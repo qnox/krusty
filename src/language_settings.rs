@@ -1,8 +1,9 @@
 //! Per-compilation Kotlin language and API settings.
 //!
 //! These settings are deliberately values, not process globals: a Bazel worker or language-server
-//! process may analyze modules at different language/API levels in sequence. The selected compiler
-//! release in [`crate::kotlin_version`] is a separate output-compatibility concern.
+//! process may analyze modules at different reference releases and language/API levels in sequence.
+//! The process target in [`crate::kotlin_version`] supplies a default, while an explicitly selected
+//! release stays attached to [`LangFeatures`] for all per-compilation semantic policy.
 
 use crate::features::{FeatureSetting, LangFeatures};
 use crate::kotlin_version::KotlinVersion;

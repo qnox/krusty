@@ -121,6 +121,7 @@ const MODELED_FEATURES: &[&str] = &[
     "ExplicitBackingFields",
     "ExplicitContextArguments",
     "ForbidExternalEnumEntriesAndPrimaryConstructorProperties",
+    "ForbidValueClassRecursionViaTypeParameters",
     "FullValueClasses",
     "ImplicitSignedToUnsignedIntegerConversion",
     "JvmSupportRecursiveTypeOf",
@@ -200,6 +201,19 @@ impl LangFeatures {
     /// The reference release whose feature table supplies the defaults.
     pub fn release(&self) -> KotlinVersion {
         self.release
+    }
+
+    /// kotlinc's `toDeprecationWarningMessage` for a diagnostic this compilation's selected
+    /// release turns into an error. `None` means that release predates the split deprecation
+    /// diagnostic and reports the construct as an ordinary error.
+    pub(crate) fn deprecation_warning_message(
+        &self,
+        feature: &str,
+        message: &str,
+    ) -> Option<String> {
+        self.table()
+            .get(feature)
+            .map(|feature| feature.deprecation_warning_message(message))
     }
 
     /// The explicitly set features and their states, by name.
@@ -475,6 +489,43 @@ mod tests {
         assert!(
             !features.is_pre_release(),
             "a disabled feature forces nothing"
+        );
+    }
+
+    #[test]
+    fn value_class_recursion_deprecation_exists_only_in_2_4_20() {
+        const FEATURE: &str = "ForbidValueClassRecursionViaTypeParameters";
+        const MESSAGE: &str = "value class cannot be recursive.";
+        assert_eq!(
+            LangFeatures::for_release(
+                KotlinVersion::V2_4_0,
+                LanguageVersion::V2_4,
+                LanguageVersion::V2_4,
+            )
+            .deprecation_warning_message(FEATURE, MESSAGE),
+            None
+        );
+        assert_eq!(
+            LangFeatures::for_release(
+                KotlinVersion::V2_4_10,
+                LanguageVersion::V2_4,
+                LanguageVersion::V2_4,
+            )
+            .deprecation_warning_message(FEATURE, MESSAGE),
+            None
+        );
+        assert_eq!(
+            LangFeatures::for_release(
+                KotlinVersion::V2_4_20,
+                LanguageVersion::V2_4,
+                LanguageVersion::V2_4,
+            )
+            .deprecation_warning_message(FEATURE, MESSAGE),
+            Some(
+                "value class cannot be recursive. This will become an error in language version \
+                 2.5. See https://youtrack.jetbrains.com/issue/KT-85848."
+                    .to_string()
+            )
         );
     }
 }

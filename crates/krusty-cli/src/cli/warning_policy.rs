@@ -2,6 +2,9 @@
 
 use std::collections::BTreeMap;
 
+use krusty::features::FeatureTable;
+use krusty::kotlin_version::KotlinVersion;
+
 /// Stable diagnostic names exposed through kotlinc's `-Xwarning-level` contract. A name enters
 /// this registry only when krusty can emit that diagnostic; accepting any other spelling would
 /// promise a policy the compiler cannot apply.
@@ -17,8 +20,21 @@ pub enum WarningName {
 }
 
 impl WarningName {
-    fn parse(name: &str) -> Option<Self> {
+    fn parse(name: &str, release: KotlinVersion) -> Option<Self> {
         if let Some(name) = krusty::diag::CompilerWarningName::parse(name) {
+            let available = match name {
+                krusty::diag::CompilerWarningName::Deprecation => true,
+                krusty::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters => {
+                    FeatureTable::for_version(release).is_some_and(|table| {
+                        table
+                            .get("ForbidValueClassRecursionViaTypeParameters")
+                            .is_some()
+                    })
+                }
+            };
+            if !available {
+                return None;
+            }
             return Some(Self::Compiler(name));
         }
         Some(match name {
@@ -77,13 +93,13 @@ impl Default for WarningPolicy {
 }
 
 impl WarningPolicy {
-    pub(super) fn configure(&mut self, value: &str) -> Result<(), String> {
+    pub(super) fn configure(&mut self, value: &str, release: KotlinVersion) -> Result<(), String> {
         let Some((name, severity)) = value.split_once(':') else {
             return Err(format!(
                 "invalid value '{value}' for -Xwarning-level: expected <NAME>:<error|warning|disabled>"
             ));
         };
-        let Some(name) = WarningName::parse(name) else {
+        let Some(name) = WarningName::parse(name, release) else {
             let name = value.split_once(':').map_or(value, |(name, _)| name);
             return Err(format!("warning with name \"{name}\" does not exist"));
         };
@@ -175,7 +191,9 @@ mod tests {
         ] {
             let mut policy = WarningPolicy::default();
             policy.promote_warnings();
-            policy.configure(&format!("DEPRECATION:{level}")).unwrap();
+            policy
+                .configure(&format!("DEPRECATION:{level}"), KotlinVersion::V2_4_20)
+                .unwrap();
             assert_eq!(
                 policy.compiler_disposition(Some(CompilerWarningName::Deprecation)),
                 expected
@@ -183,6 +201,58 @@ mod tests {
             assert_eq!(
                 policy.compiler_disposition(None),
                 WarningDisposition::WarningAndFail
+            );
+        }
+    }
+
+    #[test]
+    fn compiler_warning_names_follow_the_selected_release_catalog() {
+        const NAME: &str = "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING:warning";
+        for release in [KotlinVersion::V2_4_0, KotlinVersion::V2_4_10] {
+            assert_eq!(
+                WarningPolicy::default().configure(NAME, release),
+                Err(
+                    "warning with name \
+                     \"VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING\" does not exist"
+                        .to_string()
+                ),
+                "{release}"
+            );
+        }
+        for (level, expected_level, expected_disposition) in [
+            (
+                "disabled",
+                WarningLevel::Disabled,
+                WarningDisposition::Disabled,
+            ),
+            (
+                "warning",
+                WarningLevel::Warning,
+                WarningDisposition::Warning,
+            ),
+            ("error", WarningLevel::Error, WarningDisposition::Error),
+        ] {
+            let mut current = WarningPolicy::default();
+            assert_eq!(
+                current.configure(
+                    &format!("VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING:{level}"),
+                    KotlinVersion::V2_4_20,
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                current.configured_level(WarningName::Compiler(
+                    CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
+                )),
+                Some(expected_level),
+                "{level}"
+            );
+            assert_eq!(
+                current.compiler_disposition(Some(
+                    CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
+                )),
+                expected_disposition,
+                "{level}"
             );
         }
     }
