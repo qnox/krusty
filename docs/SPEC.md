@@ -12976,7 +12976,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `@SinceKotlin` newer than `-api-version` is omitted before overload selection, so the call is an
   unresolved reference with no receiver type (`IntArray.isSorted` and a dependency `fun` marked
   `@SinceKotlin("2.4")` at API 2.0; both resolve at API 2.4;
-  `tests/api_version_availability_e2e.rs`). Gradle forwards
+  `tests/api_version_availability_e2e.rs`). Conversely,
+  `@DeprecatedSinceKotlin(hiddenSince = "X.Y")` keeps a dependency declaration visible below X.Y
+  and removes it from candidate construction from X.Y onward. Functions read the qualified
+  annotation identity from Kotlin metadata; properties and constructors join the annotation
+  carrier through their exact metadata-recorded JVM realization. A field-backed property, including
+  object and companion `@JvmField` placement, joins `MetaProp.field` to the classfile field by JVM
+  name and descriptor before applying the API-normalized availability fact. No source spelling or
+  encoded owner name reconstructs that association. Hidden names remain importable, matching
+  kotlinc. (`tests/deprecated_since_kotlin_e2e.rs`.) Gradle forwards
   `compilerOptions.languageVersion` and `compilerOptions.apiVersion` unchanged, with no krusty-only
   property. With no explicit setting, the stable language/API default is the selected kotlinc
   release's default. The accepted option domain also follows that concrete release: 2.4.0 and

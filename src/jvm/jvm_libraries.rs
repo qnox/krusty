@@ -127,6 +127,8 @@ pub(super) struct JvmStaticField {
     pub(super) constant: Option<crate::libraries::LibraryConst>,
     pub(super) visibility: Visibility,
     pub(super) is_final: bool,
+    /// API-normalized availability from the exact metadata field declaration, when one exists.
+    pub(super) deprecated_hidden: bool,
 }
 
 /// Kotlin operator capability of a Java instance method. Java declarations cannot encode
@@ -365,7 +367,7 @@ impl JvmLibraries {
                 false,
                 &|name| self.metadata_value_class_underlying(name),
             );
-            if self.hides_callable(meta.deprecated_hidden, meta.since_kotlin) {
+            if self.hides_callable(meta.deprecated_hidden, meta.hidden_since, meta.since_kotlin) {
                 continue;
             }
             let source_name = meta.source_name.clone().unwrap_or_else(|| name.to_string());
@@ -709,7 +711,7 @@ impl JvmLibraries {
         for function in super::metadata::class_functions(&class) {
             if function.kotlin_name != name
                 || !function.is_public()
-                || self.hides_callable(function.deprecated_hidden(), function.since_kotlin())
+                || self.hides_function(function)
             {
                 continue;
             }
@@ -905,7 +907,7 @@ impl JvmLibraries {
                 implicit_integer_coercion: false,
                 compile_time_constant: None,
                 metadata_constant_read: false,
-                deprecated_hidden: property.deprecated_hidden,
+                deprecated_hidden: self.property_hidden_at_api(property),
                 accessor_availability: Default::default(),
                 is_final: property.is_final,
                 visibility: property.visibility,
@@ -946,37 +948,6 @@ impl JvmLibraries {
             api_withheld: Default::default(),
             building_types: Default::default(),
         })
-    }
-
-    fn metadata_property_ty(&self, internal: TypeName, name: &str) -> Option<Ty> {
-        let declared = |ci: &crate::jvm::classreader::ClassInfo| {
-            super::metadata::class_properties(ci)
-                .iter()
-                .find(|property| property.name == name)
-                .and_then(|property| static_properties::declared_property_ty(property, None))
-        };
-        let ci = self.cp.find_name(internal)?;
-        if let Some(ty) = declared(&ci) {
-            return Some(ty);
-        }
-        // A top-level `const val` lives as a static field on a file/multifile facade, but its
-        // semantic declaration is a PACKAGE property rather than a class property. Read the same
-        // facade-merged metadata view used by callable lookup before falling back to the physical
-        // field descriptor; otherwise an unsigned/value-class constant exposes its carrier
-        // (`UInt` stored in `I` was published as `Int`) to downstream source.
-        if let Some(ty) = self
-            .cp
-            .meta_properties_name(internal)
-            .iter()
-            .find(|property| property.name == name)
-            .and_then(|property| static_properties::declared_property_ty(property, None))
-        {
-            return Some(ty);
-        }
-        let companion = self
-            .cp
-            .find_nested_class(internal, crate::names::COMPANION_OBJECT_NAME)?;
-        declared(&companion)
     }
 
     fn metadata_static_companion_consts_for_class(
@@ -1293,8 +1264,8 @@ impl JvmLibraries {
             // The class's `@Metadata` CONSTRUCTOR records — the only place a constructor parameter's
             // source-level shape survives (a receiver function type erases to `FunctionN` in both the
             // descriptor and the `Signature`).
-            let ctor_param_lists = metadata::class_constructor_params(&ci);
             let meta_constructors = metadata::class_constructors(&ci);
+            let ctor_param_lists = self.visible_constructor_params(meta_constructors);
             crate::trace_compiler!(
                 "resolve",
                 "classifier constructor metadata owner={internal_name:?} declarations={ctor_param_lists:?}",
@@ -1321,7 +1292,7 @@ impl JvmLibraries {
                             .map(|method| (method, Some(declaration), None))
                     })
                     .chain(meta_constructors.iter().filter_map(|declaration| {
-                        if declaration.deprecated_hidden {
+                        if self.constructor_hidden_at_api(declaration) {
                             return None;
                         }
                         let descriptor = declaration.jvm_desc?;
@@ -1496,7 +1467,7 @@ impl JvmLibraries {
                     member.set_is_member_extension(declaration.is_extension());
                     member.set_is_operator(declaration.is_operator());
                     member.set_is_infix(declaration.is_infix());
-                    member.set_deprecated_hidden(declaration.deprecated_hidden());
+                    member.set_deprecated_hidden(self.function_hidden_at_api(declaration));
                     member.call_sig = declaration.member_call_sig();
                     member.declared_ret = metadata_declared_nonnull_return(declaration);
                 } else if let Some(declaration) = constructor_declaration {
@@ -2029,7 +2000,7 @@ impl JvmLibraries {
                 // Iterating the declarations directly (rather than the filtered param-list
                 // projection) keeps this loop and the hidden filter from ever disagreeing.
                 let signature = &declaration.params;
-                if declaration.deprecated_hidden
+                if self.constructor_hidden_at_api(declaration)
                     || signature.types.len() != signature.names.len()
                     || signature.types.contains(&Ty::Error)
                     || constructors.iter().any(|constructor| {
@@ -2376,7 +2347,7 @@ impl JvmLibraries {
                     callable_signatures.push(callable);
                 }
             }
-            let mut named_parameter_lists = metadata::class_constructor_params(&ci);
+            let mut named_parameter_lists = self.visible_constructor_params(meta_constructors);
             if kind == crate::libraries::TypeKind::Annotation && !has_kotlin_metadata {
                 named_parameter_lists.push(java_annotation_parameter_list(&ci)?);
             }
@@ -3361,7 +3332,7 @@ impl JvmLibraries {
                         implicit_integer_coercion: false,
                         compile_time_constant: None,
                         metadata_constant_read: false,
-                        deprecated_hidden: mp.deprecated_hidden,
+                        deprecated_hidden: self.property_hidden_at_api(mp),
                         accessor_availability: Default::default(),
                         is_final: mp.is_final,
                         visibility: mp.visibility,
@@ -3524,7 +3495,7 @@ impl JvmLibraries {
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
                     metadata_constant_read: false,
-                    deprecated_hidden: mp.deprecated_hidden,
+                    deprecated_hidden: self.property_hidden_at_api(mp),
                     accessor_availability: Default::default(),
                     is_final: mp.is_final,
                     visibility: mp.visibility,
@@ -3568,7 +3539,11 @@ impl JvmLibraries {
                             .map(|(ty, _)| self.semanticize_jvm_type(ty))
                     })
                     .unwrap_or(erased_ty);
-                let field_ty = self.metadata_property_ty(cn, name).unwrap_or(field_ty);
+                let metadata = self.metadata_property_for_field(cn, &field.name, &field.descriptor);
+                let field_ty = metadata
+                    .as_ref()
+                    .and_then(|property| static_properties::declared_property_ty(property, None))
+                    .unwrap_or(field_ty);
                 let field_ty = if ci.meta.is_present() {
                     field_ty
                 } else {
@@ -3644,7 +3619,9 @@ impl JvmLibraries {
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
                     metadata_constant_read: false,
-                    deprecated_hidden: false,
+                    deprecated_hidden: metadata
+                        .as_ref()
+                        .is_some_and(|property| self.property_hidden_at_api(property)),
                     accessor_availability: Default::default(),
                     is_final: false,
                     visibility,
@@ -4057,7 +4034,7 @@ impl JvmLibraries {
                         self.note_api_withheld(receiver, name);
                     }
                 }
-                if self.hides_callable(mf.deprecated_hidden(), mf.since_kotlin()) {
+                if self.hides_function(mf) {
                     continue;
                 }
                 let raw_receiver = mf.generic_sig.as_ref().and_then(|g| g.receiver);
@@ -4326,18 +4303,19 @@ impl JvmLibraries {
             SymbolNamespace::Classifier(owner) => self.static_field_name(owner, name),
         };
         if let (SymbolNamespace::Package(_), Some(field)) = (namespace, static_field.as_ref()) {
-            if let Some(metadata) = self
-                .cp
-                .meta_properties_name(field.owner)
-                .iter()
-                .find(|property| property.name == name)
+            if let Some(metadata) =
+                self.metadata_property_for_field(field.owner, &field.name, &field.descriptor)
             {
                 super::top_level_properties::merge_metadata_const(
-                    name, metadata, field, &mut props,
+                    name,
+                    &metadata,
+                    field,
+                    field.deprecated_hidden,
+                    &mut props,
                 );
             }
         }
-        props.retain(|property| !property.deprecated_hidden);
+        let hidden = self.withhold_hidden_declarations(package, name, &mut props);
         let platform_callables = match (overloads.is_empty(), props.is_empty()) {
             (false, false) => Callables::Both {
                 functions: FunctionSet { overloads },
@@ -4379,7 +4357,8 @@ impl JvmLibraries {
         };
         let callables = self
             .register_external_callables(callables, package.map(SemanticCallableOwner::Package));
-        let importable_declaration = core.importable_declaration || static_field.is_some();
+        let importable_declaration =
+            core.importable_declaration || static_field.is_some() || hidden;
         self.cp.memoize_symbols(
             self.api_version,
             namespace,
@@ -5113,7 +5092,9 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         package: TypeName,
         name: &str,
     ) -> Option<crate::libraries::PropertyInfo> {
-        self.associated_property_for_static_field(self.top_level_static_field(package, name)?)
+        let property =
+            self.associated_property_for_static_field(self.top_level_static_field(package, name)?)?;
+        (!property.deprecated_hidden).then_some(property)
     }
 
     fn external_property_diagnostic_label(

@@ -19,9 +19,76 @@ impl JvmLibraries {
     pub(super) fn hides_callable(
         &self,
         deprecated_hidden: bool,
+        hidden_since: Option<LanguageVersion>,
         since_kotlin: Option<LanguageVersion>,
     ) -> bool {
-        deprecated_hidden || self.since_kotlin_withheld(since_kotlin)
+        self.deprecated_hidden_at_api(deprecated_hidden, hidden_since)
+            || self.since_kotlin_withheld(since_kotlin)
+    }
+
+    pub(super) fn hides_function(&self, function: &crate::jvm::metadata::MetaFn) -> bool {
+        self.function_hidden_at_api(function) || self.since_kotlin_withheld(function.since_kotlin())
+    }
+
+    pub(super) fn function_hidden_at_api(&self, function: &crate::jvm::metadata::MetaFn) -> bool {
+        self.deprecated_hidden_at_api(function.deprecated_hidden(), function.hidden_since())
+    }
+
+    pub(in crate::jvm) fn property_hidden_at_api(
+        &self,
+        property: &crate::jvm::metadata::MetaProp,
+    ) -> bool {
+        self.deprecated_hidden_at_api(property.deprecated_hidden, property.hidden_since)
+    }
+
+    pub(super) fn constructor_hidden_at_api(
+        &self,
+        constructor: &crate::jvm::metadata::MetaConstructor,
+    ) -> bool {
+        self.deprecated_hidden_at_api(constructor.deprecated_hidden, constructor.hidden_since)
+    }
+
+    pub(super) fn visible_constructor_params(
+        &self,
+        constructors: &[crate::jvm::metadata::MetaConstructor],
+    ) -> Vec<crate::libraries::ParamList> {
+        constructors
+            .iter()
+            .filter(|constructor| !self.constructor_hidden_at_api(constructor))
+            .map(|constructor| constructor.params.clone())
+            .collect()
+    }
+
+    pub(super) fn deprecated_hidden_at_api(
+        &self,
+        deprecated_hidden: bool,
+        hidden_since: Option<LanguageVersion>,
+    ) -> bool {
+        deprecated_hidden || hidden_since.is_some_and(|since| since <= self.api_version)
+    }
+
+    /// Remove hidden properties while retaining the declaration name for import resolution.
+    pub(super) fn withhold_hidden_declarations(
+        &self,
+        package: Option<TypeName>,
+        name: &str,
+        properties: &mut Vec<crate::libraries::PropertyInfo>,
+    ) -> bool {
+        let hidden_property = properties.iter().any(|property| property.deprecated_hidden);
+        properties.retain(|property| !property.deprecated_hidden);
+        let hidden_function = package.is_some_and(|package| {
+            self.cp
+                .package_facades_name(package)
+                .into_iter()
+                .any(|facade| {
+                    self.cp.meta_functions_name(facade).iter().any(|function| {
+                        function.kotlin_name == name
+                            && self.function_hidden_at_api(function)
+                            && !self.since_kotlin_withheld(function.since_kotlin())
+                    })
+                })
+        });
+        hidden_property || hidden_function
     }
 
     pub(super) fn since_kotlin_withheld(&self, since_kotlin: Option<LanguageVersion>) -> bool {
@@ -48,7 +115,7 @@ impl JvmLibraries {
         let mut hidden = functions
             .iter()
             .filter(|declaration| {
-                declaration.deprecated_hidden()
+                self.function_hidden_at_api(declaration)
                     && !self.since_kotlin_withheld(declaration.since_kotlin())
             })
             .map(|declaration| declaration.kotlin_name.clone())
@@ -56,7 +123,7 @@ impl JvmLibraries {
         hidden.extend(
             crate::jvm::metadata::class_properties(class)
                 .iter()
-                .filter(|property| property.deprecated_hidden)
+                .filter(|property| self.property_hidden_at_api(property))
                 .map(|property| property.name.clone()),
         );
         if kotlin_scope_is_authoritative {

@@ -1779,6 +1779,8 @@ mod all_tail_calls_e2e;
 mod captured_var_not_null_cast_e2e;
 #[path = "classpath_tail_forward_e2e.rs"]
 mod classpath_tail_forward_e2e;
+#[path = "deprecated_since_kotlin_e2e.rs"]
+mod deprecated_since_kotlin_e2e;
 #[path = "for_loop_iterable_slot_e2e.rs"]
 mod for_loop_iterable_slot_e2e;
 #[path = "inline_arguments_in_place_e2e.rs"]
