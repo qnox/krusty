@@ -140,14 +140,17 @@ pub(super) fn common_settings(arguments: &[(&ArgumentSpec, &str)]) -> Vec<Featur
     settings
 }
 
-/// The refusal of each applied `@Enables` entry naming a feature krusty does not model: its
-/// accepted spelling would promise behaviour krusty does not have.
-pub(super) fn unmodeled_feature_errors(arguments: &[(&ArgumentSpec, &str)]) -> Vec<String> {
+/// The refusal of each applied `@Enables` entry naming a feature krusty does not model under the
+/// resolved `features`: its accepted spelling would promise behaviour krusty does not have.
+pub(super) fn unmodeled_feature_errors(
+    arguments: &[(&ArgumentSpec, &str)],
+    features: &LangFeatures,
+) -> Vec<String> {
     let mut errors = Vec::new();
     for &(spec, value) in arguments {
         if let Some(toggle) = spec.enables.iter().find(|toggle| {
             toggle_applies(toggle.if_value_is.as_deref(), value)
-                && !LangFeatures::models(&toggle.feature)
+                && !features.models_enabled(&toggle.feature)
         }) {
             errors.push(format!(
                 "krusty does not implement the language feature '{}' selected by '{}'",

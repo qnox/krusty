@@ -495,10 +495,6 @@ pub(super) fn finish_language_settings(
         None => None,
     };
     let feature_arguments = language_features::feature_arguments(explicit);
-    opts.errors
-        .extend(language_features::unmodeled_feature_errors(
-            &feature_arguments,
-        ));
     let common = language_features::common_settings(&feature_arguments);
     let progressive = if parsed.progressive {
         language_features::progressive_settings(table, &common)
@@ -510,6 +506,11 @@ pub(super) fn finish_language_settings(
     match LanguageSettings::for_release(reference_version, language_version, api_version, &settings)
     {
         Ok(settings) => {
+            opts.errors
+                .extend(language_features::unmodeled_feature_errors(
+                    &feature_arguments,
+                    &settings.features,
+                ));
             let (cannot_disable, pre_release) = language_features::manual_setting_checks(
                 &manual,
                 table,
@@ -546,6 +547,18 @@ pub(super) fn finish_language_settings(
             );
             opts.install_language_settings(settings);
         }
-        Err(error) => opts.errors.push(error),
+        Err(error) => {
+            let features = LangFeatures::for_release(
+                reference_version,
+                language_version,
+                api_version.unwrap_or(language_version),
+            );
+            opts.errors
+                .extend(language_features::unmodeled_feature_errors(
+                    &feature_arguments,
+                    &features,
+                ));
+            opts.errors.push(error);
+        }
     }
 }

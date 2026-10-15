@@ -825,17 +825,30 @@ mod tests {
 
     #[test]
     fn feature_argument_values_cannot_enable_unmodeled_semantics() {
-        for mode in ["name-mismatch", "complete"] {
-            let flag = format!("-Xname-based-destructuring={mode}");
-            let parsed = parse_args(&[&flag, "x.kt"]);
-            assert_eq!(
-                parsed.errors,
-                ["krusty does not implement the language feature \
-                  'DeprecateNameMismatchInShortDestructuringWithParentheses' selected by \
-                  '-Xname-based-destructuring'"
-                    .to_string()],
-                "{mode}"
-            );
+        let parsed = parse_args(&["-Xname-based-destructuring=name-mismatch", "x.kt"]);
+        assert_eq!(
+            parsed.errors,
+            ["krusty does not implement the language feature \
+              'DeprecateNameMismatchInShortDestructuringWithParentheses' selected by \
+              '-Xname-based-destructuring'"
+                .to_string()]
+        );
+    }
+
+    /// `complete` also enables the name-based short form, which switches off the only check the
+    /// name-mismatch deprecation feeds, so the mode needs nothing krusty does not model.
+    #[test]
+    fn complete_name_based_destructuring_enables_the_short_form() {
+        let parsed = parse_args(&["-Xname-based-destructuring=complete", "x.kt"]);
+        assert_eq!(parsed.errors, Vec::<String>::new());
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+        let features = &parsed.language_settings.features;
+        for feature in [
+            "NameBasedDestructuring",
+            "DeprecateNameMismatchInShortDestructuringWithParentheses",
+            "EnableNameBasedDestructuringShortForm",
+        ] {
+            assert!(features.has(feature), "{feature}");
         }
     }
 
