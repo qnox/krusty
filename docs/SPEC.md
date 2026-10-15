@@ -3842,6 +3842,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   runs only after every earlier arm fell through. Null, compound, and type-test conditions use the
   same narrowing rules as `if` branches.
   `tests/when_null_guard_smartcast_e2e.rs`.
+- **The variable of `when (val subject = value)` is the `when`'s subject.** Checked FIR carries the
+  declared local's exact identity, and common lowering reads that local instead of copying it into
+  `tmp_subject`, so the value is stored once and every comparison reads the declared variable. An
+  expression body made from this form is the subject's nested block, not the function's root scope;
+  the subject's debug range therefore ends before the return, as in kotlinc.
+  `tests/when_subject_variable_e2e.rs`.
 - **`x ?: return` smart-casts `x` for the code that follows** (also `?: throw`/`break`/`continue`/a
   `Nothing`-typed call): completing an elvis whose right-hand side is `Nothing` proves a stable
   `val`/parameter non-null, exactly like an `if (x == null) return` guard. A nullable-primitive local
