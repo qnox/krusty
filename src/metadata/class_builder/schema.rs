@@ -121,7 +121,12 @@ const PRIVATE_VISIBILITY: u64 = 2;
 /// delegated, or when it narrows the property's visibility (`private set`). A bodiless `set`, even
 /// an annotated one, stays the default accessor.
 fn setter_is_not_default(p: &PropMeta) -> bool {
-    p.is_var && (p.modifiers.declared_setter || p.setter_visibility != p.visibility)
+    p.is_var
+        && (p.modifiers.declared_setter
+            || p.setter_visibility != p.visibility
+            || p.accessor_annotations
+                .setter_parameter
+                .declares_annotations())
 }
 
 /// `Property.flags` bits 4-5, which the accessor flag words share.
