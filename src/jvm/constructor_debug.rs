@@ -12,6 +12,12 @@ use crate::ir::{ExprId, IrClass, IrExpr, IrFile};
 /// or `(`, which may sit on a line after the class name; without one the constructor is the
 /// declaration itself and starts where its annotations do.
 pub(super) fn primary_constructor_line(ir: &IrFile, class: &IrClass) -> u32 {
+    if class.primary_ctor_lines.rebuilt_body_line != 0 {
+        return class.primary_ctor_lines.rebuilt_body_line;
+    }
+    if class.primary_ctor_lines.decl_line != 0 {
+        return class.primary_ctor_lines.decl_line;
+    }
     if let Some(&line) = ir.ctor_open_lines.get(&class.fq_name_id()) {
         return line;
     }

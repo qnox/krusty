@@ -1,6 +1,6 @@
 //! Recovery value for a class declaration whose nesting guard tripped.
 
-use crate::ast::{ClassDecl, ClassKind};
+use crate::ast::{ClassDecl, ClassKind, PrimaryCtorLines};
 use crate::diag::Span;
 use crate::types::Visibility;
 
@@ -43,8 +43,7 @@ pub(super) fn error_class_decl(span: Span) -> ClassDecl {
         secondary_ctors: Vec::new(),
         type_aliases: Vec::new(),
         span,
-        ctor_open_line: 0,
-        ctor_close_line: 0,
+        primary_ctor_lines: PrimaryCtorLines::default(),
         companion_block_members: Vec::new(),
         decl_line: 0,
         decl_start_line: 0,

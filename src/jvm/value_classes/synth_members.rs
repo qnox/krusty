@@ -108,7 +108,6 @@ pub(super) fn synth_value_members(
     class_id: u32,
     under: &Under,
     callable_under: &Under,
-    has_init: bool,
     constructor_default: Option<ExprId>,
     realized: &mut SynthesizedValueMembers,
 ) -> bool {
@@ -320,6 +319,18 @@ pub(super) fn synth_value_members(
         ir.synthetic_methods.insert(fid);
         ir.jvm_value_class_representation_order.insert(fid, 1);
     }
+    // The private `<init>` left behind is kotlinc's rebuilt constructor, whose `Object()` call,
+    // field store and `return` are all built at the source constructor's own start
+    // (`JvmInlineClassLowering.buildPrimaryValueClassConstructor`), not at the class declaration
+    // or the property. Re-anchor the two that common lowering placed elsewhere.
+    {
+        let class = &mut ir.classes[class_id as usize];
+        let constructor_line = class.primary_ctor_lines.decl_line;
+        if constructor_line != 0 {
+            class.primary_ctor_lines.rebuilt_body_line = constructor_line;
+            class.fields[0].constructor_store_line = constructor_line;
+        }
+    }
     // constructor-impl(U): U  — runs the `init { … }` block (side effects/validation), then returns the
     // constructed value. The init runs HERE, not in `box-impl`/`<init>`: `box-impl` only wraps an
     // already-built value. MOVE `init_body` out of the class (so `<init>` keeps only the field
@@ -330,11 +341,7 @@ pub(super) fn synth_value_members(
     {
         let mut stmts = Vec::new();
         let mut result = 0;
-        if let Some(init_root) = ir.classes[class_id as usize]
-            .init_body
-            .take()
-            .filter(|_| has_init)
-        {
+        if let Some(init_root) = ir.classes[class_id as usize].init_body.take() {
             let mut reach = HashSet::default();
             collect_reachable_scoped(&ir.exprs, init_root, &mut reach);
             // `this` is the temporary; the parameter, which is the class's sole property, is read

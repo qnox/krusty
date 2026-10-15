@@ -7,6 +7,9 @@
 
 use super::common;
 
+#[path = "value_class_constructor_lines_e2e.rs"]
+mod constructor_lines;
+
 const SRC: &str = "var sink: Any? = null\n\
     var last = 0\n\
     var label = \"\"\n\

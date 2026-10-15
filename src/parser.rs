@@ -2053,8 +2053,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotations: Some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
-            ctor_open_line: 0,
-            ctor_close_line: 0,
+            primary_ctor_lines: PrimaryCtorLines::default(),
             companion_block_members: Vec::new(),
             decl_line: 0,
             decl_start_line: 0,
@@ -2441,8 +2440,10 @@ impl<'a> Parser<'a> {
             primary_ctor_annotations: has_primary_ctor.then_some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
-            ctor_open_line: ctor_open_offset,
-            ctor_close_line: 0,
+            primary_ctor_lines: PrimaryCtorLines {
+                open_line: ctor_open_offset,
+                ..PrimaryCtorLines::default()
+            },
             companion_block_members: companions.block_members,
             decl_line: 0,
             decl_start_line: 0,
@@ -2902,7 +2903,9 @@ impl<'a> Parser<'a> {
         let annotation_args = self.take_pending_annotation_args();
         let context_params = std::mem::take(&mut self.pending_context_params);
         let start = self.tok().span;
-        self.bump(); // 'class'
+        // `class`, then the name — the grammar lets it follow on a later line (`value class⏎N(…)`).
+        self.bump();
+        self.skip_plain_newlines();
         let name = self.ident_or_error("class name");
         let name_span = self.declaration_name_span;
         let (type_params, _, _, type_param_bounds, type_param_variances) = if self.at(TokenKind::Lt)
@@ -2939,6 +2942,7 @@ impl<'a> Parser<'a> {
             }
         }
         let header_ctor_kw = self.at(TokenKind::Ident) && self.keyword_text("constructor");
+        let mut ctor_decl_offset = header_ctor_kw.then(|| self.tok().span.lo).unwrap_or(0);
         if header_ctor_kw {
             self.bump();
         }
@@ -2950,6 +2954,9 @@ impl<'a> Parser<'a> {
         let primary_ctor_open = self.tok().span.lo;
         if ctor_open_offset == 0 && self.at(TokenKind::LParen) {
             ctor_open_offset = primary_ctor_open;
+        }
+        if ctor_decl_offset == 0 && self.at(TokenKind::LParen) {
+            ctor_decl_offset = primary_ctor_open;
         }
         let has_primary_ctor_parens = self.eat(TokenKind::LParen);
         let mut primary_constructor_parameters_span = None;
@@ -3166,8 +3173,11 @@ impl<'a> Parser<'a> {
             secondary_ctors,
             type_aliases,
             span: Span::new(start.lo, end.hi),
-            ctor_open_line: ctor_open_offset,
-            ctor_close_line: ctor_close_lo,
+            primary_ctor_lines: PrimaryCtorLines {
+                open_line: ctor_open_offset,
+                decl_line: ctor_decl_offset,
+                close_line: ctor_close_lo,
+            },
             companion_block_members: companions.block_members,
             decl_line: 0,
             decl_start_line: 0,
@@ -3530,8 +3540,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotations: Some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
-            ctor_open_line: 0,
-            ctor_close_line: 0,
+            primary_ctor_lines: PrimaryCtorLines::default(),
             companion_block_members: companions.block_members,
             decl_line: 0,
             decl_start_line: 0,
@@ -3646,8 +3655,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotations: Some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(span.lo, end.hi),
-            ctor_open_line: 0,
-            ctor_close_line: 0,
+            primary_ctor_lines: PrimaryCtorLines::default(),
             companion_block_members: Vec::new(),
             decl_line: 0,
             decl_start_line: 0,
@@ -3784,8 +3792,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotations: Some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
-            ctor_open_line: 0,
-            ctor_close_line: 0,
+            primary_ctor_lines: PrimaryCtorLines::default(),
             companion_block_members: Vec::new(),
             decl_line: 0,
             decl_start_line: 0,
