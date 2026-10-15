@@ -162,7 +162,7 @@ impl JvmLibraries {
             &|name| self.metadata_value_class_underlying(name),
         );
         if facts.visibility.is_none()
-            || facts.deprecated_hidden
+            || self.deprecated_hidden_at_api(facts.deprecated_hidden, facts.hidden_since)
             || facts.kept_params != Some(physical_params.len())
             || facts.context_count != 0
         {

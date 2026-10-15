@@ -60,8 +60,7 @@ use self::method_body_cache::{
 use self::property_access::*;
 use self::value_class_erasure::{
     meta_descriptor_position, meta_param_exact, metadata_carrier_matches,
-    metadata_value_class_bound_carrier, metadata_value_class_underlying, value_class_param_types,
-    value_class_return_type,
+    metadata_value_class_bound_carrier, metadata_value_class_underlying,
 };
 
 use crate::fx_hash::{HashMap, HashSet};
@@ -74,7 +73,7 @@ use crate::jvm::classreader::{parse_class, ClassBodies, ClassInfo, MethodCode, R
 use crate::jvm::compilation_inputs::{
     classify_classpath_entry, JvmClasspathEntryKind, JvmCompilationInputInventory,
 };
-use crate::libraries::{CallSig, GenericSig, ReturnInfo};
+use crate::libraries::{GenericSig, ReturnInfo};
 use crate::name_tree::{NameId, NameTree};
 use crate::symbol_source::SymbolNamespace;
 use crate::types::{type_name, type_name_from, Ty, TypeName, TypeNameList};
@@ -2169,57 +2168,15 @@ impl Classpath {
         extension: bool,
         value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
     ) -> MetadataCallFacts {
-        let meta = self.class_meta_name(internal);
-        let Some((end, c)) = aligned_meta_callable(
-            &meta,
+        call_metadata::for_callable(
+            self,
+            internal,
             fn_name,
             desc_params,
             desc_ret,
+            extension,
             value_underlying,
-            &|ty| self.function_classifier_arity(ty),
-            &|name| {
-                self.find_name(name)
-                    .is_some_and(|class| class.is_interface())
-            },
-        ) else {
-            return MetadataCallFacts::fallback(if extension {
-                CallSig::default()
-            } else {
-                CallSig::metadata_plain(desc_params.len())
-            });
-        };
-        // One decoded source-call shape for members, top-level functions, and extensions. Rebuilding
-        // a subset here previously discarded type-use inference policy (`@NoInfer`) while preserving
-        // only names/defaults/nullability, so dependency calls behaved differently from source calls.
-        let call_sig = c.member_call_sig();
-        MetadataCallFacts {
-            source_name: Some(c.kotlin_name.clone()),
-            kept_params: Some(end),
-            visibility: Some(c.visibility),
-            call_sig,
-            ret: metadata_return_info(c.ret_class, c.ret_nullable()),
-            declared_ret: metadata_declared_return(c),
-            declared_params: metadata_declared_params(c),
-            generic_sig: c.generic_sig.clone(),
-            suspend: c.is_suspend(),
-            is_inline: c.is_inline(),
-            has_reified_type_params: c.has_reified_type_params(),
-            is_operator: c.is_operator(),
-            is_infix: c.is_infix(),
-            annotations: c.annotations.clone(),
-            contract: c.contract.clone(),
-            context_count: c.context_count(),
-            deprecated_hidden: c.deprecated_hidden(),
-            since_kotlin: c.since_kotlin(),
-            value_class_params: value_class_param_types(
-                c,
-                desc_params,
-                extension,
-                end,
-                value_underlying,
-            ),
-            value_class_ret: value_class_return_type(c, desc_ret, value_underlying),
-        }
+        )
     }
 
     /// The metadata-declared RETURN type of the PROPERTY getter realized by JVM method

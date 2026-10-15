@@ -8,6 +8,7 @@
 
 use super::java_nullability_qualifiers::descriptor_nullability_qualifier;
 use crate::kt_string::KtString;
+use crate::language_version::LanguageVersion;
 use crate::libraries::AnnotationElementDefault;
 use crate::types::{TypeName, TypeNameList};
 
@@ -46,6 +47,8 @@ pub struct MethodSig {
     /// callable exists only for binary compatibility: kotlinc removes it from overload
     /// resolution entirely, so it must never enter a candidate set.
     pub deprecated_hidden: bool,
+    /// `@kotlin.DeprecatedSinceKotlin(hiddenSince)` decoded from this exact realization method.
+    pub deprecated_hidden_since: Option<LanguageVersion>,
     /// For a Java `@interface` element: the declaration has an `AnnotationDefault`, so a use site
     /// may omit it. Always false for an ordinary method.
     pub has_annotation_default: bool,
@@ -144,6 +147,7 @@ struct MemberAttributes {
     parameter_access: Vec<u16>,
     deprecated_hidden: bool,
     type_use_nullability: TypeUseNullability,
+    deprecated_hidden_since: Option<LanguageVersion>,
 }
 
 #[derive(Clone, Debug)]
@@ -1002,6 +1006,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             parameter_nullability: member.attributes.parameter_nullability,
             return_nullability: member.attributes.declaration_nullability,
             deprecated_hidden: member.attributes.deprecated_hidden,
+            deprecated_hidden_since: member.attributes.deprecated_hidden_since,
             has_annotation_default: member.attributes.annotation_default.is_some(),
         })
         .collect();
@@ -1557,6 +1562,7 @@ fn read_member_attributes(r: &mut Reader, cp: &[C]) -> Result<MemberAttributes, 
                     cp,
                     &mut attributes.declaration_nullability,
                     &mut attributes.deprecated_hidden,
+                    &mut attributes.deprecated_hidden_since,
                 )?;
             }
             // An omitted element is never written into an applied annotation, but instantiating
@@ -1603,6 +1609,7 @@ fn read_declaration_annotations(
     cp: &[C],
     nullability_out: &mut Option<JavaNullability>,
     deprecated_hidden_out: &mut bool,
+    deprecated_hidden_since_out: &mut Option<LanguageVersion>,
 ) -> Result<(), ReadError> {
     let utf8 = |index: u16| match cp.get(index as usize) {
         Some(C::Utf8(value)) => value.as_str(),
@@ -1629,6 +1636,16 @@ fn read_declaration_annotations(
                     }
                 } else {
                     // Unexpected shape — stop parsing rather than desync the reader.
+                    return Ok(());
+                }
+                continue;
+            }
+            if annotation == "Lkotlin/DeprecatedSinceKotlin;" && element_name == "hiddenSince" {
+                let tag = r.u1()? as char;
+                if tag == 's' {
+                    *deprecated_hidden_since_out =
+                        LanguageVersion::from_major_minor_text(utf8(r.u2()?));
+                } else {
                     return Ok(());
                 }
                 continue;

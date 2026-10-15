@@ -1,6 +1,6 @@
 use super::common;
 use krusty::jvm::classreader::parse_class;
-use krusty::jvm::metadata::class_constructor_params;
+use krusty::jvm::metadata::class_constructors;
 
 #[test]
 fn non_field_constructor_parameter_is_recorded() {
@@ -14,9 +14,9 @@ fn non_field_constructor_parameter_is_recorded() {
             (name == "Child").then(|| parse_class(bytes).expect("parse Child"))
         })
         .expect("Child class");
-    let constructors = class_constructor_params(&child);
+    let constructors = class_constructors(&child);
 
     assert_eq!(constructors.len(), 1);
-    assert_eq!(constructors[0].names, ["value"]);
-    assert_eq!(constructors[0].defaults, [true]);
+    assert_eq!(constructors[0].params.names, ["value"]);
+    assert_eq!(constructors[0].params.defaults, [true]);
 }

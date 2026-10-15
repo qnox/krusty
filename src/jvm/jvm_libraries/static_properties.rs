@@ -10,6 +10,49 @@ use super::*;
 use crate::libraries::LibConst;
 
 impl JvmLibraries {
+    /// Metadata declaration realized by one exact JVM field. The field name and descriptor are a
+    /// single provider-boundary identity; source spelling alone is not enough because companion and
+    /// facade storage may share a class with unrelated fields.
+    pub(super) fn metadata_property_for_field(
+        &self,
+        internal: TypeName,
+        field_name: &str,
+        field_descriptor: &str,
+    ) -> Option<super::metadata::MetaProp> {
+        let realizes_field = |property: &super::metadata::MetaProp| {
+            property
+                .field
+                .as_ref()
+                .is_some_and(|field| field.name == field_name && field.desc == field_descriptor)
+        };
+        let ci = self.cp.find_name(internal)?;
+        if let Some(property) = super::metadata::class_properties(&ci)
+            .iter()
+            .find(|property| realizes_field(property))
+            .cloned()
+        {
+            return Some(property);
+        }
+        // A top-level const lives in package-facade metadata; an outer class may instead hold the
+        // physical storage of its companion's declaration. In both cases metadata names the field.
+        if let Some(property) = self
+            .cp
+            .meta_properties_name(internal)
+            .iter()
+            .find(|property| realizes_field(property))
+            .cloned()
+        {
+            return Some(property);
+        }
+        let companion_name = super::metadata::class_companion_name(&ci)?;
+        let companion = crate::types::existing_type_name_nested_child(internal, &companion_name)?;
+        let companion = self.cp.find_name(companion)?;
+        super::metadata::class_properties(&companion)
+            .iter()
+            .find(|property| realizes_field(property))
+            .cloned()
+    }
+
     pub(super) fn library_const(value: &crate::jvm::classreader::ConstVal) -> LibConst {
         use crate::jvm::classreader::ConstVal;
 
@@ -87,6 +130,7 @@ impl JvmLibraries {
                 name,
                 declaration,
                 &field,
+                field.deprecated_hidden,
                 &mut properties,
             );
         }
@@ -128,6 +172,7 @@ impl JvmLibraries {
             constant,
             visibility: declaration.visibility,
             is_final: true,
+            deprecated_hidden: self.property_hidden_at_api(declaration),
         };
         self.register_external_static_field(&mut field);
         Some(field)
@@ -168,8 +213,10 @@ impl JvmLibraries {
                     // here made a valid subclass read indistinguishable from a missing property.
                     && f.access & 0x0002 == 0
             }) {
-                let ty = self
-                    .metadata_property_ty(cur, name)
+                let metadata = self.metadata_property_for_field(cur, &f.name, &f.descriptor);
+                let ty = metadata
+                    .as_ref()
+                    .and_then(|property| declared_property_ty(property, None))
                     .or_else(|| {
                         f.signature
                             .as_deref()
@@ -203,6 +250,9 @@ impl JvmLibraries {
                         Visibility::PackagePrivate
                     },
                     is_final: f.access & 0x0010 != 0,
+                    deprecated_hidden: metadata
+                        .as_ref()
+                        .is_some_and(|property| self.property_hidden_at_api(property)),
                 };
                 self.register_external_static_field(&mut field);
                 return Some(field);
@@ -234,11 +284,15 @@ impl JvmLibraries {
                 return None;
             }
             let companion = self.cp.find_name(internal)?;
+            let field = self.static_field_name(outer, name)?;
             super::metadata::class_properties(&companion)
                 .iter()
-                .any(|property| property.name == name)
-                .then(|| self.static_field_name(outer, name))
-                .flatten()
+                .any(|property| {
+                    property.field.as_ref().is_some_and(|signature| {
+                        signature.name == field.name && signature.desc == field.descriptor
+                    })
+                })
+                .then_some(field)
         })
     }
 
@@ -288,7 +342,7 @@ impl JvmLibraries {
             implicit_integer_coercion: false,
             compile_time_constant: field.constant,
             metadata_constant_read: false,
-            deprecated_hidden: false,
+            deprecated_hidden: field.deprecated_hidden,
             accessor_availability: Default::default(),
             is_final: field.is_final,
             visibility: field.visibility,
@@ -560,7 +614,7 @@ impl JvmLibraries {
             implicit_integer_coercion: false,
             compile_time_constant: None,
             metadata_constant_read: false,
-            deprecated_hidden: mp.deprecated_hidden,
+            deprecated_hidden: self.property_hidden_at_api(mp),
             accessor_availability: Default::default(),
             is_final: mp.is_final,
             visibility: mp.visibility,
