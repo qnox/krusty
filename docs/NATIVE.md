@@ -163,12 +163,49 @@ unchanged.
   `platform.zlib`) are made the same way from Kotlin/Native's own `.def` files.
 - **What direct mode cannot express**, Kotlin/Native's direct mode cannot either: a function
   defined in the `.def` file itself, and a macro that expands to an expression rather than a
-  constant. `errno` is the important case: it is `(*__errno_location())`. These need code, and the
+  constant. `errno` is the important case: it is `(*__errno_location())`. Both are declared, with
+  a `@CCall.Direct` name that says why they cannot be called. Calling them needs code, and the
   plan is for krusty's cinterop to emit such accessors as Cranelift functions in the library
   rather than compile C.
+- **The library is metadata only** (`src/native/cinterop/library/`), laid out as
+  `cinterop -Xccall-mode direct` lays one out: manifest, module header and package fragments, with
+  no IR and no bitcode. Its declarations are those of the `.def` file's own headers (all of them,
+  or those its `headerFilter` names) and of its code, plus every struct, enum and typedef they
+  reference. The library depends only on the standard library, so a referenced type from another
+  header (`size_t`, `__va_list_tag`) is declared in it too, as Kotlin/Native declares it with
+  `-no-default-libs`. Types from the platform libraries are not yet imported from them.
 - **Per-target ABI, never the host's.** Struct layout, integer widths (`long` is 64-bit on LP64
   Linux and macOS, 32-bit on LLP64 Windows) and how a struct is passed by value are computed for
   the target: SysV x86-64, AAPCS64 (and Apple's variant), RISC-V LP64D, and Win64.
+- **Headers are read in three stages** under `src/native/cinterop/`: the preprocessor (clang's
+  predefined macros and krusty's own freestanding headers per target), the declaration parser
+  (`declarations/`), and the layout engine (`layout.rs`). The parser builds an index-based model
+  (`model.rs`) of the typedefs, functions, records, enums and globals a header set declares,
+  including the GNU extensions glibc uses (`__attribute__`, `__asm__` labels, `__extension__`,
+  `__mode__`, `__typeof__`). A `static inline` function's body is skipped and the function is
+  recorded as defined, because Kotlin/Native does not bind those by default. A constant
+  expression can measure a type (`sizeof`, `_Alignof`, `__builtin_offsetof`), so parsing is done
+  per target. Layout follows clang's algorithm: SysV bitfield placement, `packed` and
+  `aligned(n)`, and AAPCS64's rule that an unnamed bitfield counts toward a struct's alignment.
+  Against clang for the posix, linux, zlib and sqlite3 header sets on Kotlin/Native's x86_64
+  glibc 2.19 sysroot, every record's size, alignment and field offsets (bitfields included) and
+  every typedef's size match. `#pragma pack(n)`, `push`/`pop` (including named frames), reset, and
+  `_Pragma("pack(…)")` carry their maximum member alignment into each record definition.
+- **Making a library: `krusty cinterop`.** It takes Kotlin/Native's `cinterop` options (`-def`,
+  `-header`, `-pkg`, `-o`, `-target`, `-compiler-option(s)`, `-linker-option(s)`, `-nopack`,
+  `-no-default-libs`, `-Xmodule-name`, `-Xccall-mode direct`) and refuses the rest by name. In
+  particular, `-Xccall-mode both` is refused because the library has no indirect-call bridges.
+  It writes a packed `.klib` named after `-o` (a directory with `-nopack`), whose package is
+  `-pkg`, else the `.def` file's `package`, else the `.def` file's name, as Kotlin/Native chooses
+  it. Headers are read from the build machine's include directories below the sysroot `/`.
+- **Link facts travel with the library.** The `-l`/`-L` options of `linkerOpts` (and of
+  `-linker-option`) are resolved when the library is made: each `lib<name>.so` is found in the
+  `-L` directories, then the target's multiarch and common library directories, and read into an
+  `ImportLibrary`. The facts are written to `default/targets/<target>/imports` as text: a
+  `library <soname>` line, then `function <name> [<version>]` or `data <name> [<version>]` per
+  export. Any other linker option is refused. So the libraries are read on the machine that
+  makes the interop library, and a program built against it later needs only the klib. Reading
+  the facts back into a program's link lands with building programs against interop libraries.
 
 ## Other operating systems
 

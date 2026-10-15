@@ -1,0 +1,1160 @@
+default/
+default/linkdata/
+=== default/linkdata/module
+module_name: <types>
+package: org
+package: org.example
+package: org.example.types
+empty_package: org
+empty_package: org.example
+default/linkdata/package_org/
+=== default/linkdata/package_org/0_org.knm
+is_empty: 1
+fq_name: org
+default/linkdata/package_org.example/
+=== default/linkdata/package_org.example/0_example.knm
+is_empty: 1
+fq_name: org.example
+default/linkdata/package_org.example.types/
+=== default/linkdata/package_org.example.types/0_types.knm
+package {
+  typealias {
+    flags: 7
+    name: cstrVar
+    underlying_type: kotlinx/cinterop/CPointerVarOf<^org/example/types/cstr>
+    expanded_type: kotlinx/cinterop/CPointerVarOf<kotlinx/cinterop/CPointer<kotlinx/cinterop/ByteVarOf<kotlin/Byte> /* = ^kotlinx/cinterop/ByteVar */> /* = ^org/example/types/cstr */>
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  typealias {
+    flags: 7
+    name: cstr
+    underlying_type: kotlinx/cinterop/CPointer<^kotlinx/cinterop/ByteVar>
+    expanded_type: kotlinx/cinterop/CPointer<kotlinx/cinterop/ByteVarOf<kotlin/Byte> /* = ^kotlinx/cinterop/ByteVar */>
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  typealias {
+    flags: 7
+    name: uintVar
+    underlying_type: kotlinx/cinterop/UIntVarOf<^org/example/types/uint>
+    expanded_type: kotlinx/cinterop/UIntVarOf<kotlin/UInt /* = ^org/example/types/uint */>
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  typealias {
+    flags: 7
+    name: uint
+    underlying_type: kotlin/UInt
+    expanded_type: kotlin/UInt
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  typealias {
+    flags: 7
+    name: int4Var
+    underlying_type: kotlinx/cinterop/CPointerVarOf<^org/example/types/int4>
+    expanded_type: kotlinx/cinterop/CPointerVarOf<kotlinx/cinterop/CPointer<kotlinx/cinterop/IntVarOf<kotlin/Int> /* = ^kotlinx/cinterop/IntVar */> /* = ^org/example/types/int4 */>
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  typealias {
+    flags: 7
+    name: int4
+    underlying_type: ^kotlinx/cinterop/CArrayPointer<^kotlinx/cinterop/IntVar>
+    expanded_type: kotlinx/cinterop/CPointer<kotlinx/cinterop/IntVarOf<kotlin/Int> /* = ^kotlinx/cinterop/IntVar */> /* = ^kotlinx/cinterop/CArrayPointer<kotlinx/cinterop/IntVarOf<kotlin/Int> /* = ^kotlinx/cinterop/IntVar */> */
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  typealias {
+    flags: 7
+    name: ns_tVar
+    underlying_type: org/example/types/ns.Var
+    expanded_type: org/example/types/ns.Var
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  typealias {
+    flags: 7
+    name: ns_t
+    underlying_type: org/example/types/ns
+    expanded_type: org/example/types/ns
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  typealias {
+    flags: 7
+    name: t_handleVar
+    underlying_type: kotlinx/cinterop/CPointerVarOf<^org/example/types/t_handle>
+    expanded_type: kotlinx/cinterop/CPointerVarOf<kotlinx/cinterop/CPointer<org/example/types/t_tag> /* = ^org/example/types/t_handle */>
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  typealias {
+    flags: 7
+    name: t_handle
+    underlying_type: kotlinx/cinterop/CPointer<org/example/types/t_tag>
+    expanded_type: kotlinx/cinterop/CPointer<org/example/types/t_tag>
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  typealias {
+    flags: 7
+    name: cmp_fnVar
+    underlying_type: kotlinx/cinterop/CPointerVarOf<^org/example/types/cmp_fn>
+    expanded_type: kotlinx/cinterop/CPointerVarOf<kotlinx/cinterop/CPointer<kotlinx/cinterop/CFunction<kotlin/Function2<kotlinx/cinterop/CPointer<out kotlinx/cinterop/CPointed>? /* = ^kotlinx/cinterop/COpaquePointer? */, kotlinx/cinterop/CPointer<out kotlinx/cinterop/CPointed>? /* = ^kotlinx/cinterop/COpaquePointer? */, kotlin/Int>>> /* = ^org/example/types/cmp_fn */>
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  typealias {
+    flags: 7
+    name: cmp_fn
+    underlying_type: kotlinx/cinterop/CPointer<kotlinx/cinterop/CFunction<kotlin/Function2<^kotlinx/cinterop/COpaquePointer?, ^kotlinx/cinterop/COpaquePointer?, kotlin/Int>>>
+    expanded_type: kotlinx/cinterop/CPointer<kotlinx/cinterop/CFunction<kotlin/Function2<kotlinx/cinterop/CPointer<out kotlinx/cinterop/CPointed>? /* = ^kotlinx/cinterop/COpaquePointer? */, kotlinx/cinterop/CPointer<out kotlinx/cinterop/CPointed>? /* = ^kotlinx/cinterop/COpaquePointer? */, kotlin/Int>>>
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  typealias {
+    flags: 7
+    name: flagsVar
+    underlying_type: kotlinx/cinterop/UIntVarOf<^org/example/types/flags>
+    expanded_type: kotlinx/cinterop/UIntVarOf<kotlin/UInt /* = ^org/example/types/flags */>
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  typealias {
+    flags: 7
+    name: flags
+    underlying_type: kotlin/UInt
+    expanded_type: kotlin/UInt
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  package_fq_name: org/example/types
+}
+class {
+  flags: 7
+  fq_name: org/example/types/s
+  companion_object_name: Companion
+  supertype: kotlinx/cinterop/CStructVar
+  nested_class_name: Companion
+  constructor {
+    value_parameter {
+      name: rawPtr
+      type: kotlin/native/internal/NativePtr /* = ^kotlinx/cinterop/NativePtr */
+    }
+  }
+  property {
+    name: v
+    return_type: kotlin/Int
+    setter_value_parameter {
+      name: value
+      type: kotlin/Int
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(0))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(0))
+  }
+  annotation: @kotlinx/cinterop/internal/CStruct(spelling = string("struct  { int v; }"))
+  annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+}
+class {
+  flags: 391
+  fq_name: org/example/types/s.Companion
+  supertype: kotlinx/cinterop/CStructVar.Type
+  constructor {
+    flags: 2
+  }
+  annotation: @kotlinx/cinterop/internal/CStruct.VarType(size = long(4), align = int(4))
+  annotation: @kotlin/Deprecated(message = string("Use sizeOf<T>() or alignOf<T>() instead."), replaceWith = annotation(@kotlin/ReplaceWith(imports = array(), expression = string(""))), level = enum(kotlin/DeprecationLevel .WARNING))
+}
+class {
+  flags: 7
+  fq_name: org/example/types/t_tag
+  companion_object_name: Companion
+  supertype: kotlinx/cinterop/CStructVar
+  nested_class_name: Companion
+  constructor {
+    value_parameter {
+      name: rawPtr
+      type: kotlin/native/internal/NativePtr /* = ^kotlinx/cinterop/NativePtr */
+    }
+  }
+  property {
+    name: a
+    return_type: kotlin/Long
+    setter_value_parameter {
+      name: value
+      type: kotlin/Long
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(0))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(0))
+  }
+  annotation: @kotlinx/cinterop/internal/CStruct(spelling = string("struct  { long a; }"))
+  annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+}
+class {
+  flags: 391
+  fq_name: org/example/types/t_tag.Companion
+  supertype: kotlinx/cinterop/CStructVar.Type
+  constructor {
+    flags: 2
+  }
+  annotation: @kotlinx/cinterop/internal/CStruct.VarType(size = long(8), align = int(8))
+  annotation: @kotlin/Deprecated(message = string("Use sizeOf<T>() or alignOf<T>() instead."), replaceWith = annotation(@kotlin/ReplaceWith(imports = array(), expression = string(""))), level = enum(kotlin/DeprecationLevel .WARNING))
+}
+class {
+  flags: 7
+  fq_name: org/example/types/mix
+  companion_object_name: Companion
+  supertype: kotlinx/cinterop/CStructVar
+  nested_class_name: Companion
+  constructor {
+    value_parameter {
+      name: rawPtr
+      type: kotlin/native/internal/NativePtr /* = ^kotlinx/cinterop/NativePtr */
+    }
+  }
+  property {
+    name: b
+    return_type: kotlin/Boolean
+    setter_value_parameter {
+      name: value
+      type: kotlin/Boolean
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(0))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(0))
+  }
+  property {
+    name: e
+    return_type: org/example/types/ns
+    setter_value_parameter {
+      name: value
+      type: org/example/types/ns
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(4))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(4))
+  }
+  property {
+    name: f
+    return_type: kotlin/UInt /* = ^org/example/types/flags */
+    setter_value_parameter {
+      name: value
+      type: kotlin/UInt /* = ^org/example/types/flags */
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(8))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(8))
+  }
+  property {
+    name: et
+    return_type: org/example/types/ns /* = ^org/example/types/ns_t */
+    setter_value_parameter {
+      name: value
+      type: org/example/types/ns /* = ^org/example/types/ns_t */
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(12))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(12))
+  }
+  property {
+    name: p
+    return_type: kotlinx/cinterop/CPointer<out kotlinx/cinterop/CPointed>? /* = ^kotlinx/cinterop/COpaquePointer? */
+    setter_value_parameter {
+      name: value
+      type: kotlinx/cinterop/CPointer<out kotlinx/cinterop/CPointed>? /* = ^kotlinx/cinterop/COpaquePointer? */
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(16))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(16))
+  }
+  property {
+    name: inner
+    return_type: org/example/types/s
+    getter_flags: 199
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(24))
+  }
+  property {
+    name: arr
+    return_type: kotlinx/cinterop/CPointer<kotlinx/cinterop/IntVarOf<kotlin/Int> /* = ^kotlinx/cinterop/IntVar */> /* = ^kotlinx/cinterop/CArrayPointer<kotlinx/cinterop/IntVarOf<kotlin/Int> /* = ^kotlinx/cinterop/IntVar */> */
+    getter_flags: 199
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.ArrayMemberAt(offset = long(28))
+  }
+  property {
+    name: fn
+    return_type: kotlinx/cinterop/CPointer<kotlinx/cinterop/CFunction<kotlin/Function2<kotlinx/cinterop/CPointer<out kotlinx/cinterop/CPointed>? /* = ^kotlinx/cinterop/COpaquePointer? */, kotlinx/cinterop/CPointer<out kotlinx/cinterop/CPointed>? /* = ^kotlinx/cinterop/COpaquePointer? */, kotlin/Int>>>? /* = ^org/example/types/cmp_fn? */
+    setter_value_parameter {
+      name: value
+      type: kotlinx/cinterop/CPointer<kotlinx/cinterop/CFunction<kotlin/Function2<kotlinx/cinterop/CPointer<out kotlinx/cinterop/CPointed>? /* = ^kotlinx/cinterop/COpaquePointer? */, kotlinx/cinterop/CPointer<out kotlinx/cinterop/CPointed>? /* = ^kotlinx/cinterop/COpaquePointer? */, kotlin/Int>>>? /* = ^org/example/types/cmp_fn? */
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(40))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(40))
+  }
+  property {
+    name: quad
+    return_type: kotlinx/cinterop/CPointer<kotlinx/cinterop/IntVarOf<kotlin/Int> /* = ^kotlinx/cinterop/IntVar */> /* = ^org/example/types/int4 */
+    getter_flags: 199
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.ArrayMemberAt(offset = long(48))
+  }
+  property {
+    name: u
+    return_type: kotlin/UInt /* = ^org/example/types/uint */
+    setter_value_parameter {
+      name: value
+      type: kotlin/UInt /* = ^org/example/types/uint */
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(64))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(64))
+  }
+  property {
+    name: c
+    return_type: kotlin/Byte
+    setter_value_parameter {
+      name: value
+      type: kotlin/Byte
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(68))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(68))
+  }
+  property {
+    name: fl
+    return_type: kotlin/Float
+    setter_value_parameter {
+      name: value
+      type: kotlin/Float
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(72))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(72))
+  }
+  property {
+    name: d
+    return_type: kotlin/Double
+    setter_value_parameter {
+      name: value
+      type: kotlin/Double
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(80))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(80))
+  }
+  property {
+    name: by_typedef
+    return_type: org/example/types/s
+    getter_flags: 199
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(88))
+  }
+  property {
+    name: anon
+    return_type: org/example/types/anonymousStruct1
+    getter_flags: 199
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(92))
+  }
+  annotation: @kotlinx/cinterop/internal/CStruct(spelling = string("struct  { char b; unsigned int e; unsigned int f; unsigned int et; void* p; struct  { int v; } inner; int arr[2]; void* fn; int quad[4]; unsigned int u; char c; float fl; double d; struct  { int v; } by_typedef; union { struct  { short lo; short hi; } parts; int whole; } anon; }"))
+  annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+}
+class {
+  flags: 391
+  fq_name: org/example/types/mix.Companion
+  supertype: kotlinx/cinterop/CStructVar.Type
+  constructor {
+    flags: 2
+  }
+  annotation: @kotlinx/cinterop/internal/CStruct.VarType(size = long(96), align = int(8))
+  annotation: @kotlin/Deprecated(message = string("Use sizeOf<T>() or alignOf<T>() instead."), replaceWith = annotation(@kotlin/ReplaceWith(imports = array(), expression = string(""))), level = enum(kotlin/DeprecationLevel .WARNING))
+}
+class {
+  flags: 7
+  fq_name: org/example/types/anonymousStruct1
+  companion_object_name: Companion
+  supertype: kotlinx/cinterop/CStructVar
+  nested_class_name: Companion
+  constructor {
+    value_parameter {
+      name: rawPtr
+      type: kotlin/native/internal/NativePtr /* = ^kotlinx/cinterop/NativePtr */
+    }
+  }
+  property {
+    name: parts
+    return_type: org/example/types/anonymousStruct2
+    getter_flags: 199
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(0))
+  }
+  property {
+    name: whole
+    return_type: kotlin/Int
+    setter_value_parameter {
+      name: value
+      type: kotlin/Int
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(0))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(0))
+  }
+  annotation: @kotlinx/cinterop/internal/CStruct(spelling = string("union { struct  { short lo; short hi; } parts; int whole; }"))
+  annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+}
+class {
+  flags: 391
+  fq_name: org/example/types/anonymousStruct1.Companion
+  supertype: kotlinx/cinterop/CStructVar.Type
+  constructor {
+    flags: 2
+  }
+  annotation: @kotlinx/cinterop/internal/CStruct.VarType(size = long(4), align = int(4))
+  annotation: @kotlin/Deprecated(message = string("Use sizeOf<T>() or alignOf<T>() instead."), replaceWith = annotation(@kotlin/ReplaceWith(imports = array(), expression = string(""))), level = enum(kotlin/DeprecationLevel .WARNING))
+}
+class {
+  flags: 7
+  fq_name: org/example/types/anonymousStruct2
+  companion_object_name: Companion
+  supertype: kotlinx/cinterop/CStructVar
+  nested_class_name: Companion
+  constructor {
+    value_parameter {
+      name: rawPtr
+      type: kotlin/native/internal/NativePtr /* = ^kotlinx/cinterop/NativePtr */
+    }
+  }
+  property {
+    name: lo
+    return_type: kotlin/Short
+    setter_value_parameter {
+      name: value
+      type: kotlin/Short
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(0))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(0))
+  }
+  property {
+    name: hi
+    return_type: kotlin/Short
+    setter_value_parameter {
+      name: value
+      type: kotlin/Short
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(2))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(2))
+  }
+  annotation: @kotlinx/cinterop/internal/CStruct(spelling = string("struct  { short lo; short hi; }"))
+  annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+}
+class {
+  flags: 391
+  fq_name: org/example/types/anonymousStruct2.Companion
+  supertype: kotlinx/cinterop/CStructVar.Type
+  constructor {
+    flags: 2
+  }
+  annotation: @kotlinx/cinterop/internal/CStruct.VarType(size = long(4), align = int(2))
+  annotation: @kotlin/Deprecated(message = string("Use sizeOf<T>() or alignOf<T>() instead."), replaceWith = annotation(@kotlin/ReplaceWith(imports = array(), expression = string(""))), level = enum(kotlin/DeprecationLevel .WARNING))
+}
+class {
+  flags: 7
+  fq_name: org/example/types/packed_s
+  companion_object_name: Companion
+  supertype: kotlinx/cinterop/CStructVar
+  nested_class_name: Companion
+  constructor {
+    value_parameter {
+      name: rawPtr
+      type: kotlin/native/internal/NativePtr /* = ^kotlinx/cinterop/NativePtr */
+    }
+  }
+  property {
+    name: c
+    return_type: kotlin/Byte
+    setter_value_parameter {
+      name: value
+      type: kotlin/Byte
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(0))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(0))
+  }
+  property {
+    name: i
+    return_type: kotlin/Int
+    setter_value_parameter {
+      name: value
+      type: kotlin/Int
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(1))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(1))
+  }
+  annotation: @kotlinx/cinterop/internal/CStruct(spelling = string("struct  { char c; int i; } __attribute__((packed))"))
+  annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+}
+class {
+  flags: 391
+  fq_name: org/example/types/packed_s.Companion
+  supertype: kotlinx/cinterop/CStructVar.Type
+  constructor {
+    flags: 2
+  }
+  annotation: @kotlinx/cinterop/internal/CStruct.VarType(size = long(5), align = int(1))
+  annotation: @kotlin/Deprecated(message = string("Use sizeOf<T>() or alignOf<T>() instead."), replaceWith = annotation(@kotlin/ReplaceWith(imports = array(), expression = string(""))), level = enum(kotlin/DeprecationLevel .WARNING))
+}
+class {
+  flags: 7
+  fq_name: org/example/types/aligned_s
+  companion_object_name: Companion
+  supertype: kotlinx/cinterop/CStructVar
+  nested_class_name: Companion
+  constructor {
+    value_parameter {
+      name: rawPtr
+      type: kotlin/native/internal/NativePtr /* = ^kotlinx/cinterop/NativePtr */
+    }
+  }
+  property {
+    name: c
+    return_type: kotlin/Byte
+    setter_value_parameter {
+      name: value
+      type: kotlin/Byte
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(0))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(0))
+  }
+  property {
+    name: i
+    return_type: kotlin/Int
+    setter_value_parameter {
+      name: value
+      type: kotlin/Int
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(8))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(8))
+  }
+  annotation: @kotlinx/cinterop/internal/CStruct(spelling = string("struct  { char c; int i __attribute__((aligned(8))); } __attribute__((aligned(8)))"))
+  annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+}
+class {
+  flags: 391
+  fq_name: org/example/types/aligned_s.Companion
+  supertype: kotlinx/cinterop/CStructVar.Type
+  constructor {
+    flags: 2
+  }
+  annotation: @kotlinx/cinterop/internal/CStruct.VarType(size = long(16), align = int(8))
+  annotation: @kotlin/Deprecated(message = string("Use sizeOf<T>() or alignOf<T>() instead."), replaceWith = annotation(@kotlin/ReplaceWith(imports = array(), expression = string(""))), level = enum(kotlin/DeprecationLevel .WARNING))
+}
+class {
+  flags: 7
+  fq_name: org/example/types/with_bits
+  companion_object_name: Companion
+  supertype: kotlinx/cinterop/CStructVar
+  nested_class_name: Companion
+  constructor {
+    value_parameter {
+      name: rawPtr
+      type: kotlin/native/internal/NativePtr /* = ^kotlinx/cinterop/NativePtr */
+    }
+  }
+  property {
+    name: a
+    return_type: kotlin/Int
+    setter_value_parameter {
+      name: value
+      type: kotlin/Int
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(0))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(0))
+  }
+  property {
+    name: d
+    return_type: kotlin/Long
+    setter_value_parameter {
+      name: value
+      type: kotlin/Long
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(8))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.MemberAt(offset = long(8))
+  }
+  property {
+    name: b
+    return_type: kotlin/UInt
+    setter_value_parameter {
+      name: value
+      type: kotlin/UInt
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.BitField(offset = long(32), size = int(4))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.BitField(offset = long(32), size = int(4))
+  }
+  property {
+    name: c
+    return_type: kotlin/UInt
+    setter_value_parameter {
+      name: value
+      type: kotlin/UInt
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1798
+    getter_annotation: @kotlinx/cinterop/internal/CStruct.BitField(offset = long(36), size = int(4))
+    setter_annotation: @kotlinx/cinterop/internal/CStruct.BitField(offset = long(36), size = int(4))
+  }
+  annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+}
+class {
+  flags: 391
+  fq_name: org/example/types/with_bits.Companion
+  supertype: kotlinx/cinterop/CStructVar.Type
+  constructor {
+    flags: 2
+  }
+  annotation: @kotlinx/cinterop/internal/CStruct.VarType(size = long(16), align = int(8))
+  annotation: @kotlin/Deprecated(message = string("Use sizeOf<T>() or alignOf<T>() instead."), replaceWith = annotation(@kotlin/ReplaceWith(imports = array(), expression = string(""))), level = enum(kotlin/DeprecationLevel .WARNING))
+}
+class {
+  flags: 32903
+  fq_name: org/example/types/ns
+  companion_object_name: Companion
+  supertype: kotlin/Enum<org/example/types/ns>
+  supertype: kotlinx/cinterop/CEnum
+  nested_class_name: Var, Companion
+  constructor {
+    flags: 2
+    value_parameter {
+      name: value
+      type: kotlin/UInt
+    }
+  }
+  property {
+    name: value
+    return_type: kotlin/UInt
+    getter_flags: 86
+    flags: 534
+  }
+  enum_entry {
+    name: NS_X
+    annotation: @kotlinx/cinterop/internal/ConstantValue.UInt(value = int(0 flags=1))
+    ordinal: 0
+  }
+  enum_entry {
+    name: NS_Y
+    annotation: @kotlinx/cinterop/internal/ConstantValue.UInt(value = int(1 flags=1))
+    ordinal: 1
+  }
+  annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+}
+class {
+  fq_name: org/example/types/ns.Var
+  companion_object_name: Companion
+  supertype: kotlinx/cinterop/CEnumVar
+  nested_class_name: Companion
+  constructor {
+    value_parameter {
+      name: rawPtr
+      type: kotlin/native/internal/NativePtr /* = ^kotlinx/cinterop/NativePtr */
+    }
+  }
+  property {
+    name: value
+    return_type: org/example/types/ns
+    setter_value_parameter {
+      name: value
+      type: org/example/types/ns
+    }
+    getter_flags: 198
+    setter_flags: 198
+    flags: 1798
+  }
+}
+class {
+  flags: 391
+  fq_name: org/example/types/ns.Var.Companion
+  supertype: kotlinx/cinterop/CPrimitiveVar.Type
+  constructor {
+    flags: 2
+  }
+  annotation: @kotlinx/cinterop/internal/CEnumVarTypeSize(size = int(4))
+  annotation: @kotlin/Deprecated(message = string("Use sizeOf<T>() or alignOf<T>() instead."), replaceWith = annotation(@kotlin/ReplaceWith(imports = array(), expression = string(""))), level = enum(kotlin/DeprecationLevel .WARNING))
+}
+class {
+  flags: 390
+  fq_name: org/example/types/ns.Companion
+  constructor {
+    flags: 2
+  }
+  function {
+    name: byValue
+    return_type: org/example/types/ns
+    value_parameter {
+      name: value
+      type: kotlin/UInt
+    }
+    flags: 7
+    annotation: @kotlin/Deprecated(message = string("Will be removed."), replaceWith = annotation(@kotlin/ReplaceWith(imports = array(), expression = string(""))), level = enum(kotlin/DeprecationLevel .WARNING))
+  }
+}
+is_empty: 0
+fq_name: org.example.types
+class_name: org/example/types/s, org/example/types/s.Companion, org/example/types/t_tag, org/example/types/t_tag.Companion, org/example/types/mix, org/example/types/mix.Companion, org/example/types/anonymousStruct1, org/example/types/anonymousStruct1.Companion, org/example/types/anonymousStruct2, org/example/types/anonymousStruct2.Companion, org/example/types/packed_s, org/example/types/packed_s.Companion, org/example/types/aligned_s, org/example/types/aligned_s.Companion, org/example/types/with_bits, org/example/types/with_bits.Companion, org/example/types/ns, org/example/types/ns.Var, org/example/types/ns.Var.Companion, org/example/types/ns.Companion
+=== default/linkdata/package_org.example.types/1_types.knm
+package {
+  function {
+    name: take_void
+    return_type: kotlin/Unit
+    value_parameter {
+      name: p
+      type: kotlinx/cinterop/CValuesRef<*>?
+    }
+    value_parameter {
+      name: cp
+      type: kotlinx/cinterop/CValuesRef<*>?
+    }
+    flags: 4103
+    annotation: @kotlinx/cinterop/internal/CCall.Direct(name = string("take_void"))
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  function {
+    name: take_cstr
+    return_type: kotlin/Unit
+    value_parameter {
+      flags: 1
+      name: s
+      type: kotlin/String?
+      annotation: @kotlinx/cinterop/internal/CCall.CString()
+    }
+    value_parameter {
+      name: mutable
+      type: kotlinx/cinterop/CValuesRef<kotlinx/cinterop/ByteVarOf<kotlin/Byte> /* = ^kotlinx/cinterop/ByteVar */>?
+    }
+    value_parameter {
+      name: bytes
+      type: kotlinx/cinterop/CValuesRef<kotlinx/cinterop/UByteVarOf<kotlin/UByte> /* = ^kotlinx/cinterop/UByteVar */>?
+    }
+    value_parameter {
+      name: sbytes
+      type: kotlinx/cinterop/CValuesRef<kotlinx/cinterop/ByteVarOf<kotlin/Byte> /* = ^kotlinx/cinterop/ByteVar */>?
+    }
+    flags: 4103
+    annotation: @kotlinx/cinterop/internal/CCall.Direct(name = string("take_cstr"))
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  function {
+    name: take_cstr
+    return_type: kotlin/Unit
+    value_parameter {
+      name: s
+      type: kotlinx/cinterop/CPointer<kotlinx/cinterop/ByteVarOf<kotlin/Byte> /* = ^kotlinx/cinterop/ByteVar */>? /* = ^org/example/types/cstr? */
+    }
+    value_parameter {
+      name: mutable
+      type: kotlinx/cinterop/CValuesRef<kotlinx/cinterop/ByteVarOf<kotlin/Byte> /* = ^kotlinx/cinterop/ByteVar */>?
+    }
+    value_parameter {
+      name: bytes
+      type: kotlinx/cinterop/CValuesRef<kotlinx/cinterop/UByteVarOf<kotlin/UByte> /* = ^kotlinx/cinterop/UByteVar */>?
+    }
+    value_parameter {
+      name: sbytes
+      type: kotlinx/cinterop/CValuesRef<kotlinx/cinterop/ByteVarOf<kotlin/Byte> /* = ^kotlinx/cinterop/ByteVar */>?
+    }
+    flags: 4103
+    annotation: @kotlinx/cinterop/internal/CCall.Direct(name = string("take_cstr"))
+    annotation: @kotlin/internal/LowPriorityInOverloadResolution()
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  function {
+    name: ret_bool
+    return_type: kotlin/Boolean
+    flags: 4103
+    annotation: @kotlinx/cinterop/internal/CCall.Direct(name = string("ret_bool"))
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  function {
+    name: ret_char
+    return_type: kotlin/Byte
+    flags: 4103
+    annotation: @kotlinx/cinterop/internal/CCall.Direct(name = string("ret_char"))
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  function {
+    name: ret_float
+    return_type: kotlin/Float
+    value_parameter {
+      name: f
+      type: kotlin/Float
+    }
+    flags: 4103
+    annotation: @kotlinx/cinterop/internal/CCall.Direct(name = string("ret_float"))
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  function {
+    name: take_enum
+    return_type: kotlin/Unit
+    value_parameter {
+      name: f
+      type: kotlin/UInt /* = ^org/example/types/flags */
+    }
+    value_parameter {
+      name: n
+      type: org/example/types/ns
+    }
+    value_parameter {
+      name: t
+      type: org/example/types/ns /* = ^org/example/types/ns_t */
+    }
+    flags: 4103
+    annotation: @kotlinx/cinterop/internal/CCall.Direct(name = string("take_enum"))
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  function {
+    name: take_quad
+    return_type: kotlin/Unit
+    value_parameter {
+      name: q
+      type: kotlinx/cinterop/CPointer<kotlinx/cinterop/IntVarOf<kotlin/Int> /* = ^kotlinx/cinterop/IntVar */>? /* = ^org/example/types/int4? */
+    }
+    value_parameter {
+      name: sp
+      type: kotlinx/cinterop/CValuesRef<org/example/types/s>?
+    }
+    value_parameter {
+      name: sp2
+      type: kotlinx/cinterop/CValuesRef<org/example/types/s>?
+    }
+    value_parameter {
+      name: h
+      type: kotlinx/cinterop/CPointer<org/example/types/t_tag>? /* = ^org/example/types/t_handle? */
+    }
+    flags: 4103
+    annotation: @kotlinx/cinterop/internal/CCall.Direct(name = string("take_quad"))
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  function {
+    name: unnamed
+    return_type: kotlin/Unit
+    value_parameter {
+      name: arg0
+      type: kotlin/Int
+    }
+    value_parameter {
+      name: arg1
+      type: kotlinx/cinterop/CValuesRef<kotlinx/cinterop/ByteVarOf<kotlin/Byte> /* = ^kotlinx/cinterop/ByteVar */>?
+    }
+    flags: 36871
+    annotation: @kotlinx/cinterop/internal/CCall.Direct(name = string("unnamed"))
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  function {
+    name: mixed_names
+    return_type: kotlin/Unit
+    value_parameter {
+      name: a
+      type: kotlin/Int
+    }
+    value_parameter {
+      name: arg1
+      type: kotlin/Int
+    }
+    flags: 36871
+    annotation: @kotlinx/cinterop/internal/CCall.Direct(name = string("mixed_names"))
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  function {
+    name: ret_const
+    return_type: kotlin/Int
+    value_parameter {
+      name: x
+      type: kotlin/Int
+    }
+    flags: 4103
+    annotation: @kotlinx/cinterop/internal/CCall.Direct(name = string("ret_const"))
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  function {
+    name: ret_s
+    return_type: kotlinx/cinterop/CValue<org/example/types/s>
+    flags: 4103
+    annotation: @kotlinx/cinterop/internal/CCall.Direct(name = string("ret_s"))
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  function {
+    name: ret_s2
+    return_type: kotlinx/cinterop/CValue<org/example/types/s>
+    value_parameter {
+      name: value
+      type: kotlinx/cinterop/CValue<org/example/types/s>
+    }
+    flags: 4103
+    annotation: @kotlinx/cinterop/internal/CCall.Direct(name = string("ret_s2"))
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+  }
+  property {
+    name: g_const_s
+    return_type: org/example/types/s
+    getter_flags: 199
+    flags: 519
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    getter_annotation: @kotlinx/cinterop/internal/CGlobalAccess(name = string("g_const_s"))
+    getter_annotation: @kotlinx/cinterop/internal/CGlobalAccess.Pointer()
+  }
+  property {
+    name: g_cstr
+    return_type: kotlinx/cinterop/CPointer<kotlinx/cinterop/ByteVarOf<kotlin/Byte> /* = ^kotlinx/cinterop/ByteVar */>?
+    setter_value_parameter {
+      name: value
+      type: kotlinx/cinterop/CPointer<kotlinx/cinterop/ByteVarOf<kotlin/Byte> /* = ^kotlinx/cinterop/ByteVar */>?
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1799
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    getter_annotation: @kotlinx/cinterop/internal/CGlobalAccess(name = string("g_cstr"))
+    setter_annotation: @kotlinx/cinterop/internal/CGlobalAccess(name = string("g_cstr"))
+  }
+  property {
+    name: g_flags
+    return_type: kotlin/UInt /* = ^org/example/types/flags */
+    setter_value_parameter {
+      name: value
+      type: kotlin/UInt /* = ^org/example/types/flags */
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1799
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    getter_annotation: @kotlinx/cinterop/internal/CGlobalAccess(name = string("g_flags"))
+    setter_annotation: @kotlinx/cinterop/internal/CGlobalAccess(name = string("g_flags"))
+  }
+  property {
+    name: g_fn
+    return_type: kotlinx/cinterop/CPointer<kotlinx/cinterop/CFunction<kotlin/Function2<kotlinx/cinterop/CPointer<out kotlinx/cinterop/CPointed>? /* = ^kotlinx/cinterop/COpaquePointer? */, kotlinx/cinterop/CPointer<out kotlinx/cinterop/CPointed>? /* = ^kotlinx/cinterop/COpaquePointer? */, kotlin/Int>>>? /* = ^org/example/types/cmp_fn? */
+    setter_value_parameter {
+      name: value
+      type: kotlinx/cinterop/CPointer<kotlinx/cinterop/CFunction<kotlin/Function2<kotlinx/cinterop/CPointer<out kotlinx/cinterop/CPointed>? /* = ^kotlinx/cinterop/COpaquePointer? */, kotlinx/cinterop/CPointer<out kotlinx/cinterop/CPointed>? /* = ^kotlinx/cinterop/COpaquePointer? */, kotlin/Int>>>? /* = ^org/example/types/cmp_fn? */
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1799
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    getter_annotation: @kotlinx/cinterop/internal/CGlobalAccess(name = string("g_fn"))
+    setter_annotation: @kotlinx/cinterop/internal/CGlobalAccess(name = string("g_fn"))
+  }
+  property {
+    name: g_ns
+    return_type: org/example/types/ns /* = ^org/example/types/ns_t */
+    setter_value_parameter {
+      name: value
+      type: org/example/types/ns /* = ^org/example/types/ns_t */
+    }
+    getter_flags: 199
+    setter_flags: 199
+    flags: 1799
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    getter_annotation: @kotlinx/cinterop/internal/CGlobalAccess(name = string("g_ns"))
+    setter_annotation: @kotlinx/cinterop/internal/CGlobalAccess(name = string("g_ns"))
+  }
+  property {
+    name: g_quad
+    return_type: kotlinx/cinterop/CPointer<kotlinx/cinterop/IntVarOf<kotlin/Int> /* = ^kotlinx/cinterop/IntVar */> /* = ^org/example/types/int4 */
+    getter_flags: 199
+    flags: 519
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    getter_annotation: @kotlinx/cinterop/internal/CGlobalAccess(name = string("g_quad"))
+    getter_annotation: @kotlinx/cinterop/internal/CGlobalAccess.Pointer()
+  }
+  property {
+    name: M_NEG_FLOAT
+    return_type: kotlin/Double
+    getter_flags: 6
+    flags: 10759
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    compile_time_value: double(-1.5)
+  }
+  property {
+    name: M_ULL
+    return_type: kotlin/ULong
+    getter_flags: 6
+    flags: 10759
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    compile_time_value: long(-1 flags=1)
+  }
+  property {
+    name: M_CAST_TYPEDEF
+    return_type: kotlin/UInt /* = ^org/example/types/uint */
+    getter_flags: 6
+    flags: 10759
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    compile_time_value: int(3 flags=1)
+  }
+  property {
+    name: M_ENUM_EXPR
+    return_type: kotlin/Int
+    getter_flags: 6
+    flags: 10759
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    compile_time_value: int(2)
+  }
+  property {
+    name: M_CHAR_CAST
+    return_type: kotlin/Byte
+    getter_flags: 6
+    flags: 10759
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    compile_time_value: byte(65)
+  }
+  property {
+    name: M_SHORT
+    return_type: kotlin/Short
+    getter_flags: 6
+    flags: 10759
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    compile_time_value: short(-2)
+  }
+  property {
+    name: M_DOUBLE_EXPR
+    return_type: kotlin/Double
+    getter_flags: 6
+    flags: 10759
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    compile_time_value: double(0.25)
+  }
+  property {
+    name: M_FLOAT_INT_MIX
+    return_type: kotlin/Float
+    getter_flags: 6
+    flags: 10759
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    compile_time_value: float(3f)
+  }
+  property {
+    name: M_DEFINED_LATER
+    return_type: kotlin/Int
+    getter_flags: 6
+    flags: 10759
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    compile_time_value: int(7)
+  }
+  property {
+    name: LATER_VALUE
+    return_type: kotlin/Int
+    getter_flags: 6
+    flags: 10759
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    compile_time_value: int(7)
+  }
+  property {
+    name: M_U8
+    return_type: kotlin/String
+    getter_flags: 6
+    flags: 10759
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    compile_time_value: string("utf")
+  }
+  property {
+    name: M_CHAR_ONLY
+    return_type: kotlin/Int
+    getter_flags: 6
+    flags: 10759
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    compile_time_value: int(122)
+  }
+  property {
+    name: M_LONG_NEG
+    return_type: kotlin/Long
+    getter_flags: 6
+    flags: 10759
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    compile_time_value: long(-5)
+  }
+  property {
+    name: M_STRING_PAREN
+    return_type: kotlinx/cinterop/CPointer<kotlinx/cinterop/ByteVarOf<kotlin/Byte> /* = ^kotlinx/cinterop/ByteVar */>?
+    getter_flags: 199
+    flags: 519
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    getter_annotation: @kotlinx/cinterop/internal/CCall.Direct(name = string("M_STRING_PAREN unsupported: https://youtrack.jetbrains.com/issue/KT-82031"))
+  }
+  property {
+    name: FL_A
+    return_type: kotlin/UInt /* = ^org/example/types/flags */
+    getter_flags: 6
+    flags: 10759
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    compile_time_value: int(1 flags=1)
+  }
+  property {
+    name: FL_B
+    return_type: kotlin/UInt /* = ^org/example/types/flags */
+    getter_flags: 6
+    flags: 10759
+    annotation: @kotlinx/cinterop/ExperimentalForeignApi()
+    compile_time_value: int(2 flags=1)
+  }
+  package_fq_name: org/example/types
+}
+is_empty: 0
+fq_name: org.example.types
+=== default/manifest
+abi_version=2.4.0
+builtins_platform=NATIVE
+compilerOpts=-I.
+compiler_version=2.4.20
+depends=stdlib
+exportForwardDeclarations=
+headerFilter=types.h
+headers=types.h
+includedForwardDeclarations=
+includedHeaders=eb6a7a4d5659363d3fa0a9cf3356f453b3fb2bb450ccae7f54a1d46dd9357151
+interop=true
+ir_provider=kotlin.native.cinterop
+ir_signature_versions=1,2
+metadata_version=2.4.0
+native_targets=linux_x64
+package=org.example.types
+unique_name=types
+default/resources/
+default/targets/
+default/targets/linux_x64/
+default/targets/linux_x64/included/
+default/targets/linux_x64/native/
