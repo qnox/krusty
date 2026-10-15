@@ -3,6 +3,9 @@
 
 use super::*;
 
+mod java_hash_map;
+mod switch;
+
 /// Whether a discarded `when` still joins a value, as kotlinc's `visitWhen` has it: only a `when`
 /// that is not exhaustive, or whose type is `Unit`, discards each branch's value in the branch.
 /// Any other materializes every branch at its type, and the statement discarding the `when` pops
@@ -18,18 +21,6 @@ pub(super) fn discard_joined_value(keeps_value: bool, result_ty: Ty, code: &mut 
     if keeps_value && !code.is_dead() {
         discard(result_ty, code);
     }
-}
-
-/// A switch subject, its constant cases in source order with the branch each selects, the bodies
-/// of the branches a case still reaches, and the optional final `else` body.
-pub(super) struct IntSwitchPlan {
-    subject: u32,
-    cases: Vec<(i32, usize)>,
-    bodies: Vec<u32>,
-    default: Option<u32>,
-    /// An exhaustive `when` without `else` gets fir2ir's `else -> throw
-    /// NoWhenBranchMatchedException()`, at the `when`'s line when it has one.
-    no_branch_matched: Option<Option<u32>>,
 }
 
 /// The merge contract shared by every emitted case body.
@@ -120,97 +111,6 @@ impl Emitter<'_> {
         last
     }
 
-    /// kotlinc's `SwitchGenerator`: every clause of every branch (`a, b ->` is an `||` chain of
-    /// clauses) compares the same `Int` local against a constant, and an `else`, if present, is
-    /// last. A key repeated later is unreachable and dropped, and so is a branch left without a
-    /// key. A single key remains a comparison.
-    pub(super) fn int_switch_plan(&self, branches: &[(Option<u32>, u32)]) -> Option<IntSwitchPlan> {
-        let mut subject = None;
-        let mut cases: Vec<(i32, usize)> = Vec::new();
-        let mut bodies = Vec::new();
-        let mut default = None;
-        for (index, (cond, body)) in branches.iter().enumerate() {
-            let Some(cond) = cond else {
-                if index + 1 != branches.len() {
-                    return None;
-                }
-                default = Some(*body);
-                continue;
-            };
-            let mut clauses = Vec::new();
-            self.switch_clauses(*cond, &mut clauses);
-            let branch = bodies.len();
-            let mut reachable = false;
-            for clause in clauses {
-                let (variable, read, key) = self.switch_clause(clause)?;
-                match subject {
-                    None => subject = Some((variable, read)),
-                    Some((already, _)) if already == variable => {}
-                    Some(_) => return None,
-                }
-                if cases.iter().all(|(seen, _)| *seen != key) {
-                    cases.push((key, branch));
-                    reachable = true;
-                }
-            }
-            if reachable {
-                bodies.push(*body);
-            }
-        }
-        let (_, subject) = subject?;
-        (cases.len() >= 2).then_some(IntSwitchPlan {
-            subject,
-            cases,
-            bodies,
-            default,
-            no_branch_matched: None,
-        })
-    }
-
-    /// The clauses of a branch condition: the leaves of an `||` chain, or the condition itself.
-    fn switch_clauses(&self, condition: u32, clauses: &mut Vec<u32>) {
-        if self.ir.short_circuits.get(&condition) == Some(&crate::ir::IrShortCircuitKind::Or) {
-            if let IrExpr::When { branches } = self.ir.expr(condition) {
-                if let [(Some(first), _), (None, rest)] = branches.as_slice() {
-                    self.switch_clauses(*first, clauses);
-                    self.switch_clauses(*rest, clauses);
-                    return;
-                }
-            }
-        }
-        clauses.push(condition);
-    }
-
-    /// `subject == key` with an `Int` local subject: the local, its read, and the key.
-    fn switch_clause(&self, clause: u32) -> Option<(u32, u32, i32)> {
-        let (lhs, rhs) = match self.ir.expr(clause) {
-            IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Eq,
-                lhs,
-                rhs,
-            } => (*lhs, *rhs),
-            IrExpr::Equality {
-                op: IrBinOp::Eq,
-                mode: crate::ir::EqualityMode::Primitive,
-                lhs,
-                rhs,
-            } => (*lhs, *rhs),
-            _ => return None,
-        };
-        let key = match self.ir.expr(rhs) {
-            IrExpr::Const(IrConst::Int(key)) => *key,
-            IrExpr::EnumSwitchKey { classifier, name } => self.enum_switch_key(*classifier, name),
-            _ => return None,
-        };
-        let IrExpr::GetValue(variable) = self.ir.expr(lhs) else {
-            return None;
-        };
-        if self.value_ty(lhs) != Ty::Int {
-            return None;
-        }
-        Some((*variable, lhs, key))
-    }
-
     /// A safe call's guard laid out as kotlinc writes it: `ifnull` to the null path, the selector
     /// falling through — `aload t; ifnull N; <selector>; goto E; N: <null result>; E:`. A guard
     /// inside a chain (see `link_safe_call_chain`) jumps to the chain's null exit and leaves
@@ -284,91 +184,6 @@ impl Emitter<'_> {
         let _ = emit_arm(self, null_result, selector_diverges, code);
         self.bind(emission.end, code);
     }
-
-    /// Emit the reachable branch bodies in source order with `else` last, using kotlinc's
-    /// switch-density rule.
-    pub(super) fn emit_int_switch(
-        &mut self,
-        plan: &IntSwitchPlan,
-        emission: Emission,
-        code: &mut CodeBuilder,
-    ) {
-        let default = code.new_label();
-        let branch_labels: Vec<Label> = plan.bodies.iter().map(|_| code.new_label()).collect();
-        // kotlinc's `SwitchGenerator` loads the `when`'s subject once, not a condition's read of
-        // it, so the load carries none of the conditions' source lines.
-        let subject = self.ir.expr(plan.subject).clone();
-        self.emit_value_node(plan.subject, &subject, code);
-        let low = plan.cases.iter().map(|(key, _)| *key).min().expect("keys");
-        let high = plan.cases.iter().map(|(key, _)| *key).max().expect("keys");
-        let span = i64::from(high) - i64::from(low) + 1;
-        for &label in branch_labels.iter().chain(std::iter::once(&default)) {
-            self.record_label_assignment_state(label, code);
-        }
-        if span <= 2 * plan.cases.len() as i64 {
-            let mut targets = vec![default; span as usize];
-            for (key, branch) in &plan.cases {
-                targets[(i64::from(*key) - i64::from(low)) as usize] = branch_labels[*branch];
-            }
-            code.tableswitch(low, high, default, &targets);
-        } else {
-            let mut pairs: Vec<(i32, Label)> = plan
-                .cases
-                .iter()
-                .map(|(key, branch)| (*key, branch_labels[*branch]))
-                .collect();
-            pairs.sort_by_key(|(key, _)| *key);
-            code.lookupswitch(default, &pairs);
-        }
-
-        let merge = emission.terminal_target.unwrap_or(emission.end);
-        for (label, body) in branch_labels.iter().zip(&plan.bodies) {
-            self.bind(*label, code);
-            code.set_stack(emission.entry_height);
-            if self.emit_switch_body(*body, &emission, code) {
-                code.goto(merge);
-            }
-        }
-        self.bind(default, code);
-        code.set_stack(emission.entry_height);
-        match plan.default {
-            Some(body) => {
-                if self.emit_switch_body(body, &emission, code)
-                    && emission.terminal_target.is_some()
-                {
-                    code.goto(merge);
-                }
-            }
-            None => match plan.no_branch_matched {
-                Some(line) => {
-                    if let Some(line) = line {
-                        code.mark_line(line);
-                    }
-                    self.emit_no_when_branch_matched(code);
-                }
-                None => {
-                    if emission.terminal_target.is_some() {
-                        code.goto(merge);
-                    }
-                }
-            },
-        }
-        if emission.terminal_target.is_none() {
-            self.bind(emission.end, code);
-        }
-    }
-
-    /// Emit one case body and report whether it reaches the merge.
-    fn emit_switch_body(&mut self, body: u32, emission: &Emission, code: &mut CodeBuilder) -> bool {
-        if emission.is_stmt {
-            self.emit(body, code);
-            !self.discarding_diverges(body)
-        } else {
-            self.emit_value(body, code);
-            self.adapt_physical_operand_for(body, self.value_ty(body), emission.result_ty, code);
-            !self.diverges(body)
-        }
-    }
 }
 
 impl Emitter<'_> {
@@ -405,14 +220,14 @@ impl Emitter<'_> {
         let keeps_value = discarded && keeps_discarded_value(exhaustive, result_ty);
         let is_stmt = is_stmt && !keeps_value;
         let terminal_target = is_stmt.then_some(enclosing_terminal_target).flatten();
-        // A `when` comparing ONE Int local against constants is a JVM switch in kotlinc, not a chain
+        // A `when` comparing ONE Int, Char or String local against constants is a JVM switch in kotlinc, not a chain
         // of comparisons. Everything above (the result type, the statement/value decision, the entry
         // height) applies unchanged; only the dispatch differs.
-        if let Some(mut plan) = self.int_switch_plan(branches) {
+        if let Some(mut plan) = self.switch_plan(branches) {
             if !has_else && exhaustive_result.is_some() {
                 plan.no_branch_matched = Some(self.ir.whens.source_lines.get(&expression).copied());
             }
-            self.emit_int_switch(
+            self.emit_switch(
                 &plan,
                 Emission::new(is_stmt, result_ty, entry_height, end, terminal_target),
                 code,
