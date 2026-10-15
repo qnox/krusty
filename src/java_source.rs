@@ -132,6 +132,17 @@ pub(crate) struct SrcType {
     pub(crate) segments: Vec<SrcTypeSegment>,
     pub(crate) array: u32,
     pub(crate) span: Option<Span>,
+    /// The wildcard this type argument was written as. The type itself is its declared bound, with
+    /// `java.lang.Object` standing in for an unbounded `?`.
+    pub(crate) wildcard: Option<SrcWildcard>,
+}
+
+/// A Java wildcard type argument: `? extends B`, `? super B`, or an unbounded `?`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SrcWildcard {
+    Extends,
+    Super,
+    Unbounded,
 }
 
 impl SrcType {
@@ -720,9 +731,17 @@ fn src_type_arguments(p: &mut P) -> Option<Vec<SrcType>> {
 fn src_type(p: &mut P) -> Option<SrcType> {
     skip_type_annotations(p)?;
     if p.eat_punct('?') {
-        // A wildcard is modeled as its bound (or Object) — sound for a stub's erasure/signature.
-        if p.eat_ident("extends") || p.eat_ident("super") {
-            return src_type(p);
+        let wildcard = if p.eat_ident("extends") {
+            SrcWildcard::Extends
+        } else if p.eat_ident("super") {
+            SrcWildcard::Super
+        } else {
+            SrcWildcard::Unbounded
+        };
+        if wildcard != SrcWildcard::Unbounded {
+            let mut bound = src_type(p)?;
+            bound.wildcard = Some(wildcard);
+            return Some(bound);
         }
         return Some(SrcType {
             name: "java.lang.Object".into(),
@@ -735,6 +754,7 @@ fn src_type(p: &mut P) -> Option<SrcType> {
                 .collect(),
             array: 0,
             span: None,
+            wildcard: Some(SrcWildcard::Unbounded),
         });
     }
     let start = p.span()?;
@@ -770,6 +790,7 @@ fn src_type(p: &mut P) -> Option<SrcType> {
         segments,
         array,
         span: Some(Span::new(start.lo, end.hi)),
+        wildcard: None,
     })
 }
 
