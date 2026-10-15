@@ -2137,6 +2137,7 @@ impl<'a> Parser<'a> {
                     is_property,
                     is_actual: epmods.iter().any(|modifier| modifier == "actual"),
                     is_override: epmods.iter().any(|modifier| modifier == "override"),
+                    has_open_modifier: epmods.iter().any(|modifier| modifier == "open"),
                     is_final: epmods.iter().any(|modifier| modifier == "final"),
                     is_open: !epmods.iter().any(|modifier| modifier == "final")
                         && epmods
@@ -3008,6 +3009,7 @@ impl<'a> Parser<'a> {
                     is_property,
                     is_actual: cpmods.iter().any(|modifier| modifier == "actual"),
                     is_override: cpmods.iter().any(|modifier| modifier == "override"),
+                    has_open_modifier: cpmods.iter().any(|modifier| modifier == "open"),
                     is_final: cpmods.iter().any(|modifier| modifier == "final"),
                     is_open: !cpmods.iter().any(|modifier| modifier == "final")
                         && cpmods

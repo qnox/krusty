@@ -934,6 +934,9 @@ pub struct PropParam {
     /// classifier whose header declares it.
     pub is_actual: bool,
     pub is_override: bool,
+    /// The constructor parameter explicitly wrote `open`. [`Self::is_open`] also includes an
+    /// `override` without `final`, so it cannot answer diagnostics about the written modifier.
+    pub has_open_modifier: bool,
     /// `open` or `override` without `final`.
     pub is_open: bool,
     /// The declaration wrote `final`.
@@ -1968,6 +1971,12 @@ pub struct File {
     /// `+FullValueClasses`: a `value class` without `@JvmInline` is a boxed class with structural
     /// `equals`/`hashCode`/`toString`. Without the feature that declaration is an error.
     pub full_value_classes: bool,
+    /// `+ForbidValueClassRecursionViaTypeParameters`: a value class whose underlying type reaches
+    /// itself through a type parameter's bound is an error rather than a deprecation warning.
+    pub forbid_value_class_recursion_via_type_parameters: bool,
+    /// The exact deprecation message selected by this compilation's reference release. Releases
+    /// before the warning/error split leave this absent and report the construct as a plain error.
+    pub value_class_recursion_via_type_parameters_warning: Option<String>,
     /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
     /// parameters whose declared upper bounds contain a cycle.
     pub recursive_type_of: bool,

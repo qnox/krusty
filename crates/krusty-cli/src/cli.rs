@@ -330,7 +330,9 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
             continue;
         }
         match kotlinc_arguments::disposition::of(&occurrence.spec.name) {
-            Some(Disposition::Applied) => apply(&mut opts, &mut parsed, occurrence),
+            Some(Disposition::Applied) => {
+                apply(&mut opts, &mut parsed, occurrence, catalog.version)
+            }
             Some(Disposition::Inert) => {}
             Some(Disposition::Unsupported) | None => {
                 // A refused argument that changes language features is a language error too;
@@ -1550,6 +1552,45 @@ mod tests {
             Some(WarningLevel::Error),
             "a rejected duplicate must not mutate the first configuration"
         );
+    }
+
+    #[test]
+    fn warning_level_rejects_names_absent_from_the_selected_release() {
+        const NAME: &str = "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING";
+        for release in ["2.4.0", "2.4.10"] {
+            let parsed = parse_args(&[
+                &format!("-Xkotlin-reference-version={release}"),
+                &format!("-Xwarning-level={NAME}:warning"),
+                "f.kt",
+            ]);
+            assert_eq!(
+                parsed.errors,
+                [format!("warning with name \"{NAME}\" does not exist")],
+                "{release}"
+            );
+        }
+
+        for (level, expected) in [
+            ("disabled", WarningLevel::Disabled),
+            ("warning", WarningLevel::Warning),
+            ("error", WarningLevel::Error),
+        ] {
+            let parsed = parse_args(&[
+                "-Xkotlin-reference-version=2.4.20",
+                &format!("-Xwarning-level={NAME}:{level}"),
+                "f.kt",
+            ]);
+            assert_eq!(parsed.errors, Vec::<String>::new(), "{level}");
+            assert_eq!(
+                parsed
+                    .warning_policy
+                    .configured_level(WarningName::Compiler(
+                    krusty::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
+                )),
+                Some(expected),
+                "{level}"
+            );
+        }
     }
 
     #[test]

@@ -16,6 +16,7 @@ use krusty::diag::{Diagnostic, DiagnosticKind, Severity, Span};
 use krusty::features::FeatureSetting;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
+use krusty::kotlin_version::KotlinVersion;
 use krusty::language_settings::LanguageSettings;
 use krusty::language_version::LanguageVersion;
 use krusty::source::{SourceInput, SourceKind};
@@ -101,10 +102,12 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// A compilation's language settings on the wire: its language and API versions and the feature
-/// settings that rebuild its features over their defaults ([`LanguageSettings::feature_settings`]).
+/// A compilation's language settings on the wire: its reference release, language and API
+/// versions, and the feature settings that rebuild its features over that release's defaults
+/// ([`LanguageSettings::feature_settings`]).
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct WireLanguage {
+    reference_version: String,
     language_version: String,
     api_version: String,
     features: Vec<(String, bool)>,
@@ -113,6 +116,7 @@ struct WireLanguage {
 impl WireLanguage {
     fn of(settings: &LanguageSettings) -> Self {
         Self {
+            reference_version: settings.features.release().to_string(),
             language_version: settings.language_version.to_string(),
             api_version: settings.api_version.to_string(),
             features: settings
@@ -128,7 +132,17 @@ impl WireLanguage {
         let Some(language) = language else {
             return Ok(LanguageSettings::default());
         };
-        let target = krusty::kotlin_version::target();
+        let target = KotlinVersion::parse(&language.reference_version)
+            .filter(|version| KotlinVersion::supported().contains(version))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "unsupported Kotlin reference release '{}'",
+                        language.reference_version
+                    ),
+                )
+            })?;
         let version = |text: &str| {
             LanguageVersion::parse_supported_for(text, target).ok_or_else(|| {
                 io::Error::new(
@@ -145,7 +159,8 @@ impl WireLanguage {
                 enabled: *enabled,
             })
             .collect::<Vec<_>>();
-        LanguageSettings::new(
+        LanguageSettings::for_release(
+            target,
             version(&language.language_version)?,
             Some(version(&language.api_version)?),
             &features,
@@ -1496,22 +1511,64 @@ mod tests {
 
     #[test]
     fn compiler_warning_name_survives_the_worker_wire_boundary() {
-        let analysis = DocumentAnalysis::with_diagnostics(vec![Diagnostic {
+        let diagnostic = |warning_name: krusty::diag::CompilerWarningName, msg: &str| Diagnostic {
             span: Span::new(1, 2),
             editor_span: None,
             severity: Severity::Warning,
-            warning_name: Some(krusty::diag::CompilerWarningName::Deprecation),
+            warning_name: Some(warning_name),
             kind: DiagnosticKind::Compiler,
-            msg: "deprecated".to_string(),
+            msg: msg.to_string(),
             identity: None,
             file: 0,
-        }]);
+        };
+        let analysis = DocumentAnalysis::with_diagnostics(vec![
+            diagnostic(krusty::diag::CompilerWarningName::Deprecation, "deprecated"),
+            diagnostic(
+                krusty::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
+                "recursive",
+            ),
+        ]);
 
         let decoded = AnalysisResponse::from(analysis).into_document_analysis();
 
         assert_eq!(
-            decoded.diagnostics[0].warning_name,
-            Some(krusty::diag::CompilerWarningName::Deprecation)
+            decoded
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.warning_name)
+                .collect::<Vec<_>>(),
+            [
+                Some(krusty::diag::CompilerWarningName::Deprecation),
+                Some(
+                    krusty::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn language_wire_preserves_the_selected_reference_release() {
+        let old = LanguageSettings::for_release(
+            KotlinVersion::V2_4_0,
+            LanguageVersion::V2_4,
+            Some(LanguageVersion::V2_4),
+            &[],
+        )
+        .unwrap();
+
+        let wire = WireLanguage::of(&old);
+        assert_eq!(wire.reference_version, "2.4.0");
+        let carried = WireLanguage::settings(Some(&wire)).unwrap();
+        assert_eq!(carried.features.release(), KotlinVersion::V2_4_0);
+        assert_eq!(carried.language_version, LanguageVersion::V2_4);
+        assert_eq!(carried.api_version, LanguageVersion::V2_4);
+        assert!(
+            carried
+                .features
+                .table()
+                .get("ForbidValueClassRecursionViaTypeParameters")
+                .is_none(),
+            "the worker must not rebuild old-release semantics from its process-global target"
         );
     }
 
