@@ -15,6 +15,7 @@ pub(super) fn merge_metadata_const(
     source_name: &str,
     metadata: &MetaProp,
     field: &JvmStaticField,
+    deprecated_hidden: bool,
     properties: &mut Vec<PropertyInfo>,
 ) {
     if metadata.name != source_name || !metadata.is_const || metadata.is_extension {
@@ -31,6 +32,7 @@ pub(super) fn merge_metadata_const(
     }) {
         property.is_const = true;
         property.compile_time_constant = Some(constant);
+        property.deprecated_hidden = deprecated_hidden;
         return;
     }
 
@@ -88,7 +90,7 @@ pub(super) fn merge_metadata_const(
         implicit_integer_coercion: false,
         compile_time_constant: Some(constant),
         metadata_constant_read: false,
-        deprecated_hidden: metadata.deprecated_hidden,
+        deprecated_hidden,
         accessor_availability: Default::default(),
         is_final: true,
         visibility: metadata.visibility,

@@ -4,6 +4,12 @@ use crate::language_version::LanguageVersion;
 use crate::libraries::{CallSig, ReturnInfo};
 use crate::types::{Ty, TypeName, Visibility};
 
+use super::value_class_erasure::{value_class_param_types, value_class_return_type};
+use super::{
+    aligned_meta_callable, metadata_declared_params, metadata_declared_return,
+    metadata_return_info, Classpath,
+};
+
 #[derive(Clone)]
 pub struct MetadataCallFacts {
     /// Kotlin/source spelling of the descriptor-aligned declaration. The physical JVM spelling is
@@ -55,6 +61,9 @@ pub struct MetadataCallFacts {
     /// `@SinceKotlin` on the selected declaration. Newer than the compilation API level means the
     /// callable is not a candidate.
     pub since_kotlin: Option<LanguageVersion>,
+    /// `@DeprecatedSinceKotlin(hiddenSince)` on this exact declaration. At or above this API level
+    /// the callable is absent from candidate construction.
+    pub hidden_since: Option<LanguageVersion>,
     /// Per DESCRIPTOR parameter position, the VALUE CLASS `@Metadata` declares there when the JVM
     /// descriptor carries its erased underlying (`timeout: kotlin.time.Duration` ↔ `J`).
     ///
@@ -95,8 +104,72 @@ impl MetadataCallFacts {
             context_count: 0,
             deprecated_hidden: false,
             since_kotlin: None,
+            hidden_since: None,
             value_class_params: Vec::new(),
             value_class_ret: None,
         }
+    }
+}
+
+/// Project every descriptor-aligned fact from one metadata callable. Keeping this construction
+/// beside the boundary record prevents individual classpath consumers from realigning an overload.
+pub(super) fn for_callable(
+    classpath: &Classpath,
+    internal: TypeName,
+    fn_name: &str,
+    desc_params: &[Ty],
+    desc_ret: &Ty,
+    extension: bool,
+    value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
+) -> MetadataCallFacts {
+    let meta = classpath.class_meta_name(internal);
+    let Some((end, callable)) = aligned_meta_callable(
+        &meta,
+        fn_name,
+        desc_params,
+        desc_ret,
+        value_underlying,
+        &|ty| classpath.function_classifier_arity(ty),
+        &|name| {
+            classpath
+                .find_name(name)
+                .is_some_and(|class| class.is_interface())
+        },
+    ) else {
+        return MetadataCallFacts::fallback(if extension {
+            CallSig::default()
+        } else {
+            CallSig::metadata_plain(desc_params.len())
+        });
+    };
+    let call_sig = callable.member_call_sig();
+    MetadataCallFacts {
+        source_name: Some(callable.kotlin_name.clone()),
+        kept_params: Some(end),
+        visibility: Some(callable.visibility),
+        call_sig,
+        ret: metadata_return_info(callable.ret_class, callable.ret_nullable()),
+        declared_ret: metadata_declared_return(callable),
+        declared_params: metadata_declared_params(callable),
+        generic_sig: callable.generic_sig.clone(),
+        suspend: callable.is_suspend(),
+        is_inline: callable.is_inline(),
+        has_reified_type_params: callable.has_reified_type_params(),
+        is_operator: callable.is_operator(),
+        is_infix: callable.is_infix(),
+        annotations: callable.annotations.clone(),
+        contract: callable.contract.clone(),
+        context_count: callable.context_count(),
+        deprecated_hidden: callable.deprecated_hidden(),
+        since_kotlin: callable.since_kotlin(),
+        hidden_since: callable.hidden_since(),
+        value_class_params: value_class_param_types(
+            callable,
+            desc_params,
+            extension,
+            end,
+            value_underlying,
+        ),
+        value_class_ret: value_class_return_type(callable, desc_ret, value_underlying),
     }
 }

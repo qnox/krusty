@@ -76,6 +76,9 @@ struct FunctionExtras {
     equality_bound: Option<Ty>,
     /// `@SinceKotlin` version. A callable newer than the compilation's API level is not a candidate.
     since_kotlin: Option<LanguageVersion>,
+    /// `@DeprecatedSinceKotlin(hiddenSince)` version. The declaration is no longer a candidate at
+    /// or above this API level.
+    hidden_since: Option<LanguageVersion>,
 }
 
 /// The decoded function before its rare facts are packed into [`FunctionExtras`].
@@ -98,6 +101,7 @@ pub(super) struct DecodedFunction {
     pub context_parameter_kinds: Vec<ContextParameterKind>,
     pub annotations: Vec<TypeName>,
     pub since_kotlin: Option<LanguageVersion>,
+    pub hidden_since: Option<LanguageVersion>,
 }
 
 fn pack_extras(
@@ -107,6 +111,7 @@ fn pack_extras(
     reified_type_parameter_ordinals: Vec<u32>,
     equality_bound: Option<Ty>,
     since_kotlin: Option<LanguageVersion>,
+    hidden_since: Option<LanguageVersion>,
 ) -> Option<Box<FunctionExtras>> {
     if context_params.is_empty()
         && context_parameter_kinds.is_empty()
@@ -114,6 +119,7 @@ fn pack_extras(
         && reified_type_parameter_ordinals.is_empty()
         && equality_bound.is_none()
         && since_kotlin.is_none()
+        && hidden_since.is_none()
     {
         None
     } else {
@@ -124,6 +130,7 @@ fn pack_extras(
             reified_type_parameter_ordinals,
             equality_bound,
             since_kotlin,
+            hidden_since,
         }))
     }
 }
@@ -150,6 +157,7 @@ impl MetaFn {
                 decoded.reified_type_parameter_ordinals,
                 decoded.equality_bound,
                 decoded.since_kotlin,
+                decoded.hidden_since,
             ),
         }
     }
@@ -211,6 +219,11 @@ impl MetaFn {
     /// `@SinceKotlin` on this declaration. Absent means the callable is available at every API level.
     pub fn since_kotlin(&self) -> Option<LanguageVersion> {
         self.extras.as_ref().and_then(|extras| extras.since_kotlin)
+    }
+
+    /// API version at which `@DeprecatedSinceKotlin` removes this declaration from resolution.
+    pub fn hidden_since(&self) -> Option<LanguageVersion> {
+        self.extras.as_ref().and_then(|extras| extras.hidden_since)
     }
 
     pub fn context_params(&self) -> &[MetaValueParam] {
@@ -356,6 +369,7 @@ mod tests {
             context_parameter_kinds: Vec::new(),
             annotations: Vec::new(),
             since_kotlin: None,
+            hidden_since: None,
         }
     }
 
