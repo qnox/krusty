@@ -226,6 +226,28 @@ spawn the JVM when no registered processor's trigger annotation appears), and **
 bypassing the JVM entirely** (serialization/Compose are native passes — only true APs spin a sidecar).
 Drop daemon/incremental/zero-copy machinery for CI; it's dev-loop tooling.
 
+## Hosting kotlinc plugin jars — the API surface
+
+"World 1" says a FIR/IR plugin jar cannot run without being kotlinc. That holds for the compiler's
+*services*, not for its API. Measured over twelve plugin jars (the first-party ones plus Poko and
+Metro), about 97% of what plugins link against is data types, builders and helper functions; the
+part that needs a running compiler is the session, symbol lookup, the IR plugin context and the
+builtins. `tools/kotlin-plugin-api` turns that into a jar:
+
+- `SurfaceGenerator` derives the surface from the plugin jars themselves: every compiler type they
+  name, with the compiler's exact binary shape, and only the members they use or can override.
+  Self-contained compiler classes (names, ids, predicates, cone types) and self-contained members
+  (constructors, accessors, companions) keep the compiler's code; every other concrete member throws
+  naming itself.
+- Every reference plugin loads, links and passes bytecode verification against that jar and the
+  standard library alone, which the project's tests check per plugin.
+
+The surface is the boundary a host implements. The kotlinc API is unstable, so the surface is
+regenerated per Kotlin release, never maintained by hand. Running a plugin needs an implementation of
+the contract members it reaches: the services backed by krusty's resolved model, and the tree and
+builder types it constructs. The registry keeps reporting such jars as `Unsupported` until a host
+serves their extension points.
+
 ## Drop-in extension management — two layers, like kotlinc
 
 Extensions have **two registration layers**, mirroring kotlinc exactly:
