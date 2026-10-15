@@ -1691,6 +1691,10 @@ pub struct File {
     /// when the assignment spans several lines. Parallel to `assignment_target_spans`, and absent
     /// for every other statement form.
     pub assignment_target_lines: crate::fx_hash::HashMap<u32, u32>,
+    /// Deferred local declarations written `val` (`val x: Int` assigned later). The statement stores
+    /// them as mutable locals, since their initialization is an ordinary store; the checker's
+    /// definite-assignment analysis allows that store exactly once.
+    pub deferred_val_declarations: crate::fx_hash::HashSet<StmtId>,
     /// Name of each NAMED annotation argument, keyed by that argument's own `ExprId`
     /// (`@Deprecated("gone", level = HIDDEN)` → the `HIDDEN` expression maps to `"level"`).
     /// Sparse: a positional argument has no entry. Annotation elements have defaults and may be
@@ -2023,6 +2027,7 @@ impl File {
         self.expr_end_lines = Vec::new();
         self.stmt_lines = Vec::new();
         self.assignment_target_lines = Default::default();
+        self.deferred_val_declarations = Default::default();
         self.value_operator_spans = Default::default();
         self.when_subject_variables = Default::default();
         // Both return-label span tables are keyed by the arenas released here.

@@ -174,7 +174,7 @@ impl Parser<'_> {
         if let Some(operator) = init_operator {
             self.file.value_operator_spans.insert(init.0, operator);
         }
-        self.finish_stmt(
+        let statement = self.finish_stmt(
             Stmt::Local {
                 is_var: is_var || deferred,
                 name,
@@ -182,7 +182,11 @@ impl Parser<'_> {
                 init,
             },
             start,
-        )
+        );
+        if deferred && !is_var {
+            self.file.deferred_val_declarations.insert(statement);
+        }
+        statement
     }
 
     /// Square-bracket destructuring is parsed at every language level. The `[` span is retained so

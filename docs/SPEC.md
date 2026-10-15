@@ -13602,6 +13602,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_holds_in_effect_names_its_lambda_and_condition`, `src/metadata/builder.rs`
   `holds_in_contract_round_trips_through_metadata`, `tests/contract_metadata_roundtrip_e2e.rs`
   `a_member_contract_naming_a_class_type_parameter_loads`.)
+- **A deferred local is initialized by definite assignment, and `callsInPlace` counts.** A
+  `val x: T` or `var x: T` declared without an initializer is tracked through the body's control
+  flow as definitely and possibly initialized. A read where it is not definitely initialized is
+  "variable 'x' must be initialized." at the read; a write to a `val` that may already be
+  initialized is "'val' cannot be reassigned." at the target; a `val` write from a lambda or local
+  function that does not run in place is "captured values cannot be initialized because of
+  possible reassignments." at the target. A lambda argument runs in place by the selected callee's
+  `callsInPlace` contract: `EXACTLY_ONCE` runs it once, `AT_MOST_ONCE` may skip it,
+  `AT_LEAST_ONCE` repeats it and `UNKNOWN` may skip or repeat it; an inline parameter without a
+  contract (`forEach`) runs an unknown number of times, after every argument of the call has been
+  evaluated in source order (`invoke({ x = 1 }, x)` reads `x` first). A loop body and a repeated
+  lambda feed their end back to their start; a `catch` and a `finally` start from a state where any
+  write of the `try` body may or may not have happened, and the code after a `finally` continues
+  from the normal completion. `while (true)` has no exit through its condition and
+  `do … while (false)` no back edge; a statement-position `when` that is exhaustive (by `else` or
+  by its subject) has no fall-through path. As in kotlinc, a path that cannot be taken (after
+  `return`, `throw`, `break`, or an expression of type `Nothing` such as `error()` or a `Nothing`
+  property) still carries its state into code reached only that way. Property accessors and `init`
+  blocks are analyzed like function bodies; local and anonymous class bodies are not analyzed yet.
+  Verified against kotlinc 2.4.20.
+  (`tests/local_initialization_e2e.rs`.)
 - **An implicit extension call's not-null contract narrows that receiver.**
   `returns(true) implies (this@f != null)` on `fun T?.f()` applies when the call is written
   without a receiver (`f() && this.member`). The proof is the extension receiver the call
@@ -17053,6 +17074,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `expected '='` for source kotlinc accepts, including IntelliJ's deferred
   `val ranges: List<MatchedFragment>?` assigned in both arms of an `if`.
   Tests: `tests/deferred_nullable_val_e2e.rs`.
+
+- **Definite assignment runs once for every independently executable expression root.** A function
+  or accessor body is not the only root that can contain a deferred local: parameter defaults,
+  property initializers and delegates, constructor parameter defaults, constructor/delegation
+  arguments, and enum-entry arguments each own control flow that executes without an enclosing
+  source body. Type checking first records every resolved local read/write and calls-in-place
+  decision for that root; the body-check phase then consumes those facts as one unit. It does not
+  wait for lowering or for some later function walk to rediscover the expression. Inferred
+  expression bodies and secondary-constructor bodies cross the same phase boundary as explicitly
+  typed bodies. Kotlinc 2.4.20 deliberately omits definite-assignment diagnostics from an ordinary
+  function's parameter default (while still applying them to primary and secondary constructor
+  defaults); the declaration owner carries that distinction explicitly. Tests:
+  `tests/local_initialization_e2e.rs::declaration_expression_roots_check_their_deferred_locals`,
+  `…::constructor_and_delegation_roots_check_their_deferred_locals`.
 
 - **An out projection is consumed when a callable output becomes a value.** Everything read out of
   `List<out Range>` is a `Range`. A projection is a generic-argument constraint, never a top-level

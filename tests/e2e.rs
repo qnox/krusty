@@ -1473,6 +1473,8 @@ mod local_fun_overload_e2e;
 mod local_fun_ref_e2e;
 #[path = "local_function_signature_e2e.rs"]
 mod local_function_signature_e2e;
+#[path = "local_initialization_e2e.rs"]
+mod local_initialization_e2e;
 #[path = "local_inner_enclosing_line_e2e.rs"]
 mod local_inner_enclosing_line_e2e;
 #[path = "local_object_type_of_e2e.rs"]

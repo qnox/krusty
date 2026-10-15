@@ -108,6 +108,9 @@ impl Checker<'_> {
                 },
                 (None, None) => Ty::Error,
             };
+            if let Some(initializer) = property.init {
+                self.finish_executable_root(initializer);
+            }
             let storage = if body_local_class || self.active_declarations.is_none() {
                 checked_storage
             } else {
