@@ -51,9 +51,9 @@ use mapped_builtin_member_status::{
 use super::classpath::{
     kotlin_name_to_ty, kotlin_type_name_to_ty, metadata_return_info, Classpath,
 };
-use super::classreader::JavaNullability;
 use super::jvm_class_map::{erased_top_member_owner, to_kotlin_internal};
 use super::metadata;
+use super::JavaNullability;
 use crate::jvm::names::type_descriptor;
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
@@ -1367,6 +1367,16 @@ impl JvmLibraries {
                 };
                 let physical_params = params.clone();
                 let physical_ret = ret;
+                let constructor_enclosing_prefix = usize::from(
+                    uses_java_type_semantics
+                        && m.name == "<init>"
+                        && constructor_outer.is_some_and(|outer| {
+                            physical_params
+                                .first()
+                                .and_then(|parameter| parameter.obj_internal())
+                                == Some(outer)
+                        }),
+                );
                 if uses_java_type_semantics {
                     for (index, parameter) in params.iter_mut().enumerate() {
                         *parameter = java_type_nullability(
@@ -1374,6 +1384,7 @@ impl JvmLibraries {
                             m.parameter_nullability.get(index).copied().flatten(),
                         );
                     }
+                    params.drain(..constructor_enclosing_prefix);
                     ret = java_type_nullability(
                         java_collection_return_lower_bound(ret),
                         m.return_nullability,
@@ -1392,7 +1403,10 @@ impl JvmLibraries {
                         .enumerate()
                         .map(|(index, parameter)| {
                             parameter.is_reference()
-                                && m.parameter_nullability.get(index).copied().flatten()
+                                && m.parameter_nullability
+                                    .get(index + constructor_enclosing_prefix)
+                                    .copied()
+                                    .flatten()
                                     != Some(JavaNullability::NotNull)
                         })
                         .collect::<Vec<_>>()
@@ -1569,7 +1583,11 @@ impl JvmLibraries {
                         pass_receiver: dispatch_parameter,
                     };
                 }
-                parameter_plans::member(&mut member, dispatch_parameter, continuation_parameter);
+                parameter_plans::member(
+                    &mut member,
+                    dispatch_parameter || constructor_enclosing_prefix > 0,
+                    continuation_parameter,
+                );
                 if let Some(declaration) = declaration {
                     member.semantic_role =
                         crate::libraries::builtin_declaration::semantic_call_role(
@@ -1656,7 +1674,9 @@ impl JvmLibraries {
                     // the class type parameters; publication turns those into the result.
                     member.generic_sig = self.publish_java_member_generic_signature(
                         m.signature.as_deref(),
-                        &m.parameter_nullability,
+                        m.parameter_nullability
+                            .get(constructor_enclosing_prefix..)
+                            .unwrap_or_default(),
                         m.return_nullability,
                         (uses_java_type_semantics && m.name == "<init>").then_some((
                             ci.signature.as_deref(),
