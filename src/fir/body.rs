@@ -1407,6 +1407,9 @@ pub enum FirExprKind {
     },
     When {
         subject: Option<FirExprId>,
+        /// Exact local declared by `when (val subject = value)`. Lowering reads this identity
+        /// directly instead of reconstructing it from an IR expression or allocating a copy.
+        subject_variable: Option<LocalValueId>,
         branches: Box<[FirWhenBranch]>,
         /// The checker's verdict on whether fir2ir types this `when` by its checked result
         /// (`isDeeplyProperlyExhaustive`). With an `else`, an `else if` chain written as the

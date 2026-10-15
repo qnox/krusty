@@ -1143,12 +1143,14 @@ impl BodyLowering<'_> {
             }
             FirExprKind::When {
                 subject,
+                subject_variable,
                 branches,
                 deeply_exhaustive,
             } => {
                 let line = self.body.expression_debug_lines(expression_id).source;
                 self.when_expression(
                     *subject,
+                    *subject_variable,
                     branches,
                     expression.ty.get(),
                     *deeply_exhaustive,

@@ -8,7 +8,8 @@
 //! backend's bytecode temporaries pass, never to this module.
 
 use crate::fir::{
-    FirExprId, FirWhenBranch, FirWhenCondition, FirWhenSubjectNumericEquality, ResolvedTy,
+    FirExprId, FirWhenBranch, FirWhenCondition, FirWhenSubjectNumericEquality, LocalValueId,
+    ResolvedTy,
 };
 use crate::ir::{ExprId, IrBinOp, IrExpr, IrTypeOp};
 use crate::types::Ty;
@@ -19,6 +20,7 @@ impl BodyLowering<'_> {
     pub(super) fn when_expression(
         &mut self,
         subject: Option<FirExprId>,
+        subject_variable: Option<LocalValueId>,
         branches: &[FirWhenBranch],
         result_ty: Ty,
         deeply_exhaustive: bool,
@@ -26,8 +28,14 @@ impl BodyLowering<'_> {
     ) -> Result<ExprId, FirLoweringFailure> {
         let mut prefix = Vec::new();
         let subject_expression = subject;
-        let subject = subject
-            .map(|subject| {
+        let subject = match (subject, subject_variable) {
+            (Some(subject), Some(variable)) => {
+                let slot = self.value_slot(variable);
+                let read = self.when_subject_read(slot, Some(variable));
+                self.set_expression_state(subject, LoweringState::Lowered(read));
+                Some(slot)
+            }
+            (Some(subject), None) => Some({
                 let subject_expression = self
                     .body
                     .expr(subject)
@@ -47,11 +55,15 @@ impl BodyLowering<'_> {
                     init: Some(value),
                     named: false,
                 }));
-                let read = self.ir.add_expr(IrExpr::GetValue(temporary));
+                let read = self.when_subject_read(temporary, None);
                 self.set_expression_state(subject, LoweringState::Lowered(read));
-                Ok::<_, FirLoweringFailure>(temporary)
-            })
-            .transpose()?;
+                temporary
+            }),
+            (None, None) => None,
+            (None, Some(variable)) => {
+                return Err(FirLoweringFailure::MalformedWhenSubjectVariable(variable));
+            }
+        };
 
         let mut lowered_branches = Vec::with_capacity(branches.len());
         for branch in branches {
@@ -66,7 +78,7 @@ impl BodyLowering<'_> {
                         let subject = subject.ok_or(FirLoweringFailure::MissingWhenSubject {
                             origin: branch.origin,
                         })?;
-                        let read = self.ir.add_expr(IrExpr::GetValue(subject));
+                        let read = self.when_subject_read(subject, subject_variable);
                         // The read has the subject's checked type, as fir2ir's `irGet` of the
                         // subject variable does; a backend's dispatch on it reads that type.
                         if let Some(subject_ty) = subject_expression
@@ -92,7 +104,7 @@ impl BodyLowering<'_> {
                         // fir2ir reads the subject afresh in each condition (`is T`, `in r`), at
                         // that condition's offsets, so the read carries the condition's line.
                         if let (Some(expression), Some(temporary)) = (subject_expression, subject) {
-                            let read = self.ir.add_expr(IrExpr::GetValue(temporary));
+                            let read = self.when_subject_read(temporary, subject_variable);
                             let line = self.body.expression_debug_lines(candidate).source;
                             if line != 0 {
                                 self.ir.expr_source_lines.insert(read, line);
@@ -151,6 +163,20 @@ impl BodyLowering<'_> {
                 value: Some(when),
             }))
         }
+    }
+
+    /// A fresh read of the selected subject slot. A declared subject keeps the checked local's
+    /// stability on every predicate read, so nullable type tests can reuse that exact binding
+    /// instead of introducing another snapshot temporary.
+    fn when_subject_read(&mut self, slot: u32, subject_variable: Option<LocalValueId>) -> ExprId {
+        let read = self.ir.add_expr(IrExpr::GetValue(slot));
+        if let Some(stability) = subject_variable
+            .and_then(|variable| self.binding_stability.get(&variable))
+            .copied()
+        {
+            self.ir.binding_read_stability.insert(read, stability);
+        }
+        read
     }
 
     /// Materialize the resolver's exact numeric equality plan. The declared subject stays a

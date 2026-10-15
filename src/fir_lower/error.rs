@@ -72,6 +72,8 @@ pub enum FirLoweringFailure {
     MissingWhenSubject {
         origin: OriginId,
     },
+    /// Checked FIR attached a declared subject identity to a subjectless `when`.
+    MalformedWhenSubjectVariable(LocalValueId),
     MissingLocalCallable(FirLocalCallableRef),
     UnsupportedLocalCallableReference(FirLocalCallableRef),
     MissingLocalDefault {

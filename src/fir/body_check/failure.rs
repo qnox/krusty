@@ -27,6 +27,9 @@ pub enum BodyCheckFailureKind {
     /// The surrounding target is still a function type, or the recorded conversion did not
     /// materialize. Leaving the original function value would check-cast it to the interface.
     UnpublishedRecordedSamConversion,
+    /// Parser-marked `when (val subject = value)` did not publish the subject as the local value
+    /// introduced by its surrounding block. Continuing would lose the checked declaration identity.
+    MalformedWhenSubjectVariable,
     UnsupportedExpression(ExpressionForm),
     UnsupportedStatement(StatementForm),
 }
