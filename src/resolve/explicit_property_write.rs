@@ -62,6 +62,41 @@ impl ExplicitPropertyWrite {
 }
 
 impl Checker<'_> {
+    fn lookup_property_for_write(
+        &self,
+        receiver: Ty,
+        name: &str,
+    ) -> Option<(
+        TypeName,
+        Ty,
+        bool,
+        Option<Visibility>,
+        Option<crate::fir::DeclarationId>,
+    )> {
+        if let Some(property) = self.checked_body_local_property_for_write(receiver, name) {
+            return Some((
+                property.owner,
+                property.ty,
+                property.mutable,
+                property.mutable.then_some(property.visibility),
+                property.stable_declaration,
+            ));
+        }
+        let selected = self
+            .resolver()
+            .select_member_property_write_applicable_where(receiver.non_null(), name, |_| {
+                Some((true, 0))
+            })?;
+        let property = selected.property?;
+        Some((
+            selected.owner,
+            selected.ty,
+            property.setter.is_some(),
+            property.setter.as_ref().map(|_| property.setter_visibility),
+            property.stable_declaration,
+        ))
+    }
+
     /// Select the write target of `receiver.name` on the non-accessor member rungs, in priority
     /// order. Nothing is recorded here.
     fn select_explicit_property_write(
@@ -74,7 +109,7 @@ impl Checker<'_> {
             None
         } else {
             rt.obj_internal()
-                .and_then(|_| self.lookup_prop_with_owner_name(rt, name))
+                .and_then(|_| self.lookup_property_for_write(rt, name))
         };
         let setter = (!rt.is_nullable())
             .then(|| self.select_property_setter(rt, name))
@@ -97,12 +132,14 @@ impl Checker<'_> {
             };
         }
         if let Some(property) = (!rt.is_nullable())
-            .then(|| self.select_property_member(rt, name))
+            .then(|| self.resolver().select_member_property(rt, name))
             .flatten()
+            .and_then(|selected| selected.property)
+            .filter(|property| property.setter.is_none())
         {
-            return ExplicitPropertyWrite::ReadOnlyMember(property.ret);
+            return ExplicitPropertyWrite::ReadOnlyMember(property.ty);
         }
-        match self.member_extension_property(scope, rt, name) {
+        match self.member_extension_property_for_write(scope, rt, name) {
             Ok(Some(property)) => {
                 return ExplicitPropertyWrite::MemberExtension(Box::new(property))
             }
@@ -111,7 +148,7 @@ impl Checker<'_> {
         }
         let type_variables = self.postponed_type_variables_in(rt);
         let resolver = self.resolver().with_type_variables(&type_variables);
-        match resolver.select_extension_property(rt, name) {
+        match resolver.select_extension_property_for_write(rt, name) {
             Ok(Some(property)) => ExplicitPropertyWrite::Extension(Box::new(property)),
             Ok(None) => ExplicitPropertyWrite::None,
             Err(_) => ExplicitPropertyWrite::ExtensionAmbiguous,
@@ -219,9 +256,15 @@ impl Checker<'_> {
                 Ty::Obj(..) => {
                     let hidden_deprecated = self
                         .resolver()
-                        .receiver_has_hidden_deprecated_member(rt, name);
-                    self.diags
-                        .error(span, unresolved_member_message(name, rt, hidden_deprecated))
+                        .receiver_has_hidden_deprecated_property_accessor(
+                            rt,
+                            name,
+                            crate::symbol_resolver::PropertyAccess::Write,
+                        );
+                    self.diags.error(
+                        self.assignment_member_name_span(s, name),
+                        unresolved_member_message(name, rt, hidden_deprecated),
+                    )
                 }
                 _ => self.diags.error(
                     span,

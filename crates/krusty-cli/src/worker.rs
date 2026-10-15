@@ -878,7 +878,7 @@ mod tests {
             );
         }
         assert_eq!(
-            parsed.warning_policy.compiler_disposition(),
+            parsed.warning_policy.compiler_disposition(None),
             crate::cli::WarningDisposition::Disabled
         );
     }

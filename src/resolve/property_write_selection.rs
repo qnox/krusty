@@ -43,6 +43,19 @@ impl PropertyWriteSelection {
 }
 
 impl Checker<'_> {
+    fn select_declared_top_level_property_for_write(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+    ) -> TopLevelPropertySelection {
+        let properties = self.resolver().top_level_properties_for_write(name);
+        self.select_top_level_property_candidates_for_access(
+            scope,
+            properties,
+            crate::symbol_resolver::PropertyAccess::Write,
+        )
+    }
+
     /// Resolve a bare property write through Kotlin's ordered implicit rungs. A read-only property
     /// on a nearer rung is terminal and must not fall through to a farther writable property.
     pub(super) fn implicit_property_write(
@@ -69,7 +82,7 @@ impl Checker<'_> {
                     }
                 }
                 implicit_rungs::ImplicitRung::StaticScope(classifier) => {
-                    match self.select_static_scope_property(scope, classifier, name) {
+                    match self.select_static_scope_property_for_write(scope, classifier, name) {
                         TopLevelPropertySelection::None => {}
                         TopLevelPropertySelection::Selected(property) => {
                             return PropertyWriteSelection::Receiverless(property);
@@ -95,7 +108,7 @@ impl Checker<'_> {
                 }
             }
         }
-        match self.select_declared_top_level_property(scope, name) {
+        match self.select_declared_top_level_property_for_write(scope, name) {
             TopLevelPropertySelection::None => PropertyWriteSelection::None,
             TopLevelPropertySelection::Selected(property) => {
                 PropertyWriteSelection::Receiverless(property)
@@ -113,7 +126,7 @@ impl Checker<'_> {
         receiver: ImplicitReceiver,
         name: &str,
     ) -> Result<Option<ImplicitPropertyWriteResolution>, Vec<String>> {
-        if let Some(property) = self.checked_body_local_property(receiver.ty, name) {
+        if let Some(property) = self.checked_body_local_property_for_write(receiver.ty, name) {
             return Ok(Some(ImplicitPropertyWriteResolution {
                 receiver,
                 property_ty: property.ty,
@@ -125,10 +138,9 @@ impl Checker<'_> {
                 stable_declaration: property.stable_declaration,
             }));
         }
-        let selected = self.resolver().select_member_property_applicable_where(
-            receiver.ty,
-            name,
-            |property| {
+        let selected = self
+            .resolver()
+            .select_member_property_write_applicable_where(receiver.ty, name, |property| {
                 let context_types = property.getter.params.get(..property.context_count)?;
                 self.select_context_arguments_with_types(scope, context_types)
                     .ok()
@@ -143,8 +155,7 @@ impl Checker<'_> {
                             property.context_count,
                         )
                     })
-            },
-        );
+            });
         if let Some(selected) = selected {
             if let Some(candidates) = self.competing_accessor_candidates(name, &selected) {
                 return Err(candidates);
@@ -187,38 +198,10 @@ impl Checker<'_> {
                 stable_declaration: property.stable_declaration,
             }));
         }
-        let getter = self.select_property_member(receiver.ty, name);
-        let setter = self.select_property_setter(receiver.ty, name);
-        if let Some(setter) = setter {
-            let ty = setter.callable.params.first().copied().unwrap_or(Ty::Error);
-            let stable_declaration = setter.stable_declaration;
-            return Ok(Some(ImplicitPropertyWriteResolution {
-                receiver,
-                property_ty: ty,
-                is_var: true,
-                context_args: Vec::new(),
-                getter,
-                setter: Some(setter),
-                extension: None,
-                stable_declaration,
-            }));
-        }
-        if let Some(property) = getter {
-            let stable_declaration = property.member.stable_declaration;
-            return Ok(Some(ImplicitPropertyWriteResolution {
-                receiver,
-                property_ty: property.ret,
-                is_var: false,
-                context_args: Vec::new(),
-                getter: Some(property),
-                setter: None,
-                extension: None,
-                stable_declaration,
-            }));
-        }
         let type_variables = self.postponed_type_variables_in(receiver.ty);
         let resolver = self.resolver().with_type_variables(&type_variables);
-        if let Ok(Some(property)) = resolver.select_extension_property(receiver.ty, name) {
+        if let Ok(Some(property)) = resolver.select_extension_property_for_write(receiver.ty, name)
+        {
             let context_args = if property.context_count == 0 {
                 Vec::new()
             } else {

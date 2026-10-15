@@ -2042,6 +2042,27 @@ pub enum PropKind {
     TopLevel,
 }
 
+/// Source availability of a property's independently declared accessors.
+///
+/// `@Deprecated(level = HIDDEN)` removes only the accessor carrying it: a hidden getter does not
+/// remove the setter from write selection, and a hidden setter does not remove the getter from read
+/// selection. Providers normalize that declaration fact here while the accessor identities are in
+/// hand; selectors consume it without reopening annotations or inferring an accessor from a name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PropertyAccessorAvailability {
+    pub getter: bool,
+    pub setter: bool,
+}
+
+impl Default for PropertyAccessorAvailability {
+    fn default() -> Self {
+        Self {
+            getter: true,
+            setter: true,
+        }
+    }
+}
+
 /// Whether repeated reads of a selected property are semantically guaranteed to observe the same
 /// value. Providers derive this from declaration facts; the checker combines an overridable read
 /// with the receiver's finality instead of reopening provider-specific declarations.
@@ -2136,6 +2157,9 @@ pub struct PropertyInfo {
     /// The declaration remains available to override matching but is absent from ordinary property
     /// lookup because it is `@Deprecated(level = HIDDEN)`.
     pub deprecated_hidden: bool,
+    /// Independent availability of the getter and setter after declaration annotations have been
+    /// normalized. Setter presence remains represented by [`Self::setter`].
+    pub accessor_availability: PropertyAccessorAvailability,
     /// The property cannot be overridden. Providers publish source modality rather than requiring
     /// override planning to infer it from an accessor or target representation.
     pub is_final: bool,
@@ -2166,6 +2190,20 @@ pub struct PropertyInfo {
     pub read_stability: PropertyReadStability,
     /// See [`LibraryMember::return_value_status`]; `None` for a Java or current-module property.
     pub return_value_status: Option<crate::types::ReturnValueStatus>,
+}
+
+impl PropertyInfo {
+    /// Whether this declaration participates in property-read selection.
+    pub fn readable(&self) -> bool {
+        !self.deprecated_hidden && self.accessor_availability.getter
+    }
+
+    /// Whether this declaration participates in property-write selection. A visible `val` remains
+    /// a candidate so the checker can report reassignment and stop the scope tower; a `var` whose
+    /// setter is HIDDEN is absent and permits a farther declaration to win.
+    pub fn write_selectable(&self) -> bool {
+        !self.deprecated_hidden && (self.setter.is_none() || self.accessor_availability.setter)
+    }
 }
 
 /// ALL properties of one name applicable to an access — members AND extensions AND top-level, in one

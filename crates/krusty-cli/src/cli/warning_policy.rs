@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 /// promise a policy the compiler cannot apply.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum WarningName {
+    Compiler(krusty::diag::CompilerWarningName),
     CliArgDisablesStableFeature,
     DeprecatedCliArg,
     DeprecatedLanguageVersion,
@@ -17,6 +18,9 @@ pub enum WarningName {
 
 impl WarningName {
     fn parse(name: &str) -> Option<Self> {
+        if let Some(name) = krusty::diag::CompilerWarningName::parse(name) {
+            return Some(Self::Compiler(name));
+        }
         Some(match name {
             "CLI_ARG_DISABLES_STABLE_FEATURE" => Self::CliArgDisablesStableFeature,
             "DEPRECATED_CLI_ARG" => Self::DeprecatedCliArg,
@@ -132,12 +136,54 @@ impl WarningPolicy {
         }
     }
 
-    /// Policy for compiler and module warnings that have no configurable identity yet.
-    pub fn compiler_disposition(&self) -> WarningDisposition {
+    /// Policy for a compiler warning. A named level wins over the global default exactly as it
+    /// does for command-line warnings; `None` is reserved for genuinely unnamed diagnostics and
+    /// module warnings.
+    pub fn compiler_disposition(
+        &self,
+        name: Option<krusty::diag::CompilerWarningName>,
+    ) -> WarningDisposition {
+        if let Some(level) = name
+            .map(WarningName::Compiler)
+            .and_then(|name| self.configured_level(name))
+        {
+            return match level {
+                WarningLevel::Disabled => WarningDisposition::Disabled,
+                WarningLevel::Warning => WarningDisposition::Warning,
+                WarningLevel::Error => WarningDisposition::Error,
+            };
+        }
         match self.compiler_default {
             WarningLevel::Disabled => WarningDisposition::Disabled,
             WarningLevel::Warning => WarningDisposition::Warning,
             WarningLevel::Error => WarningDisposition::WarningAndFail,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use krusty::diag::CompilerWarningName;
+
+    #[test]
+    fn a_named_compiler_warning_overrides_global_policy() {
+        for (level, expected) in [
+            ("disabled", WarningDisposition::Disabled),
+            ("warning", WarningDisposition::Warning),
+            ("error", WarningDisposition::Error),
+        ] {
+            let mut policy = WarningPolicy::default();
+            policy.promote_warnings();
+            policy.configure(&format!("DEPRECATION:{level}")).unwrap();
+            assert_eq!(
+                policy.compiler_disposition(Some(CompilerWarningName::Deprecation)),
+                expected
+            );
+            assert_eq!(
+                policy.compiler_disposition(None),
+                WarningDisposition::WarningAndFail
+            );
         }
     }
 }

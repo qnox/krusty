@@ -110,3 +110,50 @@ pub(crate) fn compile_source_set(
         .collect::<Vec<_>>();
     (!diags.has_errors() && !classes.is_empty()).then_some(classes)
 }
+
+/// The complete frontend report of one multiplatform JVM compilation whose first `common` sources
+/// are common sources, each line `file.kt:line:column: severity: message` in emission order, as
+/// kotlinc prints it under `-Xmulti-platform -Xcommon-sources=…`.
+pub fn source_set_diagnostics(sources: &[(&str, &str)], common: usize) -> Vec<String> {
+    let mut features = krusty::features::LangFeatures::new();
+    features.enable("MultiPlatformProjects");
+    let inputs = sources
+        .iter()
+        .enumerate()
+        .map(|(index, (name, source))| {
+            let input = SourceInput::kotlin(source).with_file_stem(name.trim_end_matches(".kt"));
+            if index < common {
+                input.common()
+            } else {
+                input
+            }
+        })
+        .collect::<Vec<_>>();
+    let jdk = super::jdk_modules();
+    let cp = super::cached_classpath(&[super::stdlib_jar()], Some(jdk.as_path()));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
+    );
+    let mut diags = DiagSink::new();
+    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+        &inputs,
+        super::with_native_plugins(CompilationTarget::Jvm, platform),
+        &features,
+        |_, _| {},
+        &mut diags,
+    );
+    let _ = krusty::compiler::check_frontend_only(analysis, &mut diags);
+    diags
+        .diags
+        .iter()
+        .map(|diagnostic| {
+            let (name, source) = sources[diagnostic.file as usize];
+            let (line, column) = krusty::diag::line_col(source, diagnostic.span.lo);
+            let severity = match diagnostic.severity {
+                krusty::diag::Severity::Error => "error",
+                krusty::diag::Severity::Warning => "warning",
+            };
+            format!("{name}:{line}:{column}: {severity}: {}", diagnostic.msg)
+        })
+        .collect()
+}

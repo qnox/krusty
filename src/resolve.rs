@@ -56,10 +56,11 @@ mod checked_constant_publication;
 pub(crate) use actualization_names::actualization_type_bindings;
 #[cfg(test)]
 pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
-pub(crate) use checked_annotation_publication::publish_checked_classifier_annotations;
+pub(crate) use checked_annotation_publication::publish_checked_declaration_annotations;
 pub(crate) use checked_constant_publication::publish_checked_compile_time_constants;
 pub(crate) use lexical_policies::publish_file_lexical_policies;
 pub(crate) use type_use_annotation_publication::publish_checked_type_use_annotations;
+mod body_local_property_selection;
 mod call_constraints;
 mod call_diagnostics;
 mod call_result_constraint;
@@ -98,7 +99,9 @@ pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod contract_declarations;
 mod contract_effects;
 mod declaration_rendering;
+mod declaration_usage;
 mod dependency_platform;
+mod deprecation_usage;
 mod destructuring;
 mod diagnostic_selection;
 mod eager_lambda_analysis;
@@ -190,6 +193,7 @@ mod source_fragment;
 mod source_generic_signatures;
 mod source_signature_display;
 mod source_type_resolution;
+mod symbol_display;
 mod type_use_annotation_publication;
 use source_fragment::SourceFragmentMode;
 use source_generic_signatures::{
@@ -10703,6 +10707,8 @@ struct CheckedLocalProperty {
     interface: bool,
     source_member: crate::libraries::SourceMember,
     stable_declaration: Option<crate::fir::DeclarationId>,
+    deprecated_hidden: bool,
+    accessor_availability: crate::libraries::PropertyAccessorAvailability,
 }
 
 struct DispatchPropertyBinding {
@@ -12037,6 +12043,26 @@ impl<'a> Checker<'a> {
         if property.receiver.is_some() || ty.mentions_error() || ty.mentions_pending() {
             return;
         }
+        let hidden = |declaration| {
+            self.resolved_index.is_some_and(|index| {
+                index
+                    .declaration_applied_annotations(declaration)
+                    .iter()
+                    .any(crate::types::ResolvedAnnotation::is_deprecated_hidden)
+            })
+        };
+        let deprecated_hidden = stable_declaration.is_some_and(|declaration| hidden(declaration));
+        let accessor_available = |sibling| {
+            stable_declaration
+                .and_then(|declaration| {
+                    self.resolved_index?.owned_declaration(
+                        declaration,
+                        crate::fir::DeclarationKind::Accessor,
+                        sibling,
+                    )
+                })
+                .is_none_or(|accessor| !hidden(accessor))
+        };
         self.checked_local_properties.insert(
             (owner, property.name.clone()),
             CheckedLocalProperty {
@@ -12047,33 +12073,13 @@ impl<'a> Checker<'a> {
                 interface,
                 source_member,
                 stable_declaration,
+                deprecated_hidden,
+                accessor_availability: crate::libraries::PropertyAccessorAvailability {
+                    getter: accessor_available(0),
+                    setter: accessor_available(1),
+                },
             },
         );
-    }
-
-    /// The first property declaration published by a classifier in the active bounded body.
-    /// Reads, writes, and update expressions share this exact overlay lookup; none may fall back to
-    /// the immutable provider merely because the local declaration has an explicit type.
-    fn checked_body_local_property(
-        &self,
-        receiver: Ty,
-        name: &str,
-    ) -> Option<&CheckedLocalProperty> {
-        std::iter::once((receiver.non_null(), false))
-            .chain(
-                self.body_local_supertypes(receiver)
-                    .into_iter()
-                    .map(|supertype| (supertype, true)),
-            )
-            .filter_map(|(candidate, inherited)| {
-                let owner = candidate.kotlin_class_internal()?;
-                let property = self
-                    .checked_local_properties
-                    .get(&(owner, name.to_string()))?;
-                (!inherited || crate::symbol_resolver::member_is_inheritable(property.visibility))
-                    .then_some(property)
-            })
-            .next()
     }
 
     fn remove_checked_source_member_result(
@@ -12590,7 +12596,7 @@ impl<'a> Checker<'a> {
                 Expr::Member { receiver, .. } => Some(*receiver),
                 _ => None,
             });
-            let message = self.unresolved_member_diagnostic(scope, receiver, name, rt);
+            let message = self.unresolved_property_read_diagnostic(scope, receiver, name, rt);
             self.diags.error(diagnostic_span, message);
         }
         Ty::Error
@@ -13458,6 +13464,7 @@ impl<'a> Checker<'a> {
             .filter(|property| {
                 property.kind == crate::libraries::PropKind::TopLevel && property.context_count == 0
             })
+            .filter(|property| property.readable())
             .cloned()
             .collect::<Vec<_>>();
         if properties
@@ -22031,13 +22038,19 @@ impl<'a> Checker<'a> {
             }
             Stmt::Destructure { entries, init } => self.stmt_destructure(scope, s, entries, init),
             Stmt::IncDec { name, dec, prefix } => self.stmt_inc_dec(scope, s, name, dec, prefix),
-            Stmt::Assign { name, value } => self.stmt_assign(scope, s, name, value),
+            Stmt::Assign { name, value } => {
+                self.stmt_assign(scope, s, name, value);
+                self.check_property_write_deprecation(s);
+            }
             Stmt::AssignMember {
                 receiver,
                 name,
                 value,
                 safe,
-            } => self.stmt_assign_member(scope, s, receiver, name, value, safe),
+            } => {
+                self.stmt_assign_member(scope, s, receiver, name, value, safe);
+                self.check_property_write_deprecation(s);
+            }
             Stmt::AssignIndex {
                 array,
                 indices,
@@ -22981,7 +22994,8 @@ impl<'a> Checker<'a> {
         let receiver_qualifier = self.qualifier(scope, QualifierInput::Expression(receiver));
         if let Ok(ResolvedQualifier::Classifier(owner)) = receiver_qualifier {
             // Associated properties precede the members of the companion-object value.
-            let associated = self.select_qualified_associated_property(scope, owner, &name);
+            let associated =
+                self.select_qualified_associated_property_for_write(scope, owner, &name);
             if !matches!(associated, TopLevelPropertySelection::None) {
                 if self.reject_inaccessible_classifier_expression(receiver, owner) {
                     return;
@@ -22989,7 +23003,7 @@ impl<'a> Checker<'a> {
                 self.write_receiverless_property(scope, s, value, &name, associated);
                 return;
             }
-            if let Some(property) = self.resolver().associated_property(owner, &name) {
+            if let Some(property) = self.resolver().associated_property_for_write(owner, &name) {
                 let member_span = self.assignment_member_name_span(s, &name);
                 let access_owner = property.associated_access_owner.unwrap_or(property.owner);
                 if !self.callable_accessible(
@@ -23032,27 +23046,16 @@ impl<'a> Checker<'a> {
             }
         }
         if let Ok(ResolvedQualifier::Package(package)) = receiver_qualifier {
-            if let Some(property) = self
+            let properties = self
                 .resolver_in_scope(std::slice::from_ref(&package))
-                .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, &name, &[], &[])
-                .and_then(crate::symbol_resolver::Symbol::value)
-            {
-                if property.setter.is_none() {
-                    self.report_val_reassignment(
-                        self.file.stmt_spans[s.0 as usize],
-                        format!("val cannot be reassigned: '{name}'"),
-                    );
-                    return;
-                };
-                let value_ty = self.expr(scope, value);
-                self.expect_assignable(property.ty, value_ty, self.span(value), "assignment");
-                self.stmt_lowers.insert(
-                    s,
-                    StmtLowering::TopLevelPropertySet(Box::new(ResolvedPropertyAccess {
-                        property,
-                        context_args: Vec::new(),
-                    })),
-                );
+                .top_level_properties_for_write(&name);
+            let selection = self.select_top_level_property_candidates_for_access(
+                scope,
+                properties,
+                crate::symbol_resolver::PropertyAccess::Write,
+            );
+            if !matches!(selection, TopLevelPropertySelection::None) {
+                self.write_receiverless_property(scope, s, value, &name, selection);
                 return;
             }
         }
@@ -23084,12 +23087,14 @@ impl<'a> Checker<'a> {
         // Its checked overlay must shadow the immutable provider's deliberately unresolved local
         // placeholder for explicit writes just as it already does for reads and implicit writes.
         // Falling through below preserves the overlay's exact mutability and stable declaration.
-        let checked_local_member =
-            !rt.is_nullable() && self.checked_body_local_property(rt, &name).is_some();
+        let checked_local_member = !rt.is_nullable()
+            && self
+                .checked_body_local_property_for_write(rt, &name)
+                .is_some();
         let selected_member_property = (!rt.is_nullable() && !checked_local_member)
             .then(|| {
                 self.resolver()
-                    .select_member_property_applicable_where(rt, &name, |property| {
+                    .select_member_property_write_applicable_where(rt, &name, |property| {
                         let context_types = property.getter.params.get(..property.context_count)?;
                         self.select_context_arguments_with_types(scope, context_types)
                             .ok()
@@ -27282,6 +27287,7 @@ fun box(): String {
                             compile_time_constant: None,
                             metadata_constant_read: false,
                             deprecated_hidden: false,
+                            accessor_availability: Default::default(),
                             is_final: false,
                             visibility: Visibility::Public,
                             owner: foo,
@@ -33148,6 +33154,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_default_member_calls: HashMap::default(),
         resolved_constants: HashMap::default(),
         constant_integer_coercion_reads: crate::fx_hash::HashSet::default(),
+        constant_property_reads: HashMap::default(),
         resolved_constant_receivers: HashMap::default(),
         resolved_enum_entries: HashMap::default(),
         resolved_call_arg_slots: HashMap::default(),
@@ -34368,6 +34375,10 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         c.set_anonymous_lexical_class_context(d);
         if fragment.is_type_use_annotations() && !matches!(file.decl(d), Decl::Class(_)) {
             c.check_owned_type_use_annotations(scope, Some(d));
+            continue;
+        }
+        if fragment.is_declaration_annotations() && !matches!(file.decl(d), Decl::Class(_)) {
+            c.fold_top_level_declaration_annotations(scope, d);
             continue;
         }
         match file.decl(d) {
@@ -35796,6 +35807,9 @@ struct Checker<'a> {
     /// Constant folding removes the property-get lowering, so applicability keeps this compact fact
     /// independently and publishes the selected argument conversion through the resolved call.
     constant_integer_coercion_reads: crate::fx_hash::HashSet<ExprId>,
+    /// The source property each folded constant read selected. Folding removes the property-get
+    /// lowering; use-site checks still need the declaration the reference names.
+    constant_property_reads: HashMap<ExprId, crate::fir::DeclarationId>,
     resolved_constant_receivers: HashMap<ExprId, ExprId>,
     resolved_enum_entries: HashMap<ExprId, ResolvedEnumEntry>,
     resolved_call_arg_slots: HashMap<ExprId, SelectedArgumentCommitment>,
@@ -37036,6 +37050,35 @@ impl<'a> Checker<'a> {
         extension_receiver: Ty,
         name: &str,
     ) -> Result<Option<MemberExtensionProperty>, ()> {
+        self.member_extension_property_for_access(
+            scope,
+            extension_receiver,
+            name,
+            crate::symbol_resolver::PropertyAccess::Read,
+        )
+    }
+
+    fn member_extension_property_for_write(
+        &self,
+        scope: &CheckerScope<'_>,
+        extension_receiver: Ty,
+        name: &str,
+    ) -> Result<Option<MemberExtensionProperty>, ()> {
+        self.member_extension_property_for_access(
+            scope,
+            extension_receiver,
+            name,
+            crate::symbol_resolver::PropertyAccess::Write,
+        )
+    }
+
+    fn member_extension_property_for_access(
+        &self,
+        scope: &CheckerScope<'_>,
+        extension_receiver: Ty,
+        name: &str,
+        access: crate::symbol_resolver::PropertyAccess,
+    ) -> Result<Option<MemberExtensionProperty>, ()> {
         member_extension_property(
             &self.fed_source(),
             self,
@@ -37049,6 +37092,7 @@ impl<'a> Checker<'a> {
             },
             extension_receiver,
             name,
+            access,
         )
     }
 
@@ -41348,6 +41392,19 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         properties: Vec<crate::libraries::PropertyInfo>,
     ) -> TopLevelPropertySelection {
+        self.select_top_level_property_candidates_for_access(
+            scope,
+            properties,
+            crate::symbol_resolver::PropertyAccess::Read,
+        )
+    }
+
+    fn select_top_level_property_candidates_for_access(
+        &self,
+        scope: &CheckerScope<'_>,
+        properties: Vec<crate::libraries::PropertyInfo>,
+        access: crate::symbol_resolver::PropertyAccess,
+    ) -> TopLevelPropertySelection {
         let mut missing_context = None;
         let mut applicable = Vec::new();
         for mut property in properties {
@@ -41357,6 +41414,10 @@ impl<'a> Checker<'a> {
             // still reserves the declared name while its declaration diagnostic is reported.
             if property.kind != crate::libraries::PropKind::TopLevel
                 || property.context_count > property.getter.params.len()
+                || match access {
+                    crate::symbol_resolver::PropertyAccess::Read => !property.readable(),
+                    crate::symbol_resolver::PropertyAccess::Write => !property.write_selectable(),
+                }
             {
                 continue;
             }
@@ -41417,6 +41478,9 @@ impl<'a> Checker<'a> {
         property: &crate::libraries::PropertyInfo,
     ) -> Option<Ty> {
         let constant = property.compile_time_constant.clone()?;
+        if let Some(declaration) = property.stable_declaration {
+            self.constant_property_reads.insert(expression, declaration);
+        }
         if property.is_const && property.implicit_integer_coercion {
             self.constant_integer_coercion_reads.insert(expression);
         }
@@ -49050,37 +49114,8 @@ impl<'a> Checker<'a> {
         // completes; member-specific suppressions nest inside it.
         let class_suppression_depth =
             self.push_declaration_policies(scope, &cl.annotations, &cl.annotation_args);
-        if self.fragment.is_classifier_annotations() {
-            for (annotation, arguments) in cl.annotations.iter().zip(&cl.annotation_args) {
-                if self
-                    .module
-                    .legacy_symbols()
-                    .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))
-                    .is_some()
-                {
-                    self.check_non_property_annotation_application(
-                        scope, annotation, arguments, "class",
-                    );
-                }
-            }
-            // Method annotations are declaration facts for later candidate collection. Fold only
-            // those applications: this fragment retains their arguments and releases value-parameter
-            // annotations. The method's body unit checks the parameter applications, and a fold this
-            // restricted checker cannot complete is not a diagnostic.
-            let diagnostics_before_methods = self.diags.diags.len();
-            for method in &cl.methods {
-                if method.annotations.iter().any(|annotation| {
-                    self.module
-                        .legacy_symbols()
-                        .and_then(|symbols| {
-                            symbols.resolved_annotation(self.file_index, annotation)
-                        })
-                        .is_some()
-                }) {
-                    self.check_classifier_method_annotations(scope, method);
-                }
-            }
-            self.diags.diags.truncate(diagnostics_before_methods);
+        if self.fragment.is_declaration_annotations() {
+            self.fold_classifier_declaration_annotations(scope, cl);
             self.active_lexical_policies
                 .truncate(class_suppression_depth);
             return;
@@ -49204,7 +49239,7 @@ impl<'a> Checker<'a> {
         // declaration applications below belong to the passes that retain their arguments.
         if !self.fragment.is_type_use_annotations() {
             self.check_classifier_own_annotations(scope, cl, current_owner);
-            self.check_supertype_opt_in(cl, current_owner);
+            self.check_supertype_usage(cl, current_owner);
             for entry in &cl.enum_entries {
                 self.check_non_property_annotation_applications_in_declaration_scope(
                     scope,
@@ -54870,7 +54905,7 @@ impl<'a> Checker<'a> {
         let t = crate::wide_stack::on_wide_stack(|| {
             self.expr_inner(scope, e, expected, value_required)
         });
-        self.check_expression_opt_in(scope, e);
+        self.check_expression_usage(scope, e);
         self.check_expression_missing_supertypes(e);
         self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();

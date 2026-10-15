@@ -12967,8 +12967,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   leaves `REDUNDANT_CLI_ARG` in place
   (`suppress_version_warnings_drops_only_version_status_warnings` in
   `crates/krusty-cli/src/cli.rs`). The registry contains only
-  diagnostics the compiler can actually emit: deprecated and experimental language-version
-  warnings and `REDUNDANT_CLI_ARG`. Language-feature arguments are replayed from the selected
+  diagnostics the compiler can actually emit: source `DEPRECATION`, deprecated and experimental
+  language-version warnings, and `REDUNDANT_CLI_ARG`. A located compiler warning carries that
+  typed name separately from its duplicate-report identity; the CLI applies its named disposition
+  before deciding whether frontend diagnostics fail the compilation. Language-feature arguments
+  are replayed from the selected
   language/API baseline; an argument that makes no semantic change emits `REDUNDANT_CLI_ARG` with
   kotlinc's wording. The configured severity is applied before compilation: `error` fails the
   invocation, `warning` reports it, and `disabled` omits it. The Bazel worker normalizes
@@ -12982,6 +12985,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same policy. `compilerVersion` must equal the applied Kotlin Gradle plugin version, which must be
   an exact supported release; a pre-release or RC suffix is rejected.
   (`warning_level_configures_named_diagnostics` in `crates/krusty-cli/src/cli.rs`;
+  `named_warning_policy_controls_deprecation` in `tests/deprecation_usage_e2e.rs`;
   `warning_level_is_forwarded_to_the_typed_cli_policy` in `crates/krusty-cli/src/worker.rs`;
   `kotlin_compiler_slice_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
 - **The command line is parsed by kotlinc's rules, from kotlinc's own argument table.** Each
@@ -13214,6 +13218,40 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   resolved once per source and reach every checking unit. Verified against kotlinc 2.4.20.
   (`tests/opt_in_usage_e2e.rs`.)
 
+- **Deprecated source declarations (`@Deprecated`).** A use of a declaration of this compilation
+  annotated `@kotlin.Deprecated` reports `'<symbol>' is deprecated.<message>`: a warning for the
+  default `WARNING` level (`DEPRECATION`, silenced by `@Suppress("DEPRECATION")`), an error for
+  `ERROR` and `HIDDEN`. The message is kotlinc's OPTIONAL_SENTENCE: nothing for a blank `message`,
+  otherwise a space, the trimmed message, and a period unless it already ends with one;
+  `replaceWith` takes no part. The level is a semantic fact of the checked application, read from
+  the selected `DeprecationLevel` entry, never from its spelling. A call reports at the callee
+  name, a read or write at the property name, a callable reference at the name after `::`, a
+  classifier qualifier (`Obj.f()`, `Old.Nested()`, a companion reached through its class) at the
+  qualifier, and a type reference (parameters, results, locals, type arguments, supertypes,
+  `is`/`as`, class literals) at the reference. A property's deprecation covers reads and writes, a
+  getter's only reads and a setter's only writes; both render as the property. A constructor call
+  reports once, for the more severe of the constructor's and its class's deprecation, rendered as
+  the constructor. Uses inside a deprecated declaration are reported too. In a multiplatform
+  compilation a use in a common source binds to the `expect` header, so the deprecation of an
+  `actual` declaration, or of a member of one, is not reported there, and a `HIDDEN` top-level
+  `actual` stays a candidate there; platform uses report it, naming the declaration with its
+  `actual` modifier (`'actual fun warn(): String'`, `'actual val p: String'`).
+  A `HIDDEN` function or
+  property is no candidate at all (a call selects a visible overload or is unresolved); a `HIDDEN`
+  classifier still resolves and each use is an error. The symbol is kotlinc's short declaration
+  rendering, without visibility, modality, `inline`, `infix`, `operator`, `const`, `lateinit` or
+  class modifiers: `fun <T : Comparable<T>> g1(x: T, vararg ys: String, z: Int = ...): List<T>?`,
+  `suspend fun g3(): Unit`, `fun <reified T> g2(noinline f: suspend () -> Unit): Unit`,
+  `val <T> List<T>.g5: Int`, `constructor<T, out R>(x: T): G10<T, R>`, `O.constructor(): O.In`,
+  `enum class E : Enum<E>`, `annotation class A : Annotation`, `fun interface F : Any`,
+  `companion object Companion : I`, `class G<in T, out R : Any> : Any`. The checked annotations of
+  top-level functions and properties, body properties, accessors and constructors are folded and
+  published on their stable declarations in Pass 1, like those of classifiers and methods. Not yet
+  modeled: dependency (Kotlin metadata and Java) deprecation, `@DeprecatedSinceKotlin`, imports,
+  `@get:`/`@set:` use-site targets, constructor-property parameters, type aliases, enum entries,
+  operator conventions, `this(...)` delegation, annotation uses, the deprecation of an
+  `expect` header itself, and the `actual` of a primary constructor in its rendering.
+  Test: `tests/deprecation_usage_e2e.rs`.
 - **An abstract member's metadata and nullability match a concrete one's, without the field.** An
   abstract property has no backing field, so kotlinc writes no field entry in its
   `JvmPropertySignature` and interns none of the field's strings: `interface Holder { val count:

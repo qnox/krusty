@@ -1121,7 +1121,7 @@ where
             // editor queries while consuming declaration identities from the finalized index.
             let needs_bounded_pass_one_syntax = multiplatform
                 || has_signature_defaults(&file)
-                || retained_syntax::has_classifier_annotation_arguments(&file)
+                || retained_syntax::has_declaration_annotation_arguments(&file)
                 // File annotation policies are resolved once, after every header is collected.
                 || !file.file_annotations.is_empty()
                 || !file.type_annotation_arguments.is_empty()
@@ -1406,8 +1406,13 @@ where
         // Publish the inventory before deriving declaration-owned metadata such as enum-entry
         // override edges; those entries deliberately have no ordinary classifier header.
         pass1_headers.publish_declaration_inventory(&mut index);
+        for (source, file) in files[..inferred_end].iter().enumerate() {
+            if file.is_common {
+                index.publish_common_source(crate::fir::SourceFileId::from_raw(source as u32));
+            }
+        }
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
-        crate::resolve::publish_checked_classifier_annotations(
+        crate::resolve::publish_checked_declaration_annotations(
             &files[..inferred_end],
             &mut index,
             &mut symbols,
