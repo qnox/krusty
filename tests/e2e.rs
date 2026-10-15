@@ -1335,10 +1335,8 @@ mod java_not_null_null_argument_e2e;
 mod java_parameters_attribute_e2e;
 #[path = "java_source_interop_e2e.rs"]
 mod java_source_interop_e2e;
-#[path = "java_static_callable_reference_e2e.rs"]
-mod java_static_callable_reference_e2e;
-#[path = "java_static_field_e2e.rs"]
-mod java_static_field_e2e;
+mod java_static_modules;
+java_static_modules::declare!();
 #[path = "java_supertype_type_arguments_e2e.rs"]
 mod java_supertype_type_arguments_e2e;
 #[path = "java_type_use_nullability_e2e.rs"]
