@@ -29,6 +29,40 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.lambda_implementation_uses_inferred_result =
         features.language_version() < crate::language_version::LanguageVersion::V2_4;
     file.full_value_classes = features.has("FullValueClasses");
+    file.forbid_value_class_recursion_via_type_parameters =
+        features.has("ForbidValueClassRecursionViaTypeParameters");
+    file.value_class_recursion_via_type_parameters_warning = features.deprecation_warning_message(
+        "ForbidValueClassRecursionViaTypeParameters",
+        "value class cannot be recursive.",
+    );
     file.recursive_type_of = features.has("JvmSupportRecursiveTypeOf");
     file.opted_in_markers = features.opted_in().map(str::to_string).collect();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kotlin_version::KotlinVersion;
+    use crate::language_version::LanguageVersion;
+
+    #[test]
+    fn value_class_recursion_policy_comes_from_each_compilations_release() {
+        let settings = |release| {
+            LangFeatures::for_release(release, LanguageVersion::V2_4, LanguageVersion::V2_4)
+        };
+        let mut old = File::default();
+        apply_file_features(&mut old, &settings(KotlinVersion::V2_4_0));
+        let mut current = File::default();
+        apply_file_features(&mut current, &settings(KotlinVersion::V2_4_20));
+
+        assert_eq!(old.value_class_recursion_via_type_parameters_warning, None);
+        assert_eq!(
+            current.value_class_recursion_via_type_parameters_warning,
+            Some(
+                "value class cannot be recursive. This will become an error in language version \
+                 2.5. See https://youtrack.jetbrains.com/issue/KT-85848."
+                    .to_string()
+            )
+        );
+    }
 }

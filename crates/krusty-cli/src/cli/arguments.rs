@@ -217,7 +217,12 @@ pub(super) fn rendered(occurrence: &Occurrence) -> String {
     }
 }
 
-pub(super) fn apply(opts: &mut Options, parsed: &mut ParsedSettings, occurrence: &Occurrence) {
+pub(super) fn apply(
+    opts: &mut Options,
+    parsed: &mut ParsedSettings,
+    occurrence: &Occurrence,
+    reference_version: KotlinVersion,
+) {
     let spec = occurrence.spec;
     let name = spec.name.as_str();
     let (flag, text, list) = match &occurrence.value {
@@ -261,7 +266,7 @@ pub(super) fn apply(opts: &mut Options, parsed: &mut ParsedSettings, occurrence:
         // option would claim a warning policy the compiler never applies.
         "-Xwarning-level" => {
             for value in list {
-                if let Err(error) = opts.warning_policy.configure(value) {
+                if let Err(error) = opts.warning_policy.configure(value, reference_version) {
                     opts.errors.push(error);
                 }
             }

@@ -28,18 +28,25 @@ pub enum Severity {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum CompilerWarningName {
     Deprecation,
+    ValueClassCannotBeRecursiveViaTypeParameters,
 }
 
 impl CompilerWarningName {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Deprecation => "DEPRECATION",
+            Self::ValueClassCannotBeRecursiveViaTypeParameters => {
+                "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING"
+            }
         }
     }
 
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "DEPRECATION" => Self::Deprecation,
+            "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING" => {
+                Self::ValueClassCannotBeRecursiveViaTypeParameters
+            }
             _ => return None,
         })
     }

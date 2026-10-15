@@ -27,7 +27,7 @@ use rayon::prelude::*;
 
 use krusty::backend::{Artifact, Backend, BOX_RESULT_FRAME};
 use krusty::conformance::TestTarget;
-use krusty::diag::DiagSink;
+use krusty::diag::{DiagSink, Severity};
 use krusty::jvm::classpath::Classpath;
 use krusty::source::SourceInput;
 
@@ -63,6 +63,17 @@ pub enum Outcome {
     NotApplicable(&'static str),
     /// Accepted, but the program did not run correctly.
     Failed(String),
+}
+
+/// The box lanes may compile sources that legitimately emit warnings. Only an error means the
+/// frontend rejected a case; retaining this distinction lets warning-bearing programs continue to
+/// target emission and execution just as an ordinary compiler invocation does.
+fn first_error(diags: &DiagSink, start: usize) -> Option<&krusty::diag::Diagnostic> {
+    diags
+        .diags
+        .iter()
+        .skip(start)
+        .find(|diagnostic| diagnostic.severity == Severity::Error)
 }
 
 /// One target's way of compiling and starting a case.
@@ -329,7 +340,7 @@ pub fn compile<B: Backend>(
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, &mut diags,
     );
-    if let Some(first) = diags.diags.first() {
+    if let Some(first) = first_error(&diags, 0) {
         return Err(Outcome::Frontend(first.msg.clone()));
     }
     let artifacts =
@@ -343,7 +354,7 @@ pub fn compile<B: Backend>(
             decline.trim_end_matches(" yet").to_string(),
         ));
     }
-    if let Some(first) = diags.diags.first() {
+    if let Some(first) = first_error(&diags, 0) {
         return Err(Outcome::Frontend(first.msg.clone()));
     }
     Ok(artifacts)
@@ -405,7 +416,7 @@ pub fn analyze_module(
     let analysis = krusty::frontend::analyze_source_set_streaming_with_module(
         &inputs, platform, &features, &unit.name, diags,
     );
-    if let Some(first) = diags.diags.get(diagnostics_start) {
+    if let Some(first) = first_error(diags, diagnostics_start) {
         return Err(Outcome::Frontend(first.msg.clone()));
     }
     Ok((analysis, stems))
@@ -447,10 +458,7 @@ pub fn compile_modules<B: Backend>(
                 decline.trim_end_matches(" yet").to_string(),
             ));
         }
-        diags
-            .diags
-            .first()
-            .map(|first| Outcome::Frontend(first.msg.clone()))
+        first_error(diags, 0).map(|first| Outcome::Frontend(first.msg.clone()))
     }
 
     fn write_dependency_archive(
@@ -1159,6 +1167,25 @@ fn source_sets_split_files_and_receive_runner_helpers() {
 fn a_depends_on_source_set_enables_the_multiplatform_project_feature() {
     assert!(!module_features("", 0).has("MultiPlatformProjects"));
     assert!(module_features("", 1).has("MultiPlatformProjects"));
+}
+
+#[test]
+fn a_warning_does_not_reject_a_box_case_but_an_error_does() {
+    let mut diags = DiagSink::new();
+    let span = krusty::diag::Span { lo: 3, hi: 4 };
+    diags.warning(span, "warning only");
+    assert_eq!(first_error(&diags, 0).map(|diag| diag.msg.as_str()), None);
+
+    let error_start = diags.diags.len();
+    diags.error(span, "frontend rejection");
+    assert_eq!(
+        first_error(&diags, 0).map(|diag| (diag.severity, diag.msg.as_str())),
+        Some((Severity::Error, "frontend rejection"))
+    );
+    assert_eq!(
+        first_error(&diags, error_start).map(|diag| diag.msg.as_str()),
+        Some("frontend rejection")
+    );
 }
 
 #[test]
