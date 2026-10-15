@@ -8824,6 +8824,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/feature_coverage_p_e2e.rs::when_comma_conditions_and_mixed_is_in`,
   `::when_widened_subject_boxes_every_primitive_comparand`,
   `tests/when_subject_ieee754_e2e.rs`.
+- **A `when` over a `String` or `Char` local switches like kotlinc's `SwitchGenerator`.** When
+  every clause of every branch (`a, b ->` being an `||` chain) compares one local with a constant
+  and an `else`, if any, is last, the JVM emitter dispatches through a switch; a key repeated later
+  is dropped, and a branch left without a key is not emitted. The local's physical type picks the
+  switch. An `Int` subject (an enum's mapped ordinal included) and a `Char` subject with `Char`
+  constants switch on the value (a `Char` on its code) once there are two keys. A `String`
+  subject switches on `hashCode()` once there are three distinct hashes (fewer stay
+  comparisons): each hash bucket tests its strings with `String.equals` in source order and falls
+  to the default, and the buckets are laid out in the iteration order of the
+  `java.util.HashMap<Integer, ArrayList<…>>` kotlinc's `StringSwitch` fills in source order (by
+  slot `(h ^ (h >>> 16)) & (capacity - 1)` of a table that starts at 16 and doubles past three
+  quarters full). The emitter simulates OpenJDK's `HashMap` rather than sorting by slot, because a
+  slot does not always keep insertion order: a ninth key in one bin treeifies it, which only
+  doubles the table below 64 slots, and from 64 slots makes the bin a red-black tree whose
+  iteration chain puts each rebalanced root first; a resize splits a tree bin, untreeifying a half
+  of at most six nodes and re-treeifying a larger one. A subject that may be `null`
+  first jumps on `ifnull` to the branch with a `null` clause, else to the default; whether it may
+  be `null` is the checked type common lowering records on the subject read in each comparison, as
+  fir2ir's `irGet` of the subject carries it. A switch uses `tableswitch` when the key range is at
+  most twice the key count, else `lookupswitch`, and neither the subject loads nor the bucket's
+  constants carry a source line. Verified against kotlinc 2.4.20 by byte diff. Tests:
+  `tests/string_when_switch_e2e.rs` (`string_and_char_whens_switch_like_kotlinc`,
+  `string_and_char_switches_execute`, `string_hash_buckets_follow_hash_map_tree_bins_like_kotlinc`,
+  `string_hash_bucket_switches_execute`), and the `HashMap` simulation against `java.util.HashMap`
+  iteration orders in `src/jvm/ir_emit/when/java_hash_map.rs`.
 - **`x in a..b` over a WIDENED value.** `when (x: Any) { in 4..10 -> … }` compiles: kotlinc lowers it
   to `CollectionsKt.contains(4..10, x)`, and an `IntRange` is not a `Collection`, so that walks the
   range comparing with `equals` — true exactly when `x` is a BOXED element of the range. krusty keeps

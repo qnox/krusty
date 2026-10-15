@@ -1665,6 +1665,8 @@ mod source_map_annotation_parts_e2e;
 mod special_collection_bridge_e2e;
 #[path = "splice_nullable_value_class_lambda_e2e.rs"]
 mod splice_nullable_value_class_lambda_e2e;
+#[path = "string_when_switch_e2e.rs"]
+mod string_when_switch_e2e;
 #[path = "super_delegation_line_e2e.rs"]
 mod super_delegation_line_e2e;
 #[path = "suspend_argument_operands_e2e.rs"]
