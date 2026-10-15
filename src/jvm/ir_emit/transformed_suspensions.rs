@@ -4,7 +4,9 @@
 //! Such a body is emitted as kotlinc's codegen emits it: each suspend call between
 //! `InlineMarker.beforeInlineCall()` and `afterInlineCall()`, its invoke between `mark(0)` and
 //! `mark(1)` (with `mark(11)` before a call whose result is `Unit`), and the call's erased `Object`
-//! result coerced to the callee's declared result after the markers. The transformer reads the
+//! result coerced to the callee's declared result after the markers. A call whose resumption
+//! delivers the box of the value-class carrier it returns unboxes it right after `mark(1)`,
+//! between `mark(8)` and `mark(9)`: the transformer moves that unboxing to the resume path. The transformer reads the
 //! markers, builds the machine and deletes them when the class is written.
 
 use crate::fx_hash::{HashMap, HashSet};
@@ -18,7 +20,7 @@ use crate::jvm::classfile::{
     ClassWriter, CodeBuilder, CoroutineOutcome, CoroutineRequest, TransformedCoroutine,
 };
 use crate::jvm::suspend::{ContinuationMetadata, TransformedMachine};
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
 /// The suspension points of the function being emitted, by call, with each callee's declared
 /// result, and the continuation reads written as fake continuations. Empty for every function the
@@ -26,6 +28,8 @@ use crate::types::Ty;
 #[derive(Default)]
 pub(super) struct TransformedSuspensions {
     results: HashMap<ExprId, Ty>,
+    /// The value class and carrier of each point whose resumption delivers the box.
+    resumed_boxes: HashMap<ExprId, (TypeName, Ty)>,
     fake_continuations: HashSet<ExprId>,
     /// The suspension point a local declaration's initializer is, while that initializer is
     /// emitted: kotlinc's `visitVariable` marks the initializer's line before casting its value.
@@ -202,6 +206,9 @@ impl Emitter<'_> {
             return;
         };
         code.suspend_marker(SuspendMarker::AfterSuspend as i32, self.cw);
+        if let Some(&(value_class, carrier)) = self.transformed_suspensions.resumed_boxes.get(&e) {
+            self.unbox_on_resume(value_class, carrier, code);
+        }
         code.inline_call_marker(false);
         let block = self.is_transformed_block(e);
         if block {
@@ -240,6 +247,23 @@ impl Emitter<'_> {
 }
 
 impl Emitter<'_> {
+    /// kotlinc's `generateResumePathUnboxing`: the box's unboxing to `carrier`, then a cast to
+    /// `Object` that keeps the direct path's type, between the markers. The transformer copies
+    /// what precedes the cast to the resume path and deletes the rest.
+    fn unbox_on_resume(&mut self, value_class: TypeName, carrier: Ty, code: &mut CodeBuilder) {
+        code.suspend_marker(SuspendMarker::BeforeUnboxInlineClass as i32, self.cw);
+        super::value_class_adapters::emit_value_class_unbox_adapter(
+            self.cw,
+            code,
+            value_class,
+            super::ir_ty_to_jvm(&carrier).non_null(),
+            crate::jvm::suspend::box_may_be_null(self.ir, value_class, carrier),
+        );
+        let object = self.cw.class_ref("java/lang/Object");
+        code.checkcast(object);
+        code.suspend_marker(SuspendMarker::AfterUnboxInlineClass as i32, self.cw);
+    }
+
     /// Arm the emission of a function the transformer takes: its suspension points, and the
     /// `$completion` parameter (value-index `completion`) they pass on, which a suspend lambda has
     /// none of. The completion's slot.
@@ -261,6 +285,11 @@ impl Emitter<'_> {
                 .suspensions
                 .iter()
                 .map(|suspension| (suspension.call, suspension.result))
+                .collect(),
+            resumed_boxes: machine
+                .suspensions
+                .iter()
+                .filter_map(|suspension| Some((suspension.call, suspension.resumed_box?)))
                 .collect(),
             fake_continuations: machine.fake_continuations.iter().copied().collect(),
             initializer: None,
