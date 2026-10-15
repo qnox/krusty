@@ -278,6 +278,71 @@ fn an_override_of_a_java_method_replaces_the_platform_signature_at_call_sites() 
     );
 }
 
+const WILDCARD_BOX: &str = "public interface Box<T> {}\n";
+
+const WILDCARD_CONTRACT: &str = "public interface WildcardContract<T> {\n\
+    \u{20} void upper(Box<? extends T> p0);\n\
+    \u{20} void lower(Box<? super T> p0);\n\
+    \u{20} void star(Box<?> p0);\n\
+    }\n";
+
+/// Java-source headers preserve each use-site projection for the Kotlin override graph. A concrete
+/// subclass in another file also proves that the accepted overrides discharge the inherited
+/// obligations rather than only suppressing `NOTHING_TO_OVERRIDE` on their declarations.
+#[test]
+fn kotlin_overrides_keep_java_source_wildcard_variance() {
+    let base = "abstract class KotlinContract<T : Any> : WildcardContract<T> {\n\
+        \u{20} override fun upper(value: Box<out T>) {}\n\
+        \u{20} override fun lower(value: Box<in T>) {}\n\
+        \u{20} override fun star(value: Box<*>) {}\n\
+        }\n";
+    common::assert_sources_accepted_like_kotlinc(
+        &[
+            ("Box.java", WILDCARD_BOX),
+            ("WildcardContract.java", WILDCARD_CONTRACT),
+            ("Base.kt", base),
+            ("Concrete.kt", "class Concrete : KotlinContract<String>()\n"),
+        ],
+        &[],
+    );
+}
+
+/// Reversing `extends` and `super` remains a mismatch. Pin both complete diagnostic ledgers so
+/// preserving a wildcard cannot silently become an over-permissive or invariant override rule.
+/// The sole difference is the known nested-flexibility rendering gap: kotlinc marks the Java type
+/// variable as `T!`, while krusty currently renders that nested argument as `T`.
+#[test]
+fn opposite_java_source_wildcard_variance_reports_exact_overrides() {
+    let wrong = "abstract class Wrong<T : Any> : WildcardContract<T> {\n\
+        \u{20} override fun upper(value: Box<in T>) {}\n\
+        \u{20} override fun lower(value: Box<out T>) {}\n\
+        \u{20} override fun star(value: Box<*>) {}\n\
+        }\n";
+    let sources = [
+        ("Box.java", WILDCARD_BOX),
+        ("WildcardContract.java", WILDCARD_CONTRACT),
+        ("Wrong.kt", wrong),
+    ];
+    assert_eq!(
+        common::reference_error_blocks(&sources, &[]),
+        [
+            "Wrong.kt:2:3: 'upper' overrides nothing. Potential signatures for overriding:",
+            "| fun upper(p0: Box<out T!>!): Unit",
+            "Wrong.kt:3:3: 'lower' overrides nothing. Potential signatures for overriding:",
+            "| fun lower(p0: Box<in T!>!): Unit",
+        ]
+    );
+    assert_eq!(
+        common::krusty_error_blocks_with_args(&sources, &[]),
+        [
+            "Wrong.kt:2:3: 'upper' overrides nothing. Potential signatures for overriding:",
+            "| fun upper(p0: Box<out T>!): Unit",
+            "Wrong.kt:3:3: 'lower' overrides nothing. Potential signatures for overriding:",
+            "| fun lower(p0: Box<in T>!): Unit",
+        ]
+    );
+}
+
 fn java_diagnostics(java: &[(&str, &str)], main: &str) -> Vec<String> {
     let sources = java
         .iter()
