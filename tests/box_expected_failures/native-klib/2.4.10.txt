@@ -1895,7 +1895,6 @@ multiplatform/k2/kt66970.kt
 multiplatform/k2/kt68801.kt
 multiplatform/k2/mergedOverrides.kt
 multiplatform/k2/migratedOldTests/mpp_default_args.kt
-multiplatform/k2/regularAndDeprecatedOverloads.kt
 nameBasedDestructuring/fullFormFromSmartCast.kt
 nameBasedDestructuring/fullFormLoopsAndLambdas.kt
 nameBasedDestructuring/shortFormFromSmartCast.kt
