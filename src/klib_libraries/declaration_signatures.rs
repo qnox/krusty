@@ -51,6 +51,9 @@ pub(super) struct SignedFunction {
     /// Target-stdlib intrinsic semantics authenticated while the archive authority and complete
     /// metadata declaration are still joined.
     pub(super) target_intrinsic: Option<super::target_intrinsics::KlibIntrinsicShape>,
+    /// Exact C target authenticated from an interop archive and this declaration's qualified
+    /// annotation application.
+    pub(super) direct_c_function: Option<crate::libraries::DirectCFunction>,
     /// This declaration's KLIB is a friend of the current compilation. Friendship is attached to
     /// the declaration while its archive identity is still known; package ownership cannot encode
     /// it because unrelated KLIBs may contribute declarations to the same package.
@@ -123,10 +126,11 @@ pub(super) fn sign_package_function(
     declaration: KotlinFunction,
     internal_friend: bool,
     module: Option<&str>,
+    native_interop_library: bool,
 ) -> Result<SignedFunction, KlibLibraryError> {
     let path = declaration.name.clone();
     let mut signed = sign_function(
-        top_level(package),
+        top_level(package, native_interop_library),
         &path,
         declaration,
         None,
@@ -143,10 +147,11 @@ pub(super) fn sign_package_property(
     declaration: KotlinProperty,
     internal_friend: bool,
     module: Option<&str>,
+    native_interop_library: bool,
 ) -> Result<SignedProperty, KlibLibraryError> {
     let path = declaration.name.clone();
     let mut signed = sign_property(
-        top_level(package),
+        top_level(package, native_interop_library),
         &path,
         declaration,
         None,
@@ -156,11 +161,11 @@ pub(super) fn sign_package_property(
     Ok(signed)
 }
 
-fn top_level(package: &[String]) -> MetadataContainer<'_> {
+fn top_level(package: &[String], native_interop_library: bool) -> MetadataContainer<'_> {
     MetadataContainer {
         package,
         classes: &[],
-        native_interop_library: false,
+        native_interop_library,
     }
 }
 
@@ -193,6 +198,7 @@ pub(super) fn sign_function(
         type_parameters,
         compiler_builtin_owner: false,
         target_intrinsic: None,
+        direct_c_function: None,
         internal_friend,
         module: None,
         defaults: Vec::new(),

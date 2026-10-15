@@ -19,7 +19,7 @@ use std::collections::hash_map::Entry;
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 use crate::libraries::{
-    DefaultCallRealization, ExternalCallableKind, GenericSig, InlineKind,
+    DefaultCallRealization, DirectCFunction, ExternalCallableKind, GenericSig, InlineKind,
     KlibBodyCompanionReceiver, KlibDeclarationSignature, KlibDependencyCallable, MemberRealization,
     NonvirtualCallRealization, SingletonDispatch,
 };
@@ -88,6 +88,8 @@ pub struct BackendCallableFact {
     /// Exact KLIB module and declaration identity for target linkage, if this declaration came
     /// from a KLIB provider.
     pub dependency_callable: Option<KlibDependencyCallable>,
+    /// Exact Native C entry the selected interop declaration's provider authenticated.
+    pub direct_c_function: Option<DirectCFunction>,
     /// Frozen KLIB-only receiver contract for an associated companion extension body.
     pub(crate) klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
 }
@@ -269,6 +271,7 @@ mod tests {
             generic_sig: None,
             declaration_signature: None,
             dependency_callable: None,
+            direct_c_function: None,
             klib_body_companion_receiver: None,
         };
         assert!(fact.matches_dependency_body_call(&params, Some(1), false));
@@ -314,6 +317,7 @@ mod tests {
             generic_sig: None,
             declaration_signature: None,
             dependency_callable: None,
+            direct_c_function: None,
             klib_body_companion_receiver: None,
         };
         assert!(fact.matches_dependency_body_call(&[Ty::Int], None, true));
@@ -517,6 +521,7 @@ impl CheckedBackendCallables {
                 let parameter_identities = realization.parameter_identities;
                 let declaration_signature = realization.declaration_signature;
                 let dependency_callable = realization.dependency_callable;
+                let direct_c_function = realization.direct_c_function;
                 let klib_body_companion_receiver = realization.klib_body_companion_receiver;
                 let callable = realization.callable;
                 slot.insert(BackendCallableFact {
@@ -552,6 +557,7 @@ impl CheckedBackendCallables {
                     generic_sig: callable.generic_sig,
                     declaration_signature,
                     dependency_callable,
+                    direct_c_function,
                     klib_body_companion_receiver,
                 })
             }

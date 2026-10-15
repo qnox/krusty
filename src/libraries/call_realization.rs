@@ -21,6 +21,27 @@ pub struct KlibDependencyCallable {
     pub declaration: KlibDeclarationSignature,
 }
 
+/// A C ABI entry published by an exact Native interop declaration.
+///
+/// The symbol is physical provider data. It is never lookup input: source resolution selects the
+/// declaration's opaque identity first, and a Native backend consumes this target only afterward.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectCFunction {
+    symbol: Box<str>,
+}
+
+impl DirectCFunction {
+    pub(crate) fn new(symbol: &str) -> Self {
+        Self {
+            symbol: symbol.into(),
+        }
+    }
+
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+}
+
 /// A receiver slot retained only by a classifier-associated companion extension's serialized
 /// KLIB body.
 ///
@@ -222,6 +243,9 @@ pub struct ExternalCallableRealization {
     /// Exact KLIB module plus declaration identity used to join a selected dependency call to
     /// target code emitted earlier in the same program. This is absent for non-KLIB providers.
     pub dependency_callable: Option<KlibDependencyCallable>,
+    /// Exact Native C entry authenticated while the provider still owned the interop archive,
+    /// qualified annotation application, and declaration shape.
+    pub direct_c_function: Option<DirectCFunction>,
     /// KLIB-only serialized receiver contract for a classifier-associated companion extension.
     /// It is separate from source parameters because source lookup names the declaration through
     /// the classifier without a value receiver.

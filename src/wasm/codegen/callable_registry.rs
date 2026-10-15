@@ -557,6 +557,7 @@ mod tests {
             generic_sig: None,
             declaration_signature: None,
             dependency_callable: None,
+            direct_c_function: None,
             klib_body_companion_receiver: Some(KlibBodyCompanionReceiver::new(type_name(
                 "kotlin/Float",
             ))),

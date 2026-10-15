@@ -4,6 +4,8 @@
 //! mapping from a frozen dependency-callable fact to the native runtime operation that implements
 //! it. Name-based runtime tables remain explicit migration debt inside `native::intrinsics`.
 
+mod c_calls;
+
 use super::*;
 
 /// Whether an authenticated source-module dependency export can realize this call directly.
@@ -509,6 +511,16 @@ impl BodyLowering<'_, '_, '_> {
                     let func_ref = self.func_ref(id);
                     let call = self.emit_call(func_ref, &arguments)?;
                     return Ok(self.builder.inst_results(call).first().copied());
+                }
+                if let Some(function) = &realization.direct_c_function {
+                    return self.direct_c_call(
+                        function.symbol(),
+                        params,
+                        *ret,
+                        defaults,
+                        dispatch_receiver,
+                        args,
+                    );
                 }
                 // A callable reference reaches this ordinary dependency-call path, while retaining
                 // the exact compiler intrinsic the source-form operation uses.

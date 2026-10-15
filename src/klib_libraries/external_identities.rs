@@ -46,6 +46,7 @@ impl ExternalIdentities {
             signed.internal_friend,
             signed.module.as_deref(),
             companion_receiver,
+            signed.direct_c_function.clone(),
             &mut function.callable,
         );
     }
@@ -70,6 +71,7 @@ impl ExternalIdentities {
             signed.internal_friend,
             signed.module.as_deref(),
             companion_receiver.clone(),
+            None,
             &mut property.getter,
         );
         if let Some(setter) = &mut property.setter {
@@ -89,6 +91,7 @@ impl ExternalIdentities {
                 signed.internal_friend,
                 signed.module.as_deref(),
                 companion_receiver,
+                None,
                 setter,
             );
         }
@@ -118,6 +121,7 @@ impl ExternalIdentities {
             internal_friend,
             module,
             None,
+            None,
             &mut callable,
         );
         constructor.external_identity = callable.external_identity;
@@ -144,6 +148,7 @@ impl ExternalIdentities {
             parameters,
             internal_friend,
             module,
+            None,
             None,
             &mut callable,
         );
@@ -195,6 +200,7 @@ impl ExternalIdentities {
         internal_friend: bool,
         module: Option<&str>,
         klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
+        direct_c_function: Option<crate::libraries::DirectCFunction>,
         callable: &mut LibraryCallable,
     ) {
         let key = (module.map(str::to_owned), signature.clone());
@@ -228,6 +234,7 @@ impl ExternalIdentities {
                 module: module.to_owned(),
                 declaration: signature,
             }),
+            direct_c_function,
             klib_body_companion_receiver,
         });
         self.by_signature.borrow_mut().insert(key, identity);
