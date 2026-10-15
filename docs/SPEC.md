@@ -6954,6 +6954,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   does for a primitive without `wrapPrimitives`. `T::class` over a reified type parameter loads the
   boxed class even when an inlined call substitutes a primitive for it (`ldc Integer`), so the IR
   literal records that it names a type parameter. Test: `tests/class_literal_e2e.rs`.
+- **Two class literals compare by their class tokens.** `a::class == b::class` and
+  `x::class != String::class` load each operand's `java.lang.Class` and decide with
+  `if_acmpeq`/`if_acmpne`, never `Intrinsics.areEqual` over two `KClass` wrappers (kotlinc's
+  `Equals` with `isClassValue`, `wrapPrimitives = true`: `Int::class` there is `ldc Integer`). A
+  bound literal over a primitive value discards the value and loads the primitive's class
+  (`Integer.TYPE` outside a comparison), as `JavaClassProperty.invokeWith` does. A bound literal
+  `value::class` is typed `KClass<out T>` for the value's type `T`, in an inferred declaration
+  type as in a body. Inside an emitted `inline fun <reified T>`, `T::class` is still a class value:
+  the comparison loads its reification placeholder (`reifiedOperationMarker(4, "T")` and the erased
+  class constant) without the `KClass` wrap. Test: `tests/class_literal_equality_e2e.rs`.
 - **`@MustBeDocumented` mirrors as `@java.lang.annotation.Documented`.** An annotation class
   carrying it gets the Java `Documented` meta-annotation after its source annotations and before
   the `Retention` and `Target` mirrors, as kotlinc's `AdditionalClassAnnotationLowering` adds them.

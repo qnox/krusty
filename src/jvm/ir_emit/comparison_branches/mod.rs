@@ -30,6 +30,7 @@ impl Emitter<'_> {
                     || (matches!(op, Eq | Ne)
                         && (matches!(self.ir.expr(*lhs), IrExpr::Const(IrConst::Null))
                             || matches!(self.ir.expr(*rhs), IrExpr::Const(IrConst::Null))))
+                    || self.is_class_value_equality(*op, *lhs, *rhs)
                     || self.emits_control_flow(*lhs)
                     || self.emits_control_flow(*rhs)
             }
@@ -188,6 +189,15 @@ impl Emitter<'_> {
             .obj_internal()
             .and_then(|classifier| self.classifiers.classifier(classifier))
             .is_some_and(|classifier| classifier.is_enum())
+    }
+
+    /// `==`/`!=` between two class literals (`a::class == b::class`, `x::class == String::class`):
+    /// kotlinc's `Equals` compares their `java.lang.Class` tokens by reference instead of calling
+    /// `Intrinsics.areEqual` on two `KClass` wrappers (`isClassValue`).
+    fn is_class_value_equality(&self, op: IrBinOp, lhs: ExprId, rhs: ExprId) -> bool {
+        matches!(op, IrBinOp::Eq | IrBinOp::Ne)
+            && self.is_class_value(lhs)
+            && self.is_class_value(rhs)
     }
 
     /// Negate the Boolean on the operand stack as kotlinc's `Not` materializes it:
@@ -354,6 +364,18 @@ impl Emitter<'_> {
             && (self.is_enum_value(lhs) || self.is_enum_value(rhs))
         {
             self.emit_identity_operands(lhs, rhs, code);
+            self.mark_comparison_decision(&[lhs, rhs], code);
+            if (op == Eq) == jt {
+                code.if_acmpeq(target);
+            } else {
+                code.if_acmpne(target);
+            }
+            return true;
+        }
+        if self.is_class_value_equality(op, lhs, rhs) {
+            for operand in [lhs, rhs] {
+                self.emitting(operand, |this| this.emit_class_value_token(operand, code));
+            }
             self.mark_comparison_decision(&[lhs, rhs], code);
             if (op == Eq) == jt {
                 code.if_acmpeq(target);
