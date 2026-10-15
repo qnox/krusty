@@ -133,13 +133,29 @@ impl IrSecondaryCtorLines {
     }
 }
 
+/// The source lines a class's primary constructor owns. All are 1-based; 0 means not recorded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IrPrimaryCtorLines {
+    /// The constructor declaration's own start — its `constructor` keyword, or its parameter list's
+    /// `(` — where its trailing `return` maps, and where a JVM value class's rebuilt private
+    /// `<init>` maps. 0 for a constructor the header did not write.
+    pub decl_line: u32,
+    /// Where a target lowering rebuilt the whole constructor body. Its delegation and trailing
+    /// return both use this line; 0 keeps the checked body's distinct source positions.
+    pub rebuilt_body_line: u32,
+}
+
 impl super::IrClass {
-    /// The line kotlinc builds a primary constructor's delegating call at: where the declaration
-    /// starts, annotations included.
+    /// The line a primary constructor's delegating call is at: where a lowering re-anchored it, or
+    /// otherwise where kotlinc builds it — the declaration's start, annotations included.
     pub fn primary_delegation_line(&self) -> Option<u32> {
-        [self.decl_start_line, self.decl_line]
-            .into_iter()
-            .find(|&line| line != 0)
+        [
+            self.primary_ctor_lines.rebuilt_body_line,
+            self.decl_start_line,
+            self.decl_line,
+        ]
+        .into_iter()
+        .find(|&line| line != 0)
     }
 }
 
