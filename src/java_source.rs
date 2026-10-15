@@ -123,6 +123,7 @@ pub(crate) struct FileCtx {
 pub(crate) struct SrcTypeSegment {
     pub(crate) name: String,
     pub(crate) args: Vec<SrcType>,
+    annotations: Vec<String>,
 }
 
 /// A source-level type reference: dotted name as written, its qualified segments, and array depth.
@@ -135,6 +136,19 @@ pub(crate) struct SrcType {
     /// The wildcard this type argument was written as. The type itself is its declared bound, with
     /// `java.lang.Object` standing in for an unbounded `?`.
     pub(crate) wildcard: Option<SrcWildcard>,
+    /// Annotation spellings in the member/parameter modifier prefix. Resolution decides whether a
+    /// recognized qualifier permits declaration-site use or is only a leading type-use annotation.
+    modifier_annotations: Vec<String>,
+    /// Type-use annotations with their JVMS array-element path depth. Depth zero qualifies this
+    /// type itself; positive depth qualifies an array component and must not affect outer
+    /// nullability. An annotation on a nested argument lives on that argument's own `SrcType`.
+    type_annotations: Vec<SrcTypeAnnotation>,
+}
+
+#[derive(Clone, Debug)]
+struct SrcTypeAnnotation {
+    spelling: String,
+    array_depth: u32,
 }
 
 /// A Java wildcard type argument: `? extends B`, `? super B`, or an unbounded `?`.
@@ -152,6 +166,53 @@ impl SrcType {
 
     pub(crate) fn has_type_arguments(&self) -> bool {
         self.segments.iter().any(|segment| !segment.args.is_empty())
+    }
+
+    pub(crate) fn modifier_annotations(&self) -> impl Iterator<Item = &str> {
+        self.modifier_annotations.iter().map(String::as_str)
+    }
+
+    pub(crate) fn outer_type_annotations(&self, nested_depth: usize) -> impl Iterator<Item = &str> {
+        let outermost = self
+            .segments
+            .len()
+            .checked_sub(nested_depth.saturating_add(1));
+        let innermost = self.segments.len().checked_sub(1);
+        let classifier_annotations =
+            (self.array == 0)
+                .then_some(())
+                .into_iter()
+                .flat_map(move |_| {
+                    self.segments
+                        .iter()
+                        .enumerate()
+                        .filter(move |(index, _)| {
+                            Some(*index) == outermost || Some(*index) == innermost
+                        })
+                        .flat_map(|(_, segment)| segment.annotations.iter().map(String::as_str))
+                });
+        classifier_annotations.chain(
+            self.type_annotations
+                .iter()
+                .filter(|annotation| annotation.array_depth == 0)
+                .map(|annotation| annotation.spelling.as_str()),
+        )
+    }
+
+    fn prepend_modifier_annotations(&mut self, annotations: Vec<String>) {
+        self.modifier_annotations.splice(0..0, annotations);
+    }
+
+    fn add_outer_array_dimension(&mut self, annotations: Vec<String>) {
+        self.array += 1;
+        for annotation in &mut self.type_annotations {
+            annotation.array_depth += 1;
+        }
+        self.type_annotations
+            .extend(annotations.into_iter().map(|spelling| SrcTypeAnnotation {
+                spelling,
+                array_depth: 0,
+            }));
     }
 }
 
@@ -508,9 +569,10 @@ impl P<'_> {
             &self.spans[start..end],
         ));
     }
-    /// Skip an annotation use: `@Name` or `@Name(...)` (`@` already consumed).
-    fn skip_annotation(&mut self) -> Option<()> {
-        self.dotted()?;
+    /// Skip an annotation use, returning its spelling: `@Name` or `@Name(...)` (`@` already
+    /// consumed).
+    fn skip_annotation(&mut self) -> Option<String> {
+        let name = self.dotted()?;
         if self.eat_punct('(') {
             let mut depth = 1;
             while depth > 0 {
@@ -522,7 +584,7 @@ impl P<'_> {
                 }
             }
         }
-        Some(())
+        Some(name)
     }
     fn skip_default_value(&mut self) -> Option<()> {
         if self.eat_punct('{') {
@@ -530,7 +592,7 @@ impl P<'_> {
             return Some(());
         }
         if self.eat_punct('@') {
-            return self.skip_annotation();
+            return self.skip_annotation().map(drop);
         }
         let mut depth = 0i32;
         loop {
@@ -647,15 +709,21 @@ const MODIFIERS: &[&str] = &[
 /// Collect modifiers + annotation uses, returning the access bits we model (plus the internal
 /// [`STUB_DEFAULT`] marker for `default`).
 fn modifiers(p: &mut P) -> Option<u16> {
+    modifiers_and_annotations(p).map(|(access, _)| access)
+}
+
+/// [`modifiers`], also returning the spellings of the annotation uses among them.
+fn modifiers_and_annotations(p: &mut P) -> Option<(u16, Vec<String>)> {
     let mut acc = 0u16;
+    let mut annotations = Vec::new();
     loop {
         if p.peek() == Some(&Tok::Punct('@')) {
             // `@interface` is a declaration kind, not an annotation use — leave it to the caller.
             if matches!(p.t.get(p.i + 1), Some(Tok::Ident(s)) if s == "interface") {
-                return Some(acc);
+                return Some((acc, annotations));
             }
             p.i += 1;
-            p.skip_annotation()?;
+            annotations.push(p.skip_annotation()?);
             continue;
         }
         match p.peek() {
@@ -679,7 +747,7 @@ fn modifiers(p: &mut P) -> Option<u16> {
                 }
                 p.i += 1;
             }
-            _ => return Some(acc),
+            _ => return Some((acc, annotations)),
         }
     }
 }
@@ -726,10 +794,18 @@ fn src_type_arguments(p: &mut P) -> Option<Vec<SrcType>> {
     }
 }
 
+fn annotation_uses(p: &mut P) -> Option<Vec<String>> {
+    let mut annotations = Vec::new();
+    while p.eat_punct('@') {
+        annotations.push(p.skip_annotation()?);
+    }
+    Some(annotations)
+}
+
 /// A source type: `int`, `java.util.List<String>[]`, `E`, `Map.Entry<K,V>`,
 /// `Outer<T>.Inner<U>`, `?`, or `? extends X`.
 fn src_type(p: &mut P) -> Option<SrcType> {
-    skip_type_annotations(p)?;
+    let leading_annotations = annotation_uses(p)?;
     if p.eat_punct('?') {
         let wildcard = if p.eat_ident("extends") {
             SrcWildcard::Extends
@@ -739,6 +815,10 @@ fn src_type(p: &mut P) -> Option<SrcType> {
             SrcWildcard::Unbounded
         };
         if wildcard != SrcWildcard::Unbounded {
+            // These annotate the wildcard node, not its bound. Wildcards can only occur below a
+            // member's outer type in the supported Java header grammar, so the source-stub
+            // provider deliberately does not publish them as bound annotations.
+            drop(leading_annotations);
             let mut bound = src_type(p)?;
             bound.wildcard = Some(wildcard);
             return Some(bound);
@@ -750,23 +830,37 @@ fn src_type(p: &mut P) -> Option<SrcType> {
                 .map(|name| SrcTypeSegment {
                     name: name.to_string(),
                     args: Vec::new(),
+                    annotations: Vec::new(),
                 })
                 .collect(),
             array: 0,
             span: None,
             wildcard: Some(SrcWildcard::Unbounded),
+            modifier_annotations: Vec::new(),
+            type_annotations: Vec::new(),
         });
     }
     let start = p.span()?;
     let mut segments = Vec::new();
+    let mut segment_annotations = leading_annotations;
     loop {
         let name = p.ident()?;
         let args = src_type_arguments(p)?;
-        segments.push(SrcTypeSegment { name, args });
-        if p.peek() != Some(&Tok::Punct('.')) || !matches!(p.t.get(p.i + 1), Some(Tok::Ident(_))) {
+        segments.push(SrcTypeSegment {
+            name,
+            args,
+            annotations: std::mem::take(&mut segment_annotations),
+        });
+        if p.peek() != Some(&Tok::Punct('.')) {
             break;
         }
+        let checkpoint = p.i;
         p.i += 1;
+        segment_annotations = annotation_uses(p)?;
+        if !matches!(p.peek(), Some(Tok::Ident(_))) {
+            p.i = checkpoint;
+            break;
+        }
     }
     let end = p.spans.get(p.i.saturating_sub(1)).copied().unwrap_or(start);
     let name = segments
@@ -774,16 +868,28 @@ fn src_type(p: &mut P) -> Option<SrcType> {
         .map(|segment| segment.name.as_str())
         .collect::<Vec<_>>()
         .join(".");
-    let mut array = 0;
+    let mut dimension_annotations = Vec::new();
     loop {
-        skip_type_annotations(p)?;
+        let checkpoint = p.i;
+        let annotations = annotation_uses(p)?;
         if !p.eat_punct('[') {
+            // A vararg may carry annotations before `...`; leave those tokens to the parameter
+            // parser, which adds the ellipsis as the outermost array dimension.
+            p.i = checkpoint;
             break;
         }
         if !p.eat_punct(']') {
             return None;
         }
-        array += 1;
+        dimension_annotations.push(annotations);
+    }
+    let array = dimension_annotations.len() as u32;
+    let mut type_annotations = Vec::new();
+    for (array_depth, annotations) in dimension_annotations.into_iter().enumerate() {
+        type_annotations.extend(annotations.into_iter().map(|spelling| SrcTypeAnnotation {
+            spelling,
+            array_depth: array_depth as u32,
+        }));
     }
     Some(SrcType {
         name,
@@ -791,14 +897,13 @@ fn src_type(p: &mut P) -> Option<SrcType> {
         array,
         span: Some(Span::new(start.lo, end.hi)),
         wildcard: None,
+        modifier_annotations: Vec::new(),
+        type_annotations,
     })
 }
 
 fn skip_type_annotations(p: &mut P) -> Option<()> {
-    while p.eat_punct('@') {
-        p.skip_annotation()?;
-    }
-    Some(())
+    annotation_uses(p).map(drop)
 }
 
 /// Parse one file: package/imports, then top-level type declarations.
@@ -997,7 +1102,7 @@ fn type_decl_with_access(
         if p.eat_punct(';') {
             continue;
         }
-        let macc = modifiers(p)?;
+        let (macc, member_annotations) = modifiers_and_annotations(p)?;
         if matches!(p.peek(), Some(Tok::Ident(s)) if s == "class" || s == "interface" || s == "enum" || s == "record")
             || (p.peek() == Some(&Tok::Punct('@'))
                 && matches!(p.t.get(p.i + 1), Some(Tok::Ident(s)) if s == "interface"))
@@ -1053,7 +1158,8 @@ fn type_decl_with_access(
             continue;
         }
         // Field or method: `Type name (` → method; `Type name [;=,]` → field.
-        let ty = src_type(p)?;
+        let mut ty = src_type(p)?;
+        ty.prepend_modifier_annotations(member_annotations);
         let name = p.ident()?;
         if p.eat_punct('(') {
             let (params, varargs) = param_list(p)?;
@@ -1139,7 +1245,7 @@ fn annotation_type_decl(
         if p.eat_punct(';') {
             continue;
         }
-        let macc = modifiers(p)?;
+        let (macc, member_annotations) = modifiers_and_annotations(p)?;
         if matches!(p.peek(), Some(Tok::Ident(s)) if s == "class" || s == "interface" || s == "enum" || s == "record")
             || (p.peek() == Some(&Tok::Punct('@'))
                 && matches!(p.t.get(p.i + 1), Some(Tok::Ident(s)) if s == "interface"))
@@ -1154,7 +1260,8 @@ fn annotation_type_decl(
             )?;
             continue;
         }
-        let ty = src_type(p)?;
+        let mut ty = src_type(p)?;
+        ty.prepend_modifier_annotations(member_annotations);
         let name = p.ident()?;
         p.eat_punct('(').then_some(())?;
         p.eat_punct(')').then_some(())?;
@@ -1183,14 +1290,18 @@ fn typed_parameter(p: &mut P) -> Option<(String, SrcType, bool)> {
     // Method parameters and record components share this exact Java grammar prefix. Parse it once so
     // accepting an annotation/modifier, recognizing `...`, and converting that spelling to its JVM
     // array type cannot drift between the explicit-method and synthesized-record constructor paths.
-    let _ = modifiers(p)?;
+    let (_, modifier_annotations) = modifiers_and_annotations(p)?;
     let mut ty = src_type(p)?;
+    ty.prepend_modifier_annotations(modifier_annotations);
+    let checkpoint = p.i;
+    let vararg_annotations = annotation_uses(p)?;
     let is_varargs = if p.eat_punct('.') {
         p.eat_punct('.').then_some(())?;
         p.eat_punct('.').then_some(())?;
-        ty.array += 1;
+        ty.add_outer_array_dimension(vararg_annotations);
         true
     } else {
+        p.i = checkpoint;
         false
     };
     let name = p.ident()?;
@@ -1295,7 +1406,14 @@ fn explicit_body_type_refs(tokens: &[Tok], spans: &[Span]) -> Vec<SrcType> {
 
 // --- Resolution + emission -------------------------------------------------
 
-fn classifier_path(name: &str, exists: &dyn Fn(&str) -> bool) -> Option<String> {
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ResolvedJavaName {
+    pub(crate) internal: String,
+    /// Nested classifier segments after the outermost classifier in the source spelling.
+    pub(crate) nested_depth: usize,
+}
+
+fn classifier_path(name: &str, exists: &dyn Fn(&str) -> bool) -> Option<ResolvedJavaName> {
     let segments = name
         .split(['.', '/'])
         .filter(|segment| !segment.is_empty())
@@ -1313,7 +1431,10 @@ fn classifier_path(name: &str, exists: &dyn Fn(&str) -> bool) -> Option<String> 
                 return None;
             }
         }
-        return Some(resolved);
+        return Some(ResolvedJavaName {
+            internal: resolved,
+            nested_depth: segments.len() - classifier_end,
+        });
     }
     None
 }
@@ -1321,7 +1442,7 @@ fn classifier_path(name: &str, exists: &dyn Fn(&str) -> bool) -> Option<String> 
 fn existing_candidates(
     candidates: impl IntoIterator<Item = String>,
     exists: &dyn Fn(&str) -> bool,
-) -> Vec<String> {
+) -> Vec<ResolvedJavaName> {
     let mut matches = candidates
         .into_iter()
         .filter_map(|candidate| classifier_path(&candidate, exists))
@@ -1337,6 +1458,16 @@ pub(crate) fn resolve_internal_name(
     name: &str,
     exists: &dyn Fn(&str) -> bool,
 ) -> Option<String> {
+    resolve_internal_name_with_depth(package, imports, name, exists)
+        .map(|resolved| resolved.internal)
+}
+
+pub(crate) fn resolve_internal_name_with_depth(
+    package: &str,
+    imports: &[JavaImport],
+    name: &str,
+    exists: &dyn Fn(&str) -> bool,
+) -> Option<ResolvedJavaName> {
     let (head, tail) = name
         .split_once('.')
         .map_or((name, None), |(head, tail)| (head, Some(tail)));
@@ -1352,6 +1483,10 @@ pub(crate) fn resolve_internal_name(
         .collect::<Vec<_>>();
     if !explicit.is_empty() {
         let mut matches = existing_candidates(explicit, exists);
+        let written_nested_depth = tail.map_or(0, |tail| tail.split('.').count());
+        for candidate in &mut matches {
+            candidate.nested_depth = written_nested_depth;
+        }
         return (matches.len() == 1).then(|| matches.pop().unwrap());
     }
 

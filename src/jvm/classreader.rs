@@ -6,9 +6,17 @@
 //! Also reads the `@kotlin.Metadata` annotation (RuntimeVisibleAnnotations) to extract the `d2`
 //! string table, which contains type-alias targets used by `classpath.rs` for type resolution.
 
+use super::java_nullability_qualifiers::descriptor_nullability_qualifier;
 use crate::kt_string::KtString;
 use crate::libraries::AnnotationElementDefault;
 use crate::types::{TypeName, TypeNameList};
+
+mod member_nullability_attributes;
+
+pub use super::JavaNullability;
+use member_nullability_attributes::{
+    read_parameter_nullability, read_type_use_nullability, TypeUseNullability,
+};
 
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PRIVATE: u16 = 0x0002;
@@ -20,12 +28,6 @@ pub const ACC_SYNTHETIC: u16 = 0x1000;
 /// The final array parameter accepts Java vararg elements.
 pub const ACC_VARARGS: u16 = 0x0080;
 pub const ACC_ENUM: u16 = 0x4000;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum JavaNullability {
-    NotNull,
-    Nullable,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MethodSig {
@@ -141,6 +143,7 @@ struct MemberAttributes {
     declaration_nullability: Option<JavaNullability>,
     parameter_access: Vec<u16>,
     deprecated_hidden: bool,
+    type_use_nullability: TypeUseNullability,
 }
 
 #[derive(Clone, Debug)]
@@ -926,12 +929,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             let access = r.u2()?;
             let name = utf8(r.u2()?);
             let descriptor = utf8(r.u2()?);
-            let mut attributes = read_member_attributes(r, &cp)?;
-            align_parameter_nullability(
-                &descriptor,
-                &mut attributes.parameter_nullability,
-                &attributes.parameter_access,
-            );
+            let attributes = read_member_attributes(r, &cp)?;
             v.push(RawMember {
                 access,
                 name,
@@ -953,7 +951,37 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             nullability: member.attributes.declaration_nullability,
         })
         .collect();
-    let raw_methods = read_members(&mut r)?;
+    let mut raw_methods = read_members(&mut r)?;
+
+    // Parameter attributes precede class attributes in the classfile, but an inner constructor's
+    // source-to-descriptor prefix is stated by this class's structural InnerClasses self entry.
+    // Join those two facts only after both have been decoded; never infer nesting from `$` in the
+    // encoded class name.
+    let attrs = read_class_attrs(&mut r, &cp);
+    let constructor_outer = attrs
+        .inner_classes
+        .iter()
+        .find(|entry| entry.inner == this_class && entry.access & ACC_STATIC == 0)
+        .and_then(|entry| entry.outer.as_deref())
+        .map(crate::types::type_name);
+    for member in &mut raw_methods {
+        let enclosing_instance_prefix = usize::from(
+            member.name == "<init>"
+                && constructor_outer.is_some_and(|outer| {
+                    crate::jvm::names::parse_method_descriptor(&member.descriptor)
+                        .and_then(|(parameters, _)| parameters.first().copied())
+                        .is_some_and(|parameter| {
+                            crate::jvm::names::descriptor_is_classifier(parameter, outer)
+                        })
+                }),
+        );
+        align_parameter_nullability(
+            &member.descriptor,
+            &mut member.attributes.parameter_nullability,
+            &member.attributes.parameter_access,
+            enclosing_instance_prefix,
+        );
+    }
     let annotation_element_defaults = raw_methods
         .iter()
         .filter_map(|member| {
@@ -977,10 +1005,6 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             has_annotation_default: member.attributes.annotation_default.is_some(),
         })
         .collect();
-
-    // Read class-level attributes: @kotlin.Metadata → d1/d2 arrays, the generic `Signature` attr, and
-    // (for an annotation class) its `@Retention` policy.
-    let attrs = read_class_attrs(&mut r, &cp);
 
     let raw_metadata = crate::jvm::metadata::RawMetadata {
         d1: attrs.d1.unwrap_or_default(),
@@ -1518,6 +1542,13 @@ fn read_member_attributes(r: &mut Reader, cp: &[C]) -> Result<MemberAttributes, 
                 read_parameter_nullability(body, cp, &mut attributes.parameter_nullability)?;
             }
             Some(C::Utf8(s))
+                if s == "RuntimeVisibleTypeAnnotations"
+                    || s == "RuntimeInvisibleTypeAnnotations" =>
+            {
+                let body = r.take(len)?;
+                read_type_use_nullability(body, cp, &mut attributes.type_use_nullability)?;
+            }
+            Some(C::Utf8(s))
                 if s == "RuntimeVisibleAnnotations" || s == "RuntimeInvisibleAnnotations" =>
             {
                 let body = r.take(len)?;
@@ -1548,6 +1579,22 @@ fn read_member_attributes(r: &mut Reader, cp: &[C]) -> Result<MemberAttributes, 
             }
         }
     }
+    // Kotlin flattens a qualifier on any nested-class segment onto the member result. Declaration
+    // annotations still take precedence when both encodings are present.
+    let type_use = std::mem::take(&mut attributes.type_use_nullability);
+    attributes.declaration_nullability = attributes.declaration_nullability.or(type_use.member);
+    if attributes.parameter_nullability.len() < type_use.parameters.len() {
+        attributes
+            .parameter_nullability
+            .resize(type_use.parameters.len(), None);
+    }
+    for (slot, type_use) in attributes
+        .parameter_nullability
+        .iter_mut()
+        .zip(type_use.parameters)
+    {
+        *slot = slot.or(type_use);
+    }
     Ok(attributes)
 }
 
@@ -1565,11 +1612,8 @@ fn read_declaration_annotations(
     let annotation_count = r.u2()?;
     for _ in 0..annotation_count {
         let annotation = utf8(r.u2()?);
-        let nullability = match annotation {
-            "Lorg/jetbrains/annotations/NotNull;" => Some(JavaNullability::NotNull),
-            "Lorg/jetbrains/annotations/Nullable;" => Some(JavaNullability::Nullable),
-            _ => None,
-        };
+        let nullability =
+            descriptor_nullability_qualifier(annotation).map(|qualifier| qualifier.nullability);
         let pair_count = r.u2()?;
         for _ in 0..pair_count {
             let element_name = utf8(r.u2()?);
@@ -1602,6 +1646,7 @@ fn align_parameter_nullability(
     descriptor: &str,
     nullability: &mut Vec<Option<JavaNullability>>,
     parameter_access: &[u16],
+    enclosing_instance_prefix: usize,
 ) {
     const SYNTHETIC_OR_MANDATED: u16 = 0x1000 | 0x8000;
 
@@ -1612,52 +1657,40 @@ fn align_parameter_nullability(
         return;
     }
 
-    let source_parameters = parameter_access
-        .iter()
-        .enumerate()
-        .filter_map(|(index, access)| (access & SYNTHETIC_OR_MANDATED == 0).then_some(index))
-        .collect::<Vec<_>>();
-    if parameter_access.len() == parameters.len() && source_parameters.len() == nullability.len() {
+    if parameter_access.len() == parameters.len() {
+        let source_parameters = parameter_access
+            .iter()
+            .enumerate()
+            .filter_map(|(index, access)| (access & SYNTHETIC_OR_MANDATED == 0).then_some(index))
+            .collect::<Vec<_>>();
+        if nullability.len() > source_parameters.len() {
+            return;
+        }
         let source_nullability = std::mem::take(nullability);
         nullability.resize(parameters.len(), None);
         for (index, value) in source_parameters.into_iter().zip(source_nullability) {
             nullability[index] = value;
         }
+        return;
     }
-}
 
-fn read_parameter_nullability(
-    body: &[u8],
-    cp: &[C],
-    out: &mut Vec<Option<JavaNullability>>,
-) -> Result<(), ReadError> {
-    let utf8 = |index: u16| match cp.get(index as usize) {
-        Some(C::Utf8(value)) => value.as_str(),
-        _ => "",
-    };
-    let mut r = Reader { b: body, i: 0 };
-    let parameter_count = r.u1()? as usize;
-    out.resize(out.len().max(parameter_count), None);
-    for slot in out.iter_mut().take(parameter_count) {
-        let annotation_count = r.u2()?;
-        for _ in 0..annotation_count {
-            let annotation = utf8(r.u2()?);
-            let nullability = match annotation {
-                "Lorg/jetbrains/annotations/NotNull;" => Some(JavaNullability::NotNull),
-                "Lorg/jetbrains/annotations/Nullable;" => Some(JavaNullability::Nullable),
-                _ => None,
-            };
-            let pair_count = r.u2()?;
-            for _ in 0..pair_count {
-                r.u2()?;
-                read_element_value(&mut r, cp, ElementValueExtract::Skip)?;
-            }
-            if let Some(nullable) = nullability {
-                *slot = Some(nullable);
-            }
+    // Some producers omit MethodParameters entirely. For a non-static member class, InnerClasses
+    // and the constructor descriptor still prove the one mandated enclosing-instance prefix;
+    // `formal_parameter_index` and Runtime*ParameterAnnotations index only the source formals.
+    if parameter_access.is_empty()
+        && enclosing_instance_prefix > 0
+        && nullability.len() <= parameters.len().saturating_sub(enclosing_instance_prefix)
+    {
+        let source_nullability = std::mem::take(nullability);
+        nullability.resize(parameters.len(), None);
+        for (slot, value) in nullability
+            .iter_mut()
+            .skip(enclosing_instance_prefix)
+            .zip(source_nullability)
+        {
+            *slot = value;
         }
     }
-    Ok(())
 }
 
 struct Reader<'a> {
@@ -1740,6 +1773,20 @@ fn decode_modified_utf8(bytes: &[u8]) -> KtString {
 mod tests {
     use super::*;
     use crate::jvm::classfile::*;
+
+    #[test]
+    fn inner_constructor_nullability_uses_an_authenticated_descriptor_prefix() {
+        let descriptor = "(Ldemo/Outer;Ljava/lang/String;Ljava/lang/String;)V";
+        let source = vec![Some(JavaNullability::NotNull), None];
+
+        let mut aligned = source.clone();
+        align_parameter_nullability(descriptor, &mut aligned, &[], 1);
+        assert_eq!(aligned, vec![None, Some(JavaNullability::NotNull), None]);
+
+        let mut unproven = source.clone();
+        align_parameter_nullability(descriptor, &mut unproven, &[], 0);
+        assert_eq!(unproven, source);
+    }
 
     fn class_attributes(name_index: u16, body: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::new();

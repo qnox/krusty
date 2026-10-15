@@ -25,8 +25,8 @@ use super::classfile::{
 };
 use crate::fx_hash::{HashMap, HashSet};
 use crate::java_source::{
-    lex_java, parse_raw_file, primitive_desc, resolve_internal_name, DeclKind, FileCtx,
-    JavaConstant, Member, RawDecl, SrcType, SrcWildcard, STUB_DEFAULT,
+    lex_java, parse_raw_file, primitive_desc, resolve_internal_name_with_depth, DeclKind, FileCtx,
+    JavaConstant, Member, RawDecl, ResolvedJavaName, SrcType, SrcWildcard, STUB_DEFAULT,
 };
 
 #[cfg(test)]
@@ -259,14 +259,62 @@ fn classfile_header_access(d: &RawDecl, declaration_access: u16) -> u16 {
 }
 
 impl Resolver<'_> {
+    /// The nullability annotation qualifying the outermost `ty`, as the field descriptor of the
+    /// annotation type its spelling resolves to. Stub classfiles publish this normalized provider
+    /// fact as a declaration annotation; annotations on array components and nested arguments stay
+    /// on their own source type-use paths and therefore cannot qualify the enclosing type.
+    fn nullability_annotation(&self, ty: &SrcType) -> Option<String> {
+        for spelling in ty.modifier_annotations() {
+            let Some((qualifier, descriptor)) = self.resolved_nullability_annotation(spelling)
+            else {
+                continue;
+            };
+            // A type-use-only qualifier written in the modifier prefix applies to the component
+            // type of an array. Declaration-site qualifiers instead apply to the member itself.
+            if qualifier.permits_declaration_site || ty.array == 0 {
+                return Some(descriptor);
+            }
+        }
+        let nested_depth = self
+            .internal_of_with_depth(&ty.name)
+            .map_or(0, |resolved| resolved.nested_depth);
+        ty.outer_type_annotations(nested_depth)
+            .find_map(|spelling| {
+                self.resolved_nullability_annotation(spelling)
+                    .map(|(_, descriptor)| descriptor)
+            })
+    }
+
+    fn resolved_nullability_annotation(
+        &self,
+        spelling: &str,
+    ) -> Option<(
+        super::java_nullability_qualifiers::NullabilityQualifier,
+        String,
+    )> {
+        let internal = self.internal_of(spelling)?;
+        let qualifier = super::java_nullability_qualifiers::nullability_qualifier(
+            crate::types::type_name(&internal),
+        )?;
+        Some((qualifier, format!("L{internal};")))
+    }
+
     fn internal_of(&self, name: &str) -> Option<String> {
+        self.internal_of_with_depth(name)
+            .map(|resolved| resolved.internal)
+    }
+
+    fn internal_of_with_depth(&self, name: &str) -> Option<ResolvedJavaName> {
         if let Some(owner) = self.owner {
             let nested = name.replace('.', "$");
             let mut scope = Some(owner);
             while let Some(current) = scope {
                 let candidate = format!("{current}${nested}");
                 if (self.resolve)(&candidate) {
-                    return Some(candidate);
+                    return Some(ResolvedJavaName {
+                        internal: candidate,
+                        nested_depth: name.split('.').count().saturating_sub(1),
+                    });
                 }
                 scope = self
                     .declarations_by_internal
@@ -275,7 +323,7 @@ impl Resolver<'_> {
                     .and_then(|declaration| declaration.outer_internal.as_deref());
             }
         }
-        resolve_internal_name(&self.ctx.package, &self.ctx.imports, name, self.resolve)
+        resolve_internal_name_with_depth(&self.ctx.package, &self.ctx.imports, name, self.resolve)
     }
 
     /// Erased JVM descriptor of a source type (JLS §4.6). `None` if a reference type doesn't
@@ -584,7 +632,15 @@ impl Resolver<'_> {
                         crate::ir::IrConst::String(crate::kt_string::KtString::from(value.clone()))
                     }
                 });
-            w.add_field_late_sig(acc, name, &desc, fsig.as_deref(), constant, None);
+            let nullability = self.nullability_annotation(ty);
+            w.add_field_late_sig(
+                acc,
+                name,
+                &desc,
+                fsig.as_deref(),
+                constant,
+                nullability.as_deref(),
+            );
         }
 
         if is_record {
@@ -766,6 +822,17 @@ impl Resolver<'_> {
         }
         if m.has_annotation_default {
             w.mark_unevaluated_annotation_default(&m.name, &desc);
+        }
+        let result = m
+            .ret
+            .as_ref()
+            .and_then(|ty| self.nullability_annotation(ty));
+        let parameters = std::iter::repeat_n(None, if enum_constructor { 2 } else { 0 })
+            .chain(m.params.iter().map(|ty| self.nullability_annotation(ty)))
+            .collect::<Vec<_>>();
+        if result.is_some() || parameters.iter().any(Option::is_some) {
+            let parameters = parameters.iter().map(Option::as_deref).collect::<Vec<_>>();
+            w.set_method_nullability(&m.name, &desc, result.as_deref(), &parameters);
         }
         Some(())
     }
