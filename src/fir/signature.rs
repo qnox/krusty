@@ -1471,8 +1471,7 @@ pub struct ResolvedModuleIndex {
     classifier_hierarchies: HashMap<DeclarationId, Box<[ResolvedAppliedClassifier]>>,
     /// Exact property override edges selected while module/dependency declarations are live. These
     /// are semantic declaration headers; target erasure and bridge materialization are absent.
-    pub(super) property_overrides: HashMap<DeclarationId, Box<[super::ResolvedPropertyOverride]>>,
-    pub(super) function_overrides: HashMap<DeclarationId, Box<[super::ResolvedFunctionOverride]>>,
+    pub(super) override_relations: super::OverrideRelations,
     /// The interface defaults each source classifier inherits without overriding, selected while
     /// the semantic hierarchy provider is live; target backends realize them without a walk.
     pub(super) inherited_defaults: HashMap<DeclarationId, Box<[super::ResolvedInheritedDefault]>>,
@@ -2654,6 +2653,7 @@ impl ResolvedModuleIndex {
             && self.callable_default_providers.is_empty()
             && self.callable_equality_bounds.is_empty()
             && self.callable_inherited_statuses.is_empty()
+            && self.override_relations.is_empty()
             && self.property_return_value_statuses.is_empty()
             && self.function_typed_parameter_callables.is_empty()
             && self.properties.is_empty()
@@ -3190,35 +3190,7 @@ impl ResolvedModuleIndex {
                 .values()
                 .map(|hierarchy| hierarchy.len() * std::mem::size_of::<ResolvedAppliedClassifier>())
                 .sum::<usize>()
-            + self.property_overrides.len()
-                * (std::mem::size_of::<DeclarationId>()
-                    + std::mem::size_of::<Box<[super::ResolvedPropertyOverride]>>())
-            + self
-                .property_overrides
-                .values()
-                .map(|overrides| {
-                    overrides.len() * std::mem::size_of::<super::ResolvedPropertyOverride>()
-                })
-                .sum::<usize>()
-            + self.function_overrides.len()
-                * (std::mem::size_of::<DeclarationId>()
-                    + std::mem::size_of::<Box<[super::ResolvedFunctionOverride]>>())
-            + self
-                .function_overrides
-                .values()
-                .map(|overrides| {
-                    overrides.len() * std::mem::size_of::<super::ResolvedFunctionOverride>()
-                        + overrides
-                            .iter()
-                            .map(|edge| {
-                                (edge.declared_parameters.len()
-                                    + edge.applied_parameters.len()
-                                    + edge.implementation_parameters.len())
-                                    * std::mem::size_of::<ResolvedTy>()
-                            })
-                            .sum::<usize>()
-                })
-                .sum::<usize>()
+            + self.override_relations.storage_bytes()
             + self
                 .inherited_defaults
                 .values()

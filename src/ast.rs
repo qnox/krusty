@@ -1977,6 +1977,15 @@ pub struct File {
     /// The exact deprecation message selected by this compilation's reference release. Releases
     /// before the warning/error split leave this absent and report the construct as a plain error.
     pub value_class_recursion_via_type_parameters_warning: Option<String>,
+    /// `+ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects`: a non-overriding `operator fun
+    /// equals` in an enum entry or anonymous object is an error rather than a deprecation warning.
+    pub forbid_operator_equals_in_enum_entries_and_anonymous_objects: bool,
+    /// Exact per-compilation warning text for that transition. Releases before the diagnostic split
+    /// leave this absent and report the construct as an ordinary error.
+    pub inapplicable_operator_modifier_warning: Option<String>,
+    /// `+CustomEqualsInValueClasses`: permit the typed `equals(Self)` convention in a value class
+    /// whose selected representation is inline rather than full/boxed.
+    pub custom_equals_in_value_classes: bool,
     /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
     /// parameters whose declared upper bounds contain a cycle.
     pub recursive_type_of: bool,

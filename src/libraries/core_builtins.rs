@@ -309,6 +309,12 @@ impl EmptySymbolSource {
                         annotations: &[],
                     },
                 );
+                if callable.semantic_role == Some(crate::types::SemanticCallRole::KotlinAnyEquals) {
+                    callable.compiler_core_declaration =
+                        Some(CompilerCoreDeclaration::KotlinAnyEquals);
+                    callable.declaration_owner =
+                        Some(crate::types::SemanticCallableOwner::Classifier(internal));
+                }
                 if name == "toString" {
                     // The target-free core provider has no dependency registry from which it could
                     // allocate an `ExternalCallableId`. Preserve the selected declaration as the

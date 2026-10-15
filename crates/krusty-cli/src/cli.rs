@@ -1569,40 +1569,51 @@ mod tests {
 
     #[test]
     fn warning_level_rejects_names_absent_from_the_selected_release() {
-        const NAME: &str = "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING";
-        for release in ["2.4.0", "2.4.10"] {
-            let parsed = parse_args(&[
-                &format!("-Xkotlin-reference-version={release}"),
-                &format!("-Xwarning-level={NAME}:warning"),
-                "f.kt",
-            ]);
-            assert_eq!(
-                parsed.errors,
-                [format!("warning with name \"{NAME}\" does not exist")],
-                "{release}"
-            );
+        const NAMES: &[(&str, krusty::diag::CompilerWarningName)] = &[
+            (
+                "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING",
+                krusty::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
+            ),
+            (
+                "INAPPLICABLE_OPERATOR_MODIFIER_WARNING",
+                krusty::diag::CompilerWarningName::InapplicableOperatorModifier,
+            ),
+        ];
+        for &(name, _) in NAMES {
+            for release in ["2.4.0", "2.4.10"] {
+                let parsed = parse_args(&[
+                    &format!("-Xkotlin-reference-version={release}"),
+                    &format!("-Xwarning-level={name}:warning"),
+                    "f.kt",
+                ]);
+                assert_eq!(
+                    parsed.errors,
+                    [format!("warning with name \"{name}\" does not exist")],
+                    "{release}: {name}"
+                );
+            }
         }
 
-        for (level, expected) in [
-            ("disabled", WarningLevel::Disabled),
-            ("warning", WarningLevel::Warning),
-            ("error", WarningLevel::Error),
-        ] {
-            let parsed = parse_args(&[
-                "-Xkotlin-reference-version=2.4.20",
-                &format!("-Xwarning-level={NAME}:{level}"),
-                "f.kt",
-            ]);
-            assert_eq!(parsed.errors, Vec::<String>::new(), "{level}");
-            assert_eq!(
-                parsed
-                    .warning_policy
-                    .configured_level(WarningName::Compiler(
-                    krusty::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
-                )),
-                Some(expected),
-                "{level}"
-            );
+        for &(name, identity) in NAMES {
+            for (level, expected) in [
+                ("disabled", WarningLevel::Disabled),
+                ("warning", WarningLevel::Warning),
+                ("error", WarningLevel::Error),
+            ] {
+                let parsed = parse_args(&[
+                    "-Xkotlin-reference-version=2.4.20",
+                    &format!("-Xwarning-level={name}:{level}"),
+                    "f.kt",
+                ]);
+                assert_eq!(parsed.errors, Vec::<String>::new(), "{name}: {level}");
+                assert_eq!(
+                    parsed
+                        .warning_policy
+                        .configured_level(WarningName::Compiler(identity)),
+                    Some(expected),
+                    "{name}: {level}"
+                );
+            }
         }
     }
 

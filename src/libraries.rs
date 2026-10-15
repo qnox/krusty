@@ -802,6 +802,12 @@ pub enum Origin {
     },
 }
 
+/// Exact declaration identity owned by the compiler's artifact-independent core provider.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompilerCoreDeclaration {
+    KotlinAnyEquals,
+}
+
 /// A package-level callable: a top-level function (`listOf`), or an extension (its receiver is the
 /// first parameter). `owner` is the internal name of the facade/declaring container for emit.
 #[derive(Clone, Debug)]
@@ -818,6 +824,9 @@ pub struct LibraryCallable {
     /// a Kotlin property. Explicit calls still use `external_identity`; property reads/writes carry
     /// this distinct identity so the target backend alone chooses field versus accessor realization.
     pub external_property_identity: Option<crate::fir::ExternalPropertyId>,
+    /// Exact artifact-independent declaration supplied by the compiler core provider. This is
+    /// assigned only at that provider boundary and is never reconstructed from name or shape.
+    pub compiler_core_declaration: Option<CompilerCoreDeclaration>,
     /// Exact semantic namespace that declares this callable. This is provider-owned identity, not
     /// the physical JVM facade/class in [`Self::owner`]. Keeping it on the normalized declaration
     /// lets cached inline-body dependencies be re-interned in another classpath without recovering

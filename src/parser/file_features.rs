@@ -35,6 +35,13 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         "ForbidValueClassRecursionViaTypeParameters",
         "value class cannot be recursive.",
     );
+    file.forbid_operator_equals_in_enum_entries_and_anonymous_objects =
+        features.has("ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects");
+    file.inapplicable_operator_modifier_warning = features.deprecation_warning_message(
+        "ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects",
+        "'operator' modifier is not applicable to function: must override 'equals()' in Any.",
+    );
+    file.custom_equals_in_value_classes = features.has("CustomEqualsInValueClasses");
     file.recursive_type_of = features.has("JvmSupportRecursiveTypeOf");
     file.opted_in_markers = features.opted_in().map(str::to_string).collect();
 }
@@ -46,7 +53,7 @@ mod tests {
     use crate::language_version::LanguageVersion;
 
     #[test]
-    fn value_class_recursion_policy_comes_from_each_compilations_release() {
+    fn deprecation_policies_come_from_each_compilations_release() {
         let settings = |release| {
             LangFeatures::for_release(release, LanguageVersion::V2_4, LanguageVersion::V2_4)
         };
@@ -56,11 +63,21 @@ mod tests {
         apply_file_features(&mut current, &settings(KotlinVersion::V2_4_20));
 
         assert_eq!(old.value_class_recursion_via_type_parameters_warning, None);
+        assert_eq!(old.inapplicable_operator_modifier_warning, None);
         assert_eq!(
             current.value_class_recursion_via_type_parameters_warning,
             Some(
                 "value class cannot be recursive. This will become an error in language version \
                  2.5. See https://youtrack.jetbrains.com/issue/KT-85848."
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            current.inapplicable_operator_modifier_warning,
+            Some(
+                "'operator' modifier is not applicable to function: must override 'equals()' in \
+                 Any. This will become an error in language version 2.5. See \
+                 https://youtrack.jetbrains.com/issue/KT-86143."
                     .to_string()
             )
         );

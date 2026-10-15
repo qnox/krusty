@@ -53,6 +53,7 @@ mod anonymous_receiver_labels;
 mod applied_hierarchy;
 mod checked_annotation_publication;
 mod checked_constant_publication;
+pub(crate) mod operator_override_relations;
 pub(crate) use actualization_names::actualization_type_bindings;
 #[cfg(test)]
 pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
@@ -156,6 +157,7 @@ mod member_overload_clash;
 mod missing_dependency_supertypes;
 mod named_class_constructors;
 mod operator_calls;
+mod operator_declarations;
 mod opt_in_usage;
 use operator_calls::{range_operator, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess};
 mod enhanced_values;
@@ -7542,6 +7544,9 @@ pub struct TypeInfo {
     /// Own formals are the prefix and lexical captures follow them. This is the exact semantic
     /// layout used for the class dispatch receiver, not retained syntax or a lowering-time lookup.
     pub(crate) checked_local_classifier_type_arguments: HashMap<crate::fir::DeclarationId, Vec<Ty>>,
+    /// Exact active-local Any.equals relations frozen with those declarations' stable signatures.
+    pub(crate) checked_operator_equals_relations:
+        HashMap<crate::fir::DeclarationId, crate::fir::ResolvedOperatorEqualsOverride>,
     pub anonymous_object_types: HashMap<DeclId, TypeName>,
     /// Selected expression lowerings that cannot be recovered from the expression shape alone.
     pub expr_lowers: HashMap<ExprId, ExprLowering>,
@@ -23474,7 +23479,11 @@ impl<'a> Checker<'a> {
                 crate::symbol_resolver::ty_subst_keep_unbound(semantic, &semantic_erasure);
             (physical, semantic)
         };
-        self.check_operator_declaration(f, semantic_ret_ty);
+        self.check_operator_declaration(
+            f,
+            semantic_ret_ty,
+            operator_declarations::OperatorDeclarationSite::NonMember,
+        );
 
         let generic_sig = (!f.type_params.is_empty()).then(|| {
             let formal_bounds = f
@@ -32975,6 +32984,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         inferred_member_ext_fun_rets: HashMap::default(),
         checked_local_properties: HashMap::default(),
         checked_local_methods: HashMap::default(),
+        checked_operator_equals_relations: HashMap::default(),
         body_local_default_providers: HashMap::default(),
         checked_local_constructors: HashMap::default(),
         call_site_lexical_formals: HashMap::default(),
@@ -34505,6 +34515,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         checked_local_class_declarations,
         checked_local_classifier_identities,
         checked_local_classifier_type_arguments,
+        checked_operator_equals_relations,
         lambda_body_results,
         ..
     } = c;
@@ -34759,6 +34770,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         checked_local_class_declarations,
         checked_local_classifier_identities,
         checked_local_classifier_type_arguments,
+        checked_operator_equals_relations,
         anonymous_object_types,
         expr_lowers,
         resolved_sam_conversions,
@@ -35561,6 +35573,10 @@ struct Checker<'a> {
     /// ordinary overload selection can choose it and the local dependency scheduler can check its
     /// body on demand. It is discarded with the checker and never reaches FIR.
     checked_local_methods: HashMap<TypeName, HashMap<String, Vec<crate::libraries::FunctionInfo>>>,
+    /// Exact Any.equals relations selected from normalized body-local member headers. Stable owner
+    /// flags choose this map rather than retrying the immutable module relation for a local class.
+    checked_operator_equals_relations:
+        HashMap<crate::fir::DeclarationId, crate::fir::ResolvedOperatorEqualsOverride>,
     /// Effective provider for defaults inherited by one checked body-local method.
     body_local_default_providers:
         HashMap<crate::fir::DeclarationId, crate::fir::ResolvedFunctionOverrideTarget>,
@@ -47247,40 +47263,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_operator_declaration(&mut self, function: &FunDecl, ret: Ty) {
-        // A delegated-property convention is called from a GENERATED accessor, which has no scope
-        // to fill an implicit context from. The declaration is rejected here, so the property that
-        // uses it reports no applicable convention rather than reaching a call whose argument list
-        // cannot be mapped onto the declaration's slots.
-        if function.is_operator()
-            && crate::resolve::delegated_properties::DELEGATE_CONVENTION_NAMES
-                .contains(&function.name.as_str())
-            && !crate::resolve::delegated_properties::is_usable_delegate_convention(
-                true,
-                function.context_count,
-            )
-        {
-            self.diags.error(
-                function
-                    .context_span
-                    .expect("a function with context parameters must retain its clause span"),
-                "context parameters on delegation operators are unsupported.".to_string(),
-            );
-        }
-        if function.is_operator()
-            && function.name == "hasNext"
-            && !matches!(ret.canonical_semantic(), Ty::Boolean | Ty::Error)
-        {
-            self.diags.error(
-                function
-                    .operator_span
-                    .expect("an operator function must retain its modifier span"),
-                "'operator' modifier is not applicable to function: must return 'Boolean'."
-                    .to_string(),
-            );
-        }
-    }
-
     fn annotation_shape(&self, internal: TypeName) -> Option<AnnotationShape> {
         let classifier = self.resolver().classifier(internal)?;
         let application = classifier.annotation_application()?;
@@ -48032,7 +48014,11 @@ impl<'a> Checker<'a> {
             // to infer on their lexical rung below.
             && !self.has_finalized_signature(stable_declaration);
         if !self.signature_defaults_only && !infer_ret {
-            self.check_operator_declaration(f, self.ret_ty);
+            self.check_operator_declaration(
+                f,
+                self.ret_ty,
+                operator_declarations::OperatorDeclarationSite::NonMember,
+            );
         }
         // Default arguments are evaluated in the caller's context. The extension receiver and
         // preceding value parameters are available, while later parameters are not.
@@ -48106,7 +48092,11 @@ impl<'a> Checker<'a> {
             }
         }
         if infer_ret {
-            self.check_operator_declaration(f, self.ret_ty);
+            self.check_operator_declaration(
+                f,
+                self.ret_ty,
+                operator_declarations::OperatorDeclarationSite::NonMember,
+            );
         }
         self.report_inferred_nothing_return(f, self.ret_ty, false);
         if f.receiver.is_some() && companion_classifier.is_none() {
@@ -49252,6 +49242,9 @@ impl<'a> Checker<'a> {
         }
         // `abstract` modifier consistency (illegal in any class kind): an abstract member has no
         // body, and cannot also be `final` (kotlinc rejects each).
+        if !body_local_class {
+            self.check_bodyless_operator_declarations(scope, cl, d, current_owner);
+        }
         for m in &cl.methods {
             if m.is_abstract() && !matches!(m.body, FunBody::None) {
                 self.diags.error(
@@ -50032,6 +50025,11 @@ impl<'a> Checker<'a> {
                         // same body owns that binding and this diagnostic.
                         local_method_dependencies::OverrideImplementation::Unbound => continue,
                     };
+                    let operator_equals_override = self.recognize_any_equals_override(
+                        m,
+                        implementation_declaration,
+                        implementation.as_ref(),
+                    );
                     let source = self.fed_source();
                     let candidates = direct_supertypes
                         .iter()
@@ -50069,6 +50067,7 @@ impl<'a> Checker<'a> {
                                             && function.suspend == m.is_suspend()
                                 )
                             }));
+                    overrides_super |= operator_equals_override;
                     // A body-local super member with an inferred result intentionally has no
                     // Pass-1 signature. Its stable header and active Pass-2 declaration still
                     // provide the complete non-extension override shape; do not diagnose it as
@@ -50241,6 +50240,10 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
+                // Active local member headers and their stable declarations are now normalized.
+                // Bodyless declarations consume the same relation before their diagnostic; they
+                // cannot use the post-check aggregate publication performed by the driver.
+                self.check_bodyless_operator_declarations(scope, cl, d, current_owner);
             }
             let mut method_check_index = 0;
             for (method_index, m) in cl.methods.iter().enumerate() {
@@ -50249,18 +50252,7 @@ impl<'a> Checker<'a> {
                     owner: d.0,
                     method: method_index as u32,
                 };
-                let stable_declaration = self
-                    .resolved_index
-                    .and_then(|index| {
-                        let owner =
-                            current_owner.and_then(|owner| index.classifier_declaration(owner))?;
-                        index.owned_declaration(
-                            owner,
-                            crate::fir::DeclarationKind::Function,
-                            u32::try_from(method_index).expect("too many class methods"),
-                        )
-                    })
-                    .or_else(|| self.active_source_member_declaration(source_member));
+                let stable_declaration = self.member_declaration(d, current_owner, method_index);
                 let selected = if self.signature_defaults_only {
                     default_owned_class
                         || self.selected_signature_default_source_member(source_member)
@@ -52379,8 +52371,12 @@ impl<'a> Checker<'a> {
                     index < f.context_count,
                 );
             }
-            if !self.signature_defaults_only && !infer_ret {
-                self.check_operator_declaration(f, self.ret_ty);
+            if !self.signature_defaults_only && !infer_ret && !matches!(f.body, FunBody::None) {
+                self.check_operator_declaration(
+                    f,
+                    self.ret_ty,
+                    operator_declarations::OperatorDeclarationSite::Member(stable_declaration),
+                );
             }
             if infer_ret {
                 if let FunBody::Expr(e) = &f.body {
@@ -52448,7 +52444,11 @@ impl<'a> Checker<'a> {
             }
         }
         if infer_ret {
-            self.check_operator_declaration(f, self.ret_ty);
+            self.check_operator_declaration(
+                f,
+                self.ret_ty,
+                operator_declarations::OperatorDeclarationSite::Member(stable_declaration),
+            );
         }
         self.report_inferred_nothing_return(f, self.ret_ty, f.is_override());
         if f.receiver.is_some() {
