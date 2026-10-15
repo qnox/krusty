@@ -21933,15 +21933,14 @@ impl<'a> Checker<'a> {
                         format!("krusty: conflicting local declaration '{name}'"),
                     );
                 }
-                // A `lateinit var`: a mutable local of the (non-null) annotation type, initialized later.
-                // No initializer to check; reads before assignment are allowed (they throw at runtime).
+                // A `lateinit var` is a non-null mutable local; reads before assignment may throw.
                 let prop_ty = self.type_ref_ty(scope, &ty);
-                // Same rule as `Stmt::Local`: an unresolved annotation errors, never a silent `Error`.
                 if prop_ty == Ty::Error {
                     self.report_unresolved_type_ref(&ty);
                 }
                 self.local_decl_types.insert(s, prop_ty);
-                self.declare(scope, &name, prop_ty, true);
+                let flow_identity = self.declare(scope, &name, prop_ty, true);
+                self.annotation_argument_locals.record(flow_identity);
             }
             Stmt::Destructure { entries, init } => self.stmt_destructure(scope, s, entries, init),
             Stmt::IncDec { name, dec, prefix } => self.stmt_inc_dec(scope, s, name, dec, prefix),
@@ -22328,11 +22327,8 @@ impl<'a> Checker<'a> {
         } else {
             bound_ty
         };
-        // A callable reference assigned to an explicitly declared function type has already been
-        // adapted to that type. Keep the declared semantic shape on the local: the reference's raw
-        // signature may spell a receiver as its first ordinary parameter (`Foo::Inner`), while the
-        // target type spells the same value as `Foo.() -> Inner`. Invocation must consume the binding's
-        // type, not reopen the initializer and silently undo that adaptation.
+        // An explicitly typed callable-reference local has already adapted to its target shape.
+        // Keep that shape instead of reopening the raw reference and undoing the adaptation.
         let flow_identity = if let Some(function_type) = declared
             .filter(|ty| matches!(ty, Ty::Fun(_)))
             .or_else(|| self.callable_reference_types.get(&init).copied())
@@ -22342,6 +22338,7 @@ impl<'a> Checker<'a> {
         } else {
             self.declare_inferred(scope, &name, bound_ty, is_var, error_provenance)
         };
+        self.annotation_argument_locals.record(flow_identity);
         if declared.is_none() {
             self.record_enhanced_local(flow_identity, init);
         }
@@ -22401,7 +22398,8 @@ impl<'a> Checker<'a> {
             self.record_delegate_setvalue(scope, delegate, dt, Ty::Null, prop_ty, site.clone());
         }
         self.local_decl_types.insert(s, prop_ty);
-        self.declare(scope, &name, prop_ty, site.is_var);
+        let flow_identity = self.declare(scope, &name, prop_ty, site.is_var);
+        self.annotation_argument_locals.record(flow_identity);
         let storage_ty = self
             .delegate_provide_targets
             .get(&delegate)
@@ -33022,6 +33020,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         implicit_receiver_selections: HashMap::default(),
         implicit_receiver_identities: HashMap::default(),
         read_flow_roots: HashMap::default(),
+        annotation_argument_locals: Default::default(),
         read_callable_reference_types: HashMap::default(),
         anonymous_super_read_provenance: HashMap::default(),
         stable_property_reads: crate::fx_hash::HashSet::default(),
@@ -35675,6 +35674,7 @@ struct Checker<'a> {
     implicit_receiver_identities: HashMap<ExprId, (usize, usize)>,
     /// The flow root each checked lexical-value or `this` read resolved to.
     read_flow_roots: HashMap<ExprId, scope::PathRoot>,
+    annotation_argument_locals: annotation_argument_constness::LocalPropertyIdentities,
     /// The exact function shape of a callable reference a checked name read is bound to.
     read_callable_reference_types: HashMap<ExprId, Ty>,
     /// Exact selected value/receiver identity for a bare read that an anonymous object's constructor
@@ -47347,162 +47347,6 @@ impl<'a> Checker<'a> {
                 .map_or(application_span, |argument| self.span(argument));
             self.diags.error(span, error.to_string());
         }
-    }
-
-    fn fold_annotation_value(
-        &mut self,
-        e: ExprId,
-        expected: Option<Ty>,
-    ) -> Option<crate::types::AnnotationValue> {
-        use crate::synthetics::SyntheticKind;
-        use crate::types::AnnotationValue;
-
-        // Enum-entry identity is the checked semantic result and is independent of how the source
-        // spelled the reference. A qualified `Kind.VALUE`, an explicitly imported `VALUE`, and a
-        // context-sensitive `VALUE` therefore fold identically instead of branching on AST shape.
-        if let Some(entry) = self.resolved_enum_entries.get(&e) {
-            return Some(AnnotationValue::Enum(entry.classifier, entry.name.clone()));
-        }
-
-        let value = match self.file.expr(e) {
-            Expr::StringLit(value) => AnnotationValue::String(value.clone()),
-            // An integer LITERAL takes the element's declared width too. Emitting `I` for a
-            // `byte`/`short` element writes the wrong tag just as a mistyped constant does, and
-            // read-back throws `AnnotationTypeMismatchException`.
-            Expr::IntLit(value) | Expr::UIntLit(value) => match expected.map(Ty::non_null) {
-                Some(Ty::Byte) => AnnotationValue::Byte(i8::try_from(*value).ok()?),
-                Some(Ty::Short) => AnnotationValue::Short(i16::try_from(*value).ok()?),
-                Some(Ty::Long) => AnnotationValue::Long(*value),
-                _ => AnnotationValue::Int(*value as i32),
-            },
-            Expr::LongLit(value) | Expr::ULongLit(value) => AnnotationValue::Long(*value),
-            Expr::DoubleLit(value) => AnnotationValue::Double(*value),
-            Expr::FloatLit(value) => AnnotationValue::Float(*value),
-            Expr::BoolLit(value) => AnnotationValue::Boolean(*value),
-            Expr::CharLit(value) => AnnotationValue::Char(*value),
-            Expr::Template(_) => AnnotationValue::String(self.fold_annotation_string(e)?),
-            Expr::Binary { op: BinOp::Add, .. }
-                if self.expr_types[e.0 as usize].non_null() == Ty::String =>
-            {
-                AnnotationValue::String(self.fold_annotation_string(e)?)
-            }
-            Expr::AnnotationArrayLiteral(elements) => {
-                // The DECLARED element type decides what these expressions fold to, which is why
-                // the parser retained the literal instead of picking an array factory.
-                let element = expected.map(Ty::non_null).and_then(Ty::array_elem);
-                let elements = elements.clone();
-                AnnotationValue::Array(
-                    elements
-                        .iter()
-                        .map(|&element_expr| self.fold_annotation_value(element_expr, element))
-                        .collect::<Option<Vec<_>>>()?,
-                )
-            }
-            Expr::UnsupportedAnnotationArgument(_) => return None,
-            // A qualified named constant reached through its owner (`Rules.AUTHENTICATED`, a
-            // `const val` on a companion). Enum entries returned above from their resolved identity.
-            Expr::Member { .. } => self.folded_library_constant(e, expected)?,
-            Expr::CallableRef {
-                receiver: Some(_),
-                name,
-            } if name == "class" => {
-                AnnotationValue::Class(Ty::obj_name(self.class_literal_targets.get(&e).copied()?))
-            }
-            Expr::Call { args, .. } => match self.expr_lowers.get(&e) {
-                Some(ExprLowering::CompilerSynthetic(
-                    SyntheticKind::PrimitiveVararg(_)
-                    | SyntheticKind::ReferenceVararg
-                    | SyntheticKind::EmptyReference,
-                )) => {
-                    let element = expected.and_then(Ty::array_elem);
-                    AnnotationValue::Array(
-                        args.iter()
-                            .map(|argument| self.fold_annotation_value(*argument, element))
-                            .collect::<Option<Vec<_>>>()?,
-                    )
-                }
-                _ => {
-                    // A call selected as part of Kotlin's compile-time constant language (for
-                    // example, `'8'.toByte()`) is an annotation value in its own right. Only a
-                    // call that does not fold through its selected callable can be a nested
-                    // annotation construction. Trying the checked constant first keeps callable
-                    // identity authoritative and avoids reinterpreting an intrinsic by syntax.
-                    if let Some(value) = self.folded_library_constant(e, expected) {
-                        return Some(value);
-                    }
-                    let internal = self.expr_types[e.0 as usize].kotlin_class_internal()?;
-                    let (values, _) = self.fold_annotation_values(internal, args, Some(e))?;
-                    AnnotationValue::Annotation { internal, values }
-                }
-            },
-            _ => self.folded_library_constant(e, expected)?,
-        };
-        Some(value)
-    }
-
-    /// Fold the compile-time string language after ordinary expression checking has selected every
-    /// constant reference. Unlike the parser's directive-oriented string helper, this consumes the
-    /// resolver's `LibraryConst` payloads, so nested-class and dependency constants participate
-    /// without reopening a source spelling or classifier lookup.
-    fn fold_annotation_string(&self, expression: ExprId) -> Option<crate::kt_string::KtString> {
-        match self.checked_constant(expression, Ty::String)?.value {
-            crate::libraries::LibConst::Str(value) => Some(value),
-            _ => None,
-        }
-    }
-
-    fn checked_constant(
-        &self,
-        expression: ExprId,
-        declared: Ty,
-    ) -> Option<crate::libraries::LibraryConst> {
-        let context = CheckedConstantExpression {
-            file: self.file,
-            expression_types: &self.expr_types,
-            resolved_constants: &self.resolved_constants,
-            resolved_calls: &self.resolved_calls,
-            resolved_operator_calls: &self.resolved_operator_calls,
-        };
-        checked_constant_expression(context, expression, declared)
-    }
-
-    /// A resolved compile-time constant read (`const val`), whatever expression shape reached it.
-    ///
-    /// The value is re-typed to the ELEMENT's declared type. `LibConst` models an integral constant
-    /// as `Int` whatever its declared width, so folding it verbatim wrote a `boolean` element with
-    /// the `I` tag — which javap shows as `flag=1` where kotlinc writes `Z`/`flag=true`, and which
-    /// throws `AnnotationTypeMismatchException` when the annotation is read back. An element type
-    /// the constant cannot honor folds to `None`, which reports the argument rather than emitting
-    /// a mistyped one.
-    fn folded_library_constant(
-        &self,
-        e: ExprId,
-        expected: Option<Ty>,
-    ) -> Option<crate::types::AnnotationValue> {
-        use crate::libraries::LibConst;
-        use crate::types::AnnotationValue;
-
-        let declared = expected.map(Ty::non_null);
-        // A constant reference was resolved by checking; any other constant expression (`-1`,
-        // `LIMIT * 2`) folds through the same checked constant language as a `const val`.
-        let constant = match self.resolved_constants.get(&e) {
-            Some(constant) => constant.clone(),
-            None => self.checked_constant(e, declared?)?,
-        };
-        Some(match &constant.value {
-            LibConst::Int(value) => match declared {
-                Some(Ty::Boolean) => AnnotationValue::Boolean(*value != 0),
-                Some(Ty::Char) => AnnotationValue::Char(u16::try_from(*value).ok()?),
-                Some(Ty::Long) => AnnotationValue::Long(i64::from(*value)),
-                Some(Ty::Byte) => AnnotationValue::Byte(i8::try_from(*value).ok()?),
-                Some(Ty::Short) => AnnotationValue::Short(i16::try_from(*value).ok()?),
-                _ => AnnotationValue::Int(*value),
-            },
-            LibConst::Long(value) => AnnotationValue::Long(*value),
-            LibConst::Float(value) => AnnotationValue::Float(*value),
-            LibConst::Double(value) => AnnotationValue::Double(*value),
-            LibConst::Str(value) => AnnotationValue::String(value.clone()),
-        })
     }
 
     fn is_optional_expectation_classifier(&self, classifier: TypeName) -> bool {

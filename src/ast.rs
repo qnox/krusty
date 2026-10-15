@@ -21,6 +21,7 @@ pub(crate) mod definitely_evaluated;
 mod destructuring;
 mod external_modifier_targets;
 mod operators;
+mod property_initializers;
 mod type_refs;
 pub use type_refs::TrFlags;
 mod use_site_annotations;

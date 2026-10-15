@@ -80,7 +80,7 @@ impl Checker<'_> {
                         self.resolved_destructure_components
                             .insert((s, idx), target);
                         if !entry.ignored {
-                            self.declare(scope, name, t, is_var);
+                            self.declare_local_property(scope, name, t, is_var);
                         }
                     }
                     None => {
@@ -91,7 +91,7 @@ impl Checker<'_> {
                             ),
                         );
                         if !entry.ignored {
-                            self.declare(scope, name, Ty::Error, is_var);
+                            self.declare_local_property(scope, name, Ty::Error, is_var);
                         }
                     }
                 }
@@ -112,7 +112,7 @@ impl Checker<'_> {
             ) {
                 Ok(target) => target,
                 Err(()) => {
-                    self.declare(scope, name, Ty::Error, is_var);
+                    self.declare_local_property(scope, name, Ty::Error, is_var);
                     continue;
                 }
             };
@@ -136,17 +136,30 @@ impl Checker<'_> {
                         .unwrap_or(component);
                     self.resolved_destructure_components
                         .insert((s, idx), target);
-                    self.declare(scope, name, t, is_var);
+                    self.declare_local_property(scope, name, t, is_var);
                 }
                 None => {
                     self.diags.error(
                         span,
                         format!("krusty: cannot destructure this type (no operator '{comp}')"),
                     );
-                    self.declare(scope, name, Ty::Error, is_var);
+                    self.declare_local_property(scope, name, Ty::Error, is_var);
                 }
             }
         }
+    }
+
+    /// Destructuring entries are local properties with their own stable flow identities, just like
+    /// plain, delegated, and `lateinit` local declarations.
+    fn declare_local_property(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        ty: Ty,
+        is_var: bool,
+    ) {
+        let flow_identity = self.declare(scope, name, ty, is_var);
+        self.annotation_argument_locals.record(flow_identity);
     }
 
     fn destructure_component_target(
