@@ -319,7 +319,6 @@ fn run_backend_passes_after_plugins(
         ir,
         &mut facts.property_reference_realizations,
     );
-    crate::jvm::parameter_assertions::finalize_after_value_class_lowering(ir);
     crate::jvm::default_parameter_representation::record_defaulted_primitive_bounds(ir);
     // A concatenation appends a `toString()` call's receiver itself, as kotlinc does once its
     // value-class lowering has turned a value class's `toString()` into a static call.

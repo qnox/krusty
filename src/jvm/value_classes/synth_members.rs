@@ -183,7 +183,7 @@ pub(super) fn synth_value_members(
         let is_getter = {
             let function = &mut ir.functions[accessor as usize];
             function.name.clone_from(&jvm_name);
-            function.params.insert(0, u_ir);
+            super::parameter_guards::prepend_carrier(function, u_ir);
             function.is_static = true;
             ir.classes[class_id as usize].properties[property_index].getter == Some(accessor)
         };
@@ -236,7 +236,7 @@ pub(super) fn synth_value_members(
             ir.vc_declared_sigs
                 .insert(fid, (function.name.clone(), declared.0.clone(), declared.1));
             function.name = name.to_string();
-            function.params.insert(0, u_ir);
+            super::parameter_guards::prepend_carrier(function, u_ir);
             function.is_static = true;
             custom_carrier_functions.push((fid, declared));
         }
