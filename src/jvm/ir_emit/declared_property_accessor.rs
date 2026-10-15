@@ -249,11 +249,25 @@ pub(super) fn emit(
             let sig = &signatures.setter;
             let setter_ann = accessor_nullability(ir, fq_name, property, field, accessor_jt);
             let annotations = &property.accessor_annotations.setter;
+            let parameter_annotations =
+                std::slice::from_ref(&property.accessor_annotations.setter_parameter);
+            let (visible, invisible) =
+                crate::jvm::classfile::split_declaration_annotations(&parameter_annotations[0]);
+            let parameter_types = visible
+                .iter()
+                .chain(&invisible)
+                .map(|annotation| format!("L{};", annotation.internal))
+                .collect::<Vec<_>>();
+            let pool_types = parameter_types
+                .iter()
+                .map(String::as_str)
+                .chain(setter_ann)
+                .collect::<Vec<_>>();
             cw.reserve_method_pool_with_annotations(
                 setter,
                 setter_desc,
                 sig.as_deref(),
-                &setter_ann.into_iter().collect::<Vec<_>>(),
+                &pool_types,
                 annotations,
                 &[],
             );
@@ -317,6 +331,7 @@ pub(super) fn emit(
             st.link();
             let access = default_accessor_access(property.setter_visibility, overridable);
             cw.add_method_sig(access, setter, setter_desc, &st, sig.as_deref());
+            cw.set_method_param_annotations(setter, setter_desc, parameter_annotations);
             super::function_annotations::emit_declared(cw, annotations, setter, setter_desc);
             seed_accessor_locals(c, fq_name, cw);
         }

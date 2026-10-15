@@ -30,6 +30,103 @@ const ANNOTATIONS: &str = "package accessors\n\
     @Retention(AnnotationRetention.SOURCE)\n\
     annotation class SourceOnly\n";
 
+const USE_SITE_ANNOTATIONS: &str = "package sites\n\
+    \n\
+    annotation class Visible\n\
+    \n\
+    @Retention(AnnotationRetention.BINARY)\n\
+    annotation class Invisible\n\
+    \n\
+    annotation class Tagged(val tag: String)\n\
+    \n\
+    @Target(AnnotationTarget.FIELD)\n\
+    annotation class FieldOnly\n";
+
+#[test]
+fn use_site_targets_on_class_properties_match_kotlinc() {
+    assert_module_matches_kotlinc(&[
+        ("Annotations.kt", USE_SITE_ANNOTATIONS),
+        (
+            "Holder.kt",
+            "package sites\n\
+             \n\
+             class Holder(\n\
+             \x20   @field:Visible @param:Invisible val first: Int,\n\
+             \x20   @get:Tagged(\"first\") @set:Invisible @setparam:Visible\n\
+             \x20   @property:Visible @field:Invisible var second: String,\n\
+             \x20   @param:Visible plain: Int,\n\
+             ) {\n\
+             \x20   @field:Visible\n\
+             \x20   val a: Int = plain\n\
+             \n\
+             \x20   @field:Tagged(\"b\") @property:Invisible @FieldOnly\n\
+             \x20   val b: String = \"b\"\n\
+             \n\
+             \x20   @get:Visible @set:Invisible @setparam:Tagged(\"c\")\n\
+             \x20   var c: String = \"c\"\n\
+             \n\
+             \x20   @get:Invisible\n\
+             \x20   val d: Int get() = 4\n\
+             }\n",
+        ),
+    ]);
+}
+
+/// A property-prefix use-site annotation surrounds an accessor's own annotations in the order
+/// kotlinc visits them. A generated setter also retains its value-parameter application.
+#[test]
+fn use_site_targets_beside_declared_accessors_match_kotlinc() {
+    assert_module_matches_kotlinc(&[
+        ("Annotations.kt", USE_SITE_ANNOTATIONS),
+        (
+            "Accessors.kt",
+            "package sites\n\
+             \n\
+             class Accessors {\n\
+             \x20   @get:Visible\n\
+             \x20   val x: Int = 1\n\
+             \x20       @Invisible get() = field\n\
+             \n\
+             \x20   @set:Visible @setparam:Invisible\n\
+             \x20   var y: Int = 1\n\
+             \x20       @Invisible set(v) { field = v }\n\
+             \n\
+             \x20   @setparam:Visible\n\
+             \x20   var z: String = \"\"\n\
+             \n\
+             \x20   @get:Visible\n\
+             \x20   val bodylessGetter: Int = 1\n\
+             \x20       @Invisible get\n\
+             \n\
+             \x20   @set:Visible @setparam:Tagged(\"ignored\")\n\
+             \x20   var bodylessSetter: Int = 1\n\
+             \x20       @Invisible set\n\
+             }\n",
+        ),
+    ]);
+}
+
+#[test]
+fn wrong_use_site_targets_are_retained_for_exact_diagnostics() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "WrongUseSites.kt",
+            "@Target(AnnotationTarget.FIELD) annotation class F\n\
+             @Target(AnnotationTarget.VALUE_PARAMETER) annotation class ParameterOnly\n\
+             @Target(AnnotationTarget.PROPERTY_SETTER) annotation class SetterOnly\n\
+             class Holder(\n\
+             \x20   @get:F val constructorValue: Int,\n\
+             ) {\n\
+             \x20   @get:F val value: Int = 1\n\
+             \x20   @set:F @setparam:F var mutable: Int = 1\n\
+             \x20   @param:ParameterOnly val notAParameter: Int = 1\n\
+             \x20   @set:SetterOnly val immutable: Int = 1\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
 #[test]
 fn annotations_on_member_accessors_match_kotlinc() {
     assert_module_matches_kotlinc(&[
@@ -534,6 +631,21 @@ fn an_explicit_field_site_rejects_an_annotation_class_property() {
             "@Target(AnnotationTarget.FIELD)\n\
              annotation class FieldOnly\n\
              annotation class Token(@field:FieldOnly val value: Int)\n",
+        )],
+        &[],
+    );
+}
+
+/// A field-only annotation selects the same unavailable field implicitly. The diagnostic still
+/// names the annotation element's property host, but has no explicit use-site suffix.
+#[test]
+fn an_implicit_field_site_rejects_an_annotation_class_property() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Target(AnnotationTarget.FIELD)\n\
+             annotation class FieldOnly\n\
+             annotation class Token(@FieldOnly val value: Int)\n",
         )],
         &[],
     );

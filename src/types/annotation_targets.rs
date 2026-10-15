@@ -177,6 +177,33 @@ pub enum PropertyAnnotationSite {
     Getter,
     /// The property's setter declaration.
     Setter,
+    /// The property's setter value parameter.
+    SetterParameter,
+}
+
+impl PropertyAnnotationSite {
+    /// The source keyword kotlinc names when diagnosing an explicit use-site target.
+    pub(crate) fn keyword(self) -> &'static str {
+        match self {
+            Self::ValueParameter => "param",
+            Self::Property => "property",
+            Self::Field => "field",
+            Self::Getter => "get",
+            Self::Setter => "set",
+            Self::SetterParameter => "setparam",
+        }
+    }
+
+    /// The declaration target selected by this property use-site.
+    pub(crate) fn kotlin_target(self) -> KotlinTarget {
+        match self {
+            Self::ValueParameter | Self::SetterParameter => KotlinTarget::ValueParameter,
+            Self::Property => KotlinTarget::Property,
+            Self::Field => KotlinTarget::Field,
+            Self::Getter => KotlinTarget::PropertyGetter,
+            Self::Setter => KotlinTarget::PropertySetter,
+        }
+    }
 }
 
 impl AnnotationTargets {

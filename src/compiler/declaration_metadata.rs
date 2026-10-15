@@ -79,36 +79,70 @@ pub(super) fn accessor_annotations(
     property: &ast::PropDecl,
     info: &TypeInfo,
 ) -> crate::ir::AccessorAnnotations {
-    let site = |entries: &[ast::AccessorAnnotation],
-                target: crate::types::PropertyAnnotationSite| {
-        let targeted = property
-            .annotations
-            .iter()
-            .filter(|annotation| annotation.property_site == Some(target))
-            .filter_map(|annotation| info.applied_annotation(annotation));
-        let declared = entries
-            .iter()
-            .filter_map(|entry| info.applied_annotation(&entry.annotation));
-        checked_annotations(targeted.chain(declared))
-    };
     let setter = property.setter.as_ref();
     crate::ir::AccessorAnnotations {
-        getter: site(
+        getter: accessor_site_annotations(
+            &property.annotations,
             &property.getter_annotations,
             crate::types::PropertyAnnotationSite::Getter,
+            property.getter.is_some(),
+            info,
         ),
-        setter: site(
+        setter: accessor_site_annotations(
+            &property.annotations,
             setter.map_or(&[], |setter| setter.annotations.as_slice()),
             crate::types::PropertyAnnotationSite::Setter,
+            setter.is_some_and(|setter| setter.body.is_some()),
+            info,
         ),
-        setter_parameter: setter.map_or_else(Default::default, |setter| {
-            checked_annotations(
-                setter
-                    .param_annotations
-                    .iter()
-                    .filter_map(|entry| info.applied_annotation(&entry.annotation)),
+        setter_parameter: if setter.is_some_and(|setter| setter.param.is_none()) {
+            Default::default()
+        } else {
+            accessor_site_annotations(
+                &property.annotations,
+                setter.map_or(&[], |setter| setter.param_annotations.as_slice()),
+                crate::types::PropertyAnnotationSite::SetterParameter,
+                setter.is_some_and(|setter| setter.body.is_some()),
+                info,
             )
-        }),
+        },
+    }
+}
+
+/// The checked annotations a primary-constructor property sends to its generated accessors.
+pub(super) fn constructor_property_accessor_annotations(
+    property: &ast::PropParam,
+    info: &TypeInfo,
+) -> crate::ir::AccessorAnnotations {
+    let site = |target| accessor_site_annotations(&property.annotations, &[], target, false, info);
+    crate::ir::AccessorAnnotations {
+        getter: site(crate::types::PropertyAnnotationSite::Getter),
+        setter: site(crate::types::PropertyAnnotationSite::Setter),
+        setter_parameter: site(crate::types::PropertyAnnotationSite::SetterParameter),
+    }
+}
+
+/// Merge an accessor's own annotations with the property-prefix applications targeted at it.
+/// kotlinc visits a targeted application first for an accessor with a body and after a written
+/// bodyless accessor.
+fn accessor_site_annotations(
+    property_annotations: &[ast::AnnotationRef],
+    accessor_annotations: &[ast::AccessorAnnotation],
+    target: crate::types::PropertyAnnotationSite,
+    has_body: bool,
+    info: &TypeInfo,
+) -> crate::ir::DeclarationAnnotations {
+    let targeted = property_annotations
+        .iter()
+        .filter(|annotation| annotation.property_site == Some(target))
+        .filter_map(|annotation| info.applied_annotation(annotation));
+    let declared = accessor_annotations
+        .iter()
+        .filter_map(|entry| info.applied_annotation(&entry.annotation));
+    if has_body {
+        checked_annotations(targeted.chain(declared))
+    } else {
+        checked_annotations(declared.chain(targeted))
     }
 }
 

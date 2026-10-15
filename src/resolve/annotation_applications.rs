@@ -79,14 +79,19 @@ impl TypeInfo {
 }
 
 #[derive(Clone, Copy)]
-enum AnnotationApplicationHost<'a> {
+enum AnnotationApplicationHost {
     Unspecified,
     Property {
-        fieldless_target: Option<&'a str>,
+        declaration_target: &'static str,
+        field_unavailable_target: &'static str,
+        has_backing_field: bool,
         mutable: bool,
         constructor_parameter: bool,
     },
-    NonProperty(&'static str),
+    NonProperty {
+        declaration_target: &'static str,
+        constructor_parameter: bool,
+    },
 }
 
 impl Checker<'_> {
@@ -148,6 +153,7 @@ impl Checker<'_> {
             scope,
             property,
             "top level property without backing field or delegate",
+            "top level property with backing field",
             false,
         )
     }
@@ -165,6 +171,7 @@ impl Checker<'_> {
             scope,
             property,
             "member property without backing field or delegate",
+            "member property with backing field",
             owner_is_interface,
         );
         self.active_lexical_policies.truncate(policy_depth);
@@ -177,6 +184,7 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         property: &PropDecl,
         fieldless_description: &'static str,
+        field_description: &'static str,
         owner_forbids_fields: bool,
     ) -> usize {
         let policy_depth =
@@ -189,16 +197,21 @@ impl Checker<'_> {
             && (property.init.is_some()
                 || property.is_lateinit
                 || property.explicit_backing_field.is_some());
-        let fieldless_target = (owner_forbids_fields
-            || !(crate::ast::has_backing_field(property) || companion_block_storage))
-            .then_some(fieldless_description);
+        let has_backing_field = !owner_forbids_fields
+            && (crate::ast::has_backing_field(property) || companion_block_storage);
         for (annotation, arguments) in property.annotations.iter().zip(&property.annotation_args) {
             self.check_annotation_application_for_host(
                 scope,
                 annotation,
                 arguments,
                 AnnotationApplicationHost::Property {
-                    fieldless_target,
+                    declaration_target: if has_backing_field {
+                        field_description
+                    } else {
+                        fieldless_description
+                    },
+                    field_unavailable_target: fieldless_description,
+                    has_backing_field,
                     mutable: property.is_var,
                     constructor_parameter: false,
                 },
@@ -226,13 +239,21 @@ impl Checker<'_> {
         {
             let host = if parameter.is_property {
                 AnnotationApplicationHost::Property {
-                    fieldless_target: owner_is_annotation
-                        .then_some("member property without backing field or delegate"),
+                    declaration_target: "value parameter",
+                    field_unavailable_target: if owner_is_annotation {
+                        "member property without backing field or delegate"
+                    } else {
+                        "value parameter"
+                    },
+                    has_backing_field: !owner_is_annotation,
                     mutable: parameter.is_var,
                     constructor_parameter: true,
                 }
             } else {
-                AnnotationApplicationHost::NonProperty("value parameter")
+                AnnotationApplicationHost::NonProperty {
+                    declaration_target: "value parameter",
+                    constructor_parameter: true,
+                }
             };
             self.check_annotation_application_for_host(scope, annotation, arguments, host);
         }
@@ -252,7 +273,10 @@ impl Checker<'_> {
             scope,
             annotation,
             arguments,
-            AnnotationApplicationHost::NonProperty(declaration_target),
+            AnnotationApplicationHost::NonProperty {
+                declaration_target,
+                constructor_parameter: false,
+            },
         )
     }
 
@@ -304,7 +328,7 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         annotation: &AnnotationRef,
         arguments: &[ExprId],
-        host: AnnotationApplicationHost<'_>,
+        host: AnnotationApplicationHost,
     ) -> Option<TypeName> {
         if arguments
             .iter()
@@ -405,7 +429,7 @@ impl Checker<'_> {
         &mut self,
         annotation: &AnnotationRef,
         internal: TypeName,
-        host: AnnotationApplicationHost<'_>,
+        host: AnnotationApplicationHost,
     ) -> bool {
         if let AnnotationApplicationHost::Property { mutable, .. } = host {
             return self.validate_immutable_volatile_property(mutable, annotation, internal);
@@ -420,7 +444,7 @@ impl Checker<'_> {
         &mut self,
         annotation: &AnnotationRef,
         internal: TypeName,
-        host: AnnotationApplicationHost<'_>,
+        host: AnnotationApplicationHost,
     ) -> bool {
         // A source annotation class can be checked before its declaration policies are published,
         // including while the metadata-publication fragment is being assembled. Bind the
@@ -444,16 +468,44 @@ impl Checker<'_> {
         let targets = self
             .diagnostic_annotation_targets(internal)
             .unwrap_or(crate::types::AnnotationTargets::DEFAULT);
-        let fieldless_target = match host {
+        let (
+            declaration_target,
+            field_unavailable_target,
+            is_property,
+            has_backing_field,
+            mutable,
+            constructor_parameter,
+        ) = match host {
             AnnotationApplicationHost::Property {
-                fieldless_target, ..
-            } => fieldless_target,
-            AnnotationApplicationHost::NonProperty(target) => Some(target),
-            AnnotationApplicationHost::Unspecified => None,
+                declaration_target,
+                field_unavailable_target,
+                has_backing_field,
+                mutable,
+                constructor_parameter,
+            } => (
+                Some(declaration_target),
+                Some(field_unavailable_target),
+                true,
+                has_backing_field,
+                mutable,
+                constructor_parameter,
+            ),
+            AnnotationApplicationHost::NonProperty {
+                declaration_target,
+                constructor_parameter,
+            } => (
+                Some(declaration_target),
+                None,
+                false,
+                false,
+                false,
+                constructor_parameter,
+            ),
+            AnnotationApplicationHost::Unspecified => (None, None, false, false, false, false),
         };
         let site = annotation.property_site.or_else(|| match host {
             AnnotationApplicationHost::Property {
-                fieldless_target: Some(_),
+                has_backing_field: false,
                 constructor_parameter,
                 ..
             } => targets.property_declaration_site(constructor_parameter),
@@ -465,54 +517,64 @@ impl Checker<'_> {
         } else {
             "WRONG_ANNOTATION_TARGET"
         };
-        let target = match site {
-            crate::types::PropertyAnnotationSite::ValueParameter => {
-                crate::types::KotlinTarget::ValueParameter
+        let target = site.kotlin_target();
+        let unavailable = match site {
+            crate::types::PropertyAnnotationSite::ValueParameter if !constructor_parameter => {
+                Some("'@param:' annotations can only be applied to primary constructor parameters.")
             }
-            crate::types::PropertyAnnotationSite::Property => crate::types::KotlinTarget::Property,
-            crate::types::PropertyAnnotationSite::Field => crate::types::KotlinTarget::Field,
-            crate::types::PropertyAnnotationSite::Getter => {
-                crate::types::KotlinTarget::PropertyGetter
+            crate::types::PropertyAnnotationSite::Property
+            | crate::types::PropertyAnnotationSite::Getter
+            | crate::types::PropertyAnnotationSite::Setter
+            | crate::types::PropertyAnnotationSite::SetterParameter
+                if !is_property =>
+            {
+                Some(match site {
+                    crate::types::PropertyAnnotationSite::Property => {
+                        "'@property:' annotations can only be applied to property declarations."
+                    }
+                    crate::types::PropertyAnnotationSite::Getter => {
+                        "'@get:' annotations can only be applied to property declarations."
+                    }
+                    crate::types::PropertyAnnotationSite::Setter => {
+                        "'@set:' annotations can only be applied to property declarations."
+                    }
+                    crate::types::PropertyAnnotationSite::SetterParameter => {
+                        "'@setparam:' annotations can only be applied to property declarations."
+                    }
+                    _ => unreachable!("matched a property-only annotation use-site"),
+                })
             }
-            crate::types::PropertyAnnotationSite::Setter => {
-                crate::types::KotlinTarget::PropertySetter
+            crate::types::PropertyAnnotationSite::Setter if !mutable => {
+                Some("'@set:' annotations can only be applied to mutable properties.")
             }
+            crate::types::PropertyAnnotationSite::SetterParameter if !mutable => {
+                Some("'@setparam:' annotations can only be applied to mutable properties.")
+            }
+            _ => None,
         };
-        if site == crate::types::PropertyAnnotationSite::Field {
-            if let Some(declaration_target) = fieldless_target {
-                let suppressed = self.suppresses_diagnostic(wrong_target_suppression);
-                // kotlinc retains a suppressed use-site application on a non-property's actual
-                // declaration host. A fieldless property remains different: it has no declaration
-                // capable of carrying a field application, so its application is still discarded.
-                if suppressed && matches!(host, AnnotationApplicationHost::NonProperty(_)) {
-                    return true;
-                }
-                if !suppressed {
-                    let applicable = targets
-                        .applicable()
-                        .iter()
-                        .map(|target| target.description())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let use_site = annotation
-                        .property_site
-                        .is_some()
-                        .then_some(" and use-site target '@field'")
-                        .unwrap_or_default();
-                    self.diags.error(
-                        Span::new(annotation.at, annotation.span.hi),
-                        format!(
-                            "this annotation is not applicable to target '{declaration_target}'\
-                             {use_site}. Applicable targets: {applicable}"
-                        ),
-                    );
-                }
-                self.discard_annotation_application(annotation);
-                return false;
-            }
+        if let Some(message) = unavailable {
+            self.diags.error(
+                Span::new(annotation.at, annotation.span.hi),
+                message.to_string(),
+            );
         }
-        if targets.allows(target) || self.suppresses_diagnostic(wrong_target_suppression) {
+        let host_valid = unavailable.is_none()
+            && (site != crate::types::PropertyAnnotationSite::Field || has_backing_field);
+        let suppressed = self.suppresses_diagnostic(wrong_target_suppression);
+        if host_valid && (targets.allows(target) || suppressed) {
             return true;
+        }
+        // kotlinc retains a suppressed `@field:` application on a non-property's actual
+        // declaration host. A property without storage has no declaration capable of carrying it.
+        if suppressed
+            && site == crate::types::PropertyAnnotationSite::Field
+            && matches!(host, AnnotationApplicationHost::NonProperty { .. })
+        {
+            return true;
+        }
+        if suppressed || (unavailable.is_some() && targets.allows(target)) {
+            self.discard_annotation_application(annotation);
+            return false;
         }
         let applicable = targets
             .applicable()
@@ -520,13 +582,23 @@ impl Checker<'_> {
             .map(|target| target.description())
             .collect::<Vec<_>>()
             .join(", ");
-        let (target_description, use_site) = match (host, annotation.property_site) {
-            (
-                AnnotationApplicationHost::Property { .. },
-                Some(crate::types::PropertyAnnotationSite::Field),
-            ) => ("backing field", " and use-site target '@field'"),
-            _ => (target.description(), ""),
-        };
+        let target_description =
+            if site == crate::types::PropertyAnnotationSite::Field && !has_backing_field {
+                field_unavailable_target
+                    .or(declaration_target)
+                    .unwrap_or_else(|| target.description())
+            } else if host_valid {
+                if site == crate::types::PropertyAnnotationSite::Field {
+                    "backing field"
+                } else {
+                    target.description()
+                }
+            } else {
+                declaration_target.unwrap_or_else(|| target.description())
+            };
+        let use_site = annotation.property_site.map_or_else(String::new, |site| {
+            format!(" and use-site target '@{}'", site.keyword())
+        });
         self.diags.error(
             Span::new(annotation.at, annotation.span.hi),
             format!(
@@ -534,6 +606,7 @@ impl Checker<'_> {
                  Applicable targets: {applicable}"
             ),
         );
+        self.discard_annotation_application(annotation);
         false
     }
 

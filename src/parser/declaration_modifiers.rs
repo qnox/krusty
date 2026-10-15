@@ -61,8 +61,9 @@ impl Parser<'_> {
         std::mem::take(&mut self.pending_annotation_args)
     }
 
-    /// Consume one annotation and retain its complete classifier reference plus arguments. `None` for
-    /// a use-site `@file:`/`@get:` target, which does not apply to the declaration/type parameter itself.
+    /// Consume one annotation and retain its complete classifier reference plus arguments. Property
+    /// use-site targets stay on the reference for frontend validation and later partitioning;
+    /// `@file:` and unsupported use-site targets return `None` here.
     /// Keep a type-use annotation's non-empty argument list, keyed by the annotation's span.
     pub(super) fn record_type_annotation_arguments(
         &mut self,
@@ -134,11 +135,17 @@ impl Parser<'_> {
         }
         if qname.is_empty() {
             (None, args)
-        } else if matches!(target.as_str(), "field" | "get" | "set") {
+        } else if matches!(
+            target.as_str(),
+            "field" | "property" | "param" | "get" | "set" | "setparam"
+        ) {
             let property_site = match target.as_str() {
                 "field" => crate::types::PropertyAnnotationSite::Field,
+                "property" => crate::types::PropertyAnnotationSite::Property,
+                "param" => crate::types::PropertyAnnotationSite::ValueParameter,
                 "get" => crate::types::PropertyAnnotationSite::Getter,
                 "set" => crate::types::PropertyAnnotationSite::Setter,
+                "setparam" => crate::types::PropertyAnnotationSite::SetterParameter,
                 _ => unreachable!("matched property annotation use-site"),
             };
             (
