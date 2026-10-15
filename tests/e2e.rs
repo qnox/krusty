@@ -1325,8 +1325,8 @@ mod java_fluent_setter_e2e;
 mod java_instance_e2e;
 #[path = "java_interface_mutable_collection_face_e2e.rs"]
 mod java_interface_mutable_collection_face_e2e;
-#[path = "java_member_flexible_return_e2e.rs"]
-mod java_member_flexible_return_e2e;
+mod java_member_modules;
+java_member_modules::declare!();
 #[path = "java_nested_static_e2e.rs"]
 mod java_nested_static_e2e;
 #[path = "java_not_null_null_argument_e2e.rs"]

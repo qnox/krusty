@@ -24237,6 +24237,7 @@ mod tests {
             false,
             0,
             erased_callable,
+            None,
         )
         .expect("CallSig receiver metadata must survive erased provider parameters");
         assert_eq!(expectation.receiver, Some(Ty::String));
@@ -55645,6 +55646,7 @@ impl<'a> Checker<'a> {
                         candidate.flags.inline.can_inline(),
                         parameter_index,
                         param,
+                        Some(&semantic),
                     )
                 })
                 .collect();
@@ -55754,6 +55756,7 @@ impl<'a> Checker<'a> {
                         candidate.inline.can_inline(),
                         parameter_index,
                         param,
+                        candidate.generic_sig.as_ref(),
                     )
                 })
                 .collect(),
@@ -55946,10 +55949,7 @@ impl<'a> Checker<'a> {
         // A result that still mentions a callee formal is not fixed yet and must not be pushed —
         // overload inference owns it until it is.
         let result_constraint = expectation
-            .result
-            .filter(|result| {
-                *result != Ty::Error && !result.mentions_ty_param() && !result.mentions_pending()
-            })
+            .fixed_result()
             .map_or(LambdaResultConstraint::Open, LambdaResultConstraint::Fixed);
         if !expectation.context_types.is_empty() || expectation.receiver.is_some() {
             self.check_lambda_with_implicit_receivers_and_return_labeled(
