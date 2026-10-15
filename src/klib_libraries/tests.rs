@@ -1275,4 +1275,5 @@ mod analysis;
 mod builtin_operations;
 mod classes;
 mod external_coverage;
+mod implementation_inventory;
 mod properties;
