@@ -2,8 +2,9 @@
 
 use crate::fx_hash::HashMap;
 
+use super::declaration_types::jvm_is_erased_top;
 use super::frame_map::{FrameKey, Mark, TempRole, TempSlot};
-use super::{CodeBuilder, Emitter, Label, Ty};
+use super::{ir_ty_to_jvm, CodeBuilder, Emitter, Label, Ty};
 use crate::ir::{IrDebugLocalProvenance, IrExpr};
 
 impl Emitter<'_> {
@@ -57,6 +58,8 @@ impl Emitter<'_> {
             reserved_inline_stack,
             close_lambda_before_locals,
             emit_after_frame_close,
+            discard_after_frame,
+            close_discarded_provider_frame,
         } = if self.try_emit_duplicated_safe_call(block, &stmts, value, true, code) {
             self.terminal_statement_target = None;
             self.statement_line = enclosing_statement_line;
@@ -65,6 +68,8 @@ impl Emitter<'_> {
                 reserved_inline_stack: None,
                 close_lambda_before_locals: false,
                 emit_after_frame_close: None,
+                discard_after_frame: None,
+                close_discarded_provider_frame: None,
             }
         } else {
             self.block_depth -= 1;
@@ -72,6 +77,8 @@ impl Emitter<'_> {
                 normalize_at_lambda_frame: delays_stack_normalization,
                 stack_height: inline_stack_height,
                 opening: self.external_inline_body_opening(block, &stmts),
+                discarded_frame_result: value
+                    .and_then(|value| self.discarded_copied_frame_tail(block, &stmts, value)),
             };
             self.emit_open_block(stmts, value, terminal_target, entry, true, code)
         };
@@ -87,8 +94,16 @@ impl Emitter<'_> {
                 // locals.
                 self.emit_spliced_lambda_brace(block, code);
             }
+            if let Some(invocation) = close_discarded_provider_frame {
+                self.close_provider_invocation_frame(invocation, code);
+            }
             self.close_scope_locals(code, marked_initializer);
-            self.close_copied_function_inline_frame(block, code);
+            if close_discarded_provider_frame.is_none() {
+                self.close_copied_function_inline_frame(block, code);
+            }
+        }
+        if let Some(words) = discard_after_frame {
+            discard_stack_words(words, code);
         }
         if let Some(expression) = emit_after_frame_close {
             self.emit_discarding(expression, code);
@@ -154,6 +169,7 @@ impl Emitter<'_> {
         let mut reserved_inline_stack = None;
         let mut anchored_lambda_result = false;
         let mut deferred_invocation_result = None;
+        let mut copied_frame_result = None;
         if !self.try_emit_duplicated_safe_call(block, stmts, value, false, code) {
             let mut normalize_at_lambda_frame = delays_stack_normalization;
             let opening = self.external_inline_body_opening(block, stmts);
@@ -237,6 +253,9 @@ impl Emitter<'_> {
                         } else {
                             self.emit_value(value, code);
                         }
+                    } else if let Some(result) = self.copied_frame_result(block, value) {
+                        self.emit_copied_frame_result_before_adaptation(result, value, code);
+                        copied_frame_result = Some(result);
                     } else {
                         self.emit_value(value, code);
                     }
@@ -246,9 +265,18 @@ impl Emitter<'_> {
         // A callable's own scope is its body. A value-returning lambda keeps those locals
         // open through the return, the same way a statement-position callable scope does.
         if !anchored_lambda_result && !self.ir.callable_scopes.contains(&block) {
+            self.adapt_pending_copied_result_before_lambda_close(stmts, value, code);
             self.close_external_inline_frame(block, code);
+            if let Some(result) = copied_frame_result {
+                self.close_provider_result_frame(result, code);
+            }
             self.close_scope_locals(code, false);
-            self.close_copied_function_inline_frame(block, code);
+            if !copied_frame_result.is_some_and(CopiedFrameResult::is_provider) {
+                self.close_copied_function_inline_frame(block, code);
+            }
+        }
+        if let Some(result) = copied_frame_result {
+            self.adapt_copied_frame_result(result, code);
         }
         if normalizes_inline_stack
             && (!delays_stack_normalization || reserved_inline_stack.is_some())
@@ -268,6 +296,327 @@ impl Emitter<'_> {
         self.restore_slot_scope(saved);
         self.release_reserved_inline_stack(reserved_inline_stack);
         self.statement_line = enclosing_statement_line;
+    }
+
+    /// A copied inline-function frame result the caller physically adapts after the frame's
+    /// locals end. Common IR marks the exact same-module result boundary; a nested same-module or
+    /// provider-planned external boundary owns its own trailing result instead.
+    fn copied_frame_result(&self, block: u32, value: u32) -> Option<CopiedFrameResult> {
+        // A safe call whose selector opens a spliced lambda frame joins that selector with its
+        // null arm after the copied frame's closing nop. kotlinc narrows an erased invocation
+        // before that nop. Unit materialization and other copied results still follow their
+        // ordinary after-frame path.
+        let adapts_before_lambda_close = self.active_safe_call_selector_contains(block)
+            && self.trailing_value_opens_spliced_lambda_frame(value);
+        let tail = self.copied_frame_tail(block, value)?;
+        let expression = tail.expression();
+        match *self.ir.expr(expression) {
+            IrExpr::UnitInstance if tail.is_owned() => Some(CopiedFrameResult::Unit),
+            IrExpr::InvokeFunction { ret, .. }
+                if tail.is_owned()
+                    && self.erases_copied_frame_result(block)
+                    && self
+                        .ir
+                        .invocation_result_adaptation_line(expression)
+                        .is_none()
+                    && !matches!(ret, Ty::Unit | Ty::Nothing)
+                    && self.transformed_result(expression).is_none()
+                    && !self.erased_invocations.contains(&expression) =>
+            {
+                Some(CopiedFrameResult::Invocation {
+                    invocation: expression,
+                    ret,
+                    adapts_before_lambda_close,
+                })
+            }
+            IrExpr::InvokeFunction { ret, .. }
+                if !tail.is_owned()
+                    && self
+                        .ir
+                        .invocation_result_adaptation_line(expression)
+                        .is_some()
+                    && !matches!(ret, Ty::Unit | Ty::Nothing)
+                    && self.transformed_result(expression).is_none()
+                    && !self.erased_invocations.contains(&expression) =>
+            {
+                let caller_line = self
+                    .ir
+                    .inline_copy_provenance(expression)?
+                    .last()?
+                    .call_line?;
+                Some(CopiedFrameResult::ProviderInvocation {
+                    invocation: expression,
+                    ret,
+                    caller_line,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Follow only transparent trailing-value blocks inside one explicitly recorded copied result
+    /// boundary. A nested copied boundary keeps ownership of its own result. A provider-planned
+    /// external boundary keeps adaptation ownership too, but allows the enclosing copied frame to
+    /// delay that adaptation until its own locals have ended.
+    fn copied_frame_tail(&self, block: u32, value: u32) -> Option<CopiedFrameTail> {
+        if !self.ir.is_inline_result_boundary(block) {
+            return None;
+        }
+        let mut tail = value;
+        let mut provider_owned = false;
+        while let IrExpr::Block {
+            value: Some(inner), ..
+        } = self.ir.expr(tail)
+        {
+            if self.ir.is_inline_result_boundary(tail) {
+                return None;
+            }
+            provider_owned |= self.ir.external_inline_expansions.contains(&tail);
+            tail = *inner;
+        }
+        Some(if provider_owned {
+            CopiedFrameTail::Provider(tail)
+        } else {
+            CopiedFrameTail::Owned(tail)
+        })
+    }
+
+    /// The active safe-call selector may retain result coercions around its copied inline body.
+    /// Follow only those transparent coercions to identify that exact body.
+    fn active_safe_call_selector_contains(&self, block: u32) -> bool {
+        let Some(mut selector) = self.active_safe_call_selector else {
+            return false;
+        };
+        loop {
+            if selector == block {
+                return true;
+            }
+            match self.ir.expr(selector) {
+                IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg,
+                    ..
+                } => selector = *arg,
+                _ => return false,
+            }
+        }
+    }
+
+    /// A copied function body can wrap the spliced lambda that produces its trailing result in
+    /// transparent value blocks. The lambda frame, rather than the outer function frame, is what
+    /// makes kotlinc narrow the safe-call selector before the copied frame closes.
+    fn trailing_value_opens_spliced_lambda_frame(&self, mut value: u32) -> bool {
+        loop {
+            let IrExpr::Block {
+                stmts,
+                value: Some(inner),
+            } = self.ir.expr(value)
+            else {
+                return false;
+            };
+            if self.opens_spliced_lambda_frame(stmts) {
+                return true;
+            }
+            value = *inner;
+        }
+    }
+
+    fn adapt_pending_copied_result_before_lambda_close(
+        &mut self,
+        stmts: &[u32],
+        value: Option<u32>,
+        code: &mut CodeBuilder,
+    ) {
+        if !self.opens_spliced_lambda_frame(stmts) {
+            return;
+        }
+        let Some(pending) = self.pending_pre_close_copied_result else {
+            return;
+        };
+        let Some(mut tail) = value else {
+            return;
+        };
+        loop {
+            if tail == pending.invocation {
+                self.pending_pre_close_copied_result = None;
+                if !code.is_dead() {
+                    self.narrow_invocation_result(pending.ret, code);
+                }
+                return;
+            }
+            match self.ir.expr(tail) {
+                IrExpr::Block {
+                    value: Some(inner), ..
+                } => tail = *inner,
+                _ => return,
+            }
+        }
+    }
+
+    /// The trailing value of a discarded copied result boundary. It is emitted while the copied
+    /// frame is open and popped only after the frame's locals have ended.
+    pub(super) fn discarded_copied_frame_result(
+        &self,
+        block: u32,
+        stmts: &[u32],
+        value: u32,
+    ) -> Option<u32> {
+        self.discarded_copied_frame_tail(block, stmts, value)
+            .map(CopiedFrameTail::expression)
+    }
+
+    fn discarded_copied_frame_tail(
+        &self,
+        block: u32,
+        _stmts: &[u32],
+        value: u32,
+    ) -> Option<CopiedFrameTail> {
+        let tail = self.copied_frame_tail(block, value)?;
+        let provider_owned = !tail.is_owned();
+        let expression = tail.expression();
+        // Select every semantic value here; emission below measures its actual JVM stack width.
+        // Restricting this to calls moves a copied body's field/local/static/constructor pop back
+        // inside the frame even though each of those tails physically leaves a value too. The
+        // transparent carrier blocks may contain effects: emitting the complete value retains its
+        // result on the stack across the enclosing copied boundary. A provider-planned invocation
+        // similarly retains its own adaptation identity, but a discarded outer call suppresses
+        // that consumer-only adaptation and owns the eventual pop.
+        let produces_value = !matches!(
+            self.value_ty(expression),
+            Ty::Unit | Ty::Nothing | Ty::Error
+        );
+        (produces_value
+            && !self.diverges(expression)
+            && self.transformed_result(expression).is_none()
+            && !self.machine_suspensions.contains_key(&expression)
+            && (provider_owned
+                || self
+                    .ir
+                    .invocation_result_adaptation_line(expression)
+                    .is_none()))
+        .then_some(tail)
+    }
+
+    /// Emit a discarded copied frame's trailing value and return the physical JVM stack width to
+    /// pop after the frame ends. A function-value invocation stays erased because it has no
+    /// consumer that needs its checked narrowing.
+    fn emit_discarded_frame_result(
+        &mut self,
+        value: u32,
+        result: u32,
+        code: &mut CodeBuilder,
+    ) -> Option<u16> {
+        let erased = matches!(self.ir.expr(result), IrExpr::InvokeFunction { .. });
+        if erased {
+            self.erased_invocations.insert(result);
+        }
+        let before = code.stack_height();
+        self.emit_value(value, code);
+        self.erased_invocations.remove(&result);
+        let words = code.stack_height() - before;
+        (!code.is_dead() && matches!(words, 1 | 2)).then_some(words as u16)
+    }
+
+    fn erases_copied_frame_result(&self, block: u32) -> bool {
+        self.ir
+            .inline_declared_type(block)
+            .is_some_and(|declared| jvm_is_erased_top(ir_ty_to_jvm(&declared)))
+    }
+
+    fn emit_copied_frame_result_before_adaptation(
+        &mut self,
+        result: CopiedFrameResult,
+        value: u32,
+        code: &mut CodeBuilder,
+    ) {
+        match result {
+            CopiedFrameResult::Unit => self.emit_discarding(value, code),
+            CopiedFrameResult::Invocation {
+                invocation,
+                ret,
+                adapts_before_lambda_close,
+            } => {
+                self.erased_invocations.insert(invocation);
+                let enclosing = self.pending_pre_close_copied_result.take();
+                self.pending_pre_close_copied_result = adapts_before_lambda_close
+                    .then_some(PendingPreCloseCopiedResult { invocation, ret });
+                self.emit_value(value, code);
+                let unconsumed = self.pending_pre_close_copied_result.take();
+                self.pending_pre_close_copied_result = enclosing;
+                if unconsumed.is_some() && !code.is_dead() {
+                    self.run.set_emit_error(
+                        "a safe-call copied result did not reach its trailing lambda frame"
+                            .to_string(),
+                    );
+                }
+            }
+            CopiedFrameResult::ProviderInvocation { invocation, .. } => {
+                self.erased_invocations.insert(invocation);
+                self.emit_value(value, code);
+            }
+        }
+    }
+
+    fn adapt_copied_frame_result(&mut self, result: CopiedFrameResult, code: &mut CodeBuilder) {
+        match result {
+            CopiedFrameResult::Unit => {
+                if !code.is_dead() {
+                    let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+                    code.getstatic(unit, 1);
+                }
+            }
+            CopiedFrameResult::Invocation {
+                invocation,
+                ret,
+                adapts_before_lambda_close,
+            } => {
+                if adapts_before_lambda_close {
+                    self.erased_invocations.remove(&invocation);
+                    return;
+                }
+                if !self.erased_invocations.remove(&invocation) && !code.is_dead() {
+                    self.narrow_invocation_result(ret, code);
+                }
+            }
+            CopiedFrameResult::ProviderInvocation {
+                invocation: _,
+                ret,
+                caller_line,
+            } => {
+                if !code.is_dead() {
+                    // The enclosing copied boundary, rather than the provider expansion itself,
+                    // now precedes the adaptation. Restore the containing same-file call line from
+                    // its resolved copy provenance here. The provider's own recorded line names
+                    // the inline declaration before this extra copied-frame boundary.
+                    code.forget_line();
+                    code.mark_line(caller_line);
+                    self.narrow_invocation_result(ret, code);
+                }
+            }
+        }
+    }
+
+    /// A provider result delayed through a copied same-file frame closes that containing frame on
+    /// the copied declaration's mapped line while its marker locals are still open. The provider's
+    /// caller-owned adaptation follows after those locals end.
+    fn close_provider_result_frame(&mut self, result: CopiedFrameResult, code: &mut CodeBuilder) {
+        let CopiedFrameResult::ProviderInvocation { invocation, .. } = result else {
+            return;
+        };
+        self.close_provider_invocation_frame(invocation, code);
+    }
+
+    fn close_provider_invocation_frame(&mut self, invocation: u32, code: &mut CodeBuilder) {
+        if code.is_dead() {
+            return;
+        }
+        let line = self
+            .ir
+            .invocation_result_adaptation_line(invocation)
+            .expect("a provider-owned result must retain its declaration line");
+        code.forget_line();
+        self.mark_expression_line(invocation, line, code);
+        code.nop();
     }
 
     /// An inlined `return this` (`also`, `apply`): the block's value reads a local this block
@@ -565,6 +914,7 @@ impl Emitter<'_> {
             mut normalize_at_lambda_frame,
             stack_height: inline_stack_height,
             opening,
+            discarded_frame_result,
         } = entry;
         let mut reserved_inline_stack = None;
         // The trailing read is thrown away. Record it before the statements, so a break inside
@@ -608,10 +958,16 @@ impl Emitter<'_> {
         let mut discard_after_frame_close = None;
         let mut close_lambda_before_locals = false;
         let mut emit_after_frame_close = None;
+        let mut discard_after_frame = None;
+        let mut close_discarded_provider_frame = None;
         if !dead {
             if let Some(value) = value {
                 self.mark_statement_line(value, code);
-                if closes_lambda_before_locals {
+                if let Some(result) = discarded_frame_result {
+                    let expression = result.expression();
+                    close_discarded_provider_frame = (!result.is_owned()).then_some(expression);
+                    discard_after_frame = self.emit_discarded_frame_result(value, expression, code);
+                } else if closes_lambda_before_locals {
                     let (effects, unit) = lambda_unit_after_effects
                         .take()
                         .expect("the Unit lambda-frame shape was identified above");
@@ -643,6 +999,8 @@ impl Emitter<'_> {
             reserved_inline_stack,
             close_lambda_before_locals,
             emit_after_frame_close,
+            discard_after_frame,
+            close_discarded_provider_frame,
         }
     }
 
@@ -794,6 +1152,9 @@ pub(super) struct InlineBodyEntry {
     /// The caller's operand stack height when the block began.
     pub(super) stack_height: i32,
     opening: Option<InlineBodyOpening>,
+    /// A discarded same-module inline result emitted inside its copied frame and popped only after
+    /// that frame's locals end.
+    discarded_frame_result: Option<CopiedFrameTail>,
 }
 
 /// The first frame marker of an external inline expansion and the call line its opening `nop`
@@ -805,6 +1166,53 @@ struct InlineBodyOpening {
     line: u32,
 }
 
+#[derive(Clone, Copy)]
+enum CopiedFrameResult {
+    Unit,
+    Invocation {
+        invocation: u32,
+        ret: Ty,
+        adapts_before_lambda_close: bool,
+    },
+    /// A nested provider plan still owns the adaptation; the copied frame only delays it until
+    /// its own locals have ended.
+    ProviderInvocation {
+        invocation: u32,
+        ret: Ty,
+        caller_line: u32,
+    },
+}
+
+impl CopiedFrameResult {
+    fn is_provider(self) -> bool {
+        matches!(self, Self::ProviderInvocation { .. })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct PendingPreCloseCopiedResult {
+    invocation: u32,
+    ret: Ty,
+}
+
+#[derive(Clone, Copy)]
+enum CopiedFrameTail {
+    Owned(u32),
+    Provider(u32),
+}
+
+impl CopiedFrameTail {
+    fn expression(self) -> u32 {
+        match self {
+            Self::Owned(expression) | Self::Provider(expression) => expression,
+        }
+    }
+
+    fn is_owned(self) -> bool {
+        matches!(self, Self::Owned(_))
+    }
+}
+
 pub(super) struct EmittedBlock {
     pub(super) discard_after_close: Option<u32>,
     pub(super) reserved_inline_stack: Option<Vec<TempSlot>>,
@@ -814,6 +1222,19 @@ pub(super) struct EmittedBlock {
     /// The trailing `Unit` is emitted after the lambda's marker/local range closes. A retained
     /// mapped inline-return line becomes its own `nop`; an ordinary discarded `Unit` emits none.
     pub(super) emit_after_frame_close: Option<u32>,
+    /// Physical JVM words left by a discarded copied result and popped after its frame ends.
+    pub(super) discard_after_frame: Option<u16>,
+    /// A provider-owned tail closes on its declaration line while copied-frame locals remain live;
+    /// the delayed pop follows only after those locals end.
+    close_discarded_provider_frame: Option<u32>,
+}
+
+fn discard_stack_words(words: u16, code: &mut CodeBuilder) {
+    match words {
+        1 => code.pop(),
+        2 => code.pop2(),
+        _ => unreachable!("a JVM value occupies one or two words"),
+    }
 }
 
 /// A source local whose debug range is open: declared in the block at `depth`, live in `slot`

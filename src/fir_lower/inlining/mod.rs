@@ -958,10 +958,22 @@ impl BodyLowering<'_> {
                 let mut statements = operand_declarations;
                 statements.push(cloned_root);
                 let value = statements.pop();
-                return Some(self.ir.add_expr(IrExpr::Block {
+                let frame = self.ir.add_expr(IrExpr::Block {
                     stmts: statements,
                     value,
-                }));
+                });
+                self.ir.mark_inline_result_boundary(frame);
+                // A result declared as an unreified type parameter leaves the copied body erased;
+                // the call site adapts it to the specialized type once that frame has ended.
+                let declared_ret = self.ir.functions[function as usize].ret;
+                if declared_ret
+                    .non_null()
+                    .ty_param_name()
+                    .is_some_and(|name| !reified_bindings.contains_key(name))
+                {
+                    self.ir.record_inline_declared_type(frame, declared_ret);
+                }
+                return Some(frame);
             }
         }
 

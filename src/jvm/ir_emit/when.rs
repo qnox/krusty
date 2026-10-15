@@ -179,7 +179,11 @@ impl Emitter<'_> {
                     emitter.diverges(arm)
                 }
             };
+        let selector_boundary = super::safe_calls::safe_call_selector_boundary(self.ir, selector);
+        let enclosing_safe_call_selector =
+            self.active_safe_call_selector.replace(selector_boundary);
         let selector_diverges = always_null || emit_arm(self, selector, false, code);
+        self.active_safe_call_selector = enclosing_safe_call_selector;
         if matches!(exit, Some((_, false))) {
             return;
         }

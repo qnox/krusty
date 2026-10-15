@@ -5401,6 +5401,12 @@ struct Emitter<'a> {
     /// A safe-call receiver already on the operand stack. The one read of this temporary consumes
     /// it in place (`dup; ifnull`) instead of loading a slot that was never stored.
     stack_resident_value: Option<u32>,
+    /// The exact selector currently emitted by a safe-call guard. Its copied inline frame may
+    /// need to adapt a value before the selector joins the null arm.
+    active_safe_call_selector: Option<u32>,
+    /// An erased copied result whose enclosing safe-call selector owns adaptation, but whose
+    /// trailing spliced lambda must perform it before closing its locals and inline frame.
+    pending_pre_close_copied_result: Option<block_scope::PendingPreCloseCopiedResult>,
     /// A chain's receiver temporaries declared after its first guard already jumped to the shared
     /// null exit, by that exit: none of them is assigned on every path into it.
     safe_call_exit_temporaries: HashMap<Label, Vec<u32>>,
@@ -5566,6 +5572,8 @@ impl<'a> Emitter<'a> {
             label_stack_resident_values: HashMap::default(),
             safe_call_null_exits: HashMap::default(),
             stack_resident_value: None,
+            active_safe_call_selector: None,
+            pending_pre_close_copied_result: None,
             safe_call_exit_temporaries: HashMap::default(),
             var_types: collect_body_var_types(ir, roots.iter().copied()),
             value_stores: non_null_operands::ValueStores::collect(ir, &roots),

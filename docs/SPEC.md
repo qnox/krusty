@@ -5800,6 +5800,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   statement whose `Unit` value follows the lambda's brace now does too, unless a copied body's
   terminal `Unit` keeps its own mapped line and so writes that `nop` itself.
   Tests: `tests/inline_scope_function_bytes_e2e.rs`.
+- **A same-file inline call's result is adapted after its copied frame ends.** kotlinc ends the
+  `$i$f$` marker and the inlined parameter locals at the copied body's end label before its caller
+  adapts the result. An erased type-parameter result is narrowed after those locals end, a
+  value-position `Unit` result is materialized there, and a discarded value is popped there
+  without a narrowing that only a consumer needs. Common IR records the exact same-module result
+  boundary; the JVM backend does not infer it from a synthetic name. A provider-planned external
+  inline invocation retains its own recorded adaptation boundary when nested at that tail, so the
+  two inline paths never adapt the same result twice.
+  Tests: `tests/inline_scope_function_bytes_e2e.rs`.
 - **A reified `catch (e: E)` uses the inline call's type argument as its JVM catch type.** The
   clause is checked as the reified parameter. Common IR stores only that semantic type. While the
   parameter is still unsubstituted, the JVM reified-operation pass records the declaration's
