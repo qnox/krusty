@@ -3645,16 +3645,16 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         if !unbound && !receiver.is_reference() && receiver.jvm_boxed_ref().is_none() {
             return Err(Self::failure());
         }
-        let base = self
-            .table
-            .libraries
-            .class_literal_type()
-            .ok_or_else(Self::failure)?;
-        let result = if unbound {
-            super::super::parameterized_class_literal_type(base, receiver)
-        } else {
-            base
+        let Some(base) = self.table.libraries.class_literal_type() else {
+            return Err(Self::failure());
         };
+        // A bound value's runtime class may be a subtype of its static type.
+        let represented = if unbound {
+            receiver
+        } else {
+            Ty::out_projection(receiver.non_null())
+        };
+        let result = super::super::parameterized_class_literal_type(base, represented);
         crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure())
     }
 

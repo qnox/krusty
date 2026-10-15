@@ -1515,17 +1515,7 @@ impl super::Emitter<'_> {
                 erased,
                 kclass,
             } => {
-                // kotlinc's reified placeholder: `reifiedOperationMarker(4, "T")` then the erased
-                // class constant — a splicer patches the pair with the call-site class.
-                code.push_int(4, self.cw);
-                code.push_string(name, self.cw);
-                let m = self.cw.methodref(
-                    "kotlin/jvm/internal/Intrinsics",
-                    "reifiedOperationMarker",
-                    "(ILjava/lang/String;)V",
-                );
-                code.invokestatic(m, 2, 0);
-                code.ldc_class(&erased.render(), self.cw);
+                self.emit_reified_class_token(name, *erased, code);
                 if *kclass {
                     let reflection = self.cw.methodref(
                         "kotlin/jvm/internal/Reflection",
