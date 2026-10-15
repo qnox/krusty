@@ -1910,7 +1910,7 @@ fn statically_proven_suspend_function_tests_and_casts_build_checked_fir() {
             "test" => assert!(matches!(
                 body.expr(root).map(|expression| &expression.kind),
                 Some(FirExprKind::TypeOperation {
-                    operation: FirTypeOperation::Is,
+                    operation: FirTypeOperation::Is(_),
                     target,
                     ..
                 }) if matches!(target.get(), crate::types::Ty::Fun(signature) if signature.suspend)
@@ -1983,7 +1983,7 @@ suspend fun inspect(): Boolean {
                 .flatten()
         })
         .filter_map(|lowering| match lowering {
-            crate::resolve::ExprLowering::RuntimeTypeOperand(target) => Some(*target),
+            crate::resolve::ExprLowering::RuntimeTypeTest { target, .. } => Some(*target),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -2085,7 +2085,7 @@ fun box(): String {
                 .flatten()
         })
         .filter_map(|lowering| match lowering {
-            crate::resolve::ExprLowering::RuntimeTypeOperand(target) => Some(*target),
+            crate::resolve::ExprLowering::RuntimeTypeTest { target, .. } => Some(*target),
             _ => None,
         })
         .collect::<Vec<_>>();

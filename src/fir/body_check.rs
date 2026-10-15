@@ -79,6 +79,7 @@ mod try_expressions;
 mod type_materialization;
 #[cfg(test)]
 mod type_operation_tests;
+mod type_operations;
 mod unary_operators;
 mod when_expressions;
 #[cfg(test)]
@@ -1399,7 +1400,7 @@ impl BodyFirChecker<'_> {
                 }
                 Some(
                     ExprLowering::BuiltinUnaryCall { .. }
-                    | ExprLowering::RuntimeTypeOperand(_)
+                    | ExprLowering::RuntimeTypeTest { .. }
                     | ExprLowering::ExtensionFunctionBinding { .. }
                     | ExprLowering::PluginExpression(_)
                     | ExprLowering::ClassStorageRead { .. }
@@ -1777,20 +1778,7 @@ impl BodyFirChecker<'_> {
                     operand,
                     ty,
                     negated,
-                } => {
-                    let target = self.info.resolved_type(ty).ok_or_else(|| {
-                        self.failure(Some(ty.span), BodyCheckFailureKind::UnresolvedTypeSyntax)
-                    })?;
-                    FirExprKind::TypeOperation {
-                        operation: if *negated {
-                            FirTypeOperation::NotIs
-                        } else {
-                            FirTypeOperation::Is
-                        },
-                        operand: self.expression(*operand)?,
-                        target: self.resolved_type(ty.span, target)?,
-                    }
-                }
+                } => self.type_test(expression, *operand, ty, *negated)?,
                 Expr::As {
                     operand,
                     ty,

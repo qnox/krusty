@@ -1189,7 +1189,7 @@ impl BodyFirChecker<'_> {
             }
             Some(
                 ExprLowering::BuiltinUnaryCall { .. }
-                | ExprLowering::RuntimeTypeOperand(_)
+                | ExprLowering::RuntimeTypeTest { .. }
                 | ExprLowering::ExtensionFunctionBinding { .. }
                 | ExprLowering::PluginExpression(_)
                 | ExprLowering::ClassStorageRead { .. }

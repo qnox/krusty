@@ -94,3 +94,31 @@ fn a_cast_to_a_function_type_keeps_the_value_callable() {
          }\n";
     every_backend_agrees_with_kotlinc("CastToFunction1", source);
 }
+
+/// The semantic function role selects the marker for `is`, but it must not replace the concrete
+/// representation path used by a cast. User callables need the former for the type test and retain
+/// their own class representation while the arrow-typed value is invoked.
+#[test]
+fn a_function_role_marker_is_confined_to_the_instance_test() {
+    let source = "class Doubler : (Int) -> Int { override fun invoke(x: Int): Int = x * 2 }\n\
+         fun box(): String {\n\
+         \x20   val value: Any = Doubler()\n\
+         \x20   if (value !is Function1<*, *>) return \"is\"\n\
+         \x20   @Suppress(\"UNCHECKED_CAST\")\n\
+         \x20   val function = value as (Int) -> Int\n\
+         \x20   return if (function(3) == 6) \"OK\" else \"invoke\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("FunctionRoleInstanceOnly", source);
+}
+
+/// An arrow-written supertype also contributes the common `Function` marker. It remains a checked
+/// semantic supertype in common IR rather than a nominal entry whose spelling a backend may inspect.
+#[test]
+fn a_source_function_implementation_is_a_common_function() {
+    let source = "class Doubler : (Int) -> Int { override fun invoke(x: Int): Int = x * 2 }\n\
+         fun box(): String {\n\
+         \x20   val value: Any = Doubler()\n\
+         \x20   return if (value is Function<*>) \"OK\" else \"function\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("SourceFunctionIsFunction", source);
+}
