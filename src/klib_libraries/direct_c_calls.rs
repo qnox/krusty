@@ -54,6 +54,10 @@ pub(super) fn authenticate(
             "`@CCall.Direct` does not annotate a receiver-less external C function",
         ));
     }
+    if !declaration.formals.is_empty() {
+        // One C symbol has one ABI; a type parameter would let each call site substitute another.
+        return Err(fail("`@CCall.Direct` annotates a generic function"));
+    }
     let symbol = exact_name(annotation)
         .ok_or_else(|| fail("`@CCall.Direct` has no single string `name` argument"))?;
     Ok(Some(DirectCFunction::new(symbol)))
@@ -210,6 +214,37 @@ mod tests {
             .expect_err("an associated function cannot publish a C function")
             .detail(),
             "`@CCall.Direct` does not annotate a receiver-less external C function"
+        );
+    }
+
+    #[test]
+    fn a_direct_c_function_has_one_fixed_signature() {
+        let mut generic = declaration(
+            type_name(CCALL_DIRECT),
+            vec![(
+                "name".to_owned(),
+                AnnotationArgument::String("fixture_sum".to_owned()),
+            )],
+        );
+        let id = crate::metadata::semantic::KotlinTypeParameterId(0);
+        generic.formals = vec![crate::metadata::semantic::KotlinTypeParameter {
+            id,
+            name: "T".to_owned(),
+            bounds: Vec::new(),
+            variance: crate::types::TypeVariance::Invariant,
+            only_input: false,
+            reified: false,
+        }];
+        generic.params = vec![KotlinType::Param {
+            name: "T".to_owned(),
+            id,
+            nullable: false,
+        }];
+        assert_eq!(
+            authenticate(&["fixture".to_owned()], true, placement(), &generic)
+                .expect_err("a generic declaration cannot publish a C function")
+                .detail(),
+            "`@CCall.Direct` annotates a generic function"
         );
     }
 }
