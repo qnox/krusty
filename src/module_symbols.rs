@@ -75,17 +75,11 @@ impl<'a> ModuleSymbols<'a> {
     }
 
     pub(crate) fn type_parameter_extra_bounds(&self, identity: &str) -> Vec<Ty> {
-        self.syms
-            .classes
-            .values()
-            .find_map(|class| {
-                let index = class
-                    .type_params()
-                    .iter()
-                    .position(|parameter| parameter == identity)?;
-                class.type_parameter_extra_bounds.get(index).cloned()
-            })
-            .unwrap_or_default()
+        self.syms.type_parameter_extra_bounds(identity)
+    }
+
+    pub(crate) fn type_parameter_bounds(&self, identity: &str) -> Vec<Ty> {
+        self.syms.type_parameter_bounds(identity)
     }
 
     pub(crate) fn annotation_retention(
@@ -1250,6 +1244,10 @@ fn source_property(
 }
 
 impl SymbolSource for ModuleSymbols<'_> {
+    fn type_variable_bounds(&self, name: &str) -> Vec<Ty> {
+        self.type_parameter_bounds(name)
+    }
+
     fn sam_with_receiver_annotations(&self) -> &[TypeName] {
         &self.syms.sam_with_receiver_annotations
     }
