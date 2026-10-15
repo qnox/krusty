@@ -145,11 +145,14 @@ fn assert_inert_for_source(argument: &str, file: &str, source: &str) -> (i32, St
     let expected = classes(&path("kotlinc"));
     assert!(!expected.is_empty(), "kotlinc emitted no classes");
     assert_eq!(classes(&path("krusty")), expected, "{argument}");
-    // kotlinc writes a source below the working directory relative to it.
+    // kotlinc writes a source below its working directory relative to it, and any other source
+    // absolutely; which one it is depends on where the reference compiler runs.
     let source_path = path(file);
     let cwd = std::env::current_dir().expect("working directory");
     let written = source_path.strip_prefix(&cwd).unwrap_or(&source_path);
-    let without = without.replace(&text(written), "<path>");
+    let without = without
+        .replace(&text(&source_path), "<path>")
+        .replace(&text(written), "<path>");
     let _ = std::fs::remove_dir_all(work);
     (code, without)
 }
