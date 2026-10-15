@@ -10728,6 +10728,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   modifier, `constructor` keyword, or `(`, not the class name's line
   (`setExtraLineNumberForVoidReturningFunction` over the primary constructor's start offset). The
   same holds for an enum class. Test: `tests/primary_constructor_newline_e2e.rs`.
+- **An annotated package declaration declares no Java header.** A `package-info.java` annotates
+  its package (`@ApiStatus.Internal package p;`, JLS §7.4.1), and a stray `;` may sit between
+  top-level declarations (JLS §7.6). The Java header parser read any leading annotation as the
+  start of a type declaration, so the file failed to parse and the whole source module was refused
+  with "cannot resolve Java source declaration headers". The parser now reads modifiers first and,
+  when `package` follows, treats the annotations as the package's: no header is published for
+  them, and javac still compiles the file. Tests:
+  `tests/java_source_interop_e2e.rs::annotated_package_declaration_publishes_no_header` and
+  `tests/java_source_interop_e2e.rs::a_stray_top_level_semicolon_declares_no_header`.
 - **A `@Serializable object` is serialized by an `ObjectSerializer`; it has no `$serializer`.**
   kotlinc gives the object a member `serializer()` returning
   `ObjectSerializer(serialName, INSTANCE, annotations)`, cached in a synthetic static

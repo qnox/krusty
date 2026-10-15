@@ -256,6 +256,37 @@ fun box(): String = J().name()
     assert_eq!(run_kotlin_first(kotlin, &[("J", java)]), "OK");
 }
 
+/// An annotated package declaration (`package-info.java`) is legal Java (JLS 7.4.1). It declares
+/// no type, so the module's other Java headers still publish.
+#[test]
+fn annotated_package_declaration_publishes_no_header() {
+    let kotlin = r#"
+package p
+
+fun box(): String = J.ok()
+"#;
+    let package_info = "@Deprecated\npackage p;\n";
+    let java = "package p;\npublic class J { public static String ok() { return \"OK\"; } }\n";
+    assert_eq!(
+        run_kotlin_first(kotlin, &[("package-info", package_info), ("J", java)]),
+        "OK"
+    );
+}
+
+/// JLS 7.6 permits an empty top-level declaration. It publishes no Java header and does not hide
+/// the declarations on either side of it.
+#[test]
+fn a_stray_top_level_semicolon_declares_no_header() {
+    let kotlin = r#"
+package p
+
+fun box(): String = J.ok()
+"#;
+    let java =
+        "package p;\n;\npublic class J { public static String ok() { return \"OK\"; } }\n;\n";
+    assert_eq!(run_kotlin_first(kotlin, &[("J", java)]), "OK");
+}
+
 /// A Java source annotation element declared with a `default` may be omitted where Kotlin applies
 /// the annotation. The source header does not evaluate the default; it records only that one exists.
 #[test]

@@ -818,17 +818,20 @@ pub(crate) fn parse_raw_file(toks: &LexedJava) -> Option<(FileCtx, Vec<RawDecl>,
                     span,
                 });
             }
+            // JLS 7.6: a stray `;` between top-level declarations.
+            Tok::Punct(';') => p.i += 1,
             _ => {
-                type_decl(&mut p, &ctx.package, None, &mut decls)?;
+                let access = modifiers(&mut p)?;
+                // JLS 7.4.1: a package declaration may carry annotations (`package-info.java`).
+                // They annotate the package, not a type, so no stub declaration follows.
+                if access == 0 && matches!(p.peek(), Some(Tok::Ident(s)) if s == "package") {
+                    continue;
+                }
+                type_decl_with_access(&mut p, &ctx.package, None, &mut decls, access)?;
             }
         }
     }
     Some((ctx, decls, p.body_refs))
-}
-
-fn type_decl(p: &mut P, package: &str, outer: Option<&str>, out: &mut Vec<RawDecl>) -> Option<()> {
-    let acc = modifiers(p)?;
-    type_decl_with_access(p, package, outer, out, acc)
 }
 
 fn type_decl_with_access(
