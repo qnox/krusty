@@ -23,6 +23,16 @@ pub(super) fn discard_joined_value(keeps_value: bool, result_ty: Ty, code: &mut 
     }
 }
 
+/// Every live arrival at a value `when`'s end carries the entry operands and the joined value. The
+/// linear counter shows that only when the last arm falls through: after a throwing last arm (the
+/// implicit `NoWhenBranchMatchedException`, an `else throw`) it is back at the entry height, and a
+/// consumer that discards by the counter would leave the joined value behind.
+fn land_joined_value(is_stmt: bool, entry_height: u16, result_ty: Ty, code: &mut CodeBuilder) {
+    if !is_stmt && !code.is_dead() {
+        code.set_stack(entry_height + slot_words(result_ty));
+    }
+}
+
 /// The merge contract shared by every emitted case body.
 pub(super) struct Emission {
     is_stmt: bool,
@@ -232,6 +242,9 @@ impl Emitter<'_> {
                 Emission::new(is_stmt, result_ty, entry_height, end, terminal_target),
                 code,
             );
+            if terminal_target.is_none() {
+                land_joined_value(is_stmt, entry_height, result_ty, code);
+            }
             discard_joined_value(keeps_value, result_ty, code);
             return;
         }
@@ -318,6 +331,7 @@ impl Emitter<'_> {
             self.emit_no_when_branch_matched(code);
         }
         self.bind(end, code);
+        land_joined_value(is_stmt, entry_height, result_ty, code);
         discard_joined_value(keeps_value, result_ty, code);
     }
 }

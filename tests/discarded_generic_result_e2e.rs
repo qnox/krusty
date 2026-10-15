@@ -59,3 +59,37 @@ fn a_discarded_generic_result_still_runs_its_call() {
     .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(actual, "OK");
 }
+
+/// An argument whose last arm throws (an exhaustive `when`'s implicit `NoWhenBranchMatchedException`,
+/// an `else throw`) still joins with its value on the stack, so the erased result above it is popped.
+/// Without the pop the enclosing `if` joined two stack heights and frames could not be computed.
+/// Only the method bodies are compared: the class's constant pool is a separate parity question.
+#[test]
+fn a_discarded_generic_result_pops_after_an_argument_whose_last_arm_throws() {
+    let src = "sealed class Shape { class Round : Shape(); class Square : Shape() }\n\
+               enum class Side { LEFT, RIGHT }\n\
+               class Box<T> { fun put(at: Int, value: T): T = value }\n\
+               fun sealed(b: Box<String>, s: Shape, at: Int) {\n\
+               \x20   if (at >= 0) {\n\
+               \x20       b.put(at, when (s) { is Shape.Round -> \"r\"; is Shape.Square -> \"s\" })\n\
+               \x20   }\n\
+               }\n\
+               fun enumerated(b: Box<String>, s: Side, at: Int) {\n\
+               \x20   if (at >= 0) {\n\
+               \x20       b.put(at, when (s) { Side.LEFT -> \"l\"; Side.RIGHT -> \"r\" })\n\
+               \x20   }\n\
+               }\n\
+               fun thrown(b: java.util.ArrayList<String>, d: Boolean, at: Int) {\n\
+               \x20   if (at >= 0) {\n\
+               \x20       b[at] = if (d) \"a\" else throw IllegalStateException()\n\
+               \x20   }\n\
+               }\n";
+    let pair = common::ModuleClassPair::compile(
+        &[("DiscardedAfterThrowingArm.kt", src)],
+        "DiscardedAfterThrowingArmKt",
+    );
+    for method in ["sealed", "enumerated", "thrown"] {
+        let (kotlinc, krusty) = pair.method_code("DiscardedAfterThrowingArmKt", method);
+        assert_eq!(krusty, kotlinc, "{method}");
+    }
+}
