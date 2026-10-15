@@ -204,8 +204,15 @@ unchanged.
   `ImportLibrary`. The facts are written to `default/targets/<target>/imports` as text: a
   `library <soname>` line, then `function <name> [<version>]` or `data <name> [<version>]` per
   export. Any other linker option is refused. So the libraries are read on the machine that
-  makes the interop library, and a program built against it later needs only the klib. Reading
-  the facts back into a program's link lands with building programs against interop libraries.
+  makes the interop library, and a program built against it later needs only the klib.
+- **A program links the libraries its interop klibs name.** `native::interop_link_libraries`
+  reads the facts of each `interop=true` klib among a program's libraries for the program's
+  target, in klib order, and the program is linked with them
+  (`link_program_with_libraries`). A klib that is not an interop library names no C library, and
+  one without an `imports` entry for the target names none either. An interop klib made for
+  another target, and facts that are not lines `encode` writes, are refused by name: the facts are
+  authoritative, and the shared object is never read at program link time. Its declarations reach
+  the frontend through the ordinary klib provider, which authenticates each `@CCall.Direct`.
 
 ## Other operating systems
 

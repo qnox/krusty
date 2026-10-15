@@ -12,7 +12,7 @@ mod def_file;
 mod layout;
 mod lexer;
 mod library;
-mod link_facts;
+pub(super) mod link_facts;
 mod model;
 mod preprocessor;
 mod tool;

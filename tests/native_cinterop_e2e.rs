@@ -1,6 +1,9 @@
-//! A real cinterop KLIB declaration selected through the Native KLIB provider and called with the
-//! C ABI. The fixture is metadata-only; its implementation is a separate C object, so this test
-//! covers no cinterop generator or library-discovery path.
+//! Interop KLIB declarations selected through the Native KLIB provider and called with the C ABI.
+//!
+//! The first tests use a Kotlin/Native-built fixture, metadata-only, whose implementation is a
+//! separate C object linked by hand. The last builds the interop KLIB with `krusty cinterop` from a
+//! checked-in `.def` file and header, and links the program with the shared library that KLIB's
+//! link facts name, as a program built against it links.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -251,5 +254,215 @@ fn an_authenticated_direct_c_pointer_declines_its_nullable_boxed_carrier_exactly
     assert_eq!(
         diags.render_all(&[("directPointer.kt", POINTER_SOURCE)]),
         "directPointer.kt:5:5: error: krusty: the native backend does not support a call of the C function `krusty_fixture_pointer` passing `kotlinx.cinterop.CValuesRef?`, which has no C representation here yet\n"
+    );
+}
+
+const SHARED_SOURCE: &str = "\
+@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+import fixture.sharedc.krusty_shared_scale
+import fixture.sharedc.krusty_shared_sum
+
+fun box(): String {
+    if (krusty_shared_sum(19, 23) != 42) return \"wrong sum\"
+    if (krusty_shared_scale(-3_000_000_000L, 3) != -9_000_000_000L) return \"wrong scale\"
+    return \"OK\"
+}
+";
+
+const SHARED_IMPLEMENTATION: &str = "\
+#include \"shared_call.h\"
+
+int krusty_shared_sum(int left, int right) { return left + right; }
+long long krusty_shared_scale(long long value, int factor) { return value * factor; }
+";
+
+/// The soname the `.def` file's `-lkrusty_shared_call` finds the implementation by.
+const SHARED_LIBRARY: &str = "libkrusty_shared_call.so";
+
+fn shared_fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/native_cinterop")
+}
+
+/// Build the C implementation of `shared_call.h` as the shared library [`SHARED_LIBRARY`] in
+/// `directory`, named by that soname.
+fn shared_library(compiler: &str, directory: &Path) {
+    let source = directory.join("shared_call.c");
+    std::fs::write(&source, SHARED_IMPLEMENTATION).expect("write the C implementation");
+    let output = Command::new(compiler)
+        .args(["-std=c11", "-O0", "-shared", "-fPIC", "-I"])
+        .arg(shared_fixtures())
+        .arg(format!("-Wl,-soname,{SHARED_LIBRARY}"))
+        .arg("-o")
+        .arg(directory.join(SHARED_LIBRARY))
+        .arg(&source)
+        .output()
+        .expect("run the C compiler");
+    assert!(
+        output.status.success(),
+        "the C implementation must build as a shared library:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn a_program_against_a_krusty_built_interop_klib_links_and_calls_its_shared_library() {
+    let Some(target) = NativeTarget::host()
+        .filter(|target| target.arch == Arch::X86_64 && krusty::native::can_link(*target))
+    else {
+        return;
+    };
+    let Some(stdlib) = krusty::toolchain::kotlin_stdlib_klib(
+        krusty::compilation_target::CompilationTarget::Native,
+    ) else {
+        assert!(
+            std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
+            "required Native stdlib KLIB is unavailable"
+        );
+        return;
+    };
+    let scratch = Scratch::new();
+    shared_library(&c_compiler().expect("a host C compiler"), &scratch.0);
+
+    let klib = scratch.0.join("shared_call.klib");
+    let built = Command::new(common::krusty_binary())
+        .arg("cinterop")
+        .arg("-def")
+        .arg(shared_fixtures().join("shared_call.def"))
+        .arg("-compiler-option")
+        .arg(format!("-I{}", shared_fixtures().display()))
+        .arg("-linker-option")
+        .arg(format!("-L{}", scratch.0.display()))
+        .arg("-o")
+        .arg(&klib)
+        .output()
+        .expect("run krusty cinterop");
+    assert_eq!(
+        (
+            built.status.code(),
+            String::from_utf8_lossy(&built.stdout).into_owned(),
+            String::from_utf8_lossy(&built.stderr).into_owned()
+        ),
+        (Some(0), String::new(), String::new()),
+        "krusty cinterop builds the interop KLIB silently"
+    );
+    // The implementation is gone before the program is built: the KLIB's link facts are all the
+    // link reads.
+    let loaded = scratch.0.join("loaded");
+    std::fs::create_dir_all(&loaded).expect("create the loader's library directory");
+    std::fs::rename(scratch.0.join(SHARED_LIBRARY), loaded.join(SHARED_LIBRARY))
+        .expect("move the shared library out of the link's reach");
+
+    let libraries = krusty::klib_libraries::KlibLibraries::open(&[
+        krusty::klib_libraries::KlibLibraryInput::dependency(klib.clone()),
+        krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
+            stdlib.clone(),
+            krusty::klib_libraries::KlibStdlibSemantics::Native,
+        ),
+    ])
+    .expect("open the krusty-built interop KLIB and the Native stdlib KLIB");
+    for (name, expected) in [
+        ("krusty_shared_sum", "krusty_shared_sum"),
+        ("krusty_shared_scale", "krusty_shared_scale"),
+    ] {
+        let symbols =
+            libraries.symbols(SymbolNamespace::Package(type_name("fixture/sharedc")), name);
+        let [function] = symbols.callables.functions() else {
+            panic!(
+                "expected one `{name}`, found {}",
+                symbols.callables.functions().len()
+            );
+        };
+        let realization = libraries
+            .external_callable(
+                function
+                    .callable
+                    .external_identity
+                    .expect("the declaration has a provider identity"),
+            )
+            .expect("the provider realizes its assigned identity");
+        let Some(krusty::libraries::KlibDeclarationSignature::Public(signature)) =
+            &realization.declaration_signature
+        else {
+            panic!("`{name}` has a public KLIB identity")
+        };
+        assert_eq!(
+            signature.mask(),
+            4,
+            "`{name}` has a Native interop identity"
+        );
+        assert_eq!(
+            realization
+                .direct_c_function
+                .as_ref()
+                .expect("the provider authenticated the direct C target")
+                .symbol(),
+            expected
+        );
+    }
+
+    let inputs = [SourceInput::kotlin(SHARED_SOURCE).with_file_stem("sharedCall")];
+    let stems = ["sharedCall".to_owned()];
+    let mut diags = DiagSink::new();
+    let backend = CraneliftBackend::new(target)
+        .with_entry(Entry::Box)
+        .verified();
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+        &inputs,
+        krusty::frontend::PlatformProvider::new(backend.compilation_target(), Box::new(libraries)),
+        &krusty::features::LangFeatures::new(),
+        &mut diags,
+    );
+    let artifacts =
+        krusty::compiler::emit_analyzed(analysis, &stems, &backend, "shared", &mut diags);
+    assert_eq!(diags.render_all(&[("sharedCall.kt", SHARED_SOURCE)]), "");
+    let objects = artifacts
+        .iter()
+        .filter(|(name, _)| name.ends_with(".o"))
+        .map(|(_, bytes)| bytes.as_slice())
+        .collect::<Vec<_>>();
+
+    let imports = krusty::native::interop_link_libraries(&[klib, stdlib], target)
+        .expect("read the interop KLIB's link facts");
+    assert_eq!(
+        imports
+            .iter()
+            .map(|library| {
+                let exports = library.exports().into_iter().map(|(name, _)| name);
+                (library.soname(), exports.collect::<Vec<_>>())
+            })
+            .collect::<Vec<_>>(),
+        vec![(
+            SHARED_LIBRARY,
+            vec!["krusty_shared_scale", "krusty_shared_sum"]
+        )]
+    );
+    let image = krusty::native::link_program_with_libraries(&objects, &imports, target)
+        .expect("link the Native program with its imported library");
+    let executable = scratch.0.join("program");
+    std::fs::write(&executable, image).expect("write the Native program");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            .expect("make the Native program executable");
+    }
+    let output = common::run_freshly_written(
+        Command::new(&executable)
+            .env_clear()
+            .env("LD_LIBRARY_PATH", &loaded),
+    )
+    .expect("run the Native program");
+    assert_eq!(
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned()
+        ),
+        (
+            Some(0),
+            format!("{}OK", krusty::native::BOX_RESULT_FRAME),
+            String::new()
+        ),
+        "the program calls both C functions through the imported shared library"
     );
 }

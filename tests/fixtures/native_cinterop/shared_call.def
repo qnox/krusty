@@ -1,0 +1,4 @@
+package = fixture.sharedc
+headers = shared_call.h
+headerFilter = shared_call.h
+linkerOpts = -lkrusty_shared_call
