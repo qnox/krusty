@@ -1,0 +1,4 @@
+package = fixture.directc
+headers = direct_call.h
+headerFilter = direct_call.h
+compilerOpts = -I.

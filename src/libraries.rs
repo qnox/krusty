@@ -36,7 +36,7 @@ pub use annotation_application::{
 };
 pub(crate) use call_realization::KlibBodyCompanionReceiver;
 pub use call_realization::{
-    DefaultCallRealization, ExternalCallableKind, ExternalCallableRealization,
+    DefaultCallRealization, DirectCFunction, ExternalCallableKind, ExternalCallableRealization,
     ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
     KlibDependencyCallable, NonvirtualCallRealization, OverriddenCallKind,
     OverriddenCallRealization,

@@ -15,6 +15,7 @@ mod classifier_records;
 mod classifier_signatures;
 mod declaration_bodies;
 mod declaration_signatures;
+mod direct_c_calls;
 mod external_identities;
 mod inventory;
 mod lookup;

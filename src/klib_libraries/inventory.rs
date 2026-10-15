@@ -21,6 +21,19 @@ pub(super) struct CompanionExtension<T> {
     pub(super) signed: T,
 }
 
+/// One decoded package fragment with the archive authority needed while its declarations are
+/// signed and normalized. Keeping these facts named prevents tuple position from becoming an
+/// accidental provider contract as archive semantics grow.
+pub(super) struct ArchivePackageInput {
+    pub(super) segments: Vec<String>,
+    pub(super) package: KotlinPackage,
+    pub(super) compiler_builtin_owner: bool,
+    pub(super) internal_friend: bool,
+    pub(super) module: Option<String>,
+    pub(super) intrinsic_platform: Option<TargetIntrinsicPlatform>,
+    pub(super) native_interop_library: bool,
+}
+
 impl<T> CompanionExtension<T> {
     /// The semantic placement shared by namespace publication and exact dependency linking.
     pub(super) fn placement(&self, classifier: TypeName) -> crate::libraries::CallablePlacement {
@@ -69,23 +82,24 @@ impl PackageInventory {
         Self::from_target_package_inputs(
             packages
                 .into_iter()
-                .map(|(segments, package, builtins, friend, module)| {
-                    (segments, package, builtins, friend, module, None)
-                })
+                .map(
+                    |(segments, package, builtins, friend, module)| ArchivePackageInput {
+                        segments,
+                        package,
+                        compiler_builtin_owner: builtins,
+                        internal_friend: friend,
+                        module,
+                        intrinsic_platform: None,
+                        native_interop_library: false,
+                    },
+                )
                 .collect(),
         )
     }
 
     /// Build an archive inventory, retaining target-stdlib authority beside each fragment.
     pub(super) fn from_target_package_inputs(
-        packages: Vec<(
-            Vec<String>,
-            KotlinPackage,
-            bool,
-            bool,
-            Option<String>,
-            Option<TargetIntrinsicPlatform>,
-        )>,
+        packages: Vec<ArchivePackageInput>,
     ) -> Result<Self, KlibLibraryError> {
         let mut inventory = Self {
             functions: HashMap::default(),
@@ -106,14 +120,15 @@ impl PackageInventory {
         // package fragments from the same module must not become duplicate candidates, while two
         // modules' equal internal signatures remain distinct so exact friendship can select one.
         let mut declared_signatures = HashSet::default();
-        for (
+        for ArchivePackageInput {
             segments,
             package,
             compiler_builtin_owner,
             internal_friend,
             module,
             intrinsic_platform,
-        ) in packages
+            native_interop_library,
+        } in packages
         {
             let identity = inventory.declare_package(&segments);
             for alias in package
@@ -140,16 +155,28 @@ impl PackageInventory {
                 // serializes it under a file-local identity, never a public one.
                 .filter(|function| function.visibility != Visibility::Private)
                 .map(|function| {
-                    sign_package_function(&segments, function, internal_friend, module.as_deref())
-                        .map(|mut signed| {
-                            signed.compiler_builtin_owner = compiler_builtin_owner;
-                            signed.target_intrinsic = super::target_intrinsics::authenticate(
-                                intrinsic_platform,
-                                crate::libraries::CallablePlacement::Package(identity),
-                                &signed.declaration,
-                            );
-                            signed
-                        })
+                    sign_package_function(
+                        &segments,
+                        function,
+                        internal_friend,
+                        module.as_deref(),
+                        native_interop_library,
+                    )
+                    .and_then(|mut signed| {
+                        signed.compiler_builtin_owner = compiler_builtin_owner;
+                        signed.direct_c_function = super::direct_c_calls::authenticate(
+                            &segments,
+                            native_interop_library,
+                            crate::libraries::CallablePlacement::Package(identity),
+                            &signed.declaration,
+                        )?;
+                        signed.target_intrinsic = super::target_intrinsics::authenticate(
+                            intrinsic_platform,
+                            crate::libraries::CallablePlacement::Package(identity),
+                            &signed.declaration,
+                        );
+                        Ok(signed)
+                    })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             for function in signed {
@@ -168,7 +195,13 @@ impl PackageInventory {
                 // As for functions, a private top-level property has a file-local identity.
                 .filter(|property| property.visibility != Visibility::Private)
                 .map(|property| {
-                    sign_package_property(&segments, property, internal_friend, module.as_deref())
+                    sign_package_property(
+                        &segments,
+                        property,
+                        internal_friend,
+                        module.as_deref(),
+                        native_interop_library,
+                    )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             for property in signed {
@@ -203,12 +236,19 @@ impl PackageInventory {
                 internal_friend,
                 compiler_builtin_owner,
                 module.as_deref(),
+                native_interop_library,
             )? {
                 let member = crate::libraries::CallablePlacement::Member {
                     owner: classifier,
                     owner_is_interface: signed.shape.is_interface(),
                 };
                 for function in &mut signed.functions {
+                    function.direct_c_function = super::direct_c_calls::authenticate(
+                        &segments,
+                        native_interop_library,
+                        member,
+                        &function.declaration,
+                    )?;
                     function.target_intrinsic = super::target_intrinsics::authenticate(
                         intrinsic_platform,
                         member,
@@ -217,15 +257,22 @@ impl PackageInventory {
                     inventory.intrinsics.insert(function);
                 }
                 for function in &mut signed.associated_functions {
+                    let associated = crate::libraries::CallablePlacement::Associated {
+                        classifier,
+                        declaration_owner: crate::types::SemanticCallableOwner::Classifier(
+                            classifier,
+                        ),
+                        access_owner: Some(classifier),
+                    };
+                    function.direct_c_function = super::direct_c_calls::authenticate(
+                        &segments,
+                        native_interop_library,
+                        associated,
+                        &function.declaration,
+                    )?;
                     function.target_intrinsic = super::target_intrinsics::authenticate(
                         intrinsic_platform,
-                        crate::libraries::CallablePlacement::Associated {
-                            classifier,
-                            declaration_owner: crate::types::SemanticCallableOwner::Classifier(
-                                classifier,
-                            ),
-                            access_owner: Some(classifier),
-                        },
+                        associated,
                         &function.declaration,
                     );
                     inventory.intrinsics.insert(function);

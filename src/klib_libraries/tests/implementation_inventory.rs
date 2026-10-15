@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use super::super::builtin_realizations;
 use super::super::declaration_signatures::SignedFunction;
-use super::super::inventory::PackageInventory;
+use super::super::inventory::{ArchivePackageInput, PackageInventory};
 use super::super::lookup::published_function;
 use super::super::target_intrinsics::TargetIntrinsicPlatform;
 use super::*;
@@ -108,10 +108,16 @@ fn record(
         Some(true) => DecodedBodyState::Bodyful,
     };
     let function = normalized_function(libraries, joined, joined_placement, enclosing);
+    let provider_operation = function
+        .callable
+        .external_identity
+        .and_then(|identity| libraries.external_callable(identity))
+        .is_some_and(|realization| realization.direct_c_function.is_some());
     let fact = ImplementationFact {
         placement: joined_placement,
         body,
-        has_operation: has_operation(&function)
+        has_operation: provider_operation
+            || has_operation(&function)
             || libraries
                 .inventory
                 .intrinsic_facts()
@@ -175,6 +181,16 @@ fn identity(
     classes: &[MetadataClass<'_>],
     function: &KotlinFunction,
 ) -> KlibDependencyCallable {
+    identity_with_interop(module, package, classes, function, false)
+}
+
+fn identity_with_interop(
+    module: &str,
+    package: &[&str],
+    classes: &[MetadataClass<'_>],
+    function: &KotlinFunction,
+    native_interop_library: bool,
+) -> KlibDependencyCallable {
     let package = segments(package);
     KlibDependencyCallable {
         module: module.to_owned(),
@@ -183,7 +199,7 @@ fn identity(
                 MetadataContainer {
                     package: &package,
                     classes,
-                    native_interop_library: false,
+                    native_interop_library,
                 },
                 function,
             )
@@ -469,6 +485,52 @@ fn decoded_body_state_distinguishes_absent_bodyless_and_bodyful_exactly() {
             (bodyless, fact(placement, DecodedBodyState::Bodyless, false)),
             (bodyful, fact(placement, DecodedBodyState::Bodyful, false)),
         ])
+    );
+}
+
+#[test]
+fn an_interop_direct_c_declaration_is_an_exact_bodyless_operation() {
+    let module = "direct-c";
+    let package = ["fixture", "directc"];
+    let mut declaration = function(
+        "krusty_fixture_sum",
+        None,
+        vec![class("kotlin/Int", false), class("kotlin/Int", false)],
+    );
+    declaration.ret = class("kotlin/Int", false);
+    declaration.is_external = true;
+    let annotation = crate::metadata::semantic::AnnotationApplication {
+        identity: type_name("kotlinx/cinterop/internal/CCall$Direct"),
+        arguments: vec![(
+            "name".to_owned(),
+            crate::metadata::semantic::AnnotationArgument::String("krusty_fixture_sum".to_owned()),
+        )],
+    };
+    declaration.annotations = vec![annotation.identity];
+    declaration.annotation_applications = vec![annotation];
+    let exact = identity_with_interop(module, &package, &[], &declaration, true);
+    let inventory = PackageInventory::from_target_package_inputs(vec![ArchivePackageInput {
+        segments: segments(&package),
+        package: package_of(vec![declaration]),
+        compiler_builtin_owner: false,
+        internal_friend: false,
+        module: Some(module.to_owned()),
+        intrinsic_platform: None,
+        native_interop_library: true,
+    }])
+    .expect("the exact interop declaration is signable");
+    let libraries = libraries(inventory, Vec::new());
+
+    assert_eq!(
+        implementation_inventory(&libraries),
+        HashMap::from_iter([(
+            exact,
+            fact(
+                CallablePlacement::Package(type_name("fixture/directc")),
+                DecodedBodyState::Absent,
+                true,
+            ),
+        )])
     );
 }
 

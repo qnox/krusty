@@ -7,11 +7,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::klib::{KlibArchive, KlibError};
-use crate::metadata::semantic::{
-    parse_package_fragment_checked, KotlinPackage, PackageFragmentDecodeError,
-};
+use crate::metadata::semantic::{parse_package_fragment_checked, PackageFragmentDecodeError};
 
-use super::inventory::PackageInventory;
+use super::inventory::{ArchivePackageInput, PackageInventory};
 use super::parameter_defaults::ParameterDefaults;
 use super::{
     KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError, KlibLibraries,
@@ -99,6 +97,9 @@ struct LibraryRecord<'a> {
     compiler_builtin_owner: bool,
     internal_friend: bool,
     intrinsic_platform: Option<super::target_intrinsics::TargetIntrinsicPlatform>,
+    /// The producer-declared Native interop signature family. Unlike platform-stdlib authority,
+    /// this is archive format data: it affects every serialized declaration's IdSignature.
+    native_interop_library: bool,
 }
 
 /// Why the selected libraries could not be published.
@@ -209,6 +210,7 @@ impl KlibLibraries {
             };
             let compiler_builtin_owner = matches!(input.role, KlibLibraryRole::PlatformStdlib(_));
             let internal_friend = matches!(input.role, KlibLibraryRole::Friend);
+            let native_interop_library = manifest.get("interop") == Some("true");
             records.push(LibraryRecord {
                 input,
                 module,
@@ -216,6 +218,7 @@ impl KlibLibraries {
                 compiler_builtin_owner,
                 internal_friend,
                 intrinsic_platform,
+                native_interop_library,
             });
         }
         let platform_module = records
@@ -242,6 +245,7 @@ impl KlibLibraries {
                 record.internal_friend,
                 &record.module,
                 record.intrinsic_platform,
+                record.native_interop_library,
             )?);
         }
         let mut inventory = PackageInventory::from_target_package_inputs(packages)
@@ -405,17 +409,8 @@ fn package_fragments(
     internal_friend: bool,
     module: &str,
     intrinsic_platform: Option<super::target_intrinsics::TargetIntrinsicPlatform>,
-) -> Result<
-    Vec<(
-        Vec<String>,
-        KotlinPackage,
-        bool,
-        bool,
-        Option<String>,
-        Option<super::target_intrinsics::TargetIntrinsicPlatform>,
-    )>,
-    KlibLibrariesOpenError,
-> {
+    native_interop_library: bool,
+) -> Result<Vec<ArchivePackageInput>, KlibLibrariesOpenError> {
     archive
         .package_fragments()
         .into_iter()
@@ -439,14 +434,15 @@ fn package_fragments(
                     .map(str::to_owned)
                     .collect()
             };
-            Ok((
+            Ok(ArchivePackageInput {
                 segments,
                 package,
                 compiler_builtin_owner,
                 internal_friend,
-                Some(module.to_owned()),
+                module: Some(module.to_owned()),
                 intrinsic_platform,
-            ))
+                native_interop_library,
+            })
         })
         .collect()
 }

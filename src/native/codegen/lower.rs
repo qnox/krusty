@@ -37,6 +37,7 @@ use declared_capabilities::{
 };
 mod functions;
 mod implementor_dispatch;
+mod imported_functions;
 mod lists;
 mod local_delegates;
 mod maps;
@@ -283,7 +284,7 @@ pub fn lower_file(
         symbols: super::super::symbols::symbols(ir, module_name, runtime_symbols.clone()),
         model: class_model,
         functions: Vec::new(),
-        imports: HashMap::default(),
+        imports: imported_functions::ImportedFunctions::default(),
         data_imports: HashMap::default(),
         strings: HashMap::default(),
         string_objects: HashMap::default(),
@@ -400,8 +401,8 @@ struct FileLowering<'a> {
     model: ClassModel,
     /// Declared Cranelift function per IR function index; `None` for an abstract method.
     functions: Vec<Option<FuncId>>,
-    /// Runtime functions this file imports, by symbol.
-    imports: HashMap<String, FuncId>,
+    /// Runtime and external functions this file imports, keyed by symbol and exact Native ABI.
+    imports: imported_functions::ImportedFunctions,
     /// Runtime data this file imports (the built-in type descriptors), by symbol.
     data_imports: HashMap<String, DataId>,
     /// String literal data, deduplicated by content.
@@ -580,15 +581,15 @@ impl<'a> FileLowering<'a> {
 
     /// A runtime function by symbol, declared as an import on first use.
     fn import(&mut self, symbol: &str, params: &[Ty], ret: Ty) -> Result<FuncId, Unsupported> {
-        if let Some(id) = self.imports.get(symbol) {
-            return Ok(*id);
-        }
         let signature = self.signature_of(params, ret)?;
+        if let Some(id) = self.imports.existing(symbol, &signature)? {
+            return Ok(id);
+        }
         let id = self
             .module
             .declare_function(symbol, Linkage::Import, &signature)
             .map_err(|error| format!("importing `{symbol}` ({error})"))?;
-        self.imports.insert(symbol.to_string(), id);
+        self.imports.insert(symbol, id, signature);
         Ok(id)
     }
 
