@@ -13267,6 +13267,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     independent `CustomEqualsInValueClasses` feature also admits typed `equals(Self)` only when
     the target-selected declaration is an inline value class, not a full/boxed value class.
     (`tests/operator_equals_declarations_e2e.rs`.)
+  - `ForbidArrayOfNothingInLhsOfClassLiteral`: a class literal of `Array<Nothing>` or
+    `Array<Nothing?>`, including either array nested in another type argument, is the warning
+    `UNSUPPORTED_ARRAY_OF_NOTHING_IN_CLASS_LITERAL_LHS` until the feature makes it the plain
+    `UNSUPPORTED` error, reported at the complete left-hand side.
+    (`tests/class_literal_array_of_nothing_e2e.rs`.)
 - **Pre-release output.** As kotlinc's `LanguageVersionSettings.isPreRelease`, a compilation is
   pre-release when its language version is not stable in the release or any explicitly set feature (an
   `@Enables` argument, `-progressive`, `-XXLanguage`, or a `// LANGUAGE:` directive) is enabled and
