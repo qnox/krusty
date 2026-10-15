@@ -5,7 +5,8 @@
 //! under kotlinc unless the check is off. Those tests build such a library with kotlinc, then
 //! compile a consumer with both compilers under the argument and compare the classes byte for
 //! byte. The third is the reservation of the `kotlin` package for the standard library, which a
-//! source declaring that package passes only with `-Xallow-kotlin-package`.
+//! source declaring that package passes only with `-Xallow-kotlin-package`. The fourth is the
+//! warning kotlinc reports for a `@Suppress` that names an error diagnostic.
 
 use std::path::{Path, PathBuf};
 
@@ -112,44 +113,76 @@ fn skipping_the_pre_release_check_compiles_as_kotlinc_does() {
     assert_inert("-Xskip-prerelease-check", &["-language-version", "2.5"]);
 }
 
-#[test]
-fn allowing_the_kotlin_package_compiles_as_kotlinc_does() {
-    const ARGUMENT: &str = "-Xallow-kotlin-package";
+/// Compile one `source` file with both compilers under `argument`, compare their classes byte for
+/// byte, and return kotlinc's exit code and diagnostics for the same source without `argument`,
+/// with the source's path written as `<path>`.
+fn assert_inert_for_source(argument: &str, file: &str, source: &str) -> (i32, String) {
     let work = common::scratch_dir().expect("allocate a scratch directory");
     let path = |name: &str| -> PathBuf { work.join(name) };
     let text = |path: &Path| path.to_string_lossy().into_owned();
-    std::fs::write(
-        path("Reserved.kt"),
-        "package kotlin.reserved\nclass Marker(val v: String)\nfun box(): String = Marker(\"OK\").v\n",
-    )
-    .expect("write the source");
+    std::fs::write(path(file), source).expect("write the source");
     let compile = |output: &str, with_argument: bool| {
-        let mut arguments = vec![text(&path("Reserved.kt")), "-d".into(), text(&path(output))];
+        let mut arguments = vec![text(&path(file)), "-d".into(), text(&path(output))];
         if with_argument {
-            arguments.push(ARGUMENT.to_string());
+            arguments.push(argument.to_string());
         }
         arguments
     };
-    let (code, _) = kotlinc(&compile("refused", false));
-    assert_eq!(
-        code, 1,
-        "kotlinc must refuse the package without {ARGUMENT}"
-    );
-    let (code, stderr) = kotlinc(&compile("kotlinc", true));
-    assert_eq!((code, stderr.as_str()), (0, ""), "kotlinc {ARGUMENT}");
+    let (code, without) = kotlinc(&compile("without", false));
+    let (code_with, stderr) = kotlinc(&compile("kotlinc", true));
+    assert_eq!((code_with, stderr.as_str()), (0, ""), "kotlinc {argument}");
 
     let result = std::process::Command::new(common::krusty_binary())
         .args(compile("krusty", true))
         .output()
         .expect("run krusty");
-    assert_eq!(result.status.code(), Some(0), "krusty {ARGUMENT}");
+    assert_eq!(result.status.code(), Some(0), "krusty {argument}");
     assert_eq!(
         String::from_utf8_lossy(&result.stderr),
         "",
-        "krusty {ARGUMENT}"
+        "krusty {argument}"
     );
     let expected = classes(&path("kotlinc"));
     assert!(!expected.is_empty(), "kotlinc emitted no classes");
-    assert_eq!(classes(&path("krusty")), expected, "{ARGUMENT}");
+    assert_eq!(classes(&path("krusty")), expected, "{argument}");
+    // kotlinc writes a source below the working directory relative to it.
+    let source_path = path(file);
+    let cwd = std::env::current_dir().expect("working directory");
+    let written = source_path.strip_prefix(&cwd).unwrap_or(&source_path);
+    let without = without.replace(&text(written), "<path>");
     let _ = std::fs::remove_dir_all(work);
+    (code, without)
+}
+
+#[test]
+fn allowing_the_kotlin_package_compiles_as_kotlinc_does() {
+    const ARGUMENT: &str = "-Xallow-kotlin-package";
+    let source =
+        "package kotlin.reserved\nclass Marker(val v: String)\nfun box(): String = Marker(\"OK\").v\n";
+    let (code, _) = assert_inert_for_source(ARGUMENT, "Reserved.kt", source);
+    assert_eq!(
+        code, 1,
+        "kotlinc must refuse the package without {ARGUMENT}"
+    );
+}
+
+/// kotlinc warns about a `@Suppress` naming an error diagnostic unless this argument is given;
+/// krusty never reports that warning, so under the argument both compilers are silent.
+#[test]
+fn not_warning_on_error_suppression_compiles_as_kotlinc_does() {
+    const ARGUMENT: &str = "-Xdont-warn-on-error-suppression";
+    let source = "package a\n@Suppress(\"INVISIBLE_REFERENCE\") fun f() = 1\n";
+    let (code, stderr) = assert_inert_for_source(ARGUMENT, "Suppressing.kt", source);
+    assert_eq!(
+        (code, stderr.as_str()),
+        (
+            0,
+            "<path>:2:11: warning: suppression of error 'INVISIBLE_REFERENCE' might compile and \
+             work, but the compiler behavior is UNSPECIFIED and WILL NOT BE PRESERVED. Please \
+             report your use case to the Kotlin issue tracker instead: https://kotl.in/issue\n\
+             @Suppress(\"INVISIBLE_REFERENCE\") fun f() = 1\n          \
+             ^^^^^^^^^^^^^^^^^^^^^\n"
+        ),
+        "kotlinc without {ARGUMENT}"
+    );
 }

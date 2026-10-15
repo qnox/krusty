@@ -109,7 +109,6 @@ diagnosticTests/signatureClash.args
 diagnosticTests/singleJavaFileRoots.args
 diagnosticTests/suspensionPointInMonitor.args
 diagnosticTests/wrongAnnotationArgumentInCtor.args
-errorSuppressionNoWarning.args
 errorSuppressionWarning.args
 experimentalCheckers.args
 explicitContextArguments.args

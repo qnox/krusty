@@ -68,6 +68,9 @@ pub const INERT: &[&str] = &[
     // krusty does not reserve the `kotlin` package, so it already compiles declarations there as
     // kotlinc does once this argument lifts the reservation.
     "-Xallow-kotlin-package",
+    // krusty does not warn about a `@Suppress` naming an error diagnostic, so it already reports
+    // what kotlinc reports once this argument silences that warning.
+    "-Xdont-warn-on-error-suppression",
     // krusty reads class files without checking their metadata version or pre-release flag, so it
     // already compiles as kotlinc does once these checks are off.
     "-Xskip-metadata-version-check",
@@ -114,7 +117,6 @@ pub const UNSUPPORTED: &[&str] = &[
     "-Xdisable-phases",
     "-Xdisable-standard-script",
     "-Xdont-sort-source-files",
-    "-Xdont-warn-on-error-suppression",
     "-Xdump-directory",
     "-Xdump-fqname",
     "-Xdump-perf",
