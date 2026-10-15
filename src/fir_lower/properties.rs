@@ -441,6 +441,7 @@ pub(super) fn apply_property_decl_line(
         } => {
             if let Some(storage) = ir.statics.get_mut(*storage as usize) {
                 storage.line = line;
+                storage.accessor_lines = accessor_lines;
             }
             (*getter, *setter)
         }
@@ -710,6 +711,7 @@ fn materialize_top_level_property(
             erased_declared_ty: None,
             accessors: top_level_accessors(index, &property),
             line: 0,
+            accessor_lines: crate::ir::IrAccessorLines::default(),
             source_order,
             property_delegate: false,
         });
@@ -1116,6 +1118,7 @@ fn materialize_member_property(
             erased_declared_ty: None,
             accessors: crate::ir::IrStaticAccessors::DEFAULT,
             line: 0,
+            accessor_lines: crate::ir::IrAccessorLines::default(),
             source_order,
             property_delegate: false,
         });

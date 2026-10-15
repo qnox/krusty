@@ -218,7 +218,12 @@ pub(super) fn attach_synth_debug_tables(
         };
         let pd = crate::jvm::names::type_descriptor(jvm_declared_ty(&hoisted.ty));
         let (g, s) = accessor_jvm_names(c, &property.name);
-        cw.set_method_debug(&g, &format!("(){pd}"), Some((0, pline)), &this_only);
+        let getter_line = if property.accessor_lines.getter != 0 {
+            property.accessor_lines.getter
+        } else {
+            pline
+        };
+        cw.set_method_debug(&g, &format!("(){pd}"), Some((0, getter_line)), &this_only);
         if hoisted.is_var {
             let setter_line = if property.accessor_lines.setter != 0 {
                 property.accessor_lines.setter

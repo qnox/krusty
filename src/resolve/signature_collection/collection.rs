@@ -3652,10 +3652,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         || p.getter.is_some(),
                         |flags| flags.has(crate::fir::DeclarationFlags::CUSTOM_GETTER),
                     );
-                    let has_custom_setter = property_flags.map_or_else(
-                        || p.setter.is_some(),
-                        |flags| flags.has(crate::fir::DeclarationFlags::CUSTOM_SETTER),
-                    );
                     let setter_has_body = property_flags.map_or_else(
                         || {
                             p.setter
@@ -4005,8 +4001,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     // A top-level backing-field property with a CUSTOM accessor (`val x = init get() =
                     // field`, `var y = init set(v){…}`) is lowered as a facade static + custom
                     // `getX`/`setX` (with `field` bound to the static). Reject only a custom accessor with
-                    // NO backing-field initializer — there is nothing for `field` to bind to.
-                    let has_custom_accessor = has_custom_getter || has_custom_setter;
+                    // NO backing-field initializer — there is nothing for `field` to bind to. A
+                    // setter written without a body (`lateinit var a: String` + `internal set`)
+                    // only narrows visibility and keeps the default setter.
+                    let has_custom_accessor = has_custom_getter || setter_has_body;
                     if has_custom_accessor && !has_initializer && !is_computed {
                         diags.error(
                             property_span,

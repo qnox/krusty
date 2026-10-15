@@ -7543,11 +7543,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   setter value parameter, and writes the records to `Property.getter_annotation` (f15),
   `setter_annotation` (f16) and the value parameter's `annotation` (f7), with arguments. A setter
   falls off the end of its body into its implicit `return`, which is marked on the body's last line
-  (a block's closing `}`, an expression body's last line), as kotlinc does. A member accessor
-  written with no body (`get`, `@A get`, `protected set` on its own line) keeps the generated body
-  but maps it to the accessor's own line, not the property's. An `internal set` on a public
-  property is an internal member, so its setter carries the module suffix for both its declaring
-  class and sibling-file call sites. Known gaps, independent of annotations: `@JvmName` renames a
+  (a block's closing `}`, an expression body's last line), as kotlinc does. An accessor written with
+  no body (`get`, `@A get`, `protected set`) keeps the generated body but maps it to the first line
+  of its own annotation/modifier/header prefix, not the property's; a multiline bodyless setter
+  returns on its `set` line. This applies to members, file-facade accessors, and companion accessors
+  whose storage the JVM hoists. A multiline `lateinit` declaration maps the getter's throw-tail and
+  the setter's return to the whole declaration's last line. An `internal set` on a public property
+  is an internal member, so its setter carries the module suffix for both its declaring class and
+  sibling-file call sites; a top-level `lateinit var` may use that bodyless visibility-only setter
+  without an initializer. Known gaps, independent of annotations: `@JvmName` renames a
   declared accessor (and the package `JvmPropertySignature`
   names the renamed method) but not a bodyless one; use-site targets (`@get:A`) are not part of this
   path. Tests: `property_accessor_annotation_e2e`, `written_default_accessor_e2e`,

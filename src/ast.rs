@@ -1305,8 +1305,8 @@ pub struct ExplicitBackingField {
     pub ty: Option<TypeRef>,
 }
 
-/// Where a property's written accessor headers start, and where accessor bodies end, each a
-/// 1-based line (0 = none). A visibility-only accessor has a header and no body end.
+/// Where a property's written accessor headers start and end, each a 1-based line (0 = none).
+/// A visibility-only accessor has a header and no body, but its keyword still supplies its end.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AccessorLines {
     pub getter: u32,
@@ -1314,6 +1314,8 @@ pub struct AccessorLines {
     /// The line each such accessor's body ends on, as [`FunBodyLines::end`].
     pub getter_end: u32,
     pub setter_end: u32,
+    /// The last line of the whole property declaration, its accessors included.
+    pub declaration_end: u32,
 }
 
 /// A top-level `val`/`var` property: `val name: Type = init`.
@@ -1330,9 +1332,9 @@ pub struct PropDecl {
     pub context_params: Vec<Param>,
     /// 1-based source line of the declaration, filled by the parser post-pass (0 = unknown).
     pub decl_line: u32,
-    /// 1-based source lines of the headers of a getter and a setter written with a body, filled
-    /// by the same post-pass (0 = none written, or unknown). An accessor is a declaration in its own right, so
-    /// kotlinc anchors what it generates for one (a value class's interface entry) on this line.
+    /// 1-based source lines of written accessor declarations and their ends, filled by the same
+    /// post-pass (0 = absent or unknown). An accessor is a declaration in its own right, so kotlinc
+    /// anchors what it generates for one (a value class's interface entry) on this line.
     pub accessor_lines: AccessorLines,
     /// Declaration visibility (`public` by default). A `private set` narrows only the SETTER — that
     /// lives on [`PropAccessor::visibility`]; this is the property's (getter's) visibility.
@@ -1391,6 +1393,9 @@ pub struct PropDecl {
     /// list, excluding the body. `None` when no getter was written. An accessor is a declaration in
     /// its own right and a diagnostic about it points here, not at the property.
     pub getter_span: Option<Span>,
+    /// Byte offset of the first annotation, modifier, or keyword in the getter declaration.
+    /// Kept separate from [`Self::getter_span`], whose diagnostic contract begins at `get`.
+    pub getter_declaration_start: u32,
     /// The getter carries the semantic `inline` modifier and must retain checked FIR for call sites.
     pub getter_inline: bool,
     /// An explicit getter return type (`get(): T`). Kept apart from the property's annotation so
@@ -1453,6 +1458,9 @@ pub struct PropAccessor {
     /// Source span of the `set`/`set(v)` header — the keyword through its parameter list, excluding
     /// the body — mirroring [`PropDecl::getter_span`].
     pub span: Span,
+    /// Byte offset of the first annotation, modifier, or keyword in this accessor declaration.
+    /// [`Self::span`] deliberately remains the keyword-based diagnostic span.
+    pub declaration_start: u32,
     /// `None` = default accessor body (just a visibility change); `Some` = explicit body.
     pub body: Option<FunBody>,
     /// The visibility modifier written on the accessor (`private set`, `protected set`); `None`

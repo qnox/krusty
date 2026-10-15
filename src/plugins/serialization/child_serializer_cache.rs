@@ -259,6 +259,7 @@ pub(super) fn add_child_serializer_cache(
                 erased_declared_ty: None,
                 accessors: crate::ir::IrStaticAccessors::ABSENT,
                 line: 0,
+                accessor_lines: crate::ir::IrAccessorLines::default(),
                 source_order: u32::MAX,
                 property_delegate: false,
             });
@@ -374,6 +375,7 @@ pub(super) fn add_child_serializer_cache(
             accessors: crate::ir::IrStaticAccessors::ABSENT,
             // kotlinc's `<clinit>` maps the cache's array construction to the same declaration line.
             line: owner_decl_line,
+            accessor_lines: crate::ir::IrAccessorLines::default(),
             source_order: u32::MAX,
             property_delegate: false,
         });

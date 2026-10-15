@@ -31,6 +31,7 @@ struct Candidate {
     setter_visibility: Visibility,
     source_order: u32,
     decl_line: u32,
+    accessor_lines: crate::ir::IrAccessorLines,
     /// `@JvmField`: the hoisted static IS the property's public surface — a PUBLIC field with no
     /// companion accessors and no `access$…$cp` bridges (kotlinc's realization).
     is_jvm_field: bool,
@@ -333,6 +334,7 @@ pub(crate) fn lower_companion_properties(
                 setter_visibility: declaration.setter_visibility,
                 source_order: declaration.source_order,
                 decl_line: declaration.decl_line,
+                accessor_lines: declaration.accessor_lines,
                 is_jvm_field,
                 declared_getter: declaration.getter,
                 declared_setter: declaration.setter,
@@ -377,6 +379,7 @@ pub(crate) fn lower_companion_properties(
                 setter_visibility: Visibility::Private,
                 source_order: declaration.source_order,
                 decl_line: declaration.decl_line,
+                accessor_lines: declaration.accessor_lines,
                 is_jvm_field: false,
                 declared_getter: declaration.getter,
                 declared_setter: declaration.setter,
@@ -431,6 +434,7 @@ pub(crate) fn lower_companion_properties(
             erased_declared_ty: None,
             accessors,
             line: candidate.decl_line,
+            accessor_lines: crate::ir::IrAccessorLines::default(),
             source_order: candidate.source_order,
             // kotlinc's hoisted field is a new declaration, not the delegate storage it moved:
             // it keeps its generic `Signature`.
@@ -623,6 +627,25 @@ pub(crate) fn lower_companion_properties(
                     value,
                 });
                 let returned = ir.add_expr(IrExpr::Return(None));
+                let setter_line = if candidate.accessor_lines.setter != 0 {
+                    candidate.accessor_lines.setter
+                } else {
+                    candidate.decl_line
+                };
+                if setter_line != 0 {
+                    ir.expr_lines.insert(write, setter_line);
+                }
+                // This default setter is backend-synthesized, but its source declaration is not:
+                // a visibility-only `lateinit` accessor owns the prefix line at its store and the
+                // whole property's final line at its explicit return. Record those identities at
+                // the producer so ordinary expression emission places their exact physical PCs.
+                if candidate.is_lateinit
+                    && candidate.accessor_lines.setter != 0
+                    && candidate.accessor_lines.declaration_end > setter_line
+                {
+                    ir.expr_lines
+                        .insert(returned, candidate.accessor_lines.declaration_end);
+                }
                 let body = ir.add_expr(IrExpr::Block {
                     stmts: vec![write, returned],
                     value: None,

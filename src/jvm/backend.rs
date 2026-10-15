@@ -1827,6 +1827,7 @@ mod tests {
             erased_declared_ty: None,
             accessors: crate::ir::IrStaticAccessors::ABSENT,
             line: 0,
+            accessor_lines: crate::ir::IrAccessorLines::default(),
             source_order: 0,
             property_delegate: false,
         });

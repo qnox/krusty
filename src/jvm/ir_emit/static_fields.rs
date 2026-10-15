@@ -326,6 +326,8 @@ pub(super) fn emit_default_static_accessor(
         return;
     };
     let s = &ir.statics[static_index as usize];
+    let lateinit_end = (s.is_lateinit && s.line != 0 && s.accessor_lines.declaration_end > s.line)
+        .then_some(s.accessor_lines.declaration_end);
     let signature_formatter = JvmSignatureFormatter::new(ir, env);
     let jt = jvm_declared_ty(&s.ty);
     let desc = type_descriptor(jt);
@@ -374,8 +376,13 @@ pub(super) fn emit_default_static_accessor(
         annotations,
     );
     let mut g = CodeBuilder::new(0);
-    if s.line != 0 {
-        g.mark_line(s.line);
+    let getter_line = if s.accessor_lines.getter != 0 {
+        s.accessor_lines.getter
+    } else {
+        s.line
+    };
+    if getter_line != 0 {
+        g.mark_line(getter_line);
     }
     let fref = cw.fieldref(owner, field_name, &desc);
     g.getstatic(fref, slot_words(jt) as i32);
@@ -395,6 +402,9 @@ pub(super) fn emit_default_static_accessor(
             "(Ljava/lang/String;)V",
         );
         g.invokestatic(throw, 1, 0);
+        if let Some(end) = lateinit_end {
+            g.mark_line(end);
+        }
         g.aconst_null();
     }
     emit_return(jt, &mut g);
@@ -492,13 +502,27 @@ fn emit_default_static_setter(
         );
         st.invokestatic(m, 2, 0);
     }
-    // The store maps to the property line at the POST-GUARD pc (kotlinc's shape).
-    if s.line != 0 {
-        st.mark_line(s.line);
+    // A written setter starts at its annotation/modifier prefix; an implicit one starts at the
+    // property. The store maps to that line at the POST-GUARD pc (kotlinc's shape).
+    let setter_line = if s.accessor_lines.setter != 0 {
+        s.accessor_lines.setter
+    } else {
+        s.line
+    };
+    if setter_line != 0 {
+        st.mark_line(setter_line);
     }
     load(jt, 0, &mut st);
     let fref = cw.fieldref(owner, field_name, &field_descriptor);
     st.putstatic(fref, slot_words(jt) as i32);
+    let setter_end = if s.is_lateinit && s.line != 0 && s.accessor_lines.declaration_end > s.line {
+        s.accessor_lines.declaration_end
+    } else {
+        s.accessor_lines.setter_end
+    };
+    if setter_end != 0 {
+        st.mark_line(setter_end);
+    }
     st.ret_void();
     // kotlinc writes the setter's `LocalVariableTable` as it finishes the method, so the
     // `<set-?>` name joins the pool right after the body's constants.
@@ -1127,14 +1151,15 @@ impl Emitter<'_> {
                         .jvm_companion_static_declaration(i)
                         .map(|(_, property)| property)
                         // A visibility-only setter keeps the default implementation, but its
-                        // written header still delimits the preceding default getter. Its missing
-                        // body, rather than `declared_setter`, identifies that exact source shape.
+                        // written header extends the property declaration: the getter's null tail
+                        // sits on that declaration's last line. The source header plus the
+                        // declaration-owned body flag identify that exact shape.
                         .filter(|property| {
                             property.accessor_lines.setter != 0
-                                && property.accessor_lines.setter_end == 0
+                                && !property.modifiers.declared_setter
                                 && property.accessor_lines.setter != property.decl_line
                         })
-                        .map(|property| property.accessor_lines.setter);
+                        .map(|property| property.accessor_lines.declaration_end);
                     emit_lateinit_getter_guard(&name, jt, null_tail_line, code, self.cw);
                 } else {
                     emit_lateinit_use_guard(&name, code, self.cw);
