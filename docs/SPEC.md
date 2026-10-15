@@ -8038,6 +8038,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   return types as `Map<String, Int>`, matching kotlinc
   (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_binds_explicit_type_args_on_generic_static_sam_call`).
 
+- **A SAM-converted function value binds the Java method's type variables in an inferred
+  declaration result.** For `fun <X> g(supplier: () -> X) = ThreadLocal.withInitial(supplier)`
+  kotlinc constrains the argument against the converted parameter's function type
+  (`Supplier<out S>` reads as `() -> S`), so `S := X` and `g` returns `ThreadLocal<X>`; a caller may
+  assign `g { "a" }` to `ThreadLocal<String>`, and a property initializer
+  `val local = ThreadLocal.withInitial(supplier)` types the same way. The call-site application
+  that produces the published result binds through the same SAM shape as candidate selection: a
+  function value unified against a functional-interface classifier it does not subtype constrains
+  the abstract method's parameters and result through the whole call's variance-aware constraint
+  set. Inputs are upper constraints and the result is a lower constraint: `(Number) -> Int` against
+  Java's `T -> T` therefore fixes `T` to `Int`, not their common supertype `Number`. An input-only
+  `Sink<T>` followed by an ordinary `T` argument likewise keeps the SAM's upper bound separate until
+  the later lower evidence fixes `T`; argument order cannot widen `String` back to `Any`. Previously
+  the original application left `S` unbound and published `ThreadLocal<*>!`
+  (`tests/java_static_sam_inferred_return_e2e.rs`).
+  The metadata of the inferred declaration itself still differs from kotlinc in type-argument
+  flexibility (kotlinc publishes `ThreadLocal<X!>!`), which is the same pre-existing gap as any
+  inferred Java generic result such as `Collections.singletonList(x)`.
+
 - **Interface fields are implicitly public static final (JLS §9.3).** Signature stubs stamp the
   implicit flags, so generic constant-holder fields (`Modifiers.STATIC`, `Names.STRING`) resolve
   as static field reads
