@@ -17,6 +17,11 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // `krusty cinterop …` is Kotlin/Native's `cinterop` tool: a `.def` file to an interop library.
+    if argv.first().is_some_and(|command| command == "cinterop") {
+        run_cinterop(&argv[1..]);
+        return;
+    }
     // Bazel starts a persistent worker by appending `--persistent_worker` to the tool's command
     // line; every actual compilation then arrives as a work request on stdin.
     if argv
@@ -75,6 +80,24 @@ fn main() {
         ),
         Err(error) => {
             eprint!("{error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Build the interop library the `cinterop` arguments describe, or say why not and exit 1.
+fn run_cinterop(arguments: &[String]) {
+    match krusty_cli::cinterop::parse(arguments) {
+        Ok(krusty_cli::cinterop::Invocation::Help) => println!("{}", krusty_cli::cinterop::HELP),
+        Ok(krusty_cli::cinterop::Invocation::Build(options)) => {
+            if let Err(error) = krusty::native::cinterop::build_interop_library(&options) {
+                eprintln!("error: {error}");
+                std::process::exit(1);
+            }
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            eprintln!("info: use krusty cinterop -help for more information");
             std::process::exit(1);
         }
     }

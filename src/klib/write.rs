@@ -83,6 +83,12 @@ pub struct KlibWriter {
     module_name: String,
     /// Each package's fragments in compilation order, keyed by the package's dotted name.
     packages: Vec<(String, Vec<Vec<u8>>)>,
+    /// Packages that declare nothing themselves, such as an interop library's parent packages.
+    empty_packages: Vec<String>,
+    /// Directories the library holds even when they are empty, relative to its root.
+    directories: Vec<String>,
+    /// Other files, as (library-relative path, bytes).
+    files: Vec<(String, Vec<u8>)>,
 }
 
 impl KlibWriter {
@@ -138,7 +144,34 @@ impl KlibWriter {
             manifest,
             module_name: unique_name.to_string(),
             packages: Vec::new(),
+            empty_packages: Vec::new(),
+            directories: Vec::new(),
+            files: Vec::new(),
         }
+    }
+
+    /// Set the manifest property `key`, replacing what the writer stamped.
+    pub fn set_property(&mut self, key: &str, value: &str) {
+        self.manifest.insert(key.to_string(), value.to_string());
+    }
+
+    /// Add the fragment of a package that declares nothing: the module header lists the package
+    /// among its empty ones too.
+    pub fn add_empty_package(&mut self, package: &str, fragment: Vec<u8>) {
+        self.add_fragment(package, fragment);
+        if !self.empty_packages.iter().any(|name| name == package) {
+            self.empty_packages.push(package.to_string());
+        }
+    }
+
+    /// Keep the directory `path` (library-relative) in the written library even when empty.
+    pub fn add_directory(&mut self, path: &str) {
+        self.directories.push(path.to_string());
+    }
+
+    /// Add the file `path` (library-relative) holding `bytes`.
+    pub fn add_file(&mut self, path: &str, bytes: Vec<u8>) {
+        self.files.push((path.to_string(), bytes));
     }
 
     /// Add one file's fragment to `package` (dotted; empty for the root package).
@@ -149,14 +182,15 @@ impl KlibWriter {
         }
     }
 
-    /// The manifest as it goes to disk: `key=value`, one per line, keys sorted. No comment header:
-    /// `java.util.Properties.store` would write a timestamp, and the reference compiler omits it.
+    /// The manifest as it goes to disk: `key=value`, one per line, keys sorted, escaped as
+    /// `java.util.Properties.store` escapes them. No comment header: `store` would write a
+    /// timestamp, and the reference compiler omits it.
     fn manifest_bytes(&self) -> Vec<u8> {
         let mut out = String::new();
         for (key, value) in &self.manifest {
-            out.push_str(key);
+            escape_property(&mut out, key, true);
             out.push('=');
-            out.push_str(value);
+            escape_property(&mut out, value, false);
             out.push('\n');
         }
         out.into_bytes()
@@ -164,7 +198,7 @@ impl KlibWriter {
 
     /// The `default/linkdata/module` header: `module_name` (1) as `<name>`, then the name of each
     /// package that has fragments (`package_fragment_name` = 7), sorted, the root package's empty
-    /// name included.
+    /// name included, then those that declare nothing (`empty_package` = 8).
     fn module_header(&self) -> Vec<u8> {
         let mut header = crate::metadata::protobuf::Pb::new();
         header.field_bytes(1, format!("<{}>", self.module_name).as_bytes());
@@ -176,6 +210,9 @@ impl KlibWriter {
         packages.sort_unstable();
         for package in packages {
             header.field_bytes(7, package.as_bytes());
+        }
+        for package in &self.empty_packages {
+            header.field_bytes(8, package.as_bytes());
         }
         header.into_bytes()
     }
@@ -202,12 +239,16 @@ impl KlibWriter {
                 ));
             }
         }
+        entries.extend(self.files.iter().cloned());
         entries.sort_by(|left, right| left.0.cmp(&right.0));
         entries
     }
 
     /// Write the library as a directory tree rooted at `root` (the unpacked shape).
     pub fn write_directory(&self, root: &Path) -> io::Result<()> {
+        for directory in &self.directories {
+            std::fs::create_dir_all(root.join(directory))?;
+        }
         for (entry, bytes) in self.entries() {
             let path = root.join(&entry);
             if let Some(parent) = path.parent() {
@@ -216,6 +257,69 @@ impl KlibWriter {
             std::fs::write(&path, &bytes)?;
         }
         Ok(())
+    }
+
+    /// Write the library packed into the `.klib` archive at `path`: every directory, then every
+    /// file, in path order.
+    pub fn write_archive(&self, path: &Path) -> io::Result<()> {
+        let file = std::fs::File::create(path)?;
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let entries = self.entries();
+        let mut directories = std::collections::BTreeSet::new();
+        for directory in self.directories.iter().map(String::as_str).chain(
+            entries
+                .iter()
+                .filter_map(|(entry, _)| Some(entry.rsplit_once('/')?.0)),
+        ) {
+            let mut prefix = String::new();
+            for segment in directory.split('/') {
+                prefix.push_str(segment);
+                prefix.push('/');
+                directories.insert(prefix.clone());
+            }
+        }
+        for directory in directories {
+            archive
+                .add_directory(directory, options)
+                .map_err(io::Error::other)?;
+        }
+        for (entry, bytes) in entries {
+            archive
+                .start_file(entry, options)
+                .map_err(io::Error::other)?;
+            io::Write::write_all(&mut archive, &bytes)?;
+        }
+        archive.finish().map_err(io::Error::other)?;
+        Ok(())
+    }
+}
+
+/// Append `text` escaped as `java.util.Properties.store` writes a key (`key`) or a value: the
+/// separators and comment characters, backslashes, control characters, a value's leading space
+/// and every space of a key, and everything outside printable ASCII as `\uXXXX`.
+fn escape_property(out: &mut String, text: &str, key: bool) {
+    for (index, c) in text.chars().enumerate() {
+        match c {
+            ' ' if key || index == 0 => out.push_str("\\ "),
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\x0c' => out.push_str("\\f"),
+            '=' | ':' | '#' | '!' => {
+                out.push('\\');
+                out.push(c);
+            }
+            ' '..='~' => out.push(c),
+            other => {
+                let mut units = [0u16; 2];
+                for unit in other.encode_utf16(&mut units) {
+                    out.push_str(&format!("\\u{unit:04X}"));
+                }
+            }
+        }
     }
 }
 
@@ -379,6 +483,42 @@ mod tests {
              native_targets=\n\
              unique_name=lib\n"
         );
+    }
+
+    #[test]
+    fn manifest_properties_are_escaped_as_java_properties_store_writes_them() {
+        let mut writer = KlibWriter::new(
+            "lib",
+            KlibStamp::new(KotlinVersion::V2_4_20, LanguageVersion::V2_4),
+            KlibPlatform::Native,
+        );
+        writer.set_property("compilerOpts", "-DByte=uByte -DX:1 #! \\é");
+        writer.set_property("headers", " lead");
+        assert_eq!(
+            manifest(&writer),
+            "abi_version=2.4.0\n\
+             builtins_platform=NATIVE\n\
+             compilerOpts=-DByte\\=uByte -DX\\:1 \\#\\! \\\\\\u00E9\n\
+             compiler_version=2.4.20\n\
+             headers=\\ lead\n\
+             ir_signature_versions=1,2\n\
+             metadata_version=2.4.0\n\
+             native_targets=\n\
+             unique_name=lib\n"
+        );
+    }
+
+    #[test]
+    fn an_empty_package_is_listed_after_the_packages_with_fragments() {
+        let mut writer = writer();
+        writer.add_empty_package("p", b"empty".to_vec());
+        let mut expected = crate::metadata::protobuf::Pb::new();
+        expected.field_bytes(1, b"<lib>");
+        for package in ["", "p", "p.one", "p.two"] {
+            expected.field_bytes(7, package.as_bytes());
+        }
+        expected.field_bytes(8, b"p");
+        assert_eq!(writer.module_header(), expected.into_bytes());
     }
 
     #[test]
