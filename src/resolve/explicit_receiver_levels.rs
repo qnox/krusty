@@ -71,6 +71,7 @@ impl Checker<'_> {
             name,
             call_args.args,
             call_args.arg_tys,
+            None,
         ) {
             return Some(ret);
         }

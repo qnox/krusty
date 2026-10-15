@@ -159,7 +159,7 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
 
 pub(crate) use crate::types::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 
-/// Specialize the selected member's lambda-parameter slots from concrete non-lambda arguments.
+/// Specialize the selected member's lambda-parameter slots from concrete argument evidence.
 ///
 /// This is shared by Java SAM and Kotlin function-type expectations; naming it after either
 /// origin would encourage the checker to grow parallel specialization paths for semantically
@@ -178,10 +178,9 @@ pub(crate) fn specialized_member_params(
     )
 }
 
-/// Specialize a function candidate's semantic parameters while leaving postponed lambda-owned
-/// type variables unbound until the lambda body is checked. This is the same generic inference
-/// operation member selection uses; signature-graph evaluation calls it after ordinary overload
-/// selection instead of copying the resolver's temporary `Error` lambda probe into an expectation.
+/// Specialize a function candidate while leaving unresolved lambda-owned variables unbound. A
+/// materialized lambda's concrete type is ordinary evidence, matching overload selection; graph
+/// evaluation invokes this only after selection, without publishing its temporary `Error` probe.
 pub(crate) fn specialized_function_params(
     function: &FunctionInfo,
     args: &[CallArgKind],
@@ -215,7 +214,9 @@ fn specialized_params(
         if call_sig.is_some_and(|call_sig| !call_sig.parameter_contributes_to_inference(index)) {
             continue;
         }
-        if !arg.is_lambda_literal() && !arg.is_omitted_default() {
+        if !arg.is_omitted_default()
+            && (!arg.is_lambda_literal() || arg.contributes_type_to_inference())
+        {
             unify_inferred_ty(param, arg.type_for(param), &mut binds);
         }
     }

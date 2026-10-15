@@ -15,15 +15,21 @@ use super::{DefaultArgumentStore, InlineBodyStore, ResolvedCallableHeader};
 use super::{ResolvedInterfaceDelegation, ResolvedParameterIdentity};
 
 mod call_arguments;
+mod call_result_constraints;
 mod expressions;
+mod postponed_argument_transaction;
 mod resolved_types;
 mod selections;
+mod signature_state;
 pub use call_arguments::{ResolvedSigCallArgument, SigCallArgument, SigCallArgumentProbe};
+pub use call_result_constraints::SignatureCallResultConstraint;
 pub use classifier_headers::ResolvedClassifierHeader;
 pub(crate) use classifier_headers::{superclass_slot, DeclaredSuperclass};
 pub use expressions::*;
+pub use postponed_argument_transaction::PostponedArgumentTransaction;
 pub use resolved_types::*;
 pub use selections::*;
+pub use signature_state::SignatureState;
 mod classifier_headers;
 mod declaration_metadata;
 pub use declaration_metadata::NoArgSuperConstructor;
@@ -566,14 +572,6 @@ pub trait ExplicitHeaderSemantics {
     ) -> Result<(), DiagnosticId>;
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SignatureState {
-    Uncomputed,
-    Computing,
-    Resolved(ResolvedSignature),
-    Failed(DiagnosticId),
-}
-
 /// Semantic adapter for signature-constraint evaluation.
 ///
 /// The implementation belongs beside the normal resolver/checker and must route calls, members,
@@ -601,7 +599,7 @@ pub trait SignatureConstraintEvaluator {
 /// beside the production checker implements these methods by invoking the same scope tower,
 /// candidate collection, overload selection, generic inference, expected-type, nullability, and
 /// LUB routines used for ordinary bodies. This trait intentionally contains no fallback operation.
-pub trait SignatureSemantics {
+pub trait SignatureSemantics: PostponedArgumentTransaction {
     /// Enter/leave an implicit receiver while a scoped compact expression is evaluated. This
     /// covers both receiver-function lambdas and branch-local smart casts of `this`.
     /// Implementations may keep this as a short-lived stack; it is signature-solving state and is
@@ -711,6 +709,8 @@ pub trait SignatureSemantics {
         // The parser supplied a qualified callee and its root was bound as a namespace, not a
         // value. This is graph structure, not a fact reconstructed from `spelling`.
         qualified: bool,
+        // Keep all-typed contextual shaping alive for an active sibling-refinement fixed point.
+        refresh_typed_postponed: bool,
         expected: Option<ResolvedTy>,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<Box<[Option<ResolvedTy>]>, DiagnosticId>;
@@ -815,10 +815,9 @@ pub trait SignatureSemantics {
         arguments: &[ResolvedSigCallArgument<'_>],
         type_arguments: &[ResolvedTy],
         trailing_lambda: bool,
-        expected: Option<ResolvedTy>,
+        result_constraint: Option<SignatureCallResultConstraint>,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedMemberCall, DiagnosticId>;
-
     fn member_call_argument_expectations(
         &self,
         scope: SignatureScope,
@@ -828,7 +827,8 @@ pub trait SignatureSemantics {
         arguments: &[SigCallArgumentProbe<'_>],
         type_arguments: &[ResolvedTy],
         trailing_lambda: bool,
-        expected: Option<ResolvedTy>,
+        refresh_typed_postponed: bool,
+        result_constraint: Option<SignatureCallResultConstraint>,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<Box<[Option<ResolvedTy>]>, DiagnosticId>;
 

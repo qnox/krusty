@@ -162,3 +162,118 @@ pub enum SigExpr {
         substitutions: SubstitutionRange,
     },
 }
+
+impl SignatureGraph {
+    /// Whether `root` reaches one of `targets` through value-expression edges. Signature
+    /// extraction binds a lambda-parameter read directly to its parameter node, so this separates
+    /// a parameter declaration from a body that actually reads it.
+    pub(super) fn expression_reaches_any(&self, root: SigExprId, targets: &[SigExprId]) -> bool {
+        let mut pending = vec![root];
+        let mut visited = crate::fx_hash::HashSet::default();
+        while let Some(expression) = pending.pop() {
+            if targets.contains(&expression) {
+                return true;
+            }
+            if !visited.insert(expression) {
+                continue;
+            }
+            match self.expr(expression) {
+                Some(SigExpr::Call { arguments, .. }) => pending.extend(
+                    self.call_arguments(arguments)
+                        .iter()
+                        .map(|argument| argument.value),
+                ),
+                Some(
+                    SigExpr::BoundCallableReference {
+                        receiver,
+                        classifier,
+                        ..
+                    }
+                    | SigExpr::ClassLiteral {
+                        receiver,
+                        classifier,
+                        ..
+                    },
+                ) => {
+                    pending.push(receiver);
+                    pending.extend(classifier);
+                }
+                Some(SigExpr::Member { receiver, .. }) => pending.push(receiver),
+                Some(SigExpr::MemberCall {
+                    receiver,
+                    arguments,
+                    ..
+                }) => {
+                    pending.push(receiver);
+                    pending.extend(
+                        self.call_arguments(arguments)
+                            .iter()
+                            .map(|argument| argument.value),
+                    );
+                }
+                Some(SigExpr::Binary { lhs, rhs, .. }) => {
+                    pending.push(lhs);
+                    pending.push(rhs);
+                }
+                Some(SigExpr::Invoke {
+                    callee, arguments, ..
+                }) => {
+                    pending.push(callee);
+                    pending.extend(
+                        self.call_arguments(arguments)
+                            .iter()
+                            .map(|argument| argument.value),
+                    );
+                }
+                Some(
+                    SigExpr::Function { result, .. } | SigExpr::ContextualFunction { result, .. },
+                ) => pending.push(result),
+                Some(SigExpr::ScopedReceiver {
+                    receiver, result, ..
+                }) => {
+                    pending.push(receiver);
+                    pending.push(result);
+                }
+                Some(SigExpr::Sequence { effects, result }) => {
+                    pending.extend(self.operands(effects));
+                    pending.push(result);
+                }
+                Some(SigExpr::Delegate {
+                    delegate, expected, ..
+                }) => {
+                    pending.push(delegate);
+                    pending.extend(expected);
+                }
+                Some(SigExpr::Join { operands, .. }) => pending.extend(self.operands(operands)),
+                Some(
+                    SigExpr::Nullable(value)
+                    | SigExpr::NonNullable(value)
+                    | SigExpr::Substitute { base: value, .. },
+                ) => pending.push(value),
+                Some(SigExpr::ContractNarrowed { value, call, .. }) => {
+                    pending.push(value);
+                    pending.push(call);
+                }
+                Some(SigExpr::CastNarrowed { value, target, .. }) => {
+                    pending.push(value);
+                    pending.push(target);
+                }
+                Some(
+                    SigExpr::Known(_)
+                    | SigExpr::IntegerLiteral(_)
+                    | SigExpr::UnsignedIntegerLiteral(_)
+                    | SigExpr::DeclarationType(_)
+                    | SigExpr::ClassifierType { .. }
+                    | SigExpr::Parameter { .. }
+                    | SigExpr::Type { .. }
+                    | SigExpr::ContextualType { .. }
+                    | SigExpr::Value(_)
+                    | SigExpr::CallableReference(_)
+                    | SigExpr::ContextualParameter(_),
+                )
+                | None => {}
+            }
+        }
+        false
+    }
+}

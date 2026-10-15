@@ -79,6 +79,8 @@ struct ProductionSignatureSemantics<'a> {
         RefCell<HashMap<crate::fir::DeclarationId, Vec<crate::symbol_resolver::GSigBinds>>>,
     completed_scoped_constraints:
         RefCell<HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>>,
+    scoped_constraint_checkpoints:
+        RefCell<Vec<semantics::scoped_constraint_frames::ScopedConstraintCheckpoint>>,
     stable_functions: stable_function_index::StableFunctionIndex,
     diagnostics: RefCell<Vec<ProductionSignatureDiagnostic>>,
     /// What each selected top-level call recorded, by call origin: its contract and the typealias
@@ -1671,6 +1673,7 @@ impl ProductionSignatureSemantics<'_> {
         parameters: &[Ty],
         call_sig: &crate::libraries::CallSig,
         trailing_lambda: bool,
+        refresh_typed_postponed: bool,
     ) -> Option<Box<[Option<crate::fir::ResolvedTy>]>> {
         let names = arguments
             .iter()
@@ -1707,7 +1710,7 @@ impl ProductionSignatureSemantics<'_> {
                 crate::fir::SigCallArgumentProbe::PostponedLambda { .. }
                     | crate::fir::SigCallArgumentProbe::PostponedCallableReference { .. }
             );
-            if !contextual_call && !postponed_callable {
+            if !contextual_call && !postponed_callable && !refresh_typed_postponed {
                 continue;
             }
             let parameter = slots
@@ -3815,6 +3818,7 @@ pub(crate) fn finalized_streamed_signature_index(
         scoped_constraint_inputs: RefCell::new(HashMap::default()),
         scoped_constraints: RefCell::new(HashMap::default()),
         completed_scoped_constraints: RefCell::new(HashMap::default()),
+        scoped_constraint_checkpoints: RefCell::new(Vec::new()),
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
@@ -4480,6 +4484,7 @@ pub(crate) fn finalized_streamed_signature_index(
         scoped_constraint_inputs: RefCell::new(HashMap::default()),
         scoped_constraints: RefCell::new(HashMap::default()),
         completed_scoped_constraints: RefCell::new(HashMap::default()),
+        scoped_constraint_checkpoints: RefCell::new(Vec::new()),
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),

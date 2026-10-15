@@ -239,12 +239,11 @@ impl CallArgKind {
 
     /// A value argument whose type is known before the enclosing candidate is chosen.
     ///
-    /// An unresolved lambda is still shaped by the parameter. A nested call contributes only when
-    /// its own inputs fixed the result; a result-only producer stays postponed.
+    /// An unresolved lambda is still shaped by the parameter, while a materialized lambda is
+    /// ordinary evidence. A nested call contributes only when its own inputs fixed the result; a
+    /// result-only producer stays postponed.
     pub(crate) fn supplies_fixed_argument_type(&self) -> bool {
-        !self.is_lambda_literal()
-            && !self.is_omitted_default()
-            && (!self.is_expected_type_callable() || self.result_is_input_constrained())
+        self.contributes_type_to_inference()
     }
 
     pub(crate) fn adapts_integer_literal_to(&self, parameter: Ty) -> bool {
@@ -370,5 +369,13 @@ mod tests {
         );
 
         assert!(!call.result_is_input_constrained());
+    }
+
+    #[test]
+    fn only_a_materialized_lambda_supplies_a_fixed_argument_type() {
+        assert!(!CallArgKind::LambdaLiteral(Ty::Error).supplies_fixed_argument_type());
+        assert!(
+            CallArgKind::LambdaLiteral(Ty::fun(Vec::new(), Ty::Int)).supplies_fixed_argument_type()
+        );
     }
 }

@@ -81,6 +81,7 @@ impl PostponedDiagnostics {
         {
             self.entries.remove(index);
         }
+        self.captured.remove(&key);
     }
 
     pub(super) fn contains(&self, sink: &DiagSink, file: u32, span: Span, message: &str) -> bool {

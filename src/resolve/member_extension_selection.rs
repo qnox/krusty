@@ -46,6 +46,15 @@ pub(crate) enum MemberExtensionFunctionSelection {
     Ambiguous(Vec<MemberExtensionFunctionCandidate>),
 }
 
+/// Whether this scope-tower rung owns postponed lambda shaping. An ambiguous rung deliberately
+/// carries no shape but still claims the call, preventing lower-priority sources from turning the
+/// ambiguity into a declaration-order-dependent selection.
+pub(super) enum MemberExtensionLambdaShape {
+    Absent,
+    Ambiguous,
+    Selected(crate::symbol_resolver::LambdaCallShape),
+}
+
 pub(super) fn exclude_delegate_convention(
     shape: &MemberExtensionFunctionShape,
     selection: MemberExtensionSelection,
@@ -334,6 +343,7 @@ impl Checker<'_> {
             arg_names: None,
             explicit_type_args: &[],
             trailing_lambda: false,
+            inference_bindings: None,
         };
         let candidate = match self.member_extension_function(
             scope,
@@ -444,4 +454,105 @@ mod tests {
             ]
         );
     }
+}
+
+/// The lambda shape a member-extension call gives its postponed arguments — the lambdas and
+/// callable references `call.partial_arg_tys` leaves untyped — from the unique best candidate, or
+/// the common shape of equally ranked candidates, among those the typed arguments admit.
+///
+/// The shape is the selected candidate's parameters under the call's evidence alone, with every
+/// method formal that evidence leaves open still itself and named in `generic_formals`. It is the
+/// same carrier a top-level or extension overload gives its lambdas, so the call's lambdas go
+/// through the same postponed-lambda analysis: one lambda's result solves a formal (`R` from
+/// `selector = { it }`) for the lambdas after it (`printer: (R, R) -> String`). Shaping from the
+/// fully instantiated candidate instead would fix each open formal to its bound before any lambda
+/// had been analyzed. Pass-2 checking and Pass-1 signature evaluation both shape member-extension
+/// lambdas here; only the probes and the symbol source they supply differ.
+pub(super) fn member_extension_lambda_shape_with(
+    source: &dyn SymbolSource,
+    oracle: &dyn crate::assignable::TypeOracle,
+    receivers: &[ImplicitReceiver],
+    probes: MemberExtensionProbes<'_>,
+    result_constraint: CallResultConstraint,
+    refresh_typed_postponed: bool,
+    call: MemberExtensionCall<'_>,
+) -> MemberExtensionLambdaShape {
+    let arguments = call.args.len();
+    let mut plans = Vec::new();
+    for shape in
+        member_extension_function_shapes_in(source, receivers, call.extension_receiver, call.name)
+    {
+        let Some(instantiated) =
+            instantiate_member_extension_with(probes, result_constraint, None, &shape, call)
+        else {
+            continue;
+        };
+        let mut lambda_shape = crate::symbol_resolver::LambdaCallShape {
+            generic_formals: instantiated.open_formals,
+            argument_parameters: vec![Ty::Error; arguments],
+            ..Default::default()
+        };
+        let mut param_types = vec![Vec::new(); arguments];
+        let mut expected_types = vec![None; arguments];
+        let mut lambda_receivers = vec![None; arguments];
+        let mut context_counts = vec![0; arguments];
+        // The evaluator's final fixed-point round retains every argument as typed. It still owns
+        // the original postponed-callable provenance, so recompute the selected parameter vector
+        // even though this boundary can no longer identify a postponed source form from `call`.
+        let mut shapes_postponed_argument = refresh_typed_postponed;
+        for &(parameter_index, source_index) in &instantiated.argument_parameters {
+            let Some(&parameter) = instantiated.open_visible_params.get(parameter_index) else {
+                continue;
+            };
+            lambda_shape.argument_parameters[source_index] = parameter;
+            let Ty::Fun(signature) = parameter.non_null() else {
+                continue;
+            };
+            shapes_postponed_argument |= call
+                .partial_arg_tys
+                .get(source_index)
+                .is_some_and(Option::is_none);
+            param_types[source_index] = signature.params.clone();
+            expected_types[source_index] = Some(parameter);
+            context_counts[source_index] = signature.context_count;
+            if instantiated
+                .call_sig
+                .lambda_receiver_params
+                .get(parameter_index)
+                .copied()
+                .unwrap_or(false)
+            {
+                lambda_receivers[source_index] =
+                    signature.params.get(signature.context_count).copied();
+            }
+        }
+        if !shapes_postponed_argument {
+            continue;
+        }
+        lambda_shape.param_types = Some(param_types);
+        lambda_shape.expected_types = Some(expected_types);
+        lambda_shape.receivers = lambda_receivers
+            .iter()
+            .any(Option::is_some)
+            .then_some(lambda_receivers);
+        lambda_shape.context_counts = context_counts
+            .iter()
+            .any(|count| *count > 0)
+            .then_some(context_counts);
+        plans.push((shape.priority, instantiated.score, lambda_shape));
+    }
+    let maximal = maximal_member_extensions(oracle, &plans, |(priority, ..)| *priority);
+    let Some(best_score) = maximal.iter().map(|index| plans[*index].1).max() else {
+        return MemberExtensionLambdaShape::Absent;
+    };
+    let mut best = maximal
+        .into_iter()
+        .filter(|index| plans[*index].1 == best_score);
+    let Some(selected) = best.next() else {
+        return MemberExtensionLambdaShape::Absent;
+    };
+    if best.any(|index| plans[index].2 != plans[selected].2) {
+        return MemberExtensionLambdaShape::Ambiguous;
+    }
+    MemberExtensionLambdaShape::Selected(plans.swap_remove(selected).2)
 }

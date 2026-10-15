@@ -118,6 +118,25 @@ pub(super) fn collect_type_parameters(
     }
 }
 
+/// Whether argument probing still needs candidate parameters to materialize a postponed value.
+/// Ordinary typed arguments are complete and final selection owns their applicability; a typed
+/// contextual call is provisional and must receive the selected parameter before re-evaluation.
+pub(super) fn call_expectation_lookup_required(
+    arguments: &[crate::fir::SigCallArgumentProbe<'_>],
+    refresh_typed_postponed: bool,
+    allow_direct_contextual_call: bool,
+) -> bool {
+    refresh_typed_postponed
+        || arguments.iter().any(|argument| match argument {
+            crate::fir::SigCallArgumentProbe::Typed(argument) => {
+                argument.wrapped_contextual_call
+                    || (allow_direct_contextual_call && argument.contextual_call)
+            }
+            crate::fir::SigCallArgumentProbe::PostponedLambda { .. }
+            | crate::fir::SigCallArgumentProbe::PostponedCallableReference { .. } => true,
+        })
+}
+
 impl ProductionSignatureSemantics<'_> {
     pub(super) fn common_postponed_parameters(
         &self,
@@ -488,7 +507,9 @@ impl ProductionSignatureSemantics<'_> {
                 .copied()
                 .zip(&arguments)
             {
-                if argument.is_omitted_default() || argument.is_lambda_literal() {
+                if argument.is_omitted_default()
+                    || (argument.is_lambda_literal() && !argument.contributes_type_to_inference())
+                {
                     continue;
                 }
                 let parameter = crate::symbol_resolver::ty_subst_keep_unbound(parameter, &bindings);
@@ -548,15 +569,18 @@ impl ProductionSignatureSemantics<'_> {
         }
     }
 
-    /// Project the selected callable's parameter types back onto postponed source arguments. The
-    /// shared argument mapper owns named/default/trailing-lambda placement; this inversion only
-    /// preserves the many-source-arguments-to-one-vararg relationship which a parameter-slot vector
-    /// cannot represent. Positional vararg arguments expect the element type, while named/spread
-    /// arguments expect the declared array type.
+    /// Project the selected callable's parameter types back onto postponed source arguments. An
+    /// explicit fixed-point refresh also projects callable shapes onto materialized arguments; the
+    /// evaluator retains which of those arguments were originally postponed. The shared argument
+    /// mapper owns named/default/trailing-lambda placement; this inversion only preserves the
+    /// many-source-arguments-to-one-vararg relationship which a parameter-slot vector cannot
+    /// represent. Positional vararg arguments expect the element type, while named/spread arguments
+    /// expect the declared array type.
     pub(super) fn postponed_expectations(
         arguments: &[crate::fir::SigCallArgumentProbe<'_>],
         slots: &[Option<usize>],
         parameters: &[Ty],
+        refresh_typed_postponed: bool,
     ) -> Box<[Option<crate::fir::ResolvedTy>]> {
         let mut expectations = vec![None; arguments.len()];
         for (slot, source) in slots.iter().enumerate() {
@@ -575,7 +599,12 @@ impl ProductionSignatureSemantics<'_> {
                         | crate::fir::SigCallArgumentProbe::PostponedCallableReference { .. },
                 )
             );
-            if contextual_call || postponed_callable {
+            let typed_refresh = refresh_typed_postponed
+                && matches!(
+                    arguments.get(source),
+                    Some(crate::fir::SigCallArgumentProbe::Typed(_))
+                );
+            if contextual_call || postponed_callable || typed_refresh {
                 expectations[source] = parameters.get(slot).copied().and_then(|parameter| {
                     (contextual_call || matches!(parameter.non_null(), Ty::Fun(_)))
                         .then(|| crate::fir::ResolvedTy::new(parameter).ok())
@@ -708,5 +737,65 @@ impl ProductionSignatureSemantics<'_> {
         ProductionSignatureSemantics::merge_scoped_constraints_from_symbols(
             &source, active, bindings,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::call_expectation_lookup_required;
+    use crate::fir::{OriginId, ResolvedSigCallArgument, ResolvedTy, SigCallArgumentProbe};
+    use crate::types::Ty;
+
+    fn typed(
+        contextual_call: bool,
+        wrapped_contextual_call: bool,
+    ) -> SigCallArgumentProbe<'static> {
+        SigCallArgumentProbe::Typed(ResolvedSigCallArgument {
+            ty: ResolvedTy::new(Ty::Int).expect("Int is publishable"),
+            origin: OriginId::from_raw(1),
+            name: None,
+            spread: false,
+            integer_literal: None,
+            lambda: false,
+            contextual_call,
+            wrapped_contextual_call,
+        })
+    }
+
+    #[test]
+    fn ordinary_typed_arguments_keep_expectation_lookup_one_shot() {
+        assert!(!call_expectation_lookup_required(
+            &[typed(false, false)],
+            false,
+            false,
+        ));
+        assert!(call_expectation_lookup_required(
+            &[typed(false, false)],
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn direct_contextual_calls_retain_the_enclosing_call_shape_boundary() {
+        assert!(!call_expectation_lookup_required(
+            &[typed(true, false)],
+            false,
+            false,
+        ));
+        assert!(call_expectation_lookup_required(
+            &[typed(true, false)],
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn a_wrapped_contextual_call_requests_an_unqualified_selected_parameter() {
+        assert!(call_expectation_lookup_required(
+            &[typed(true, true)],
+            false,
+            false,
+        ));
     }
 }

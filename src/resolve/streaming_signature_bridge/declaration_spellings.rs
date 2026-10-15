@@ -198,6 +198,7 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
         scoped_constraint_inputs: std::cell::RefCell::new(crate::fx_hash::HashMap::default()),
         scoped_constraints: std::cell::RefCell::new(crate::fx_hash::HashMap::default()),
         completed_scoped_constraints: std::cell::RefCell::new(crate::fx_hash::HashMap::default()),
+        scoped_constraint_checkpoints: std::cell::RefCell::new(Vec::new()),
         diagnostics: std::cell::RefCell::new(Vec::new()),
         selected_calls: Default::default(),
         source_contracts: std::cell::RefCell::new(crate::fx_hash::HashMap::default()),
