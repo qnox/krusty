@@ -1210,6 +1210,7 @@ impl Checker<'_> {
                     CALLABLE_INVOKE_OPERATOR,
                     (MemberExtensionSelection::Operators, None),
                     result_constraint,
+                    None,
                 ) {
                     // A member EXTENSION `operator fun Recv.invoke(...)` on an implicit receiver
                     // (`"case" { … }` inside a receiver-DSL lambda). Keep the selected member-

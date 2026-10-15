@@ -32,6 +32,9 @@ pub struct ResolvedSigCallArgument<'a> {
     /// enclosing callable's selected parameter. It is set only while probing the compact graph;
     /// materialization immediately re-evaluates the call with that expectation.
     pub contextual_call: bool,
+    /// The provisional call is hidden by a nullability wrapper, so even an unqualified enclosing
+    /// call must request its selected parameter before the wrapped call can be materialized.
+    pub wrapped_contextual_call: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

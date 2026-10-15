@@ -3,6 +3,8 @@
 use super::*;
 use crate::integer_constant::IntegerConstant;
 
+mod postponed_arguments;
+
 /// The sole structural evaluator for [`SigExpr`]. It knows only how graph nodes compose; every
 /// semantic decision is delegated to [`SignatureSemantics`].
 pub struct ResolverBackedSignatureEvaluator<'a, S> {
@@ -164,6 +166,26 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     spread: argument.spread,
                 });
             }
+            if wrapped_contextual_call(argument.value, graph) {
+                // The type is only an overload-probing placeholder. `contextual_call` makes the
+                // semantic adapter ignore it as evidence and return the selected parameter; final
+                // materialization then re-evaluates the wrapped call under that expectation.
+                let placeholder = ResolvedTy::new(Ty::ty_param(
+                    "\0sig:wrapped-contextual-call-result",
+                    Ty::nullable(Ty::obj("kotlin/Any")),
+                ))
+                .expect("a signature-only type variable is publishable inside graph evaluation");
+                return Ok(SigCallArgumentProbe::Typed(ResolvedSigCallArgument {
+                    ty: placeholder,
+                    origin: argument.origin,
+                    name,
+                    spread: argument.spread,
+                    integer_literal: None,
+                    lambda: argument.lambda,
+                    contextual_call: true,
+                    wrapped_contextual_call: true,
+                }));
+            }
             let ty =
                 evaluate_expression(semantics, argument.value, graph, demand, memo, computing)?;
             Ok(SigCallArgumentProbe::Typed(ResolvedSigCallArgument {
@@ -177,6 +199,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     graph.expr(argument.value),
                     Some(SigExpr::Call { .. } | SigExpr::MemberCall { .. })
                 ),
+                wrapped_contextual_call: false,
             }))
         }
 
@@ -215,6 +238,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     integer_literal: None,
                     lambda: argument.lambda,
                     contextual_call: false,
+                    wrapped_contextual_call: false,
                 });
             }
             let Some(SigExpr::ContextualFunction {
@@ -259,6 +283,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     ),
                     lambda: argument.lambda,
                     contextual_call: false,
+                    wrapped_contextual_call: false,
                 });
             };
             let contextual_declaration = graph
@@ -290,6 +315,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         integer_literal: None,
                         lambda: argument.lambda,
                         contextual_call: false,
+                        wrapped_contextual_call: false,
                     });
                 }
                 // A lambda whose value parameters all carry written types also has a natural
@@ -323,6 +349,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     integer_literal: None,
                     lambda: argument.lambda,
                     contextual_call: false,
+                    wrapped_contextual_call: false,
                 });
             };
             let Ty::Fun(expected) = expectation.get().non_null() else {
@@ -433,7 +460,130 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 integer_literal: None,
                 lambda: argument.lambda,
                 contextual_call: false,
+                wrapped_contextual_call: false,
             })
+        }
+
+        /// Materialize one productive postponed argument. A provisional contextualization may
+        /// fail because another argument has not published its constraints yet; keep that probe
+        /// postponed and try the remaining candidates before reporting the first stable failure.
+        fn materialize_next_postponed<'a, S: SignatureSemantics>(
+            semantics: &S,
+            probes: &mut [SigCallArgumentProbe<'a>],
+            materialized: &mut [Option<ResolvedSigCallArgument<'a>>],
+            scheduler: &mut postponed_arguments::Scheduler,
+            arguments: &'a [SigCallArgument],
+            expectations: &[Option<ResolvedTy>],
+            evaluation: ExpressionEvaluation<'a, '_>,
+        ) -> Result<(), DiagnosticId> {
+            let ExpressionEvaluation {
+                graph,
+                demand,
+                memo,
+                computing,
+            } = evaluation;
+            let mut first_failure = None;
+            for index in postponed_arguments::argument_order(probes, expectations, arguments, graph)
+            {
+                let expectation = expectations.get(index).copied().flatten();
+                if !scheduler.has_cross_argument_refinement() {
+                    match materialize_argument(
+                        semantics,
+                        &arguments[index],
+                        expectation,
+                        graph,
+                        demand,
+                        memo,
+                        computing,
+                    ) {
+                        Ok(resolved) => {
+                            probes[index] = SigCallArgumentProbe::Typed(resolved);
+                            materialized[index] = Some(resolved);
+                            scheduler.record(index, expectation, Vec::new());
+                            return Ok(());
+                        }
+                        Err(failure) => {
+                            first_failure.get_or_insert(failure);
+                            continue;
+                        }
+                    }
+                }
+                match postponed_arguments::transactional(
+                    semantics,
+                    memo,
+                    computing,
+                    |memo, computing| {
+                        materialize_argument(
+                            semantics,
+                            &arguments[index],
+                            expectation,
+                            graph,
+                            demand,
+                            memo,
+                            computing,
+                        )
+                    },
+                ) {
+                    Ok((resolved, memo_entries)) => {
+                        probes[index] = SigCallArgumentProbe::Typed(resolved);
+                        materialized[index] = Some(resolved);
+                        scheduler.record(index, expectation, memo_entries);
+                        return Ok(());
+                    }
+                    Err(failure) => {
+                        first_failure.get_or_insert(failure);
+                    }
+                }
+            }
+            Err(first_failure.expect("a postponed-argument loop must retain a postponed probe"))
+        }
+
+        /// Re-evaluate the first postponed argument whose selected callable has now specialized
+        /// its expectation. Keeping the old `Typed` probe would preserve a body result computed
+        /// through a type-parameter bound even after another argument fixed the concrete input.
+        /// One refresh per round lets selection observe each new contribution before deciding
+        /// whether another argument changed, and therefore terminates when every expectation is
+        /// identical to the one that produced its current probe.
+        fn refresh_materialized_postponed<'a, S: SignatureSemantics>(
+            semantics: &S,
+            probes: &mut [SigCallArgumentProbe<'a>],
+            materialized: &mut [Option<ResolvedSigCallArgument<'a>>],
+            scheduler: &mut postponed_arguments::Scheduler,
+            arguments: &'a [SigCallArgument],
+            expectations: &[Option<ResolvedTy>],
+            evaluation: ExpressionEvaluation<'a, '_>,
+        ) -> Result<bool, DiagnosticId> {
+            let ExpressionEvaluation {
+                graph,
+                demand,
+                memo,
+                computing,
+            } = evaluation;
+            let Some(index) = scheduler.refresh_candidate(materialized, expectations) else {
+                return Ok(false);
+            };
+            let expectation = expectations.get(index).copied().flatten();
+            scheduler.invalidate(index, memo);
+            let (resolved, memo_entries) = postponed_arguments::transactional(
+                semantics,
+                memo,
+                computing,
+                |memo, computing| {
+                    materialize_argument(
+                        semantics,
+                        &arguments[index],
+                        expectation,
+                        graph,
+                        demand,
+                        memo,
+                        computing,
+                    )
+                },
+            )?;
+            probes[index] = SigCallArgumentProbe::Typed(resolved);
+            materialized[index] = Some(resolved);
+            scheduler.record(index, expectation, memo_entries);
+            Ok(true)
         }
 
         fn evaluate_callable_reference<S: SignatureSemantics>(
@@ -540,12 +690,39 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             }
         }
 
+        /// Mutable graph-walk state shared by recursive expression evaluation. The graph borrow
+        /// outlives each short mutable reborrow of the demand and memoization state.
+        struct ExpressionEvaluation<'graph, 'state> {
+            graph: &'graph SignatureGraph,
+            demand: &'state mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            memo: &'state mut HashMap<SigExprId, ResolvedTy>,
+            computing: &'state mut crate::fx_hash::HashSet<SigExprId>,
+        }
+
+        /// Whether an outer parameter expectation can reach a call only through a result wrapper.
+        /// Evaluating such an argument eagerly would reject its inner generic call before the
+        /// enclosing callable can supply that expectation (`consume(value?.choose { ... })`).
+        fn wrapped_contextual_call(expression: SigExprId, graph: &SignatureGraph) -> bool {
+            match graph.expr(expression) {
+                Some(SigExpr::Nullable(base) | SigExpr::NonNullable(base)) => {
+                    match graph.expr(base) {
+                        Some(SigExpr::Call { .. } | SigExpr::MemberCall { .. }) => true,
+                        Some(SigExpr::Nullable(_) | SigExpr::NonNullable(_)) => {
+                            wrapped_contextual_call(base, graph)
+                        }
+                        _ => false,
+                    }
+                }
+                _ => false,
+            }
+        }
+
         fn evaluate_call<S: SignatureSemantics>(
             semantics: &S,
             target: DeferredCallableSelectionId,
             arguments: CallArgumentRange,
             qualified: Option<QualifiedCallCoordinateId>,
-            forced_expected: Option<ResolvedTy>,
+            forced_result_constraint: Option<SignatureCallResultConstraint>,
             graph: &SignatureGraph,
             demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
@@ -557,13 +734,14 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             let scope = graph
                 .scope(selection.scope)
                 .expect("a deferred callable scope must belong to its graph");
-            let expected = match (forced_expected, selection.expected) {
-                (Some(expected), _) => Some(expected),
-                (None, Some(expected)) => Some(evaluate_expression(
-                    semantics, expected, graph, demand, memo, computing,
-                )?),
+            let result_constraint = match (forced_result_constraint, selection.expected) {
+                (Some(result_constraint), _) => Some(result_constraint),
+                (None, Some(expected)) => Some(SignatureCallResultConstraint::Direct(
+                    evaluate_expression(semantics, expected, graph, demand, memo, computing)?,
+                )),
                 (None, None) => None,
             };
+            let expected = result_constraint.map(SignatureCallResultConstraint::expected);
             if let Some(qualified) = qualified.map(|qualified| {
                 graph
                     .qualified_call_coordinate(qualified)
@@ -582,11 +760,13 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         qualified.member,
                         arguments,
                         qualified.origin,
-                        expected,
-                        graph,
-                        demand,
-                        memo,
-                        computing,
+                        result_constraint,
+                        ExpressionEvaluation {
+                            graph,
+                            demand,
+                            memo,
+                            computing,
+                        },
                     );
                 }
             }
@@ -605,6 +785,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 .iter()
                 .map(|argument| argument_probe(semantics, argument, graph, demand, memo, computing))
                 .collect::<Result<Vec<_>, _>>()?;
+            let mut postponed_scheduler = postponed_arguments::Scheduler::new(&probes);
 
             // Postponed arguments in one call form a constraint system, not an evaluation-order
             // dependency. A later lambda whose input is already concrete can determine a type
@@ -630,62 +811,57 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     &resolved_type_arguments,
                     selection.trailing_lambda,
                     qualified,
+                    false,
                     expected,
                     demand,
                 )?;
-                let postponed = probes
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, probe)| {
-                        matches!(
-                            probe,
-                            SigCallArgumentProbe::PostponedLambda { .. }
-                                | SigCallArgumentProbe::PostponedCallableReference { .. }
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let ready = |index: usize| {
-                    let Some(expected) = expectations.get(index).copied().flatten() else {
-                        return false;
-                    };
-                    let Ty::Fun(signature) = expected.get().non_null() else {
-                        return false;
-                    };
-                    signature.params.iter().all(|parameter| {
-                        !parameter.mentions_ty_param()
-                            && !parameter.mentions_pending()
-                            && !parameter.mentions_error()
-                    })
-                };
-                let index = postponed
-                    .iter()
-                    .find_map(|(index, _)| ready(*index).then_some(*index))
-                    .unwrap_or(postponed[0].0);
-                let resolved = materialize_argument(
+                materialize_next_postponed(
                     semantics,
-                    &call_arguments[index],
-                    expectations.get(index).copied().flatten(),
-                    graph,
-                    demand,
-                    memo,
-                    computing,
+                    &mut probes,
+                    &mut materialized,
+                    &mut postponed_scheduler,
+                    call_arguments,
+                    &expectations,
+                    ExpressionEvaluation {
+                        graph,
+                        demand,
+                        memo,
+                        computing,
+                    },
                 )?;
-                probes[index] = SigCallArgumentProbe::Typed(resolved);
-                materialized[index] = Some(resolved);
             }
 
-            let expectations = semantics.call_argument_expectations(
-                scope,
-                spelling,
-                selection.lexical_classifier,
-                selection.origin,
-                &probes,
-                &resolved_type_arguments,
-                selection.trailing_lambda,
-                qualified,
-                expected,
-                demand,
-            )?;
+            let expectations = loop {
+                let expectations = semantics.call_argument_expectations(
+                    scope,
+                    spelling,
+                    selection.lexical_classifier,
+                    selection.origin,
+                    &probes,
+                    &resolved_type_arguments,
+                    selection.trailing_lambda,
+                    qualified,
+                    postponed_scheduler.requires_typed_expectations(),
+                    expected,
+                    demand,
+                )?;
+                if !refresh_materialized_postponed(
+                    semantics,
+                    &mut probes,
+                    &mut materialized,
+                    &mut postponed_scheduler,
+                    call_arguments,
+                    &expectations,
+                    ExpressionEvaluation {
+                        graph,
+                        demand,
+                        memo,
+                        computing,
+                    },
+                )? {
+                    break expectations;
+                }
+            };
             let mut resolved_arguments = Vec::new();
             for (index, argument) in call_arguments.iter().enumerate() {
                 resolved_arguments.push(match materialized[index] {
@@ -724,6 +900,27 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Option<Result<ResolvedTy, DiagnosticId>> {
+            evaluate_expression_with_result_constraint(
+                semantics,
+                expression,
+                SignatureCallResultConstraint::Direct(expected),
+                graph,
+                demand,
+                memo,
+                computing,
+            )
+        }
+
+        fn evaluate_expression_with_result_constraint<S: SignatureSemantics>(
+            semantics: &S,
+            expression: SigExprId,
+            result_constraint: SignatureCallResultConstraint,
+            graph: &SignatureGraph,
+            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            memo: &mut HashMap<SigExprId, ResolvedTy>,
+            computing: &mut crate::fx_hash::HashSet<SigExprId>,
+        ) -> Option<Result<ResolvedTy, DiagnosticId>> {
+            let expected = result_constraint.expected();
             match graph.expr(expression)? {
                 SigExpr::Call {
                     target,
@@ -734,7 +931,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     target,
                     arguments,
                     qualified,
-                    Some(expected),
+                    Some(result_constraint),
                     graph,
                     demand,
                     memo,
@@ -751,18 +948,38 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     target,
                     arguments,
                     origin,
-                    Some(expected),
+                    Some(result_constraint),
+                    ExpressionEvaluation {
+                        graph,
+                        demand,
+                        memo,
+                        computing,
+                    },
+                )),
+                SigExpr::NonNullable(base) => {
+                    let operand_expected = match semantics.make_nullable(expected) {
+                        Ok(expected) => expected,
+                        Err(error) => return Some(Err(error)),
+                    };
+                    evaluate_expression_with_expected(
+                        semantics,
+                        base,
+                        operand_expected,
+                        graph,
+                        demand,
+                        memo,
+                        computing,
+                    )
+                    .map(|result| result.and_then(|result| semantics.make_non_nullable(result)))
+                }
+                SigExpr::Nullable(base) => evaluate_expression_with_result_constraint(
+                    semantics,
+                    base,
+                    result_constraint.safe_lifted(),
                     graph,
                     demand,
                     memo,
                     computing,
-                )),
-                SigExpr::NonNullable(base) => evaluate_expression_with_expected(
-                    semantics, base, expected, graph, demand, memo, computing,
-                )
-                .map(|result| result.and_then(|result| semantics.make_non_nullable(result))),
-                SigExpr::Nullable(base) => evaluate_expression_with_expected(
-                    semantics, base, expected, graph, demand, memo, computing,
                 )
                 .map(|result| result.and_then(|result| semantics.make_nullable(result))),
                 SigExpr::Sequence { effects, result } => {
@@ -775,8 +992,14 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                             evaluate_expression(semantics, effect, graph, demand, memo, computing);
                     }
                     Some(
-                        evaluate_expression_with_expected(
-                            semantics, result, expected, graph, demand, memo, computing,
+                        evaluate_expression_with_result_constraint(
+                            semantics,
+                            result,
+                            result_constraint,
+                            graph,
+                            demand,
+                            memo,
+                            computing,
                         )
                         .unwrap_or_else(|| {
                             evaluate_expression(semantics, result, graph, demand, memo, computing)
@@ -794,8 +1017,14 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         .scope(scope)
                         .expect("a scoped receiver must retain its declaration scope");
                     semantics.enter_scoped_receiver(scope.owner, receiver);
-                    let evaluated = evaluate_expression_with_expected(
-                        semantics, result, expected, graph, demand, memo, computing,
+                    let evaluated = evaluate_expression_with_result_constraint(
+                        semantics,
+                        result,
+                        result_constraint,
+                        graph,
+                        demand,
+                        memo,
+                        computing,
                     )
                     .unwrap_or_else(|| {
                         evaluate_expression(semantics, result, graph, demand, memo, computing)
@@ -814,8 +1043,14 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     let operand_expressions = graph.operands(operands).to_vec();
                     let mut resolved_operands = Vec::with_capacity(operand_expressions.len());
                     for operand in operand_expressions {
-                        let evaluated = match evaluate_expression_with_expected(
-                            semantics, operand, expected, graph, demand, memo, computing,
+                        let evaluated = match evaluate_expression_with_result_constraint(
+                            semantics,
+                            operand,
+                            result_constraint,
+                            graph,
+                            demand,
+                            memo,
+                            computing,
                         ) {
                             Some(evaluated) => evaluated?,
                             None => evaluate_expression(
@@ -835,19 +1070,21 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
 
         /// A member call, under the expectation the graph recorded for it or an override supplied
         /// by an enclosing argument position (`repo.delete(scope.any())` hands `String` down).
-        #[allow(clippy::too_many_arguments)]
         fn evaluate_member_call<S: SignatureSemantics>(
             semantics: &S,
             receiver: SigExprId,
             target: DeferredMemberSelectionId,
             arguments: CallArgumentRange,
             origin: OriginId,
-            expected_override: Option<ResolvedTy>,
-            graph: &SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
-            memo: &mut HashMap<SigExprId, ResolvedTy>,
-            computing: &mut crate::fx_hash::HashSet<SigExprId>,
+            result_constraint_override: Option<SignatureCallResultConstraint>,
+            evaluation: ExpressionEvaluation<'_, '_>,
         ) -> Result<ResolvedTy, DiagnosticId> {
+            let ExpressionEvaluation {
+                graph,
+                demand,
+                memo,
+                computing,
+            } = evaluation;
             let receiver =
                 evaluate_expression(semantics, receiver, graph, demand, memo, computing)?;
             let selection = graph
@@ -866,40 +1103,102 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     semantics, argument, graph, demand, memo, computing,
                 )?);
             }
-            let expected = match (expected_override, selection.expected) {
-                (Some(expected), _) => Some(expected),
-                (None, Some(expected)) => Some(evaluate_expression(
-                    semantics, expected, graph, demand, memo, computing,
-                )?),
+            let result_constraint = match (result_constraint_override, selection.expected) {
+                (Some(result_constraint), _) => Some(result_constraint),
+                (None, Some(expected)) => Some(SignatureCallResultConstraint::Direct(
+                    evaluate_expression(semantics, expected, graph, demand, memo, computing)?,
+                )),
                 (None, None) => None,
             };
-            let probes = graph
-                .call_arguments(arguments)
+            let call_arguments = graph.call_arguments(arguments);
+            let mut probes = call_arguments
                 .iter()
                 .map(|argument| argument_probe(semantics, argument, graph, demand, memo, computing))
                 .collect::<Result<Vec<_>, _>>()?;
-            let expectations = semantics.member_call_argument_expectations(
-                scope,
-                spelling,
-                origin,
-                receiver,
-                &probes,
-                &resolved_type_arguments,
-                selection.trailing_lambda,
-                expected,
-                demand,
-            )?;
-            let mut resolved_arguments = Vec::new();
-            for (index, argument) in graph.call_arguments(arguments).iter().enumerate() {
-                resolved_arguments.push(materialize_argument(
-                    semantics,
-                    argument,
-                    expectations.get(index).copied().flatten(),
-                    graph,
+            let mut postponed_scheduler = postponed_arguments::Scheduler::new(&probes);
+            // A later lambda can establish the input of an earlier source argument. Recompute the
+            // selected member's shapes after every materialized contribution, exactly as for a
+            // receiver-less call above; one expectation snapshot would freeze the earlier lambda
+            // against an unresolved formal.
+            let mut materialized = vec![None; call_arguments.len()];
+            while probes.iter().any(|probe| {
+                matches!(
+                    probe,
+                    SigCallArgumentProbe::PostponedLambda { .. }
+                        | SigCallArgumentProbe::PostponedCallableReference { .. }
+                )
+            }) {
+                let expectations = semantics.member_call_argument_expectations(
+                    scope,
+                    spelling,
+                    origin,
+                    receiver,
+                    &probes,
+                    &resolved_type_arguments,
+                    selection.trailing_lambda,
+                    false,
+                    result_constraint,
                     demand,
-                    memo,
-                    computing,
-                )?);
+                )?;
+                materialize_next_postponed(
+                    semantics,
+                    &mut probes,
+                    &mut materialized,
+                    &mut postponed_scheduler,
+                    call_arguments,
+                    &expectations,
+                    ExpressionEvaluation {
+                        graph,
+                        demand,
+                        memo,
+                        computing,
+                    },
+                )?;
+            }
+            let expectations = loop {
+                let expectations = semantics.member_call_argument_expectations(
+                    scope,
+                    spelling,
+                    origin,
+                    receiver,
+                    &probes,
+                    &resolved_type_arguments,
+                    selection.trailing_lambda,
+                    postponed_scheduler.requires_typed_expectations(),
+                    result_constraint,
+                    demand,
+                )?;
+                if !refresh_materialized_postponed(
+                    semantics,
+                    &mut probes,
+                    &mut materialized,
+                    &mut postponed_scheduler,
+                    call_arguments,
+                    &expectations,
+                    ExpressionEvaluation {
+                        graph,
+                        demand,
+                        memo,
+                        computing,
+                    },
+                )? {
+                    break expectations;
+                }
+            };
+            let mut resolved_arguments = Vec::new();
+            for (index, argument) in call_arguments.iter().enumerate() {
+                resolved_arguments.push(match materialized[index] {
+                    Some(argument) => argument,
+                    None => materialize_argument(
+                        semantics,
+                        argument,
+                        expectations.get(index).copied().flatten(),
+                        graph,
+                        demand,
+                        memo,
+                        computing,
+                    )?,
+                });
             }
             let selected = semantics.select_member_call(
                 scope,
@@ -909,7 +1208,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 &resolved_arguments,
                 &resolved_type_arguments,
                 selection.trailing_lambda,
-                expected,
+                result_constraint,
                 demand,
             )?;
             if let Some(effect) = selected
@@ -1231,8 +1530,18 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         arguments,
                         origin,
                     } => evaluate_member_call(
-                        semantics, receiver, target, arguments, origin, None, graph, demand, memo,
-                        computing,
+                        semantics,
+                        receiver,
+                        target,
+                        arguments,
+                        origin,
+                        None,
+                        ExpressionEvaluation {
+                            graph,
+                            demand,
+                            memo,
+                            computing,
+                        },
                     ),
                     SigExpr::Binary {
                         operator,

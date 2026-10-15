@@ -880,7 +880,11 @@ fn postponed_call_solution_rechecks_earlier_lambda_body_with_concrete_parameter(
     let [parameter] = lambda_body.parameters() else {
         panic!("receiver lambda must publish its one value parameter")
     };
-    assert_eq!(parameter.ty.get(), Ty::obj("TargetBase"));
+    assert_eq!(
+        parameter.ty.get(),
+        Ty::obj("Target"),
+        "the later upper bound must not erase the concrete solution from the first result",
+    );
     assert_eq!(property.ty.get(), Ty::obj("Concrete"));
     let FirExprKind::PropertyRead {
         target,
@@ -899,7 +903,8 @@ fn postponed_call_solution_rechecks_earlier_lambda_body_with_concrete_parameter(
             .expect("checked lambda parameter read")
             .ty
             .get(),
-        Ty::obj("TargetBase"),
+        Ty::obj("Target"),
+        "the rechecked parameter read must carry the concrete postponed-call solution",
     );
 }
 

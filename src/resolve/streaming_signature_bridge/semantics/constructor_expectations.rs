@@ -18,6 +18,11 @@ pub(in crate::resolve::streaming_signature_bridge) struct ReceiverLevelCall<'cal
         &'call [crate::fir::SigCallArgumentProbe<'source>],
     pub(in crate::resolve::streaming_signature_bridge) type_arguments: &'call [Ty],
     pub(in crate::resolve::streaming_signature_bridge) trailing_lambda: bool,
+    /// The evaluator has materialized every postponed callable and is requesting the candidate's
+    /// updated parameter vector for its fixed-point refresh.
+    pub(in crate::resolve::streaming_signature_bridge) refresh_typed_postponed: bool,
+    pub(in crate::resolve::streaming_signature_bridge) result_constraint:
+        crate::resolve::CallResultConstraint,
 }
 
 /// Parameter shapes in declaration order, with the source argument each parameter slot receives.
@@ -40,6 +45,8 @@ impl ProductionSignatureSemantics<'_> {
             arguments,
             type_arguments,
             trailing_lambda,
+            refresh_typed_postponed: _,
+            result_constraint: _,
         } = call;
         let family = self.with_resolver(scope, |resolver| {
             Some(
@@ -83,6 +90,7 @@ impl ProductionSignatureSemantics<'_> {
         arguments: &[crate::fir::SigCallArgumentProbe<'_>],
         type_arguments: &[Ty],
         trailing_lambda: bool,
+        refresh_typed_postponed: bool,
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
         let (parameters, slots) = self.with_resolver(scope, |resolver| {
             let source_probes = arguments
@@ -178,7 +186,12 @@ impl ProductionSignatureSemantics<'_> {
             };
             Some((parameters, source_indices.into_iter().map(Some).collect()))
         })?;
-        Ok(Self::postponed_expectations(arguments, &slots, &parameters))
+        Ok(Self::postponed_expectations(
+            arguments,
+            &slots,
+            &parameters,
+            refresh_typed_postponed,
+        ))
     }
 
     /// `parameters` of one mapped candidate projected onto source-argument order; the extra

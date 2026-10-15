@@ -2172,6 +2172,8 @@ impl TestSignatureSemantics {
     }
 }
 
+impl PostponedArgumentTransaction for TestSignatureSemantics {}
+
 impl SignatureSemantics for TestSignatureSemantics {
     fn classifier_type(
         &self,
@@ -2270,6 +2272,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         _type_arguments: &[ResolvedTy],
         _trailing_lambda: bool,
         _qualified: bool,
+        _refresh_typed_postponed: bool,
         _expected: Option<ResolvedTy>,
         _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<Box<[Option<ResolvedTy>]>, DiagnosticId> {
@@ -2387,7 +2390,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         arguments: &[ResolvedSigCallArgument<'_>],
         _type_arguments: &[ResolvedTy],
         _trailing_lambda: bool,
-        expected: Option<ResolvedTy>,
+        result_constraint: Option<SignatureCallResultConstraint>,
         _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedMemberCall, DiagnosticId> {
         self.operations
@@ -2395,7 +2398,8 @@ impl SignatureSemantics for TestSignatureSemantics {
             .push(format!("member-call:{spelling}"));
         Ok(ResolvedMemberCall {
             ty: Some(
-                expected
+                result_constraint
+                    .map(SignatureCallResultConstraint::expected)
                     .or_else(|| arguments.last().map(|argument| argument.ty))
                     .unwrap_or(receiver),
             ),
@@ -2412,7 +2416,8 @@ impl SignatureSemantics for TestSignatureSemantics {
         arguments: &[SigCallArgumentProbe<'_>],
         _type_arguments: &[ResolvedTy],
         _trailing_lambda: bool,
-        _expected: Option<ResolvedTy>,
+        _refresh_typed_postponed: bool,
+        _result_constraint: Option<SignatureCallResultConstraint>,
         _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<Box<[Option<ResolvedTy>]>, DiagnosticId> {
         self.operations

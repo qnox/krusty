@@ -3,7 +3,63 @@
 
 use super::*;
 
+/// Constraint stores whose mutations belong to one provisional postponed-argument evaluation.
+pub(in crate::resolve::streaming_signature_bridge) struct ScopedConstraintCheckpoint {
+    active: HashMap<crate::fir::DeclarationId, Vec<crate::symbol_resolver::GSigBinds>>,
+    completed: HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>,
+}
+
+impl ScopedConstraintCheckpoint {
+    fn capture(
+        active: &HashMap<crate::fir::DeclarationId, Vec<crate::symbol_resolver::GSigBinds>>,
+        completed: &HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>,
+    ) -> Self {
+        Self {
+            active: active.clone(),
+            completed: completed.clone(),
+        }
+    }
+
+    fn restore(
+        self,
+        active: &mut HashMap<crate::fir::DeclarationId, Vec<crate::symbol_resolver::GSigBinds>>,
+        completed: &mut HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>,
+    ) {
+        *active = self.active;
+        *completed = self.completed;
+    }
+}
+
 impl ProductionSignatureSemantics<'_> {
+    fn begin_scoped_constraint_transaction(&self) {
+        let checkpoint = ScopedConstraintCheckpoint::capture(
+            &self.scoped_constraints.borrow(),
+            &self.completed_scoped_constraints.borrow(),
+        );
+        self.scoped_constraint_checkpoints
+            .borrow_mut()
+            .push(checkpoint);
+    }
+
+    fn commit_scoped_constraint_transaction(&self) {
+        self.scoped_constraint_checkpoints
+            .borrow_mut()
+            .pop()
+            .expect("a committed postponed-argument transaction must have a checkpoint");
+    }
+
+    fn rollback_scoped_constraint_transaction(&self) {
+        let checkpoint = self
+            .scoped_constraint_checkpoints
+            .borrow_mut()
+            .pop()
+            .expect("a rolled-back postponed-argument transaction must have a checkpoint");
+        checkpoint.restore(
+            &mut self.scoped_constraints.borrow_mut(),
+            &mut self.completed_scoped_constraints.borrow_mut(),
+        );
+    }
+
     pub(in crate::resolve::streaming_signature_bridge) fn active_scoped_constraint_frame(
         &self,
         declaration: crate::fir::DeclarationId,
@@ -136,5 +192,52 @@ impl ProductionSignatureSemantics<'_> {
         let mut finished = self.completed_scoped_constraints.borrow_mut();
         let target = finished.entry(declaration).or_default();
         Self::merge_scoped_constraints(target, completed);
+    }
+}
+
+impl crate::fir::PostponedArgumentTransaction for ProductionSignatureSemantics<'_> {
+    fn begin_postponed_argument_transaction(&self) {
+        self.begin_scoped_constraint_transaction();
+    }
+
+    fn commit_postponed_argument_transaction(&self) {
+        self.commit_scoped_constraint_transaction();
+    }
+
+    fn rollback_postponed_argument_transaction(&self) {
+        self.rollback_scoped_constraint_transaction();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_postponed_probe_restores_active_parent_constraints() {
+        let parent = crate::fir::DeclarationId::from_raw(1);
+        let child = crate::fir::DeclarationId::from_raw(2);
+        let mut parent_constraints = crate::symbol_resolver::GSigBinds::default();
+        parent_constraints.insert("T".to_owned(), Ty::String);
+        let mut active =
+            crate::fx_hash::HashMap::from_iter([(parent, vec![parent_constraints.clone()])]);
+        let completed = crate::fx_hash::HashMap::default();
+        let active_before = active.clone();
+        let completed_before = completed.clone();
+        let checkpoint = ScopedConstraintCheckpoint::capture(&active, &completed);
+
+        active
+            .get_mut(&parent)
+            .unwrap()
+            .last_mut()
+            .unwrap()
+            .insert("Leaked".to_owned(), Ty::Int);
+        let mut completed_after_failure = completed;
+        completed_after_failure.insert(child, parent_constraints);
+
+        checkpoint.restore(&mut active, &mut completed_after_failure);
+
+        assert_eq!(active, active_before);
+        assert_eq!(completed_after_failure, completed_before);
     }
 }

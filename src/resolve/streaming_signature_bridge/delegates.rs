@@ -90,7 +90,7 @@ impl ProductionSignatureSemantics<'_> {
                                 .map(crate::symbol_resolver::CallArgKind::Typed),
                             ..Default::default()
                         },
-                        None,
+                        super::super::CallResultConstraint::None,
                         super::super::MemberExtensionSelection::DelegateConventions,
                     ) {
                         super::lookups::SignatureMemberExtensionCallSelection::Selected {
@@ -207,7 +207,9 @@ impl ProductionSignatureSemantics<'_> {
                                 .map(crate::symbol_resolver::CallArgKind::Typed),
                             ..Default::default()
                         },
-                        expected.map(crate::fir::ResolvedTy::get),
+                        super::super::CallResultConstraint::direct(
+                            expected.map(crate::fir::ResolvedTy::get),
+                        ),
                         super::super::MemberExtensionSelection::DelegateConventions,
                     );
                     let (result, declaration) = match selection {
