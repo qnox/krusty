@@ -194,8 +194,11 @@ struct BridgeMember {
     descriptor: String,
     kind: MappedBuiltinMemberKind,
     parameters: Vec<Ty>,
+    generic_parameters: Vec<Ty>,
+    parameter_accepts_null: Vec<bool>,
     parameter_names: Vec<String>,
     result: Ty,
+    generic_result: Ty,
     policy: Option<CollectionBridgePolicy>,
 }
 
@@ -348,14 +351,27 @@ fn builtin_bridge_members(classpath: &Classpath, start: Ty) -> Vec<BridgeMember>
                 physical_name: declaration.physical_name,
                 descriptor: declaration.descriptor,
                 kind: declaration.kind,
+                parameter_accepts_null: declaration
+                    .generic_sig
+                    .params
+                    .iter()
+                    .map(|ty| specialized_slot_accepts_null(*ty, &bindings))
+                    .collect(),
                 parameters: declaration
                     .generic_sig
                     .params
                     .iter()
                     .map(|ty| specialize_generic_slot(*ty, &bindings))
                     .collect(),
+                generic_parameters: declaration
+                    .generic_sig
+                    .params
+                    .iter()
+                    .map(|ty| ty_subst(*ty, &bindings))
+                    .collect(),
                 parameter_names: declaration.parameter_names,
                 result: specialize_generic_slot(declaration.generic_sig.ret, &bindings),
+                generic_result: ty_subst(declaration.generic_sig.ret, &bindings),
                 policy,
             });
         }
@@ -379,6 +395,16 @@ fn specialize_generic_slot(declared: Ty, bindings: &HashMap<String, Ty>) -> Ty {
     } else {
         substituted
     }
+}
+
+fn specialized_slot_accepts_null(declared: Ty, bindings: &HashMap<String, Ty>) -> bool {
+    let substituted = ty_subst(declared, bindings);
+    substituted.admits_null()
+        || (declared
+            .non_null()
+            .ty_param_name()
+            .is_some_and(|name| bindings.contains_key(name))
+            && substituted.upper_bound_admits_null())
 }
 
 /// kotlinc groups overloads of one Kotlin name together, then emits renamed physical members last.
@@ -477,8 +503,16 @@ fn member_bridges(
 
     let specialized_property_signature = (specification.kind == MappedBuiltinMemberKind::Property)
         .then(|| property_signature(specialized_result));
-    let physical_property_signature = (specification.kind == MappedBuiltinMemberKind::Property)
-        .then(|| property_signature(specification.result));
+    let physical_signature = if specification.kind == MappedBuiltinMemberKind::Property {
+        Some(property_signature(specification.result).1)
+    } else {
+        inherited_special_method_signature(
+            &substituted_parameters,
+            substituted_result,
+            &specification.generic_parameters,
+            specification.generic_result,
+        )
+    };
     let mut bridges = vec![InheritedCollectionBridge {
         name: specialized_name.clone(),
         parameters: specification.parameters.clone(),
@@ -524,7 +558,7 @@ fn member_bridges(
         delegate_descriptor: &specialized_descriptor,
         delegate_result: specialized_result,
         access: InheritedCollectionBridgeAccess::Final,
-        signature: physical_property_signature.map(|pair| pair.1),
+        signature: physical_signature,
     }));
     if let Some(ordinary) = &replaced_ordinary {
         if ordinary.descriptor != specialized_descriptor {
@@ -603,7 +637,11 @@ fn checked_bridge(input: CheckedBridgeInput<'_>) -> InheritedCollectionBridge {
             Some(InheritedCollectionCheck {
                 parameter,
                 class_name: class_name(reference_of(semantic)),
-                nullable: semantic.admits_null(),
+                nullable: specification
+                    .parameter_accepts_null
+                    .get(usize::from(parameter))
+                    .copied()
+                    .unwrap_or_else(|| semantic.admits_null()),
             })
         })
         .collect();
@@ -715,6 +753,40 @@ fn property_signature(result: Ty) -> (String, String) {
         format!("(){}", signature_type(result, false)),
         format!("(){}", signature_type(result, true)),
     )
+}
+
+/// The final checked entry of a generic special member keeps the class-owned result variable and
+/// every parameter occurrence tied to it, while a type-checked input remains the erased JVM slot.
+/// `Map.getOrDefault` on `Map<String, V>` is therefore `(Object, V): V`: the foreign key stays
+/// `Object`, but the default and result retain `V`. A method whose result names no variable (the
+/// two-argument `remove`, for example) carries no generic signature in kotlinc.
+fn inherited_special_method_signature(
+    physical_parameters: &[Ty],
+    physical_result: Ty,
+    semantic_parameters: &[Ty],
+    semantic_result: Ty,
+) -> Option<String> {
+    if !semantic_result.mentions_ty_param() {
+        return None;
+    }
+    let parameters = physical_parameters
+        .iter()
+        .zip(semantic_parameters)
+        .map(|(&physical, &semantic)| {
+            if semantic.mentions_ty_param() && descriptor_of(semantic) == descriptor_of(physical) {
+                semantic
+            } else {
+                physical
+            }
+        })
+        .map(|parameter| signature_type(parameter, true))
+        .collect::<String>();
+    let result = if descriptor_of(semantic_result) == descriptor_of(physical_result) {
+        semantic_result
+    } else {
+        physical_result
+    };
+    Some(format!("({parameters}){}", signature_type(result, true)))
 }
 
 fn signature_type(ty: Ty, keep_parameters: bool) -> String {
