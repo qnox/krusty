@@ -677,20 +677,13 @@ impl<'a> FileLowering<'a> {
             .into_iter()
             .map(|interface| self.classes[interface as usize].descriptor)
             .collect();
-        let external_roots = self.ir.classes[class as usize]
-            .interfaces
-            .iter()
-            .chain(
-                local_interfaces
-                    .into_iter()
-                    .flat_map(|interface| self.ir.classes[interface as usize].interfaces.iter()),
-            )
-            .filter(|interface| self.ir.class_id_by_name(*interface).is_none())
-            .collect::<Vec<_>>();
-        for marker in super::classifier_shapes::runtime_interface_descriptors(
+        let runtime_markers = super::classifier_shapes::class_runtime_interface_descriptors(
+            self.ir,
             self.classifiers,
-            external_roots,
-        ) {
+            class,
+            &local_interfaces,
+        );
+        for marker in runtime_markers {
             let descriptor = self.import_data(marker)?;
             if !interfaces.contains(&descriptor) {
                 interfaces.push(descriptor);

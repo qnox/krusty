@@ -12006,6 +12006,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter. Class-file descriptors erase `SuspendFunctionN` to that same `Function{N+1}`;
   metadata still names `SuspendFunctionN`. The narrowing on an `as?`'s
   successful branch is a plain `checkcast` (kotlinc's implicit cast), since its `is` already asked.
+  Native consumes the checked function role of each semantic class supertype when it builds that
+  class's runtime descriptor. Thus a source class declared with an arrow supertype carries both its
+  physical arity marker (source arity plus the continuation for a suspend arrow) and the common
+  `Function` marker even though the arrow has no nominal classifier entry; the backend does not
+  recover either marker from a name. A dependency interface's normalized direct-supertype graph is
+  flattened into that same descriptor table: the resolved `FunctionN` role contributes the arity
+  marker and the resolved `kotlin.Function` identity contributes the common marker.
   These checks read the marker interfaces kotlinc adds to every class or interface with a direct
   Kotlin collection supertype: `KMappedMarker` for read-only faces (once) and `KMutableX` for each
   mutable one, in supertype order after the declared interfaces, in both the interface table and the
@@ -12014,6 +12021,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `NullPointerException("null cannot be cast to non-null type <type>")` for a non-null `as` (a
   root-package class is spelled `<root>.Token` there) and tests an `as?` before its `checkcast`.
   (`tests/type_intrinsics_e2e.rs`,
+  `tests/native_function_type_checks_e2e.rs`,
+  `tests/multimodule_conformance_cases.rs`,
   `jvm::inliner::reified::tests::a_suspend_function_argument_tests_the_marker_and_the_jvm_arity`,
   `fir::body_check::local_function_tests::suspend_local_function_reference_keeps_its_suspend_function_type`.)
   Corpus: `coroutines/featureIntersection/suspendFunctionIsAs.kt`.

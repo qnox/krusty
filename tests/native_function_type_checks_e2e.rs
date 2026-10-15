@@ -110,3 +110,15 @@ fn a_function_role_marker_is_confined_to_the_instance_test() {
          }\n";
     every_backend_agrees_with_kotlinc("FunctionRoleInstanceOnly", source);
 }
+
+/// An arrow-written supertype also contributes the common `Function` marker. It remains a checked
+/// semantic supertype in common IR rather than a nominal entry whose spelling a backend may inspect.
+#[test]
+fn a_source_function_implementation_is_a_common_function() {
+    let source = "class Doubler : (Int) -> Int { override fun invoke(x: Int): Int = x * 2 }\n\
+         fun box(): String {\n\
+         \x20   val value: Any = Doubler()\n\
+         \x20   return if (value is Function<*>) \"OK\" else \"function\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("SourceFunctionIsFunction", source);
+}
