@@ -9,6 +9,7 @@
 //! `super::objects`.
 
 use super::*;
+use crate::ir::TypeCheckRole;
 use crate::types::TypeName;
 
 /// What an `is` against a type Kotlin settles by itself answers.
@@ -68,7 +69,7 @@ impl<'a> FileLowering<'a> {
         Ok(id)
     }
 
-    /// The runtime descriptor for a type an `is`/`as` names: an in-file class or a built-in.
+    /// The runtime descriptor for a represented type: an in-file class or a built-in.
     pub(super) fn type_descriptor(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
         let target = ty.non_null();
         if let Some(class) = target
@@ -311,6 +312,25 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         self.file.type_descriptor(target)
     }
 
+    /// The descriptor an `is`/`!is` operation asks the runtime about.
+    ///
+    /// A checked function type names its semantic arity marker. Keep that substitution at the
+    /// instance-test boundary: casts and ordinary representation queries retain their nominal or
+    /// erased representation path, since values such as property references and user classes are
+    /// callable without necessarily wearing the native FunctionN runtime marker.
+    fn instance_check_descriptor(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
+        match self.file.ir.type_check_role(ty.non_null()) {
+            Some(role @ TypeCheckRole::FunctionOfArity(_))
+            | Some(role @ TypeCheckRole::SuspendFunctionOfArity(_)) => {
+                let Some(symbol) = super::classifier_shapes::function_check_descriptor(role) else {
+                    return Ok(None);
+                };
+                self.file.import_data(symbol).map(Some)
+            }
+            Some(TypeCheckRole::MutableCollection(_)) | None => self.file.type_descriptor(ty),
+        }
+    }
+
     /// The `is` checks Kotlin settles by the type alone — `Nothing`, which has no instances, and
     /// `Any`, which every non-`null` value is one of — and `None` when the question really is
     /// about the object.
@@ -422,7 +442,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if let Some(settled) = Self::settled_by_language(type_operand) {
                     return self.language_instance_check(op, arg, settled);
                 }
-                let Some(descriptor) = self.file.type_descriptor(type_operand)? else {
+                let Some(descriptor) = self.instance_check_descriptor(type_operand)? else {
                     return Err(declined!(
                         "an `is` check against `{}`",
                         type_name_of(type_operand)

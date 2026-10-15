@@ -94,6 +94,26 @@ pub const LOCAL_FUNCTION_SYMBOLS: Case = Case {
              }\n",
 };
 
+pub const DEPENDENCY_FUNCTION_IMPLEMENTATION_MARKERS: Case = Case {
+    stem: "multimoduleDependencyFunctionImplementationMarkers",
+    source: "// TARGET_BACKEND: NATIVE\n\
+             // MODULE: lib\n\
+             interface ExternalFn : (Int) -> Int\n\
+             // MODULE: main(lib)\n\
+             interface LocalFn : ExternalFn\n\
+             class Impl : ExternalFn { override fun invoke(value: Int) = value }\n\
+             class LocalImpl : LocalFn { override fun invoke(value: Int) = value }\n\
+             fun box(): String {\n\
+             \x20   val direct: Any = Impl()\n\
+             \x20   val throughLocal: Any = LocalImpl()\n\
+             \x20   if (direct !is Function<*>) return \"direct common\"\n\
+             \x20   if (direct !is Function1<*, *>) return \"direct arity\"\n\
+             \x20   if (throughLocal !is Function<*>) return \"local common\"\n\
+             \x20   if (throughLocal !is Function1<*, *>) return \"local arity\"\n\
+             \x20   return \"OK\"\n\
+             }\n",
+};
+
 pub const NATIVE_ABI_SYMBOLS: Case = Case {
     stem: "multimoduleNativeAbiSymbols",
     source: "// TARGET_BACKEND: NATIVE\n\
@@ -166,6 +186,7 @@ pub const ALL: &[Case] = &[
     PROPERTY_IDS,
     FORWARD_PROPERTY_IDS,
     LOCAL_FUNCTION_SYMBOLS,
+    DEPENDENCY_FUNCTION_IMPLEMENTATION_MARKERS,
     NATIVE_ABI_SYMBOLS,
     FLOATING_BITS,
     FLOATING_BIT_REFERENCES,

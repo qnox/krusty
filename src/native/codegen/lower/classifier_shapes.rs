@@ -3,7 +3,8 @@
 //! provider records or common IR as a parallel semantic-role taxonomy.
 
 use crate::backend::BackendClassifierSource;
-use crate::ir::ClassId;
+use crate::ir::TypeCheckRole;
+use crate::ir::{ClassId, IrFile};
 use crate::types::{ClassifierRole, CollectionKind, MappedCollection, Ty, TypeName};
 
 use super::super::super::intrinsics::CollectionShape;
@@ -159,7 +160,9 @@ pub(super) fn is_enum_entries(internal: TypeName) -> bool {
 }
 
 fn standard_interface_descriptor(internal: TypeName) -> Option<&'static str> {
-    Some(if is_comparable(internal) {
+    Some(if internal == crate::types::wk::function_root() {
+        "kt_type_function"
+    } else if is_comparable(internal) {
         "kt_type_comparable"
     } else if is_char_sequence(internal) {
         "kt_type_char_sequence"
@@ -328,11 +331,13 @@ pub(super) fn is_list_check_type(
     )
 }
 
-/// The native runtime marker for a published non-suspend function classifier.
-pub(super) fn function_type_descriptor(
-    classifiers: &dyn BackendClassifierSource,
-    internal: TypeName,
-) -> Option<&'static str> {
+/// The native runtime marker for a checked function role.
+///
+/// Native function values publish one marker per ordinary source arity through 22. Suspend
+/// functions have a distinct semantic role, but this runtime does not yet construct suspend
+/// function values or publish suspend markers. Wider ordinary functions likewise have no marker,
+/// so both remain an explicit decline instead of being mistaken for another function family.
+pub(super) fn function_check_descriptor(role: TypeCheckRole) -> Option<&'static str> {
     const ARITIES: [&str; 23] = [
         "kt_type_function0",
         "kt_type_function1",
@@ -358,13 +363,88 @@ pub(super) fn function_type_descriptor(
         "kt_type_function21",
         "kt_type_function22",
     ];
+    match role {
+        TypeCheckRole::FunctionOfArity(arity) => ARITIES.get(usize::from(arity)).copied(),
+        TypeCheckRole::SuspendFunctionOfArity(_) | TypeCheckRole::MutableCollection(_) => None,
+    }
+}
+
+/// Runtime markers a class's checked function supertypes contribute to its descriptor.
+///
+/// [`IrClass::interfaces`](crate::ir::IrClass::interfaces) contains nominal classifier identities,
+/// while an arrow-written supertype remains a semantic [`Ty::Fun`]. Its checked role therefore
+/// travels through [`IrClass::supertypes`](crate::ir::IrClass::supertypes) instead. Native attaches
+/// both the arity marker used by `is FunctionN` and the common marker used by `is Function`; it
+/// never reconstructs either role from a classifier spelling.
+pub(super) fn function_supertype_descriptors(
+    roles: impl IntoIterator<Item = TypeCheckRole>,
+) -> Vec<&'static str> {
+    let mut descriptors = Vec::new();
+    for role in roles {
+        let physical_arity = match role {
+            TypeCheckRole::FunctionOfArity(arity) => Some(arity),
+            TypeCheckRole::SuspendFunctionOfArity(arity) => arity.checked_add(1),
+            TypeCheckRole::MutableCollection(_) => continue,
+        };
+        if let Some(arity) = physical_arity
+            .and_then(|arity| function_check_descriptor(TypeCheckRole::FunctionOfArity(arity)))
+        {
+            if !descriptors.contains(&arity) {
+                descriptors.push(arity);
+            }
+        }
+        if !descriptors.contains(&"kt_type_function") {
+            descriptors.push("kt_type_function");
+        }
+    }
+    descriptors
+}
+
+/// Runtime marker descriptors contributed by one source class's checked interface graph.
+///
+/// Nominal dependency interfaces are flattened through backend classifier facts. Arrow-written
+/// function supertypes have no nominal entry in [`crate::ir::IrClass::interfaces`], so their
+/// already-checked semantic roles are consumed from [`crate::ir::IrClass::supertypes`].
+pub(super) fn class_runtime_interface_descriptors(
+    ir: &IrFile,
+    classifiers: &dyn BackendClassifierSource,
+    class: ClassId,
+    local_interfaces: &[ClassId],
+) -> Vec<&'static str> {
+    let external_roots = ir.classes[class as usize]
+        .interfaces
+        .iter()
+        .chain(
+            local_interfaces
+                .iter()
+                .flat_map(|interface| ir.classes[*interface as usize].interfaces.iter()),
+        )
+        .filter(|interface| ir.class_id_by_name(*interface).is_none());
+    let mut descriptors = runtime_interface_descriptors(classifiers, external_roots);
+    let function_roles = std::iter::once(class)
+        .chain(local_interfaces.iter().copied())
+        .flat_map(|classifier| ir.classes[classifier as usize].supertypes.iter())
+        .filter_map(|supertype| ir.type_check_role(*supertype));
+    for descriptor in function_supertype_descriptors(function_roles) {
+        if !descriptors.contains(&descriptor) {
+            descriptors.push(descriptor);
+        }
+    }
+    descriptors
+}
+
+/// The native runtime marker for a published non-suspend function classifier.
+pub(super) fn function_type_descriptor(
+    classifiers: &dyn BackendClassifierSource,
+    internal: TypeName,
+) -> Option<&'static str> {
     if internal == crate::types::wk::function_root() {
         return Some("kt_type_function");
     }
     let ClassifierRole::FunctionOfArity(arity) = classifiers.classifier(internal)?.role? else {
         return None;
     };
-    ARITIES.get(usize::from(arity)).copied()
+    function_check_descriptor(TypeCheckRole::FunctionOfArity(arity))
 }
 
 /// Runtime marker descriptors for dependency interfaces in one class's declared interface graph.
@@ -373,8 +453,9 @@ pub(super) fn function_type_descriptor(
 /// interfaces instead name one of the runtime's representation markers. Follow the provider's
 /// direct-supertype graph and flatten those markers here because `KType.interfaces` is deliberately
 /// a flat table: `kt_is_instance` must not reopen a provider or recursively interpret interface
-/// declarations at run time.
-pub(super) fn runtime_interface_descriptors(
+/// declarations at run time. The graph's resolved `kotlin.Function` identity contributes the
+/// common function marker separately from the arity role on `FunctionN`.
+fn runtime_interface_descriptors(
     classifiers: &dyn BackendClassifierSource,
     roots: impl IntoIterator<Item = TypeName>,
 ) -> Vec<&'static str> {
@@ -411,32 +492,7 @@ pub(super) fn runtime_interface_descriptors(
                 CollectionKind::ListIterator => None,
             },
             Some(ClassifierRole::FunctionOfArity(arity)) => {
-                const ARITIES: [&str; 23] = [
-                    "kt_type_function0",
-                    "kt_type_function1",
-                    "kt_type_function2",
-                    "kt_type_function3",
-                    "kt_type_function4",
-                    "kt_type_function5",
-                    "kt_type_function6",
-                    "kt_type_function7",
-                    "kt_type_function8",
-                    "kt_type_function9",
-                    "kt_type_function10",
-                    "kt_type_function11",
-                    "kt_type_function12",
-                    "kt_type_function13",
-                    "kt_type_function14",
-                    "kt_type_function15",
-                    "kt_type_function16",
-                    "kt_type_function17",
-                    "kt_type_function18",
-                    "kt_type_function19",
-                    "kt_type_function20",
-                    "kt_type_function21",
-                    "kt_type_function22",
-                ];
-                ARITIES.get(usize::from(arity)).copied()
+                function_check_descriptor(TypeCheckRole::FunctionOfArity(arity))
             }
             Some(ClassifierRole::SuspendFunctionOfArity(_)) | None => {
                 standard_interface_descriptor(internal)
@@ -598,6 +654,42 @@ impl<'a> FileLowering<'a> {
 mod tests {
     use super::*;
     use crate::types::type_name;
+    use std::sync::Arc;
+
+    #[derive(Default)]
+    struct Facts(crate::fx_hash::HashMap<TypeName, Arc<crate::backend::BackendClassifierFact>>);
+
+    impl BackendClassifierSource for Facts {
+        fn classifier(
+            &self,
+            classifier: TypeName,
+        ) -> Option<Arc<crate::backend::BackendClassifierFact>> {
+            self.0.get(&classifier).cloned()
+        }
+    }
+
+    fn interface_fact(
+        supertypes: &[TypeName],
+        role: Option<ClassifierRole>,
+    ) -> Arc<crate::backend::BackendClassifierFact> {
+        Arc::new(crate::backend::BackendClassifierFact {
+            access: crate::libraries::ClassifierAccess::Public,
+            is_kotlin: true,
+            source: false,
+            outer_instance: None,
+            kind: crate::libraries::TypeKind::Interface,
+            is_abstract: true,
+            is_extensible: true,
+            supertypes: supertypes.into(),
+            annotations: Box::new([]),
+            own_type_parameter_count: 0,
+            type_param_variances: Box::new([]),
+            value_underlying: None,
+            value_declaration: None,
+            role,
+            companion: None,
+        })
+    }
 
     #[test]
     fn native_standard_library_implementations_require_exact_classifier_identities() {
@@ -624,6 +716,14 @@ mod tests {
     #[test]
     fn native_interface_markers_require_exact_classifier_identities() {
         assert_eq!(
+            standard_interface_descriptor(crate::types::wk::function_root()),
+            Some("kt_type_function")
+        );
+        assert_eq!(
+            standard_interface_descriptor(type_name("sample/Function")),
+            None
+        );
+        assert_eq!(
             standard_interface_descriptor(type_name("kotlin/reflect/KProperty1")),
             Some("kt_type_kproperty1")
         );
@@ -633,5 +733,56 @@ mod tests {
         );
         assert!(is_comparable(type_name("kotlin/Comparable")));
         assert!(!is_comparable(type_name("sample/Comparable")));
+    }
+
+    #[test]
+    fn native_function_check_markers_follow_runtime_role_limits() {
+        assert_eq!(
+            function_check_descriptor(TypeCheckRole::FunctionOfArity(0)),
+            Some("kt_type_function0")
+        );
+        assert_eq!(
+            function_check_descriptor(TypeCheckRole::FunctionOfArity(22)),
+            Some("kt_type_function22")
+        );
+        assert_eq!(
+            function_check_descriptor(TypeCheckRole::FunctionOfArity(23)),
+            None
+        );
+        assert_eq!(
+            function_check_descriptor(TypeCheckRole::SuspendFunctionOfArity(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn dependency_function_graph_contributes_arity_and_common_markers() {
+        let external = type_name("sample/ExternalFn");
+        let function1 = type_name("kotlin/Function1");
+        let function = crate::types::wk::function_root();
+        let mut facts = Facts::default();
+        facts.0.insert(external, interface_fact(&[function1], None));
+        facts.0.insert(
+            function1,
+            interface_fact(&[function], Some(ClassifierRole::FunctionOfArity(1))),
+        );
+        facts.0.insert(function, interface_fact(&[], None));
+
+        assert_eq!(
+            runtime_interface_descriptors(&facts, [external]),
+            vec!["kt_type_function1", "kt_type_function"]
+        );
+    }
+
+    #[test]
+    fn checked_function_supertypes_contribute_physical_arity_and_common_markers() {
+        assert_eq!(
+            function_supertype_descriptors([
+                TypeCheckRole::FunctionOfArity(1),
+                TypeCheckRole::FunctionOfArity(1),
+                TypeCheckRole::SuspendFunctionOfArity(1),
+            ]),
+            vec!["kt_type_function1", "kt_type_function", "kt_type_function2"]
+        );
     }
 }

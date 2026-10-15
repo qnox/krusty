@@ -195,6 +195,7 @@ mod source_generic_signatures;
 mod source_signature_display;
 mod source_type_resolution;
 mod symbol_display;
+mod type_test_planning;
 mod type_use_annotation_publication;
 use source_fragment::SourceFragmentMode;
 use source_generic_signatures::{
@@ -8917,10 +8918,13 @@ pub enum ExprLowering {
     /// selected the built-in operation; checked FIR consumes this decision without reinterpreting
     /// the callable spelling or synthesizing a declaration lookup.
     BuiltinUnaryCall { operation: BuiltinUnaryOperation },
-    /// Runtime type operand selected from a classifier declaration whose semantic callable shape is
-    /// not identical to its nominal classifier type. Backends realize the recorded type; lowering
-    /// never re-resolves the source type reference.
-    RuntimeTypeOperand(Ty),
+    /// Runtime type-test plan selected from declaration facts. `target` carries any normalized
+    /// callable shape, and the erased-bound equality is final; lowering never reopens a provider or
+    /// reinterprets the source type reference.
+    RuntimeTypeTest {
+        target: Ty,
+        same_erased_upper_bound: bool,
+    },
     /// `receiver.(callable)` after the callable has been proven to have an extension-function type.
     /// `target` is the complete unbound function shape (context parameters, extension receiver, value
     /// parameters, result, and suspend bit); `result` is the same shape with only the extension
@@ -25556,28 +25560,6 @@ fun use() {
     same(value, value)
 }
 "#);
-    }
-
-    #[test]
-    fn named_function_runtime_check_records_its_metadata_callable_shape() {
-        let source = "fun inspect(value: Any) = value is Function1<*, *>";
-        let platform =
-            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
-        let (file, info, diagnostics) = retained_platform_analysis(source, Box::new(platform));
-        let check = file
-            .expr_arena
-            .iter()
-            .enumerate()
-            .find_map(|(index, expression)| {
-                matches!(expression, Expr::Is { .. }).then_some(ExprId(index as u32))
-            })
-            .expect("type check expression");
-        assert_no_diags(&diagnostics);
-        assert!(matches!(
-            info.expr_lowers.get(&check),
-            Some(ExprLowering::RuntimeTypeOperand(Ty::Fun(signature)))
-                if signature.params.len() == 1
-        ));
     }
 
     #[test]
@@ -57887,22 +57869,31 @@ impl<'a> Checker<'a> {
                     return Ty::Error;
                 }
             }
-            if function_shape.is_some() && function_type_ref_shape(&ty).is_none() {
+            let runtime_type = if function_shape.is_some() && function_type_ref_shape(&ty).is_none()
+            {
                 // FunctionN/SuspendFunctionN are metadata-only classifier spellings and test
                 // their physical function interface. Reflective KFunctionN/KSuspendFunctionN
                 // are nominal runtime markers: retain that classifier so lowering does not
                 // collapse `is KSuspendFunction1` into the broader `is Function2` test.
-                let runtime_type =
-                    crate::symbol_resolver::declared_function_type(&self.fed_source(), tt)
-                        .unwrap_or(tt);
-                self.expr_lowers
-                    .insert(e, ExprLowering::RuntimeTypeOperand(runtime_type));
-            }
+                crate::symbol_resolver::declared_function_type(&self.fed_source(), tt).unwrap_or(tt)
+            } else {
+                tt
+            };
             // An unresolved non-function target reads exactly as kotlinc reports it — `unresolved
             // reference 'T'.` at the failing type's span — never as a compiler-specific rejection.
             if tt.contains_error() && self.report_unresolved_type_ref(&ty) {
                 return Ty::Error;
             }
+            let source = self.fed_source();
+            let same_erased_upper_bound =
+                type_test_planning::same_erased_upper_bound(&source, ot, runtime_type);
+            self.expr_lowers.insert(
+                e,
+                ExprLowering::RuntimeTypeTest {
+                    target: runtime_type,
+                    same_erased_upper_bound,
+                },
+            );
             // Operand representation is not a source-validity condition. Scalars, nullable scalar
             // boxes, value classes, and references all carry the same resolved type-test operation
             // into FIR; common lowering/backend code owns boxing and runtime test realization.
