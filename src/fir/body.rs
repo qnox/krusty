@@ -1833,6 +1833,9 @@ pub struct FirBody {
     /// to a literal. Both are `FirExprKind::Constant`; metadata's constant-initializer rule
     /// tells them apart.
     constant_reads: HashSet<FirExprId>,
+    /// Local-storage blocks originating from postfix `++`/`--`, whose checked shape snapshots the
+    /// old value.
+    postfix_updates: HashSet<FirExprId>,
     /// This callable's own lifting site, for a lambda or local function body.
     lifting_site: Option<FirLiftingSite>,
     /// Target-realized callables declared in this body that have no common FIR body: the accessors
@@ -1899,6 +1902,7 @@ impl FirBody {
             debug_lines: Default::default(),
             generated_class_provenance: HashMap::default(),
             constant_reads: HashSet::default(),
+            postfix_updates: HashSet::default(),
             lifting_site: None,
             bodiless_lifting_sites: Vec::new(),
             local_delegate_plans: Vec::new(),
@@ -2566,6 +2570,14 @@ impl FirBody {
     /// Whether this constant is a read of a constant declaration rather than a literal.
     pub fn is_constant_read(&self, expression: FirExprId) -> bool {
         self.constant_reads.contains(&expression)
+    }
+
+    pub(crate) fn record_postfix_update(&mut self, block: FirExprId) {
+        self.postfix_updates.insert(block);
+    }
+
+    pub(crate) fn is_postfix_update(&self, block: FirExprId) -> bool {
+        self.postfix_updates.contains(&block)
     }
 
     pub(crate) fn set_generated_class_provenance(
