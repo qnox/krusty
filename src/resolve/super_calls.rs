@@ -267,33 +267,43 @@ impl Checker<'_> {
             |owner: TypeName| qualifier.is_none_or(|qualifier| owner.qualifier_matches(qualifier));
         let select = |applied_owner: Ty, interface: bool| {
             let owner = applied_owner.obj_internal()?;
-            let selected = self.resolver().select_member_property_applicable_where(
-                applied_owner,
-                name,
-                |property| {
-                    let visibility = if setter {
-                        property.setter_visibility
-                    } else {
-                        property.visibility
-                    };
-                    (property.context_count == 0).then_some((
-                        self.receiver_property_accessible(
-                            visibility,
-                            property.owner,
-                            access_receiver,
-                            if setter {
-                                property
-                                    .setter
-                                    .as_ref()
-                                    .and_then(|setter| setter.external_identity)
-                            } else {
-                                property.getter.external_identity
-                            },
-                        ),
-                        0,
-                    ))
-                },
-            )?;
+            let select_property = |property: &crate::libraries::PropertyInfo| {
+                let visibility = if setter {
+                    property.setter_visibility
+                } else {
+                    property.visibility
+                };
+                (property.context_count == 0).then_some((
+                    self.receiver_property_accessible(
+                        visibility,
+                        property.owner,
+                        access_receiver,
+                        if setter {
+                            property
+                                .setter
+                                .as_ref()
+                                .and_then(|setter| setter.external_identity)
+                        } else {
+                            property.getter.external_identity
+                        },
+                    ),
+                    0,
+                ))
+            };
+            let selected = if setter {
+                self.resolver()
+                    .select_member_property_write_applicable_where(
+                        applied_owner,
+                        name,
+                        select_property,
+                    )
+            } else {
+                self.resolver().select_member_property_applicable_where(
+                    applied_owner,
+                    name,
+                    select_property,
+                )
+            }?;
             let access_visibility = if setter {
                 selected
                     .property

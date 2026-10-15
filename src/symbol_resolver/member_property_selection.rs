@@ -2,7 +2,7 @@
 
 use super::{
     direct_supertypes, hierarchy_projection, member_hierarchy::declared_callables,
-    member_is_inheritable, PropKind, SelectedMemberProperty, SymbolResolver, Ty,
+    member_is_inheritable, PropKind, PropertyAccess, SelectedMemberProperty, SymbolResolver, Ty,
 };
 use crate::symbol_source::SymbolSource;
 
@@ -33,6 +33,38 @@ impl SymbolResolver<'_> {
         name: &str,
         property_applicable: impl Fn(&crate::libraries::PropertyInfo) -> Option<(bool, usize)>,
     ) -> Option<SelectedMemberProperty> {
+        self.select_member_property_for_access(
+            recv,
+            name,
+            PropertyAccess::Read,
+            property_applicable,
+        )
+    }
+
+    /// [`Self::select_member_property_applicable_where`] for a write. Getter and setter
+    /// availability are independent declaration facts, so write selection must not admit a
+    /// declaration merely because its getter remains readable.
+    pub(crate) fn select_member_property_write_applicable_where(
+        &self,
+        recv: Ty,
+        name: &str,
+        property_applicable: impl Fn(&crate::libraries::PropertyInfo) -> Option<(bool, usize)>,
+    ) -> Option<SelectedMemberProperty> {
+        self.select_member_property_for_access(
+            recv,
+            name,
+            PropertyAccess::Write,
+            property_applicable,
+        )
+    }
+
+    fn select_member_property_for_access(
+        &self,
+        recv: Ty,
+        name: &str,
+        access: PropertyAccess,
+        property_applicable: impl Fn(&crate::libraries::PropertyInfo) -> Option<(bool, usize)>,
+    ) -> Option<SelectedMemberProperty> {
         if recv.is_nullable()
             || (!matches!(recv.non_null(), Ty::Intersection(_))
                 && recv.kotlin_class_internal().is_none())
@@ -42,15 +74,16 @@ impl SymbolResolver<'_> {
         // Component order is the selection order. A later component's direct property must not
         // hide a property the earlier component only inherits, and a `var` overrides a `val`.
         if let Some(parts) = hierarchy_projection::intersection_components(recv) {
-            return self.intersection_member_property(parts, name, &property_applicable);
+            return self.intersection_member_property(parts, name, access, &property_applicable);
         }
-        self.select_classifier_member_property(recv, name, &property_applicable)
+        self.select_classifier_member_property(recv, name, access, &property_applicable)
     }
 
     fn select_classifier_member_property(
         &self,
         recv: Ty,
         name: &str,
+        access: PropertyAccess,
         property_applicable: &dyn Fn(&crate::libraries::PropertyInfo) -> Option<(bool, usize)>,
     ) -> Option<SelectedMemberProperty> {
         let mut queue = std::collections::VecDeque::from([(recv, 0u32)]);
@@ -79,9 +112,10 @@ impl SymbolResolver<'_> {
                     .inherited_accessor_properties(&self.src, current, name)
                     .overloads,
             );
-            local_properties
-                .overloads
-                .retain(|property| !property.deprecated_hidden);
+            local_properties.overloads.retain(|property| match access {
+                PropertyAccess::Read => property.readable(),
+                PropertyAccess::Write => property.write_selectable(),
+            });
             if depth > 0 {
                 local_properties
                     .overloads
@@ -226,12 +260,13 @@ impl SymbolResolver<'_> {
         &self,
         parts: &[Ty],
         name: &str,
+        access: PropertyAccess,
         property_applicable: &dyn Fn(&crate::libraries::PropertyInfo) -> Option<(bool, usize)>,
     ) -> Option<SelectedMemberProperty> {
         let mut selected_val = None;
         for part in parts.iter().copied() {
             let Some(selected) =
-                self.select_classifier_member_property(part, name, property_applicable)
+                self.select_classifier_member_property(part, name, access, property_applicable)
             else {
                 continue;
             };
@@ -260,6 +295,20 @@ impl SymbolResolver<'_> {
                 .select_member_property(receiver, name)
                 .and_then(|selected| selected.property);
         }
-        super::member_property_from_callables(callables)
+        super::member_property_from_callables(callables, PropertyAccess::Read)
+    }
+
+    pub(super) fn declared_member_property_for_write(
+        &self,
+        receiver: Ty,
+        name: &str,
+        callables: &crate::libraries::Callables,
+    ) -> Option<crate::libraries::PropertyInfo> {
+        if hierarchy_projection::intersection_components(receiver.non_null()).is_some() {
+            return self
+                .select_member_property_write_applicable_where(receiver, name, |_| Some((true, 0)))
+                .and_then(|selected| selected.property);
+        }
+        super::member_property_from_callables(callables, PropertyAccess::Write)
     }
 }

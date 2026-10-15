@@ -1594,6 +1594,7 @@ impl ProductionSignatureSemantics<'_> {
             },
             extension_receiver,
             name,
+            crate::symbol_resolver::PropertyAccess::Read,
         )?;
         Ok(selected.map(|selected| (selected.ty, selected.stable_declaration)))
     }

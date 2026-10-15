@@ -13,7 +13,7 @@ use crate::libraries::{
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{stored_value_ty, Ty, TypeName};
 
-use super::{DeclarationFlags, DeclarationId, DeclarationKind, ResolvedModuleIndex};
+use super::{DeclarationFlags, DeclarationId, DeclarationKind, ResolvedModuleIndex, SourceFileId};
 
 /// Pass-2 current-module provider. Its type deliberately cannot retain the Pass-1 symbol table.
 pub(crate) struct StreamedModuleSymbols<'a> {
@@ -441,7 +441,9 @@ impl<'a> StreamedModuleSymbols<'a> {
         let exposes_constructors = !flags.has(DeclarationFlags::INTERFACE)
             && !flags.has(DeclarationFlags::SINGLETON)
             && !flags.has(DeclarationFlags::ENUM);
-        for (_, declaration) in declarations.into_iter().filter(|_| exposes_constructors) {
+        for (_, declaration) in declarations.into_iter().filter(|(_, declaration)| {
+            exposes_constructors && !self.declaration_is_hidden_at_use(*declaration)
+        }) {
             let Some(signature) = self.index.signature(declaration) else {
                 continue;
             };
@@ -587,6 +589,17 @@ impl<'a> StreamedModuleSymbols<'a> {
         Some(projected)
     }
 
+    /// Whether `declaration` is hidden at this provider view's use site. A common source binds to
+    /// the `expect` header an `actual` (or one of its owned declarations) replaces, so the
+    /// implementation's `HIDDEN` deprecation does not remove that candidate there.
+    fn declaration_is_hidden_at_use(&self, declaration: DeclarationId) -> bool {
+        self.declaration_is_deprecated_hidden(declaration)
+            && !self.source_file.is_some_and(|source| {
+                self.index
+                    .binds_expectation(SourceFileId::from_raw(source), declaration)
+            })
+    }
+
     /// A hidden-deprecated declaration stays in emitted binary form and is absent from Kotlin
     /// candidate collection. Its provider published that meaning as an annotation fact.
     fn declaration_is_deprecated_hidden(&self, declaration: DeclarationId) -> bool {
@@ -594,6 +607,22 @@ impl<'a> StreamedModuleSymbols<'a> {
             .declaration_applied_annotations(declaration)
             .iter()
             .any(crate::types::ResolvedAnnotation::is_deprecated_hidden)
+    }
+
+    /// Availability of a source property's independently annotated accessors.
+    fn property_accessor_availability(
+        &self,
+        declaration: DeclarationId,
+    ) -> crate::libraries::PropertyAccessorAvailability {
+        let available = |sibling| {
+            self.index
+                .owned_declaration(declaration, DeclarationKind::Accessor, sibling)
+                .is_none_or(|accessor| !self.declaration_is_hidden_at_use(accessor))
+        };
+        crate::libraries::PropertyAccessorAvailability {
+            getter: available(0),
+            setter: available(1),
+        }
     }
 
     fn semantic_callable(
@@ -721,7 +750,8 @@ impl<'a> StreamedModuleSymbols<'a> {
             implicit_integer_coercion: false,
             compile_time_constant: None,
             metadata_constant_read: false,
-            deprecated_hidden: self.declaration_is_deprecated_hidden(declaration),
+            deprecated_hidden: self.declaration_is_hidden_at_use(declaration),
+            accessor_availability: self.property_accessor_availability(declaration),
             is_final: header.flags.has(DeclarationFlags::FINAL),
             visibility: header.visibility,
             owner,
@@ -947,7 +977,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             {
                 continue;
             }
-            let deprecated_hidden = self.declaration_is_deprecated_hidden(declaration);
+            let deprecated_hidden = self.declaration_is_hidden_at_use(declaration);
             // Kotlin members are final by default. An override stays open unless it writes
             // `final`; interface declarations are likewise overridable without an `open` token.
             let is_final = header.flags.has(DeclarationFlags::FINAL)
@@ -1310,7 +1340,8 @@ impl<'a> StreamedModuleSymbols<'a> {
                 implicit_integer_coercion: false,
                 compile_time_constant: self.index.compile_time_constant(declaration).cloned(),
                 metadata_constant_read: false,
-                deprecated_hidden: self.declaration_is_deprecated_hidden(declaration),
+                deprecated_hidden: self.declaration_is_hidden_at_use(declaration),
+                accessor_availability: self.property_accessor_availability(declaration),
                 is_final,
                 visibility: header.visibility,
                 owner: internal,
@@ -1526,7 +1557,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 infix: header.flags.has(DeclarationFlags::INFIX),
                 is_abstract: header.flags.has(DeclarationFlags::ABSTRACT),
                 is_final: header.flags.has(DeclarationFlags::FINAL),
-                deprecated_hidden: false,
+                deprecated_hidden: self.declaration_is_hidden_at_use(declaration),
                 inherited_by_delegation: false,
                 return_value_status: None,
             };
@@ -1710,7 +1741,8 @@ impl<'a> StreamedModuleSymbols<'a> {
                     }),
                 compile_time_constant: self.index.compile_time_constant(declaration).cloned(),
                 metadata_constant_read: false,
-                deprecated_hidden: self.declaration_is_deprecated_hidden(declaration),
+                deprecated_hidden: self.declaration_is_hidden_at_use(declaration),
+                accessor_availability: self.property_accessor_availability(declaration),
                 is_final: true,
                 visibility: header.visibility,
                 owner: TypeName::ROOT,
@@ -1776,6 +1808,10 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
             functions.overloads.extend(associated_functions);
             properties.overloads.extend(associated_properties);
         }
+        // A HIDDEN-deprecated declaration stays in binary form but is never a Kotlin candidate.
+        functions
+            .overloads
+            .retain(|function| !function.flags.deprecated_hidden);
         properties
             .overloads
             .retain(|property| !property.deprecated_hidden);

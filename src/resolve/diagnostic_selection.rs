@@ -62,6 +62,52 @@ impl Checker<'_> {
         name: &str,
         receiver_ty: Ty,
     ) -> String {
+        let hidden_deprecated = self
+            .resolver()
+            .receiver_has_hidden_deprecated_member(receiver_ty, name);
+        self.unresolved_member_diagnostic_with_hidden(
+            scope,
+            receiver,
+            name,
+            receiver_ty,
+            hidden_deprecated,
+        )
+    }
+
+    /// Property-read form of [`Self::unresolved_member_diagnostic`]. Accessor-level HIDDEN
+    /// deprecation is independent of the property declaration and therefore needs the selected
+    /// operation as an input to diagnostic fact selection.
+    pub(super) fn unresolved_property_read_diagnostic(
+        &self,
+        scope: &CheckerScope<'_>,
+        receiver: Option<ExprId>,
+        name: &str,
+        receiver_ty: Ty,
+    ) -> String {
+        let hidden_deprecated = self
+            .resolver()
+            .receiver_has_hidden_deprecated_property_accessor(
+                receiver_ty,
+                name,
+                crate::symbol_resolver::PropertyAccess::Read,
+            );
+        self.unresolved_member_diagnostic_with_hidden(
+            scope,
+            receiver,
+            name,
+            receiver_ty,
+            hidden_deprecated,
+        )
+    }
+
+    fn unresolved_member_diagnostic_with_hidden(
+        &self,
+        scope: &CheckerScope<'_>,
+        receiver: Option<ExprId>,
+        name: &str,
+        receiver_ty: Ty,
+        hidden_deprecated: bool,
+    ) -> String {
         let qualifier = receiver.is_some_and(|receiver| {
             matches!(
                 self.qualifier(scope, QualifierInput::Expression(receiver)),
@@ -73,12 +119,7 @@ impl Checker<'_> {
         } else if self.omit_unshaped_any_receiver_type > 0 && receiver_ty == Ty::obj("kotlin/Any") {
             crate::diagnostic_wording::unresolved_reference_on(name, None)
         } else {
-            unresolved_member_message(
-                name,
-                receiver_ty,
-                self.resolver()
-                    .receiver_has_hidden_deprecated_member(receiver_ty, name),
-            )
+            unresolved_member_message(name, receiver_ty, hidden_deprecated)
         }
     }
 }

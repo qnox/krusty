@@ -325,7 +325,33 @@ impl SymbolResolver<'_> {
     /// one: the property facet of [`SymbolResolver::select_symbol`] on a receiver-less name,
     /// without collecting and selecting among the same name's function overloads.
     pub(crate) fn top_level_properties(&self, name: &str) -> Vec<PropertyInfo> {
-        self.nearest_top_level_properties(self.symbol_levels_in_scope(name))
+        self.top_level_properties_for_access(name, super::PropertyAccess::Read)
+    }
+
+    pub(crate) fn top_level_properties_for_write(&self, name: &str) -> Vec<PropertyInfo> {
+        self.top_level_properties_for_access(name, super::PropertyAccess::Write)
+    }
+
+    fn top_level_properties_for_access(
+        &self,
+        name: &str,
+        access: super::PropertyAccess,
+    ) -> Vec<PropertyInfo> {
+        self.symbol_levels_in_scope(name)
+            .iter()
+            .map(|symbols| {
+                level_properties(symbols)
+                    .filter(|property| property.kind == PropKind::TopLevel)
+                    .filter(|property| self.property_visible(property))
+                    .filter(|property| match access {
+                        super::PropertyAccess::Read => property.readable(),
+                        super::PropertyAccess::Write => property.write_selectable(),
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .find(|properties| !properties.is_empty())
+            .unwrap_or_default()
     }
 
     pub(super) fn nearest_top_level_properties(
@@ -338,6 +364,7 @@ impl SymbolResolver<'_> {
                 level_properties(symbols)
                     .filter(|property| property.kind == PropKind::TopLevel)
                     .filter(|property| self.property_visible(property))
+                    .filter(|property| property.readable())
                     .cloned()
                     .collect::<Vec<_>>()
             })

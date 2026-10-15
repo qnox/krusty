@@ -137,6 +137,7 @@ pub(super) fn select(
     context_arguments: &dyn Fn(&[Ty]) -> Option<Vec<(ResolvedContextArgument, Ty)>>,
     extension_receiver: Ty,
     name: &str,
+    access: crate::symbol_resolver::PropertyAccess,
 ) -> Result<Option<MemberExtensionProperty>, ()> {
     let mut candidates = Vec::new();
     for (dispatch_rank, dispatch_receiver) in implicit_receivers.iter().copied().enumerate() {
@@ -159,6 +160,12 @@ pub(super) fn select(
                             property.kind == crate::libraries::PropKind::MemberExtension
                                 && (property.stable_declaration.is_some()
                                     || property.getter.external_property_identity.is_some())
+                        })
+                        .filter(|property| match access {
+                            crate::symbol_resolver::PropertyAccess::Read => property.readable(),
+                            crate::symbol_resolver::PropertyAccess::Write => {
+                                property.write_selectable()
+                            }
                         })
                         .filter_map(|property| {
                             let receiver = property.receiver?;

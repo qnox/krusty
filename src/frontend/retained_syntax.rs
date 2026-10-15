@@ -222,6 +222,10 @@ fn retain_parameter_defaults<'a>(
 fn collect_pass_one_roots(file: &File) -> Reachable {
     let mut retained = Reachable::default();
     for declaration in &file.decl_arena {
+        // Checked declaration metadata is published after stable signature finalization: the
+        // arguments of every declaration's own annotations are folded before any body is checked.
+        // The declarations' bodies stay with their ordinary declaration units.
+        retained.roots(file, declaration_annotation_arguments(declaration));
         match declaration {
             Decl::Fun(function) => {
                 retain_parameter_defaults(&mut retained, file, &function.params);
@@ -253,18 +257,6 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
                 }
             }
             Decl::Class(class) => {
-                // Checked declaration metadata is published after stable signature finalization.
-                // Retain the classifier's own annotation expressions and each method's annotation
-                // arguments: both are folded before any body is checked. Method bodies stay with
-                // their ordinary declaration units.
-                retained.roots(file, class.annotation_args.iter().flatten().copied());
-                retained.roots(
-                    file,
-                    class
-                        .methods
-                        .iter()
-                        .flat_map(|method| method.annotation_args.iter().flatten().copied()),
-                );
                 retained.roots(
                     file,
                     class.props.iter().filter_map(|parameter| parameter.default),
@@ -449,22 +441,68 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
     retained
 }
 
-pub(super) fn has_classifier_annotation_arguments(file: &File) -> bool {
+pub(super) fn has_declaration_annotation_arguments(file: &File) -> bool {
     file.decl_arena.iter().any(|declaration| {
-        let Decl::Class(class) = declaration else {
-            return false;
-        };
-        class
-            .annotation_args
-            .iter()
-            .any(|arguments| !arguments.is_empty())
-            || class.methods.iter().any(|method| {
-                method
-                    .annotation_args
-                    .iter()
-                    .any(|arguments| !arguments.is_empty())
-            })
+        declaration_annotation_arguments(declaration)
+            .next()
+            .is_some()
     })
+}
+
+/// The arguments of the annotations written on a declaration and on the members a classifier
+/// declares itself: its methods, body properties and their accessors, and its constructors.
+/// Checked declaration-annotation publication folds exactly these applications.
+fn declaration_annotation_arguments(declaration: &Decl) -> impl Iterator<Item = ExprId> + '_ {
+    let (functions, properties, classifier, constructors): (
+        &[FunDecl],
+        &[PropDecl],
+        Option<&ClassDecl>,
+        Option<&ClassDecl>,
+    ) = match declaration {
+        Decl::Fun(function) => (std::slice::from_ref(function), &[], None, None),
+        Decl::Property(property) => (&[], std::slice::from_ref(property), None, None),
+        Decl::Class(class) => (&class.methods, &class.body_props, Some(class), Some(class)),
+    };
+    let classifier = classifier
+        .into_iter()
+        .flat_map(|class| class.annotation_args.iter().flatten().copied());
+    let functions = functions
+        .iter()
+        .flat_map(|function| function.annotation_args.iter().flatten().copied());
+    let properties = properties.iter().flat_map(property_annotation_arguments);
+    let constructors = constructors.into_iter().flat_map(|class| {
+        class
+            .primary_ctor_annotation_args
+            .iter()
+            .flatten()
+            .copied()
+            .chain(
+                class
+                    .secondary_ctors
+                    .iter()
+                    .flat_map(|constructor| constructor.annotation_args.iter().flatten().copied()),
+            )
+    });
+    classifier
+        .chain(functions)
+        .chain(properties)
+        .chain(constructors)
+}
+
+/// The arguments of a property's own annotations and of those written on its accessors.
+fn property_annotation_arguments(property: &PropDecl) -> impl Iterator<Item = ExprId> + '_ {
+    property.annotation_args.iter().flatten().copied().chain(
+        property
+            .getter_annotations
+            .iter()
+            .chain(
+                property
+                    .setter
+                    .iter()
+                    .flat_map(|setter| &setter.annotations),
+            )
+            .flat_map(|annotation| annotation.arguments.iter().copied()),
+    )
 }
 
 fn expr_map(reachable: &Reachable) -> (Vec<ExprId>, HashMap<ExprId, ExprId>) {
@@ -535,6 +573,21 @@ fn remap_property(property: &mut PropDecl, expressions: &HashMap<ExprId, ExprId>
     if let Some(setter) = &mut property.setter {
         if let Some(body) = &mut setter.body {
             remap_fun_body(body, expressions);
+        }
+    }
+    let accessor_annotations =
+        property
+            .getter_annotations
+            .iter_mut()
+            .chain(property.setter.iter_mut().flat_map(|setter| {
+                setter
+                    .annotations
+                    .iter_mut()
+                    .chain(&mut setter.param_annotations)
+            }));
+    for annotation in accessor_annotations {
+        for argument in &mut annotation.arguments {
+            *argument = mapped_expr(expressions, *argument);
         }
     }
     for arguments in &mut property.annotation_args {
@@ -1233,7 +1286,7 @@ mod tests {
         let mut file =
             crate::frontend::parse_source_with_detected_features(source, &mut diagnostics);
         assert!(!diagnostics.has_errors(), "{:#?}", diagnostics.diags);
-        assert!(has_classifier_annotation_arguments(&file));
+        assert!(has_declaration_annotation_arguments(&file));
 
         compact(&mut file);
 
@@ -1269,7 +1322,7 @@ mod tests {
         let mut file =
             crate::frontend::parse_source_with_detected_features(source, &mut diagnostics);
         assert!(!diagnostics.has_errors(), "{:#?}", diagnostics.diags);
-        assert!(has_classifier_annotation_arguments(&file));
+        assert!(has_declaration_annotation_arguments(&file));
 
         compact(&mut file);
 

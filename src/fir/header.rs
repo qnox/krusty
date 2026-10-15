@@ -919,6 +919,7 @@ fn extract_file_stub_inventory(
                 .with(DeclarationFlags::TAILREC, function.is_tailrec())
                 .with(DeclarationFlags::OPERATOR, function.is_operator())
                 .with(DeclarationFlags::INFIX, function.is_infix())
+                .with(DeclarationFlags::ACTUAL, function.is_actual())
                 .with(
                     DeclarationFlags::HAS_VISIBILITY_MODIFIER,
                     function.has_visibility_modifier(),
@@ -1055,6 +1056,7 @@ fn extract_file_stub_inventory(
                     property.has_visibility_modifier,
                 )
                 .with(DeclarationFlags::LATEINIT, property.is_lateinit)
+                .with(DeclarationFlags::ACTUAL, property.is_actual)
                 .with(DeclarationFlags::DELEGATED, property.delegate.is_some())
                 .with(
                     DeclarationFlags::INFERRED_PROPERTY_TYPE,
@@ -1367,7 +1369,8 @@ fn extract_file_stub_inventory(
                 initialization_order: None,
                 kind: DeclarationKind::Constructor,
                 visibility: constructor.visibility,
-                flags: DeclarationFlags::default(),
+                flags: DeclarationFlags::default()
+                    .with(DeclarationFlags::ACTUAL, constructor.is_actual),
             });
         }
         for (index, method) in class.methods.iter().enumerate() {

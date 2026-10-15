@@ -308,6 +308,40 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         .zip(&sources)
         .map(|(p, s)| (p.as_str(), s.as_str()))
         .collect();
+    // Apply named compiler-warning policy before deciding whether the frontend failed. A warning
+    // promoted by `-Xwarning-level=<NAME>:error` is an ordinary source error; an explicit
+    // `warning` level exempts that diagnostic from global `-Werror`, and `disabled` removes it.
+    let mut compiler_warning_under_werror = false;
+    diags.diags.retain_mut(|diagnostic| {
+        if diagnostic.severity != krusty::diag::Severity::Warning {
+            return true;
+        }
+        match opts
+            .warning_policy
+            .compiler_disposition(diagnostic.warning_name)
+        {
+            cli::WarningDisposition::Disabled => false,
+            cli::WarningDisposition::Warning => true,
+            cli::WarningDisposition::Error => {
+                diagnostic.severity = krusty::diag::Severity::Error;
+                true
+            }
+            cli::WarningDisposition::WarningAndFail => {
+                compiler_warning_under_werror = true;
+                true
+            }
+        }
+    });
+    match opts.warning_policy.compiler_disposition(None) {
+        cli::WarningDisposition::Disabled => diags.module_warnings.clear(),
+        cli::WarningDisposition::WarningAndFail if !diags.module_warnings.is_empty() => {
+            compiler_warning_under_werror = true;
+        }
+        cli::WarningDisposition::Warning
+        | cli::WarningDisposition::WarningAndFail
+        | cli::WarningDisposition::Error => {}
+    }
+
     if diags.has_errors() {
         // Like kotlinc, a failed compilation reports its errors only.
         diags
@@ -323,35 +357,21 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     // The same typed policy owns ordinary compiler and module warnings. Unlike command-line
     // configuration warnings, these are suppressed by `-nowarn`; `-Werror` reports them and fails
     // before any output is written.
-    let warning_diagnostics = diags
-        .diags
-        .iter()
-        .any(|diagnostic| diagnostic.severity == krusty::diag::Severity::Warning)
-        || !diags.module_warnings.is_empty();
-    match opts.warning_policy.compiler_disposition() {
-        cli::WarningDisposition::WarningAndFail if warning_diagnostics => {
-            // kotlinc reports unlocated module warnings before its -Werror summary, then the
-            // located source warnings. Keep those three ledger segments distinct instead of
-            // prepending the summary to the generic renderer (which owns module-before-source
-            // order for an ordinary successful compilation).
-            let module_warnings = std::mem::take(&mut diags.module_warnings);
-            let mut report = String::new();
-            for warning in module_warnings {
-                report.push_str("warning: ");
-                report.push_str(&warning);
-                report.push('\n');
-            }
-            report.push_str("error: warnings found and -Werror specified\n");
-            report.push_str(&diags.render_all(&rendered));
-            return Err(report);
+    if compiler_warning_under_werror {
+        // kotlinc reports unlocated module warnings before its -Werror summary, then the located
+        // source warnings. Keep those three ledger segments distinct instead of prepending the
+        // summary to the generic renderer (which owns module-before-source order for an ordinary
+        // successful compilation).
+        let module_warnings = std::mem::take(&mut diags.module_warnings);
+        let mut report = String::new();
+        for warning in module_warnings {
+            report.push_str("warning: ");
+            report.push_str(&warning);
+            report.push('\n');
         }
-        cli::WarningDisposition::Disabled => {
-            diags.diags.clear();
-            diags.module_warnings.clear();
-        }
-        cli::WarningDisposition::WarningAndFail
-        | cli::WarningDisposition::Warning
-        | cli::WarningDisposition::Error => {}
+        report.push_str("error: warnings found and -Werror specified\n");
+        report.push_str(&diags.render_all(&rendered));
+        return Err(report);
     }
     eprint!("{}", diags.render_all(&rendered));
 

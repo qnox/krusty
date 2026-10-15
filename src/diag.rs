@@ -21,6 +21,30 @@ pub enum Severity {
     Warning,
 }
 
+/// Stable compiler-warning names exposed through kotlinc's `-Xwarning-level` contract.
+///
+/// This is separate from [`DiagnosticIdentity`]: a warning name selects command-line policy,
+/// while an identity says when two reports describe the same semantic occurrence.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum CompilerWarningName {
+    Deprecation,
+}
+
+impl CompilerWarningName {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Deprecation => "DEPRECATION",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "DEPRECATION" => Self::Deprecation,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum DiagnosticKind {
     #[default]
@@ -53,6 +77,8 @@ pub struct Diagnostic {
     /// Optional editor-facing source range.
     pub editor_span: Option<Span>,
     pub severity: Severity,
+    /// The `-Xwarning-level` identity of a warning, when kotlinc exposes one.
+    pub warning_name: Option<CompilerWarningName>,
     pub kind: DiagnosticKind,
     pub msg: String,
     pub identity: Option<DiagnosticIdentity>,
@@ -150,6 +176,15 @@ impl DiagSink {
 
     /// Report a diagnostic that does not fail the compilation.
     pub fn warning(&mut self, span: Span, msg: impl Into<String>) {
+        self.push_warning(span, None, msg.into());
+    }
+
+    /// Report a warning whose stable name can be configured through `-Xwarning-level`.
+    pub fn warning_named(&mut self, span: Span, name: CompilerWarningName, msg: impl Into<String>) {
+        self.push_warning(span, Some(name), msg.into());
+    }
+
+    fn push_warning(&mut self, span: Span, name: Option<CompilerWarningName>, msg: String) {
         if !self.accepts(span) {
             return;
         }
@@ -157,8 +192,9 @@ impl DiagSink {
             span,
             editor_span: None,
             severity: Severity::Warning,
+            warning_name: name,
             kind: DiagnosticKind::Compiler,
-            msg: msg.into(),
+            msg,
             identity: None,
             file: self.current_file,
         });
@@ -178,6 +214,7 @@ impl DiagSink {
             span,
             editor_span: None,
             severity: Severity::Error,
+            warning_name: None,
             kind,
             msg,
             identity: None,
@@ -205,6 +242,7 @@ impl DiagSink {
             span,
             editor_span: None,
             severity: Severity::Error,
+            warning_name: None,
             kind: DiagnosticKind::Compiler,
             msg,
             identity: Some(identity),
@@ -232,6 +270,7 @@ impl DiagSink {
             span,
             editor_span: Some(editor_span),
             severity: Severity::Error,
+            warning_name: None,
             kind: DiagnosticKind::Compiler,
             msg,
             identity: None,
@@ -254,6 +293,7 @@ impl DiagSink {
                 seen_identities.insert((
                     diagnostic.file,
                     diagnostic.severity,
+                    diagnostic.warning_name,
                     diagnostic.kind,
                     identity,
                 ))
@@ -263,6 +303,7 @@ impl DiagSink {
                     diagnostic.span,
                     diagnostic.editor_span,
                     diagnostic.severity,
+                    diagnostic.warning_name,
                     diagnostic.kind,
                     diagnostic.msg.clone(),
                 ))
@@ -389,6 +430,23 @@ mod tests {
         s.collapse_duplicates();
 
         assert_eq!(s.diags.len(), 4, "{:?}", s.diags);
+    }
+
+    #[test]
+    fn warning_policy_name_is_part_of_duplicate_identity() {
+        let mut s = DiagSink::new();
+        let span = Span::new(3, 4);
+        s.warning(span, "same rendering");
+        s.warning_named(span, CompilerWarningName::Deprecation, "same rendering");
+
+        s.collapse_duplicates();
+
+        assert_eq!(s.diags.len(), 2, "{:?}", s.diags);
+        assert_eq!(s.diags[0].warning_name, None);
+        assert_eq!(
+            s.diags[1].warning_name,
+            Some(CompilerWarningName::Deprecation)
+        );
     }
 
     #[test]

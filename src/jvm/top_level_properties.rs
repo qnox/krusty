@@ -89,6 +89,7 @@ pub(super) fn merge_metadata_const(
         compile_time_constant: Some(constant),
         metadata_constant_read: false,
         deprecated_hidden: metadata.deprecated_hidden,
+        accessor_availability: Default::default(),
         is_final: true,
         visibility: metadata.visibility,
         owner: field.owner,

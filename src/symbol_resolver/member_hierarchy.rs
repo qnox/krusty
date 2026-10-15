@@ -8,7 +8,7 @@ pub(crate) use bound_inner_constructors::bound_inner_constructor_candidates;
 use super::{
     classifier_bindings, direct_supertypes_from_classifier, resolution_subtype,
     specialize_call_sig, specialize_callable, specialize_member_type, ty_subst_keep_unbound,
-    TypePosition,
+    PropertyAccess, TypePosition,
 };
 use crate::libraries::{Callables, FnKind, FunctionInfo, FunctionSet, PropKind, PropertySet};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
@@ -453,6 +453,52 @@ pub(crate) fn has_hidden_deprecated_member(
     false
 }
 
+/// Whether failed property selection encountered an independently HIDDEN accessor in the applied
+/// receiver hierarchy. Providers publish getter/setter availability on the property declaration;
+/// diagnostic selection consumes that exact fact instead of reopening annotations or deriving an
+/// accessor from its spelling.
+pub(crate) fn has_hidden_deprecated_property_accessor(
+    source: &dyn SymbolSource,
+    receiver: Ty,
+    name: &str,
+    access: PropertyAccess,
+) -> bool {
+    let mut queue = std::collections::VecDeque::from([receiver.non_null()]);
+    let mut seen = crate::fx_hash::HashSet::default();
+    while let Some(current) = queue.pop_front() {
+        if let Some(parts) = super::hierarchy_projection::intersection_components(current) {
+            queue.extend(parts.iter().copied());
+            continue;
+        }
+        let Some(internal) = current.kotlin_class_internal() else {
+            continue;
+        };
+        if !seen.insert(internal) {
+            continue;
+        }
+        let Some(classifier) = source.classifier(internal) else {
+            continue;
+        };
+        let (_, properties) = declared_callables(source, &classifier, current, name).into_parts();
+        if classifier.hidden_deprecated_callables.contains(name)
+            || source.api_withheld_callable(internal, name)
+            || properties.overloads.iter().any(|property| {
+                property.deprecated_hidden
+                    || match access {
+                        PropertyAccess::Read => !property.accessor_availability.getter,
+                        PropertyAccess::Write => {
+                            property.setter.is_some() && !property.accessor_availability.setter
+                        }
+                    }
+            })
+        {
+            return true;
+        }
+        queue.extend(direct_supertypes_from_classifier(&classifier, current));
+    }
+    false
+}
+
 impl super::SymbolResolver<'_> {
     /// A provider rejection fact consulted only after ordinary candidate selection has failed.
     pub(crate) fn receiver_has_hidden_deprecated_member(&self, receiver: Ty, name: &str) -> bool {
@@ -460,6 +506,21 @@ impl super::SymbolResolver<'_> {
             &self.src,
             super::hierarchy_projection::member_scope_receiver(receiver),
             name,
+        )
+    }
+
+    /// The accessor-specific rejection fact for a failed property read or write.
+    pub(crate) fn receiver_has_hidden_deprecated_property_accessor(
+        &self,
+        receiver: Ty,
+        name: &str,
+        access: PropertyAccess,
+    ) -> bool {
+        has_hidden_deprecated_property_accessor(
+            &self.src,
+            super::hierarchy_projection::member_scope_receiver(receiver),
+            name,
+            access,
         )
     }
 }

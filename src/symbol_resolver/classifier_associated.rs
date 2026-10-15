@@ -20,12 +20,31 @@ impl SymbolResolver<'_> {
     /// The receiver-less property `internal.name` names: the one `internal`'s namespace record
     /// publishes as associated with it.
     pub fn associated_property(&self, internal: TypeName, name: &str) -> Option<PropertyInfo> {
+        self.associated_property_where(internal, name, PropertyInfo::readable)
+    }
+
+    pub(crate) fn associated_property_for_write(
+        &self,
+        internal: TypeName,
+        name: &str,
+    ) -> Option<PropertyInfo> {
+        self.associated_property_where(internal, name, PropertyInfo::write_selectable)
+    }
+
+    fn associated_property_where(
+        &self,
+        internal: TypeName,
+        name: &str,
+        available: impl Fn(&PropertyInfo) -> bool,
+    ) -> Option<PropertyInfo> {
         self.src
             .symbols(SymbolNamespace::Classifier(internal), name)
             .callables
             .properties()
             .iter()
-            .find(|property| property.associated_classifier == Some(internal))
+            .find(|property| {
+                property.associated_classifier == Some(internal) && available(property)
+            })
             .cloned()
     }
 
