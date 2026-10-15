@@ -83,6 +83,9 @@ pub struct CodegenModule {
     /// Export spellings already claimed by earlier files. The C spelling is intentionally
     /// human-readable and therefore lossy; a collision is refused rather than emitted twice.
     abi_symbols: crate::fx_hash::HashSet<String>,
+    /// The ABI each external symbol was first imported with; the linker joins every object's
+    /// import of it into one definition.
+    imported_abis: lower::ImportedAbis,
     /// Exact declaring KLIB module plus declaration identity to its collision-free target export.
     /// Entries survive source-module boundaries for one emission session; the module component
     /// distinguishes legal same-signature internals in unrelated dependencies.
@@ -251,6 +254,7 @@ impl Backend for CraneliftBackend {
                 callables: &file.callables,
                 runtime_symbols,
                 abi_symbols: &mut state.abi_symbols,
+                imported_abis: &mut state.imported_abis,
                 dependency_properties: &properties,
                 value_classes: &value_classes,
                 source: file.source,

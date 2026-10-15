@@ -38,6 +38,7 @@ use declared_capabilities::{
 mod functions;
 mod implementor_dispatch;
 mod imported_functions;
+pub(super) use imported_functions::ImportedAbis;
 mod lists;
 mod local_delegates;
 mod maps;
@@ -194,6 +195,8 @@ pub struct FileInput<'a> {
     pub runtime_symbols: &'a crate::fx_hash::HashSet<String>,
     /// C export symbols already claimed by earlier files in this module.
     pub abi_symbols: &'a mut crate::fx_hash::HashSet<String>,
+    /// The ABI every external function was first imported with, by any file in this emission.
+    pub imported_abis: &'a mut ImportedAbis,
     /// This file's identity in the module. Its initializer is exported under it.
     pub source: crate::fir::SourceFileId,
     /// The exact source module this file belongs to. Module-local callable and initializer symbols
@@ -232,6 +235,7 @@ pub fn lower_file(
         dependency_properties,
         runtime_symbols,
         abi_symbols,
+        imported_abis,
         source,
         module_name,
         unit_kind,
@@ -284,7 +288,7 @@ pub fn lower_file(
         symbols: super::super::symbols::symbols(ir, module_name, runtime_symbols.clone()),
         model: class_model,
         functions: Vec::new(),
-        imports: imported_functions::ImportedFunctions::default(),
+        imports: imported_functions::ImportedFunctions::new(imported_abis),
         data_imports: HashMap::default(),
         strings: HashMap::default(),
         string_objects: HashMap::default(),
@@ -402,7 +406,7 @@ struct FileLowering<'a> {
     /// Declared Cranelift function per IR function index; `None` for an abstract method.
     functions: Vec<Option<FuncId>>,
     /// Runtime and external functions this file imports, keyed by symbol and exact Native ABI.
-    imports: imported_functions::ImportedFunctions,
+    imports: imported_functions::ImportedFunctions<'a>,
     /// Runtime data this file imports (the built-in type descriptors), by symbol.
     data_imports: HashMap<String, DataId>,
     /// String literal data, deduplicated by content.

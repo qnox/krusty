@@ -145,11 +145,16 @@ fn assert_inert_for_source(argument: &str, file: &str, source: &str) -> (i32, St
     let expected = classes(&path("kotlinc"));
     assert!(!expected.is_empty(), "kotlinc emitted no classes");
     assert_eq!(classes(&path("krusty")), expected, "{argument}");
-    // kotlinc writes a source below the working directory relative to it.
+    // Normalize a source below the working directory whether kotlinc writes it absolutely or
+    // relative to that directory.
     let source_path = path(file);
     let cwd = std::env::current_dir().expect("working directory");
     let written = source_path.strip_prefix(&cwd).unwrap_or(&source_path);
-    let without = without.replace(&text(written), "<path>");
+    // A recorded diagnostic can retain the absolute runner path. Replace the longer spelling first
+    // so redacting the relative suffix cannot leave the runner prefix behind.
+    let without = without
+        .replace(&text(&source_path), "<path>")
+        .replace(&text(written), "<path>");
     let _ = std::fs::remove_dir_all(work);
     (code, without)
 }
