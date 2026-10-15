@@ -775,6 +775,7 @@ fn push_delegate_static(
         erased_declared_ty: None,
         accessors: crate::ir::IrStaticAccessors::ABSENT,
         line: 0,
+        accessor_lines: crate::ir::IrAccessorLines::default(),
         source_order,
         property_delegate: true,
     });

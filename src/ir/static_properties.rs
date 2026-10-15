@@ -1,7 +1,7 @@
 //! A static property's storage and how each of its accessors comes about: the facade (or owner
 //! class) field a top-level or hoisted property lives in.
 
-use super::ExprId;
+use super::{ExprId, IrAccessorLines};
 use crate::types::{Ty, TypeName};
 
 /// How each of a static property's accessors comes about.
@@ -91,6 +91,8 @@ pub struct IrStatic {
     /// 1-based source line of the property declaration (0 = unknown). kotlinc maps the accessors'
     /// LineNumberTables and the `<clinit>` initializer store to this line.
     pub line: u32,
+    /// Lines of the written accessors and of the declaration's end, recorded with [`Self::line`].
+    pub accessor_lines: IrAccessorLines,
     /// Source byte offset of the declaration (`u32::MAX` for a target/plugin synthetic). This is the
     /// exact ordering key when class metadata interleaves static and instance properties.
     pub source_order: u32,

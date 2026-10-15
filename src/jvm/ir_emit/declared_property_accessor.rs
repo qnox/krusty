@@ -154,6 +154,7 @@ pub(super) fn emit(
         })
         .or(field.type_param.as_deref());
     let signatures = property_jvm_signatures(formatter, &field.ty, type_parameter);
+    let lateinit_end = lateinit_end_line(property, field);
     let field_jt = jvm_value_ty(&field.ty);
     let field_desc = type_descriptor(field_jt);
     let accessor_jt = declared_property_accessor_jvm(ir, property, field);
@@ -191,6 +192,9 @@ pub(super) fn emit(
             &[],
         );
         let mut g = CodeBuilder::new(1);
+        if let Some((_, start)) = lateinit_end {
+            g.mark_line(own_accessor_line(property.accessor_lines.getter, start));
+        }
         let physical_name = instance_field_jvm_name(ir, run, c, field_index as usize);
         let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
         if static_storage(ir, c) {
@@ -200,7 +204,8 @@ pub(super) fn emit(
             g.getfield(fref, slot_words(field_jt) as i32);
         }
         // kotlinc's `LateinitLowering` getter: return the value, or throw and then
-        // `aconst_null; areturn` so the null path has a reference for the verifier.
+        // `aconst_null; areturn` so the null path has a reference for the verifier. That return
+        // sits on the declaration's last line, so a multi-line declaration gives the getter two.
         if field.is_lateinit() {
             g.dup();
             let missing = g.new_label();
@@ -216,6 +221,9 @@ pub(super) fn emit(
                 "(Ljava/lang/String;)V",
             );
             g.invokestatic(m, 1, 0);
+            if let Some((end, _)) = lateinit_end {
+                g.mark_line(end);
+            }
             g.aconst_null();
             emit_return(getter_jt, &mut g);
         } else {
@@ -272,6 +280,17 @@ pub(super) fn emit(
                 );
                 st.invokestatic(m, 2, 0);
             }
+            // A written setter begins at its annotation/modifier prefix. A multiline bodyless
+            // setter returns on its `set` header; a lateinit setter returns on the whole property's
+            // last line, matching kotlinc's LateinitLowering.
+            let setter_start = if property.accessor_lines.setter != 0 {
+                Some(property.accessor_lines.setter)
+            } else {
+                lateinit_end.map(|(_, start)| start)
+            };
+            if let Some(start) = setter_start {
+                st.mark_line(start);
+            }
             let statics_storage = static_storage(ir, c);
             if !statics_storage {
                 st.aload(0);
@@ -285,6 +304,14 @@ pub(super) fn emit(
             } else {
                 st.putfield(fref, slot_words(field_jt) as i32);
             }
+            let setter_end = lateinit_end.map(|(end, _)| end).or((property
+                .accessor_lines
+                .setter_end
+                != 0)
+                .then_some(property.accessor_lines.setter_end));
+            if let Some(end) = setter_end {
+                st.mark_line(end);
+            }
             st.ret_void();
             st.ensure_locals(1 + words);
             st.link();
@@ -293,6 +320,26 @@ pub(super) fn emit(
             super::function_annotations::emit_declared(cw, annotations, setter, setter_desc);
             seed_accessor_locals(c, fq_name, cw);
         }
+    }
+}
+
+/// The last line of a lateinit declaration that spans more than its first line, with that first
+/// line: the generated accessors' throw path and setter return sit on the last one.
+fn lateinit_end_line(
+    property: &crate::ir::IrProperty,
+    field: &crate::ir::IrField,
+) -> Option<(u32, u32)> {
+    let end = property.accessor_lines.declaration_end;
+    (field.is_lateinit() && property.decl_line != 0 && end > property.decl_line)
+        .then_some((end, property.decl_line))
+}
+
+/// A written accessor's own line, else the property's.
+fn own_accessor_line(written: u32, property: u32) -> u32 {
+    if written != 0 {
+        written
+    } else {
+        property
     }
 }
 

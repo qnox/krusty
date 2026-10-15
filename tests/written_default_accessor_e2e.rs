@@ -64,3 +64,68 @@ fn an_internal_setter_links_across_files_with_kotlincs_name() {
         ),
     ]);
 }
+
+#[test]
+fn multiline_accessor_prefixes_and_lateinit_tails_keep_exact_lines() {
+    assert_module_matches_kotlinc(&[(
+        "AccessorLines.kt",
+        "package written\n\
+         \n\
+         class AccessorLines {\n\
+         \x20   lateinit var first: String\n\
+         \x20       internal set\n\
+         \x20   lateinit var split: String\n\
+         \x20       internal\n\
+         \x20       set\n\
+         \x20   var annotated: String = \"\"\n\
+         \x20       @Deprecated(\"old\")\n\
+         \x20       get\n\
+         }\n",
+    )]);
+}
+
+#[test]
+fn top_level_multiline_accessors_and_lateinit_tails_keep_exact_lines() {
+    assert_module_matches_kotlinc(&[(
+        "TopLevelAccessorLines.kt",
+        "package written\n\
+         \n\
+         lateinit var value: String\n\
+         \x20   internal\n\
+         \x20   set\n\
+         var annotated: String = \"\"\n\
+         \x20   @Deprecated(\"old\")\n\
+         \x20   get\n",
+    )]);
+}
+
+#[test]
+fn a_hoisted_companion_getter_keeps_its_written_line() {
+    assert_module_matches_kotlinc(&[(
+        "HoistedAccessorLines.kt",
+        "package written\n\
+         \n\
+         class HoistedAccessorLines {\n\
+         \x20   companion object {\n\
+         \x20       var value: String = \"\"\n\
+         \x20           get\n\
+         \x20   }\n\
+         }\n",
+    )]);
+}
+
+#[test]
+fn a_hoisted_companion_lateinit_getter_tail_uses_the_declaration_end() {
+    assert_module_matches_kotlinc(&[(
+        "HoistedLateinitAccessorLines.kt",
+        "package written\n\
+         \n\
+         class HoistedLateinitAccessorLines {\n\
+         \x20   companion object {\n\
+         \x20       lateinit var value: String\n\
+         \x20           internal\n\
+         \x20           set\n\
+         \x20   }\n\
+         }\n",
+    )]);
+}
