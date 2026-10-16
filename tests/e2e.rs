@@ -496,6 +496,8 @@ mod companion_custom_accessor_field_e2e;
 mod companion_e2e;
 #[path = "companion_init_block_e2e.rs"]
 mod companion_init_block_e2e;
+#[path = "companion_initializer_lambda_e2e.rs"]
+mod companion_initializer_lambda_e2e;
 #[path = "companion_member_read_e2e.rs"]
 mod companion_member_read_e2e;
 #[path = "companion_nested_classifier_scope_e2e.rs"]
