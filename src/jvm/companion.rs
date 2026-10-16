@@ -1105,10 +1105,25 @@ fn move_initializer_lambdas(
     ir.classes[companion as usize]
         .methods
         .retain(|method| !moving.contains(method));
-    for function in &moving {
+    // Implementation names are numbered per class: a moved lambda continues the outer class's
+    // sequence for its name, as kotlinc numbers it there.
+    for &function in &moving {
+        let ordinal = ir.lambda_origins.get(&function).map(|origin| {
+            ir.classes[outer_class as usize]
+                .methods
+                .iter()
+                .filter_map(|method| ir.lambda_origins.get(method))
+                .filter(|other| other.implementation_name == origin.implementation_name)
+                .map(|other| other.implementation_ordinal + 1)
+                .max()
+                .unwrap_or(0)
+        });
+        if let (Some(ordinal), Some(origin)) = (ordinal, ir.lambda_origins.get_mut(&function)) {
+            origin.implementation_ordinal = ordinal;
+        }
         let methods = &mut ir.classes[outer_class as usize].methods;
-        if !methods.contains(function) {
-            methods.push(*function);
+        if !methods.contains(&function) {
+            methods.push(function);
         }
     }
     let owner = ir.classes[outer_class as usize].fq_name_id();
