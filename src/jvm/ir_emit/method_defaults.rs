@@ -43,18 +43,24 @@ fn owner_is_inheritable(ir: &IrFile, owner: &str) -> bool {
 }
 
 /// Emit an instance method's mask-expanding `$default` synthetic.
-#[allow(clippy::too_many_arguments)]
+/// The function a `$default` stub is emitted for, and its parameters' default expressions.
+#[derive(Clone, Copy)]
+pub(super) struct DefaultStubSource<'a> {
+    pub ir: &'a IrFile,
+    pub fid: u32,
+    pub defaults: &'a [Option<u32>],
+}
+
 pub(super) fn emit_default_stub(
-    ir: &IrFile,
-    fid: u32,
+    source: DefaultStubSource<'_>,
     static_owner: Option<StaticOwner>,
     owner: &str,
     facade: &str,
     cw: &mut ClassWriter,
-    defaults: &[Option<u32>],
     env: &EmitEnv,
     is_interface: bool,
 ) {
+    let DefaultStubSource { ir, fid, defaults } = source;
     let function = &ir.functions[fid as usize];
     let method_name = function.name.clone();
     let real_params = jvm_function_params(ir, fid);
@@ -476,17 +482,15 @@ fn publish_exported_private_access(emitter: &mut Emitter<'_>, fid: u32) {
 }
 
 /// Emit a facade-style static function `$default` synthetic.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_facade_default_stub(
-    ir: &IrFile,
-    fid: u32,
+    source: DefaultStubSource<'_>,
     static_owner: StaticOwner,
     facade: &str,
     cw: &mut ClassWriter,
-    defaults: &[Option<u32>],
     env: &EmitEnv,
     marker: Ty,
 ) {
+    let DefaultStubSource { ir, fid, defaults } = source;
     let function = &ir.functions[fid as usize];
     let method_name = function.name.clone();
     let real_params = jvm_function_params(ir, fid);

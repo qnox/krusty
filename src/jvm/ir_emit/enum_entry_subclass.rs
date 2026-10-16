@@ -199,24 +199,20 @@ pub(super) fn emit_enum_entry_subclass(
         if let Some(defaults) = ir.declared_param_defaults(fid) {
             if function.is_static {
                 emit_facade_default_stub(
-                    ir,
-                    fid,
+                    DefaultStubSource { ir, fid, defaults },
                     StaticOwner::Class(c.fq_name),
                     &fq_name,
                     &mut cw,
-                    defaults,
                     env,
                     Ty::obj("java/lang/Object"),
                 );
             } else {
                 emit_default_stub(
-                    ir,
-                    fid,
+                    DefaultStubSource { ir, fid, defaults },
                     Some(StaticOwner::Class(c.fq_name)),
                     &fq_name,
                     facade,
                     &mut cw,
-                    defaults,
                     env,
                     false,
                 );
