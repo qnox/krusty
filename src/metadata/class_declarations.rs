@@ -1323,7 +1323,14 @@ fn generated_function_flags(ir: &IrFile, function: u32, visibility: Visibility) 
     } else {
         0
     };
-    (declaration_visibility_bits(visibility) << 1) | (modality << 4)
+    // A generated override inherits the return-value status of the declaration it overrides.
+    let return_value_status = ir
+        .fn_return_value_statuses
+        .get(&function)
+        .map_or(0, |status| {
+            status.metadata_value() << crate::metadata::function_flags::RETURN_VALUE_STATUS_SHIFT
+        });
+    (declaration_visibility_bits(visibility) << 1) | (modality << 4) | return_value_status
 }
 
 /// A generated override of one of `Any`'s members, which has no source of its own.

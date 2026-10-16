@@ -36,6 +36,7 @@ mod source_lambda;
 mod source_map;
 mod type_parameters;
 
+pub(crate) use crate::types::GeneratedClassifierPurpose;
 pub(crate) use active_source::*;
 pub(crate) use annotation_constructor_defaults::publish_checked_annotation_defaults;
 pub use body::value_parameters::FirValueParameterName;

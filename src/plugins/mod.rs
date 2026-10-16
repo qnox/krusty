@@ -313,6 +313,8 @@ pub struct PluginContext {
     /// T>`), mapped to whether the provider confirms an `object` (read through `INSTANCE`) rather
     /// than a class (constructed). Absent ⇒ the provider could not classify it.
     external_serializer_objects: crate::fx_hash::HashMap<TypeName, bool>,
+    /// What each generated `$serializer` member inherits from the runtime declaration it overrides.
+    generated_serializer_statuses: Option<crate::types::SerializationGeneratedMemberStatuses>,
 }
 
 impl Default for PluginContext {
@@ -324,6 +326,7 @@ impl Default for PluginContext {
             external_serializers: crate::fx_hash::HashMap::default(),
             runtime_serializers: crate::fx_hash::HashSet::default(),
             external_serializer_objects: crate::fx_hash::HashMap::default(),
+            generated_serializer_statuses: None,
         }
     }
 }
@@ -337,6 +340,7 @@ impl Clone for PluginContext {
             external_serializers: self.external_serializers.clone(),
             runtime_serializers: self.runtime_serializers.clone(),
             external_serializer_objects: self.external_serializer_objects.clone(),
+            generated_serializer_statuses: self.generated_serializer_statuses,
         }
     }
 }
@@ -388,6 +392,21 @@ impl PluginContext {
     ) -> Self {
         self.external_serializer_objects = objects;
         self
+    }
+
+    /// Record what each generated `$serializer` member inherits from the runtime.
+    pub(crate) fn with_generated_serializer_statuses(
+        mut self,
+        statuses: crate::types::SerializationGeneratedMemberStatuses,
+    ) -> Self {
+        self.generated_serializer_statuses = Some(statuses);
+        self
+    }
+
+    pub(crate) fn generated_serializer_statuses(
+        &self,
+    ) -> Option<crate::types::SerializationGeneratedMemberStatuses> {
+        self.generated_serializer_statuses
     }
 
     /// Whether external serializer class `serializer` is an `object`; `None` when the provider did
@@ -714,10 +733,18 @@ pub trait IrPlugin {
 /// Annotation names and values have already been resolved and folded, so neither reparsed source
 /// nor spelling participates. `plugins` is the same selection the frontend ran; with none selected
 /// this is a no-op.
-pub fn declare_enabled(ir: &mut IrFile, plugins: &registry::NativePlugins, module_name: &str) {
-    let ctx = PluginContext::from_ir(ir);
+pub fn declare_enabled(
+    ir: &mut IrFile,
+    plugins: &registry::NativePlugins,
+    module_name: &str,
+    generated_serializer_statuses: Option<crate::types::SerializationGeneratedMemberStatuses>,
+) {
+    let mut ctx = PluginContext::from_ir(ir);
     if !triggered(ir, plugins, &ctx) {
         return;
+    }
+    if let Some(statuses) = generated_serializer_statuses {
+        ctx = ctx.with_generated_serializer_statuses(statuses);
     }
     plugins.host(module_name).declare(ir, &ctx);
 }

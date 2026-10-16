@@ -1,6 +1,33 @@
 //! Declaration facts a provider publishes for a classifier, as its declaring compilation fixed them.
 
-use super::{Ty, TypeName, Visibility};
+use super::{ReturnValueStatus, Ty, TypeName, Visibility};
+
+/// Return-value statuses of the four overrides every serialization-plugin generated serializer
+/// declares. Pass 1 selects the overridden declarations from their complete semantic shapes; the
+/// closed result crosses common lowering without retaining a provider or reopening member lookup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SerializationGeneratedMemberStatuses {
+    pub(crate) serialize: ReturnValueStatus,
+    pub(crate) deserialize: ReturnValueStatus,
+    pub(crate) child_serializers: ReturnValueStatus,
+    pub(crate) type_parameter_serializers: ReturnValueStatus,
+}
+
+impl SerializationGeneratedMemberStatuses {
+    pub(crate) fn new(
+        serialize: ReturnValueStatus,
+        deserialize: ReturnValueStatus,
+        child_serializers: ReturnValueStatus,
+        type_parameter_serializers: ReturnValueStatus,
+    ) -> Self {
+        Self {
+            serialize,
+            deserialize,
+            child_serializers,
+            type_parameter_serializers,
+        }
+    }
+}
 
 /// A plugin-generated classifier published with the source header that owns it. The common
 /// frontend records semantic declaration facts; a representation backend maps them to its own

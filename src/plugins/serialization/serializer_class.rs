@@ -107,7 +107,11 @@ fn plain_data_class(ir: &IrFile, class_id: ClassId) -> bool {
 }
 
 /// Declare `class_id`'s `$serializer` and the members the plugin adds to `class_id` itself.
-pub(super) fn declare(ir: &mut IrFile, class_id: ClassId) {
+pub(super) fn declare(
+    ir: &mut IrFile,
+    class_id: ClassId,
+    statuses: crate::types::SerializationGeneratedMemberStatuses,
+) {
     let SerializedClass {
         class_name,
         serializer_name,
@@ -123,13 +127,7 @@ pub(super) fn declare(ir: &mut IrFile, class_id: ClassId) {
         elements,
         ..
     } = SerializedClass::of(ir, class_id);
-    let GeneratedSerializerMembers {
-        descriptor,
-        serialize,
-        deserialize,
-        child_serializers: child,
-        type_parameter_serializers: type_params_ser,
-    } = add_serializer_members(
+    let members = add_serializer_members(
         ir,
         serializer_name,
         serialized_ty,
@@ -137,6 +135,14 @@ pub(super) fn declare(ir: &mut IrFile, class_id: ClassId) {
         owner_end_line,
         !type_params.is_empty(),
     );
+    statuses.record(ir, members);
+    let GeneratedSerializerMembers {
+        descriptor,
+        serialize,
+        deserialize,
+        child_serializers: child,
+        type_parameter_serializers: type_params_ser,
+    } = members;
     // A generic `$serializer` stores one `KSerializer` per type parameter; a non-generic
     // serializer keeps the singleton-object form.
     let n_tp = type_params.len();

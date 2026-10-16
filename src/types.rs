@@ -11,6 +11,7 @@ mod semantic_callable_owner;
 pub use classifier_declarations::{
     ClassifierDeclarationFacts, ClassifierDeclarationKind, DeclaredValueClass,
     GeneratedClassifierFact, GeneratedClassifierKind, GeneratedClassifierPurpose,
+    SerializationGeneratedMemberStatuses,
 };
 pub use deprecation::{Deprecation, DeprecationLevel};
 pub use overridden_declaration::OverriddenDeclaration;

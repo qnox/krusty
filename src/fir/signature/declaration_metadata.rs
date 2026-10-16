@@ -125,6 +125,34 @@ impl ResolvedModuleIndex {
             .unwrap_or_default()
     }
 
+    pub(crate) fn has_generated_classifier_purpose(
+        &self,
+        purpose: crate::types::GeneratedClassifierPurpose,
+    ) -> bool {
+        self.generated_classifiers
+            .values()
+            .flatten()
+            .any(|classifier| classifier.purpose == purpose)
+    }
+
+    pub fn serialization_generated_member_statuses(
+        &self,
+    ) -> Option<crate::types::SerializationGeneratedMemberStatuses> {
+        self.serialization_generated_member_statuses
+    }
+
+    pub(crate) fn publish_serialization_generated_member_statuses(
+        &mut self,
+        statuses: crate::types::SerializationGeneratedMemberStatuses,
+    ) {
+        assert!(
+            self.serialization_generated_member_statuses
+                .replace(statuses)
+                .is_none(),
+            "serialization generated-member statuses may be published only once"
+        );
+    }
+
     pub fn serialization_companion_accessor(
         &self,
         declaration: DeclarationId,

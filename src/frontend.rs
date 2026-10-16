@@ -1402,6 +1402,19 @@ where
     let mut recovery_streamed = None;
     let pending_streamed = if streamed_index.failures.is_empty() {
         let mut index = streamed_index.index;
+        if index.has_generated_classifier_purpose(
+            crate::fir::GeneratedClassifierPurpose::SerializationSerializer,
+        ) {
+            match crate::resolve::resolve_serialization_generated_member_statuses(
+                &*symbols.libraries,
+            ) {
+                Some(statuses) => index.publish_serialization_generated_member_statuses(statuses),
+                None => diags.error(
+                    Span::new(0, 0),
+                    "serialization runtime is missing a generated serializer override declaration",
+                ),
+            }
+        }
         // Finalized signatures and their stable declaration ancestry form one Pass-1 product.
         // Publish the inventory before deriving declaration-owned metadata such as enum-entry
         // override edges; those entries deliberately have no ordinary classifier header.
