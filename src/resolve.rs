@@ -32643,7 +32643,7 @@ impl<'a> Checker<'a> {
 }
 
 /// Select one member-extension function using caller-owned source, receivers, and call probes.
-pub(crate) fn member_extension_function_with(
+fn member_extension_function_with(
     source: &dyn SymbolSource,
     oracle: &dyn crate::assignable::TypeOracle,
     receivers: &[ImplicitReceiver],
