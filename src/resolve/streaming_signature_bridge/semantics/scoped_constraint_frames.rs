@@ -193,6 +193,97 @@ impl ProductionSignatureSemantics<'_> {
         let target = finished.entry(declaration).or_default();
         Self::merge_scoped_constraints(target, completed);
     }
+
+    pub(in crate::resolve::streaming_signature_bridge) fn record_scoped_argument_constraints(
+        &self,
+        scope: crate::fir::SignatureScope,
+        parameters: &[Ty],
+        arguments: &[Ty],
+    ) {
+        self.record_scoped_call_constraints(scope, parameters, arguments, &[]);
+    }
+
+    /// Record arguments against a callee's declared parameters. `callee_formals` are the callee's
+    /// own type variables: a relation between one of them and a builder variable
+    /// (`wrap(this)` relating `X` to `E`) is solved by the callee's own inference and is not a
+    /// bound of the builder variable.
+    pub(super) fn record_scoped_call_constraints(
+        &self,
+        scope: crate::fir::SignatureScope,
+        parameters: &[Ty],
+        arguments: &[Ty],
+        callee_formals: &[String],
+    ) {
+        let constraint_frame = self.active_scoped_constraint_frame(scope.owner);
+        crate::trace_compiler!(
+            "signature",
+            "scoped argument owner lookup scope={:?} active={constraint_frame:?} parameters={parameters:?} arguments={arguments:?}",
+            scope.owner,
+        );
+        let Some((constraint_owner, constraint_index)) = constraint_frame else {
+            return;
+        };
+        let active_formals = self
+            .scoped_constraint_inputs
+            .borrow()
+            .get(&constraint_owner)
+            .and_then(|stack| stack.get(constraint_index))
+            .map(|inputs| {
+                let mut formals = crate::fx_hash::HashSet::default();
+                for input in inputs {
+                    super::super::postponed_calls::collect_type_parameters(*input, &mut formals);
+                }
+                formals
+            })
+            .unwrap_or_default();
+        if active_formals.is_empty() {
+            return;
+        }
+        let mut all = self.scoped_constraints.borrow_mut();
+        let Some(active) = all
+            .get_mut(&constraint_owner)
+            .and_then(|stack| stack.get_mut(constraint_index))
+        else {
+            return;
+        };
+        crate::trace_compiler!(
+            "signature",
+            "scoped argument constraints owner={:?} parameters={parameters:?} arguments={arguments:?} before={active:?}",
+            constraint_owner,
+        );
+        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
+        for (&parameter, &argument) in parameters.iter().zip(arguments) {
+            let constraints =
+                crate::symbol_resolver::collect_assignability_constraints_from_symbols(
+                    &source, parameter, argument,
+                );
+            let mut inferred = constraints.lower;
+            for (formal, upper) in constraints.upper {
+                for actual in upper {
+                    inferred
+                        .entry(formal.clone())
+                        .and_modify(|known| {
+                            *known = crate::symbol_resolver::merge_inferred_ty(Some(*known), actual)
+                        })
+                        .or_insert(actual);
+                }
+            }
+            inferred.retain(|formal, actual| {
+                active_formals.contains(formal.as_str())
+                    && !crate::types::ty_mentions_param(*actual, callee_formals)
+            });
+            Self::merge_scoped_constraints_from_symbols(&source, active, inferred);
+        }
+        crate::trace_compiler!(
+            "signature",
+            "scoped argument constraints owner={:?} after={active:?}",
+            constraint_owner,
+        );
+    }
 }
 
 impl crate::fir::PostponedArgumentTransaction for ProductionSignatureSemantics<'_> {
@@ -206,6 +297,15 @@ impl crate::fir::PostponedArgumentTransaction for ProductionSignatureSemantics<'
 
     fn rollback_postponed_argument_transaction(&self) {
         self.rollback_scoped_constraint_transaction();
+    }
+
+    fn constrain_expected_value(
+        &self,
+        scope: crate::fir::SignatureScope,
+        expected: crate::fir::ResolvedTy,
+        actual: crate::fir::ResolvedTy,
+    ) {
+        self.record_expected_value_constraints(scope, expected.get(), actual.get());
     }
 }
 
@@ -239,5 +339,42 @@ mod tests {
 
         assert_eq!(active, active_before);
         assert_eq!(completed_after_failure, completed_before);
+    }
+
+    #[test]
+    fn a_failed_value_flow_probe_does_not_bind_the_selected_builder_candidate() {
+        let builder = crate::fir::DeclarationId::from_raw(1);
+        let mut active = crate::fx_hash::HashMap::from_iter([(builder, vec![Default::default()])]);
+        let mut completed = crate::fx_hash::HashMap::default();
+        let checkpoint = ScopedConstraintCheckpoint::capture(&active, &completed);
+
+        // A rejected postponed candidate can evaluate a typed local or invoked function value
+        // before its later expression fails. That provisional value flow must not constrain the
+        // builder frame used by the candidate that is ultimately selected.
+        active
+            .get_mut(&builder)
+            .unwrap()
+            .last_mut()
+            .unwrap()
+            .insert("E".to_owned(), Ty::String);
+        checkpoint.restore(&mut active, &mut completed);
+        active
+            .get_mut(&builder)
+            .unwrap()
+            .last_mut()
+            .unwrap()
+            .insert("E".to_owned(), Ty::Int);
+
+        assert_eq!(
+            active,
+            crate::fx_hash::HashMap::from_iter([(
+                builder,
+                vec![crate::symbol_resolver::GSigBinds::from_iter([(
+                    "E".to_owned(),
+                    Ty::Int,
+                )])],
+            )])
+        );
+        assert!(completed.is_empty());
     }
 }

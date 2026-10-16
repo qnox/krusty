@@ -1,7 +1,7 @@
-//! A builder lambda sees the type variables of the call it is an argument of. kotlinc's PCLA lets an
-//! extension whose declared receiver fixes such a variable apply to the lambda's receiver
-//! (`Buildee<UserKlass>.f()` on `Buildee<FT>`), and the receiver constraint is what infers the
-//! builder call's type argument.
+//! A builder lambda sees the type variables of the call it is an argument of. kotlinc's PCLA lets
+//! an extension whose declared receiver fixes such a variable apply to the lambda's receiver
+//! (`Buildee<UserKlass>.f()` on `Buildee<FT>`), and lets that receiver constrain the variable when
+//! it flows into a typed local or invoked function value.
 
 use super::common;
 
@@ -283,5 +283,86 @@ fn a_member_extension_argument_infers_a_suspend_builder_variable() {
     common::expect_box_same_as_kotlinc(
         SUSPEND_MEMBER_EXTENSION_ARGUMENT,
         "BuilderSuspendMemberExtensionRun",
+    );
+}
+
+const FIXED_TYPE_VALUE_FLOWS: &str = r#"class Chan<E> {
+    val items = ArrayList<E>()
+    fun send(e: E) { items.add(e) }
+}
+
+fun <E> build(block: Chan<E>.() -> Unit): List<E> {
+    val c = Chan<E>()
+    c.block()
+    return c.items
+}
+
+class W<R>(val ch: Chan<R>) {
+    fun out(r: R) = ch.send(r)
+}
+
+fun <X> wrap(c: Chan<X>): W<X> = W(c)
+
+fun <R> invokeOnWrapper(r: R, action: W<R>.(Int) -> Unit) = build { W(this).action(1) }
+fun <R> invokeOnLocal(r: R, action: W<R>.(Int) -> Unit) = build { val w = W(this); w.action(2) }
+fun <R> invokeWithWrapper(r: R, action: W<R>.(Int) -> Unit) = build { action(W(this), 3) }
+
+fun <R> declaredWrapper(r: R) = build { val w: W<R> = W(this); w.out(r) }
+fun <R> declaredReceiver(r: R) = build { val c: Chan<R> = this; c.send(r) }
+fun declaredConcrete() = build { val c: Chan<String> = this; c.send("d") }
+fun <R> functionArgument(r: R, f: (Chan<R>) -> Unit) = build { f(this) }
+fun <R> wrappedArgument(r: R, f: (W<R>) -> Unit) = build { f(wrap(this)) }
+fun <R> implicitReceiver(r: R, f: Chan<R>.() -> Unit) = build { f() }
+fun <R> explicitReceiver(r: R, f: Chan<R>.() -> Unit) = build { this.f() }
+
+fun box(): String {
+    val a: List<String> = invokeOnWrapper("a") { out("x$it") }
+    val b: List<String> = invokeOnLocal("b") { out("y$it") }
+    val c: List<String> = invokeWithWrapper("c") { out("z$it") }
+    if (a + b + c != listOf("x1", "y2", "z3")) return "invoke: $a $b $c"
+    val d: List<String> = declaredWrapper("w") + declaredReceiver("r") + declaredConcrete()
+    if (d != listOf("w", "r", "d")) return "declared: $d"
+    val e: List<Int> = functionArgument(0) { it.send(4) } + wrappedArgument(0) { it.out(5) }
+    if (e != listOf(4, 5)) return "arguments: $e"
+    val f: List<Int> = implicitReceiver(0) { send(6) } + explicitReceiver(0) { send(7) }
+    if (f != listOf(6, 7)) return "receivers: $f"
+    return "OK"
+}
+"#;
+
+/// A builder receiver flowing into a typed local, an invoked function value's argument, or its
+/// extension receiver constrains the builder variable rather than leaving it at `Any?`.
+#[test]
+fn fixed_type_value_flows_constrain_the_builder_variable() {
+    common::assert_accepted_like_kotlinc(FIXED_TYPE_VALUE_FLOWS);
+    common::expect_box_same_as_kotlinc(FIXED_TYPE_VALUE_FLOWS, "BuilderFixedTypeConstraintsRun");
+}
+
+const CONTEXT_FUNCTION_EXPECTED_VALUE_FLOW: &str = r#"class Chan<E>
+
+class Holder<E> { val action: context(Chan<E>) () -> Unit = {} }
+
+fun <E> holder(block: Holder<E>.() -> Unit): Holder<E> {
+    val value = Holder<E>()
+    value.block()
+    return value
+}
+
+fun inferred() = holder { context(Chan<String>()) { action() } }
+
+fun box(): String {
+    val value: Holder<String> = inferred()
+    return "OK"
+}
+"#;
+
+/// A fixed implicit context constrains the postponed expected context type. A postponed builder
+/// receiver is deliberately not eligible as a fixed context input: kotlinc does not select it.
+#[test]
+fn fixed_context_constrains_a_function_values_expected_context_type() {
+    common::assert_accepted_like_kotlinc(CONTEXT_FUNCTION_EXPECTED_VALUE_FLOW);
+    common::expect_box_same_as_kotlinc(
+        CONTEXT_FUNCTION_EXPECTED_VALUE_FLOW,
+        "BuilderFixedContextConstraintsRun",
     );
 }
