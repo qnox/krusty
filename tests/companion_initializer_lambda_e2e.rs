@@ -61,3 +61,68 @@ fn a_moved_companion_lambda_is_numbered_after_the_outer_class_lambdas() {
         .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
     }
 }
+
+const SAME_NAME_SIBLINGS: &str = r#"
+fun join(first: () -> String, second: () -> String): String = first() + second()
+
+class Holder {
+    val value = join({ "O" }, { "" })
+
+    companion object {
+        val value = join({ "K" }, { "" })
+    }
+}
+
+fun box(): String = Holder().value + Holder.value
+"#;
+
+/// The expression walk that finds implementations is stack based, but physical `$lambda$N`
+/// ordinals still follow source order when several moved siblings share one declaration name.
+#[test]
+fn moved_sibling_lambdas_keep_source_ordinal_order() {
+    common::expect_box_same_as_kotlinc(
+        SAME_NAME_SIBLINGS,
+        "CompanionInitializerSiblingLambdaNames",
+    );
+    for class in ["Holder", "Holder$Companion"] {
+        common::byte_diff_against_kotlinc_cp(
+            "CompanionInitializerSiblingLambdaNames",
+            SAME_NAME_SIBLINGS,
+            class,
+            &[common::stdlib_jar()],
+        )
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
+    }
+}
+
+const SAME_NAME_NESTED: &str = r#"
+fun plain(f: () -> String): String = f()
+
+class Holder {
+    val value = plain { plain { "O" } }
+
+    companion object {
+        val value = plain { plain { "K" } }
+    }
+}
+
+fun box(): String = Holder().value + Holder.value
+"#;
+
+/// A nested implementation follows its moved parent's physical ordinal: `value$lambda$1$0`, not
+/// the companion's independent lexical `value$lambda$0$0` sequence.
+#[test]
+fn a_nested_moved_lambda_uses_its_parents_physical_ordinal() {
+    common::expect_box_same_as_kotlinc(SAME_NAME_NESTED, "CompanionInitializerNestedLambdaNames");
+    for class in ["Holder", "Holder$Companion"] {
+        common::byte_diff_against_kotlinc_cp(
+            "CompanionInitializerNestedLambdaNames",
+            SAME_NAME_NESTED,
+            class,
+            &[common::stdlib_jar()],
+        )
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
+    }
+}

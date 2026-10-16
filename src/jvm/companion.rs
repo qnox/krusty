@@ -180,9 +180,10 @@ fn synthetic_owner_static_field(
 }
 
 /// Realize the JVM's companion-property storage layout from semantic common IR.
-pub(crate) fn lower_companion_properties(
+pub(super) fn lower_companion_properties(
     ir: &mut IrFile,
     realizations: &crate::jvm::property_realizations::PropertyRealizations,
+    physical_top_lambda_ordinals: &mut crate::jvm::lifted_names::PhysicalTopLambdaOrdinals,
 ) {
     // A companion `const val` remains declared by the companion in common IR and metadata, while
     // the JVM stores its public static final field on the outer class. Select that physical owner by
@@ -400,7 +401,7 @@ pub(crate) fn lower_companion_properties(
         )
     });
     if candidates.is_empty() {
-        schedule_class_companion_initializers(ir, realizations);
+        schedule_class_companion_initializers(ir, realizations, physical_top_lambda_ordinals);
         return;
     }
 
@@ -715,7 +716,13 @@ pub(crate) fn lower_companion_properties(
             ir.statics[static_index as usize].init = Some(initializer);
             // The outer `<clinit>` now evaluates the initializer, so it owns the lambdas too.
             let outer = ir.classes[candidate.outer as usize].fq_name;
-            move_initializer_lambdas(ir, candidate.companion, outer, initializer);
+            move_initializer_lambdas(
+                ir,
+                candidate.companion,
+                outer,
+                initializer,
+                physical_top_lambda_ordinals,
+            );
         }
 
         let class = &mut ir.classes[candidate.companion as usize];
@@ -740,7 +747,7 @@ pub(crate) fn lower_companion_properties(
             }
         }
     }
-    schedule_class_companion_initializers(ir, realizations);
+    schedule_class_companion_initializers(ir, realizations, physical_top_lambda_ordinals);
 }
 
 /// Allocate the final JVM names of companion fields hoisted onto their enclosing classes.
@@ -892,6 +899,7 @@ pub(crate) fn finalize_hoisted_static_field_names(
 fn schedule_class_companion_initializers(
     ir: &mut IrFile,
     realizations: &crate::jvm::property_realizations::PropertyRealizations,
+    physical_top_lambda_ordinals: &mut crate::jvm::lifted_names::PhysicalTopLambdaOrdinals,
 ) {
     let mut scheduled = Vec::new();
     for index in 0..ir.classes.len() {
@@ -927,7 +935,7 @@ fn schedule_class_companion_initializers(
         // The initializer now emits in the outer `<clinit>`. A lambda it evaluates is a private
         // static of that class; leaving it on the companion makes the outer class call a private
         // method it cannot see.
-        move_initializer_lambdas(ir, companion, owner, body);
+        move_initializer_lambdas(ir, companion, owner, body, physical_top_lambda_ordinals);
         // `<clinit>` has no `this`. Each use of the companion instance reloads the outer field.
         // A single local would be `astore`/`aload`, which is not kotlinc's `<clinit>`.
         reload_companion_instance(ir, owner, companion, body);
@@ -1072,33 +1080,41 @@ fn move_initializer_lambdas(
     companion: ClassId,
     outer: crate::types::TypeName,
     body: ExprId,
+    physical_top_lambda_ordinals: &mut crate::jvm::lifted_names::PhysicalTopLambdaOrdinals,
 ) {
     let Some(outer_class) = ir.class_id_by_name(outer) else {
         return;
     };
     let mut pending = vec![body];
     let mut seen = HashSet::default();
-    let mut lambdas = Vec::new();
+    let mut reachable_lambdas = HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
         }
         if let IrExpr::Lambda { impl_fn, .. } = ir.expr(expression) {
-            lambdas.push(*impl_fn);
-            if let Some(nested) = ir
-                .functions
-                .get(*impl_fn as usize)
-                .and_then(|function| function.body)
-            {
-                pending.push(nested);
+            if reachable_lambdas.insert(*impl_fn) {
+                if let Some(nested) = ir
+                    .functions
+                    .get(*impl_fn as usize)
+                    .and_then(|function| function.body)
+                {
+                    pending.push(nested);
+                }
             }
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
-    let moving: Vec<u32> = lambdas
-        .into_iter()
-        .filter(|function| ir.classes[companion as usize].methods.contains(function))
-        .collect();
+    // The expression walk is deliberately stack based and therefore does not preserve sibling
+    // order. The companion's method inventory does: retain that source order while also collapsing
+    // repeated expression edges to one implementation.
+    let mut selected = HashSet::default();
+    let moving = ir.classes[companion as usize]
+        .methods
+        .iter()
+        .copied()
+        .filter(|function| reachable_lambdas.contains(function) && selected.insert(*function))
+        .collect::<Vec<_>>();
     if moving.is_empty() {
         return;
     }
@@ -1106,21 +1122,66 @@ fn move_initializer_lambdas(
         .methods
         .retain(|method| !moving.contains(method));
     // Implementation names are numbered per class: a moved lambda continues the outer class's
-    // sequence for its name, as kotlinc numbers it there.
+    // sequence for its name, as kotlinc numbers it there. Only the outermost implementation owns a
+    // class-level ordinal; a callable nested beneath it keeps the remainder of that root's lifted
+    // path. Allocate each name-group in its original source ordinal order; the stack walk above is
+    // intentionally irrelevant to that order.
+    let mut renumber = moving
+        .iter()
+        .filter_map(|&function| {
+            if !owns_class_lambda_ordinal(ir, function) {
+                return None;
+            }
+            let origin = ir.lambda_origins.get(&function)?;
+            Some((
+                origin.implementation_name.clone(),
+                origin.implementation_ordinal,
+                origin.identity,
+                function,
+            ))
+        })
+        .collect::<Vec<_>>();
+    renumber.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then(left.1.cmp(&right.1))
+            .then(left.2.cmp(&right.2))
+            .then(left.3.cmp(&right.3))
+    });
+    let mut next_ordinals = crate::fx_hash::HashMap::<String, u32>::default();
+    for (name, _, _, function) in renumber {
+        let ordinal = {
+            let next = next_ordinals.entry(name.clone()).or_insert_with(|| {
+                ir.classes[outer_class as usize]
+                    .methods
+                    .iter()
+                    .filter_map(|method| {
+                        owns_class_lambda_ordinal(ir, *method)
+                            .then(|| ir.lambda_origins.get(method))
+                            .flatten()
+                    })
+                    .filter(|other| other.implementation_name == name)
+                    .map(|other| other.implementation_ordinal)
+                    .max()
+                    .map_or(0, |ordinal| {
+                        ordinal
+                            .checked_add(1)
+                            .expect("lambda implementation ordinal overflow")
+                    })
+            });
+            let ordinal = *next;
+            *next = next
+                .checked_add(1)
+                .expect("lambda implementation ordinal overflow");
+            ordinal
+        };
+        ir.lambda_origins
+            .get_mut(&function)
+            .expect("a selected lambda origin remains present")
+            .implementation_ordinal = ordinal;
+    }
+    physical_top_lambda_ordinals.record_moved(ir, &moving);
     for &function in &moving {
-        let ordinal = ir.lambda_origins.get(&function).map(|origin| {
-            ir.classes[outer_class as usize]
-                .methods
-                .iter()
-                .filter_map(|method| ir.lambda_origins.get(method))
-                .filter(|other| other.implementation_name == origin.implementation_name)
-                .map(|other| other.implementation_ordinal + 1)
-                .max()
-                .unwrap_or(0)
-        });
-        if let (Some(ordinal), Some(origin)) = (ordinal, ir.lambda_origins.get_mut(&function)) {
-            origin.implementation_ordinal = ordinal;
-        }
         let methods = &mut ir.classes[outer_class as usize].methods;
         if !methods.contains(&function) {
             methods.push(function);
@@ -1130,6 +1191,22 @@ fn move_initializer_lambdas(
     for function in moving {
         ir.class_static_local_functions.insert(function, owner);
     }
+}
+
+/// Whether one lambda implementation owns an ordinal in its physical class's `$lambda$N`
+/// namespace. A structured multi-step lifting path proves that the implementation is nested below
+/// another lambda and therefore shares that root's class-level ordinal. An implementation without
+/// lifting provenance still owns the ordinal recorded in its [`crate::ir::IrLambdaOrigin`].
+fn owns_class_lambda_ordinal(ir: &IrFile, function: crate::ir::FunId) -> bool {
+    let Some((_, site)) = ir.lifted_functions.get(&function) else {
+        return true;
+    };
+    site.lifted
+        && matches!(
+            site.path.as_ref(),
+            [step]
+                if step.kind == crate::lifting_provenance::LiftingCallableKind::Lambda
+        )
 }
 
 /// Whether `body` still reads or writes a companion instance field.
