@@ -421,6 +421,7 @@ mod tests {
         assert_eq!(
             normalized_invocation(&runs[runtime_at], &root, &kgp),
             strings(&[
+                "$ROOT/core/util.runtime/build/generated/stamp/org/jetbrains/kotlin/util/Stamp.kt",
                 "$ROOT/core/util.runtime/src/org/jetbrains/kotlin/util/Runtime.kt",
                 "$ROOT/core/util.runtime/src/org/jetbrains/kotlin/util/RuntimeJava.java",
                 "-classpath",
@@ -2325,11 +2326,26 @@ plugins {
 
 val krustyNegative = providers.gradleProperty("krusty.negative").orNull
 
+// A source directory added by path, its generator wired onto the Kotlin task alone.
+val generateStamp by tasks.registering {
+    val out = layout.buildDirectory.file("generated/stamp/org/jetbrains/kotlin/util/Stamp.kt")
+    outputs.file(out)
+    doLast {
+        out.get().asFile.apply {
+            parentFile.mkdirs()
+            writeText("package org.jetbrains.kotlin.util\nconst val STAMP = \"stamp\"\n")
+        }
+    }
+}
+
 kotlin {
     sourceSets.named("main") {
         kotlin.srcDir("src")
+        kotlin.srcDir(layout.buildDirectory.dir("generated/stamp"))
     }
 }
+
+tasks.named("compileKotlin") { dependsOn(generateStamp) }
 
 sourceSets.named("main") {
     java.setSrcDirs(listOf("src"))
