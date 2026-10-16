@@ -3,8 +3,7 @@
 use super::constructed_standard_serializers::constructed_standard_serializer;
 use super::{
     build_field_serializer_instance, class_ty, contextual_serializer_for, declared_serializer_of,
-    encode_element_method, is_nullable, property_is_contextual, ty_descriptor,
-    value_class_underlying, virtual_iface,
+    encode_element_method, is_nullable, property_is_contextual, ty_descriptor, virtual_iface,
 };
 use crate::ir::{Callee, ClassId, ExprId, IrConst, IrExpr, IrFile};
 use crate::libraries::InlineKind;
@@ -155,23 +154,31 @@ impl SerializeBody<'_> {
         let read_property =
             |ir: &mut IrFile, field_index: usize, name: &str, ty: &Ty| -> Option<ExprId> {
                 let receiver = ir.add_expr(IrExpr::GetValue(value_slot));
-                if delegate {
-                    return Some(ir.add_expr(IrExpr::GetField {
+                let read = if delegate {
+                    ir.add_expr(IrExpr::GetField {
                         receiver,
                         class: foo_id,
                         index: field_index as u32,
-                    }));
+                    })
+                } else {
+                    // The generic inlined shape lives on `$serializer`, so it uses the public
+                    // getter.
+                    let descriptor = ty_descriptor(ctx, ty)?;
+                    super::synthesized_accessor::getter(
+                        ir,
+                        receiver,
+                        serialized_name,
+                        name,
+                        descriptor,
+                        (foo_id, field_index as u32),
+                    )
+                };
+                // An unsigned value is held as its signed carrier; the read is boxed as the
+                // unsigned type it is.
+                if ty.is_unsigned() {
+                    ir.logical_types.insert(read, *ty);
                 }
-                // The generic inlined shape lives on `$serializer`, so it uses the public getter.
-                let descriptor = ty_descriptor(ctx, ty)?;
-                Some(super::synthesized_accessor::getter(
-                    ir,
-                    receiver,
-                    serialized_name,
-                    name,
-                    descriptor,
-                    (foo_id, field_index as u32),
-                ))
+                Some(read)
             };
         // Element `i` is written from backing field `field`; they differ after a transient property.
         for (i, &field) in elements.iter().enumerate() {
@@ -183,19 +190,7 @@ impl SerializeBody<'_> {
                 this_desc(ir)
             };
             let idx = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
-            // A value-class element is written as its underlying value, which `fields` types it as.
-            let declared = ir.classes[foo_id as usize].fields[field].ty;
-            let v = if value_class_underlying(ir, &declared).is_some() {
-                super::value_class_types::underlying_read(
-                    ir,
-                    declared,
-                    element_temporary_start
-                        + u32::try_from(i).expect("too many serialized elements"),
-                    &mut |ir| read_property(ir, field, pname, ty),
-                )
-            } else {
-                read_property(ir, field, pname, ty)
-            };
+            let v = read_property(ir, field, pname, ty);
             let Some(v) = v else {
                 bail = true;
                 break;

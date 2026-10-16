@@ -222,10 +222,15 @@ pub(super) fn declare_deserialization_constructor(
     named_fields: &[(String, Ty)],
     elements: &SerialElements,
 ) {
-    let element_fields = elements.select(named_fields);
-    // The deserialization ABI retains a value-class field's BOXED source type. The extra default
-    // marker below disambiguates this constructor from the physical primary constructor; the body
-    // performs the representation conversion when storing the field.
+    // A value-class element is taken as its NULLABLE type, as kotlinc declares every reference
+    // parameter of this constructor nullable. Its representation is that of `V?`: the underlying
+    // reference itself, or the box when the underlying is a primitive. The body converts it when
+    // storing the field.
+    let element_fields = elements
+        .select(named_fields)
+        .into_iter()
+        .map(|(name, ty)| (name, deserialization_parameter_ty(ty)))
+        .collect::<Vec<_>>();
     let mask_count = mask_count(element_fields.len());
     let mut params = vec![Ty::Int; mask_count];
     params.extend(element_fields.iter().map(|(_, ty)| *ty));
@@ -384,12 +389,21 @@ pub(super) fn complete_deserialization_constructor(
         let store_argument = element.map(|element| {
             let argument = ir.add_expr(IrExpr::GetValue(element as u32 + 1 + mask_count as u32));
             if value_class_underlying(ir, field_ty).is_some() {
-                // Unlike ordinary source-constructor parameters, this ABI slot carries the
-                // value-class BOX. Publish that exact expression representation so JVM lowering
-                // inserts `unbox-impl` at the erased backing-field store. The slot holds the box
-                // reference itself, so a nullable property's `X?` is still physically `X`.
-                ir.physical_types.insert(argument, field_ty.non_null());
+                // The slot carries the nullable value class, which JVM lowering converts at the
+                // erased backing-field store.
+                ir.physical_types
+                    .insert(argument, deserialization_parameter_ty(*field_ty));
             }
+            // An unsigned slot carries its box, unboxed into the field as kotlinc does.
+            let argument = if field_ty.is_unsigned() {
+                ir.add_expr(IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg: argument,
+                    type_operand: *field_ty,
+                })
+            } else {
+                argument
+            };
             ir.add_expr(IrExpr::SetField {
                 receiver: this,
                 class: class_id,
@@ -530,6 +544,19 @@ fn store_field_default(
         }
     }
     store
+}
+
+/// The deserialization constructor's parameter type for an element of type `ty`. kotlinc declares
+/// every parameter that is not a signed primitive nullable, so a value class is taken as `V?`.
+/// Whether `ty` is a value class is the backend's question: a sibling file's value class may not
+/// be known to this pass when the constructor is declared.
+fn deserialization_parameter_ty(ty: Ty) -> Ty {
+    // An unsigned type is a value class, so it is taken nullable (boxed) like any other.
+    if ty.is_jvm_scalar() && !ty.is_unsigned() {
+        ty
+    } else {
+        Ty::nullable(ty.non_null())
+    }
 }
 
 #[cfg(test)]
