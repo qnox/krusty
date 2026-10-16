@@ -128,6 +128,7 @@ pub(crate) mod function_type_parameters;
 mod function_value_conversions;
 mod generic_call_bindings;
 mod if_expression;
+mod implicit_receiver_calls;
 mod implicit_rungs;
 mod inline_access;
 mod inner_constructor_calls;
@@ -21721,18 +21722,21 @@ impl<'a> Checker<'a> {
                 }
                 if retained_receiver_call_rejections
                     .as_ref()
-                    .is_some_and(|rejections| rejections.mapping_failure.is_some())
+                    .is_some_and(|rejections| rejections.has_mapping_failure())
                 {
                     let retained = retained_receiver_call_rejections
                         .take()
                         .expect("a retained mapping failure belongs to one receiver rung");
-                    self.report_retained_member_mapping_failure(
-                        call,
+                    self.report_rejected_implicit_receiver_call(
+                        scope,
+                        CallArgs {
+                            call,
+                            args,
+                            arg_tys: &arg_tys,
+                        },
                         &fname,
-                        args,
-                        retained
-                            .mapping_failure
-                            .expect("the retained receiver rung has a mapping failure"),
+                        expected,
+                        retained,
                     );
                     return Ty::Error;
                 }
@@ -21862,8 +21866,7 @@ impl<'a> Checker<'a> {
                 }
                 if !had_rejected_callable {
                     if let Some(rejections) = retained_receiver_call_rejections {
-                        let type_args = self.resolved_explicit_type_args(scope, call);
-                        self.report_inapplicable_receiver_candidates(
+                        self.report_rejected_implicit_receiver_call(
                             scope,
                             CallArgs {
                                 call,
@@ -21871,12 +21874,8 @@ impl<'a> Checker<'a> {
                                 arg_tys: &arg_tys,
                             },
                             &fname,
-                            CallConstraints {
-                                type_args: &type_args,
-                                receiver: rejections.receiver,
-                                expected,
-                            },
-                            &rejections.candidates,
+                            expected,
+                            rejections,
                         );
                         return Ty::Error;
                     }
@@ -36061,12 +36060,6 @@ struct ExtensionRungSelection {
 struct MemberMappingFailure {
     failure: CallArgMappingFailure,
     candidate: crate::libraries::FunctionInfo,
-}
-
-struct ReceiverCallRejections {
-    receiver: Ty,
-    candidates: Vec<crate::libraries::FunctionInfo>,
-    mapping_failure: Option<MemberMappingFailure>,
 }
 
 fn ty_param_names_into(ty: Ty, out: &mut Vec<&'static str>) {
@@ -58354,6 +58347,7 @@ impl<'a> Checker<'a> {
             // AFTER the receiver so a receiver-only diagnostic doesn't mask an unresolved member.
             let checkpoint = self.diags.diags.len();
             let mut checked_arg_tys = Vec::new();
+            let mut rejected_safe_call_candidates = None;
             let mut result = match &args {
                 // A function value's explicit `invoke` spelling is the invoke-operator convention,
                 // not a failed ordinary member lookup. Select that semantic path up front so the
@@ -58429,49 +58423,56 @@ impl<'a> Checker<'a> {
                             MemberSlotCall::ExtensionRung {
                                 extension,
                                 member_mapping_failure,
-                                ..
-                            } => self
-                                .record_scope_level_receiver_call(
-                                    scope,
-                                    CallArgs {
-                                        call: e,
-                                        args: a,
-                                        arg_tys,
-                                    },
-                                    receiver,
-                                    recv,
-                                    &name,
-                                    FunctionValueRungs::InTower,
-                                )
-                                .or_else(|| {
-                                    let call_args = CallArgs {
-                                        call: e,
-                                        args: a,
-                                        arg_tys,
-                                    };
-                                    let owned = match member_mapping_failure {
-                                        Some(failure) if extension.selection.is_none() => self
-                                            .report_owned_member_failure(
-                                                call_args, &name, recv, *failure,
-                                            ),
-                                        _ => None,
-                                    };
-                                    owned.or_else(|| {
-                                        self.record_extension_selection(
-                                            scope,
-                                            call_args,
-                                            &name,
-                                            CallConstraints {
-                                                type_args: &type_args,
-                                                receiver: recv,
-                                                expected,
-                                            },
-                                            extension,
-                                        )
+                                rejected_candidates,
+                            } => {
+                                let result = self
+                                    .record_scope_level_receiver_call(
+                                        scope,
+                                        CallArgs {
+                                            call: e,
+                                            args: a,
+                                            arg_tys,
+                                        },
+                                        receiver,
+                                        recv,
+                                        &name,
+                                        FunctionValueRungs::InTower,
+                                    )
+                                    .or_else(|| {
+                                        let call_args = CallArgs {
+                                            call: e,
+                                            args: a,
+                                            arg_tys,
+                                        };
+                                        let owned = match member_mapping_failure {
+                                            Some(failure) if extension.selection.is_none() => self
+                                                .report_owned_member_failure(
+                                                    call_args,
+                                                    &name,
+                                                    &rejected_candidates,
+                                                    *failure,
+                                                ),
+                                            _ => None,
+                                        };
+                                        owned.or_else(|| {
+                                            self.record_extension_selection(
+                                                scope,
+                                                call_args,
+                                                &name,
+                                                CallConstraints {
+                                                    type_args: &type_args,
+                                                    receiver: recv,
+                                                    expected,
+                                                },
+                                                extension,
+                                            )
+                                        })
                                     })
-                                })
-                                .or_else(|| self.report_unmapped_labelled_call(e, a))
-                                .unwrap_or(Ty::Error),
+                                    .or_else(|| self.report_unmapped_labelled_call(e, a))
+                                    .unwrap_or(Ty::Error);
+                                rejected_safe_call_candidates = Some(rejected_candidates);
+                                result
+                            }
                         }
                     } else if recv == Ty::Nothing
                         || crate::symbol_resolver::supports_member_lookup(recv)
@@ -58492,49 +58493,56 @@ impl<'a> Checker<'a> {
                             MemberSlotCall::ExtensionRung {
                                 extension,
                                 member_mapping_failure,
-                                ..
-                            } => self
-                                .record_scope_level_receiver_call(
-                                    scope,
-                                    CallArgs {
-                                        call: e,
-                                        args: a,
-                                        arg_tys,
-                                    },
-                                    receiver,
-                                    recv,
-                                    &name,
-                                    FunctionValueRungs::InTower,
-                                )
-                                .or_else(|| {
-                                    let call_args = CallArgs {
-                                        call: e,
-                                        args: a,
-                                        arg_tys,
-                                    };
-                                    let owned = match member_mapping_failure {
-                                        Some(failure) if extension.selection.is_none() => self
-                                            .report_owned_member_failure(
-                                                call_args, &name, recv, *failure,
-                                            ),
-                                        _ => None,
-                                    };
-                                    owned.or_else(|| {
-                                        self.record_extension_selection(
-                                            scope,
-                                            call_args,
-                                            &name,
-                                            CallConstraints {
-                                                type_args: &type_args,
-                                                receiver: recv,
-                                                expected,
-                                            },
-                                            extension,
-                                        )
+                                rejected_candidates,
+                            } => {
+                                let result = self
+                                    .record_scope_level_receiver_call(
+                                        scope,
+                                        CallArgs {
+                                            call: e,
+                                            args: a,
+                                            arg_tys,
+                                        },
+                                        receiver,
+                                        recv,
+                                        &name,
+                                        FunctionValueRungs::InTower,
+                                    )
+                                    .or_else(|| {
+                                        let call_args = CallArgs {
+                                            call: e,
+                                            args: a,
+                                            arg_tys,
+                                        };
+                                        let owned = match member_mapping_failure {
+                                            Some(failure) if extension.selection.is_none() => self
+                                                .report_owned_member_failure(
+                                                    call_args,
+                                                    &name,
+                                                    &rejected_candidates,
+                                                    *failure,
+                                                ),
+                                            _ => None,
+                                        };
+                                        owned.or_else(|| {
+                                            self.record_extension_selection(
+                                                scope,
+                                                call_args,
+                                                &name,
+                                                CallConstraints {
+                                                    type_args: &type_args,
+                                                    receiver: recv,
+                                                    expected,
+                                                },
+                                                extension,
+                                            )
+                                        })
                                     })
-                                })
-                                .or_else(|| self.report_unmapped_labelled_call(e, a))
-                                .unwrap_or(Ty::Error),
+                                    .or_else(|| self.report_unmapped_labelled_call(e, a))
+                                    .unwrap_or(Ty::Error);
+                                rejected_safe_call_candidates = Some(rejected_candidates);
+                                result
+                            }
                         }
                     } else {
                         // Every non-`String`, non-`Obj` receiver reaches one semantic plan after
@@ -58545,7 +58553,8 @@ impl<'a> Checker<'a> {
                         // library/source extension indexes. In particular, generic library
                         // extensions such as `takeIf` must not disappear only for the non-null form.
                         let receiver_callables = self.stable_receiver_callables(recv, &name);
-                        if let Some(ret) = self.check_builtin_operator_method(
+                        let rejected_candidates = receiver_callables.functions().to_vec();
+                        let result = if let Some(ret) = self.check_builtin_operator_method(
                             e,
                             recv,
                             &name,
@@ -58584,7 +58593,9 @@ impl<'a> Checker<'a> {
                             })
                             .or_else(|| self.report_unmapped_labelled_call(e, a))
                             .unwrap_or(Ty::Error)
-                        }
+                        };
+                        rejected_safe_call_candidates = Some(rejected_candidates);
+                        result
                     }
                 }
             };
@@ -58683,10 +58694,7 @@ impl<'a> Checker<'a> {
             // stay a silent `Ty::Error` so the backend bail reports the gap honestly.
             let mut reported_inapplicable = false;
             if result == Ty::Error && self.diags.diags.len() == checkpoint {
-                let candidates = self
-                    .stable_receiver_callables(safe_rt, &name)
-                    .functions()
-                    .to_vec();
+                let candidates = rejected_safe_call_candidates.unwrap_or_default();
                 crate::trace_compiler!(
                     "resolve",
                     "safe-call inapplicable receiver={:?} name={name} candidates={} result={result:?}",
@@ -64016,95 +64024,6 @@ impl<'a> Checker<'a> {
             selected.receiver,
             selected.member.external_identity,
         )
-    }
-
-    fn this_member_call_ret(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call_args: CallArgs<'_>,
-        tower_rung: MemberCallTowerRung,
-        name: &str,
-        expected: Option<Ty>,
-        retained: &mut Option<ReceiverCallRejections>,
-    ) -> Option<Ty> {
-        let receiver = tower_rung
-            .receiver
-            .expect("this-member selection requires an implicit-receiver rung");
-        let CallArgs { call, args, .. } = call_args;
-        let rt = self.apply_postponed_call_bindings(receiver.ty);
-        let type_args = self.resolved_explicit_type_args(scope, call);
-        let (rung, rejected_candidates, mut member_mapping_failure) = if rt == Ty::String
-            || matches!(rt, Ty::Obj(..) | Ty::TyParam(..))
-        {
-            match self
-                .record_member_call_with_slots(scope, call, rt, name, args, tower_rung, expected)
-            {
-                MemberSlotCall::Resolved(ret) => {
-                    self.mark_implicit_receiver_selection(call, receiver);
-                    return Some(ret);
-                }
-                MemberSlotCall::Ambiguous | MemberSlotCall::Rejected => {
-                    return Some(Ty::Error);
-                }
-                MemberSlotCall::ExtensionRung {
-                    extension,
-                    member_mapping_failure: failure,
-                    rejected_candidates: candidates,
-                } => (extension, candidates, failure.map(|failure| *failure)),
-            }
-        } else {
-            let callables = self.stable_receiver_callables(rt, name);
-            let rejected = callables.functions().to_vec();
-            (
-                self.select_extension_rung(scope, call_args, rt, &type_args, expected, &callables),
-                rejected,
-                None,
-            )
-        };
-        if rung.selection.is_none() {
-            if member_mapping_failure.is_none() {
-                member_mapping_failure = self
-                    .unanimous_callable_mapping_failure(
-                        scope,
-                        call,
-                        args,
-                        &type_args,
-                        &rung.overloads,
-                    )
-                    .map(|(failure, candidate)| MemberMappingFailure { failure, candidate });
-            }
-            if !rejected_candidates.is_empty() {
-                retained.get_or_insert(ReceiverCallRejections {
-                    receiver: rt,
-                    candidates: rejected_candidates,
-                    mapping_failure: member_mapping_failure,
-                });
-            }
-            return None;
-        }
-        let ret = self.record_extension_selection(
-            scope,
-            call_args,
-            name,
-            CallConstraints {
-                type_args: &type_args,
-                receiver: rt,
-                expected,
-            },
-            rung,
-        );
-        if let Some(ret) = ret {
-            self.mark_implicit_receiver_selection(call, receiver);
-            return Some(ret);
-        }
-        if !rejected_candidates.is_empty() {
-            retained.get_or_insert(ReceiverCallRejections {
-                receiver: rt,
-                candidates: rejected_candidates,
-                mapping_failure: member_mapping_failure,
-            });
-        }
-        None
     }
 
     fn inferred_member_ret(&self, receiver: Ty, name: &str, params: &[Ty]) -> Option<Ty> {

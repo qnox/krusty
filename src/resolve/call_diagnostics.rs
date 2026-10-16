@@ -642,14 +642,10 @@ impl Checker<'_> {
         &mut self,
         call_args: CallArgs<'_>,
         name: &str,
-        receiver: Ty,
+        candidates: &[crate::libraries::FunctionInfo],
         failure: MemberMappingFailure,
     ) -> Option<Ty> {
-        let candidates = self
-            .stable_receiver_callables(receiver, name)
-            .functions()
-            .to_vec();
-        match self.rejected_call_owner(call_args.call, call_args.args, &candidates) {
+        match self.rejected_call_owner(call_args.call, call_args.args, candidates) {
             RejectedCallOwner::Extension(_) => return None,
             RejectedCallOwner::Member => self.report_retained_member_mapping_failure(
                 call_args.call,

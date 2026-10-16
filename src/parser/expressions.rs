@@ -1497,7 +1497,7 @@ impl Parser<'_> {
                 if subject.is_none() {
                     self.diags.error(
                         self.t[self.i.saturating_sub(1)].span,
-                        "guard statements are only allowed in 'when' with subject.",
+                        "Guard statements are only allowed in 'when' with subject.",
                     );
                 } else if !self.when_guards {
                     self.diags.error(

@@ -288,7 +288,7 @@ fn an_unstable_boolean_or_root_proves_nothing_like_kotlinc() {
              \x20   var x: LoopBase = LoopDerived()\n\
              \x20   while (cond) {\n\
              \x20       x.derived()\n\
-             \x20       class Local(val y: LoopBase = run { x = LoopBase(); x })\n\
+             \x20       class Local(val x: LoopBase = run { x = LoopBase(); x })\n\
              \x20       Local()\n\
              \x20   }\n\
              }\n\
@@ -296,7 +296,7 @@ fn an_unstable_boolean_or_root_proves_nothing_like_kotlinc() {
              \x20   var x: LoopBase = LoopDerived()\n\
              \x20   while (cond) {\n\
              \x20       x.derived()\n\
-             \x20       fun reset(y: LoopBase = run { x = LoopBase(); x }) {}\n\
+             \x20       fun reset(x: LoopBase = run { x = LoopBase(); x }) {}\n\
              \x20       reset()\n\
              \x20   }\n\
              }\n\
@@ -305,7 +305,7 @@ fn an_unstable_boolean_or_root_proves_nothing_like_kotlinc() {
              \x20   while (cond) {\n\
              \x20       x.derived()\n\
              \x20       class Local {\n\
-             \x20           fun reset(y: LoopBase = run { x = LoopBase(); x }) {}\n\
+             \x20           fun reset(x: LoopBase = run { x = LoopBase(); x }) {}\n\
              \x20       }\n\
              \x20       Local().reset()\n\
              \x20   }\n\

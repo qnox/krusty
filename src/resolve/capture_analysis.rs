@@ -116,12 +116,27 @@ pub(super) fn local_fun_body_uses_any(
                 class_active.remove(name);
             }
         }
+        // Constructor parameters enter scope only after their own defaults. An outer `x` is still
+        // the binding in `class C(x: T = run { use(x) })`, while a later parameter default and the
+        // completed class header see the newly declared constructor parameter.
+        let mut constructor_active = active.clone();
+        for parameter in &class.context_params {
+            constructor_active.remove(&parameter.name);
+        }
+        for parameter in &class.props {
+            if parameter
+                .default
+                .is_some_and(|default| expression_uses(file, default, &constructor_active))
+            {
+                return true;
+            }
+            constructor_active.remove(&parameter.name);
+        }
         if class
             .base_args
             .iter()
             .copied()
-            .chain(class.props.iter().filter_map(|property| property.default))
-            .any(|expression| expression_uses(file, expression, &class_active))
+            .any(|expression| expression_uses(file, expression, &constructor_active))
         {
             return true;
         }
@@ -162,6 +177,12 @@ pub(super) fn local_fun_body_uses_any(
         for method in &class.methods {
             let mut method_active = class_active.clone();
             for parameter in &method.params {
+                if parameter
+                    .default
+                    .is_some_and(|default| expression_uses(file, default, &method_active))
+                {
+                    return true;
+                }
                 method_active.remove(&parameter.name);
             }
             if let FunBody::Expr(body) | FunBody::Block(body) = method.body {
@@ -173,6 +194,12 @@ pub(super) fn local_fun_body_uses_any(
         for constructor in &class.secondary_ctors {
             let mut constructor_active = class_active.clone();
             for parameter in &constructor.params {
+                if parameter
+                    .default
+                    .is_some_and(|default| expression_uses(file, default, &constructor_active))
+                {
+                    return true;
+                }
                 constructor_active.remove(&parameter.name);
             }
             let arguments = match &constructor.delegation {
@@ -180,11 +207,9 @@ pub(super) fn local_fun_body_uses_any(
                 CtorDelegation::This(call) | CtorDelegation::Super(call) => call.args.as_slice(),
             };
             if constructor
-                .params
-                .iter()
-                .filter_map(|parameter| parameter.default)
+                .body
+                .into_iter()
                 .chain(arguments.iter().copied())
-                .chain(constructor.body)
                 .any(|expression| expression_uses(file, expression, &constructor_active))
             {
                 return true;
