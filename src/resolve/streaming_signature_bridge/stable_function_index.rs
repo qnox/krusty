@@ -6,7 +6,18 @@ use std::cell::{Ref, RefCell};
 use crate::fir::DeclarationId;
 use crate::types::{Ty, TypeName};
 
-use super::{member_extension_receiver, ProductionSignatureSemantics, Signature, SymbolTable};
+use super::{ProductionSignatureSemantics, Signature, SymbolTable};
+
+/// The receiver a member extension's signature carries: its generic receiver when the signature
+/// is generic, else the declared receiver type.
+pub(super) fn member_extension_receiver(function: &super::super::MemberExtFunSig) -> Ty {
+    function
+        .signature()
+        .generic_sig
+        .as_ref()
+        .and_then(|generic| generic.receiver)
+        .unwrap_or_else(|| function.receiver_ty())
+}
 
 /// Where in the symbol table a stable declaration's signature lives.
 ///

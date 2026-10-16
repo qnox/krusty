@@ -1267,12 +1267,12 @@ fn extract_file_stub_inventory(
                 class.span,
                 u32::MAX / 2,
                 "copy",
-                DeclarationFlags::default().with(DeclarationFlags::FINAL, true),
-                if file.data_copy_respects_ctor_visibility {
-                    class.primary_ctor_visibility
-                } else {
-                    Visibility::Public
-                },
+                DeclarationFlags::default()
+                    .with(DeclarationFlags::FINAL, true)
+                    .with(DeclarationFlags::DATA_CLASS_COPY, true),
+                // Provisional: signature collection decides `copy`'s visibility from the language
+                // feature and the class's resolved copy-visibility annotations.
+                Visibility::Public,
             ));
         }
         // A final `value class` gets the same structural trio as a data class. `componentN`/`copy`

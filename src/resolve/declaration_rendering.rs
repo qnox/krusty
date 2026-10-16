@@ -13,7 +13,7 @@
 //! classifier short names (`Map.Entry`), expand aliases, and spell a Java type's flexibility as
 //! kotlinc does: `String!`, `(Mutable)List<T!>!`, `Array<(out) String!>!`.
 
-use crate::libraries::{FunctionInfo, PropertyInfo};
+use crate::libraries::{CallSig, FunctionInfo, LibraryMember, PropertyInfo};
 use crate::symbol_source::SymbolSource;
 use crate::types::{CollectionKind, MappedCollection, Ty, TypeName, TypeVariance};
 
@@ -41,7 +41,15 @@ pub(super) fn potential_overrides<'a>(
         .into_iter()
         .map(|candidate| {
             let defaults = potential_override_defaults(source, index, candidate);
-            format!("\n{}", function_declaration(source, candidate, &defaults))
+            format!(
+                "\n{}",
+                function_declaration(
+                    source,
+                    candidate,
+                    &defaults,
+                    LegacyContextStyle::UnusedVariable
+                )
+            )
         })
         .collect::<String>();
     if candidates.is_empty() {
@@ -53,7 +61,23 @@ pub(super) fn potential_overrides<'a>(
 
 /// A function as its classifier declares it.
 pub(super) fn declared_function(source: &dyn SymbolSource, function: &FunctionInfo) -> String {
-    function_declaration(source, function, &function.call_sig.param_defaults)
+    function_declaration(
+        source,
+        function,
+        &function.call_sig.param_defaults,
+        LegacyContextStyle::UnusedVariable,
+    )
+}
+
+/// A function declaration in an access diagnostic. Kotlinc renders a legacy context receiver here
+/// as its bare type, unlike the `<unused var>@Type` spelling used by override diagnostics.
+pub(super) fn access_function(source: &dyn SymbolSource, function: &FunctionInfo) -> String {
+    function_declaration(
+        source,
+        function,
+        &function.call_sig.param_defaults,
+        LegacyContextStyle::BareType,
+    )
 }
 
 /// One function declaration, as kotlinc lists it under a diagnostic.
@@ -61,93 +85,189 @@ fn function_declaration(
     source: &dyn SymbolSource,
     function: &FunctionInfo,
     declared_defaults: &[bool],
+    legacy_context_style: LegacyContextStyle,
 ) -> String {
     let signature = function.semantic_signature();
-    let context_count = function.context_count.min(signature.params.len());
-    let names = &function.call_sig.param_names;
-    // A classfile without parameter names gives kotlinc's `p0`, `p1`, … by value-parameter ordinal.
-    let parameter_name = |index: usize| -> String {
-        names
-            .get(index)
-            .filter(|name| !name.is_empty())
-            .cloned()
-            .unwrap_or_else(|| format!("p{}", index.saturating_sub(context_count)))
-    };
-    let context = context_display(
-        source,
-        signature.params[..context_count]
+    FunctionDeclarationShape {
+        name: &function.callable.name,
+        suspend: function.flags.suspend || function.callable.suspend,
+        first_reified: function.flags.reified,
+        // Member specialization stores the applied dispatch type in `receiver`; that is not a
+        // source extension receiver and must never enter the declaration spelling.
+        receiver: function
+            .is_extension()
+            .then(|| function.semantic_receiver())
+            .flatten(),
+        context_count: function.context_count,
+        static_member: false,
+        signature: &signature,
+        call_sig: &function.call_sig,
+        declared_defaults,
+        legacy_context_style,
+    }
+    .render(source)
+}
+
+/// A selected instance member as its declaration is rendered in an access diagnostic.
+///
+/// Selection has already normalized the provider into [`LibraryMember`]. Its generic signature is
+/// the declaration-owned source shape; a non-generic member's `params` are already semantic. This
+/// boundary therefore consumes one exact shape and never infers source arity from names, identities,
+/// or physical backend parameters.
+pub(super) fn declared_member(source: &dyn SymbolSource, member: &LibraryMember) -> String {
+    let signature = member
+        .generic_sig
+        .clone()
+        .unwrap_or_else(|| crate::libraries::GenericSig {
+            formals: Vec::new(),
+            formal_bounds: Vec::new(),
+            receiver: member.semantic_extension_receiver(),
+            params: member.params.clone(),
+            ret: member.ret,
+            return_policy: crate::libraries::GenericReturnPolicy::Exact,
+        });
+    FunctionDeclarationShape {
+        name: &member.name,
+        suspend: member.suspend(),
+        first_reified: member.reified,
+        receiver: member.semantic_extension_receiver(),
+        context_count: member.context_count,
+        static_member: false,
+        signature: &signature,
+        call_sig: &member.call_sig,
+        declared_defaults: &member.call_sig.param_defaults,
+        legacy_context_style: LegacyContextStyle::BareType,
+    }
+    .render(source)
+}
+
+struct FunctionDeclarationShape<'a> {
+    name: &'a str,
+    suspend: bool,
+    first_reified: bool,
+    receiver: Option<Ty>,
+    context_count: usize,
+    static_member: bool,
+    signature: &'a crate::libraries::GenericSig,
+    call_sig: &'a CallSig,
+    declared_defaults: &'a [bool],
+    legacy_context_style: LegacyContextStyle,
+}
+
+#[derive(Clone, Copy)]
+enum LegacyContextStyle {
+    UnusedVariable,
+    BareType,
+}
+
+impl FunctionDeclarationShape<'_> {
+    fn render(&self, source: &dyn SymbolSource) -> String {
+        let context_count = self.context_count.min(self.signature.params.len());
+        let names = &self.call_sig.param_names;
+        // A classfile without parameter names gives kotlinc's `p0`, `p1`, … by value-parameter ordinal.
+        let parameter_name = |index: usize| -> String {
+            names
+                .get(index)
+                .filter(|name| !name.is_empty())
+                .cloned()
+                .unwrap_or_else(|| format!("p{}", index.saturating_sub(context_count)))
+        };
+        let context = context_display(
+            source,
+            self.signature.params[..context_count]
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| {
+                    (
+                        self.call_sig.parameter_identities.get(index),
+                        parameter_name(index),
+                        *ty,
+                    )
+                }),
+            self.legacy_context_style,
+        );
+        let suspend = if self.suspend { "suspend " } else { "" };
+        let static_prefix = if self.static_member { "static " } else { "" };
+        let reified = |index: usize| {
+            self.call_sig
+                .reified_type_parameter_ordinals
+                .contains(&(index as u32))
+                || (self.first_reified && index == 0)
+        };
+        let type_parameters = type_parameters_display(
+            source,
+            self.signature
+                .formals
+                .iter()
+                .enumerate()
+                .map(|(index, formal)| {
+                    (
+                        formal.as_str(),
+                        self.signature
+                            .formal_bounds
+                            .get(index)
+                            .map(Vec::as_slice)
+                            .unwrap_or_default(),
+                        reified(index),
+                    )
+                }),
+        );
+        let receiver = self
+            .receiver
+            .map(|receiver| format!("{}.", readable_type(source, receiver)))
+            .unwrap_or_default();
+        let parameters = self.signature.params[context_count..]
             .iter()
             .enumerate()
-            .map(|(index, ty)| {
-                (
-                    function.call_sig.parameter_identities.get(index),
+            .map(|(offset, ty)| {
+                let index = context_count + offset;
+                let vararg = self.call_sig.vararg_index == Some(index);
+                let ty = if vararg {
+                    ty.array_read_elem().unwrap_or(*ty)
+                } else {
+                    *ty
+                };
+                let default = if self.declared_defaults.get(index).copied().unwrap_or(false) {
+                    " = ..."
+                } else {
+                    ""
+                };
+                format!(
+                    "{}{}: {}{default}",
+                    if vararg { "vararg " } else { "" },
                     parameter_name(index),
-                    *ty,
+                    readable_type(source, ty)
                 )
-            }),
-    );
-    let suspend = if function.flags.suspend || function.callable.suspend {
-        "suspend "
-    } else {
-        ""
-    };
-    let reified = |index: usize| {
-        function
-            .call_sig
-            .reified_type_parameter_ordinals
-            .contains(&(index as u32))
-            || (function.flags.reified && index == 0)
-    };
-    let type_parameters = type_parameters_display(
-        source,
-        signature.formals.iter().enumerate().map(|(index, formal)| {
-            (
-                formal.as_str(),
-                signature
-                    .formal_bounds
-                    .get(index)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-                reified(index),
-            )
-        }),
-    );
-    let receiver = function
-        .is_extension()
-        .then(|| function.semantic_receiver())
-        .flatten()
-        .map(|receiver| format!("{}.", readable_type(source, receiver)))
-        .unwrap_or_default();
-    let parameters = signature.params[context_count..]
-        .iter()
-        .enumerate()
-        .map(|(offset, ty)| {
-            let index = context_count + offset;
-            let vararg = function.call_sig.vararg_index == Some(index);
-            let ty = if vararg {
-                ty.array_read_elem().unwrap_or(*ty)
-            } else {
-                *ty
-            };
-            let default = if declared_defaults.get(index).copied().unwrap_or(false) {
-                " = ..."
-            } else {
-                ""
-            };
-            format!(
-                "{}{}: {}{default}",
-                if vararg { "vararg " } else { "" },
-                parameter_name(index),
-                readable_type(source, ty)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "{context}{suspend}fun {type_parameters}{receiver}{}({parameters}): {}",
-        function.callable.name,
-        readable_type(source, signature.ret)
-    )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{context}{static_prefix}{suspend}fun {type_parameters}{receiver}{}({parameters}): {}",
+            self.name,
+            readable_type(source, self.signature.ret)
+        )
+    }
+}
+
+/// A selected classifier-static function in an access diagnostic.
+pub(super) fn declared_static_function(
+    source: &dyn SymbolSource,
+    function: &FunctionInfo,
+) -> String {
+    let signature = function.semantic_signature();
+    FunctionDeclarationShape {
+        name: &function.callable.name,
+        suspend: function.flags.suspend || function.callable.suspend,
+        first_reified: function.flags.reified,
+        receiver: None,
+        context_count: function.context_count,
+        static_member: true,
+        signature: &signature,
+        call_sig: &function.call_sig,
+        declared_defaults: &function.call_sig.param_defaults,
+        legacy_context_style: LegacyContextStyle::BareType,
+    }
+    .render(source)
 }
 
 /// Whether two specialized views retain one exact source/dependency declaration identity.
@@ -277,6 +397,7 @@ pub(super) fn declared_property(source: &dyn SymbolSource, property: &PropertyIn
                     *ty,
                 )
             }),
+        LegacyContextStyle::UnusedVariable,
     );
     let keyword = if property.setter.is_some() {
         "var"
@@ -327,13 +448,17 @@ fn context_display<'a>(
             Ty,
         ),
     >,
+    legacy_context_style: LegacyContextStyle,
 ) -> String {
     let parameters = parameters
         .map(|(identity, fallback_name, ty)| {
             let ty = readable_type(source, ty);
             match identity {
                 Some(crate::fir::ResolvedParameterIdentity::LegacyContextReceiver { .. }) => {
-                    format!("<unused var>@{ty}")
+                    match legacy_context_style {
+                        LegacyContextStyle::UnusedVariable => format!("<unused var>@{ty}"),
+                        LegacyContextStyle::BareType => ty,
+                    }
                 }
                 Some(crate::fir::ResolvedParameterIdentity::ContextValue {
                     source_name, ..
@@ -688,7 +813,7 @@ fn flexible_collection_display(source: &dyn SymbolSource, name: TypeName) -> Opt
 
 #[cfg(test)]
 mod tests {
-    use super::{context_display, readable_type};
+    use super::{context_display, readable_type, LegacyContextStyle};
     use crate::fir::ResolvedParameterIdentity;
     use crate::libraries::{EmptySymbolSource, LibraryType, ResolvedSymbols};
     use crate::symbol_source::{SymbolNamespace, SymbolSource};
@@ -749,8 +874,17 @@ mod tests {
                     (Some(&legacy), "wrong".to_string(), Ty::Boolean),
                 ]
                 .into_iter(),
+                LegacyContextStyle::UnusedVariable,
             ),
             "context(named: Int, _: Long, <unused var>@Boolean) "
+        );
+        assert_eq!(
+            context_display(
+                &source,
+                [(Some(&legacy), "wrong".to_string(), Ty::Boolean)].into_iter(),
+                LegacyContextStyle::BareType,
+            ),
+            "context(Boolean) "
         );
     }
 
