@@ -168,8 +168,12 @@ impl Emitter<'_> {
             // after it — starts that line (`val value = fetch(slot)`). An unsigned
             // bitwise result still forgets after its carrier conversion, and the store is the mark
             // that follows.
-            let restore_inlined_line =
-                code.line_forgotten() && !self.completes_unsigned_bitwise_value(initializer);
+            // A same-module inline call's operand is stored into its parameter slot as kotlinc's
+            // `genValueAndPut` does, with no line of the declaration's.
+            let marks_line = self.copied_operand_binding != Some(declaration);
+            let restore_inlined_line = marks_line
+                && code.line_forgotten()
+                && !self.completes_unsigned_bitwise_value(initializer);
             if restore_inlined_line {
                 self.mark_declared_initializer_line(declaration, initializer, code);
             }
@@ -177,7 +181,7 @@ impl Emitter<'_> {
             if self.completes_unsigned_bitwise_value(initializer) {
                 code.forget_line();
             }
-            if !restore_inlined_line {
+            if marks_line && !restore_inlined_line {
                 self.mark_declared_initializer_line(declaration, initializer, code);
             }
             let slot = entered

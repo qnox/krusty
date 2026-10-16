@@ -5500,6 +5500,11 @@ struct Emitter<'a> {
     /// kotlinc's `isInsideCondition`: a `when` branch condition is being emitted, so an inlined
     /// call in it marks its own line again after the inlined code.
     inside_condition: bool,
+    /// The operand binding of a same-module inline call being emitted: kotlinc stores the operand
+    /// into its parameter slot without marking a line.
+    copied_operand_binding: Option<ExprId>,
+    /// The `&&`/`||` operand whose line is marked again before the jump that consumes it.
+    short_circuit_operand_line: Option<ExprId>,
     /// The enclosing unsigned operation's decision to move its eager source boundary.
     unsigned_receiver_line_moves: Option<bool>,
     /// A plain local operand of an unsigned bitwise member is being loaded, so it records no line.
@@ -5604,6 +5609,8 @@ impl<'a> Emitter<'a> {
             constructor_initializer_class: None,
             render_initializer_boundaries: false,
             inside_condition: false,
+            copied_operand_binding: None,
+            short_circuit_operand_line: None,
             unsigned_receiver_line_moves: None,
             suppress_unsigned_local_line: false,
             unsigned_assignment_line: false,

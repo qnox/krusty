@@ -4258,7 +4258,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   bound (constants are folded) and `UInt.compareTo`/`ULong.compareTo` in the ordering test;
   `getProgressionLastElement`'s unsigned argument coercions are not calls. The counted-loop lowering
   records those nodes as `SyntheticOriginKind::InlinedCall`; the JVM emitter applies the rule.
-  `tests/unsigned_loop_lines_e2e.rs` (full-byte against kotlinc).
+  `tests/unsigned_loop_lines_e2e.rs` (full-byte against kotlinc). A condition is a `when` branch
+  condition (`ExpressionCodegen.visitWhen`); a `while`/`do…while` condition is not one. `&&`/`||`
+  are the `andand`/`oror` intrinsics, not conditions of their own: the intrinsic marks its own line
+  before the first operand, and each operand's line again once its value is computed, for the jump
+  that consumes it. An enclosing branch condition's state carries through their operands.
+  Inline-call operands are evaluated under the caller's condition state; the callee's body is
+  compiled on its own, so that state stops at a same-module expansion's function-frame boundary.
+  Each operand is stored into its parameter slot with no line of its own (`genValueAndPut`). The
+  call then marks its line after its operands and the inliner opens the body with a `nop`, which
+  survives when that line starts a debug range (an operand on another line, or one that ran an
+  inlined body); the parameters' ranges start after it. A mark that precedes code marking lines
+  of its own (an `if`'s `visitWhen`, the `andand` intrinsic) keeps its entry when a later line is
+  marked at the same offset. `tests/inline_call_condition_line_e2e.rs` (full-byte against kotlinc).
 - **A property initializer's store repeats its line after an inlined value.** The inlined call
   forgets the constructor's line, so kotlinc's `putfield` writes the property's line again and the
   constructor's table holds that line twice in a row (`val failed: MutableList<F> =

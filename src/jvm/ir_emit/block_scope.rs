@@ -45,6 +45,7 @@ impl Emitter<'_> {
             open_inline_stack(code);
         }
         self.link_safe_call_chain(block, code);
+        let copied_caller = self.copied_function_caller(block, code);
         let enclosing_statement_line = self.statement_line;
         let saved = self.open_slot_scope();
         let terminal_target = self.terminal_statement_target.take();
@@ -81,12 +82,14 @@ impl Emitter<'_> {
                 stack_height: inline_stack_height,
                 within_inline_lambda,
                 opening: self.external_inline_body_opening(block, &stmts),
+                copied_function: copied_caller.is_some().then_some(block),
                 discarded_frame_result: value
                     .and_then(|value| self.discarded_copied_frame_tail(block, &stmts, value)),
             };
             self.emit_open_block(block, stmts, value, terminal_target, entry, true, code)
         };
         self.mark_initializer_line(block, true, code);
+        let mut anchored = false;
         if !self.ir.callable_scopes.contains(&block) {
             self.close_external_inline_frame(block, code);
             if close_lambda_before_locals {
@@ -103,7 +106,7 @@ impl Emitter<'_> {
             }
             self.close_scope_locals(code, marked_initializer);
             if close_discarded_provider_frame.is_none() {
-                self.close_copied_function_inline_frame(block, code);
+                anchored = self.close_copied_function_inline_frame(block, code);
             }
         }
         if let Some(words) = discard_after_frame {
@@ -142,6 +145,7 @@ impl Emitter<'_> {
         // the next mark is written even when it names that same line: a one-line `Unit` body marks
         // its closing `return` again (`markLineNumberAfterInlineIfNeeded`).
         self.mark_after_inlined_call(block, code);
+        self.leave_copied_function_body(copied_caller, anchored, code);
     }
 
     /// Emit a block in value position: its statements run for effect and its trailing value is
@@ -172,6 +176,7 @@ impl Emitter<'_> {
             open_inline_stack(code);
         }
         self.link_safe_call_chain(block, code);
+        let copied_caller = self.copied_function_caller(block, code);
         let enclosing_statement_line = self.statement_line;
         let saved = self.open_slot_scope();
         self.block_depth += 1;
@@ -188,6 +193,11 @@ impl Emitter<'_> {
             let opening = self.external_inline_body_opening(block, stmts);
             for &statement in stmts {
                 self.open_external_inline_body(opening, statement, code);
+                self.enter_copied_function_frame(
+                    copied_caller.is_some().then_some(block),
+                    statement,
+                    code,
+                );
                 // The lambda-frame line owns any caller-stack stores that FixStack inserts at the
                 // opening marker. Emit the line first so those stores, not only the marker local
                 // that follows them, start the mapped inline interval.
@@ -242,6 +252,7 @@ impl Emitter<'_> {
                             self.restore_slot_scope(saved);
                             self.release_reserved_inline_stack(reserved_inline_stack);
                             self.statement_line = enclosing_statement_line;
+                            self.leave_copied_function_body(copied_caller, false, code);
                             return;
                         }
                     }
@@ -280,6 +291,7 @@ impl Emitter<'_> {
         }
         // A callable's own scope is its body. A value-returning lambda keeps those locals
         // open through the return, the same way a statement-position callable scope does.
+        let mut anchored = false;
         if !anchored_lambda_result && !self.ir.callable_scopes.contains(&block) {
             self.adapt_pending_copied_result_before_lambda_close(stmts, value, code);
             self.close_external_inline_frame(block, code);
@@ -288,7 +300,7 @@ impl Emitter<'_> {
             }
             self.close_scope_locals(code, false);
             if !copied_frame_result.is_some_and(CopiedFrameResult::is_provider) {
-                self.close_copied_function_inline_frame(block, code);
+                anchored = self.close_copied_function_inline_frame(block, code);
             }
         }
         if let Some(result) = copied_frame_result {
@@ -312,6 +324,7 @@ impl Emitter<'_> {
         self.restore_slot_scope(saved);
         self.release_reserved_inline_stack(reserved_inline_stack);
         self.statement_line = enclosing_statement_line;
+        self.leave_copied_function_body(copied_caller, anchored, code);
     }
 
     /// A copied inline-function frame result the caller physically adapts after the frame's
@@ -691,21 +704,14 @@ impl Emitter<'_> {
     /// continues. The body's last instruction is on the callee's line; the caller's next
     /// instruction may be on another, so this frame's line needs an anchor of its own. A later
     /// instruction on the same line drops the `nop`.
-    fn close_copied_function_inline_frame(&mut self, block: u32, code: &mut CodeBuilder) {
-        if code.is_dead() || self.ir.inline_copy_provenance(block).is_none() {
-            return;
-        }
-        let IrExpr::Block { stmts, .. } = self.ir.expr(block) else {
-            return;
-        };
-        let opens_frame = stmts.iter().any(|&statement| {
-            matches!(
-                self.ir.debug_local_provenance(statement),
-                Some(IrDebugLocalProvenance::FunctionFrameMarker)
-            )
-        });
-        if !opens_frame {
-            return;
+    ///
+    /// Returns whether it anchored that line.
+    fn close_copied_function_inline_frame(&mut self, block: u32, code: &mut CodeBuilder) -> bool {
+        if code.is_dead()
+            || self.ir.inline_copy_provenance(block).is_none()
+            || !self.opens_function_frame(block)
+        {
+            return false;
         }
         let Some(line) = self
             .ir
@@ -714,10 +720,106 @@ impl Emitter<'_> {
             .copied()
             .filter(|line| *line != 0)
         else {
-            return;
+            return false;
         };
         self.mark_expression_line(block, line, code);
         code.nop();
+        true
+    }
+
+    /// Whether `block` opens an inline function's frame: it is that call's expansion.
+    fn opens_function_frame(&self, block: u32) -> bool {
+        let IrExpr::Block { stmts, .. } = self.ir.expr(block) else {
+            return false;
+        };
+        stmts.iter().any(|&statement| {
+            matches!(
+                self.ir.debug_local_provenance(statement),
+                Some(IrDebugLocalProvenance::FunctionFrameMarker)
+            )
+        })
+    }
+
+    /// Capture the caller state for a same-module inline function's expansion. Operand evaluation
+    /// and binding still belong to the caller; [`Self::enter_copied_function_frame`] suspends the
+    /// condition state only when the function-frame marker starts the copied callee body.
+    fn copied_function_caller(
+        &self,
+        block: u32,
+        code: &CodeBuilder,
+    ) -> Option<CopiedFunctionCaller> {
+        if self.ir.external_inline_expansions.contains(&block) || !self.opens_function_frame(block)
+        {
+            return None;
+        }
+        Some(CopiedFunctionCaller {
+            line: code.current_line(),
+            inside_condition: self.inside_condition,
+            operand_binding: self.copied_operand_binding,
+        })
+    }
+
+    /// Cross from a same-module inline call's operand bindings into its copied callee body.
+    ///
+    /// The operands are kotlinc's `genValueAndPut`: each is stored straight into its parameter
+    /// slot, with no line of its own. The call then marks its own line, after its operands
+    /// (`visitCall`), and the inliner opens the body with a `nop` there. That `nop` survives where
+    /// the call's line starts a debug range of its own (an operand on another line, or one that ran
+    /// an inlined body), so the parameters' ranges start after it.
+    fn enter_copied_function_frame(
+        &mut self,
+        copied_function: Option<u32>,
+        statement: u32,
+        code: &mut CodeBuilder,
+    ) {
+        let Some(block) = copied_function else {
+            return;
+        };
+        let opens_frame = matches!(
+            self.ir.debug_local_provenance(statement),
+            Some(IrDebugLocalProvenance::FunctionFrameMarker)
+        );
+        if !opens_frame {
+            self.copied_operand_binding = Some(statement);
+            return;
+        }
+        self.inside_condition = false;
+        if code.is_dead() {
+            return;
+        }
+        if let Some(line) = self
+            .ir
+            .expr_source_lines
+            .get(&block)
+            .copied()
+            .filter(|l| *l != 0)
+        {
+            self.mark_expression_line(block, line, code);
+            code.nop();
+        }
+    }
+
+    /// kotlinc's `markLineNumberAfterInlineIfNeeded` after a same-module inline expansion: inside a
+    /// condition the caller's line is written again for the jump that follows. Elsewhere the
+    /// expansion's frame closing already places the caller's next line, and a frame that anchored
+    /// its own line already restored the caller.
+    fn leave_copied_function_body(
+        &mut self,
+        caller: Option<CopiedFunctionCaller>,
+        anchored: bool,
+        code: &mut CodeBuilder,
+    ) {
+        let Some(caller) = caller else {
+            return;
+        };
+        self.inside_condition = caller.inside_condition;
+        self.copied_operand_binding = caller.operand_binding;
+        if anchored || code.is_dead() {
+            return;
+        }
+        if let Some(line) = caller.line.filter(|_| caller.inside_condition) {
+            code.inlined_line(line);
+        }
     }
 
     /// kotlinc's `InlineCodegen` starts every inlined body with a `nop` on the call's line, after
@@ -932,6 +1034,7 @@ impl Emitter<'_> {
             stack_height: inline_stack_height,
             within_inline_lambda,
             opening,
+            copied_function,
             discarded_frame_result,
         } = entry;
         let mut reserved_inline_stack = None;
@@ -953,6 +1056,7 @@ impl Emitter<'_> {
                 break;
             }
             self.open_external_inline_body(opening, statement, code);
+            self.enter_copied_function_frame(copied_function, statement, code);
             // FixStack replaces the opening marker with the saved caller stack. Keep that
             // generated store inside the lambda frame's mapped line interval.
             self.mark_statement_line(statement, code);
@@ -1230,6 +1334,8 @@ pub(super) struct InlineBodyEntry {
     /// [`Emitter::open_inline_stack_at_lambda_frame`]).
     pub(super) within_inline_lambda: bool,
     opening: Option<InlineBodyOpening>,
+    /// The same-module copied function whose caller state is suspended at its frame marker.
+    copied_function: Option<u32>,
     /// A discarded same-module inline result emitted inside its copied frame and popped only after
     /// that frame's locals end.
     discarded_frame_result: Option<CopiedFrameTail>,
@@ -1358,4 +1464,12 @@ impl OpenLocal {
             code.add_local_entry(entry.0, entry.1, entry.2, &entry.3, &entry.4);
         }
     }
+}
+
+/// The caller state a copied inline-function body suspends: the line in effect at the call,
+/// whether the call stands in a condition, and the enclosing call's operand binding it may be.
+struct CopiedFunctionCaller {
+    line: Option<u16>,
+    inside_condition: bool,
+    operand_binding: Option<u32>,
 }
