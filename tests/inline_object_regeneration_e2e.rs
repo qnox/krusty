@@ -246,8 +246,9 @@ fn objects_inlined_into_lambdas_and_suspend_bodies_are_the_reference_compilers_c
     let output = common::expect_box_run_against_ref("inline_object_sites", SITES_LIB, SITES_MAIN)
         .expect("reference kotlinc is provisioned");
     assert_eq!(output, "OK");
-    let classes = common::classes_against_kotlinc_lib("Sites", &[("Lib.kt", SITES_LIB)], SITES_MAIN)
-        .expect("reference kotlinc is provisioned");
+    let classes =
+        common::classes_against_kotlinc_lib("Sites", &[("Lib.kt", SITES_LIB)], SITES_MAIN)
+            .expect("reference kotlinc is provisioned");
     assert_eq!(
         classes.reference.keys().collect::<Vec<_>>(),
         [
