@@ -232,6 +232,9 @@ pub(super) struct FlowExecutionIdentity {
     /// A named local function is a separate execution even though entering it clears the enclosing
     /// lambda chain. Its statement identity cannot collide with a lambda expression identity.
     pub(super) local_function: Option<StmtId>,
+    /// Source lambda chain, including lambdas later selected for inline splicing. Keeping the full
+    /// chain makes the identity stable while overload selection is still deciding capture mode;
+    /// comparisons normalize both sides with the final inline decisions.
     pub(super) lambdas: Vec<ExprId>,
 }
 
@@ -1007,10 +1010,24 @@ impl<'p, B> Scope<'p, B> {
         &self,
         root: &PathRoot,
         execution: &FlowExecutionIdentity,
+        is_inline_spliced: impl Fn(ExprId) -> bool,
     ) {
         for rung in self.ancestors() {
             for implications in rung.flow.borrow_mut().boolean_implications.values_mut() {
-                if &implications.execution == execution {
+                let same_execution = implications.execution.local_function
+                    == execution.local_function
+                    && implications
+                        .execution
+                        .lambdas
+                        .iter()
+                        .copied()
+                        .filter(|&lambda| !is_inline_spliced(lambda))
+                        .eq(execution
+                            .lambdas
+                            .iter()
+                            .copied()
+                            .filter(|&lambda| !is_inline_spliced(lambda)));
+                if same_execution {
                     implications.when_true.forget_root(root);
                     implications.when_false.forget_root(root);
                 }

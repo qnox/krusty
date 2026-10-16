@@ -17,6 +17,7 @@ use crate::types::Ty;
 
 use condition_facts::{
     CompactBindingIdentity, CompactBooleanValue, CompactCompletion, CompactSmartcastFact,
+    CompactTryWrite,
 };
 
 use super::coverage::ExpressionForm;
@@ -53,7 +54,7 @@ pub struct SignatureConstraintExtractor {
     boolean_vals: HashMap<CompactBindingIdentity, CompactBooleanValue>,
     /// Exact outer bindings written while each active try body is extracted. An exceptional edge
     /// into a catch can begin after any such write, including one on a non-completing branch.
-    try_body_writes: Vec<Vec<CompactBindingIdentity>>,
+    try_body_writes: Vec<Vec<CompactTryWrite>>,
     /// Statements after an unconditional structural transfer are still extracted for diagnostics,
     /// but their writes never run and therefore cannot invalidate a catch or finalizer entry.
     unreachable_statement_depth: usize,
@@ -78,6 +79,7 @@ struct CompactLocalTypeAlias {
 struct CompactLexicalCallable {
     value: SigExprId,
     has_receiver: bool,
+    operator: bool,
 }
 
 #[derive(Clone)]
@@ -263,6 +265,7 @@ impl SignatureConstraintExtractor {
                             CompactLexicalCallable {
                                 value,
                                 has_receiver: true,
+                                operator: false,
                             },
                         );
                     }
@@ -2173,6 +2176,7 @@ impl SignatureConstraintExtractor {
                                         CompactLexicalCallable {
                                             value,
                                             has_receiver: true,
+                                            operator: false,
                                         },
                                     );
                             }
@@ -2381,6 +2385,7 @@ impl SignatureConstraintExtractor {
                                         CompactLexicalCallable {
                                             value,
                                             has_receiver: function.receiver.is_some(),
+                                            operator: function.is_operator(),
                                         },
                                     );
                             }
@@ -2630,6 +2635,7 @@ impl SignatureConstraintExtractor {
                     CompactLexicalCallable {
                         value: ty,
                         has_receiver: true,
+                        operator: false,
                     },
                 );
             }
@@ -2978,6 +2984,7 @@ impl SignatureConstraintExtractor {
                     CompactLexicalCallable {
                         value,
                         has_receiver: true,
+                        operator: false,
                     },
                 );
             }

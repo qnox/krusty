@@ -21954,7 +21954,9 @@ impl<'a> Checker<'a> {
             }
             Stmt::Return(e, label) => self.stmt_return(scope, s, e, label),
             Stmt::While { cond, body, label } => {
-                self.clear_narrowings_a_loop_invalidates(scope, &[cond, body]);
+                let compound_writes =
+                    self.clear_narrowings_a_loop_invalidates(scope, &[cond, body]);
+                self.provisional_loop_compound_writes.push(compound_writes);
                 let ct = self.expr(scope, cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "while condition");
                 // `while (x != null) …` — the condition holds on body entry, so narrow stable
@@ -21968,9 +21970,14 @@ impl<'a> Checker<'a> {
                     self.apply_condition_exclusions(scope, cond, true);
                     self.check_loop_body(scope, body, &label);
                 }
+                self.provisional_loop_compound_writes
+                    .pop()
+                    .expect("the while-loop compound-write frame is still open");
             }
             Stmt::DoWhile { body, cond, label } => {
-                self.clear_narrowings_a_do_while_invalidates(scope, body, cond);
+                let compound_writes =
+                    self.clear_narrowings_a_do_while_invalidates(scope, body, cond);
+                self.provisional_loop_compound_writes.push(compound_writes);
                 // Unlike a while body, a do-while block and its condition share one lexical scope:
                 // `do { val x = ... } while (x)` is legal Kotlin. Keep that scope alive through
                 // condition checking instead of rebuilding declarations from typed syntax.
@@ -21998,6 +22005,9 @@ impl<'a> Checker<'a> {
                 if label.is_some() {
                     self.loop_labels.pop();
                 }
+                self.provisional_loop_compound_writes
+                    .pop()
+                    .expect("the do-while compound-write frame is still open");
             }
             Stmt::For {
                 name,
@@ -22005,8 +22015,12 @@ impl<'a> Checker<'a> {
                 body,
                 label,
             } => {
-                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
+                let compound_writes = self.clear_narrowings_a_loop_invalidates(scope, &[body]);
+                self.provisional_loop_compound_writes.push(compound_writes);
                 self.stmt_for(scope, s, name, range, body, label);
+                self.provisional_loop_compound_writes
+                    .pop()
+                    .expect("the for-loop compound-write frame is still open");
             }
             Stmt::ForEach {
                 name,
@@ -22014,8 +22028,12 @@ impl<'a> Checker<'a> {
                 body,
                 label,
             } => {
-                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
+                let compound_writes = self.clear_narrowings_a_loop_invalidates(scope, &[body]);
+                self.provisional_loop_compound_writes.push(compound_writes);
                 self.stmt_for_each(scope, s, name, iterable, body, label);
+                self.provisional_loop_compound_writes
+                    .pop()
+                    .expect("the for-each compound-write frame is still open");
             }
             Stmt::Expr(e) => {
                 // A `kotlin.contracts.contract { … }` statement is erased metadata: it is never
@@ -22522,13 +22540,9 @@ impl<'a> Checker<'a> {
 
     fn stmt_assign(&mut self, scope: &CheckerScope<'_>, s: StmtId, name: String, value: ExprId) {
         // `name op= rhs` with a user `opAssign` operator → in-place call (legal on a `val`).
-        let compound = !self.file.value_operator_spans.contains_key(&value.0)
-            && matches!(
-                self.file.expr(value),
-                Expr::Binary { lhs, .. }
-                    if matches!(self.file.expr(*lhs), Expr::Name(lhs) if lhs == &name)
-            );
-        if self.try_in_place_assignment(scope, s, value) {
+        let in_place = self.try_in_place_assignment(scope, s, value);
+        self.resolve_provisional_loop_compound_write(&name, value);
+        if in_place {
             return;
         }
         let scoped = self.lookup(scope, &name);
@@ -22680,11 +22694,7 @@ impl<'a> Checker<'a> {
                     // that actually runs will read.
                     if is_var && self.unreachable_statement_depth == 0 {
                         let narrowing = self.assignment_narrowing(&name, lty, vt, target_span);
-                        if compound {
-                            self.set_local_narrow_preserving_implications(scope, &name, narrowing);
-                        } else {
-                            self.set_local_narrow(scope, &name, narrowing);
-                        }
+                        self.set_local_narrow(scope, &name, narrowing);
                         // A write under a live smart-cast shadow must also move the PROOF binding:
                         // reads below the shadow's rung type the variable through it, so a stale
                         // shadow would keep a killed cast alive (`if (t != null) { t = null;
@@ -33126,6 +33136,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds::default(),
         next_lexical_capture_identity: 0,
         try_body_writes: Vec::new(),
+        provisional_loop_compound_writes: Vec::new(),
         next_flow_identity: 0,
         checked_local_class_declarations: crate::fx_hash::HashSet::default(),
         checked_local_classifier_identities: HashMap::default(),
@@ -35856,6 +35867,9 @@ struct Checker<'a> {
     next_lexical_capture_identity: u32,
     /// Bindings written by each try body being checked, innermost last.
     try_body_writes: Vec<catch_flow::TryBodyWrites>,
+    /// Mutable loop-entry bindings whose compound assignment has not yet selected between an
+    /// in-place `opAssign` and a replacement `op` call.
+    provisional_loop_compound_writes: Vec<crate::fx_hash::HashMap<u32, usize>>,
     next_flow_identity: u32,
     checked_local_class_declarations: crate::fx_hash::HashSet<DeclId>,
     checked_local_classifier_identities: HashMap<crate::fir::DeclarationId, TypeName>,
@@ -57343,7 +57357,9 @@ impl<'a> Checker<'a> {
                 scope.restore_flow(&entry_flow);
                 self.clear_narrowings_a_try_body_writes(scope, &all_exit_writes);
                 let finalizer_entry = scope.flow_snapshot();
-                let _ = self.try_body_written_bindings(|checker| checker.expr_statement(scope, f));
+                let (_, finalizer_writes) =
+                    self.try_body_written_bindings(|checker| checker.expr_statement(scope, f));
+                let finalizer_local_flow = self.written_local_flow(scope, &finalizer_writes);
                 let finalizer_exit = scope.flow_snapshot();
                 scope.restore_flow_with_delta(
                     &normal_continuation,
@@ -57352,8 +57368,11 @@ impl<'a> Checker<'a> {
                 );
                 // The delta carries every flow facet established by the finalizer: local read
                 // types, path/intersection facts, exclusions, and saved Boolean implications.
-                // Clearing its written bindings here would erase the very post-finalizer facts
-                // that dominate the normal continuation.
+                // Reapply exact local write results as well: a finalizer assignment dominates the
+                // normal continuation even when it left the same fact as the conservative entry.
+                for (name, narrowing) in finalizer_local_flow {
+                    scope.narrow_local(&name, narrowing);
+                }
             }
             result
         };

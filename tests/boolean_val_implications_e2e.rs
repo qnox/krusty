@@ -175,12 +175,6 @@ fn a_stable_boolean_val_carries_its_conditions_facts_like_kotlinc() {
          \x20   try { x += 1 }\n\
          \x20   catch (e: Throwable) { if (ok) x.derived() else 0 }\n\
          }\n\
-         fun replacementCompoundKeepsCatchFact() = run {\n\
-         \x20   var x: PlusBase = PlusDerived()\n\
-         \x20   val ok = x is PlusDerived\n\
-         \x20   try { x += 1 }\n\
-         \x20   catch (e: Throwable) { if (ok) x.derived() else 0 }\n\
-         }\n\
          class CompoundContext\n\
          context(marker: CompoundContext)\n\
          operator fun CompoundBase.plusAssign(value: Long) {}\n\
@@ -224,12 +218,6 @@ fn a_stable_boolean_val_carries_its_conditions_facts_like_kotlinc() {
          \x20   val isA = key is ProjectionA\n\
          \x20   if (isA == true) return@run 0\n\
          \x20   when (key) { is ProjectionB -> 1 }\n\
-         }\n\
-         fun localClassShadow(cond: Boolean) {\n\
-         \x20   val x: CompoundBase = CompoundDerived()\n\
-         \x20   val ok = x is CompoundDerived\n\
-         \x20   while (cond) { class Local(var x: Int) { fun mutate() { x++ } }; break }\n\
-         \x20   if (ok) x.derived()\n\
          }\n\
          fun unwrittenVar(x: String?) { var y = x; val ok = y != null; if (ok) y.length }\n\
          fun inlineLambda(x: String?) { val ok = x != null; run { if (ok) x.length } }\n\
@@ -293,11 +281,6 @@ fn an_unstable_boolean_or_root_proves_nothing_like_kotlinc() {
              \x20   }\n\
              \x20   use()\n\
              }\n\
-             fun guardedWhen(x: String?, g: Boolean) = run {\n\
-             \x20   val missing = x == null\n\
-             \x20   when { missing if g -> \"\"; else -> x }\n\
-             }\n\
-             fun consumeGuardedWhen(): String = guardedWhen(null, false)\n\
              fun either(x: String?, b: Boolean) { val ok = x != null || b; if (ok) x.length }\n\
              fun shadowedRoot(x: String?) {\n\
              \x20   val ok = x != null\n\
@@ -305,6 +288,22 @@ fn an_unstable_boolean_or_root_proves_nothing_like_kotlinc() {
              }\n\
              open class LoopBase\n\
              class LoopDerived : LoopBase() { fun derived() {} }\n\
+             open class PlusBase { operator fun plus(value: Int): PlusBase = PlusBase() }\n\
+             class PlusDerived : PlusBase() { fun derived() {} }\n\
+             fun replacementCompoundDropsCatchFact() = run {\n\
+             \x20   var x: PlusBase = PlusDerived()\n\
+             \x20   val ok = x is PlusDerived\n\
+             \x20   try { x += 1 }\n\
+             \x20   catch (e: Throwable) { if (ok) x.derived() else 0 }\n\
+             }\n\
+             open class CompoundBase { operator fun plusAssign(value: Int) {} }\n\
+             class CompoundDerived : CompoundBase() { fun derived() {} }\n\
+             fun localClassMemberDoesNotShadowBeforeItsDeclaration(cond: Boolean) {\n\
+             \x20   val x: CompoundBase = CompoundDerived()\n\
+             \x20   val ok = x is CompoundDerived\n\
+             \x20   while (cond) { class Local(var x: Int) { fun mutate() { x++ } }; break }\n\
+             \x20   if (ok) x.derived()\n\
+             }\n\
              fun localFunctionKeepsValueBinding(cond: Boolean) {\n\
              \x20   var x: LoopBase = LoopDerived()\n\
              \x20   while (cond) {\n\
@@ -379,6 +378,40 @@ fn an_unstable_boolean_or_root_proves_nothing_like_kotlinc() {
              \x20   }\n\
              \x20   return 1\n\
              }\n",
+        )],
+        &[],
+    );
+}
+
+/// A subjectless `when` guard is a parser-owned error. Keep it in its own exact comparison so its
+/// recoverable syntax diagnostic cannot suppress the independent Boolean-flow ledger above.
+#[test]
+fn a_subjectless_when_guard_is_rejected_like_kotlinc() {
+    common::assert_errors_match_kotlinc(
+        &[(
+            "Main.kt",
+            "fun guardedWhen(x: String?, g: Boolean) = run {\n\
+             \x20   val missing = x == null\n\
+             \x20   when { missing if g -> \"\"; else -> x }\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// Keep the independent signature diagnostic that used to sit after the invalid guard. Its valid
+/// condition form still exercises the same saved Boolean value and nullable `when` result without
+/// letting a parser error short-circuit body recovery.
+#[test]
+fn a_boolean_when_nullable_result_is_rejected_like_kotlinc() {
+    common::assert_errors_match_kotlinc(
+        &[(
+            "Main.kt",
+            "fun guardedWhen(x: String?, g: Boolean) = run {\n\
+             \x20   val missing = x == null\n\
+             \x20   when { missing && g -> \"\"; else -> x }\n\
+             }\n\
+             fun consumeGuardedWhen(): String = guardedWhen(null, false)\n",
         )],
         &[],
     );

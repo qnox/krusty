@@ -157,6 +157,18 @@ pub enum SigExpr {
         narrowed: SigExprId,
         completions: OperandRange,
     },
+    /// A compact smart-cast fact after `x op= rhs`. The parser represents a simple-name compound
+    /// assignment as an ordinary assignment whose value is `x op rhs`; only semantic call
+    /// selection can decide whether `opAssign` preserved the binding or `op` replaced it.
+    InPlaceAssignmentNarrowed {
+        value: SigExprId,
+        narrowed: SigExprId,
+        /// Receiver, explicit argument, and optionally the exact lexical local operator candidate.
+        operands: OperandRange,
+        operator: SigBinaryOperator,
+        scope: SignatureScopeId,
+        origin: OriginId,
+    },
     /// A lexical value after a successful non-null `as` cast that has already run. Evaluation
     /// keeps `value`'s type when it is already `target` or a subtype, and uses `target` only
     /// when the cast actually narrows.
@@ -291,6 +303,16 @@ impl SignatureGraph {
                     pending.push(value);
                     pending.push(narrowed);
                     pending.extend(self.operands(completions));
+                }
+                Some(SigExpr::InPlaceAssignmentNarrowed {
+                    value,
+                    narrowed,
+                    operands,
+                    ..
+                }) => {
+                    pending.push(value);
+                    pending.push(narrowed);
+                    pending.extend(self.operands(operands));
                 }
                 Some(SigExpr::CastNarrowed { value, target, .. }) => {
                     pending.push(value);

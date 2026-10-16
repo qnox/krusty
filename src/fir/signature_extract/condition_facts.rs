@@ -5,6 +5,7 @@
 //! to what.
 
 use crate::ast::{BinOp, Expr, ExprId, File, UnOp};
+use crate::fir::SigBinaryOperator;
 use crate::fx_hash::{HashMap, HashSet};
 
 use super::{
@@ -31,6 +32,20 @@ pub(super) struct CompactSmartcastFact {
 pub(super) struct CompactBooleanValue {
     pub(super) when_true: Vec<CompactSmartcastFact>,
     pub(super) when_false: Vec<CompactSmartcastFact>,
+}
+
+#[derive(Clone)]
+pub(super) enum CompactTryWrite {
+    Replacement(CompactBindingIdentity),
+    DeferredCompound {
+        binding: CompactBindingIdentity,
+        receiver: SigExprId,
+        argument: SigExprId,
+        operator: SigBinaryOperator,
+        local_operator: Option<SigExprId>,
+        scope: SignatureScopeId,
+        origin: OriginId,
+    },
 }
 
 pub(super) enum CompactCompletion {
@@ -126,11 +141,53 @@ impl SignatureConstraintExtractor {
     pub(super) fn catch_entry_boolean_vals(
         &mut self,
         entry: &HashMap<CompactBindingIdentity, CompactBooleanValue>,
-        writes: &[CompactBindingIdentity],
+        writes: &[CompactTryWrite],
     ) -> HashMap<CompactBindingIdentity, CompactBooleanValue> {
         let mut result = entry.clone();
-        let replacements = writes.iter().collect::<HashSet<_>>();
+        let replacements = writes
+            .iter()
+            .filter_map(|write| match write {
+                CompactTryWrite::Replacement(binding) => Some(binding),
+                CompactTryWrite::DeferredCompound { .. } => None,
+            })
+            .collect::<HashSet<_>>();
         result.retain(|binding, value| {
+            for fact in value.when_true.iter_mut().chain(&mut value.when_false) {
+                if replacements.contains(&fact.binding) {
+                    continue;
+                }
+                for write in writes {
+                    let CompactTryWrite::DeferredCompound {
+                        binding,
+                        receiver,
+                        argument,
+                        operator,
+                        local_operator,
+                        scope,
+                        origin,
+                    } = write
+                    else {
+                        continue;
+                    };
+                    if binding != &fact.binding {
+                        continue;
+                    }
+                    let value = self
+                        .compact_value_for_binding(binding)
+                        .expect("a catch-entry fact retains its outer lexical binding");
+                    let operands = self
+                        .graph
+                        .add_operands([*receiver, *argument].into_iter().chain(*local_operator));
+                    fact.value = self.graph.add_expr(SigExpr::InPlaceAssignmentNarrowed {
+                        value,
+                        narrowed: fact.value,
+                        operands,
+                        operator: *operator,
+                        scope: *scope,
+                        origin: *origin,
+                    });
+                }
+            }
             value
                 .when_true
                 .retain(|fact| !replacements.contains(&fact.binding));
@@ -408,13 +465,68 @@ impl SignatureConstraintExtractor {
             return;
         };
         for writes in &mut self.try_body_writes {
-            writes.push(written.clone());
+            writes.push(CompactTryWrite::Replacement(written.clone()));
         }
         self.boolean_vals.retain(|binding, value| {
             value.when_true.retain(|fact| fact.binding != written);
             value.when_false.retain(|fact| fact.binding != written);
             binding != &written && (!value.when_true.is_empty() || !value.when_false.is_empty())
         });
+    }
+
+    /// Defer invalidation for a simple-name compound assignment until compact semantic evaluation
+    /// selects `opAssign` (in-place) or falls back to `op` (replacement). Every affected fact
+    /// carries both outcomes; unrelated roots remain unchanged.
+    pub(super) fn defer_compound_boolean_val_invalidation(
+        &mut self,
+        name: &str,
+        receiver: SigExprId,
+        argument: SigExprId,
+        operator: SigBinaryOperator,
+        local_operator: Option<SigExprId>,
+        scope: SignatureScopeId,
+        origin: OriginId,
+    ) {
+        if self.unreachable_statement_depth != 0 {
+            return;
+        }
+        let Some(written) = self.lexical_binding_identity(name) else {
+            return;
+        };
+        let Some(value) = self.compact_value_for_binding(&written) else {
+            return;
+        };
+        for writes in &mut self.try_body_writes {
+            writes.push(CompactTryWrite::DeferredCompound {
+                binding: written.clone(),
+                receiver,
+                argument,
+                operator,
+                local_operator,
+                scope,
+                origin,
+            });
+        }
+        let operands = self
+            .graph
+            .add_operands([receiver, argument].into_iter().chain(local_operator));
+        for implication in self.boolean_vals.values_mut() {
+            for fact in implication
+                .when_true
+                .iter_mut()
+                .chain(&mut implication.when_false)
+                .filter(|fact| fact.binding == written)
+            {
+                fact.value = self.graph.add_expr(SigExpr::InPlaceAssignmentNarrowed {
+                    value,
+                    narrowed: fact.value,
+                    operands,
+                    operator,
+                    scope,
+                    origin,
+                });
+            }
+        }
     }
 
     pub(super) fn leave_boolean_val_scope(&mut self) {

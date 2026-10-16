@@ -4426,6 +4426,31 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         super::integer_constants::adapted_branch(current, constant, sibling)
     }
 
+    fn selects_in_place_assignment(
+        &self,
+        scope: crate::fir::SignatureScope,
+        operator: crate::fir::SigBinaryOperator,
+        origin: crate::fir::OriginId,
+        receiver: crate::fir::ResolvedTy,
+        argument: crate::fir::ResolvedTy,
+        local_operator: Option<crate::fir::ResolvedTy>,
+        demand: &mut dyn FnMut(
+            crate::fir::DeclarationId,
+        )
+            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+    ) -> bool {
+        super::operator_conventions::selects_in_place_assignment(
+            self,
+            scope,
+            operator,
+            origin,
+            receiver,
+            argument,
+            local_operator,
+            demand,
+        )
+    }
+
     fn select_binary(
         &self,
         scope: crate::fir::SignatureScope,
