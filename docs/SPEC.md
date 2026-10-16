@@ -16139,6 +16139,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `kotlin_box_wasm_conformance::wasm_reinterpretation_runs_through_emitted_stdlib_extension_bodies`,
   and the Native `fp/toBitsZeroAndNanFloat.kt` / `fp/toBitsZeroAndNanDouble.kt` corpus cases.
 
+- **Target-stdlib implementation coverage is keyed by exact KLIB identity.** For each supported
+  Kotlin version, Native, wasm-js, and wasm-wasi inventory every callable declared `external` or
+  represented by an exact decoded IR declaration with no body. The coverage join retains the
+  provider module plus complete serialized declaration signature and asks the normalized provider
+  whether that exact callable has a compiler operation; annotation spelling and rendered source
+  signatures are never lookup keys. An uncovered declaration remains in the target/version backlog,
+  which may only shrink. A one-off maintenance run may create a new version's backlog or remove
+  declarations after an implementation lands, but CI never rewrites it. The ratchet runs inside
+  the existing Native/Wasm conformance matrix rather than in a separate semantic or blessing job.
+  Tests: `klib_libraries::tests::implementation_inventory::*`,
+  `klib_libraries::tests::implementation_coverage::*`, and
+  `outcome_lists_guard_e2e::a_growing_klib_implementation_backlog_fails`.
+
 - **A KLIB body's local variables are the source declarations.** A local `val`/`var` (origin
   `DEFINED`) lowers to a named variable in the next value slot after the parameters, reads of a
   `val` publish a stable binding and reads of a `var` a mutable one, and an assignment is a `Unit`
