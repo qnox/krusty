@@ -107,6 +107,28 @@ pub(crate) fn constructor_type_parameter(
     semantic
 }
 
+/// A type parameter a compiler plugin declares on a function it generates for `owner`, copying one
+/// of the owner's own. It never equals the owner's parameter it copies: the function binds its own.
+/// `function` is the producer's stable name for the generated function and is not interpreted.
+pub(crate) fn generated_function_type_parameter(
+    owner: super::TypeName,
+    function: &str,
+    ordinal: usize,
+    source: &str,
+) -> &'static str {
+    let source = intern(source);
+    let semantic = intern(&format!(
+        "\0generated-fn:{}:{function}:{ordinal}",
+        owner.name_id().0
+    ));
+    TYPE_PARAMETER_SOURCES
+        .get_or_init(|| Mutex::new(HashMap::default()))
+        .lock()
+        .unwrap()
+        .insert(semantic, source);
+    semantic
+}
+
 /// The source spelling carried by a declaration-scoped semantic type-parameter key. Diagnostics and
 /// metadata show the written name even though inference uses the full identity.
 pub(crate) fn type_parameter_source_name(name: &str) -> &str {

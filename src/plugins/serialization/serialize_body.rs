@@ -3,7 +3,7 @@
 use super::constructed_standard_serializers::constructed_standard_serializer;
 use super::{
     build_field_serializer_instance, class_ty, contextual_serializer_for, declared_serializer_of,
-    encode_element_method, is_nullable, property_is_contextual, ty_descriptor, virtual_iface,
+    encode_element_method, is_nullable, property_is_contextual, virtual_iface,
 };
 use crate::ir::{Callee, ClassId, ExprId, IrConst, IrExpr, IrFile};
 use crate::libraries::InlineKind;
@@ -42,7 +42,8 @@ pub(super) struct SerializeBody<'a> {
     /// The serializers of the class's type parameters, on the generic `$serializer`.
     pub(super) type_parameter_serializers:
         super::type_parameter_serializers::TypeParameterSerializers<'a>,
-    pub(super) write_self: Option<u32>,
+    /// The serialized class's `write$Self`, which `serialize` delegates the element writes to.
+    pub(super) write_self: u32,
     pub(super) write_self_name: String,
     /// The serialized class's `$childSerializers` plan, or `None` when it has no cache.
     pub(super) cache: Option<super::child_serializer_cache::ChildSerializerCachePlan>,
@@ -61,7 +62,7 @@ impl SerializeBody<'_> {
             type_parameter_serializers,
             write_self,
             write_self_name,
-            cache: cache_plan,
+            cache: plan,
         } = self;
         let ser_idx = serializer_class as usize;
         let class_id = foo_id;
@@ -73,13 +74,8 @@ impl SerializeBody<'_> {
         //
         //   val descriptor = this.descriptor                      [local 3]
         //   val output = encoder.beginStructure(descriptor)       [local 4]
-        //   Foo.write$Self$main(value, output, descriptor)
+        //   Foo.write$Self$main(value, output, descriptor, this.typeSerial0, …)
         //   output.endStructure(descriptor)
-        //
-        // krusty inlined the element writes here and left `write$Self` an empty
-        // body — so the class exported a do-nothing helper that any OTHER module's
-        // generated code calls, and `serialize` differed from kotlinc's from its
-        // first instruction.
         let ser_cid = ser_idx as u32;
         let this_desc = |ir: &mut IrFile| -> ExprId {
             let r = ir.add_expr(IrExpr::GetValue(0));
@@ -90,28 +86,19 @@ impl SerializeBody<'_> {
             })
         };
         // The element writes, in `write$Self`'s own frame: value = 0, output = 1,
-        // descriptor = 2.
-        // kotlinc hands a GENERIC class's element serializers to `write$Self` as
-        // extra parameters; krusty's `write$Self` has the three-parameter shape only,
-        // and a generic property's encode call reads `this.typeSerial<k>` off the
-        // `$serializer` INSTANCE — which a static helper has no receiver for. So the
-        // delegation applies to a non-generic class, and a generic one keeps the
-        // inlined shape until `write$Self` carries those serializers too.
-        let delegate = write_self.is_some() && ir.classes[ser_idx].type_params.is_empty();
-        let value_slot = if delegate { 0 } else { 2 };
-        let encoder_slot = if delegate { 1 } else { 3 };
+        // descriptor = 2, then a generic class's type-parameter serializers, which `serialize`
+        // passes from its `typeSerial<k>` fields.
+        let value_slot = 0;
+        let encoder_slot = 1;
+        let element_scope = type_parameter_serializers.as_parameters(3);
         let mut bail = false;
         let mut stmts: Vec<ExprId> = Vec::new();
         // `write$Self` is a static member of the serialized class, so it reaches
         // `$childSerializers` with a plain `getstatic` rather than through the `access$…$cp`
-        // bridge the `$serializer` needs. The local is the first free one after its three
-        // parameters. The inlined generic shape lives on the `$serializer` and has no such reach,
-        // so it keeps building its element serializers.
-        // The plan, as the pass that built the cache published it: which properties have a slot and
-        // which static holds them. Not a search of `ir.statics` for the field's spelling, and not a
-        // second answer to which properties are cached.
-        let plan = delegate.then_some(cache_plan).flatten();
-        let cache_local = 3u32;
+        // bridge the `$serializer` needs. The local is the first free one after its parameters.
+        // The plan, as the pass that built the cache published it, says which properties have a
+        // slot and which static holds them.
+        let cache_local = 3 + type_parameter_serializers.len() as u32;
         // Every nullable value-class read owns one semantic temporary. Reserve the whole range up
         // front so a checked computed default, which remaps its own locals into this frame below,
         // starts after them instead of aliasing a value still used by the guarded encode call.
@@ -133,68 +120,40 @@ impl SerializeBody<'_> {
                 ) {
                     return Some(cached);
                 }
-                // A delegating `write$Self` is a static helper with no `$serializer` to read a
-                // type-parameter serializer off; only the inlined generic shape has one.
-                let scope = if delegate {
-                    super::type_parameter_serializers::TypeParameterSerializers::NONE
-                } else {
-                    type_parameter_serializers
-                };
                 let annotated = super::type_argument_serializers::declared_type_spelling(
                     ctx, ir, class_id, property,
                 );
                 super::element_serializer::element_serializer_expr_in(
-                    ir, ctx, ty, scope, &annotated,
+                    ir,
+                    ctx,
+                    ty,
+                    element_scope,
+                    &annotated,
                 )
             };
         // `write$Self` is a STATIC MEMBER of the serialized class, so it reads the
         // property's private backing FIELD directly — which is what kotlinc emits.
-        // (The old inlined shape lived on the `$serializer`, which cannot, and had to
-        // go through the public getter.)
-        let read_property =
-            |ir: &mut IrFile, field_index: usize, name: &str, ty: &Ty| -> Option<ExprId> {
-                let receiver = ir.add_expr(IrExpr::GetValue(value_slot));
-                let read = if delegate {
-                    ir.add_expr(IrExpr::GetField {
-                        receiver,
-                        class: foo_id,
-                        index: field_index as u32,
-                    })
-                } else {
-                    // The generic inlined shape lives on `$serializer`, so it uses the public
-                    // getter.
-                    let descriptor = ty_descriptor(ctx, ty)?;
-                    super::synthesized_accessor::getter(
-                        ir,
-                        receiver,
-                        serialized_name,
-                        name,
-                        descriptor,
-                        (foo_id, field_index as u32),
-                    )
-                };
-                // An unsigned value is held as its signed carrier; the read is boxed as the
-                // unsigned type it is.
-                if ty.is_unsigned() {
-                    ir.logical_types.insert(read, *ty);
-                }
-                Some(read)
-            };
+        let read_property = |ir: &mut IrFile, field_index: usize, ty: &Ty| -> ExprId {
+            let receiver = ir.add_expr(IrExpr::GetValue(value_slot));
+            let read = ir.add_expr(IrExpr::GetField {
+                receiver,
+                class: foo_id,
+                index: field_index as u32,
+            });
+            // An unsigned value is held as its signed carrier; the read is boxed as the
+            // unsigned type it is.
+            if ty.is_unsigned() {
+                ir.logical_types.insert(read, *ty);
+            }
+            read
+        };
         // Element `i` is written from backing field `field`; they differ after a transient property.
         for (i, &field) in elements.iter().enumerate() {
             let (pname, ty) = &fields[field];
             let n_before = stmts.len();
-            let d = if delegate {
-                ir.add_expr(IrExpr::GetValue(2))
-            } else {
-                this_desc(ir)
-            };
+            let d = ir.add_expr(IrExpr::GetValue(2));
             let idx = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
-            let v = read_property(ir, field, pname, ty);
-            let Some(v) = v else {
-                bail = true;
-                break;
-            };
+            let v = read_property(ir, field, ty);
             let c = ir.add_expr(IrExpr::GetValue(encoder_slot));
             let contextual = property_is_contextual(ctx, ir, class_id, pname);
             let contextual = if contextual {
@@ -234,16 +193,17 @@ impl SerializeBody<'_> {
                 }));
             } else if let Some(internal) = declared_serializer_of(ctx, ir, class_id, pname) {
                 // An explicit per-property serializer takes precedence over the property's type.
-                let scope = if delegate {
-                    super::type_parameter_serializers::TypeParameterSerializers::NONE
-                } else {
-                    type_parameter_serializers
-                };
                 let annotated = super::type_argument_serializers::declared_type_spelling(
                     ctx, ir, class_id, pname,
                 );
-                let inst =
-                    build_field_serializer_instance(ir, ctx, internal, *ty, scope, &annotated);
+                let inst = build_field_serializer_instance(
+                    ir,
+                    ctx,
+                    internal,
+                    *ty,
+                    element_scope,
+                    &annotated,
+                );
                 let method = if is_nullable(ty) {
                     "encodeNullableSerializableElement"
                 } else {
@@ -362,11 +322,7 @@ impl SerializeBody<'_> {
                 && super::property_default::checked_default(ir, foo_id, field).is_some();
             if (constant_default.is_some() || computed_default) && stmts.len() == n_before + 1 {
                 let enc_stmt = stmts.pop().unwrap();
-                let cd = if delegate {
-                    ir.add_expr(IrExpr::GetValue(2))
-                } else {
-                    this_desc(ir)
-                };
+                let cd = ir.add_expr(IrExpr::GetValue(2));
                 let ci = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
                 let cc = ir.add_expr(IrExpr::GetValue(encoder_slot));
                 let should = ir.add_expr(IrExpr::Call {
@@ -379,10 +335,7 @@ impl SerializeBody<'_> {
                     args: vec![cd, ci],
                 });
                 // Re-read the property because one IR expression cannot occupy two tree nodes.
-                let Some(cur) = read_property(ir, field, pname, ty) else {
-                    bail = true;
-                    break;
-                };
+                let cur = read_property(ir, field, ty);
                 let def = match &constant_default {
                     Some(dc) => {
                         let def = ir.add_expr(IrExpr::Const(dc.clone()));
@@ -406,8 +359,8 @@ impl SerializeBody<'_> {
                     }
                     None => {
                         let mut read_field = |ir: &mut IrFile, field: usize| {
-                            let (name, ty) = fields.get(field)?;
-                            read_property(ir, field, name, ty)
+                            let (_, ty) = fields.get(field)?;
+                            Some(read_property(ir, field, ty))
                         };
                         let Some(def) = super::property_default::default_in_frame(
                             ir,
@@ -418,9 +371,8 @@ impl SerializeBody<'_> {
                                 read_field: &mut read_field,
                                 // `write$Self` is a static member of the class, so the object it
                                 // writes stands in for the receiver the default was checked
-                                // against. The inlined shape lives on the `$serializer`, which
-                                // cannot reach the object's private state.
-                                receiver: delegate.then_some(value_slot),
+                                // against.
+                                receiver: Some(value_slot),
                                 property_line: ir
                                     .prop_decl_lines
                                     .get(&(serialized_name, pname.clone()))
@@ -463,7 +415,6 @@ impl SerializeBody<'_> {
                 stmts.push(guard);
             }
         }
-        let delegated_write_self = delegate.then_some(write_self).flatten();
         if bail {
             // Do not turn an unsupported field serializer into a successful no-op. Preserve an
             // explicit plugin-owned residual so `jvm_can_emit` declines the file with the standard
@@ -480,7 +431,7 @@ impl SerializeBody<'_> {
                 value: None,
             });
             super::complete_generated_body(ir, fid, body);
-        } else if let Some(write_self) = delegated_write_self {
+        } else {
             if let Some(plan) = plan.as_ref() {
                 // `write$Self` is a static member of the class that OWNS the cache, so it reads the
                 // static directly. The plan names which one.
@@ -526,17 +477,23 @@ impl SerializeBody<'_> {
             let wvalue = ir.add_expr(IrExpr::GetValue(2));
             let woutput = ir.add_expr(IrExpr::GetValue(4));
             let wdesc = ir.add_expr(IrExpr::GetValue(3));
+            let type_serializers = type_parameter_serializers.reads(ir);
+            let type_serializer_descriptors =
+                "Lkotlinx/serialization/KSerializer;".repeat(type_serializers.len());
             let call_write_self = ir.add_expr(IrExpr::Call {
                 callee: Callee::Static {
                     owner: serialized_name,
                     name: write_self_name,
                     descriptor: format!(
-                        "(L{class_internal};Lkotlinx/serialization/encoding/CompositeEncoder;Lkotlinx/serialization/descriptors/SerialDescriptor;)V"
+                        "(L{class_internal};Lkotlinx/serialization/encoding/CompositeEncoder;Lkotlinx/serialization/descriptors/SerialDescriptor;{type_serializer_descriptors})V"
                     ),
                     inline: InlineKind::None,
                 },
                 dispatch_receiver: None,
-                args: vec![wvalue, woutput, wdesc],
+                args: [wvalue, woutput, wdesc]
+                    .into_iter()
+                    .chain(type_serializers)
+                    .collect(),
             });
             let cend = ir.add_expr(IrExpr::GetValue(4));
             let dend = ir.add_expr(IrExpr::GetValue(3));
@@ -552,46 +509,6 @@ impl SerializeBody<'_> {
             record_serialize_lines(ir, foo_id, fid, dvar);
             let body = ir.add_expr(IrExpr::Block {
                 stmts: vec![dvar, cvar, call_write_self, end],
-                value: None,
-            });
-            super::complete_generated_body(ir, fid, body);
-        } else {
-            // The inlined shape (a generic class): open the structure, write the
-            // elements here, close it.
-            let enc = ir.add_expr(IrExpr::GetValue(1));
-            let d0 = this_desc(ir);
-            let begin = ir.add_expr(IrExpr::Call {
-                callee: virtual_iface(
-                    "kotlinx/serialization/encoding/Encoder",
-                    "beginStructure",
-                    "(Lkotlinx/serialization/descriptors/SerialDescriptor;)Lkotlinx/serialization/encoding/CompositeEncoder;",
-                ),
-                dispatch_receiver: Some(enc),
-                args: vec![d0],
-            });
-            let cvar = ir.add_expr(IrExpr::Variable {
-                index: 3,
-                ty: class_ty("kotlinx/serialization/encoding/CompositeEncoder"),
-                init: Some(begin),
-                named: false,
-            });
-            let dend = this_desc(ir);
-            let cend = ir.add_expr(IrExpr::GetValue(3));
-            let end = ir.add_expr(IrExpr::Call {
-                callee: virtual_iface(
-                    "kotlinx/serialization/encoding/CompositeEncoder",
-                    "endStructure",
-                    "(Lkotlinx/serialization/descriptors/SerialDescriptor;)V",
-                ),
-                dispatch_receiver: Some(cend),
-                args: vec![dend],
-            });
-            let mut block = vec![cvar];
-            block.extend(stmts);
-            block.push(end);
-            record_serialize_lines(ir, foo_id, fid, cvar);
-            let body = ir.add_expr(IrExpr::Block {
-                stmts: block,
                 value: None,
             });
             super::complete_generated_body(ir, fid, body);
@@ -648,7 +565,7 @@ mod tests {
             nested_serializers: &[None],
             type_parameter_serializers:
                 super::super::type_parameter_serializers::TypeParameterSerializers::NONE,
-            write_self: Some(write_self),
+            write_self,
             write_self_name: "write$Self".to_owned(),
             // This fixture's property has no derivable serializer at all, so its class has no
             // cache to plan.

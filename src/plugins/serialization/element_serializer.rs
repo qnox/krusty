@@ -52,11 +52,8 @@ pub(super) enum ElementSerializerPlan {
         construction: crate::ir::IrCustomSerializerConstruction,
         arguments: Vec<ElementSerializerPlan>,
     },
-    /// A class type parameter's serializer, which the generic `$serializer` holds in `field`.
-    TypeParameter {
-        serializer_class: ClassId,
-        field: u32,
-    },
+    /// A class type parameter's serializer, as the running code holds it.
+    TypeParameter(super::type_parameter_serializers::TypeParameterSerializer),
     /// A classifier declared outside this file whose serializer its companion's generated
     /// `serializer(…)` returns, called with one argument serializer per type parameter.
     ExternalCompanion {
@@ -385,11 +382,8 @@ fn serializer_plan(
     // none to use.
     if let Some(identity) = nn.ty_param_name() {
         return scope
-            .field(identity)
-            .map(|field| ElementSerializerPlan::TypeParameter {
-                serializer_class: scope.serializer_class(),
-                field,
-            });
+            .serializer(identity)
+            .map(ElementSerializerPlan::TypeParameter);
     }
     // Include de-erased primitives/`String` (`List<Int>` element `Ty::Int`): they own no `Obj` internal
     // name but DO have a builtin element serializer (resolved at the tail via `builtin_element_serializer`).
@@ -826,17 +820,7 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
             let name = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(serial_name)));
             super::cached_serializer::object_serializer(ir, object, name, serial_info_unsupported)
         }
-        ElementSerializerPlan::TypeParameter {
-            serializer_class,
-            field,
-        } => {
-            let this = ir.add_expr(IrExpr::GetValue(0));
-            ir.add_expr(IrExpr::GetField {
-                receiver: this,
-                class: serializer_class,
-                index: field,
-            })
-        }
+        ElementSerializerPlan::TypeParameter(serializer) => serializer.read(ir),
         ElementSerializerPlan::LocalSingleton(class) => ir.add_expr(IrExpr::StaticInstance {
             owner: class,
             ty: class,

@@ -1631,10 +1631,12 @@ impl IrPlugin for SerializationPlugin {
                             field_defaults: &properties.constant_defaults,
                             nested_serializers: &properties.nested_serializers,
                             type_parameter_serializers,
-                            write_self: ir.generated_function(
-                                ir.classes[foo_id as usize].fq_name_id(),
-                                crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf,
-                            ),
+                            write_self: ir
+                                .generated_function(
+                                    ir.classes[foo_id as usize].fq_name_id(),
+                                    crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf,
+                                )
+                                .expect("a plain serializable class declares its write$Self"),
                             write_self_name: self.write_self_name(),
                             cache: self
                                 .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),
