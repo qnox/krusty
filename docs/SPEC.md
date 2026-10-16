@@ -15021,6 +15021,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `inlineClasses/hiddenConstructor/delegatingSuperConstructorCallInSecondaryConstructorGeneric.kt`
   (annotations; its private constructor's line table is a separate gap).
 
+  A property TYPED by a value class is annotated by that declared type, not by the carrier its
+  backing field stores. `val b: N` over `value class N(val s: String?)` stores a `String?` and
+  `val a: Boxed<String>` stores the `Object` that `T` erases to, yet the field, the getter, a
+  `var`'s setter, and a data class's `copy` parameter and `componentN` are all `@NotNull`, as in
+  kotlinc. The field's descriptor still decides whether the position is a reference at all
+  (`val i: I` over `Int` stores an `int` and has no annotation). The parameter guards and the
+  constructor line table keep classifying the stored type: `N` admits null, so kotlinc emits no
+  `checkNotNullParameter` for it. Tests: `tests/nullable_value_class_nullability_e2e.rs`.
+
 - **A `try` and a `return` own their own `LineNumberTable` entries.** Four rules, each measured
   against the reference compiler and each previously absent, so a debugger stepping through a
   guarded region saw the finalizer's line where the source says otherwise:

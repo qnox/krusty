@@ -68,7 +68,8 @@ mod default_impls;
 mod delegated_property_array;
 mod field_nullability;
 use field_nullability::{
-    field_nullability_kind, is_nonnull_reference_field, nullability_annotation,
+    declared_field_annotation, field_nullability_kind, is_nonnull_reference_field,
+    nullability_annotation,
 };
 mod discarding;
 use discarding::discard;
@@ -819,7 +820,7 @@ fn attach_synth_nullability(
             if !field_visibility::publishes_field_nullability(c, index) {
                 continue;
             }
-            if let Some(a) = ann(f.ty) {
+            if let Some(a) = declared_field_annotation(c, index) {
                 cw.set_field_nullability(
                     &instance_field_jvm_name(ir, run, c, index),
                     &desc(jvm_value_ty(&f.ty)),
@@ -912,8 +913,13 @@ fn attach_synth_nullability(
         cw.set_method_param_annotations("<init>", &ctor_desc, &user);
     }
     // Accessors: a reference getter annotates its return; a `var` reference setter its parameter.
-    for f in c.fields.iter().filter(|f| !f.is_compiler_generated()) {
-        let Some(a) = ann(f.ty) else {
+    for (index, f) in c
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| !f.is_compiler_generated())
+    {
+        let Some(a) = declared_field_annotation(c, index) else {
             continue;
         };
         let (getter, setter) = accessor_jvm_names(c, &f.name);
@@ -939,7 +945,9 @@ fn attach_synth_nullability(
             let function = &ir.functions[fid as usize];
             // `copy`'s parameters mirror the primary-constructor properties, so each reference param
             // takes the SAME `@NotNull`/`@Nullable` annotation kotlinc puts on the constructor's.
-            let copy_params: Vec<Option<&str>> = data_fields.iter().map(|f| ann(f.ty)).collect();
+            let copy_params: Vec<Option<&str>> = (0..data_fields.len())
+                .map(|index| declared_field_annotation(c, index))
+                .collect();
             cw.set_method_nullability(
                 &function.name,
                 &ir_method_desc(&function.params, &function.ret),
@@ -965,8 +973,8 @@ fn attach_synth_nullability(
                 &[Some("Lorg/jetbrains/annotations/Nullable;")],
             );
         }
-        for (i, f) in data_fields.iter().enumerate() {
-            if let Some(a) = ann(f.ty) {
+        for i in 0..data_fields.len() {
+            if let Some(a) = declared_field_annotation(c, i) {
                 let fid = ir
                     .data_class_member(c.fq_name_id(), IrDataClassMemberRole::Component(i as u32))
                     .expect("a data-class component records its generated identity");
@@ -2626,7 +2634,7 @@ fn emit_class(
             // the local `type_parameter` above is the `Signature` attribute's spelling, a wider source
             // that must not become a second answer to the same question.
             let field_ann = field_visibility::publishes_field_nullability(c, field_index)
-                .then(|| nullability_annotation(field_nullability_kind(*ty)))
+                .then(|| declared_field_annotation(c, field_index))
                 .flatten();
             cw.add_field_late_sig(
                 acc,

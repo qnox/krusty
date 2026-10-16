@@ -30,3 +30,23 @@ pub(super) fn field_nullability_kind(t: Ty) -> u8 {
 pub(super) fn is_nonnull_reference_field(t: Ty) -> bool {
     field_nullability_kind(t) == 1
 }
+
+/// The nullability annotation on field `index` of `class` and on the accessors and data-class
+/// members it backs. Those positions annotate the property's declared Kotlin type, not the field's
+/// erased storage: `val b: N` over `value class N(val s: String?)` stores a `String?` yet is
+/// `@NotNull`, like kotlinc's. The field's descriptor still decides whether the position is a
+/// reference at all, and the guard and line-table classification stays [`field_nullability_kind`].
+pub(super) fn declared_field_annotation(
+    class: &crate::ir::IrClass,
+    index: usize,
+) -> Option<&'static str> {
+    let field = &class.fields[index];
+    let declared = class
+        .properties
+        .iter()
+        .find(|property| property.backing_field == Some(index as u32))
+        .map_or(field.ty, |property| property.ty);
+    nullability_annotation(field_nullability_kind(field.ty)).and_then(|_| {
+        crate::jvm::declared_type_nullability::declared_annotation(declared, field.ty)
+    })
+}

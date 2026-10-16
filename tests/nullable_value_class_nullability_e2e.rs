@@ -81,3 +81,33 @@ fn a_nullable_value_class_carrier_runs() {
     );
     common::expect_box_ok_with_stdlib(&src, "a nullable value class carried unboxed");
 }
+
+/// A non-null value class whose carrier admits null is still `@NotNull` where it is declared.
+/// `val b: N` over `value class N(val s: String?)` stores a `String?`, and `val a: Boxed<String>`
+/// stores the `Object` its `T` erases to; kotlinc annotates the backing field, the getter and a
+/// data class's `copy` parameter and `componentN` by the property's declared type, not that
+/// storage.
+const DECLARED_SOURCE: &str = "@JvmInline value class Boxed<T>(val value: T)\n\
+    @JvmInline value class N(val s: String?)\n\
+    @JvmInline value class NI(val x: Int?)\n\
+    @JvmInline value class I(val x: Int)\n\
+    class Holder(val a: Boxed<String>, val b: N, val c: Boxed<String?>, val d: N?)\n\
+    data class Record(val a: Boxed<String>, val b: N, val i: I, val ni: NI, var v: N, val n: N?)\n";
+
+#[test]
+fn a_value_class_over_a_nullable_carrier_is_annotated_by_its_declared_type() {
+    for class in ["Holder", "Record"] {
+        match common::byte_diff_against_kotlinc_cp(
+            "ValueClassDeclaredNullability",
+            DECLARED_SOURCE,
+            class,
+            &[common::stdlib_jar()],
+        ) {
+            None => {
+                eprintln!("skip (ValueClassDeclaredNullability: reference toolchain unavailable)")
+            }
+            Some(Ok(())) => {}
+            Some(Err(why)) => panic!("{class}: {why}"),
+        }
+    }
+}
