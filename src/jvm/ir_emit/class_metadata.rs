@@ -296,12 +296,8 @@ impl<'a> JvmClassRealization<'a> {
                 ir,
                 c.fq_name_id(),
                 role,
-                &record.name,
-                &record.params.iter().map(|(_, ty)| *ty).collect::<Vec<_>>(),
-                record.ret,
-                crate::metadata::version_requirements::needs_definitely_non_null_type(
-                    &record.spellings,
-                ),
+                record,
+                &self.local_classifiers,
             )
             .unwrap_or_default(),
             // A data class's `equals`/`hashCode`/`toString` keep `Any`'s derivable signatures.

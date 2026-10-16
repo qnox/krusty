@@ -4503,6 +4503,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unsigned follows the member rule too (`value class Z(val x: UInt)` declares `getX-pVg5ArA()I`).
   Test: `tests/unsigned_property_getter_e2e.rs`.
 
+- **Generated members treat an unsigned type as a value class.** A value class over `UInt`
+  compares through `UInt.equals-impl0` and renders through `UInt.toString-impl`, appended as an
+  object, as a string template appends an unsigned value. A value class over another value class
+  compares through that class's `equals-impl0` in both `equals-impl0` and `equals-impl`. A data
+  class hashes a `UInt?` property by unboxing it after the null test and calling
+  `UInt.hashCode-impl`; its metadata records a component's JVM descriptor by kotlinc's
+  `requiresFunctionSignature`, so `component1(): UInt` records `()I` and `component2(): UInt?`
+  records none. A class whose constructor takes a `UInt` or `UInt?` parameter declares that
+  constructor private behind a public `DefaultConstructorMarker` accessor, primary and secondary
+  alike, and every call site uses the accessor. Test: `tests/unsigned_generated_members_e2e.rs`.
+
 - **Unsigned arrays box at a reference supertype.** `UByteArray`/`UShortArray`/`UIntArray`/`ULongArray`
   are inline classes over `byte[]`/`short[]`/`int[]`/`long[]`. The value-class table records that
   carrier. Indexing, `size`, and a function whose parameter or result is the array itself keep the
