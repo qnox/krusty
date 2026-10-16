@@ -67,9 +67,29 @@ pub(super) fn record_initializer_lines(
 ) {
     let recorded = &code.line_marks()[marks_before..];
     lines.extend(recorded.iter().map(|&(pc, line)| (pc, u32::from(line))));
+    record_restored_initializer_lines(code, marks_before, lines, restored);
+}
+
+/// Keep the exact initializer marks whose producer identified them as an inlined line or the
+/// caller-line restoration after one. Constructor debug-table curation must not collapse those
+/// marks merely because the preceding entry names the same source line.
+pub(super) fn record_restored_initializer_lines(
+    code: &CodeBuilder,
+    marks_before: usize,
+    lines: &mut Vec<(u16, u32)>,
+    restored: &mut Vec<u16>,
+) {
+    let recorded = &code.line_marks()[marks_before..];
     restored.extend(
         code.inlined_line_marks()
             .filter(|mark| recorded.contains(mark))
-            .map(|(pc, _)| pc),
+            .map(|(pc, line)| {
+                let entry = (pc, u32::from(line));
+                if !lines.contains(&entry) {
+                    lines.push(entry);
+                }
+                pc
+            }),
     );
+    lines.sort_by_key(|&(pc, _)| pc);
 }

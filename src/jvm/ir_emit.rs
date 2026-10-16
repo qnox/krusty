@@ -3794,6 +3794,7 @@ fn emit_enum_class(
     // included), then maps each property store to that property's own declaration line.
     // `(pc, line)` of each constructor-property store, for the `LineNumberTable` below.
     let mut store_lines: Vec<(u16, u32)> = Vec::new();
+    let mut restored_store_lines: Vec<u16> = Vec::new();
     let mut max_locals = 1 + ctor_words;
     // Store constructor-property parameters unless lowering already represented those stores in the
     // init body. The existence of a body property is not that contract: an init body can contain
@@ -3820,6 +3821,7 @@ fn emit_enum_class(
     // ids onto the enum's slot layout: `this` at 0, then every user parameter at slots 3+ after the
     // synthetic name and ordinal. A pure SetField block retains each store's source line.
     if let Some(init_body) = c.init_body {
+        let marks_before = ctor.line_marks().len();
         let mut e = Emitter::new(
             ir,
             &mut cw,
@@ -3844,6 +3846,12 @@ fn emit_enum_class(
         e.emit_constructor_init_body(c, init_body, &mut ctor, &mut store_lines);
         e.render_initializer_boundaries = false;
         max_locals = max_locals.max(e.frame.max());
+        initializer_lines::record_restored_initializer_lines(
+            &ctor,
+            marks_before,
+            &mut store_lines,
+            &mut restored_store_lines,
+        );
     }
     // The `return` maps to the primary constructor's start; a pending closing `init` line owns a
     // `nop` before that transition.
@@ -3891,8 +3899,11 @@ fn emit_enum_class(
                 entries.extend(store_lines.iter().copied());
                 entries.push((ctor_return_pc, primary_constructor_line(ir, c)));
             }
-            // kotlinc never emits two consecutive entries for the same line.
-            entries.dedup_by_key(|(_, l)| *l);
+            // Collapse adjacent equal lines except where the emitter explicitly restored a line
+            // after an inlined initializer value.
+            entries.dedup_by(|(pc, line), (_, previous)| {
+                line == previous && !restored_store_lines.contains(pc)
+            });
             cw.set_method_lines("<init>", &ctor_desc, &entries);
         }
     }

@@ -21,6 +21,13 @@ const SOURCE: &str = "package store\n\
                       \x20   val failed = mutableListOf<Failure>()\n\
                       }\n";
 
+const ENUM_SOURCE: &str = "package store\n\
+                           \n\
+                           enum class Checks {\n\
+                           \x20   ONLY;\n\
+                           \x20   val items: MutableList<String> = mutableListOf()\n\
+                           }\n";
+
 #[test]
 fn an_inlined_property_initializer_store_repeats_its_line_like_kotlinc() {
     for class in ["store/Inlined", "store/Called", "store/Primary"] {
@@ -33,4 +40,16 @@ fn an_inlined_property_initializer_store_repeats_its_line_like_kotlinc() {
         .expect("reference kotlinc is provisioned")
         .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
     }
+}
+
+#[test]
+fn an_enum_inlined_property_initializer_store_repeats_its_line_like_kotlinc() {
+    common::byte_diff_against_kotlinc_cp(
+        "EnumInlinedPropertyInitializerLine",
+        ENUM_SOURCE,
+        "store/Checks",
+        &[common::stdlib_jar()],
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| panic!("store/Checks differs from kotlinc: {diff}"));
 }
