@@ -220,6 +220,8 @@ pub(super) fn source_ordered_members<'a>(
                 None => Some((
                     if ir.is_jvm_delegate_method(function) {
                         (function_order(function), 3)
+                    } else if ir.follows_declared_constructors(class.fq_name_id(), function) {
+                        (function_order(function), 1)
                     } else {
                         block_accessor_slots
                             .get(&function)

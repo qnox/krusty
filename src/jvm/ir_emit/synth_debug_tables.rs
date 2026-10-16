@@ -134,6 +134,10 @@ pub(super) fn attach_synth_debug_tables(
     // Property accessors: getter has only `this`; a `var` setter also has its value parameter (named
     // `<set-?>` by kotlinc), guarded when the property type is a non-null reference.
     for (field_index, f) in c.fields.iter().enumerate() {
+        // Compiler-generated storage backs no property, so it has no synthesized accessor.
+        if f.is_compiler_generated() {
+            continue;
+        }
         // An accessor represented as a real function carries its own debug contract. Decide the
         // getter and setter independently: a `var` can declare one and retain the synthesized other.
         // The plugin-generated `descriptor` getter intentionally has NO line table, which this
