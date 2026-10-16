@@ -503,22 +503,22 @@ fn preview_lanes_and_release_carry_all_target_reports_distinctly() {
     let klib_lane = workflow_job(&workflow, "conformance-klib");
     assert!(
         lane.contains("name: conformance (${{ matrix.version }}, ${{ matrix.target }})")
-            && lane.contains("target: [jvm, wasm]")
+            && lane.contains("target: [jvm]")
             && lane.contains("steps: &conformance-steps")
             && !lane.contains("build-klib-test-bins")
-            && klib_lane.contains("target: [native]")
+            && klib_lane.contains("target: [native, wasm]")
             && klib_lane.contains("steps: *conformance-steps"),
         "every version exposes JVM, Native and Wasm rows from one shared step inventory: {lane}\n{klib_lane}"
     );
     assert_eq!(
-        workflow.matches("        target: [jvm, wasm]\n").count(),
+        workflow.matches("        target: [jvm]\n").count(),
         1,
-        "the early report lane owns exactly the JVM and Wasm rows"
+        "the early report lane owns exactly the JVM rows"
     );
     assert_eq!(
-        workflow.matches("        target: [native]\n").count(),
+        workflow.matches("        target: [native, wasm]\n").count(),
         1,
-        "the KLIB-dependent report lane owns exactly the Native rows"
+        "the KLIB-dependent report lane owns exactly the Native and Wasm rows"
     );
     assert!(
         lane.contains(

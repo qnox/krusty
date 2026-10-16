@@ -165,27 +165,27 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
             && conformance.contains("      fail-fast: false\n")
             && conformance
                 .contains("        version: ${{ fromJson(needs.versions.outputs.matrix) }}\n")
-            && conformance.contains("        target: [jvm, wasm]\n")
+            && conformance.contains("        target: [jvm]\n")
             && conformance.contains("    steps: &conformance-steps\n")
             && !conformance.contains("build-klib-test-bins"),
-        "JVM and Wasm conformance must start without waiting for the focused KLIB binaries: {conformance}"
+        "JVM conformance must start without waiting for the focused KLIB binaries: {conformance}"
     );
     assert!(
         klib_conformance.contains(
             "    needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins, versions]\n"
-        ) && klib_conformance.contains("        target: [native]\n")
+        ) && klib_conformance.contains("        target: [native, wasm]\n")
             && klib_conformance.contains("    steps: *conformance-steps\n"),
-        "Native alone waits for focused KLIB binaries while reusing the shared inventory: {klib_conformance}"
+        "Native and Wasm wait for focused KLIB binaries while reusing the shared inventory: {klib_conformance}"
     );
     assert_eq!(
-        workflow.matches("        target: [jvm, wasm]\n").count(),
+        workflow.matches("        target: [jvm]\n").count(),
         1,
-        "the early matrix owns exactly the JVM and Wasm rows"
+        "the early matrix owns exactly the JVM rows"
     );
     assert_eq!(
-        workflow.matches("        target: [native]\n").count(),
+        workflow.matches("        target: [native, wasm]\n").count(),
         1,
-        "the focused-KLIB-dependent matrix owns exactly the Native rows"
+        "the focused-KLIB-dependent matrix owns exactly the Native and Wasm rows"
     );
     let conformance_build = job(&workflow, "build-conformance-bin");
     assert!(

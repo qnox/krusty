@@ -691,7 +691,7 @@ fn prebuilt_conformance_regressions_enforce_the_deadline() {
 }
 
 #[test]
-fn ci_starts_jvm_without_waiting_for_native_test_binaries() {
+fn ci_starts_jvm_without_waiting_for_focused_klib_binaries() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workflow =
         fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci workflow");
@@ -707,8 +707,8 @@ fn ci_starts_jvm_without_waiting_for_native_test_binaries() {
             .matches("name: conformance (${{ matrix.version }}, ${{ matrix.target }})")
             .count()
             == 2
-            && workflow.matches("        target: [jvm, wasm]\n").count() == 1
-            && workflow.matches("        target: [native]\n").count() == 1
+            && workflow.matches("        target: [jvm]\n").count() == 1
+            && workflow.matches("        target: [native, wasm]\n").count() == 1
             && workflow.matches("steps: &conformance-steps").count() == 1
             && workflow.matches("steps: *conformance-steps").count() == 1,
         "each exact Kotlin version must expose JVM, Native and Wasm rows from one shared inventory"
