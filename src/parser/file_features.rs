@@ -66,12 +66,25 @@ mod tests {
         };
         let mut old = File::default();
         apply_file_features(&mut old, &settings(KotlinVersion::V2_4_0));
+        let mut patch = File::default();
+        apply_file_features(&mut patch, &settings(KotlinVersion::V2_4_10));
         let mut current = File::default();
         apply_file_features(&mut current, &settings(KotlinVersion::V2_4_20));
+        let type_arguments_not_allowed_warning = Some(
+            "type arguments are not allowed when static member is accessed. This will become an \
+             error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-390.",
+        );
 
         assert_eq!(old.value_class_recursion_via_type_parameters_warning, None);
         assert_eq!(old.inapplicable_operator_modifier_warning, None);
-        assert_eq!(old.type_arguments_not_allowed_warning, None);
+        assert_eq!(
+            old.type_arguments_not_allowed_warning.as_deref(),
+            type_arguments_not_allowed_warning
+        );
+        assert_eq!(
+            patch.type_arguments_not_allowed_warning.as_deref(),
+            type_arguments_not_allowed_warning
+        );
         assert_eq!(
             current.value_class_recursion_via_type_parameters_warning,
             Some(
@@ -90,13 +103,8 @@ mod tests {
             )
         );
         assert_eq!(
-            current.type_arguments_not_allowed_warning,
-            Some(
-                "type arguments are not allowed when static member is accessed. This will become \
-                 an error in language version 2.5. See \
-                 https://youtrack.jetbrains.com/issue/KTLC-390."
-                    .to_string()
-            )
+            current.type_arguments_not_allowed_warning.as_deref(),
+            type_arguments_not_allowed_warning
         );
     }
 }
