@@ -682,6 +682,9 @@ pub(crate) fn lower_value_classes(
             .obj_internal()
             .is_some_and(|fq| under.contains_key(&fq))
     };
+    // kotlinc hides a constructor over any inline class, the unsigned types included, behind its
+    // `DefaultConstructorMarker` accessor.
+    let hides_constructor = |t: &Ty| is_vc_ty(t) || t.non_null().is_unsigned();
     let is_callable_vc_ty = |t: &Ty| {
         t.non_null()
             .obj_internal()
@@ -1274,7 +1277,7 @@ pub(crate) fn lower_value_classes(
         if !c.is_value
             && !c.is_object
             && !c.is_interface
-            && hidden_constructors::primary_has_value_class(c, is_vc_ty)
+            && hidden_constructors::primary_has_value_class(c, hides_constructor)
         {
             // Capture the DECLARED ctor param types before the erase below rewrites them — the
             // class metadata constructor record must name the value classes.
@@ -1310,7 +1313,7 @@ pub(crate) fn lower_value_classes(
         for sc in c.secondary_ctors.iter_mut() {
             // Record the value-class fact BEFORE erasure: it drives kotlinc's private+marker ABI for
             // this constructor (a synthetic marker-disambiguated ctor keeps its own convention).
-            if !sc.synthetic && sc.params.iter().any(is_vc_ty) {
+            if !sc.synthetic && sc.params.iter().any(hides_constructor) {
                 sc.vc_params = true;
             }
             parameter_guards::retain_secondary_constructor_guards(sc, &under);
@@ -1505,7 +1508,7 @@ pub(crate) fn lower_value_classes(
                     i as ExprId,
                     *internal,
                     ps,
-                    is_vc_ty,
+                    hides_constructor,
                 );
                 if !is_value_class_internal(*internal, &under) && hides {
                     value_class_parameter_constructions.push(i as ExprId);

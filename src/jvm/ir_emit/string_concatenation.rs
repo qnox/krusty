@@ -140,7 +140,8 @@ impl Emitter<'_> {
                     .methodref(&owner.render(), "toString-impl", &descriptor);
                 code.invokestatic(method, slot_words(carrier) as i32, 1);
                 self.mark_expression_start(concat, code);
-                self.append_top(Ty::String, code);
+                // Appended at the unsigned type's static type, as kotlinc does.
+                self.append_top(Ty::obj("java/lang/Object"), code);
                 return;
             }
             // A value class rendered through its `toString-impl` is appended at its own static type,
