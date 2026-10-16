@@ -85,6 +85,12 @@ pub(super) fn emit_lambda_class(
         .map(|(index, field)| Capture {
             names: crate::jvm::capture_names::lambda_class_capture(ir, lambda, index)
                 .expect("every field of a lambda class stores one of its captures"),
+            constructor_local: !lambda.captures.get(index).is_some_and(|capture| {
+                matches!(
+                    capture,
+                    crate::ir::IrLambdaCapture::Value { inlined: true, .. }
+                )
+            }),
             ty: jvm_value_ty(&field.ty),
             descriptor: ir_type_desc(&field.ty),
             // A call-site-regenerated anonymous object carries the declaration-erased descriptor
@@ -146,17 +152,21 @@ pub(super) fn emit_lambda_class(
     let object = cw.methodref(OBJECT, "<init>", "()V");
     code.invokespecial(object, 0, 0);
     code.ret_void();
-    let parameters = captures
-        .iter()
-        .map(|capture| {
-            (
-                capture.names.parameter.as_str(),
-                capture.descriptor.as_str(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let locals =
-        function_reference_invoke::reference_constructor_locals(&mut cw, &class, &parameters);
+    // Anonymous-object regeneration drops only a transferred capture's declaration-local row.
+    // Its physical parameter still advances the slot used by every following capture.
+    let mut locals = vec![("this".to_string(), format!("L{class};"), 0u16)];
+    let mut parameter_slot = 1u16;
+    for capture in &captures {
+        if capture.constructor_local {
+            locals.push((
+                capture.names.parameter.clone(),
+                capture.descriptor.clone(),
+                parameter_slot,
+            ));
+        }
+        parameter_slot += slot_words(capture.ty);
+    }
+    cw.reserve_method_lvt(&locals);
     if lambda.public_inline {
         finish_code_sig::<0x0001>(
             &mut cw,
@@ -229,10 +239,17 @@ pub(super) fn emit_lambda_class(
         lambda.invoke,
         arity,
     );
-    if captures.is_empty() || delegated_property_array::exists(env, c.fq_name) {
-        emit_initialization(ir, c, &class, facade, env, &mut cw, captures.is_empty());
+    // A transferred inline capture preserves per-expansion closure identity even when transfer
+    // leaves no fields. Other capture-free specializations retain kotlinc's singleton shape.
+    let fresh_instance = ir
+        .specialized_functions
+        .get(&lambda.invoke)
+        .is_some_and(|specialization| specialization.consumed_inline_capture);
+    let singleton = captures.is_empty() && !fresh_instance;
+    if singleton || delegated_property_array::exists(env, c.fq_name) {
+        emit_initialization(ir, c, &class, facade, env, &mut cw, singleton);
     }
-    if captures.is_empty() {
+    if singleton {
         add_singleton_instance_field(&mut cw, &class);
     }
     if regenerated_inline_class {
@@ -284,8 +301,12 @@ fn regenerated_inline_origin(
         declaration_facade,
     );
     function = crate::jvm::lambda_classes::specialization_source(ir, function);
-    let source = ir.foreign_template_source(template)?;
-    let debug = ir.source_debug.file(source.source)?;
+    let source = if ir.foreign_inline_templates.contains(&template) {
+        ir.foreign_template_source(template)?.source
+    } else {
+        ir.source_debug.current()?
+    };
+    let debug = ir.source_debug.file(source)?;
     let source_file = debug
         .name
         .rsplit(['/', '\\'])
@@ -366,6 +387,8 @@ fn emit_initialization(
 /// A captured value's field, as the constructor and `invoke` spell it.
 struct Capture {
     names: crate::jvm::capture_names::CaptureNames,
+    /// Whether the regenerated constructor retains this parameter's debug-local row.
+    constructor_local: bool,
     ty: Ty,
     descriptor: String,
     signature: Option<String>,

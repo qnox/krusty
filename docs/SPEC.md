@@ -11511,13 +11511,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`new InlineScopeKt$capturing$1(prefix)`, `InlineScopeKt$plain$1.INSTANCE`) rather than a class of
   its own. The exception is a declaration lambda that captures a substituted inline parameter:
   `crossinline transform` used from `runBlock { transform(value) }` makes a call-site
-  `<caller>$$inlined$<callee>$1` copy. The checked parameter substitution is spliced into that
-  copy's implementation and removed from its captures, so the caller has neither a function-value
-  constructor argument nor a `$lambda$N` helper. Not yet covered: a lambda in an inline property
-  accessor (`inline val p get() = take { … }`), and the anonymous object's own public-ABI flag and
-  source map. Tests:
-  `tests/inline_function_lambda_class_e2e.rs` (each class byte for byte against kotlinc, the facades
-  of both files included, and the whole source at run time).
+  `<caller>$$inlined$<callee>$1` copy. Its body is spliced into that copy's implementation and its
+  function-value capture parameter is removed, so the caller has neither a function-value
+  constructor argument nor a `$lambda$N` helper. When the substituted lambda captures caller
+  values, those exact capture identities and constructor operands transfer to the call-site copy
+  before its body is spliced; the copied body is remapped to the new capture slots instead of
+  reinterpreting caller slots in the declaration namespace. The whole transfer is planned before
+  any implementation is consumed, so a later invalid edge cannot leave an earlier orphan
+  specialization. Not yet covered: a lambda
+  in an inline property accessor (`inline val p get() = take { … }`), and the anonymous object's own
+  public-ABI flag and source map. Tests: `tests/inline_function_lambda_class_e2e.rs` (each class byte
+  for byte against kotlinc, the facades of both files included, and the whole source at run time),
+  `tests/inline_lambda_captured_literal_e2e.rs`,
+  `tests/inline_lambda_placed_capture_suspension_e2e.rs`, and
+  `tests/inline_erased_capture_e2e.rs`.
 - **A lambda with a `Nothing`/`Nothing?` type the factory cannot adapt is the same class, with a raw
   supertype.** kotlinc's `computeParameterTypeAdaptationConstraint` also returns CONFLICT when the
   adaptee type `isNothing() || isNullableNothing()`: a parameter typed `Nothing`/`Nothing?` by the

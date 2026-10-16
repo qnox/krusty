@@ -8,7 +8,7 @@ use crate::ir::{ExprId, IrExpr};
 
 /// How a spliced lambda's parameters meet the arguments of its invocation.
 #[derive(Clone, Copy)]
-pub(in crate::fir_lower) enum LambdaParameterBinding<'callee> {
+pub(in super::super) enum LambdaParameterBinding<'callee> {
     /// Named parameters become locals holding their arguments; `callee` opens the inline frame.
     Declared { callee: Option<&'callee str> },
     /// Parameters directly reuse value slots supplied by their arguments.

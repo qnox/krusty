@@ -168,6 +168,30 @@ fn supplied_operand_plan(
     })
 }
 
+/// Direct lambda values whose invocation the declared-lambda splicer will consume. This query is
+/// intentionally mutation-free so escaping specialization can exclude those non-escaping values
+/// before any later exposure rewrite commits.
+fn directly_spliceable_invocations(
+    ir: &crate::ir::IrFile,
+    copies: &[(ExprId, ExprId)],
+) -> Vec<ExprId> {
+    copies
+        .iter()
+        .map(|&(_, copy)| copy)
+        .filter(|expression| {
+            matches!(
+                ir.expr(*expression),
+                IrExpr::InvokeFunction { func, .. }
+                    if lambda_splice_contract::invocation_is_spliceable(
+                        ir,
+                        *expression,
+                        *func,
+                    )
+            )
+        })
+        .collect()
+}
+
 /// Build the inline expansion's semantic bindings from the checker's recorded substitutions.
 ///
 /// Declaration headers are intentionally not accepted here. Whether a substitution may drive a
@@ -858,10 +882,18 @@ impl BodyLowering<'_> {
                     .map(|(_, copy)| *copy),
                 &substituted_inline_lambdas,
             );
+        let directly_spliced_lambdas = directly_spliceable_invocations(self.ir, &copies)
+            .into_iter()
+            .filter_map(|invocation| match self.ir.expr(invocation) {
+                IrExpr::InvokeFunction { func, .. } => Some(*func),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
         let escaping_lambda_plan = escaping_lambda::plan(
             self.ir,
             &escaping_copies,
             &protected,
+            &directly_spliced_lambdas,
             &substituted_inline_lambdas,
             &anonymous_owned_substitution_edges,
             &reified_bindings,
@@ -877,21 +909,7 @@ impl BodyLowering<'_> {
         // temporary's initializer, before the direct-lambda splice below.
         self.expose_inline_lambdas_behind_capture_copies(&copies, &substituted_inline_lambdas);
 
-        let inline_invocations = copies
-            .iter()
-            .map(|&(_, copy)| copy)
-            .filter(|expression| {
-                matches!(
-                    self.ir.expr(*expression),
-                    IrExpr::InvokeFunction { func, .. }
-                        if lambda_splice_contract::invocation_is_spliceable(
-                            self.ir,
-                            *expression,
-                            *func,
-                        )
-                )
-            })
-            .collect::<Vec<_>>();
+        let inline_invocations = directly_spliceable_invocations(self.ir, &copies);
         // A default lambda's implementation stays a method of the declaration's default stub,
         // which the expansion's splice must not consume.
         let default_lambda_methods = default_lambda_implementations

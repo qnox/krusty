@@ -377,17 +377,28 @@ fn actualize_headers_and_collect_inherited_defaults(
 /// declaration carries a body the reference compiler never reaches actualization, so it says
 /// nothing about a missing `actual` anywhere in the compilation — but the sources still must not
 /// reach a backend that would read a body-less header as abstract.
-#[allow(clippy::too_many_arguments)]
-fn report_unmatched_expect_roots(
-    headers: &crate::fir::StreamedHeaderModule,
-    matched: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
-    incompatible: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
-    symbols: &FrontendSymbols,
-    module_name: &str,
+struct UnmatchedExpectRoots<'a> {
+    headers: &'a crate::fir::StreamedHeaderModule,
+    matched: &'a crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    incompatible: &'a crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    symbols: &'a FrontendSymbols,
+    module_name: &'a str,
     silent: bool,
+}
+
+fn report_unmatched_expect_roots(
+    context: UnmatchedExpectRoots<'_>,
     rejected_sources: &mut [bool],
     diags: &mut DiagSink,
 ) {
+    let UnmatchedExpectRoots {
+        headers,
+        matched,
+        incompatible,
+        symbols,
+        module_name,
+        silent,
+    } = context;
     let mut unmatched = headers
         .stubs
         .iter()
@@ -1358,12 +1369,14 @@ where
     );
     if multiplatform {
         report_unmatched_expect_roots(
-            &pass1_headers,
-            &matched_expect_declarations,
-            &incompatible_expects,
-            &symbols,
-            module_name,
-            expect_bodies_rejected,
+            UnmatchedExpectRoots {
+                headers: &pass1_headers,
+                matched: &matched_expect_declarations,
+                incompatible: &incompatible_expects,
+                symbols: &symbols,
+                module_name,
+                silent: expect_bodies_rejected,
+            },
             &mut parse_errors,
             diags,
         );

@@ -49,10 +49,11 @@ pub struct IrLambdaClass {
     pub raw_supertype: bool,
     /// What each field captures, in field order.
     pub captures: Vec<IrLambdaCapture>,
-    /// Exact JVM holder identities of mutable cells among those fields. Lambda realization records
-    /// these before it consumes the shared-capture parameter ordinals; later classfile preparation
-    /// uses the identities without reconstructing them from field names or erased descriptors.
-    pub shared_capture_holders: Vec<TypeName>,
+    /// Field ordinal and exact JVM holder identity of each captured mutable cell. Lambda
+    /// realization records both before it consumes the shared-capture parameter ordinals; later
+    /// classfile preparation distinguishes declaration-owned fields from transferred inline
+    /// captures without reconstructing either fact from names or erased descriptors.
+    pub shared_capture_holders: Vec<(u32, TypeName)>,
     /// The origins of the implicit receivers the lambda captured, which
     /// [`IrLambdaCapture::Receiver`] indexes; the lambda's own record, which `invoke` no longer has.
     pub captured_receivers: Vec<IrCapturedReceiver>,
@@ -67,8 +68,12 @@ pub struct IrLambdaClass {
 /// One captured value a lambda class stores in a field.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IrLambdaCapture {
-    /// A captured local value, by its source name.
-    Value(Box<str>),
+    /// A captured local value, by its source name, and whether an inline specialization
+    /// transferred it from a supplied lambda into the regenerated declaration closure.
+    Value {
+        source_name: Box<str>,
+        inlined: bool,
+    },
     /// A captured implicit receiver, by its position among [`IrLambdaClass::captured_receivers`].
     Receiver(u32),
 }

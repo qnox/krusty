@@ -277,11 +277,28 @@ fn copied_inline_capture_holders(
             lambda_modes,
         )
         .expect("a realized specialized closure's caller has a physical JVM owner");
-        for holder in &lambda.shared_capture_holders {
+        for &(_, holder) in &lambda.shared_capture_holders {
             omitted
                 .entry(caller.clone())
                 .or_default()
                 .insert(holder.render());
+        }
+        for &(ordinal, holder) in &lambda.shared_capture_holders {
+            if lambda
+                .captures
+                .get(ordinal as usize)
+                .is_some_and(|capture| {
+                    matches!(
+                        capture,
+                        crate::ir::IrLambdaCapture::Value { inlined: true, .. }
+                    )
+                })
+            {
+                omitted
+                    .entry(class.fq_name())
+                    .or_default()
+                    .insert(holder.render());
+            }
         }
     }
     omitted
@@ -297,6 +314,31 @@ fn independent_capture_holders(
     lambda_modes: crate::jvm::ir_emit::LambdaModes,
 ) -> HashMap<String, HashSet<String>> {
     let mut introduced = HashMap::<String, HashSet<String>>::default();
+    for class in &ir.classes {
+        let Some(lambda) = &class.lambda else {
+            continue;
+        };
+        if !ir.specialized_functions.contains_key(&lambda.invoke) {
+            continue;
+        }
+        for &(ordinal, holder) in &lambda.shared_capture_holders {
+            if lambda
+                .captures
+                .get(ordinal as usize)
+                .is_some_and(|capture| {
+                    matches!(
+                        capture,
+                        crate::ir::IrLambdaCapture::Value { inlined: false, .. }
+                    )
+                })
+            {
+                introduced
+                    .entry(class.fq_name())
+                    .or_default()
+                    .insert(holder.render());
+            }
+        }
+    }
     for (raw, function) in ir.functions.iter().enumerate() {
         let Some(body) = function.body else {
             continue;
@@ -626,6 +668,7 @@ mod tests {
                 inline_callee: crate::fir::CallableId::from_raw(0),
                 inline_callee_source_name: "update".to_string(),
                 parent: None,
+                consumed_inline_capture: false,
             },
         );
         let mut closure = IrClass::synthetic(type_name("sample/Specialized"));
@@ -640,8 +683,11 @@ mod tests {
             invoke: implementation,
             function_type: Ty::fun(Vec::new(), Ty::Unit),
             raw_supertype: false,
-            captures: Vec::new(),
-            shared_capture_holders: vec![type_name("kotlin/jvm/internal/Ref$ObjectRef")],
+            captures: vec![crate::ir::IrLambdaCapture::Value {
+                source_name: "cell".into(),
+                inlined: true,
+            }],
+            shared_capture_holders: vec![(0, type_name("kotlin/jvm/internal/Ref$ObjectRef"))],
             captured_receivers: Vec::new(),
             lifting_root: None,
             bridge: crate::ir::IrInvokeBridge::logical(Vec::new(), Ty::Unit),
@@ -657,10 +703,16 @@ mod tests {
 
         assert_eq!(
             copied_inline_capture_holders(&ir, "sample/FacadeKt", LambdaModes::default(),),
-            HashMap::from_iter([(
-                "sample/FacadeKt".to_string(),
-                HashSet::from_iter(["kotlin/jvm/internal/Ref$ObjectRef".to_string()]),
-            )])
+            HashMap::from_iter([
+                (
+                    "sample/FacadeKt".to_string(),
+                    HashSet::from_iter(["kotlin/jvm/internal/Ref$ObjectRef".to_string()]),
+                ),
+                (
+                    "sample/Specialized".to_string(),
+                    HashSet::from_iter(["kotlin/jvm/internal/Ref$ObjectRef".to_string()]),
+                ),
+            ])
         );
     }
 
@@ -702,14 +754,24 @@ mod tests {
             lambdas: LambdaMode::Class,
             sam_conversions: LambdaMode::Indy,
         };
-        let expected = HashMap::from_iter([(
+        let copied = HashMap::from_iter([
+            (
+                "sample/FacadeKt$box$1".to_string(),
+                HashSet::from_iter(["kotlin/jvm/internal/Ref$ObjectRef".to_string()]),
+            ),
+            (
+                "sample/Specialized".to_string(),
+                HashSet::from_iter(["kotlin/jvm/internal/Ref$ObjectRef".to_string()]),
+            ),
+        ]);
+        let independent = HashMap::from_iter([(
             "sample/FacadeKt$box$1".to_string(),
             HashSet::from_iter(["kotlin/jvm/internal/Ref$ObjectRef".to_string()]),
         )]);
 
         assert_eq!(
             copied_inline_capture_holders(&ir, "sample/FacadeKt", modes),
-            expected
+            copied
         );
         assert_eq!(
             independent_capture_holders(
@@ -718,7 +780,7 @@ mod tests {
                 "sample/FacadeKt",
                 modes,
             ),
-            expected
+            independent
         );
     }
 

@@ -21,7 +21,10 @@
 //! the non-inline `$default` stub materializes that lambda, and kotlinc writes `FileKt$f$1`
 //! rather than an `invokedynamic`. The class is realized
 //! before the lambda gets a lifted name, since kotlinc numbers only the lambdas it lifts, and
-//! before the value-class pass, which erases `invoke` and completes its bridge.
+//! before the value-class pass, which erases `invoke` and completes its bridge. A specialization
+//! that consumed an inline-lambda capture is still constructed afresh when capture transfer leaves
+//! it fieldless: the expansion created that closure value rather than reading a declaration
+//! singleton.
 
 mod inline_scope;
 
@@ -640,7 +643,7 @@ pub(super) fn realize(
             match site.zip(constructor) {
                 Some((site, captures)) => {
                     let parameters = captures.iter().map(|capture| capture.ty).collect();
-                    construct(ir, &site, Some(parameters));
+                    construct(ir, &site, Some(parameters), false);
                     ir.inline_only_fns.insert(fid);
                     unlift(ir, fid);
                 }
@@ -663,7 +666,7 @@ pub(super) fn realize(
                 // The retained source closure is emitted by its declaration file. Consumers use
                 // that exact class, not another declaration of its body or private helpers.
                 for site in &sites {
-                    replace_value(ir, site);
+                    replace_value(ir, site, false);
                 }
                 ir.inline_only_fns.insert(fid);
                 continue;
@@ -704,8 +707,12 @@ pub(super) fn realize(
                 .as_mut()
                 .ok_or(())?
                 .public_inline = public_inline;
+            let fresh_instance = ir
+                .specialized_functions
+                .get(&fid)
+                .is_some_and(|specialization| specialization.consumed_inline_capture);
             for site in sites.iter().skip(1) {
-                replace_value(ir, site);
+                replace_value(ir, site, fresh_instance);
             }
             continue;
         }
@@ -934,9 +941,11 @@ fn captures(ir: &IrFile, fid: FunId, body: ExprId, site: &Site) -> Option<Vec<Ca
         .enumerate()
         .map(|(parameter, identity)| {
             let capture = match identity.role {
-                IrParameterRole::CapturedValue { .. } => {
-                    crate::ir::IrLambdaCapture::Value(identity.source_name.as_deref()?.into())
-                }
+                IrParameterRole::CapturedValue { .. } => crate::ir::IrLambdaCapture::Value {
+                    source_name: identity.source_name.as_deref()?.into(),
+                    inlined: identity.provenance
+                        == crate::ir::IrParameterProvenance::InlinedCapture,
+                },
                 IrParameterRole::CapturedReceiver { ordinal } => {
                     parameter_info.captured_receivers.get(ordinal as usize)?;
                     crate::ir::IrLambdaCapture::Receiver(ordinal)
@@ -974,6 +983,10 @@ fn realize_class(
     captures: &[Capture],
     origin: InlineOrigin,
 ) {
+    let fresh_instance = ir
+        .specialized_functions
+        .get(&fid)
+        .is_some_and(|specialization| specialization.consumed_inline_capture);
     super::shared_captures::realize_lambda_capture_parameters(ir, fid, captures.len());
     let class = declare_class(ir, fid, site, signature, captures, origin);
     // `invoke` takes `this` and the lambda's own parameters; each captured value is read from its
@@ -1058,23 +1071,23 @@ fn realize_class(
         // The bridge maps its whole body to the lambda's line.
         ir.fn_decl_lines.insert(fid, line);
     }
-    replace_value(ir, site);
+    replace_value(ir, site, fresh_instance);
 }
 
-fn replace_value(ir: &mut IrFile, site: &Site) {
-    construct(ir, site, None);
+fn replace_value(ir: &mut IrFile, site: &Site, fresh_instance: bool) {
+    construct(ir, site, None, fresh_instance);
 }
 
 /// Build the class's instance at `site` and each of its copies. `constructor` gives the
 /// constructor's parameter types when the class is not declared in this file.
-fn construct(ir: &mut IrFile, site: &Site, constructor: Option<Vec<Ty>>) {
+fn construct(ir: &mut IrFile, site: &Site, constructor: Option<Vec<Ty>>, fresh_instance: bool) {
     let internal = site.class;
     for node in std::iter::once(site.node).chain(site.template_copies.iter().copied()) {
         let IrExpr::Lambda { captures, .. } = &ir.exprs[node as usize] else {
             unreachable!("a lambda class site builds a lambda value");
         };
         let captures = captures.clone();
-        ir.exprs[node as usize] = if captures.is_empty() {
+        ir.exprs[node as usize] = if captures.is_empty() && !fresh_instance {
             IrExpr::ExternalStaticInstance {
                 owner: internal,
                 ty: internal,
@@ -1126,7 +1139,7 @@ fn declare_class(
         // The field keeps the capture's source spelling; the emitter spells its JVM name from
         // `IrLambdaClass::captures`.
         let source = match &capture.capture {
-            crate::ir::IrLambdaCapture::Value(name) => name.to_string(),
+            crate::ir::IrLambdaCapture::Value { source_name, .. } => source_name.to_string(),
             crate::ir::IrLambdaCapture::Receiver(_) => "this".to_string(),
         };
         class
@@ -1191,7 +1204,15 @@ fn declare_class(
             .collect(),
         shared_capture_holders: captures
             .iter()
-            .filter_map(|capture| capture.shared_holder)
+            .enumerate()
+            .filter_map(|(ordinal, capture)| {
+                capture.shared_holder.map(|holder| {
+                    (
+                        u32::try_from(ordinal).expect("a lambda capture ordinal fits u32"),
+                        holder,
+                    )
+                })
+            })
             .collect(),
         captured_receivers: ir
             .fn_params

@@ -159,6 +159,7 @@ fn remap_reachable_implementations(
                 inline_callee: expansion.site.inline_callee,
                 inline_callee_source_name: expansion.site.inline_callee_source_name.to_string(),
                 parent: detached.parent,
+                consumed_inline_capture: false,
             },
         );
         if detached.parent.is_none() && detached.class_site {

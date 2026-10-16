@@ -248,6 +248,7 @@ fn anonymous_view(
         inline_callee: specialization.inline_callee,
         inline_callee_source_name: specialization.inline_callee_source_name.clone(),
         parent: None,
+        consumed_inline_capture: false,
     }
 }
 

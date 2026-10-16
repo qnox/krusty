@@ -841,6 +841,7 @@ mod tests {
                 inline_callee: crate::fir::CallableId::from_raw(11),
                 inline_callee_source_name: "defineFunc".to_string(),
                 parent: None,
+                consumed_inline_capture: false,
             },
         );
         let second = clone_function_implementation(
@@ -857,6 +858,7 @@ mod tests {
                 inline_callee: crate::fir::CallableId::from_raw(11),
                 inline_callee_source_name: "defineFunc".to_string(),
                 parent: None,
+                consumed_inline_capture: false,
             },
         );
 

@@ -16,7 +16,7 @@ use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
 /// A mutation-free decision for every escaping implementation this expansion will regenerate.
 /// Applying the plan cannot decline, so no specialized function or retargeted arena node can be
 /// stranded when a later phase rejects the containing inline expansion.
-pub(in crate::fir_lower::inlining) struct EscapingLambdaPlan {
+pub(in super::super) struct EscapingLambdaPlan {
     roots: Vec<PlannedRoot>,
     functions: HashSet<crate::ir::FunId>,
 }
@@ -28,10 +28,11 @@ struct PlannedRoot {
 }
 
 /// Validate every escaping lambda specialization without changing common IR.
-pub(in crate::fir_lower::inlining) fn plan(
+pub(in super::super) fn plan(
     ir: &crate::ir::IrFile,
     copies: &[(ExprId, ExprId)],
     protected: &HashSet<ExprId>,
+    directly_spliced_lambdas: &HashSet<ExprId>,
     substituted_inline_lambdas: &HashSet<ExprId>,
     anonymous_owned_substitution_edges: &HashSet<(ExprId, ExprId)>,
     reified_bindings: &HashMap<String, Ty>,
@@ -65,13 +66,19 @@ pub(in crate::fir_lower::inlining) fn plan(
     lambdas.sort_unstable_by_key(|&(_, expression)| expression);
     lambdas.dedup_by_key(|(_, expression)| *expression);
     for (_, copy) in lambdas {
-        // A substituted lambda that owns caller captures stays a function value. The exact
+        // A directly invoked lambda is consumed by the declared-lambda splicer below this plan;
+        // it has no escaping value or class to specialize. In particular, its declaration
+        // implementation may already have been consumed by an earlier expansion of the same
+        // inline template while its retained inline body remains valid for this splice.
+        if directly_spliced_lambdas.contains(&copy) {
+            continue;
+        }
+        // A substituted lambda remains a caller-owned value until a declaration closure captures
+        // it. That ownership edge transfers its captures and body into the call-site copy. The exact
         // declaration lambda whose anonymous-object constructor owns a substituted capture is also
         // handled there: anonymous specialization either retains the supplied closure or consumes
-        // a capture-free one in the copied methods. Only a capture-free substitution outside that
-        // ownership edge can enter declaration-closure transfer.
-        if (substituted_inline_lambdas.contains(&copy)
-            && matches!(ir.expr(copy), IrExpr::Lambda { captures, .. } if !captures.is_empty()))
+        // it in the copied methods.
+        if caller_capturing_substitution(ir, copy, substituted_inline_lambdas)
             || anonymous_owned_lambdas.contains(&copy)
         {
             continue;
@@ -85,7 +92,7 @@ pub(in crate::fir_lower::inlining) fn plan(
         else {
             continue;
         };
-        let inline_captures = captures
+        let mut inline_captures = captures
             .iter()
             .enumerate()
             .filter(|(_, capture)| {
@@ -97,8 +104,19 @@ pub(in crate::fir_lower::inlining) fn plan(
         if let Some(inline_body) = *inline_body {
             if !inline_captures.is_empty() {
                 let shape = ir.functions.get(*impl_fn as usize)?;
-                if !inline_capture_splices_are_valid(ir, inline_body, shape, &inline_captures) {
-                    return None;
+                if !inline_capture_splices_are_valid(
+                    ir,
+                    inline_body,
+                    *impl_fn,
+                    shape,
+                    &inline_captures,
+                ) {
+                    // Capture transfer is a representation choice, not a prerequisite for the
+                    // containing inline expansion. A suspend/coroutine lambda can have an invoke
+                    // shape that this direct body splice does not own; retain that exact supplied
+                    // closure as the declaration closure's capture instead of rejecting the
+                    // otherwise-valid inline call.
+                    inline_captures.clear();
                 }
             }
         }
@@ -128,9 +146,20 @@ pub(in crate::fir_lower::inlining) fn plan(
     Some(EscapingLambdaPlan { roots, functions })
 }
 
+/// A caller-owned substituted lambda is not itself a declaration closure to specialize. Its exact
+/// capture edge is consumed when the declaration closure that captured it is planned.
+fn caller_capturing_substitution(
+    ir: &crate::ir::IrFile,
+    expression: ExprId,
+    substituted_inline_lambdas: &HashSet<ExprId>,
+) -> bool {
+    substituted_inline_lambdas.contains(&expression)
+        && matches!(ir.expr(expression), IrExpr::Lambda { captures, .. } if !captures.is_empty())
+}
+
 /// Commit a previously validated plan after every fallible transformation of the containing
 /// expansion has succeeded.
-pub(in crate::fir_lower::inlining) fn apply(
+pub(in super::super) fn apply(
     ir: &mut crate::ir::IrFile,
     plan: EscapingLambdaPlan,
     bindings: &HashMap<String, Ty>,
@@ -208,11 +237,18 @@ pub(in crate::fir_lower::inlining) fn apply(
         // Nested lambdas there still name the declaration implementations until this retarget.
         retarget_lambdas(ir, copy, state.replacements);
         if !inline_captures.is_empty() {
+            let transferred = inline_captures
+                .iter()
+                .map(|capture| match ir.expr(capture.lambda) {
+                    IrExpr::Lambda { captures, .. } => captures.clone(),
+                    _ => unreachable!("the plan validated an exact substituted source lambda"),
+                })
+                .collect::<Vec<_>>();
             let IrExpr::Lambda { captures, .. } = &mut ir.exprs[copy as usize] else {
                 unreachable!("the specialized escaping value remains a lambda");
             };
-            for capture in inline_captures.iter().rev() {
-                captures.remove(capture.parameter);
+            for (capture, transferred) in inline_captures.iter().zip(transferred).rev() {
+                captures.splice(capture.parameter..=capture.parameter, transferred);
             }
         }
     }
@@ -311,6 +347,7 @@ fn plan_function(
             || inline_capture_splices_are_valid(
                 ir,
                 body,
+                function,
                 &ir.functions[function as usize],
                 inline_captures,
             )
@@ -354,10 +391,17 @@ fn plan_function(
 fn inline_capture_splices_are_valid(
     ir: &crate::ir::IrFile,
     body: ExprId,
+    function: crate::ir::FunId,
     shape: &crate::ir::IrFunction,
     inline_captures: &[InlineCapture],
 ) -> bool {
-    if !shape.param_checks.is_empty() && shape.param_checks.len() != shape.params.len() {
+    if (!shape.param_checks.is_empty() && shape.param_checks.len() != shape.params.len())
+        || !outer_parameter_sidecars_are_valid(ir, function, shape)
+    {
+        crate::trace_compiler!(
+            "lower",
+            "escaping lambda {function} has inconsistent outer parameter sidecars"
+        );
         return false;
     }
     let mut captures = inline_captures.to_vec();
@@ -367,21 +411,119 @@ fn inline_capture_splices_are_valid(
         || captures
             .iter()
             .any(|capture| capture.parameter >= shape.params.len())
+        || replaced_parameter_checks(ir, &shape.param_checks, &captures, shape.params.len())
+            .is_none()
     {
+        crate::trace_compiler!(
+            "lower",
+            "escaping lambda {function} has invalid captured-parameter replacements {captures:?}"
+        );
         return false;
     }
+    let mut new_arity = shape.params.len();
+    for capture in &captures {
+        let IrExpr::Lambda {
+            impl_fn,
+            captures: transferred,
+            ..
+        } = ir.expr(capture.lambda)
+        else {
+            crate::trace_compiler!(
+                "lower",
+                "escaping lambda {function} capture {} is not a lambda",
+                capture.lambda
+            );
+            return false;
+        };
+        if ir
+            .functions
+            .get(*impl_fn as usize)
+            .map_or(true, |function| function.params.len() < transferred.len())
+        {
+            crate::trace_compiler!(
+                "lower",
+                "escaping lambda {function} capture implementation {impl_fn} has fewer parameters than transferred captures"
+            );
+            return false;
+        }
+        if !transferred.is_empty() {
+            let Some(identities) = ir.function_parameter_identities(*impl_fn) else {
+                crate::trace_compiler!(
+                    "lower",
+                    "escaping lambda {function} capture implementation {impl_fn} has no parameter identities"
+                );
+                return false;
+            };
+            let captured_receivers = ir
+                .fn_params
+                .get(impl_fn)
+                .map(|parameters| parameters.captured_receivers.as_slice())
+                .unwrap_or_default();
+            if identities.len() != ir.functions[*impl_fn as usize].params.len()
+                || ir
+                    .fn_params
+                    .get(impl_fn)
+                    .is_some_and(|parameters| !captured_receiver_facts_are_valid(parameters))
+                || ir.lambda_own_params_from.get(impl_fn).copied()
+                    != u32::try_from(transferred.len()).ok()
+                || !parameter_sidecars_cover(ir, *impl_fn, transferred.len())
+                || identities[..transferred.len()]
+                    .iter()
+                    .any(|identity| match identity.role {
+                        crate::ir::IrParameterRole::CapturedValue { .. } => false,
+                        crate::ir::IrParameterRole::CapturedReceiver { ordinal } => {
+                            captured_receivers.get(ordinal as usize).is_none()
+                        }
+                        _ => true,
+                    })
+            {
+                crate::trace_compiler!(
+                    "lower",
+                    "escaping lambda {function} capture implementation {impl_fn} has inconsistent capture-prefix parameter facts: identities={:?} params={} own_from={:?} transferred={} sidecars_cover={} roles={:?}",
+                    identities.len(),
+                    ir.functions[*impl_fn as usize].params.len(),
+                    ir.lambda_own_params_from.get(impl_fn),
+                    transferred.len(),
+                    parameter_sidecars_cover(ir, *impl_fn, transferred.len()),
+                    identities
+                        .iter()
+                        .map(|identity| identity.role)
+                        .collect::<Vec<_>>()
+                );
+                return false;
+            }
+        }
+        let Some(arity) = new_arity
+            .checked_sub(1)
+            .and_then(|arity| arity.checked_add(transferred.len()))
+        else {
+            return false;
+        };
+        new_arity = arity;
+    }
     let expressions = crate::ir::value_namespace_expressions(ir, body);
-    let Some(mut next_temporary) = u32::try_from(shape.params.len()).ok() else {
+    let Some(mut local_count) = u32::try_from(shape.params.len()).ok().map(|_| 0_u32) else {
         return false;
     };
     for &expression in &expressions {
         for index in super::super::lambda_splice_contract::value_indices(ir.expr(expression)) {
-            let Some(next) = index.checked_add(1) else {
-                return false;
-            };
-            next_temporary = next_temporary.max(next);
+            if index >= shape.params.len() as u32 {
+                let Some(local) = index
+                    .checked_sub(shape.params.len() as u32)
+                    .and_then(|local| local.checked_add(1))
+                else {
+                    return false;
+                };
+                local_count = local_count.max(local);
+            }
         }
     }
+    let Some(mut next_temporary) = u32::try_from(new_arity)
+        .ok()
+        .and_then(|arity| arity.checked_add(local_count))
+    else {
+        return false;
+    };
     for capture in &captures {
         let Some(parameter) = u32::try_from(capture.parameter).ok() else {
             return false;
@@ -409,15 +551,103 @@ fn inline_capture_splices_are_valid(
             })
             .collect::<HashSet<_>>();
         if reads.is_empty() || reads != invoked_reads {
+            crate::trace_compiler!(
+                "lower",
+                "escaping lambda {function} captured parameter {parameter} is not used only as a direct invocation"
+            );
             return false;
         }
         for invocation in invocations {
             if !captured_invocation_is_valid(ir, invocation, capture.lambda, &mut next_temporary) {
+                crate::trace_compiler!(
+                    "lower",
+                    "escaping lambda {function} captured invocation {invocation} cannot be spliced"
+                );
                 return false;
             }
         }
     }
     true
+}
+
+fn outer_parameter_sidecars_are_valid(
+    ir: &crate::ir::IrFile,
+    function: crate::ir::FunId,
+    shape: &crate::ir::IrFunction,
+) -> bool {
+    let arity = shape.params.len();
+    let optional_len = |len: usize| len == 0 || len == arity;
+    if let Some(info) = ir.fn_params.get(&function) {
+        if info.identities.len() != arity
+            || !captured_receiver_facts_are_valid(info)
+            || info
+                .defaults
+                .as_ref()
+                .is_some_and(|values| !optional_len(values.len()))
+            || !optional_len(info.inline_modifiers.len())
+            || !optional_len(info.expansion_modes.len())
+        {
+            return false;
+        }
+    }
+    if [
+        ir.fn_param_declared_nullable.get(&function).map(Vec::len),
+        ir.fn_param_annotations.get(&function).map(Vec::len),
+        ir.fn_param_no_infer.get(&function).map(Vec::len),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|len| !optional_len(len))
+    {
+        return false;
+    }
+    if ir
+        .lambda_own_params_from
+        .get(&function)
+        .is_some_and(|own_from| *own_from as usize > arity)
+        || ir
+            .fn_varargs
+            .get(&function)
+            .is_some_and(|vararg| vararg.index >= arity)
+        || ir
+            .shared_capture_parameters
+            .keys()
+            .any(|&(owner, ordinal)| owner == function && ordinal as usize >= arity)
+    {
+        return false;
+    }
+    true
+}
+
+fn captured_receiver_facts_are_valid(parameters: &crate::ir::FnParamInfo) -> bool {
+    let mut referenced = vec![false; parameters.captured_receivers.len()];
+    for identity in &parameters.identities {
+        let crate::ir::IrParameterRole::CapturedReceiver { ordinal } = identity.role else {
+            continue;
+        };
+        let Some(referenced) = referenced.get_mut(ordinal as usize) else {
+            return false;
+        };
+        if std::mem::replace(referenced, true) {
+            return false;
+        }
+    }
+    referenced.into_iter().all(|referenced| referenced)
+}
+
+fn parameter_sidecars_cover(
+    ir: &crate::ir::IrFile,
+    function: crate::ir::FunId,
+    count: usize,
+) -> bool {
+    [
+        ir.fn_param_declared_nullable.get(&function).map(Vec::len),
+        ir.fn_param_annotations.get(&function).map(Vec::len),
+        ir.fn_param_no_infer.get(&function).map(Vec::len),
+    ]
+    .into_iter()
+    .flatten()
+    .all(|len| len >= count)
 }
 
 fn captured_invocation_is_valid(
@@ -439,7 +669,7 @@ fn captured_invocation_is_valid(
     else {
         return false;
     };
-    if !captures.is_empty() || usize::from(*arity) != args.len() || params.len() != args.len() {
+    if usize::from(*arity) != args.len() || params.len() != args.len() {
         return false;
     }
     let Some(parameter_types) = ir
@@ -449,11 +679,12 @@ fn captured_invocation_is_valid(
     else {
         return false;
     };
-    if parameter_types.len() != args.len() {
+    if parameter_types.len() != captures.len() + args.len() {
         return false;
     }
     let identities = ir.function_parameter_identities(*impl_fn);
     for (parameter, &value) in args.iter().enumerate() {
+        let parameter = captures.len() + parameter;
         let unnamed_local = identities
             .and_then(|identities| identities.get(parameter))
             .and_then(|identity| identity.source_name.as_ref())
@@ -466,7 +697,7 @@ fn captured_invocation_is_valid(
             *next_temporary = next;
         }
     }
-    let formal_count = match u32::try_from(args.len()) {
+    let formal_count = match u32::try_from(parameter_types.len()) {
         Ok(count) => count,
         Err(_) => return false,
     };
@@ -660,10 +891,11 @@ fn specialized_lambda_function(
             inline_callee: state.inline_callee,
             inline_callee_source_name: state.inline_callee_source_name.to_string(),
             parent,
+            consumed_inline_capture: !inline_captures.is_empty(),
         },
     );
     if !inline_captures.is_empty() {
-        remove_inlined_capture_facts(ir, specialized, inline_captures);
+        transfer_inlined_capture_facts(ir, specialized, inline_captures);
         for capture in inline_captures {
             let IrExpr::Lambda { impl_fn, .. } = ir.expr(capture.lambda) else {
                 unreachable!("the plan validated an exact substituted source lambda")
@@ -748,14 +980,8 @@ fn splice_inline_captures(
     }
 
     let expressions = crate::ir::value_namespace_expressions(ir, body);
-    let mut next_temporary = u32::try_from(shape.params.len()).ok()?;
-    for &expression in &expressions {
-        for index in super::super::lambda_splice_contract::value_indices(ir.expr(expression)) {
-            next_temporary = next_temporary.max(index.checked_add(1)?);
-        }
-    }
-
-    for capture in &captures {
+    let mut invocation_sets = Vec::<(InlineCapture, Vec<ExprId>)>::new();
+    for &capture in &captures {
         let parameter = u32::try_from(capture.parameter).ok()?;
         let reads = expressions
             .iter()
@@ -782,33 +1008,125 @@ fn splice_inline_captures(
         if reads.is_empty() || reads != invoked_reads {
             return None;
         }
+        invocation_sets.push((capture, invocations));
+    }
+
+    // Replace the declaration closure's one function-value parameter with the exact capture
+    // parameters of the supplied lambda. Every old value slot is then moved into the resulting
+    // namespace before the supplied body is copied, so caller slots never leak into an unrelated
+    // implementation namespace.
+    let mut new_params = Vec::new();
+    let mut old_formal_slots = Vec::with_capacity(old_arity);
+    let mut transferred_slots = HashMap::<usize, Vec<u32>>::default();
+    let mut captures_at = captures.iter().peekable();
+    for (parameter, ty) in shape.params.iter().copied().enumerate() {
+        let replacement = captures_at
+            .peek()
+            .filter(|capture| capture.parameter == parameter)
+            .copied();
+        if let Some(capture) = replacement {
+            captures_at.next();
+            let IrExpr::Lambda {
+                impl_fn,
+                captures: transferred,
+                ..
+            } = ir.expr(capture.lambda)
+            else {
+                return None;
+            };
+            let parameter_types = &ir.functions.get(*impl_fn as usize)?.params;
+            let capture_types = parameter_types.get(..transferred.len())?;
+            let start = u32::try_from(new_params.len()).ok()?;
+            old_formal_slots.push(start);
+            let mut slots = Vec::with_capacity(capture_types.len());
+            for &capture_ty in capture_types {
+                slots.push(u32::try_from(new_params.len()).ok()?);
+                new_params.push(capture_ty);
+            }
+            transferred_slots.insert(parameter, slots);
+        } else {
+            old_formal_slots.push(u32::try_from(new_params.len()).ok()?);
+            new_params.push(ty);
+        }
+    }
+    if captures_at.next().is_some() {
+        return None;
+    }
+    let new_arity = u32::try_from(new_params.len()).ok()?;
+    let local_count = super::super::super::source_calls::rehome_inline_body_values(
+        ir,
+        body,
+        &old_formal_slots,
+        new_arity,
+    )?;
+    let mut next_temporary = new_arity.checked_add(local_count)?;
+
+    for (capture, invocations) in invocation_sets {
+        let slots = transferred_slots.get(&capture.parameter)?;
         for invocation in invocations {
             splice_captured_lambda_invocation(
                 ir,
                 invocation,
                 capture.lambda,
+                slots,
                 inline_callee,
                 &mut next_temporary,
             )?;
         }
     }
 
-    // Remove capture parameters from highest to lowest so each recorded ordinal remains valid.
-    for capture in captures.iter().rev() {
-        shape.params.remove(capture.parameter);
-        let threshold = u32::try_from(capture.parameter).ok()?.checked_add(1)?;
-        crate::ir::lower_value_indices(ir, body, threshold, 1);
-    }
-    remove_optional_parallel_values(
-        &mut shape.param_checks,
-        &captures
-            .iter()
-            .map(|capture| capture.parameter)
-            .collect::<Vec<_>>(),
-        old_arity,
-        "parameter checks",
-    );
+    shape.params = new_params;
+    shape.param_checks = replaced_parameter_checks(ir, &shape.param_checks, &captures, old_arity)?;
     Some(())
+}
+
+fn replaced_parameter_checks(
+    ir: &crate::ir::IrFile,
+    checks: &[Option<crate::ir::IrParameterCheck>],
+    captures: &[InlineCapture],
+    old_arity: usize,
+) -> Option<Vec<Option<crate::ir::IrParameterCheck>>> {
+    if !checks.is_empty() && checks.len() != old_arity {
+        return None;
+    }
+    let mut result = Vec::new();
+    let mut captures_at = captures.iter().peekable();
+    for parameter in 0..old_arity {
+        let replacement = captures_at
+            .peek()
+            .filter(|capture| capture.parameter == parameter)
+            .copied();
+        if let Some(capture) = replacement {
+            captures_at.next();
+            let IrExpr::Lambda {
+                impl_fn,
+                captures: transferred,
+                ..
+            } = ir.expr(capture.lambda)
+            else {
+                return None;
+            };
+            let implementation = ir.functions.get(*impl_fn as usize)?;
+            let source = &implementation.param_checks;
+            if !source.is_empty() && source.len() != implementation.params.len() {
+                return None;
+            }
+            if source.is_empty() {
+                result.extend(std::iter::repeat_n(None, transferred.len()));
+            } else {
+                result.extend(source.get(..transferred.len())?.iter().copied());
+            }
+        } else {
+            result.push(checks.get(parameter).copied().unwrap_or(None));
+        }
+    }
+    if captures_at.next().is_some() {
+        return None;
+    }
+    if result.iter().all(Option::is_none) {
+        result.clear();
+    }
+    Some(result)
 }
 
 /// Inline one captured source lambda at its invocation inside an escaping implementation copy.
@@ -816,6 +1134,7 @@ fn splice_captured_lambda_invocation(
     ir: &mut crate::ir::IrFile,
     invocation: ExprId,
     lambda: ExprId,
+    capture_slots: &[u32],
     inline_callee: &str,
     next_temporary: &mut u32,
 ) -> Option<()> {
@@ -833,25 +1152,27 @@ fn splice_captured_lambda_invocation(
         } => (impl_fn, captures, inline_body, arity),
         _ => return None,
     };
-    // Captures of the substituted argument have to become captures of the specialized outer
-    // closure. That ownership transfer is a separate contract; do not reinterpret caller slots as
-    // slots of this implementation.
-    if !captures.is_empty() || usize::from(arity) != args.len() {
+    if captures.len() != capture_slots.len() || usize::from(arity) != args.len() {
         return None;
     }
     let parameter_types = ir.functions.get(impl_fn as usize)?.params.clone();
-    if parameter_types.len() != args.len() || params.len() != args.len() {
+    if parameter_types.len() != captures.len() + args.len() || params.len() != args.len() {
         return None;
     }
     let identities = ir
         .function_parameter_identities(impl_fn)
         .map(<[crate::ir::IrParameterIdentity]>::to_vec);
     let mut declarations = Vec::new();
-    let mut formal_slots = Vec::with_capacity(args.len());
-    for (parameter, (value, ty)) in args.into_iter().zip(parameter_types).enumerate() {
+    let mut formal_slots = capture_slots.to_vec();
+    for (parameter, (value, ty)) in args
+        .into_iter()
+        .zip(parameter_types.into_iter().skip(captures.len()))
+        .enumerate()
+    {
+        let identity_parameter = captures.len() + parameter;
         let source_name = identities
             .as_ref()
-            .and_then(|identities| identities.get(parameter))
+            .and_then(|identities| identities.get(identity_parameter))
             .and_then(|identity| identity.source_name.clone());
         let slot = match (ir.expr(value), &source_name) {
             (IrExpr::GetValue(slot), None) => *slot,
@@ -912,7 +1233,6 @@ fn splice_captured_lambda_invocation(
         stmts: declarations,
         value: Some(spliced),
     });
-    ir.copy_inline_copy_mark(invocation, frame);
     if let Some(source) = ir.source_debug.current() {
         let owner = ir
             .lambda_origins
@@ -920,6 +1240,7 @@ fn splice_captured_lambda_invocation(
             .and_then(|origin| origin.lexical_owner);
         ir.record_inline_copy_owner(frame, impl_fn, owner, source);
     }
+    ir.copy_inline_copy_mark(invocation, frame);
     ir.exprs[invocation as usize] = IrExpr::Block {
         stmts: Vec::new(),
         value: Some(frame),
@@ -932,161 +1253,327 @@ fn splice_captured_lambda_invocation(
     Some(())
 }
 
-/// Remove the captured parameter's declaration-owned sidecars from a specialized implementation.
-fn remove_inlined_capture_facts(
+#[derive(Clone, Copy)]
+struct ParameterTransfer {
+    parameter: usize,
+    source: crate::ir::FunId,
+    count: usize,
+}
+
+/// Replace each captured inline-function value with the exact caller captures that now belong to
+/// the specialized declaration closure.
+fn transfer_inlined_capture_facts(
     ir: &mut crate::ir::IrFile,
     function: u32,
     inline_captures: &[InlineCapture],
 ) {
-    let old_arity = ir.functions[function as usize].params.len() + inline_captures.len();
-    let mut parameters = inline_captures
+    let mut captures = inline_captures.to_vec();
+    captures.sort_unstable_by_key(|capture| capture.parameter);
+    captures.dedup_by_key(|capture| capture.parameter);
+    assert_eq!(captures.len(), inline_captures.len());
+    let transfers = captures
         .iter()
-        .map(|capture| capture.parameter)
+        .map(|capture| match ir.expr(capture.lambda) {
+            IrExpr::Lambda {
+                impl_fn, captures, ..
+            } => ParameterTransfer {
+                parameter: capture.parameter,
+                source: *impl_fn,
+                count: captures.len(),
+            },
+            _ => unreachable!("the plan validated an exact substituted source lambda"),
+        })
         .collect::<Vec<_>>();
-    parameters.sort_unstable();
-    parameters.dedup();
-    assert!(
-        parameters.iter().all(|&parameter| parameter < old_arity),
-        "an inlined capture ordinal belongs to the pre-specialization parameter shape"
-    );
+    let new_arity = ir.functions[function as usize].params.len();
+    let old_arity = transfers.iter().fold(new_arity, |arity, transfer| {
+        arity
+            .checked_add(1)
+            .and_then(|arity| arity.checked_sub(transfer.count))
+            .expect("transferred captures belong to the specialized parameter shape")
+    });
+    assert!(transfers
+        .iter()
+        .all(|transfer| transfer.parameter < old_arity));
+
+    let identities = transfers
+        .iter()
+        .map(|transfer| {
+            let mut source = if transfer.count == 0 {
+                Vec::new()
+            } else {
+                ir.function_parameter_identities(transfer.source)
+                    .expect("a transferred lambda publishes exact capture identities")
+                    [..transfer.count]
+                    .to_vec()
+            };
+            for identity in &mut source {
+                identity.provenance = crate::ir::IrParameterProvenance::InlinedCapture;
+            }
+            (transfer.parameter, source)
+        })
+        .collect::<Vec<_>>();
+    let captured_receivers = transfers
+        .iter()
+        .map(|transfer| {
+            if transfer.count == 0 {
+                return (transfer.parameter, Vec::new());
+            }
+            let identities = ir
+                .function_parameter_identities(transfer.source)
+                .expect("a transferred lambda publishes exact capture identities");
+            let captured_receivers = ir
+                .fn_params
+                .get(&transfer.source)
+                .map(|parameters| parameters.captured_receivers.as_slice())
+                .unwrap_or_default();
+            let receivers = identities[..transfer.count]
+                .iter()
+                .map(|identity| match identity.role {
+                    crate::ir::IrParameterRole::CapturedReceiver { ordinal } => {
+                        Some(captured_receivers[ordinal as usize].clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            (transfer.parameter, receivers)
+        })
+        .collect::<Vec<_>>();
+    let declared_nullable = source_parameter_values(&ir.fn_param_declared_nullable, &transfers);
+    let annotations = source_parameter_values(&ir.fn_param_annotations, &transfers);
+    let no_infer = source_parameter_values(&ir.fn_param_no_infer, &transfers);
+    let transferred_shared = transfers
+        .iter()
+        .flat_map(|transfer| {
+            (0..transfer.count).filter_map(|ordinal| {
+                ir.shared_capture_parameters
+                    .get(&(
+                        transfer.source,
+                        u32::try_from(ordinal).expect("capture ordinal fits u32"),
+                    ))
+                    .copied()
+                    .map(|ty| (transfer.parameter, ordinal, ty))
+            })
+        })
+        .collect::<Vec<_>>();
+
     if let Some(info) = ir.fn_params.get_mut(&function) {
-        assert_eq!(
-            info.identities.len(),
+        let mut receiver_facts = info
+            .identities
+            .iter()
+            .map(|identity| match identity.role {
+                crate::ir::IrParameterRole::CapturedReceiver { ordinal } => {
+                    Some(info.captured_receivers[ordinal as usize].clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        replace_parameter_values(
+            &mut info.identities,
+            &identities,
             old_arity,
-            "published parameter identities exactly match the pre-specialization arity"
+            "parameter identities",
         );
-        for &parameter in parameters.iter().rev() {
-            info.identities.remove(parameter);
-        }
+        replace_parameter_values(
+            &mut receiver_facts,
+            &captured_receivers,
+            old_arity,
+            "captured receiver facts",
+        );
         if let Some(defaults) = &mut info.defaults {
-            remove_optional_parallel_values(defaults, &parameters, old_arity, "parameter defaults");
-        }
-        remove_optional_parallel_values(
-            &mut info.inline_modifiers,
-            &parameters,
-            old_arity,
-            "inline parameter modifiers",
-        );
-        remove_optional_parallel_values(
-            &mut info.expansion_modes,
-            &parameters,
-            old_arity,
-            "inline expansion modes",
-        );
-        for identity in &mut info.identities {
-            if let crate::ir::IrParameterRole::CapturedValue { ordinal, .. } = &mut identity.role {
-                let removed_before = parameters
+            if !defaults.is_empty() {
+                let inserted = transfers
                     .iter()
-                    .filter(|&&parameter| parameter < *ordinal as usize)
-                    .count();
-                *ordinal -= u32::try_from(removed_before).expect("lambda capture count fits u32");
+                    .map(|transfer| (transfer.parameter, vec![None; transfer.count]))
+                    .collect::<Vec<_>>();
+                replace_parameter_values(defaults, &inserted, old_arity, "parameter defaults");
             }
         }
+        if !info.inline_modifiers.is_empty() {
+            let inserted = transfers
+                .iter()
+                .map(|transfer| {
+                    (
+                        transfer.parameter,
+                        vec![crate::types::InlineParameterModifier::None; transfer.count],
+                    )
+                })
+                .collect::<Vec<_>>();
+            replace_parameter_values(
+                &mut info.inline_modifiers,
+                &inserted,
+                old_arity,
+                "inline parameter modifiers",
+            );
+        }
+        if !info.expansion_modes.is_empty() {
+            let inserted = transfers
+                .iter()
+                .map(|transfer| {
+                    (
+                        transfer.parameter,
+                        vec![crate::types::InlineExpansionMode::Materialize; transfer.count],
+                    )
+                })
+                .collect::<Vec<_>>();
+            replace_parameter_values(
+                &mut info.expansion_modes,
+                &inserted,
+                old_arity,
+                "inline expansion modes",
+            );
+        }
+        let mut rebuilt_receivers = Vec::new();
+        for (parameter, (identity, receiver)) in
+            info.identities.iter_mut().zip(receiver_facts).enumerate()
+        {
+            match &mut identity.role {
+                crate::ir::IrParameterRole::CapturedValue { ordinal, .. } => {
+                    *ordinal = u32::try_from(parameter).expect("lambda capture ordinal fits u32");
+                }
+                crate::ir::IrParameterRole::CapturedReceiver { ordinal } => {
+                    *ordinal = u32::try_from(rebuilt_receivers.len())
+                        .expect("captured receiver ordinal fits u32");
+                    rebuilt_receivers.push(
+                        receiver.expect("a captured receiver identity keeps its semantic fact"),
+                    );
+                }
+                _ => debug_assert!(receiver.is_none()),
+            }
+        }
+        info.captured_receivers = rebuilt_receivers;
     }
-    remove_parallel_parameters(
+    replace_parallel_map(
         &mut ir.fn_param_declared_nullable,
         function,
-        &parameters,
+        &declared_nullable,
         old_arity,
     );
-    remove_parallel_parameters(
+    replace_parallel_map(
         &mut ir.fn_param_annotations,
         function,
-        &parameters,
+        &annotations,
         old_arity,
     );
-    remove_parallel_parameters(&mut ir.fn_param_no_infer, function, &parameters, old_arity);
+    replace_parallel_map(&mut ir.fn_param_no_infer, function, &no_infer, old_arity);
     if let Some(own_from) = ir.lambda_own_params_from.get_mut(&function) {
-        assert!(
-            *own_from as usize <= old_arity,
-            "the lambda own-parameter boundary belongs to the pre-specialization shape"
-        );
-        let removed_before_own = parameters
+        assert!(*own_from as usize <= old_arity);
+        let shift = transfers
             .iter()
-            .filter(|&&parameter| parameter < *own_from as usize)
-            .count();
-        *own_from -= u32::try_from(removed_before_own).expect("lambda capture count fits u32");
+            .filter(|transfer| transfer.parameter < *own_from as usize)
+            .fold(0_isize, |shift, transfer| {
+                shift + transfer.count as isize - 1
+            });
+        *own_from = u32::try_from(*own_from as isize + shift)
+            .expect("transferred captures keep the lambda capture boundary non-negative");
     }
     let mut remove_vararg = false;
     if let Some(vararg) = ir.fn_varargs.get_mut(&function) {
-        assert!(
-            vararg.index < old_arity,
-            "the vararg ordinal belongs to the pre-specialization parameter shape"
-        );
-        for &parameter in &parameters {
-            if vararg.index == parameter {
+        assert!(vararg.index < old_arity);
+        for transfer in &transfers {
+            if vararg.index == transfer.parameter {
                 remove_vararg = true;
                 break;
             }
-            if vararg.index > parameter {
-                vararg.index -= 1;
+            if vararg.index > transfer.parameter {
+                vararg.index = usize::try_from(vararg.index as isize + transfer.count as isize - 1)
+                    .expect("transferred captures keep a later vararg ordinal non-negative");
             }
         }
     }
     if remove_vararg {
         ir.fn_varargs.remove(&function);
     }
-    let shared = ir
+
+    let old_shared = ir
         .shared_capture_parameters
         .iter()
         .filter(|((owner, _), _)| *owner == function)
-        .map(|((_, ordinal), ty)| (*ordinal, *ty))
+        .map(|((_, ordinal), ty)| (*ordinal as usize, *ty))
         .collect::<Vec<_>>();
     ir.shared_capture_parameters
         .retain(|(owner, _), _| *owner != function);
-    for (ordinal, ty) in shared {
-        let ordinal = ordinal as usize;
-        assert!(
-            ordinal < old_arity,
-            "a shared-capture ordinal belongs to the pre-specialization parameter shape"
-        );
-        if parameters.binary_search(&ordinal).is_ok() {
+    for (ordinal, ty) in old_shared {
+        if transfers
+            .binary_search_by_key(&ordinal, |transfer| transfer.parameter)
+            .is_ok()
+        {
             continue;
         }
-        let removed_before = parameters
-            .iter()
-            .filter(|&&parameter| parameter < ordinal)
-            .count();
-        let ordinal = ordinal - removed_before;
+        let shifted = shifted_parameter(ordinal, &transfers);
         ir.shared_capture_parameters.insert(
             (
                 function,
-                u32::try_from(ordinal).expect("lambda capture ordinal fits u32"),
+                u32::try_from(shifted).expect("capture ordinal fits u32"),
+            ),
+            ty,
+        );
+    }
+    for (parameter, ordinal, ty) in transferred_shared {
+        let start = shifted_parameter(parameter, &transfers);
+        ir.shared_capture_parameters.insert(
+            (
+                function,
+                u32::try_from(start + ordinal).expect("capture ordinal fits u32"),
             ),
             ty,
         );
     }
 }
 
-fn remove_parallel_parameters<T>(
+fn shifted_parameter(parameter: usize, transfers: &[ParameterTransfer]) -> usize {
+    let shift = transfers
+        .iter()
+        .filter(|transfer| transfer.parameter < parameter)
+        .fold(0_isize, |shift, transfer| {
+            shift + transfer.count as isize - 1
+        });
+    usize::try_from(parameter as isize + shift)
+        .expect("transferred captures keep parameter ordinals non-negative")
+}
+
+fn source_parameter_values<T: Clone + Default>(
+    facts: &HashMap<u32, Vec<T>>,
+    transfers: &[ParameterTransfer],
+) -> Vec<(usize, Vec<T>)> {
+    transfers
+        .iter()
+        .map(|transfer| {
+            let values = facts
+                .get(&transfer.source)
+                .map(|values| values[..transfer.count].to_vec())
+                .unwrap_or_else(|| vec![T::default(); transfer.count]);
+            (transfer.parameter, values)
+        })
+        .collect()
+}
+
+fn replace_parallel_map<T: Clone>(
     facts: &mut HashMap<u32, Vec<T>>,
     function: u32,
-    parameters: &[usize],
+    replacements: &[(usize, Vec<T>)],
     old_arity: usize,
 ) {
     if let Some(values) = facts.get_mut(&function) {
-        remove_optional_parallel_values(values, parameters, old_arity, "parameter fact sidecar");
+        if values.is_empty() {
+            return;
+        }
+        replace_parameter_values(values, replacements, old_arity, "parameter fact sidecar");
     }
 }
 
-/// Optional sidecars use one of exactly two shapes: empty (the producer published no fact) or
-/// exactly parallel to the function's parameter list. A third shape is corrupt IR and must not be
-/// carried through specialization with stale ordinals.
-fn remove_optional_parallel_values<T>(
+fn replace_parameter_values<T: Clone>(
     values: &mut Vec<T>,
-    parameters: &[usize],
+    replacements: &[(usize, Vec<T>)],
     old_arity: usize,
     fact: &str,
 ) {
-    assert!(
-        values.is_empty() || values.len() == old_arity,
-        "{fact} must be empty or exactly parallel to the pre-specialization parameter shape"
+    assert_eq!(
+        values.len(),
+        old_arity,
+        "{fact} must be exactly parallel to the pre-specialization parameter shape"
     );
-    if values.is_empty() {
-        return;
-    }
-    for &parameter in parameters.iter().rev() {
-        values.remove(parameter);
+    for (parameter, replacement) in replacements.iter().rev() {
+        values.splice(*parameter..=*parameter, replacement.iter().cloned());
     }
 }
 
@@ -1140,818 +1627,7 @@ fn type_mentions_anonymous_class(ir: &crate::ir::IrFile, ty: Ty) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ir::{
-        DeclarationAnnotations, FnParamInfo, IrCapturedDeclaration, IrCapturingCallable,
-        IrFunction, IrParameterIdentity, IrParameterRole, IrValueCapture, IrVarargParameter,
-    };
-    use crate::types::{InlineExpansionMode, InlineParameterModifier};
-
-    const LOCAL_CAPTURE: IrValueCapture = IrValueCapture {
-        declaration: IrCapturedDeclaration::Variable,
-        capturer: IrCapturingCallable::Lambda,
-    };
-
-    fn captured(name: &str, ordinal: u32) -> IrParameterIdentity {
-        IrParameterIdentity::captured_value(Some(name.to_string()), ordinal, LOCAL_CAPTURE)
-    }
-
-    #[test]
-    fn splicing_a_middle_capture_keeps_parameter_checks_parallel() {
-        let mut ir = crate::ir::IrFile::default();
-        let actual_body = ir.add_expr(IrExpr::UnitInstance);
-        let actual_implementation = ir.add_fun(IrFunction {
-            name: "actual".to_string(),
-            params: Vec::new(),
-            ret: Ty::Unit,
-            body: Some(actual_body),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        let actual = ir.add_expr(IrExpr::Lambda {
-            impl_fn: actual_implementation,
-            arity: 0,
-            captures: Vec::new(),
-            sam: None,
-            inline_body: Some(actual_body),
-        });
-        let captured_read = ir.add_expr(IrExpr::GetValue(1));
-        let body = ir.add_expr(IrExpr::InvokeFunction {
-            func: captured_read,
-            args: Vec::new(),
-            params: Vec::new(),
-            ret: Ty::Unit,
-        });
-        ir.record_inline_copy_owner(
-            body,
-            actual_implementation,
-            None,
-            crate::fir::SourceFileId::from_raw(7),
-        );
-        let invocation_provenance = ir
-            .inline_copy_provenance(body)
-            .expect("the declaration invocation is an exact inline copy")
-            .to_vec();
-        let mut shape = IrFunction {
-            name: "escaping".to_string(),
-            params: vec![Ty::String, Ty::fun(Vec::new(), Ty::Unit), Ty::String],
-            ret: Ty::Unit,
-            body: Some(body),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: vec![
-                Some(crate::ir::IrParameterCheck::NonNull),
-                None,
-                Some(crate::ir::IrParameterCheck::NonNull),
-            ],
-        };
-
-        assert_eq!(
-            splice_inline_captures(
-                &mut ir,
-                body,
-                &mut shape,
-                &[InlineCapture {
-                    parameter: 1,
-                    lambda: actual,
-                }],
-                "inlineCall",
-            ),
-            Some(())
-        );
-        assert_eq!(shape.params, [Ty::String, Ty::String]);
-        assert_eq!(
-            shape.param_checks,
-            [
-                Some(crate::ir::IrParameterCheck::NonNull),
-                Some(crate::ir::IrParameterCheck::NonNull),
-            ]
-        );
-        let IrExpr::Block {
-            stmts: outer_statements,
-            value: Some(frame),
-        } = ir.expr(body)
-        else {
-            panic!("the declaration invocation remains the outer frame")
-        };
-        assert!(outer_statements.is_empty());
-        let IrExpr::Block {
-            stmts: frame_statements,
-            value: Some(_),
-        } = ir.expr(*frame)
-        else {
-            panic!("the supplied lambda owns a nested value frame")
-        };
-        assert!(frame_statements.iter().any(|&statement| matches!(
-            ir.debug_local_provenance(statement),
-            Some(crate::ir::IrDebugLocalProvenance::LambdaFrameMarker {
-                implementation,
-                ..
-            }) if implementation == actual_implementation
-        )));
-        assert_eq!(
-            ir.inline_copy_provenance(*frame),
-            Some(invocation_provenance.as_slice())
-        );
-    }
-
-    #[test]
-    fn captured_lambda_substitution_refreshes_the_retained_inline_body() {
-        let mut ir = crate::ir::IrFile::default();
-        let actual_body = ir.add_expr(IrExpr::UnitInstance);
-        let actual_implementation = ir.add_fun(IrFunction {
-            name: "actual".to_string(),
-            params: Vec::new(),
-            ret: Ty::Unit,
-            body: Some(actual_body),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        let actual = ir.add_expr(IrExpr::Lambda {
-            impl_fn: actual_implementation,
-            arity: 0,
-            captures: Vec::new(),
-            sam: None,
-            inline_body: Some(actual_body),
-        });
-        let implementation_read = ir.add_expr(IrExpr::GetValue(0));
-        let implementation_body = ir.add_expr(IrExpr::InvokeFunction {
-            func: implementation_read,
-            args: Vec::new(),
-            params: Vec::new(),
-            ret: Ty::Unit,
-        });
-        let implementation = ir.add_fun(IrFunction {
-            name: "escaping".to_string(),
-            params: vec![Ty::fun(Vec::new(), Ty::Unit)],
-            ret: Ty::Unit,
-            body: Some(implementation_body),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        let retained_read = ir.add_expr(IrExpr::GetValue(0));
-        let retained_inline_body = ir.add_expr(IrExpr::InvokeFunction {
-            func: retained_read,
-            args: Vec::new(),
-            params: Vec::new(),
-            ret: Ty::Unit,
-        });
-        ir.logical_types.insert(retained_inline_body, Ty::Unit);
-        let copy = ir.add_expr(IrExpr::Lambda {
-            impl_fn: implementation,
-            arity: 0,
-            captures: vec![actual],
-            sam: None,
-            inline_body: Some(retained_inline_body),
-        });
-
-        let plan = plan(
-            &ir,
-            &[(copy, copy)],
-            &HashSet::default(),
-            &HashSet::from_iter([actual]),
-            &HashSet::default(),
-            &HashMap::default(),
-        )
-        .expect("the exact capture-free lambda invocation is transferable");
-        let suppressions = apply(
-            &mut ir,
-            plan,
-            &HashMap::default(),
-            &HashMap::default(),
-            crate::fir::DeclarationId::from_raw(0),
-            None,
-            false,
-            "caller",
-            implementation,
-            None,
-            crate::fir::SourceFileId::from_raw(0),
-            crate::fir::CallableId::from_raw(0),
-            "inlineCall",
-        );
-
-        assert_eq!(suppressions, [actual_implementation]);
-        let IrExpr::Lambda {
-            impl_fn: specialized,
-            captures,
-            inline_body: Some(specialized_inline_body),
-            ..
-        } = ir.expr(copy)
-        else {
-            panic!("the escaping copy remains an inlineable lambda")
-        };
-        assert!(captures.is_empty());
-        assert_ne!(*specialized, implementation);
-        let specialized_body = ir.functions[*specialized as usize]
-            .body
-            .expect("the specialized implementation retains a body");
-        assert_eq!(*specialized_inline_body, retained_inline_body);
-        assert_ne!(*specialized_inline_body, specialized_body);
-        assert_eq!(ir.logical_types[specialized_inline_body], Ty::Unit);
-        let IrExpr::Block {
-            stmts: outer_statements,
-            value: Some(frame),
-        } = ir.expr(*specialized_inline_body)
-        else {
-            panic!("the retained body owns the specialized outer frame")
-        };
-        assert!(outer_statements.is_empty());
-        assert!(matches!(
-            ir.expr(*frame),
-            IrExpr::Block { stmts, value: Some(_) }
-                if stmts.iter().any(|&statement| matches!(
-                    ir.debug_local_provenance(statement),
-                    Some(crate::ir::IrDebugLocalProvenance::LambdaFrameMarker {
-                        implementation,
-                        ..
-                    }) if implementation == actual_implementation
-                ))
-        ));
-    }
-
-    #[test]
-    fn removing_a_middle_inline_capture_keeps_every_parameter_fact_aligned() {
-        let mut ir = crate::ir::IrFile::default();
-        // The function shape has already dropped the captured inline parameter when its copied
-        // sidecars are rewritten.
-        let function = ir.add_fun(IrFunction {
-            name: "copy".to_string(),
-            params: vec![Ty::Int, Ty::String],
-            ret: Ty::Unit,
-            body: None,
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        let first_default = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(1)));
-        let removed_default = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(2)));
-        let last_default = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(3)));
-        ir.fn_params.insert(
-            function,
-            FnParamInfo {
-                identities: vec![
-                    captured("first", 0),
-                    captured("removed", 1),
-                    captured("last", 2),
-                ],
-                defaults: Some(vec![
-                    Some(first_default),
-                    Some(removed_default),
-                    Some(last_default),
-                ]),
-                inline_modifiers: vec![
-                    InlineParameterModifier::None,
-                    InlineParameterModifier::Noinline,
-                    InlineParameterModifier::Crossinline,
-                ],
-                expansion_modes: vec![
-                    InlineExpansionMode::Receiver,
-                    InlineExpansionMode::Materialize,
-                    InlineExpansionMode::Splice,
-                ],
-                ..FnParamInfo::default()
-            },
-        );
-        ir.fn_param_declared_nullable
-            .insert(function, vec![true, false, true]);
-        ir.fn_param_annotations.insert(
-            function,
-            vec![
-                DeclarationAnnotations::default().with_suppressed_source_application(true),
-                DeclarationAnnotations::default(),
-                DeclarationAnnotations::default(),
-            ],
-        );
-        ir.fn_param_no_infer
-            .insert(function, vec![false, true, true]);
-        ir.lambda_own_params_from.insert(function, 3);
-        ir.fn_varargs.insert(
-            function,
-            IrVarargParameter {
-                index: 2,
-                is_last: true,
-            },
-        );
-        ir.shared_capture_parameters.insert((function, 0), Ty::Int);
-        ir.shared_capture_parameters
-            .insert((function, 1), Ty::Boolean);
-        ir.shared_capture_parameters
-            .insert((function, 2), Ty::String);
-
-        remove_inlined_capture_facts(
-            &mut ir,
-            function,
-            &[InlineCapture {
-                parameter: 1,
-                lambda: u32::MAX,
-            }],
-        );
-
-        let info = &ir.fn_params[&function];
-        assert_eq!(
-            info.identities
-                .iter()
-                .map(|identity| (identity.source_name.as_deref(), identity.role))
-                .collect::<Vec<_>>(),
-            [
-                (
-                    Some("first"),
-                    IrParameterRole::CapturedValue {
-                        ordinal: 0,
-                        capture: LOCAL_CAPTURE,
-                    },
-                ),
-                (
-                    Some("last"),
-                    IrParameterRole::CapturedValue {
-                        ordinal: 1,
-                        capture: LOCAL_CAPTURE,
-                    },
-                ),
-            ]
-        );
-        assert_eq!(
-            info.defaults.as_deref(),
-            Some([Some(first_default), Some(last_default)].as_slice())
-        );
-        assert_eq!(
-            info.inline_modifiers,
-            [
-                InlineParameterModifier::None,
-                InlineParameterModifier::Crossinline
-            ]
-        );
-        assert_eq!(
-            info.expansion_modes,
-            [InlineExpansionMode::Receiver, InlineExpansionMode::Splice]
-        );
-        assert_eq!(ir.fn_param_declared_nullable[&function], [true, true]);
-        assert_eq!(ir.fn_param_annotations[&function].len(), 2);
-        assert!(ir.fn_param_annotations[&function][0].has_suppressed_source_application());
-        assert!(!ir.fn_param_annotations[&function][1].declares_annotations());
-        assert_eq!(ir.fn_param_no_infer[&function], [false, true]);
-        assert_eq!(ir.lambda_own_params_from[&function], 2);
-        assert_eq!(ir.fn_varargs[&function].index, 1);
-        assert_eq!(ir.shared_capture_parameters[&(function, 0)], Ty::Int);
-        assert_eq!(ir.shared_capture_parameters[&(function, 1)], Ty::String);
-        assert!(!ir.shared_capture_parameters.contains_key(&(function, 2)));
-    }
-
-    #[test]
-    fn failed_later_root_preflight_leaves_no_specialized_artifacts() {
-        let mut ir = crate::ir::IrFile::default();
-        let actual_body = ir.add_expr(IrExpr::UnitInstance);
-        let actual_implementation = ir.add_fun(IrFunction {
-            name: "actual".to_string(),
-            params: vec![Ty::Int],
-            ret: Ty::Unit,
-            body: Some(actual_body),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        let actual_capture = ir.add_expr(IrExpr::GetValue(0));
-        let actual = ir.add_expr(IrExpr::Lambda {
-            impl_fn: actual_implementation,
-            arity: 0,
-            captures: vec![actual_capture],
-            sam: None,
-            inline_body: Some(actual_body),
-        });
-        let captured_read = ir.add_expr(IrExpr::GetValue(0));
-        let invocation = ir.add_expr(IrExpr::InvokeFunction {
-            func: captured_read,
-            args: Vec::new(),
-            params: Vec::new(),
-            ret: Ty::Unit,
-        });
-        let escaping_implementation = ir.add_fun(IrFunction {
-            name: "escaping".to_string(),
-            params: vec![Ty::fun(Vec::new(), Ty::Unit)],
-            ret: Ty::Unit,
-            body: Some(invocation),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        let copy = ir.add_expr(IrExpr::Lambda {
-            impl_fn: escaping_implementation,
-            arity: 0,
-            captures: vec![actual],
-            sam: None,
-            inline_body: None,
-        });
-        let before = (
-            ir.exprs.len(),
-            ir.functions.len(),
-            ir.classes.len(),
-            ir.specialized_functions.len(),
-            ir.specialized_expansion_order.len(),
-        );
-
-        assert!(plan(
-            &ir,
-            &[(copy, copy)],
-            &HashSet::default(),
-            &HashSet::from_iter([actual]),
-            &HashSet::default(),
-            &HashMap::default(),
-        )
-        .is_none());
-        assert_eq!(
-            (
-                ir.exprs.len(),
-                ir.functions.len(),
-                ir.classes.len(),
-                ir.specialized_functions.len(),
-                ir.specialized_expansion_order.len(),
-            ),
-            before
-        );
-        assert_eq!(
-            ir.functions[actual_implementation as usize].body,
-            Some(actual_body)
-        );
-        assert_eq!(
-            ir.functions[escaping_implementation as usize].body,
-            Some(invocation)
-        );
-        let owned_edges = HashSet::from_iter([(copy, actual)]);
-        let captured_plan = plan(
-            &ir,
-            &[(copy, copy)],
-            &HashSet::default(),
-            &HashSet::from_iter([actual]),
-            &owned_edges,
-            &HashMap::default(),
-        )
-        .expect("anonymous specialization owns the retained constructor capture");
-        assert!(captured_plan.roots.is_empty());
-        assert!(captured_plan.functions.is_empty());
-    }
-
-    #[test]
-    fn captured_substituted_lambda_stays_materialized_while_capture_free_copy_specializes() {
-        let mut ir = crate::ir::IrFile::default();
-        let anonymous = crate::types::type_name("sample/InlineAnonymous");
-        let mut anonymous_class = crate::ir::IrClass::synthetic(anonymous);
-        anonymous_class.is_anonymous_object = true;
-        ir.add_class(anonymous_class);
-        let body = ir.add_expr(IrExpr::UnitInstance);
-        let implementation = ir.add_fun(IrFunction {
-            name: "supplied".to_string(),
-            params: vec![Ty::obj_name(anonymous)],
-            ret: Ty::Unit,
-            body: Some(body),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        let captured_value = ir.add_expr(IrExpr::GetValue(0));
-        let supplied = ir.add_expr(IrExpr::Lambda {
-            impl_fn: implementation,
-            arity: 0,
-            captures: vec![captured_value],
-            sam: None,
-            inline_body: Some(body),
-        });
-
-        let captured_substitution_plan = plan(
-            &ir,
-            &[(supplied, supplied)],
-            &HashSet::default(),
-            &HashSet::from_iter([supplied]),
-            &HashSet::default(),
-            &HashMap::default(),
-        )
-        .expect("a caller-capturing substituted lambda remains materialized");
-
-        assert!(captured_substitution_plan.roots.is_empty());
-        assert!(captured_substitution_plan.functions.is_empty());
-        assert_eq!(ir.functions[implementation as usize].body, Some(body));
-        let IrExpr::Lambda {
-            impl_fn,
-            captures,
-            inline_body,
-            ..
-        } = ir.expr(supplied)
-        else {
-            panic!("the substituted lambda remains a lambda")
-        };
-        assert_eq!(*impl_fn, implementation);
-        assert_eq!(captures, &[captured_value]);
-        assert_eq!(*inline_body, Some(body));
-
-        let capture_free = ir.add_expr(IrExpr::Lambda {
-            impl_fn: implementation,
-            arity: 1,
-            captures: Vec::new(),
-            sam: None,
-            inline_body: Some(body),
-        });
-        let plan = plan(
-            &ir,
-            &[(capture_free, capture_free)],
-            &HashSet::default(),
-            &HashSet::from_iter([capture_free]),
-            &HashSet::default(),
-            &HashMap::default(),
-        )
-        .expect("the capture-free substituted lambda remains transferable");
-        assert_eq!(plan.roots.len(), 1);
-        assert_eq!(plan.functions, HashSet::from_iter([implementation]));
-
-        let suppressions = apply(
-            &mut ir,
-            plan,
-            &HashMap::default(),
-            &HashMap::default(),
-            crate::fir::DeclarationId::from_raw(0),
-            None,
-            false,
-            "caller",
-            implementation,
-            None,
-            crate::fir::SourceFileId::from_raw(0),
-            crate::fir::CallableId::from_raw(0),
-            "inlineCall",
-        );
-        assert!(suppressions.is_empty());
-        assert_eq!(ir.functions[implementation as usize].body, Some(body));
-        let IrExpr::Lambda {
-            impl_fn: specialized,
-            ..
-        } = ir.expr(capture_free)
-        else {
-            panic!("the capture-free substitution remains a lambda")
-        };
-        assert_ne!(*specialized, implementation);
-        assert!(ir.functions[*specialized as usize].body.is_some());
-        assert!(!ir.inline_only_fns.contains(&implementation));
-        assert!(!ir.inline_only_fns.contains(specialized));
-    }
-
-    #[test]
-    fn invalid_nested_specialization_invalidates_the_outer_plan() {
-        let mut ir = crate::ir::IrFile::default();
-        let anonymous = crate::types::type_name("sample/InlineAnonymous");
-        let mut anonymous_class = crate::ir::IrClass::synthetic(anonymous);
-        anonymous_class.is_anonymous_object = true;
-        anonymous_class.ctor_args.push(crate::ir::IrCtorArg {
-            name: None,
-            context_kind: crate::types::ContextParameterKind::None,
-            ty: Ty::fun(Vec::new(), Ty::Unit),
-            declared_ty: None,
-            is_field: true,
-            field_index: Some(0),
-            has_default: false,
-            is_vararg: false,
-            type_param: None,
-            check: None,
-            anonymous_super_forward: None,
-            capture: None,
-            provenance: crate::ir::IrCtorParameterProvenance::Capture,
-            capture_identity: None,
-        });
-        ir.add_class(anonymous_class);
-
-        let nested_implementation = ir.add_fun(IrFunction {
-            name: "nested".to_string(),
-            params: vec![Ty::obj_name(anonymous)],
-            ret: Ty::Unit,
-            body: None,
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        let nested = ir.add_expr(IrExpr::Lambda {
-            impl_fn: nested_implementation,
-            arity: 0,
-            captures: Vec::new(),
-            sam: None,
-            inline_body: None,
-        });
-        let actual_body = ir.add_expr(IrExpr::UnitInstance);
-        let actual_implementation = ir.add_fun(IrFunction {
-            name: "actual".to_string(),
-            params: vec![Ty::Int],
-            ret: Ty::Unit,
-            body: Some(actual_body),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        let actual_capture = ir.add_expr(IrExpr::GetValue(0));
-        let actual = ir.add_expr(IrExpr::Lambda {
-            impl_fn: actual_implementation,
-            arity: 0,
-            captures: vec![actual_capture],
-            sam: None,
-            inline_body: Some(actual_body),
-        });
-        let captured_read = ir.add_expr(IrExpr::GetValue(0));
-        let invocation = ir.add_expr(IrExpr::InvokeFunction {
-            func: captured_read,
-            args: Vec::new(),
-            params: Vec::new(),
-            ret: Ty::Unit,
-        });
-        let outer_body = ir.add_expr(IrExpr::Block {
-            stmts: vec![nested],
-            value: Some(invocation),
-        });
-        let outer_implementation = ir.add_fun(IrFunction {
-            name: "outer".to_string(),
-            params: vec![Ty::fun(Vec::new(), Ty::Unit)],
-            ret: Ty::Unit,
-            body: Some(outer_body),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        let copy = ir.add_expr(IrExpr::Lambda {
-            impl_fn: outer_implementation,
-            arity: 0,
-            captures: vec![actual],
-            sam: None,
-            inline_body: Some(outer_body),
-        });
-        ir.logical_types.insert(copy, Ty::obj_name(anonymous));
-        let construction = ir.add_expr(IrExpr::New {
-            internal: anonymous,
-            args: vec![copy],
-            ctor_params: None,
-            ctor_desc: None,
-            external_target: None,
-            defaults: Box::new([]),
-            default_prefix_count: 0,
-        });
-
-        assert!(plan(
-            &ir,
-            &[(copy, copy), (construction, construction)],
-            &HashSet::default(),
-            &HashSet::from_iter([actual]),
-            &HashSet::default(),
-            &HashMap::default(),
-        )
-        .is_none());
-        assert!(ir.specialized_functions.is_empty());
-        assert_eq!(ir.functions[nested_implementation as usize].body, None);
-        assert_eq!(
-            ir.functions[outer_implementation as usize].body,
-            Some(outer_body)
-        );
-
-        let owned_edges =
-            super::super::super::escaping_anonymous::owned_substituted_lambda_capture_edges(
-                &ir,
-                [construction],
-                &HashSet::from_iter([actual]),
-            );
-        assert_eq!(owned_edges, HashSet::from_iter([(copy, actual)]));
-        let plan = plan(
-            &ir,
-            &[(copy, copy), (construction, construction)],
-            &HashSet::default(),
-            &HashSet::from_iter([actual]),
-            &owned_edges,
-            &HashMap::default(),
-        )
-        .expect("anonymous specialization owns the nested constructor lambda");
-        assert!(plan.roots.is_empty());
-        assert!(plan.functions.is_empty());
-    }
-
-    #[test]
-    fn duplicate_function_requests_require_identical_capture_provenance() {
-        let mut ir = crate::ir::IrFile::default();
-        let unit = ir.add_expr(IrExpr::UnitInstance);
-        let actual_implementation = ir.add_fun(IrFunction {
-            name: "actual".to_string(),
-            params: Vec::new(),
-            ret: Ty::Unit,
-            body: Some(unit),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        let first_actual = ir.add_expr(IrExpr::Lambda {
-            impl_fn: actual_implementation,
-            arity: 0,
-            captures: Vec::new(),
-            sam: None,
-            inline_body: Some(unit),
-        });
-        let second_actual = ir.add_expr(IrExpr::Lambda {
-            impl_fn: actual_implementation,
-            arity: 0,
-            captures: Vec::new(),
-            sam: None,
-            inline_body: Some(unit),
-        });
-        let captured_read = ir.add_expr(IrExpr::GetValue(0));
-        let invocation = ir.add_expr(IrExpr::InvokeFunction {
-            func: captured_read,
-            args: Vec::new(),
-            params: Vec::new(),
-            ret: Ty::Unit,
-        });
-        let escaping = ir.add_fun(IrFunction {
-            name: "escaping".to_string(),
-            params: vec![Ty::fun(Vec::new(), Ty::Unit)],
-            ret: Ty::Unit,
-            body: Some(invocation),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        let first_copy = ir.add_expr(IrExpr::Lambda {
-            impl_fn: escaping,
-            arity: 0,
-            captures: vec![first_actual],
-            sam: None,
-            inline_body: None,
-        });
-        let same_copy = ir.add_expr(IrExpr::Lambda {
-            impl_fn: escaping,
-            arity: 0,
-            captures: vec![first_actual],
-            sam: None,
-            inline_body: None,
-        });
-        let different_copy = ir.add_expr(IrExpr::Lambda {
-            impl_fn: escaping,
-            arity: 0,
-            captures: vec![second_actual],
-            sam: None,
-            inline_body: None,
-        });
-        let substituted = HashSet::from_iter([first_actual, second_actual]);
-
-        let exact_request = [InlineCapture {
-            parameter: 0,
-            lambda: first_actual,
-        }];
-        let mut decisions = HashMap::default();
-        let mut planned = HashSet::default();
-        let mut requests = HashMap::default();
-        let mut visiting = HashSet::default();
-        assert_eq!(
-            plan_function(
-                &ir,
-                escaping,
-                first_copy,
-                None,
-                &HashMap::default(),
-                &exact_request,
-                &mut decisions,
-                &mut planned,
-                &mut requests,
-                &mut visiting,
-            ),
-            FunctionPlan::Planned
-        );
-        assert_eq!(
-            plan_function(
-                &ir,
-                escaping,
-                first_copy,
-                None,
-                &HashMap::default(),
-                &exact_request,
-                &mut decisions,
-                &mut planned,
-                &mut requests,
-                &mut visiting,
-            ),
-            FunctionPlan::Planned
-        );
-        assert!(plan(
-            &ir,
-            &[(first_copy, first_copy), (same_copy, same_copy)],
-            &HashSet::default(),
-            &substituted,
-            &HashSet::default(),
-            &HashMap::default(),
-        )
-        .is_none());
-        assert!(plan(
-            &ir,
-            &[(first_copy, first_copy), (different_copy, different_copy)],
-            &HashSet::default(),
-            &substituted,
-            &HashSet::default(),
-            &HashMap::default(),
-        )
-        .is_none());
-        assert!(ir.specialized_functions.is_empty());
-    }
-}
+mod tests;
 
 fn function_uses_binding(
     ir: &crate::ir::IrFile,
@@ -2216,7 +1892,7 @@ fn substitutions_use_binding(
 ///
 /// Anonymous objects share this predicate. `typeOf<T>()` stays an external call until the JVM
 /// realizes it, and only the reified substitution says the call is a runtime type operation.
-pub(in crate::fir_lower::inlining) fn expression_facts_use_binding(
+pub(in super::super) fn expression_facts_use_binding(
     ir: &crate::ir::IrFile,
     expression: ExprId,
     bindings: &HashMap<String, Ty>,
