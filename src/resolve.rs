@@ -47061,6 +47061,10 @@ impl<'a> Checker<'a> {
                         out,
                         declined,
                     );
+                    // Projecting the Boolean value must not discard facts established by the
+                    // equality expression itself. In particular, a true `x?.p == true` also
+                    // proves that the safe-call receiver `x` was non-null.
+                    out.extend(self.smartcast_narrowings(scope, cond, !truth, declined));
                     return;
                 }
             }
@@ -52044,14 +52048,17 @@ impl<'a> Checker<'a> {
                 );
             }
         }
-        let class_storage_captures = match source_member.as_ref() {
+        let body_class_declaration = match source_member.as_ref() {
             Some(crate::libraries::SourceMember::Class { file, owner, .. })
                 if *file == self.file_index =>
             {
-                self.body_class_storage_captures(DeclId(*owner))
+                Some(DeclId(*owner))
             }
-            _ => Vec::new(),
+            _ => None,
         };
+        let class_storage_captures = body_class_declaration
+            .map(|declaration| self.body_class_storage_captures(declaration))
+            .unwrap_or_default();
         let infer_ret = (!self.signature_defaults_only || default_owned_method)
             && f.ret.is_none()
             && matches!(&f.body, FunBody::Expr(_))
@@ -52121,6 +52128,9 @@ impl<'a> Checker<'a> {
                         AnonymousObjectCaptureSource::LexicalValue
                             | AnonymousObjectCaptureSource::ClassStorage { .. }
                     ) && capture.storage_ty.is_none()
+                        && body_class_declaration.is_none_or(|declaration| {
+                            !self.body_class_declares_property_named(declaration, &capture.name)
+                        })
                     {
                         self.declare_class_storage(
                             scope,

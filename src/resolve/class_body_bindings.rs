@@ -23,10 +23,15 @@ impl Checker<'_> {
         }
     }
 
-    fn body_class_declares_property_named(&self, declaration: DeclId, name: &str) -> bool {
+    pub(super) fn body_class_declares_property_named(
+        &self,
+        declaration: DeclId,
+        name: &str,
+    ) -> bool {
         matches!(self.file.decl(declaration), Decl::Class(class) if class
             .props
             .iter()
+            .filter(|property| property.is_property)
             .map(|property| property.name.as_str())
             .chain(class.body_props.iter().map(|property| property.name.as_str()))
             .any(|property| property == name))

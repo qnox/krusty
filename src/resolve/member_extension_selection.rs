@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn a_selection_carries_a_pointer_to_its_callable() {
-        assert_eq!(std::mem::size_of::<MemberExtensionFunctionSelection>(), 32);
+        assert_eq!(std::mem::size_of::<MemberExtensionFunctionSelection>(), 24);
     }
 
     #[test]
