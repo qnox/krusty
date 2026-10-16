@@ -29,6 +29,22 @@ pub(super) fn emit_unconditional(
     }
 }
 
+/// Report findings produced after solver finalization when publication rejects `declaration`.
+/// Conditional findings for unrelated declarations remain deferred; unconditional access errors
+/// still surface on every publication exit.
+pub(super) fn emit_publication_failure(
+    diagnostics: &mut crate::diag::DiagSink,
+    recorded: &[ProductionSignatureDiagnostic],
+    declaration: crate::fir::DeclarationId,
+) {
+    for diagnostic in recorded
+        .iter()
+        .filter(|diagnostic| diagnostic.unconditional || diagnostic.declaration == declaration)
+    {
+        emit_production_signature_diagnostic(diagnostics, diagnostic);
+    }
+}
+
 impl ProductionSignatureSemantics<'_> {
     pub(super) fn record_unresolved_reference(
         &self,

@@ -145,10 +145,12 @@ mod lambda_call_shapes;
 mod property_read_selection;
 use lambda_call_shapes::UntypedLambdaCall;
 use lexical_policies::LexicalPolicy;
+use library_constructor_failure::LibraryConstructorFailure;
 mod lambda_expectation;
 mod lambda_returns;
 mod lexical_bindings;
 mod lexical_policies;
+mod library_constructor_failure;
 mod local_callable_reference_selection;
 mod local_capture_dependencies;
 mod local_class_scope;
@@ -272,6 +274,7 @@ mod superclass_validation;
 mod tailrec_declarations;
 mod type_join;
 mod type_parameter_owners;
+mod upper_bound_violations;
 mod value_class_parameters;
 mod when_exhaustiveness;
 mod when_flow;
@@ -8170,37 +8173,6 @@ struct LibraryConstructorOptions<'a> {
     /// A constructor already chosen by a selection that ran over a wider candidate family (the
     /// receiver member level of `outer.Inner(args)`). Only that declaration is materialized.
     selected: Option<&'a crate::libraries::FunctionInfo>,
-}
-
-enum LibraryConstructorFailure {
-    Mapping {
-        failure: CallArgMappingFailure,
-        params: Vec<Ty>,
-        call_sig: CallSig,
-        class_name: String,
-    },
-    TypeMismatch {
-        source_argument: usize,
-        expected: Ty,
-        actual: Ty,
-        /// The invalid expression still has its explicit/specialized construction type. Retaining
-        /// it after reporting the argument error lets the enclosing expectation diagnose an
-        /// independent result-type contradiction; no constructor target is committed to FIR.
-        result: Option<Ty>,
-    },
-    TypeArgumentMismatch {
-        expected: Ty,
-        actual: Ty,
-    },
-}
-
-impl LibraryConstructorFailure {
-    fn result_type(&self) -> Option<Ty> {
-        match self {
-            Self::TypeMismatch { result, .. } => *result,
-            Self::Mapping { .. } | Self::TypeArgumentMismatch { .. } => None,
-        }
-    }
 }
 
 fn constructor_delegation_cycles(edges: &[Option<usize>]) -> Vec<Vec<usize>> {
@@ -23473,7 +23445,10 @@ impl<'a> Checker<'a> {
                         .iter()
                         .filter(|(owner, _)| owner == parameter)
                         .map(|(_, bound)| {
-                            self.check_type_parameter_bound(&semantic_signature_scope, bound)
+                            self.check_callable_type_parameter_bound(
+                                &semantic_signature_scope,
+                                bound,
+                            )
                         })
                         .collect::<Vec<_>>()
                 })
@@ -32953,6 +32928,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         bound_annotation_identities: HashMap::default(),
         ret_ty: Ty::Unit,
         type_parameter_owners: HashMap::default(),
+        unchecked_bounds_reference: None,
         expected: None,
         callable_reference_literal_constraints: HashMap::default(),
         active_callable_reference: None,
@@ -35494,6 +35470,9 @@ struct Checker<'a> {
     /// kotlinc's owner wording (`fun <T : B> f`) of each declaration-owned type parameter checked
     /// so far, keyed by semantic identity, solely for diagnostics.
     type_parameter_owners: HashMap<&'static str, String>,
+    /// The type reference whose outermost application is exempt from the upper-bound check while
+    /// it is resolved: a type operator's target or a callable's type-parameter bound.
+    unchecked_bounds_reference: Option<Span>,
     /// Expected type for the next expression. Consumed by [`Self::expr`]; result-position
     /// propagation must re-arm it through [`Self::expr_expected`].
     expected: Option<Ty>,
@@ -36484,9 +36463,13 @@ impl<'a> Checker<'a> {
             ),
             Some(false) => {
                 self.check_unselected_method_annotation_applications(scope, function);
+                self.check_bodyless_method_bounds(scope, function, stable_declaration);
                 self.reset_body_mutations(fun_body_expr(&function.body));
             }
-            None => self.check_unselected_method_annotation_applications(scope, function),
+            None => {
+                self.check_unselected_method_annotation_applications(scope, function);
+                self.check_bodyless_method_bounds(scope, function, stable_declaration);
+            }
         }
     }
 
@@ -44342,63 +44325,6 @@ impl<'a> Checker<'a> {
         true
     }
 
-    fn report_library_constructor_failure(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        args: &[ExprId],
-        failure: LibraryConstructorFailure,
-    ) {
-        match failure {
-            LibraryConstructorFailure::Mapping {
-                failure,
-                params,
-                call_sig,
-                class_name,
-            } => {
-                if !self.report_constructor_too_many_arguments(
-                    call,
-                    args,
-                    &failure,
-                    &class_name,
-                    &params,
-                    &call_sig.param_names,
-                    &call_sig.param_defaults,
-                    call_sig.vararg_index,
-                ) {
-                    self.report_call_arg_mapping_error(call, args, failure);
-                }
-            }
-            LibraryConstructorFailure::TypeMismatch {
-                source_argument,
-                expected,
-                actual,
-                ..
-            } => {
-                let Some(&argument) = args.get(source_argument) else {
-                    return;
-                };
-                // A context-sensitive lambda deliberately carries `Ty::Error` until a callable
-                // candidate supplies a function/SAM shape. When the only mapped constructor
-                // parameter is non-functional, materialize the lambda's natural source type solely
-                // for the rejected-argument diagnostic; no constructor target or conversion is
-                // committed. This reports the actual `() -> Unit` versus `String!` contradiction
-                // instead of suppressing it as an ordinary propagated error sentinel.
-                let actual = if actual == Ty::Error
-                    && matches!(self.file.expr(argument), Expr::Lambda { .. })
-                {
-                    self.check_postponed_argument(scope, argument)
-                } else {
-                    actual
-                };
-                self.expect_assignable(expected, actual, self.span(argument), "argument");
-            }
-            LibraryConstructorFailure::TypeArgumentMismatch { expected, actual } => {
-                self.expect_assignable(expected, actual, self.span(call), "type argument");
-            }
-        }
-    }
-
     fn select_source_constructor(
         &self,
         scope: &CheckerScope<'_>,
@@ -45469,7 +45395,9 @@ impl<'a> Checker<'a> {
         internal: TypeName,
         r: &TypeRef,
     ) -> Ty {
-        self.classifier_type_with_arguments(scope, internal, &r.targs)
+        let resolved = self.classifier_type_with_arguments(scope, internal, &r.targs);
+        self.check_type_reference_bounds(r, resolved);
+        resolved
     }
 
     /// The alias declaration attached to an already-selected classifier binding.
@@ -47338,7 +47266,7 @@ impl<'a> Checker<'a> {
         self.check_infix_declaration(f, false);
         let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
         for (_, bound) in &f.type_param_bounds {
-            self.check_type_parameter_bound(scope, bound);
+            self.check_callable_type_parameter_bound(scope, bound);
         }
         self.check_duplicate_param_names(&f.params, f.context_count, f.span);
         // Duplicate type-parameter names (`fun <T, T> f()`) are illegal (conflicting declaration).
@@ -47418,6 +47346,7 @@ impl<'a> Checker<'a> {
             .and_then(|declaration| self.resolved_index?.callable_for_declaration(declaration))
             .and_then(|callable| callable.shape.extension_receiver)
             .map(crate::fir::ResolvedTy::get);
+        let spellings = self.finalized_declaration_spellings(stable_declaration);
         let parameter_types = match finalized_parameters
             .as_deref()
             .filter(|parameters| parameters.len() == f.params.len())
@@ -47426,11 +47355,13 @@ impl<'a> Checker<'a> {
                 .params
                 .iter()
                 .zip(parameters.iter().copied())
-                .map(|(parameter, semantic)| {
+                .enumerate()
+                .map(|(index, (parameter, semantic))| {
                     self.record_finalized_parameter_type(
                         &parameter.ty,
                         parameter.is_vararg,
                         semantic,
+                        spellings.param(index),
                     )
                 })
                 .collect::<Vec<_>>(),
@@ -47450,7 +47381,7 @@ impl<'a> Checker<'a> {
         // `this` inside the body and inside every parameter default is the extension receiver.
         let extension_receiver = f.receiver.as_ref().map(|r| {
             if let Some(receiver) = finalized_extension_receiver {
-                self.record_finalized_declaration_type(r, receiver)
+                self.record_finalized_declaration_type(r, receiver, &spellings.receiver)
             } else if f.is_companion_extension() {
                 self.check_associated_companion_receiver_type(scope, r)
             } else {
@@ -47488,7 +47419,7 @@ impl<'a> Checker<'a> {
             let want = parameter_types.clone();
             self.ret_ty = if let Some(ret) = &f.ret {
                 if let Some(result) = finalized_result {
-                    self.record_finalized_declaration_type(ret, result)
+                    self.record_finalized_declaration_type(ret, result, &spellings.ret)
                 } else {
                     self.check_declaration_type(scope, ret)
                 }
@@ -47539,7 +47470,7 @@ impl<'a> Checker<'a> {
                 .collect::<Vec<_>>();
             let explicit_result = f.ret.as_ref().map(|ret| {
                 if let Some(result) = finalized_result {
-                    self.record_finalized_declaration_type(ret, result)
+                    self.record_finalized_declaration_type(ret, result, &spellings.ret)
                 } else {
                     self.check_declaration_type(scope, ret)
                 }
@@ -47845,8 +47776,9 @@ impl<'a> Checker<'a> {
             p.reified_type_params.contains(name)
         });
         self.check_declaration_type_parameter_annotations(scope, p.span.lo);
+        let owned_type_parameters = self.publish_property_type_parameter_owner(scope, p);
         for (_, bound) in &p.type_param_bounds {
-            self.check_type_parameter_bound(scope, bound);
+            self.check_callable_type_parameter_bound(scope, bound);
         }
         self.check_duplicate_param_names(&p.context_params, p.context_params.len(), p.span);
         let prev_extension_receiver = self.this_extension_receiver;
@@ -48151,6 +48083,7 @@ impl<'a> Checker<'a> {
             );
         }
         self.leave_block_body(block);
+        self.retire_type_parameter_owners(&owned_type_parameters);
         self.active_lexical_policies.truncate(suppression_depth);
     }
 
@@ -48897,6 +48830,12 @@ impl<'a> Checker<'a> {
                 .map(|superclass| superclass.get()),
         ) {
             self.record_finalized_superclass_type(span, superclass);
+        }
+        if let Some(declaration) = current_classifier
+            .as_ref()
+            .and_then(|classifier| classifier.stable_declaration)
+        {
+            self.check_finalized_supertype_bounds(cl, declaration);
         }
         if !body_local_class && self.active_declarations.is_none() {
             // The retained inspection pipeline keeps the original declaration AST so editor
@@ -49840,6 +49779,7 @@ impl<'a> Checker<'a> {
                 };
                 if !selected {
                     self.check_unselected_method_annotation_applications(scope, m);
+                    self.check_bodyless_method_bounds(scope, m, stable_declaration);
                     method_check_index += 1;
                     continue;
                 }
@@ -50036,7 +49976,7 @@ impl<'a> Checker<'a> {
                             bp.span.lo,
                         );
                         for (_, bound) in &bp.type_param_bounds {
-                            self.check_type_parameter_bound(&property_scope, bound);
+                            self.check_callable_type_parameter_bound(&property_scope, bound);
                         }
                         self.check_duplicate_param_names(
                             &bp.context_params,
@@ -51028,6 +50968,13 @@ impl<'a> Checker<'a> {
                                         })
                             });
                     if !selected_property {
+                        let declaration = self.active_declarations.and_then(|active| {
+                            active.class_body_property_declaration(
+                                d,
+                                u32::try_from(bp_index).expect("too many class properties"),
+                            )
+                        });
+                        self.check_bodyless_property_bounds(scope, bp, declaration);
                         continue;
                     }
                     let property_suppression_depth =
@@ -51065,6 +51012,8 @@ impl<'a> Checker<'a> {
                             .collect(),
                     );
                     scope.declare_property_tparams(bp, &property_tparams);
+                    let owned_type_parameters =
+                        self.publish_property_type_parameter_owner(scope, bp);
                     self.check_declaration_type_parameter_annotations(scope, bp.span.lo);
                     self.check_duplicate_param_names(
                         &bp.context_params,
@@ -51471,6 +51420,7 @@ impl<'a> Checker<'a> {
                     }
                     self.this_extension_receiver = dispatch_extension_receiver;
                     self.symbolic_signature_inference = outer_symbolic_signature_inference;
+                    self.retire_type_parameter_owners(&owned_type_parameters);
                     self.active_lexical_policies
                         .truncate(property_suppression_depth);
                 }
@@ -51755,7 +51705,7 @@ impl<'a> Checker<'a> {
         let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
         let suppression_depth = self.check_function_annotation_applications(scope, f, "function");
         for (_, bound) in &f.type_param_bounds {
-            self.check_type_parameter_bound(scope, bound);
+            self.check_callable_type_parameter_bound(scope, bound);
         }
         let dispatch_this = scope.this_ty();
         let dispatch_extension_receiver = self.this_extension_receiver;
@@ -51766,9 +51716,10 @@ impl<'a> Checker<'a> {
             .and_then(|declaration| self.resolved_index?.callable_for_declaration(declaration))
             .and_then(|callable| callable.shape.extension_receiver)
             .map(crate::fir::ResolvedTy::get);
+        let spellings = self.finalized_declaration_spellings(stable_declaration);
         let extension_receiver = f.receiver.as_ref().map(|reference| {
             if let Some(receiver) = finalized_extension_receiver {
-                self.record_finalized_declaration_type(reference, receiver)
+                self.record_finalized_declaration_type(reference, receiver, &spellings.receiver)
             } else {
                 self.type_ref_ty(scope, reference)
             }
@@ -51836,7 +51787,7 @@ impl<'a> Checker<'a> {
                 // header. Pass 2 records that finalized semantic type against the fresh syntax
                 // occurrence; reparsing must not perform a second scope-tower selection that can
                 // drift after the temporary signature graph has been destroyed.
-                self.record_finalized_declaration_type(reference, result)
+                self.record_finalized_declaration_type(reference, result, &spellings.ret)
             }
             (Some(reference), None) => self.check_declaration_type(scope, reference),
             (None, _) => {
@@ -51889,11 +51840,13 @@ impl<'a> Checker<'a> {
                     .params
                     .iter()
                     .zip(parameters.iter().copied())
-                    .map(|(parameter, semantic)| {
+                    .enumerate()
+                    .map(|(index, (parameter, semantic))| {
                         self.record_finalized_parameter_type(
                             &parameter.ty,
                             parameter.is_vararg,
                             semantic,
+                            spellings.param(index),
                         )
                     })
                     .collect::<Vec<_>>(),
@@ -57457,7 +57410,9 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         let t = {
             let ot = self.expr(scope, operand);
-            let mut tt = self.runtime_type_ref_ty(scope, &ty);
+            let mut tt = self.with_unchecked_outermost_bounds(&ty, |checker| {
+                checker.runtime_type_ref_ty(scope, &ty)
+            });
             if tt == Ty::Error
                 && self.file.context_sensitive_resolution_using_expected_type
                 && !ty.name.contains(['.', '/', '$'])
@@ -57471,7 +57426,9 @@ impl<'a> Checker<'a> {
                         .obj_internal()
                         .is_some_and(|expected| self.obj_name_is_subtype(classifier, expected))
                     {
-                        tt = self.obj_with_targs_name(scope, classifier, &ty);
+                        tt = self.with_unchecked_outermost_bounds(&ty, |checker| {
+                            checker.obj_with_targs_name(scope, classifier, &ty)
+                        });
                         if ty.nullable() {
                             tt = Ty::nullable(tt);
                         }
@@ -57606,7 +57563,9 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         let t = {
             self.expr(scope, operand);
-            let tt = self.runtime_type_ref_ty(scope, &ty);
+            let tt = self.with_unchecked_outermost_bounds(&ty, |checker| {
+                checker.runtime_type_ref_ty(scope, &ty)
+            });
             if ty.name == "Array" && ty.targs.is_empty() && ty.arg.is_none() {
                 self.diags.error(
                     ty.span,
@@ -65939,7 +65898,7 @@ impl<'a> Checker<'a> {
                                             source_argument,
                                             ..
                                         } => *source_argument,
-                                        LibraryConstructorFailure::Mapping { .. }
+                                        LibraryConstructorFailure::Mapping(_)
                                         | LibraryConstructorFailure::TypeArgumentMismatch {
                                             ..
                                         } => usize::MAX,
@@ -65957,12 +65916,12 @@ impl<'a> Checker<'a> {
                         if let Some((failure, (params, call_sig))) =
                             take_unanimous_mapping_error(&mut mapping_failures)
                         {
-                            return Err(LibraryConstructorFailure::Mapping {
+                            return Err(LibraryConstructorFailure::mapping(
                                 failure,
                                 params,
                                 call_sig,
-                                class_name: internal.nested_segment_ref().to_string(),
-                            });
+                                internal.nested_segment_ref().to_string(),
+                            ));
                         }
                     }
                     return Ok(LibraryConstructorSelection::NoMatch);

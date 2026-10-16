@@ -88,6 +88,7 @@ impl JvmBuiltInsCustomizer {
             Vec::new(),
             BuiltinGenericShape {
                 type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
                 type_param_variances: Vec::new(),
                 supertype_templates: vec![Ty::obj("kotlin/Any")],
             },

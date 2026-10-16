@@ -4549,11 +4549,19 @@ pub(crate) fn finalized_streamed_signature_index(
                 &semantics.diagnostics.borrow()[solver_diagnostics..],
             )
         };
+        ($declaration:expr) => {
+            diagnostics::emit_publication_failure(
+                diags,
+                &semantics.diagnostics.borrow()[solver_diagnostics..],
+                $declaration,
+            )
+        };
     }
     macro_rules! stop_with_failure {
         ($declaration:expr) => {{
-            emit_publication_diagnostics!();
-            failed.push($declaration);
+            let declaration = $declaration;
+            emit_publication_diagnostics!(declaration);
+            failed.push(declaration);
             failed.sort_by_key(|declaration| declaration.raw());
             failed.dedup();
             return StreamedSignatureIndex {
@@ -4969,11 +4977,7 @@ pub(crate) fn finalized_streamed_signature_index(
             );
             stop_with_failure!(stub.id);
         };
-        // Callable collection has already resolved the declaration in its complete lexical scope,
-        // including enclosing classifier formals. Reuse that semantic generic contract when it is
-        // available: rebuilding `fun <T : S>` from an isolated own-parameter scope erases `S`,
-        // while resolving `fun <T : Bound<T>>` through an already bounded `T` recursively expands
-        // the bound an extra level.
+        // Reuse callable collection's semantic generic contract from its complete lexical scope.
         let stable_generic = matches!(
             declaration.kind,
             crate::fir::HeaderDeclarationKind::Callable { .. }
@@ -4981,15 +4985,18 @@ pub(crate) fn finalized_streamed_signature_index(
         .then(|| stable_function(table, headers, &classifier_types, stub.id))
         .flatten()
         .and_then(|(signature, _)| signature.generic_sig.as_ref());
-        let symbolic = type_parameter_publication::symbolic(
+        let Ok(symbolic) = type_parameter_publication::symbolic(
             &index,
             stub.id,
             &declared_names,
             &declared_bounds,
+            stable_generic.is_some(),
             &semantics,
             stub.source,
             declaration_start,
-        );
+        ) else {
+            stop_with_failure!(stub.id);
+        };
         for (ordinal, (source_name, parameter)) in declared_names.iter().zip(packed).enumerate() {
             let semantic = symbolic.bound(source_name);
             let semantic_name = type_parameter_publication::semantic_name(

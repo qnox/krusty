@@ -15,7 +15,7 @@
 
 use crate::libraries::{FunctionInfo, PropertyInfo};
 use crate::symbol_source::SymbolSource;
-use crate::types::{CollectionKind, MappedCollection, Ty, TypeName};
+use crate::types::{CollectionKind, MappedCollection, Ty, TypeName, TypeVariance};
 
 /// The tail of `NOTHING_TO_OVERRIDE`: each candidate as substituted at the supertype, one per line,
 /// under kotlinc's heading, or nothing when there is no candidate.
@@ -384,6 +384,47 @@ fn type_parameters_display<'a>(
     } else {
         format!("<{}> ", formals.join(", "))
     }
+}
+
+/// A declaration owner's formal list without the surrounding angle brackets. Upper bounds use
+/// the same semantic renderer as every other declaration diagnostic, and Kotlin's implicit
+/// `Any?` bound is omitted.
+pub(super) fn type_parameter_owner_formals(
+    source: &dyn SymbolSource,
+    formals: &[String],
+    bounds: &[Vec<Ty>],
+    variances: &[TypeVariance],
+) -> String {
+    assert_eq!(
+        formals.len(),
+        bounds.len(),
+        "declaration formals and bounds must be parallel"
+    );
+    formals
+        .iter()
+        .zip(bounds)
+        .enumerate()
+        .map(|(index, (formal, bounds))| {
+            let variance = match variances.get(index) {
+                Some(TypeVariance::In) => "in ",
+                Some(TypeVariance::Out) => "out ",
+                Some(TypeVariance::Invariant) | None => "",
+            };
+            let bounds = bounds
+                .iter()
+                .copied()
+                .filter(|bound| !implicit_upper_bound(*bound))
+                .map(|bound| readable_type(source, bound))
+                .collect::<Vec<_>>();
+            let name = crate::types::type_parameter_source_name(formal);
+            if bounds.is_empty() {
+                format!("{variance}{name}")
+            } else {
+                format!("{variance}{name} : {}", bounds.join(", "))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The bound a Kotlin type parameter has when none is written.

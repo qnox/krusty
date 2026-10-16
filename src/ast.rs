@@ -2021,6 +2021,9 @@ pub struct File {
     /// `+CustomEqualsInValueClasses`: permit the typed `equals(Self)` convention in a value class
     /// whose selected representation is inline rather than full/boxed.
     pub custom_equals_in_value_classes: bool,
+    /// `+ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds`: the outermost application of
+    /// a type operator's target and of a callable's type-parameter bound is bound-checked too.
+    pub forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds: bool,
     /// `+ForbidUselessTypeArgumentsIn25`: type arguments that select nothing (on a qualifier reaching
     /// a static member, …) are errors rather than deprecation warnings.
     pub forbid_useless_type_arguments: bool,

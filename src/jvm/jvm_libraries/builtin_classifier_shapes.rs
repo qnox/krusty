@@ -64,6 +64,7 @@ pub(super) fn mapped_builtin_property(internal: TypeName, name: &str) -> bool {
 
 pub(super) struct BuiltinGenericShape {
     pub(super) type_params: Vec<String>,
+    pub(super) type_param_bounds: Vec<Vec<Ty>>,
     pub(super) type_param_variances: Vec<crate::types::TypeVariance>,
     pub(super) supertype_templates: Vec<Ty>,
 }
@@ -72,10 +73,13 @@ impl JvmLibraries {
     pub(super) fn builtin_library_type(&self, internal: TypeName) -> Option<LibraryType> {
         let (kind, access, is_nested, class_access) =
             self.cp.builtin_classifier_shape_name(internal)?;
-        let (formals, supertype_templates) = self
+        let signature = self
             .cp
-            .builtin_class_gsig_name(internal)
-            .unwrap_or_default();
+            .builtin_class_signature_name(internal)
+            .expect("a decoded builtin classifier shape must retain its generic signature");
+        let formals = signature.formals;
+        let formal_bounds = signature.formal_bounds;
+        let supertype_templates = signature.supertypes;
         let variances = self
             .cp
             .builtin_class_variances_name(internal)
@@ -108,6 +112,7 @@ impl JvmLibraries {
             self.cp.builtin_constructors_name(internal),
             BuiltinGenericShape {
                 type_params: formals,
+                type_param_bounds: formal_bounds,
                 type_param_variances: variances,
                 supertype_templates,
             },
@@ -142,6 +147,16 @@ pub(super) fn builtin_library_type(
     constructors: Vec<LibraryMember>,
     generic: BuiltinGenericShape,
 ) -> LibraryType {
+    assert_eq!(
+        generic.type_params.len(),
+        generic.type_param_bounds.len(),
+        "builtin formals and bounds must be normalized together"
+    );
+    assert_eq!(
+        generic.type_params.len(),
+        generic.type_param_variances.len(),
+        "builtin formals and variances must be normalized together"
+    );
     let callable_signatures = generic
         .supertype_templates
         .iter()
@@ -178,8 +193,8 @@ pub(super) fn builtin_library_type(
         alias_target: None,
         own_type_parameter_count: generic.type_params.len(),
         type_parameters: crate::types::TypeParameters::new(
-            generic.type_params.clone(),
-            vec![Vec::new(); generic.type_params.len()],
+            generic.type_params,
+            generic.type_param_bounds,
             generic.type_param_variances,
         ),
         sealed_subclasses: TypeNameList::new(),

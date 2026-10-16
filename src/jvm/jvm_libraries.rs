@@ -1809,7 +1809,7 @@ impl JvmLibraries {
             // and it makes the residual leak JDK-DEPENDENT. See docs/SPEC.md.
             let is_mapped_builtin =
                 super::jvm_class_map::maps_to_distinct_jvm_internal(internal_name);
-            let builtin_class_signature = self.cp.builtin_class_gsig_name(internal_name);
+            let builtin_class_signature = self.cp.builtin_class_signature_name(internal_name);
             let metadata_class_signature = ci.meta.class_visibility.map(|_| {
                 (
                     ci.meta.class_type_parameters.type_params.clone(),
@@ -1818,12 +1818,13 @@ impl JvmLibraries {
                 )
             });
             let semantic_class_signature = metadata_class_signature.clone().or_else(|| {
-                builtin_class_signature
-                    .clone()
-                    .map(|(formals, supertypes)| {
-                        let bounds = vec![Vec::new(); formals.len()];
-                        (formals, bounds, supertypes)
-                    })
+                builtin_class_signature.map(|signature| {
+                    (
+                        signature.formals,
+                        signature.formal_bounds,
+                        signature.supertypes,
+                    )
+                })
             });
             let builtin_supertypes = self.cp.builtin_supertypes_name(internal_name);
             let builtin_members = if is_mapped_builtin {

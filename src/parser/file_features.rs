@@ -44,6 +44,8 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         "'operator' modifier is not applicable to function: must override 'equals()' in Any.",
     );
     file.custom_equals_in_value_classes = features.has("CustomEqualsInValueClasses");
+    file.forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds =
+        features.has("ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds");
     file.forbid_useless_type_arguments = features.has("ForbidUselessTypeArgumentsIn25");
     file.type_arguments_not_allowed_warning = features.deprecation_warning_message(
         "ForbidUselessTypeArgumentsIn25",
