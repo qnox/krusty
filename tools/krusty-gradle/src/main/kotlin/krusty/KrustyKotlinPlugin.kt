@@ -148,6 +148,15 @@ private fun replaceKotlinJvmCompiles(
             binary.set(
                 project.layout.file(binaryPath.map(::File)),
             )
+            // A build that adds a source directory by path wires its generator onto the Kotlin
+            // task (`compileKotlin { dependsOn(generator) }`), not onto the directory. The compile
+            // runs here now, so it needs those dependencies; the Kotlin task's dependency on this
+            // replacement is the one it must not take back.
+            dependsOn(
+                project.provider {
+                    kotlinTask.dependsOn.filterNot { it is TaskProvider<*> && it.name == replacementName }
+                },
+            )
         }
         aggregate.configure { dependsOn(replacement) }
         project.pluginManager.withPlugin("java-base") {
