@@ -3992,16 +3992,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that needs it reports the exact smart-cast-impossible diagnostic instead of a generic unsafe-call
   error. The null branch may still narrow to `Nothing?` when every interfering closure write also
   stores null.
-- **After `if` or `when`, a stable local `var` keeps a flow type only when every normally completing
-  edge agrees on it.** Each edge's type is the condition facts that hold there plus the assignments
-  that edge performs. A block always runs, so an assignment in it is the enclosing edge's type.
+- **After `if` or `when`, a stable local `var` reads as the common supertype of its normally
+  completing edges' types** (kotlinc `LogicSystem.or`). Each edge's type is the condition facts that
+  hold there plus the assignments that edge performs. A block always runs, so an assignment in it
+  is the enclosing edge's type.
   A `return`, `break`, `continue`, or `Nothing` edge does not complete and is left out of the
   join, so `if (x == null) return` and `if (x == null) { x = next }` both leave `x`
-  non-null afterwards when the other edge already proved that. Edges that disagree, including a
-  one-sided assignment whose other edge is still nullable, leave the declared type and drop a fact
-  the entry had proven. A non-exhaustive `when` has an extra edge on which no arm ran. Parent-frame
-  facts that a completing edge invalidated stay invalid; the agreed type itself is recorded on the
-  continuation. A `try` whose result is `Nothing`, or whose `finally` is `Nothing`, does not
+  non-null afterwards when the other edge already proved that. Edges that disagree join to their
+  common supertype (`ArrayList` and `List` edges read as `List`). When an intermediate pair has an
+  unrepresentable intersection, all edge types remain available until the final common classifier
+  facets are known; two `Source<String> & Tagged` edges followed by a `Source<StringBuilder>` edge
+  therefore join as `Source<CharSequence>` even when the local was declared as `Any?`. A join that
+  is the declared type or `Any?` proves nothing, while unanimous `Nothing?` edges preserve that
+  exact null flow type. A one-sided assignment whose other edge is still nullable leaves the
+  declared type and drops a fact the entry had proven (`tests/smart_cast_join_e2e.rs`). A
+  non-exhaustive `when` has an extra edge on which no arm ran. Parent-frame facts that a completing
+  edge invalidated stay invalid; the agreed type itself is recorded on the continuation. A `try`
+  whose result is `Nothing`, or whose `finally` is `Nothing`, does not
   complete, so the assignment after it is unreachable and does not change that type:
   `try { throw … } finally { x = "OK" }; x = 117` does not publish `117` into the outer `finally`,
   which still reads the value the inner `finally` stored. The statement is still lowered. A

@@ -2549,12 +2549,8 @@ mod sibling_value_class_data_class_e2e;
 mod sibling_value_class_members_e2e;
 #[path = "sibling_value_class_serialization_e2e.rs"]
 mod sibling_value_class_serialization_e2e;
-#[path = "smart_cast_member_extension_e2e.rs"]
-mod smart_cast_member_extension_e2e;
-#[path = "smart_cast_receiver_property_e2e.rs"]
-mod smart_cast_receiver_property_e2e;
-#[path = "smartcast_and_e2e.rs"]
-mod smartcast_and_e2e;
+mod smart_cast_modules;
+smart_cast_modules::declare!();
 #[path = "source_fallback_companion_props_e2e.rs"]
 mod source_fallback_companion_props_e2e;
 #[path = "source_map_ranges_e2e.rs"]

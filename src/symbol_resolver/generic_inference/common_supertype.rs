@@ -18,7 +18,7 @@ pub(super) fn common_super_type(source: &dyn SymbolSource, left: Ty, right: Ty) 
     common_super_types(source, &[left, right])
 }
 
-pub(super) fn common_super_types(source: &dyn SymbolSource, bounds: &[Ty]) -> Ty {
+pub(crate) fn common_super_types(source: &dyn SymbolSource, bounds: &[Ty]) -> Ty {
     CommonSupertypeSolver::new(source).common(bounds)
 }
 
