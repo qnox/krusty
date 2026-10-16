@@ -3,12 +3,19 @@
 use super::*;
 
 impl Parser<'_> {
-    fn parse_call_type_args(&mut self) -> Vec<TypeRef> {
-        if self.at(TokenKind::Lt) && self.lookahead_is_type_args_call() {
-            self.parse_type_args()
-        } else {
-            Vec::new()
-        }
+    fn parse_call_type_args(&mut self) -> Option<(Vec<TypeRef>, Span)> {
+        (self.at(TokenKind::Lt) && self.lookahead_is_type_args_call())
+            .then(|| self.parse_type_argument_list())
+    }
+
+    /// Record a written type-argument list, with its `<…>` span, under `key`.
+    fn attach_call_type_args(&mut self, key: u32, list: Option<(Vec<TypeRef>, Span)>) {
+        let Some((arguments, span)) = list.filter(|(arguments, _)| !arguments.is_empty()) else {
+            return;
+        };
+        self.file
+            .call_type_args
+            .insert(key, CallTypeArguments { arguments, span });
     }
 
     // ---- expressions (Pratt) ----
@@ -534,7 +541,7 @@ impl Parser<'_> {
     fn parse_postfix(&mut self, mut lhs: ExprId) -> ExprId {
         // Explicit type arguments parsed just before a call paren (`foo<Int>(…)`), attached to the
         // call once it is built so a constructor instantiation (`ArrayList<Int>()`) keeps its args.
-        let mut pending_targs: Vec<TypeRef> = Vec::new();
+        let mut pending_targs: Option<(Vec<TypeRef>, Span)> = None;
         // Labels consumed just before a trailing lambda (`run outer@{ … }`), attached to the lambda
         // once it is parsed so a `return@outer` inside it finds its target.
         let mut pending_lambda_labels: Vec<String> = Vec::new();
@@ -644,9 +651,7 @@ impl Parser<'_> {
                             .exact_member_name_spans
                             .insert(safe_call.0, name_span);
                     }
-                    if !type_args.is_empty() {
-                        self.file.call_type_args.insert(safe_call.0, type_args);
-                    }
+                    self.attach_call_type_args(safe_call.0, type_args);
                     if safe_names.iter().any(|n| n.is_some()) {
                         self.file.call_arg_names.insert(safe_call.0, safe_names);
                         self.file
@@ -682,11 +687,7 @@ impl Parser<'_> {
                     // Type arguments erase from the JVM owner but remain part of the semantic
                     // receiver (`Pair<String, Int>?::first` returns `String`). They belong to the
                     // receiver segment, not to the referenced member.
-                    if !pending_targs.is_empty() {
-                        self.file
-                            .call_type_args
-                            .insert(lhs.0, std::mem::take(&mut pending_targs));
-                    }
+                    self.attach_call_type_args(lhs.0, pending_targs.take());
                     let reference = self.file.add_expr(
                         Expr::CallableRef {
                             receiver: Some(lhs),
@@ -729,11 +730,7 @@ impl Parser<'_> {
                     // `::` loses `Outer<A>` as soon as `<B>` is parsed. Attach each completed
                     // segment now; an ordinary generic call still consumes its pending arguments
                     // in the `(` / trailing-lambda branches below.
-                    if !pending_targs.is_empty() {
-                        self.file
-                            .call_type_args
-                            .insert(lhs.0, std::mem::take(&mut pending_targs));
-                    }
+                    self.attach_call_type_args(lhs.0, pending_targs.take());
                     let member = self.file.add_expr(
                         Expr::Member {
                             receiver: lhs,
@@ -773,11 +770,7 @@ impl Parser<'_> {
                     // The arguments describe `A<T>` in `A<T>::member`, not the referenced member;
                     // retaining them on the receiver also preserves every applied segment in
                     // `Outer<A>.Inner<B>::member`.
-                    if !pending_targs.is_empty() {
-                        self.file
-                            .call_type_args
-                            .insert(lhs.0, std::mem::take(&mut pending_targs));
-                    }
+                    self.attach_call_type_args(lhs.0, pending_targs.take());
                     let reference = self.file.add_expr(
                         Expr::CallableRef {
                             receiver: Some(lhs),
@@ -812,11 +805,7 @@ impl Parser<'_> {
                         self.file.call_arg_names.insert(call.0, names);
                         self.file.call_arg_name_spans.insert(call.0, name_spans);
                     }
-                    if !pending_targs.is_empty() {
-                        self.file
-                            .call_type_args
-                            .insert(call.0, std::mem::take(&mut pending_targs));
-                    }
+                    self.attach_call_type_args(call.0, pending_targs.take());
                     lhs = call;
                 }
                 // Trailing lambda: `expr { … }` / `recv.m(args) { … }` → append the lambda as the
@@ -956,11 +945,7 @@ impl Parser<'_> {
                     // The no-parentheses `f<T>{…}` form still has pending type arguments. Type
                     // arguments already owned by a rebuilt call were moved above; an inner
                     // parenthesized call deliberately keeps its own entry.
-                    if !pending_targs.is_empty() {
-                        self.file
-                            .call_type_args
-                            .insert(lhs.0, std::mem::take(&mut pending_targs));
-                    }
+                    self.attach_call_type_args(lhs.0, pending_targs.take());
                 }
                 // `array[index]` element access, or `receiver[i, j, …]` — a multi-index `get` operator.
                 TokenKind::LBracket => {
@@ -999,7 +984,7 @@ impl Parser<'_> {
                 // `>` is immediately followed by `(`, `{`, or `.` (call-like context).
                 TokenKind::Lt if self.lookahead_is_type_args_call() => {
                     // Capture the explicit type arguments for the call that follows.
-                    pending_targs = self.parse_type_args();
+                    pending_targs = Some(self.parse_type_argument_list());
                 }
                 _ => break,
             }
