@@ -825,22 +825,6 @@ pub trait SignatureSemantics: PostponedArgumentTransaction {
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
-    /// Select the `opAssign` convention for a simple-name augmented assignment without emitting a
-    /// fallback diagnostic. `false` means ordinary `op` replacement semantics; the body checker
-    /// remains responsible for reporting an invalid assignment.
-    fn selects_in_place_assignment(
-        &self,
-        _scope: SignatureScope,
-        _operator: SigBinaryOperator,
-        _origin: OriginId,
-        _receiver: ResolvedTy,
-        _argument: ResolvedTy,
-        _local_operator: Option<ResolvedTy>,
-        _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
-    ) -> bool {
-        false
-    }
-
     /// Fold a binary integer constant only after [`Self::select_binary`] has semantically accepted
     /// the operator and produced `result`. The graph evaluator never infers an operator from parser
     /// syntax; implementations may return `None` when the selected operation is not a foldable

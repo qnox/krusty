@@ -1932,60 +1932,6 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                             computing,
                         )
                     }
-                    SigExpr::InPlaceAssignmentNarrowed {
-                        value,
-                        narrowed,
-                        operands,
-                        operator,
-                        scope,
-                        origin,
-                    } => {
-                        let operands = graph.operands(operands);
-                        let (receiver, argument, local_operator) = match operands {
-                            [receiver, argument] => (*receiver, *argument, None),
-                            [receiver, argument, local_operator] => {
-                                (*receiver, *argument, Some(*local_operator))
-                            }
-                            _ => unreachable!(
-                                "a compact compound assignment has two or three operands"
-                            ),
-                        };
-                        let receiver = evaluate_expression(
-                            semantics, receiver, graph, demand, memo, computing,
-                        );
-                        let argument = evaluate_expression(
-                            semantics, argument, graph, demand, memo, computing,
-                        );
-                        let local_operator = local_operator.and_then(|operator| {
-                            evaluate_expression(semantics, operator, graph, demand, memo, computing)
-                                .ok()
-                        });
-                        let in_place = match (receiver, argument) {
-                            (Ok(receiver), Ok(argument)) => {
-                                let scope = graph.scope(scope).expect(
-                                    "a compound assignment must retain its declaration scope",
-                                );
-                                semantics.selects_in_place_assignment(
-                                    scope,
-                                    operator,
-                                    origin,
-                                    receiver,
-                                    argument,
-                                    local_operator,
-                                    demand,
-                                )
-                            }
-                            _ => false,
-                        };
-                        evaluate_expression(
-                            semantics,
-                            if in_place { narrowed } else { value },
-                            graph,
-                            demand,
-                            memo,
-                            computing,
-                        )
-                    }
                     SigExpr::Substitute {
                         base,
                         substitutions,

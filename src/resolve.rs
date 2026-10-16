@@ -4500,9 +4500,19 @@ fn collect_lambda_outer_writes(
     ce(file, e, outer_names, out);
 }
 
-/// One closure-captured write: the variable's name, the enclosing-lambda stack at the write, and
-/// the assigned value when the write is an assignment (`None` for inc/dec).
-type ClosureWrite = (String, Vec<ExprId>, Option<ExprId>);
+/// One closure-captured write and the execution in which its assignment runs.
+///
+/// A local function remains a distinct execution even when it contains no materialized lambda.
+/// Keeping that declaration identity beside the lambda chain prevents the enclosing function and
+/// the local function from being mistaken for the same execution during smart-cast stability
+/// checks.
+struct ClosureWrite {
+    name: String,
+    local_function: Option<StmtId>,
+    lambdas: Vec<ExprId>,
+    /// Assigned value for an assignment; `None` for inc/dec.
+    value: Option<ExprId>,
+}
 
 /// Collect captured writes and the lambda chain that controls when each write can execute.
 fn collect_closure_reassigned(file: &File, e: ExprId, out: &mut Vec<ClosureWrite>) {
@@ -4511,32 +4521,38 @@ fn collect_closure_reassigned(file: &File, e: ExprId, out: &mut Vec<ClosureWrite
     // call that took it.
     let cell = std::cell::RefCell::new(std::mem::take(out));
     let stack = std::cell::RefCell::new(Vec::new());
+    let local_functions = std::cell::RefCell::new(Vec::new());
     fn ce(
         file: &File,
         e: ExprId,
         stack: &std::cell::RefCell<Vec<ExprId>>,
+        local_functions: &std::cell::RefCell<Vec<StmtId>>,
         cell: &std::cell::RefCell<Vec<ClosureWrite>>,
     ) {
         let is_lambda = matches!(file.expr(e), Expr::Lambda { .. });
         if is_lambda {
             stack.borrow_mut().push(e);
         }
-        if !stack.borrow().is_empty() {
+        if !stack.borrow().is_empty() || !local_functions.borrow().is_empty() {
             if let Expr::IncDec { target, .. } = file.expr(e) {
                 if let Expr::Name(n) = file.expr(*target) {
-                    cell.borrow_mut()
-                        .push((n.clone(), stack.borrow().clone(), None));
+                    cell.borrow_mut().push(ClosureWrite {
+                        name: n.clone(),
+                        local_function: local_functions.borrow().last().copied(),
+                        lambdas: stack.borrow().clone(),
+                        value: None,
+                    });
                 }
             }
         }
         file.any_child_expr(
             e,
             &mut |c| {
-                ce(file, c, stack, cell);
+                ce(file, c, stack, local_functions, cell);
                 false
             },
             &mut |s| {
-                cs(file, s, stack, cell);
+                cs(file, s, stack, local_functions, cell);
                 false
             },
         );
@@ -4548,27 +4564,53 @@ fn collect_closure_reassigned(file: &File, e: ExprId, out: &mut Vec<ClosureWrite
         file: &File,
         s: StmtId,
         stack: &std::cell::RefCell<Vec<ExprId>>,
+        local_functions: &std::cell::RefCell<Vec<StmtId>>,
         cell: &std::cell::RefCell<Vec<ClosureWrite>>,
     ) {
-        if !stack.borrow().is_empty() {
-            match file.stmt(s) {
-                Stmt::Assign { name, value } => {
-                    cell.borrow_mut()
-                        .push((name.clone(), stack.borrow().clone(), Some(*value)));
+        match file.stmt(s) {
+            Stmt::LocalFun(function) => {
+                local_functions.borrow_mut().push(s);
+                for default in function
+                    .params
+                    .iter()
+                    .filter_map(|parameter| parameter.default)
+                {
+                    ce(file, default, stack, local_functions, cell);
                 }
-                Stmt::IncDec { name, .. } => {
-                    cell.borrow_mut()
-                        .push((name.clone(), stack.borrow().clone(), None));
+                if let FunBody::Expr(body) | FunBody::Block(body) = &function.body {
+                    ce(file, *body, stack, local_functions, cell);
                 }
-                _ => {}
+                local_functions.borrow_mut().pop();
+                return;
             }
+            Stmt::Assign { name, value }
+                if !stack.borrow().is_empty() || !local_functions.borrow().is_empty() =>
+            {
+                cell.borrow_mut().push(ClosureWrite {
+                    name: name.clone(),
+                    local_function: local_functions.borrow().last().copied(),
+                    lambdas: stack.borrow().clone(),
+                    value: Some(*value),
+                });
+            }
+            Stmt::IncDec { name, .. }
+                if !stack.borrow().is_empty() || !local_functions.borrow().is_empty() =>
+            {
+                cell.borrow_mut().push(ClosureWrite {
+                    name: name.clone(),
+                    local_function: local_functions.borrow().last().copied(),
+                    lambdas: stack.borrow().clone(),
+                    value: None,
+                });
+            }
+            _ => {}
         }
         file.any_child_stmt(s, &mut |c| {
-            ce(file, c, stack, cell);
+            ce(file, c, stack, local_functions, cell);
             false
         });
     }
-    ce(file, e, &stack, &cell);
+    ce(file, e, &stack, &local_functions, &cell);
     *out = cell.into_inner();
 }
 
@@ -22030,9 +22072,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Return(e, label) => self.stmt_return(scope, s, e, label),
             Stmt::While { cond, body, label } => {
-                let compound_writes =
-                    self.clear_narrowings_a_loop_invalidates(scope, &[cond, body]);
-                self.provisional_loop_compound_writes.push(compound_writes);
+                self.clear_narrowings_a_loop_invalidates(scope, &[cond, body]);
                 let ct = self.expr(scope, cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "while condition");
                 // `while (x != null) …` — the condition holds on body entry, so narrow stable
@@ -22046,14 +22086,9 @@ impl<'a> Checker<'a> {
                     self.apply_condition_exclusions(scope, cond, true);
                     self.check_loop_body(scope, body, &label);
                 }
-                self.provisional_loop_compound_writes
-                    .pop()
-                    .expect("the while-loop compound-write frame is still open");
             }
             Stmt::DoWhile { body, cond, label } => {
-                let compound_writes =
-                    self.clear_narrowings_a_do_while_invalidates(scope, body, cond);
-                self.provisional_loop_compound_writes.push(compound_writes);
+                self.clear_narrowings_a_do_while_invalidates(scope, body, cond);
                 // Unlike a while body, a do-while block and its condition share one lexical scope:
                 // `do { val x = ... } while (x)` is legal Kotlin. Keep that scope alive through
                 // condition checking instead of rebuilding declarations from typed syntax.
@@ -22081,9 +22116,6 @@ impl<'a> Checker<'a> {
                 if label.is_some() {
                     self.loop_labels.pop();
                 }
-                self.provisional_loop_compound_writes
-                    .pop()
-                    .expect("the do-while compound-write frame is still open");
             }
             Stmt::For {
                 name,
@@ -22091,12 +22123,8 @@ impl<'a> Checker<'a> {
                 body,
                 label,
             } => {
-                let compound_writes = self.clear_narrowings_a_loop_invalidates(scope, &[body]);
-                self.provisional_loop_compound_writes.push(compound_writes);
+                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
                 self.stmt_for(scope, s, name, range, body, label);
-                self.provisional_loop_compound_writes
-                    .pop()
-                    .expect("the for-loop compound-write frame is still open");
             }
             Stmt::ForEach {
                 name,
@@ -22104,12 +22132,8 @@ impl<'a> Checker<'a> {
                 body,
                 label,
             } => {
-                let compound_writes = self.clear_narrowings_a_loop_invalidates(scope, &[body]);
-                self.provisional_loop_compound_writes.push(compound_writes);
+                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
                 self.stmt_for_each(scope, s, name, iterable, body, label);
-                self.provisional_loop_compound_writes
-                    .pop()
-                    .expect("the for-each compound-write frame is still open");
             }
             Stmt::Expr(e) => {
                 // A `kotlin.contracts.contract { … }` statement is erased metadata: it is never
@@ -22616,9 +22640,13 @@ impl<'a> Checker<'a> {
 
     fn stmt_assign(&mut self, scope: &CheckerScope<'_>, s: StmtId, name: String, value: ExprId) {
         // `name op= rhs` with a user `opAssign` operator → in-place call (legal on a `val`).
-        let in_place = self.try_in_place_assignment(scope, s, value);
-        self.resolve_provisional_loop_compound_write(&name, value);
-        if in_place {
+        let compound = !self.file.value_operator_spans.contains_key(&value.0)
+            && matches!(
+                self.file.expr(value),
+                Expr::Binary { lhs, .. }
+                    if matches!(self.file.expr(*lhs), Expr::Name(lhs) if lhs == &name)
+            );
+        if self.try_in_place_assignment(scope, s, value) {
             return;
         }
         let scoped = self.lookup(scope, &name);
@@ -22770,7 +22798,11 @@ impl<'a> Checker<'a> {
                     // that actually runs will read.
                     if is_var && self.unreachable_statement_depth == 0 {
                         let narrowing = self.assignment_narrowing(&name, lty, vt, target_span);
-                        self.set_local_narrow(scope, &name, narrowing);
+                        if compound {
+                            self.set_local_narrow_preserving_implications(scope, &name, narrowing);
+                        } else {
+                            self.set_local_narrow(scope, &name, narrowing);
+                        }
                         // A write under a live smart-cast shadow must also move the PROOF binding:
                         // reads below the shadow's rung type the variable through it, so a stale
                         // shadow would keep a killed cast alive (`if (t != null) { t = null;
@@ -33212,7 +33244,6 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds::default(),
         next_lexical_capture_identity: 0,
         try_body_writes: Vec::new(),
-        provisional_loop_compound_writes: Vec::new(),
         next_flow_identity: 0,
         checked_local_class_declarations: crate::fx_hash::HashSet::default(),
         checked_local_classifier_identities: HashMap::default(),
@@ -35871,7 +35902,7 @@ struct Checker<'a> {
     /// reassigned `var` as effectively final (passed by value).
     fn_reassigned: crate::fx_hash::HashSet<String>,
     /// Captured writes, with their enclosing lambdas and assigned expression when one exists.
-    fn_closure_reassigned: Vec<(String, Vec<ExprId>, Option<ExprId>)>,
+    fn_closure_reassigned: Vec<ClosureWrite>,
     /// Current type-checking recursion depth — guards against a stack overflow on a pathologically
     /// deep expression; past the limit, the expression types as `Error` (the file is skipped).
     expr_depth: u32,
@@ -35942,10 +35973,7 @@ struct Checker<'a> {
     receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds,
     next_lexical_capture_identity: u32,
     /// Bindings written by each try body being checked, innermost last.
-    try_body_writes: Vec<crate::fx_hash::HashSet<lexical_bindings::BindingIdentity>>,
-    /// Mutable loop-entry bindings whose compound assignment has not yet selected between an
-    /// in-place `opAssign` and a replacement `op` call.
-    provisional_loop_compound_writes: Vec<crate::fx_hash::HashMap<u32, usize>>,
+    try_body_writes: Vec<catch_flow::TryBodyWrites>,
     next_flow_identity: u32,
     checked_local_class_declarations: crate::fx_hash::HashSet<DeclId>,
     checked_local_classifier_identities: HashMap<crate::fir::DeclarationId, TypeName>,
@@ -36005,7 +36033,7 @@ struct BodyState {
     allow_lambda_mutation: bool,
     symbolic_signature_inference: bool,
     fn_reassigned: crate::fx_hash::HashSet<String>,
-    fn_closure_reassigned: Vec<(String, Vec<ExprId>, Option<ExprId>)>,
+    fn_closure_reassigned: Vec<ClosureWrite>,
     lexical_class_context: Vec<TypeName>,
     exact_anonymous_class_roots: crate::fx_hash::HashSet<TypeName>,
 }
@@ -43963,16 +43991,16 @@ impl<'a> Checker<'a> {
         .then_some(flow)
     }
 
-    /// Whether a non-inline lambda that exists by `site` can mutate `name` outside the execution
-    /// currently being checked. Writes in the same materialized lambda chain are ordinary
-    /// straight-line writes: the assignment itself replaces the flow fact, and a later read may
-    /// use that exact assigned type. A sibling or nested escaping closure can run between proof and
-    /// use and therefore still makes the variable unstable. Inline-spliced lambdas do not add an
-    /// execution boundary on either side of the comparison.
+    /// Whether a captured write that exists by `site` can mutate `name` outside the execution
+    /// currently being checked. Writes in the same local-function/materialized-lambda execution
+    /// are ordinary straight-line writes: the assignment itself replaces the flow fact, and a
+    /// later read may use that exact assigned type. A sibling or nested escaping callable can run
+    /// between proof and use and therefore still makes the variable unstable. Inline-spliced
+    /// lambdas do not add an execution boundary on either side of the comparison.
     fn closure_reassigned_before(&self, name: &str, site: Span) -> bool {
-        self.fn_closure_reassigned.iter().any(|(n, chain, _)| {
-            self.capturing_closure_write_exists_before(n, chain, name, site)
-                && !self.same_materialized_lambda_chain(chain)
+        self.fn_closure_reassigned.iter().any(|write| {
+            self.capturing_closure_write_exists_before(write, name, site)
+                && !self.same_materialized_execution(write)
         })
     }
 
@@ -43983,47 +44011,52 @@ impl<'a> Checker<'a> {
     fn capturing_closure_reassigned_before(&self, name: &str, site: Span) -> bool {
         self.fn_closure_reassigned
             .iter()
-            .any(|(n, chain, _)| self.capturing_closure_write_exists_before(n, chain, name, site))
+            .any(|write| self.capturing_closure_write_exists_before(write, name, site))
     }
 
     fn capturing_closure_write_exists_before(
         &self,
-        recorded_name: &str,
-        chain: &[ExprId],
+        write: &ClosureWrite,
         name: &str,
         site: Span,
     ) -> bool {
-        recorded_name == name
-            && chain.iter().any(|&lambda| {
-                self.span(lambda).lo <= site.lo && !self.lambda_is_inline_spliced(lambda)
-            })
+        write.name == name
+            && (write
+                .local_function
+                .is_some_and(|function| self.file.stmt_spans[function.0 as usize].lo <= site.lo)
+                || write.lambdas.iter().any(|&lambda| {
+                    self.span(lambda).lo <= site.lo && !self.lambda_is_inline_spliced(lambda)
+                }))
     }
 
-    fn same_materialized_lambda_chain(&self, recorded: &[ExprId]) -> bool {
-        recorded
-            .iter()
-            .copied()
-            .filter(|&lambda| !self.lambda_is_inline_spliced(lambda))
-            .eq(self
-                .lambda_returns
-                .active_chain()
+    fn same_materialized_execution(&self, write: &ClosureWrite) -> bool {
+        write.local_function == self.local_function_execution
+            && write
+                .lambdas
                 .iter()
                 .copied()
-                .filter(|&lambda| !self.lambda_is_inline_spliced(lambda)))
+                .filter(|&lambda| !self.lambda_is_inline_spliced(lambda))
+                .eq(self
+                    .lambda_returns
+                    .active_chain()
+                    .iter()
+                    .copied()
+                    .filter(|&lambda| !self.lambda_is_inline_spliced(lambda)))
     }
 
     /// Whether every relevant capturing-lambda write stores the null literal.
     fn closure_writes_only_null(&self, name: &str, site: Span) -> bool {
         self.fn_closure_reassigned
             .iter()
-            .filter(|(n, chain, _)| {
-                n == name
-                    && chain.iter().any(|&lambda| {
-                        self.span(lambda).lo <= site.lo && !self.lambda_is_inline_spliced(lambda)
-                    })
-                    && !self.same_materialized_lambda_chain(chain)
+            .filter(|write| {
+                self.capturing_closure_write_exists_before(write, name, site)
+                    && !self.same_materialized_execution(write)
             })
-            .all(|(_, _, value)| value.is_some_and(|v| matches!(self.file.expr(v), Expr::NullLit)))
+            .all(|write| {
+                write
+                    .value
+                    .is_some_and(|value| matches!(self.file.expr(value), Expr::NullLit))
+            })
     }
 
     /// The checker's recorded capture decision for a lambda expression (set when the enclosing
@@ -57409,6 +57442,7 @@ impl<'a> Checker<'a> {
             let (bt, written) = self.try_body_written_bindings(|checker| {
                 checker.expr_result(scope, body, wanted.expected, wanted.value_required)
             });
+            let mut all_exit_writes = catch_flow::TryBodyWrites::default();
             let mut exit_flows = self
                 .normal_completion(body)
                 .then(|| scope.flow_snapshot())
@@ -57452,12 +57486,13 @@ impl<'a> Checker<'a> {
                     );
                     Ty::Error
                 };
-                let ht = {
+                let (ht, catch_writes) = self.try_body_written_bindings(|checker| {
                     let catch_scope = scope.child(ScopeKind::Block);
                     let scope = &catch_scope;
-                    self.declare(scope, &c.name, cty, false);
-                    self.expr_result(scope, c.body, wanted.expected, wanted.value_required)
-                };
+                    checker.declare(scope, &c.name, cty, false);
+                    checker.expr_result(scope, c.body, wanted.expected, wanted.value_required)
+                });
+                all_exit_writes.extend(catch_writes);
                 if self.normal_completion(c.body) {
                     exit_flows.push(scope.flow_snapshot());
                 }
@@ -57491,8 +57526,30 @@ impl<'a> Checker<'a> {
                 result,
             );
             scope.restore_common_flow(&exit_flows);
+            let normal_continuation = scope.flow_snapshot();
+            all_exit_writes.extend(written);
             if let Some(f) = finally {
-                self.expr_statement(scope, f);
+                // A finalizer runs after every try/catch exit, including an abrupt return, throw,
+                // break, or continue. Start it from the try entry with every binding written on
+                // any reachable exit cleared; branch-only facts from a normal exit are not valid
+                // on an abrupt one. Then project the finalizer's single checked flow delta onto
+                // the normal-only continuation instead of checking its body a second time.
+                scope.restore_flow(&entry_flow);
+                self.clear_narrowings_a_try_body_writes(scope, &all_exit_writes);
+                let finalizer_entry = scope.flow_snapshot();
+                let (_, finalizer_writes) =
+                    self.try_body_written_bindings(|checker| checker.expr_statement(scope, f));
+                let finalizer_local_flow = self.written_local_flow(scope, &finalizer_writes);
+                let finalizer_exit = scope.flow_snapshot();
+                scope.restore_flow_with_delta(
+                    &normal_continuation,
+                    &finalizer_entry,
+                    &finalizer_exit,
+                );
+                self.clear_narrowings_a_try_body_writes(scope, &finalizer_writes);
+                for (name, narrowing) in finalizer_local_flow {
+                    scope.narrow_local(&name, narrowing);
+                }
             }
             result
         };

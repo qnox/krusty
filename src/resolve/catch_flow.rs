@@ -12,6 +12,24 @@ use super::lexical_bindings::BindingIdentity;
 use super::scope::PathRoot;
 use super::{Checker, CheckerScope};
 
+/// Exact outer bindings written by one checked control-flow region. Every write invalidates
+/// ordinary path/local flow at an exceptional successor. Saved Boolean implications distinguish
+/// direct replacement from Kotlin's compound-assignment flow, which preserves them even when the
+/// selected compound convention uses the replacement operator.
+#[derive(Default)]
+pub(super) struct TryBodyWrites {
+    all: HashSet<BindingIdentity>,
+    implication_replacements: HashSet<BindingIdentity>,
+}
+
+impl TryBodyWrites {
+    pub(super) fn extend(&mut self, other: Self) {
+        self.all.extend(other.all);
+        self.implication_replacements
+            .extend(other.implication_replacements);
+    }
+}
+
 impl Checker<'_> {
     /// Record the flow-narrowed read type a write leaves on the innermost `name` binding, and note
     /// that binding as written by every try body being checked. The write replaces the value, so
@@ -22,6 +40,28 @@ impl Checker<'_> {
         name: &str,
         narrowed: Option<Ty>,
     ) {
+        self.set_local_narrow_with_implications(scope, name, narrowed, true);
+    }
+
+    /// Record a compound assignment's ordinary local-flow update without deleting facts saved in
+    /// a stable Boolean val. Kotlin retains those implications for both `opAssign` and the
+    /// replacement `op` compound form; a source `name = value` still uses [`Self::set_local_narrow`].
+    pub(super) fn set_local_narrow_preserving_implications(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        narrowed: Option<Ty>,
+    ) {
+        self.set_local_narrow_with_implications(scope, name, narrowed, false);
+    }
+
+    fn set_local_narrow_with_implications(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        narrowed: Option<Ty>,
+        replace_implications: bool,
+    ) {
         // A statement after `throw` or `return` is still type-checked, then erased. Recording its
         // write would publish a value that does not run into a later `finally`.
         if self.unreachable_statement_depth != 0 {
@@ -29,10 +69,16 @@ impl Checker<'_> {
         }
         if let Some(local) = self.lookup(scope, name) {
             scope.forget_paths_rooted_at(&PathRoot::Value(local.flow_identity));
-            self.forget_implied_facts(scope, local.flow_identity);
+            if replace_implications {
+                self.forget_implied_facts(scope, local.flow_identity);
+            }
             if let Some(identity) = local.lexical_capture_identity {
                 for written in &mut self.try_body_writes {
-                    written.insert(BindingIdentity::new(identity));
+                    let identity = BindingIdentity::new(identity);
+                    written.all.insert(identity);
+                    if replace_implications {
+                        written.implication_replacements.insert(identity);
+                    }
                 }
             }
         }
@@ -43,8 +89,8 @@ impl Checker<'_> {
     pub(super) fn try_body_written_bindings(
         &mut self,
         check_body: impl FnOnce(&mut Self) -> Ty,
-    ) -> (Ty, HashSet<BindingIdentity>) {
-        self.try_body_writes.push(HashSet::default());
+    ) -> (Ty, TryBodyWrites) {
+        self.try_body_writes.push(TryBodyWrites::default());
         let ty = check_body(self);
         let written = self
             .try_body_writes
@@ -57,14 +103,35 @@ impl Checker<'_> {
     pub(super) fn clear_narrowings_a_try_body_writes(
         &mut self,
         scope: &CheckerScope<'_>,
-        written: &HashSet<BindingIdentity>,
+        written: &TryBodyWrites,
     ) {
-        for &identity in written {
+        for &identity in &written.all {
             if let Some((name, local)) = self.visible_local_binding(scope, identity) {
                 scope.forget_paths_rooted_at(&PathRoot::Value(local.flow_identity));
-                self.forget_implied_facts(scope, local.flow_identity);
+                if written.implication_replacements.contains(&identity) {
+                    self.forget_implied_facts(scope, local.flow_identity);
+                }
                 scope.narrow_local(&name, None);
             }
         }
+    }
+
+    /// The final read fact left by each binding a finalizer writes. Capturing it before restoring
+    /// the normal try continuation lets that write overwrite the continuation even when it happened
+    /// to leave the same fact that was present at the conservative finalizer entry.
+    pub(super) fn written_local_flow(
+        &self,
+        scope: &CheckerScope<'_>,
+        written: &TryBodyWrites,
+    ) -> Vec<(String, Option<Ty>)> {
+        written
+            .all
+            .iter()
+            .filter_map(|&identity| {
+                let (name, _) = self.visible_local_binding(scope, identity)?;
+                let narrowing = scope.local_narrowing(&name);
+                Some((name, narrowing))
+            })
+            .collect()
     }
 }

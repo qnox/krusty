@@ -13,8 +13,9 @@ use super::common;
 /// Each form kotlinc accepts: the plain null check, a contract through a negated `||`, an `is`
 /// test, a val copied into another val, an early return, a `when` branch, an `&&` operand, a local
 /// `var` root that is not written again, reads inside an inline lambda, a non-inline lambda and a
-/// local function, and a member call guarded by a contract through the val. `andOperand` has an
-/// inferred result type, so the declaration's signature pass reads the val as well.
+/// local function, compound assignments (including replacement `plus`), and a member call guarded
+/// by a contract through the val. `andOperand` has an inferred result type, so the declaration's
+/// signature pass reads the val as well.
 #[test]
 fn a_stable_boolean_val_carries_its_conditions_facts_like_kotlinc() {
     common::assert_accepted_like_kotlinc(
@@ -149,6 +150,19 @@ fn a_stable_boolean_val_carries_its_conditions_facts_like_kotlinc() {
          \x20   val ok = x is CompoundDerived\n\
          \x20   while (cond) { x += 1; if (ok) x.derived(); break }\n\
          }\n\
+         open class PlusBase { operator fun plus(value: Int): PlusBase = PlusBase() }\n\
+         class PlusDerived : PlusBase() { fun derived() {} }\n\
+         fun replacingCompoundKeepsSavedFact(cond: Boolean) {\n\
+         \x20   var x: PlusBase = PlusDerived()\n\
+         \x20   val ok = x is PlusDerived\n\
+         \x20   while (cond) { x += 1 }\n\
+         \x20   if (ok) x.derived()\n\
+         }\n\
+         fun replacingCompoundKeepsSavedFactOnBackEdge(cond: Boolean) {\n\
+         \x20   var x: PlusBase = PlusDerived()\n\
+         \x20   val ok = x is PlusDerived\n\
+         \x20   while (cond) { if (ok) x.derived(); x += 1 }\n\
+         }\n\
          fun unreachableTryBodyWriteKeepsCatchFact(x: String?) = run {\n\
          \x20   var y = x\n\
          \x20   val ok = y != null\n\
@@ -158,6 +172,12 @@ fn a_stable_boolean_val_carries_its_conditions_facts_like_kotlinc() {
          fun inPlaceCompoundKeepsCatchFact() = run {\n\
          \x20   var x: CompoundBase = CompoundDerived()\n\
          \x20   val ok = x is CompoundDerived\n\
+         \x20   try { x += 1 }\n\
+         \x20   catch (e: Throwable) { if (ok) x.derived() else 0 }\n\
+         }\n\
+         fun replacementCompoundKeepsCatchFact() = run {\n\
+         \x20   var x: PlusBase = PlusDerived()\n\
+         \x20   val ok = x is PlusDerived\n\
          \x20   try { x += 1 }\n\
          \x20   catch (e: Throwable) { if (ok) x.derived() else 0 }\n\
          }\n\
@@ -177,6 +197,20 @@ fn a_stable_boolean_val_carries_its_conditions_facts_like_kotlinc() {
          \x20   val ok = x is CompoundDerived\n\
          \x20   x += 1L\n\
          \x20   if (ok) x.derived() else 0\n\
+         }\n\
+         fun finalizerWriteProjectsOntoNormalContinuation(x: String?) = run {\n\
+         \x20   var y = x\n\
+         \x20   try { 0 } finally { y = \"ready\" }\n\
+         \x20   y.length\n\
+         }\n\
+         fun abruptTryWriteStaysOffNormalContinuation(x: String?, stop: Boolean) = run {\n\
+         \x20   var y = x\n\
+         \x20   val ok = y != null\n\
+         \x20   try {\n\
+         \x20       if (stop) { y = null; return@run 0 }\n\
+         \x20       0\n\
+         \x20   } finally {}\n\
+         \x20   if (ok) y.length else 0\n\
          }\n\
          sealed class ProjectionKey\n\
          class ProjectionA : ProjectionKey()\n\
@@ -244,6 +278,16 @@ fn an_unstable_boolean_or_root_proves_nothing_like_kotlinc() {
              \x20   if (ok) y.length\n\
              \x20   reset()\n\
              }\n\
+             fun localFunctionInsideLambdaHasItsOwnExecution(x: String?) {\n\
+             \x20   var y = x\n\
+             \x20   val use = {\n\
+             \x20       val ok = y != null\n\
+             \x20       fun reset() { y = null }\n\
+             \x20       if (ok) y.length\n\
+             \x20       reset()\n\
+             \x20   }\n\
+             \x20   use()\n\
+             }\n\
              fun guardedWhen(x: String?, g: Boolean) = run {\n\
              \x20   val missing = x == null\n\
              \x20   when { missing if g -> \"\"; else -> x }\n\
@@ -256,19 +300,6 @@ fn an_unstable_boolean_or_root_proves_nothing_like_kotlinc() {
              }\n\
              open class LoopBase\n\
              class LoopDerived : LoopBase() { fun derived() {} }\n\
-             open class PlusBase { operator fun plus(value: Int): PlusBase = PlusBase() }\n\
-             class PlusDerived : PlusBase() { fun derived() {} }\n\
-             fun replacingCompoundDropsFact(cond: Boolean) {\n\
-             \x20   var x: PlusBase = PlusDerived()\n\
-             \x20   val ok = x is PlusDerived\n\
-             \x20   while (cond) { x += 1 }\n\
-             \x20   if (ok) x.derived()\n\
-             }\n\
-             fun replacingCompoundInvalidatesBackEdge(cond: Boolean) {\n\
-             \x20   var x: PlusBase = PlusDerived()\n\
-             \x20   val ok = x is PlusDerived\n\
-             \x20   while (cond) { if (ok) x.derived(); x += 1 }\n\
-             }\n\
              fun localFunctionKeepsValueBinding(cond: Boolean) {\n\
              \x20   var x: LoopBase = LoopDerived()\n\
              \x20   while (cond) {\n\
@@ -319,6 +350,29 @@ fn an_unstable_boolean_or_root_proves_nothing_like_kotlinc() {
              \x20   } finally {\n\
              \x20       if (ok) y.length\n\
              \x20   }\n\
+             }\n\
+             fun explicitAbruptTryExitInvalidatesFinally(x: String?, stop: Boolean): Int {\n\
+             \x20   var y = x\n\
+             \x20   val ok = y != null\n\
+             \x20   try {\n\
+             \x20       if (stop) { y = null; return 0 }\n\
+             \x20   } finally {\n\
+             \x20       if (ok) y.length\n\
+             \x20   }\n\
+             \x20   return 1\n\
+             }\n\
+             fun abruptCatchExitInvalidatesFinally(x: String?, stop: Boolean): Int {\n\
+             \x20   var y = x\n\
+             \x20   val ok = y != null\n\
+             \x20   try {\n\
+             \x20       if (stop) throw IllegalArgumentException()\n\
+             \x20   } catch (e: IllegalArgumentException) {\n\
+             \x20       y = null\n\
+             \x20       return 0\n\
+             \x20   } finally {\n\
+             \x20       if (ok) y.length\n\
+             \x20   }\n\
+             \x20   return 1\n\
              }\n",
         )],
         &[],

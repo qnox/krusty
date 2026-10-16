@@ -26,6 +26,7 @@ impl SignatureConstraintExtractor {
             .try_body_writes
             .pop()
             .expect("the compact try-body write set is still open");
+        let mut all_exit_writes = body_writes.clone();
         let body_state = std::mem::replace(&mut self.boolean_vals, branch_entry.clone());
         let body_value = body_result?;
         results.push(body_value);
@@ -39,7 +40,13 @@ impl SignatureConstraintExtractor {
                 catch.name.clone().into_boxed_str(),
                 ty,
             )]));
+            self.try_body_writes.push(Default::default());
             let result = self.expression(file, catch.body, scope, origin);
+            let catch_writes = self
+                .try_body_writes
+                .pop()
+                .expect("the compact catch-body write set is still open");
+            all_exit_writes.extend(catch_writes);
             self.lexical_values.pop();
             let catch_state = std::mem::replace(&mut self.boolean_vals, branch_entry.clone());
             let catch_value = result?;
@@ -55,12 +62,10 @@ impl SignatureConstraintExtractor {
         // The continuation after the try still joins normal exits alone; only the finalizer's
         // writes are projected onto that state because abrupt paths never reach the continuation.
         if let Some(finally) = finally {
-            self.boolean_vals = branch_entry;
-            let all_exits = exits
-                .iter()
-                .map(|(_, state)| (super::CompactCompletion::Always, state.clone()))
-                .collect::<Vec<_>>();
-            self.join_boolean_vals(&all_exits);
+            // A nested branch's compact continuation deliberately omits abrupt paths. Start the
+            // finalizer from the try entry with every binding written by any reachable try/catch
+            // path cleared, so a return/throw/break/continue cannot leave a stale implication.
+            self.boolean_vals = self.catch_entry_boolean_vals(&branch_entry, &all_exit_writes);
             self.try_body_writes.push(Default::default());
             let _ = self.expression(file, finally, scope, origin)?;
             let finally_writes = self

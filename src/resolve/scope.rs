@@ -519,6 +519,87 @@ impl<'p, B> Scope<'p, B> {
         self.restore_flow(&common);
     }
 
+    /// Install `base`, then apply exactly the flow changes made between `effect_entry` and
+    /// `effect_exit`.
+    ///
+    /// A `finally` is checked from facts safe on every normal or abrupt try/catch exit, while its
+    /// effects run again on the normal-only continuation after the try. Rechecking the finalizer
+    /// would duplicate semantic work and diagnostics; this key-wise delta projects its removals,
+    /// replacements, and newly proved facts onto that continuation instead.
+    pub(crate) fn restore_flow_with_delta(
+        &self,
+        base: &FlowSnapshot,
+        effect_entry: &FlowSnapshot,
+        effect_exit: &FlowSnapshot,
+    ) {
+        assert_eq!(
+            base.frames.len(),
+            effect_entry.frames.len(),
+            "flow delta entry must share the base scope chain"
+        );
+        assert_eq!(
+            effect_entry.frames.len(),
+            effect_exit.frames.len(),
+            "flow delta exit must share the entry scope chain"
+        );
+
+        fn apply_map_delta<K, V>(
+            target: &mut HashMap<K, V>,
+            entry: &HashMap<K, V>,
+            exit: &HashMap<K, V>,
+        ) where
+            K: Clone + Eq + std::hash::Hash,
+            V: Clone + Eq,
+        {
+            for (key, entry_value) in entry {
+                if exit.get(key) == Some(entry_value) {
+                    continue;
+                }
+                if let Some(exit_value) = exit.get(key) {
+                    target.insert(key.clone(), exit_value.clone());
+                } else {
+                    target.remove(key);
+                }
+            }
+            for (key, exit_value) in exit {
+                if !entry.contains_key(key) {
+                    target.insert(key.clone(), exit_value.clone());
+                }
+            }
+        }
+
+        let mut projected = base.clone();
+        for ((target, entry), exit) in projected
+            .frames
+            .iter_mut()
+            .zip(&effect_entry.frames)
+            .zip(&effect_exit.frames)
+        {
+            apply_map_delta(&mut target.paths, &entry.paths, &exit.paths);
+            apply_map_delta(
+                &mut target.intersections,
+                &entry.intersections,
+                &exit.intersections,
+            );
+            apply_map_delta(&mut target.exclusions, &entry.exclusions, &exit.exclusions);
+            apply_map_delta(&mut target.locals, &entry.locals, &exit.locals);
+            apply_map_delta(
+                &mut target.boolean_implications,
+                &entry.boolean_implications,
+                &exit.boolean_implications,
+            );
+            target
+                .declined
+                .retain(|fact| !entry.declined.contains(fact) || exit.declined.contains(fact));
+            for fact in &exit.declined {
+                if !entry.declined.contains(fact) && !target.declined.contains(fact) {
+                    target.declined.push(fact.clone());
+                }
+            }
+        }
+        self.restore_flow(&projected);
+    }
+
     pub(crate) fn function_child(
         &'p self,
         receiver: Option<Ty>,
