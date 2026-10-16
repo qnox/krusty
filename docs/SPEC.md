@@ -5830,6 +5830,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   inline invocation retains its own recorded adaptation boundary when nested at that tail, so the
   two inline paths never adapt the same result twice.
   Tests: `tests/inline_scope_function_bytes_e2e.rs`.
+- **An inline call's saved operand stack goes where kotlinc's FixStack put it.** An inline-only
+  call made with caller operands on the stack (`"O" + "x".let { … }`) saves them across the
+  lambda body. Outside any inline lambda's body kotlinc runs FixStack over the finished method,
+  so the saved words go above every local the method uses (after the lambda's `$i$a$` marker),
+  and a later call reuses them. Inside an inline lambda's
+  body FixStack ran over that lambda's node before it was copied in
+  (`MethodInliner.preprocessNodeBeforeInline`), so the words are claimed ahead of the inner
+  lambda's marker. FixStack clears the stack at each opening marker, so a bracket nested inside
+  another saves only the words pushed after the enclosing one, and none when nothing was.
+  Tests: `tests/classpath_inline_plan_parity_e2e.rs`, `src/jvm/bytecode_passes/fix_stack.rs`.
 - **A reified `catch (e: E)` uses the inline call's type argument as its JVM catch type.** The
   clause is checked as the reified parameter. Common IR stores only that semantic type. While the
   parameter is still unsubstituted, the JVM reified-operation pass records the declaration's

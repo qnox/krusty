@@ -142,6 +142,16 @@ impl FrameMap {
         self.max
     }
 
+    /// The declarations of the inline-expansion frames open in this frame, outermost first.
+    pub(super) fn open_inline_frames(&self) -> impl Iterator<Item = u32> + '_ {
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry.occupant {
+                Occupant::Key(FrameKey::InlineFrameMarker(declaration)) => Some(declaration),
+                _ => None,
+            })
+    }
+
     /// Enter a keyed local of type `ty` and return its slot.
     pub(super) fn enter(&mut self, key: FrameKey, ty: Ty) -> u16 {
         self.push(Occupant::Key(key), ty).1
