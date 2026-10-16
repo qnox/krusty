@@ -143,6 +143,20 @@ impl Emitter<'_> {
         self.mark_expression_line(expression, line, code);
     }
 
+    /// Mark `expression`'s line where kotlinc marks an intrinsic call before its operands (the
+    /// `andand`/`oror` intrinsic's own mark). Operand code marking another line at this same offset
+    /// keeps the entry, as kotlinc's line table does.
+    pub(super) fn mark_kept_start_line(&mut self, expression: ExprId, code: &mut CodeBuilder) {
+        let Some(&line) = self.ir.expr_source_lines.get(&expression) else {
+            return;
+        };
+        if line != 0 && !code.is_dead() {
+            self.note_inlined_expression(expression, code);
+            let line = self.mapped_expression_line(expression, line);
+            code.mark_line_kept(line);
+        }
+    }
+
     /// Mark `line`, mapping an inline copy through the class SMAP. Returns the line written into
     /// the `LineNumberTable` (the mapped output line when a map answers), or `0` when `line` is
     /// `0` and nothing is marked.

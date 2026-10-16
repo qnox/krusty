@@ -1949,6 +1949,9 @@ pub struct CodeBuilder {
     /// same offset: the next one appends after it instead of replacing it. See
     /// [`CodeBuilder::mark_line_retained`].
     retained_line_mark: Option<usize>,
+    /// The retained mark keeps only a mark of ANOTHER line after it; the same line dedupes as
+    /// usual. See [`CodeBuilder::mark_line_kept`].
+    retained_line_distinct: bool,
     /// `(start_pc, length, slot, name, descriptor)` entries in scope-close order.
     local_entries: Vec<(u16, Option<u16>, u16, String, String)>,
     /// Semantic inline-frame placement parallel to `local_entries`. This never reaches the class
@@ -2014,6 +2017,7 @@ impl CodeBuilder {
             line_marks: Vec::new(),
             inlined_line_marks: Vec::new(),
             retained_line_mark: None,
+            retained_line_distinct: false,
             local_entries: Vec::new(),
             local_entry_placements: Vec::new(),
             implicit_void_return_pc: None,

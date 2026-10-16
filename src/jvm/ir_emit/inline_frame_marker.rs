@@ -33,8 +33,11 @@ impl Emitter<'_> {
         };
         // Operands are evaluated and opened before the frame marker, but semantically belong to
         // the frame it starts. Bind both their range start and their table-order identity here.
+        // Only this expansion's own operands are bound: an operand already bound while a later
+        // operand runs an inline call of its own belongs to the enclosing block, not that call.
+        let depth = self.block_depth;
         for local in &mut self.open_locals {
-            if local.inline_operand && local.inline_frame.is_none() {
+            if local.inline_operand && local.inline_frame.is_none() && local.depth == depth {
                 local.start = frame_start;
                 local.inline_frame = Some(frame);
             }

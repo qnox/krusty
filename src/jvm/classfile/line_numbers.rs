@@ -275,6 +275,13 @@ impl CodeBuilder {
             // names the same line. kotlinc's `visitSetValue` marks an unsigned value and the
             // inlined operation marks that line again before the receiver load. The retention is
             // spent — a third mark at the same offset replaces this one as usual.
+            // A kept entry is already this mark when it names the same line, and stays kept for
+            // the next mark.
+            Some((lpc, ll))
+                if *lpc == pc && retained && self.retained_line_distinct && *ll == line =>
+            {
+                Some(self.line_marks.len() - 1)
+            }
             Some((lpc, _)) if *lpc == pc && retained => {
                 self.retained_line_mark = None;
                 self.line_marks.push((pc, line));
@@ -345,14 +352,19 @@ impl CodeBuilder {
     /// Kotlin's unsigned binary members begin their source position between a plain receiver and a
     /// literal argument, so that eager boundary does not own the receiver load. A mark at an earlier
     /// offset stays: a call such as `toUInt()` has already written its own line there, and a
-    /// zero-initializer on the same line is not the literal's to take.
+    /// zero-initializer on the same line is not the literal's to take. A kept mark
+    /// ([`Self::mark_line_kept`]) stays too.
     pub(crate) fn withdraw_operand_line(&mut self, line: u32) {
         let line = line.min(u16::MAX as u32) as u16;
         let pc = self.bytes.len();
-        if self
-            .line_marks
-            .last()
-            .is_some_and(|&(marked_pc, marked)| marked == line && marked_pc as usize == pc)
+        // A kept mark is an enclosing expression's own, not this boundary's.
+        let kept = self.retained_line_distinct
+            && self.retained_line_mark == Some(self.line_marks.len().wrapping_sub(1));
+        if !kept
+            && self
+                .line_marks
+                .last()
+                .is_some_and(|&(marked_pc, marked)| marked == line && marked_pc as usize == pc)
         {
             let removed = self.line_marks.len() - 1;
             self.suppress_entry_line |= self.line_marks[removed].0 == 0;
@@ -445,6 +457,27 @@ impl CodeBuilder {
     /// where last-wins should have left one.
     pub fn mark_line_retained(&mut self, line: u32) {
         self.retained_line_mark = self.record_line(line);
+        self.retained_line_distinct = false;
+    }
+
+    /// Whether a kept mark ([`Self::mark_line_kept`]) of `line` stands at the current offset.
+    pub(crate) fn line_kept_here(&self, line: u32) -> bool {
+        let line = line.min(u16::MAX as u32) as u16;
+        let index = self.line_marks.len().wrapping_sub(1);
+        self.retained_line_distinct
+            && self.retained_line_mark == Some(index)
+            && self
+                .line_marks
+                .get(index)
+                .is_some_and(|&(pc, marked)| marked == line && usize::from(pc) == self.bytes.len())
+    }
+
+    /// Record `line` as kotlinc's `LineNumberMapper` does wherever a mark precedes code that marks
+    /// lines of its own: a later mark of another line at this same offset follows the entry
+    /// rather than replacing it, while a mark of the same line is the entry already in effect.
+    pub(crate) fn mark_line_kept(&mut self, line: u32) {
+        self.retained_line_mark = self.record_line(line);
+        self.retained_line_distinct = true;
     }
 
     /// The recorded `LineNumberTable` marks (empty for a body emitted without line info).

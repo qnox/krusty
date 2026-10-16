@@ -48,6 +48,7 @@ impl Emitter<'_> {
         jump_when_true: bool,
         code: &mut CodeBuilder,
     ) -> bool {
+        let operand_line = self.short_circuit_operand_line.take();
         // A constant condition folds: `while (true)` (a `Boolean(true)` pre-test, jump-out-when-false)
         // emits NO branch — a spurious `ifeq end` to the method end leaves a branch target with no
         // stack-map frame. An always-taken branch becomes an unconditional `goto`.
@@ -66,17 +67,23 @@ impl Emitter<'_> {
         // right operand is left to decide the rest (kotlinc's `jumpIfFalse`/`jumpIfTrue` over
         // `ANDAND`/`OROR`). A hand-written `if (a) b else false` keeps the materialized form, as
         // kotlinc's does, which is why the lowering records which `when`s these are.
+        // kotlinc's `andand`/`oror` intrinsic marks the expression's own line before its first
+        // operand, and each operand's line again once its value is computed, for the jump that
+        // consumes it (`BooleanConjunction`/`BooleanDisjunction`). The operands are not branch
+        // conditions of their own: an enclosing `when` condition's state carries through them.
         if let Some((first, second, kind)) = self.short_circuit_operands(cond) {
+            self.short_circuit_operand_line = None;
+            self.mark_kept_start_line(first, code);
             let decided_by = matches!(kind, crate::ir::IrShortCircuitKind::Or);
             if decided_by == jump_when_true {
-                if self.emit_cond_branch(first, target, jump_when_true, code) {
+                if self.emit_short_circuit_operand(first, target, jump_when_true, code) {
                     return true;
                 }
-                return self.emit_cond_branch(second, target, jump_when_true, code);
+                return self.emit_short_circuit_operand(second, target, jump_when_true, code);
             }
             let skip = code.new_label();
-            if !self.emit_cond_branch(first, skip, decided_by, code) {
-                let _ = self.emit_cond_branch(second, target, jump_when_true, code);
+            if !self.emit_short_circuit_operand(first, skip, decided_by, code) {
+                let _ = self.emit_short_circuit_operand(second, target, jump_when_true, code);
             }
             self.bind(skip, code);
             return false;
@@ -85,6 +92,7 @@ impl Emitter<'_> {
         // sense. A Boolean `==`/`!=`, a literal operand included, is an ordinary comparison below,
         // which kotlinc's `BooleanComparison` materializes on both sides.
         if let Some(operand) = self.ir.negated_operand(cond) {
+            self.short_circuit_operand_line = operand_line;
             return self.emit_cond_branch(operand, target, !jump_when_true, code);
         }
         // A non-null floating property in synthesized data-class `equals` uses the language's
@@ -183,12 +191,31 @@ impl Emitter<'_> {
             return true;
         }
         self.emit_value(cond, code);
+        if let Some(&line) =
+            operand_line.and_then(|operand| self.ir.expr_source_lines.get(&operand))
+        {
+            self.mark_expression_line(operand_line.unwrap_or(cond), line, code);
+        }
         if jump_when_true {
             code.ifne(target);
         } else {
             code.ifeq(target);
         }
         false
+    }
+
+    /// Emit one operand of a source `&&`/`||`, its line marked again before its jump.
+    fn emit_short_circuit_operand(
+        &mut self,
+        operand: u32,
+        target: Label,
+        jump_when_true: bool,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        self.short_circuit_operand_line = Some(operand);
+        let diverges = self.emit_cond_branch(operand, target, jump_when_true, code);
+        self.short_circuit_operand_line = None;
+        diverges
     }
 
     /// Read the operands from a provenance-tagged generic `when`. The lowering shape is an IR
