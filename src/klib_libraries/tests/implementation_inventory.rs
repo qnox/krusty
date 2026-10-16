@@ -1,4 +1,4 @@
-//! Exact declaration, body, and compiler-operation facts for a future KLIB coverage ratchet.
+//! Exact declaration, body, and compiler-operation facts for KLIB implementation coverage.
 //!
 //! This deliberately stops before deciding which bodyful declaration requires compiler support.
 //! Such a decision needs an authenticated semantic contract; an annotation spelling or a call
@@ -34,7 +34,7 @@ use crate::metadata::semantic::{KotlinClass, KotlinFunction, KotlinModality};
 use crate::types::SemanticCallableOwner;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DecodedBodyState {
+pub(super) enum DecodedBodyState {
     /// No IR declaration with this exact module-qualified identity was decoded.
     Absent,
     /// The exact IR declaration exists but intentionally carries no executable body.
@@ -44,10 +44,11 @@ enum DecodedBodyState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ImplementationFact {
+pub(super) struct ImplementationFact {
     placement: CallablePlacement,
-    body: DecodedBodyState,
-    has_operation: bool,
+    pub(super) body: DecodedBodyState,
+    pub(super) external: bool,
+    pub(super) has_operation: bool,
 }
 
 fn has_operation(function: &FunctionInfo) -> bool {
@@ -116,6 +117,7 @@ fn record(
     let fact = ImplementationFact {
         placement: joined_placement,
         body,
+        external: joined.declaration.is_external,
         has_operation: provider_operation
             || has_operation(&function)
             || libraries
@@ -131,7 +133,7 @@ fn record(
     );
 }
 
-fn implementation_inventory(
+pub(super) fn implementation_inventory(
     libraries: &KlibLibraries,
 ) -> HashMap<KlibDependencyCallable, ImplementationFact> {
     let inventory = &libraries.inventory;
@@ -175,7 +177,7 @@ fn implementation_inventory(
     facts
 }
 
-fn identity(
+pub(super) fn identity(
     module: &str,
     package: &[&str],
     classes: &[MetadataClass<'_>],
@@ -394,11 +396,13 @@ fn wasm_intrinsic_tree(callable: &KlibDependencyCallable) -> KlibIrModuleTrees {
 fn fact(
     placement: CallablePlacement,
     body: DecodedBodyState,
+    external: bool,
     has_operation: bool,
 ) -> ImplementationFact {
     ImplementationFact {
         placement,
         body,
+        external,
         has_operation,
     }
 }
@@ -433,6 +437,7 @@ fn equal_declarations_in_distinct_modules_keep_distinct_inventory_identities() {
                 CallablePlacement::Package(type_name("fixture")),
                 DecodedBodyState::Absent,
                 false,
+                false,
             ),
         ),
         (
@@ -440,6 +445,7 @@ fn equal_declarations_in_distinct_modules_keep_distinct_inventory_identities() {
             fact(
                 CallablePlacement::Package(type_name("fixture")),
                 DecodedBodyState::Absent,
+                false,
                 false,
             ),
         ),
@@ -481,9 +487,18 @@ fn decoded_body_state_distinguishes_absent_bodyless_and_bodyful_exactly() {
     assert_eq!(
         actual,
         HashMap::from_iter([
-            (absent, fact(placement, DecodedBodyState::Absent, false)),
-            (bodyless, fact(placement, DecodedBodyState::Bodyless, false)),
-            (bodyful, fact(placement, DecodedBodyState::Bodyful, false)),
+            (
+                absent,
+                fact(placement, DecodedBodyState::Absent, false, false),
+            ),
+            (
+                bodyless,
+                fact(placement, DecodedBodyState::Bodyless, false, false),
+            ),
+            (
+                bodyful,
+                fact(placement, DecodedBodyState::Bodyful, false, false),
+            ),
         ])
     );
 }
@@ -528,6 +543,7 @@ fn an_interop_direct_c_declaration_is_an_exact_bodyless_operation() {
             fact(
                 CallablePlacement::Package(type_name("fixture/directc")),
                 DecodedBodyState::Absent,
+                true,
                 true,
             ),
         )])
@@ -635,6 +651,7 @@ fn every_callable_placement_has_one_exact_inventory_fact() {
                 fact(
                     CallablePlacement::Package(type_name("kotlin/io")),
                     DecodedBodyState::Absent,
+                    false,
                     true,
                 ),
             ),
@@ -646,6 +663,7 @@ fn every_callable_placement_has_one_exact_inventory_fact() {
                         owner_is_interface: false,
                     },
                     DecodedBodyState::Absent,
+                    false,
                     true,
                 ),
             ),
@@ -662,6 +680,7 @@ fn every_callable_placement_has_one_exact_inventory_fact() {
                     },
                     DecodedBodyState::Absent,
                     false,
+                    false,
                 ),
             ),
             (
@@ -675,6 +694,7 @@ fn every_callable_placement_has_one_exact_inventory_fact() {
                         access_owner: None,
                     },
                     DecodedBodyState::Absent,
+                    false,
                     false,
                 ),
             ),
@@ -743,11 +763,11 @@ fn an_operation_covers_only_the_exact_module_qualified_declaration() {
         HashMap::from_iter([
             (
                 implemented,
-                fact(placement, DecodedBodyState::Bodyful, true),
+                fact(placement, DecodedBodyState::Bodyful, false, true),
             ),
             (
                 unimplemented,
-                fact(placement, DecodedBodyState::Bodyful, false),
+                fact(placement, DecodedBodyState::Bodyful, false, false),
             ),
         ])
     );
