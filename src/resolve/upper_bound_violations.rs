@@ -9,9 +9,9 @@
 //! alias spellings Pass 1 recorded for it, and each classifier application found there is checked
 //! by the same operation.
 //!
-//! kotlinc does not check the outermost application of a type operator's target (`a as B<String>`)
-//! or of a callable's type-parameter bound (`fun <T : B<String>> f()`); the arguments nested inside
-//! them are checked.
+//! Until `ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds`, kotlinc does not check the
+//! outermost application of a type operator's target (`a as B<String>`) or of a callable's
+//! type-parameter bound (`fun <T : B<String>> f()`); the arguments nested inside them are checked.
 
 use super::type_parameter_owners::{
     classifier_type_parameter_owner, mentioned_type_parameters, TypeParameterNumbering,
@@ -41,7 +41,8 @@ impl Checker<'_> {
     }
 
     /// [`Self::check_type_parameter_bound`] for a callable's type parameter, whose outermost
-    /// application kotlinc does not check.
+    /// application kotlinc checks only under
+    /// `ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds`.
     pub(super) fn check_callable_type_parameter_bound(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -58,6 +59,12 @@ impl Checker<'_> {
         reference: &TypeRef,
         resolve: impl FnOnce(&mut Self) -> R,
     ) -> R {
+        if self
+            .file
+            .forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds
+        {
+            return resolve(self);
+        }
         let previous = self.unchecked_bounds_reference.replace(reference.span);
         let result = resolve(self);
         self.unchecked_bounds_reference = previous;

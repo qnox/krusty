@@ -1992,6 +1992,9 @@ pub struct File {
     /// `+CustomEqualsInValueClasses`: permit the typed `equals(Self)` convention in a value class
     /// whose selected representation is inline rather than full/boxed.
     pub custom_equals_in_value_classes: bool,
+    /// `+ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds`: the outermost application of
+    /// a type operator's target and of a callable's type-parameter bound is bound-checked too.
+    pub forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds: bool,
     /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
     /// parameters whose declared upper bounds contain a cycle.
     pub recursive_type_of: bool,

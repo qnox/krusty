@@ -210,8 +210,9 @@ fun localBound() {
 }
 ";
 
-/// The outermost application of a type operator's target and of a callable's type-parameter bound
-/// is not checked; the applications nested in them, and every local declaration, are.
+/// Without `ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds` the outermost application
+/// of a type operator's target and of a callable's type-parameter bound is not checked; the
+/// applications nested in them, and every local declaration, are.
 #[test]
 fn type_operators_and_callable_bounds_check_only_nested_arguments() {
     let erased = |position: &str, ty: &str| {
@@ -369,4 +370,45 @@ fun box(): String {
 #[test]
 fn recursive_projected_bounds_from_kt49752_are_accepted() {
     assert_matches_kotlinc(KT49752_RECURSIVE_BOUNDS, &[], &[]);
+}
+
+/// `ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds` (on under `-progressive`) checks
+/// the outermost application of type-operator targets and callable type-parameter bounds too.
+#[test]
+fn forbidding_feature_checks_type_operators_and_callable_bounds() {
+    let erased = |position: &str, ty: &str| {
+        format!("{position}: cannot check for instance of erased type '{ty}'.")
+    };
+    assert_matches_kotlinc(
+        BODIES_AND_OPERATORS,
+        &["-XXLanguage:+ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds"],
+        &[
+            b_violation("4:14", "String"),
+            violation(
+                "5:24",
+                "T (of interface I<T : Comparable<T>>)",
+                "Comparable<Any>",
+                "Any",
+            ),
+            b_violation("6:22", "String"),
+            b_violation("7:21", "String"),
+            b_violation("8:20", "String"),
+            b_violation("10:27", "String"),
+            b_violation("11:32", "String"),
+            b_violation("12:38", "String"),
+            erased("13:25", "B<String>"),
+            b_violation("13:27", "String"),
+            erased("14:33", "B<String>"),
+            b_violation("14:35", "String"),
+            erased("15:36", "B<String>"),
+            b_violation("15:38", "String"),
+            erased("15:56", "List<B<String>>"),
+            b_violation("15:63", "String"),
+            b_violation("16:12", "String"),
+            b_violation("17:25", "String"),
+            b_violation("18:17", "String"),
+            b_violation("19:12", "String"),
+            b_violation("21:16", "String"),
+        ],
+    );
 }
