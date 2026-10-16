@@ -725,6 +725,7 @@ pub(super) fn realize(
         // value), the same checked fact an ordinary call carries for representation boundaries.
         let mut accessor_parameters = None;
         let mut annotation_member_semantic = None::<(PropertyId, crate::types::Ty)>;
+        let mut declared_getter_result = None::<crate::types::Ty>;
         let replacement = match ir.exprs[raw].clone() {
             IrExpr::Call {
                 callee:
@@ -814,6 +815,9 @@ pub(super) fn realize(
                     )?;
                     accessor_parameters = Some(parameters);
                     annotation_member_semantic = semantic.map(|ty| (target, ty));
+                    // The getter returns the property's declared type: a property declared as a
+                    // value class hands back its carrier, never a box.
+                    declared_getter_result = semantic.is_none().then_some(property.ty);
                     Some(call)
                 }
             }
@@ -889,6 +893,9 @@ pub(super) fn realize(
         if let Some(parameters) = accessor_parameters {
             ir.call_declared_params
                 .insert(raw as ExprId, parameters.into_boxed_slice());
+        }
+        if let Some(declared) = declared_getter_result {
+            ir.call_declared_ret.insert(raw as ExprId, declared);
         }
         if let Some((target, semantic)) = annotation_member_semantic {
             let IrExpr::Call {

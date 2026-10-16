@@ -11814,6 +11814,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   consumer (`Any?`, or a generic parameter) hands that box on unchanged: the checked coercion from
   `T` to `R<Int>` would unbox it and the consumer would box it again, and kotlinc emits neither
   call. Reading `c.a` as `R<Int>` still unboxes once. Tests: `tests/value_class_generic_carrier_e2e.rs`.
+- **A property declared as a generic value class returns its carrier.** `val boxed: Boxed<String>`
+  over `value class Boxed<T>(val value: T)` has a getter declared to return `Boxed`, so it returns
+  the carrier, which `T` erases to `Object`. A read takes that `Object` as the carrier, from the
+  declaring file (where the read records the property's declared type) and from a sibling file or a
+  top-level property (where the realized getter call records it as its declared result). Only a
+  property declared as a bare type parameter (`Gen<T>(val item: T)` with `T = Boxed<String>`)
+  yields a box. A serializable class's `write$Self` and `deserialize` pass such a property to
+  `encodeSerializableElement`/`decodeSerializableElement`, whose value parameters are declared
+  `Any?`, as its box, as kotlinc does. Tests: `tests/generic_value_class_result_e2e.rs`,
+  `tests/serializable_value_class_e2e.rs`.
 - **A return to a reference supertype is a value-class boundary.** A function declared to return
   `Any`, `Any?`, or a direct or indirect interface a value class implements hands each returned
   value, a guard

@@ -12,7 +12,7 @@
 //! `UInt.MAX_VALUE` was written as `-1`.
 
 use super::common::compare_with_kotlinc_plugin;
-use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
+use super::serialization_companion_byte_parity_e2e::{member_body, plugin_and_runtime};
 use super::serialization_test_support::both_compilers_box_files;
 
 /// Two value classes with different carriers (a reference and a primitive), each used as a
@@ -159,6 +159,14 @@ const GENERIC_MODEL: &str = "import kotlinx.serialization.Serializable\n\
     @JvmInline\n\
     value class Grouped<K, V>(\n\
     \x20   val value: Map<K, List<V>>,\n\
+    )\n\
+    @Serializable\n\
+    class Holder<T>(\n\
+    \x20   val boxed: Boxed<T>,\n\
+    )\n\
+    @Serializable\n\
+    class Counted(\n\
+    \x20   val count: Boxed<Int>,\n\
     )\n";
 
 const GENERIC_MAIN: &str = "import kotlinx.serialization.builtins.serializer\n\
@@ -166,10 +174,15 @@ const GENERIC_MAIN: &str = "import kotlinx.serialization.builtins.serializer\n\
     fun box(): String {\n\
     \x20   val boxed = Boxed.serializer(Int.serializer())\n\
     \x20   val grouped = Grouped.serializer(String.serializer(), Int.serializer())\n\
+    \x20   val holder = Holder.serializer(String.serializer())\n\
+    \x20   val d = Json.encodeToString(Counted.serializer(), Counted(Boxed(7)))\n\
     \x20   val a = Json.encodeToString(boxed, Boxed(4))\n\
     \x20   val b = Json.encodeToString(grouped, Grouped(mapOf(\"k\" to listOf(1, 2))))\n\
+    \x20   val c = Json.encodeToString(holder, Holder(Boxed(\"h\")))\n\
     \x20   return a + \" \" + Json.decodeFromString(boxed, a).value + \" \" + b + \" \" +\n\
-    \x20       Json.decodeFromString(grouped, b).value\n\
+    \x20       Json.decodeFromString(grouped, b).value + \" \" + c + \" \" +\n\
+    \x20       Json.decodeFromString(holder, c).boxed.value + \" \" + d + \" \" +\n\
+    \x20       Json.decodeFromString(Counted.serializer(), d).count.value\n\
     }\n";
 
 #[test]
@@ -179,7 +192,7 @@ fn a_generic_serializer_round_trips_through_its_type_serializers() {
             &[("Model.kt", GENERIC_MODEL), ("Main.kt", GENERIC_MAIN)],
             "generic_value_class_serializers"
         ),
-        "4 4 {\"k\":[1,2]} {k=[1, 2]}"
+        "4 4 {\"k\":[1,2]} {k=[1, 2]} {\"boxed\":\"h\"} h {\"count\":7} 7"
     );
 }
 
@@ -202,6 +215,33 @@ fn a_two_parameter_value_class_serializer_is_kotlincs() {
         GENERIC_MODEL,
         "Grouped$$serializer",
     );
+}
+
+/// A property of a generic value class is written as the value class's box: `write$Self` passes it
+/// to `encodeSerializableElement`, whose value parameter is a type parameter. Its carrier is
+/// `Object` too, and krusty unboxed the box it had just made, so the runtime serializer received
+/// the bare carrier and failed its cast.
+#[test]
+fn a_generic_value_class_property_is_written_as_its_box() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializableGenericValueClassHolder",
+        GENERIC_MODEL,
+        "Holder",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = member_body(&built.reference, "write$Self$");
+    assert!(want.len() > 1, "the reference declares write$Self");
+    assert_eq!(member_body(&built.krusty, "write$Self$"), want);
 }
 
 const UNSIGNED_MODEL: &str = "import kotlinx.serialization.Serializable\n\
