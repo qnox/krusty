@@ -320,9 +320,7 @@ use lambda_returns::{call_implicit_lambda_label, LambdaResultConstraint, LambdaR
 use local_class_scope::EnclosingTypeParameterDeclaration;
 pub(crate) use local_class_scope::{pass_one_local_class_context, PassOneLocalClassContext};
 use loop_flow::collect_all_reassigned;
-pub(crate) use member_extension_selection::{
-    MemberExtensionFunctionSelection, MemberExtensionSelection,
-};
+use member_extension_selection::{MemberExtensionFunctionSelection, MemberExtensionSelection};
 pub(crate) use named_class_constructors::publish_named_class_constructors;
 pub(crate) use override_plans::publish_override_plans;
 use postponed_constraints::PostponedCallConstraints;

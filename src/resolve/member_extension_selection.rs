@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MemberExtensionSelection {
+pub(super) enum MemberExtensionSelection {
     All,
     Operators,
     DelegateConventions,

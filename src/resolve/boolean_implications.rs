@@ -12,7 +12,7 @@
 //! a condition, and a closure that mutates the value in between declines the cast there
 //! (SMARTCAST_IMPOSSIBLE).
 
-use crate::ast::ExprId;
+use crate::ast::{Expr, ExprId};
 use crate::types::Ty;
 
 use super::scope::{
