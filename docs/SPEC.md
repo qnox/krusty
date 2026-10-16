@@ -10274,6 +10274,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   serializer, then the type's own — through `decode[Nullable]SerializableElement` with `X`.
   Tests: `tests/property_serializer_decode_e2e.rs` (a non-derivable type, a nullable one, and a
   `String` whose serializer writes an `Int`, cross-checked against the reference compiler).
+- **A property's own serializer outranks contextual serialization, and a contextual property's
+  serializer is cached.** A serializer the declaration names itself, `@Serializable(with =
+  X::class)` on the property or on its declared type, is used even when the property is
+  `@Contextual` or its type is listed in the file's `@UseContextualSerialization`: kotlinc consults
+  the property's serializer before the contextual rules. krusty checked the contextual rules first,
+  so such a property was written, read and published as a `ContextualSerializer`.
+  `property_is_contextual` is false for a property that names its serializer. A property that IS
+  contextual gets a `$childSerializers` slot holding
+  `ContextualSerializer(T::class, <T's own serializer or null>, [<T's type-argument serializers>])`,
+  which `write$Self`, `deserialize` and `childSerializers` read, as kotlinc's do; krusty built the
+  one-argument `ContextualSerializer(T::class)` at each use. A contextual collection ELEMENT keeps
+  the one-argument form, and a type that mentions a class type parameter is not cached.
+  Tests: `tests/serializer_property_with_over_contextual_e2e.rs` (the `$serializer` and the class
+  byte for byte against the reference compiler).
 - **`@Serializable(with = S::class)` on a property's TYPE ARGUMENT selects that argument's
   serializer.** `val items: List<@Serializable(with = S::class) Item>` serializes each element with
   `S` whatever serializer `Item` has, including none: kotlinc builds
