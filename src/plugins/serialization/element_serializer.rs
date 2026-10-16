@@ -887,6 +887,19 @@ pub(super) fn emit_cached_element_serializer(
     narrow_to_kserializer(ir, serializer)
 }
 
+/// The serializer a `@Contextual` property is coded with where kotlinc builds it in place: the
+/// same `ContextualSerializer(<type>::class, fallback, typeArgumentsSerializers)` its
+/// `childSerializers()` caches.
+pub(super) fn contextual_property_serializer(
+    ir: &mut IrFile,
+    ctx: &PluginContext,
+    ty: &Ty,
+    annotated: &Spelled,
+) -> Option<ExprId> {
+    let plan = contextual_property_plan(ir, ctx, ty, annotated).ok()??;
+    Some(emit_element_serializer(ir, plan))
+}
+
 pub(super) fn element_serializer_expr(
     ir: &mut IrFile,
     ctx: &PluginContext,

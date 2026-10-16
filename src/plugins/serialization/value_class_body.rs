@@ -6,13 +6,15 @@
 //! is coded with its own element serializer through `encode[Nullable]SerializableValue` and
 //! `decode[Nullable]SerializableValue`, as kotlinc does.
 
+use super::declared_serializer::build_field_serializer_instance;
 use super::deserialize_body::narrowed;
 use super::element_serializer;
 use super::type_argument_serializers::declared_type_spelling;
 use super::type_parameter_serializers::TypeParameterSerializers;
 use super::value_class_types::inline_prim_methods;
 use super::{
-    class_ty, complete_generated_body, synthesized_accessor, ty_descriptor, virtual_iface,
+    class_ty, complete_generated_body, declared_serializer_of, property_is_contextual,
+    synthesized_accessor, ty_descriptor, virtual_iface,
 };
 use crate::ir::{ClassId, ExprId, IrConst, IrExpr, IrFile};
 use crate::plugins::PluginContext;
@@ -41,6 +43,32 @@ enum Coding {
 impl ValueClassBody<'_> {
     fn coding(&self, ir: &mut IrFile, ctx: &PluginContext) -> Coding {
         let (name, ty) = self.property;
+        let annotated = declared_type_spelling(ctx, ir, self.serialized_class, name);
+        // A serializer the property names for itself takes precedence over its type's, as it does
+        // for every other serializable property: what it wrote only it can read back.
+        let selected = if property_is_contextual(ctx, ir, self.serialized_class, name) {
+            Some(
+                element_serializer::contextual_property_serializer(ir, ctx, ty, &annotated)
+                    .unwrap_or_else(|| element_serializer::unsupported_element_serializer(ir, *ty)),
+            )
+        } else {
+            declared_serializer_of(ctx, ir, self.serialized_class, name).map(|serializer| {
+                build_field_serializer_instance(
+                    ir,
+                    ctx,
+                    serializer,
+                    *ty,
+                    self.type_parameter_serializers,
+                    &annotated,
+                )
+            })
+        };
+        if let Some(serializer) = selected {
+            return Coding::Serializer {
+                serializer,
+                nullable: ty.is_nullable(),
+            };
+        }
         if !ty.is_nullable() {
             if let Some((enc_name, enc_desc, dec_name, dec_desc)) = inline_prim_methods(ty) {
                 return Coding::Direct {
@@ -52,7 +80,6 @@ impl ValueClassBody<'_> {
         // The serializer of the NON-NULL type: nullability is the coding call's, not a
         // `.nullable` wrapper's.
         let element = ty.non_null();
-        let annotated = declared_type_spelling(ctx, ir, self.serialized_class, name);
         let serializer = element_serializer::element_serializer_expr_in(
             ir,
             ctx,
@@ -167,8 +194,10 @@ impl ValueClassBody<'_> {
             value: Some(guarded),
         });
         ir.logical_types.insert(call, Ty::Unit);
-        let header_line = ir.classes[self.serialized_class as usize].decl_line;
-        if header_line != 0 {
+        let class = &ir.classes[self.serialized_class as usize];
+        let (start_line, header_line) = (class.decl_start_line, class.decl_line);
+        // On a one-line declaration the implicit return is already on that line.
+        if header_line != 0 && header_line != start_line {
             ir.fn_close_lines.insert(self.function, header_line);
         }
         let body = ir.add_expr(IrExpr::Block {

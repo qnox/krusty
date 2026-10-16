@@ -151,10 +151,15 @@ impl GeneratedSerializerMembers {
                 self.serialize,
                 &SERIALIZE_PARAMETER_NAMES,
                 metadata("serialize"),
-                IrGeneratedDeclarationDebug::declaration_line_with_fallthrough(
-                    owner_line,
-                    owner_end_line,
-                ),
+                // On a one-line declaration the implicit return is already on that line.
+                if owner_end_line == owner_line {
+                    line
+                } else {
+                    IrGeneratedDeclarationDebug::declaration_line_with_fallthrough(
+                        owner_line,
+                        owner_end_line,
+                    )
+                },
             ),
         ];
         if generic {

@@ -254,3 +254,94 @@ fn an_unsigned_element_serializer_is_kotlincs() {
         "Filter$$serializer",
     );
 }
+
+/// A carrier whose property names its serializer, by `with =`, by `@Contextual`, or on the type
+/// itself. The last two declarations each sit on one line, as the annotation does.
+const OVERRIDE_MODEL: &str = "import kotlinx.serialization.Contextual\n\
+    import kotlinx.serialization.KSerializer\n\
+    import kotlinx.serialization.Serializable\n\
+    import kotlinx.serialization.descriptors.PrimitiveKind\n\
+    import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor\n\
+    import kotlinx.serialization.encoding.Decoder\n\
+    import kotlinx.serialization.encoding.Encoder\n\
+    \n\
+    object Upper : KSerializer<String> {\n\
+    \x20   override val descriptor = PrimitiveSerialDescriptor(\"Upper\", PrimitiveKind.STRING)\n\
+    \x20   override fun serialize(encoder: Encoder, value: String) =\n\
+    \x20       encoder.encodeString(value.uppercase())\n\
+    \x20   override fun deserialize(decoder: Decoder): String = decoder.decodeString().lowercase()\n\
+    }\n\
+    \n\
+    @Serializable\n\
+    @JvmInline\n\
+    value class Shout(\n\
+    \x20   @Serializable(with = Upper::class) val text: String,\n\
+    )\n\
+    \n\
+    @Serializable\n\
+    @JvmInline\n\
+    value class Resolved(\n\
+    \x20   @Contextual val text: String?,\n\
+    )\n\
+    \n\
+    @Serializable @JvmInline value class Typed(val text: @Serializable(with = Upper::class) String)\n\
+    @Serializable class Point(val x: Int)\n";
+
+const OVERRIDE_MAIN: &str = "import kotlinx.serialization.json.Json\n\
+    fun box(): String {\n\
+    \x20   val shout = Json.encodeToString(Shout.serializer(), Shout(\"ab\"))\n\
+    \x20   val shoutBack = Json.decodeFromString(Shout.serializer(), shout)\n\
+    \x20   val resolved = Json.encodeToString(Resolved.serializer(), Resolved(\"cd\"))\n\
+    \x20   val resolvedBack = Json.decodeFromString(Resolved.serializer(), resolved)\n\
+    \x20   val typed = Json.encodeToString(Typed.serializer(), Typed(\"ef\"))\n\
+    \x20   val typedBack = Json.decodeFromString(Typed.serializer(), typed)\n\
+    \x20   return shout + \" \" + shoutBack.text + \" \" + resolved + \" \" + resolvedBack.text +\n\
+    \x20       \" \" + typed + \" \" + typedBack.text\n\
+    }\n";
+
+#[test]
+fn a_carrier_serializer_named_by_its_property_is_used() {
+    assert_eq!(
+        both_compilers_box_files(
+            &[("Model.kt", OVERRIDE_MODEL), ("Main.kt", OVERRIDE_MAIN)],
+            "value_class_carrier_serializers"
+        ),
+        "\"AB\" ab \"cd\" cd \"EF\" ef"
+    );
+}
+
+#[test]
+fn a_property_serializer_on_the_carrier_is_kotlincs() {
+    assert_class_matches_kotlinc_in(
+        "SerializableValueClassShout",
+        OVERRIDE_MODEL,
+        "Shout$$serializer",
+    );
+}
+
+#[test]
+fn a_contextual_carrier_is_kotlincs() {
+    assert_class_matches_kotlinc_in(
+        "SerializableValueClassResolved",
+        OVERRIDE_MODEL,
+        "Resolved$$serializer",
+    );
+}
+
+#[test]
+fn a_one_line_value_class_serializer_is_kotlincs() {
+    assert_class_matches_kotlinc_in(
+        "SerializableValueClassTyped",
+        OVERRIDE_MODEL,
+        "Typed$$serializer",
+    );
+}
+
+#[test]
+fn a_one_line_class_serializer_is_kotlincs() {
+    assert_class_matches_kotlinc_in(
+        "SerializableValueClassPoint",
+        OVERRIDE_MODEL,
+        "Point$$serializer",
+    );
+}
