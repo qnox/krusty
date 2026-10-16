@@ -26,5 +26,6 @@ impl<'a> Checker<'a> {
             self.expr_expected(scope, body, result)
         };
         self.expect_assignable(result, actual, self.span(body), "getter body");
+        self.finish_executable_root(body);
     }
 }
