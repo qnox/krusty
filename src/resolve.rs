@@ -59,7 +59,7 @@ pub(crate) use actualization_names::actualization_type_bindings;
 pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
 pub(crate) use checked_annotation_publication::publish_checked_declaration_annotations;
 pub(crate) use checked_constant_publication::publish_checked_compile_time_constants;
-pub(crate) use lexical_policies::publish_file_lexical_policies;
+pub(crate) use lexical_policies::publish_file_annotations;
 pub(crate) use type_use_annotation_publication::publish_checked_type_use_annotations;
 mod body_local_property_selection;
 mod call_constraints;

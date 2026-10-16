@@ -1141,7 +1141,7 @@ impl ClassWriter {
                 self.cp.utf8(parameter);
             }
         }
-        let _ = self.encode_declaration_annotations(annotations);
+        let _ = self.encode_method_annotations(annotations);
         for a in ann_types {
             if let Some(a) = self.written_annotation(a) {
                 self.cp.utf8(a);

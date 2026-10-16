@@ -199,7 +199,7 @@ pub(super) fn reference_enclosure(
 #[derive(Clone, Copy)]
 pub(super) struct Facades<'a> {
     pub(super) current: &'a str,
-    pub(super) stems: &'a [String],
+    pub(super) facades: &'a [String],
 }
 
 fn realize_adapter_reference(
@@ -312,7 +312,7 @@ fn realize_adapter_reference(
                 }
                 (crate::ir::IrStaticPlacement::Package, None) => (
                     Some(
-                        super::module_calls::facade_for(declaration.source, facades.stems)
+                        super::module_calls::facade_for(declaration.source, facades.facades)
                             .ok_or(FunctionReferenceRealizationTarget::Module(target))?,
                     ),
                     true,

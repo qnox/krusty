@@ -82,12 +82,33 @@ impl ClassWriter {
         if !self.methods.iter().any(|m| m.name == n && m.desc == d) {
             return;
         }
-        let (vis, invis) = self.encode_declaration_annotations(annotations);
+        let (vis, invis) = self.encode_method_annotations(annotations);
         if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
             m.visible_anns = vis;
             // A DECLARED annotation precedes the compiler's own `@NotNull`/`@Nullable` on the
             // return, whichever order the two setters ran in — kotlinc writes the user's first.
             m.invisible_anns.splice(0..0, invis);
         }
+    }
+
+    /// Encode a method's retained annotations: every visible one, then every invisible one. kotlinc
+    /// buffers a method in a tree node that replays its annotations attribute by attribute, so the
+    /// constants intern in that order rather than in declaration order as a class's do.
+    pub(super) fn encode_method_annotations(
+        &mut self,
+        annotations: &crate::ir::DeclarationAnnotations,
+    ) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        use crate::types::AnnotationRetention::{Binary, Source};
+        let mut encode = |visible: bool| -> Vec<Vec<u8>> {
+            annotations
+                .iter()
+                .filter(|retained| {
+                    retained.retention != Source && (retained.retention == Binary) != visible
+                })
+                .map(|retained| self.encode_annotation(&retained.annotation))
+                .collect()
+        };
+        let visible = encode(true);
+        (visible, encode(false))
     }
 }
