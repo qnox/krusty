@@ -849,11 +849,21 @@ impl BodyLowering<'_> {
         // declaration's check. Clone the implementation when this expansion fixes a type it uses.
         let mut escaping_copies = copies.clone();
         escaping_copies.extend(default_copies);
+        let anonymous_owned_substitution_edges =
+            escaping_anonymous::owned_substituted_lambda_capture_edges(
+                self.ir,
+                escaping_copies
+                    .iter()
+                    .filter(|(source, _)| !protected.contains(source))
+                    .map(|(_, copy)| *copy),
+                &substituted_inline_lambdas,
+            );
         let escaping_lambda_plan = escaping_lambda::plan(
             self.ir,
             &escaping_copies,
             &protected,
             &substituted_inline_lambdas,
+            &anonymous_owned_substitution_edges,
             &reified_bindings,
         )?;
         // A function-value conversion between an inline parameter and its lambda is a

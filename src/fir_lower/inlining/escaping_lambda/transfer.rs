@@ -33,6 +33,7 @@ pub(in crate::fir_lower::inlining) fn plan(
     copies: &[(ExprId, ExprId)],
     protected: &HashSet<ExprId>,
     substituted_inline_lambdas: &HashSet<ExprId>,
+    anonymous_owned_substitution_edges: &HashSet<(ExprId, ExprId)>,
     reified_bindings: &HashMap<String, Ty>,
 ) -> Option<EscapingLambdaPlan> {
     let mut decisions = HashMap::<u32, bool>::default();
@@ -40,6 +41,10 @@ pub(in crate::fir_lower::inlining) fn plan(
     let mut requests = HashMap::<crate::ir::FunId, SpecializationRequest>::default();
     let mut visiting = HashSet::default();
     let mut roots = Vec::new();
+    let anonymous_owned_lambdas = anonymous_owned_substitution_edges
+        .iter()
+        .map(|(constructor_lambda, _)| *constructor_lambda)
+        .collect::<HashSet<_>>();
     let mut lambdas = copies
         .iter()
         .copied()
@@ -60,6 +65,17 @@ pub(in crate::fir_lower::inlining) fn plan(
     lambdas.sort_unstable_by_key(|&(_, expression)| expression);
     lambdas.dedup_by_key(|(_, expression)| *expression);
     for (_, copy) in lambdas {
+        // A substituted lambda that owns caller captures stays a function value. The exact
+        // declaration lambda whose anonymous-object constructor owns a substituted capture is also
+        // handled there: anonymous specialization either retains the supplied closure or consumes
+        // a capture-free one in the copied methods. Only a capture-free substitution outside that
+        // ownership edge can enter declaration-closure transfer.
+        if (substituted_inline_lambdas.contains(&copy)
+            && matches!(ir.expr(copy), IrExpr::Lambda { captures, .. } if !captures.is_empty()))
+            || anonymous_owned_lambdas.contains(&copy)
+        {
+            continue;
+        }
         let IrExpr::Lambda {
             impl_fn, captures, ..
         } = ir.expr(copy)
@@ -69,7 +85,10 @@ pub(in crate::fir_lower::inlining) fn plan(
         let inline_captures = captures
             .iter()
             .enumerate()
-            .filter(|(_, capture)| substituted_inline_lambdas.contains(capture))
+            .filter(|(_, capture)| {
+                substituted_inline_lambdas.contains(capture)
+                    && !anonymous_owned_substitution_edges.contains(&(copy, **capture))
+            })
             .map(|(parameter, &lambda)| InlineCapture { parameter, lambda })
             .collect::<Vec<_>>();
         let planned = plan_function(
@@ -1335,6 +1354,7 @@ mod tests {
             &[(copy, copy)],
             &HashSet::default(),
             &HashSet::from_iter([actual]),
+            &HashSet::default(),
             &HashMap::default(),
         )
         .is_none());
@@ -1356,6 +1376,119 @@ mod tests {
             ir.functions[escaping_implementation as usize].body,
             Some(invocation)
         );
+        let owned_edges = HashSet::from_iter([(copy, actual)]);
+        let captured_plan = plan(
+            &ir,
+            &[(copy, copy)],
+            &HashSet::default(),
+            &HashSet::from_iter([actual]),
+            &owned_edges,
+            &HashMap::default(),
+        )
+        .expect("anonymous specialization owns the retained constructor capture");
+        assert!(captured_plan.roots.is_empty());
+        assert!(captured_plan.functions.is_empty());
+    }
+
+    #[test]
+    fn captured_substituted_lambda_stays_materialized_while_capture_free_copy_specializes() {
+        let mut ir = crate::ir::IrFile::default();
+        let anonymous = crate::types::type_name("sample/InlineAnonymous");
+        let mut anonymous_class = crate::ir::IrClass::synthetic(anonymous);
+        anonymous_class.is_anonymous_object = true;
+        ir.add_class(anonymous_class);
+        let body = ir.add_expr(IrExpr::UnitInstance);
+        let implementation = ir.add_fun(IrFunction {
+            name: "supplied".to_string(),
+            params: vec![Ty::obj_name(anonymous)],
+            ret: Ty::Unit,
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let captured_value = ir.add_expr(IrExpr::GetValue(0));
+        let supplied = ir.add_expr(IrExpr::Lambda {
+            impl_fn: implementation,
+            arity: 0,
+            captures: vec![captured_value],
+            sam: None,
+            inline_body: Some(body),
+        });
+
+        let captured_substitution_plan = plan(
+            &ir,
+            &[(supplied, supplied)],
+            &HashSet::default(),
+            &HashSet::from_iter([supplied]),
+            &HashSet::default(),
+            &HashMap::default(),
+        )
+        .expect("a caller-capturing substituted lambda remains materialized");
+
+        assert!(captured_substitution_plan.roots.is_empty());
+        assert!(captured_substitution_plan.functions.is_empty());
+        assert_eq!(ir.functions[implementation as usize].body, Some(body));
+        let IrExpr::Lambda {
+            impl_fn,
+            captures,
+            inline_body,
+            ..
+        } = ir.expr(supplied)
+        else {
+            panic!("the substituted lambda remains a lambda")
+        };
+        assert_eq!(*impl_fn, implementation);
+        assert_eq!(captures, &[captured_value]);
+        assert_eq!(*inline_body, Some(body));
+
+        let capture_free = ir.add_expr(IrExpr::Lambda {
+            impl_fn: implementation,
+            arity: 1,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: Some(body),
+        });
+        let plan = plan(
+            &ir,
+            &[(capture_free, capture_free)],
+            &HashSet::default(),
+            &HashSet::from_iter([capture_free]),
+            &HashSet::default(),
+            &HashMap::default(),
+        )
+        .expect("the capture-free substituted lambda remains transferable");
+        assert_eq!(plan.roots.len(), 1);
+        assert_eq!(plan.functions, HashSet::from_iter([implementation]));
+
+        let suppressions = apply(
+            &mut ir,
+            plan,
+            &HashMap::default(),
+            &HashMap::default(),
+            crate::fir::DeclarationId::from_raw(0),
+            None,
+            false,
+            "caller",
+            implementation,
+            None,
+            crate::fir::SourceFileId::from_raw(0),
+            crate::fir::CallableId::from_raw(0),
+            "inlineCall",
+        );
+        assert!(suppressions.is_empty());
+        assert_eq!(ir.functions[implementation as usize].body, Some(body));
+        let IrExpr::Lambda {
+            impl_fn: specialized,
+            ..
+        } = ir.expr(capture_free)
+        else {
+            panic!("the capture-free substitution remains a lambda")
+        };
+        assert_ne!(*specialized, implementation);
+        assert!(ir.functions[*specialized as usize].body.is_some());
+        assert!(!ir.inline_only_fns.contains(&implementation));
+        assert!(!ir.inline_only_fns.contains(specialized));
     }
 
     #[test]
@@ -1364,6 +1497,22 @@ mod tests {
         let anonymous = crate::types::type_name("sample/InlineAnonymous");
         let mut anonymous_class = crate::ir::IrClass::synthetic(anonymous);
         anonymous_class.is_anonymous_object = true;
+        anonymous_class.ctor_args.push(crate::ir::IrCtorArg {
+            name: None,
+            context_kind: crate::types::ContextParameterKind::None,
+            ty: Ty::fun(Vec::new(), Ty::Unit),
+            declared_ty: None,
+            is_field: true,
+            field_index: Some(0),
+            has_default: false,
+            is_vararg: false,
+            type_param: None,
+            check: None,
+            anonymous_super_forward: None,
+            capture: None,
+            provenance: crate::ir::IrCtorParameterProvenance::Capture,
+            capture_identity: None,
+        });
         ir.add_class(anonymous_class);
 
         let nested_implementation = ir.add_fun(IrFunction {
@@ -1385,17 +1534,18 @@ mod tests {
         let actual_body = ir.add_expr(IrExpr::UnitInstance);
         let actual_implementation = ir.add_fun(IrFunction {
             name: "actual".to_string(),
-            params: Vec::new(),
+            params: vec![Ty::Int],
             ret: Ty::Unit,
             body: Some(actual_body),
             is_static: true,
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
+        let actual_capture = ir.add_expr(IrExpr::GetValue(0));
         let actual = ir.add_expr(IrExpr::Lambda {
             impl_fn: actual_implementation,
             arity: 0,
-            captures: Vec::new(),
+            captures: vec![actual_capture],
             sam: None,
             inline_body: Some(actual_body),
         });
@@ -1424,14 +1574,25 @@ mod tests {
             arity: 0,
             captures: vec![actual],
             sam: None,
-            inline_body: None,
+            inline_body: Some(outer_body),
+        });
+        ir.logical_types.insert(copy, Ty::obj_name(anonymous));
+        let construction = ir.add_expr(IrExpr::New {
+            internal: anonymous,
+            args: vec![copy],
+            ctor_params: None,
+            ctor_desc: None,
+            external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
         });
 
         assert!(plan(
             &ir,
-            &[(copy, copy)],
+            &[(copy, copy), (construction, construction)],
             &HashSet::default(),
             &HashSet::from_iter([actual]),
+            &HashSet::default(),
             &HashMap::default(),
         )
         .is_none());
@@ -1441,6 +1602,25 @@ mod tests {
             ir.functions[outer_implementation as usize].body,
             Some(outer_body)
         );
+
+        let owned_edges =
+            super::super::super::escaping_anonymous::owned_substituted_lambda_capture_edges(
+                &ir,
+                [construction],
+                &HashSet::from_iter([actual]),
+            );
+        assert_eq!(owned_edges, HashSet::from_iter([(copy, actual)]));
+        let plan = plan(
+            &ir,
+            &[(copy, copy), (construction, construction)],
+            &HashSet::default(),
+            &HashSet::from_iter([actual]),
+            &owned_edges,
+            &HashMap::default(),
+        )
+        .expect("anonymous specialization owns the nested constructor lambda");
+        assert!(plan.roots.is_empty());
+        assert!(plan.functions.is_empty());
     }
 
     #[test]
@@ -1552,6 +1732,7 @@ mod tests {
             &[(first_copy, first_copy), (same_copy, same_copy)],
             &HashSet::default(),
             &substituted,
+            &HashSet::default(),
             &HashMap::default(),
         )
         .is_none());
@@ -1560,6 +1741,7 @@ mod tests {
             &[(first_copy, first_copy), (different_copy, different_copy)],
             &HashSet::default(),
             &substituted,
+            &HashSet::default(),
             &HashMap::default(),
         )
         .is_none());
