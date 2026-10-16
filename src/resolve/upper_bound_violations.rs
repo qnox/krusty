@@ -519,6 +519,11 @@ impl<'a> Checker<'a> {
                 .zip(header.interfaces.iter())
                 .enumerate()
             {
+                self.record_finalized_supertype(
+                    reference,
+                    resolved.get(),
+                    spellings.supertype(index),
+                );
                 self.check_finalized_type_bounds(
                     reference,
                     resolved.get(),
@@ -542,6 +547,7 @@ impl<'a> Checker<'a> {
                 fun_params: Vec::new(),
                 fun_context_count: 0,
             };
+            self.record_finalized_supertype(&reference, superclass.get(), &spellings.superclass);
             self.check_finalized_type_bounds(&reference, superclass.get(), &spellings.superclass);
         }
     }
@@ -572,7 +578,11 @@ impl<'a> Checker<'a> {
                         .and_then(|property| property.extension_receiver)
                 });
             if let Some(finalized) = finalized {
-                self.check_finalized_type_bounds(reference, finalized.get(), &spellings.receiver);
+                self.record_finalized_declaration_type(
+                    reference,
+                    finalized.get(),
+                    &spellings.receiver,
+                );
             }
         }
         let Some(signature) = index.signature(declaration) else {
@@ -585,16 +595,20 @@ impl<'a> Checker<'a> {
                 .enumerate()
             {
                 let finalized = finalized.get();
-                let declared = if *is_vararg {
-                    finalized.non_null().array_read_elem().unwrap_or(finalized)
-                } else {
-                    finalized
-                };
-                self.check_finalized_type_bounds(reference, declared, spellings.param(position));
+                self.record_finalized_parameter_type(
+                    reference,
+                    *is_vararg,
+                    finalized,
+                    spellings.param(position),
+                );
             }
         }
         if let Some(reference) = ret {
-            self.check_finalized_type_bounds(reference, signature.result.get(), &spellings.ret);
+            self.record_finalized_declaration_type(
+                reference,
+                signature.result.get(),
+                &spellings.ret,
+            );
         }
     }
 

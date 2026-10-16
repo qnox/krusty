@@ -11,7 +11,10 @@ use crate::ast::TypeRef;
 use crate::diag::{DiagnosticIdentity, Span};
 use crate::types::{Ty, TypeName};
 
-use super::{definitely_non_null_ty, inaccessible_classifier_message, Checker, CheckerScope};
+use super::{
+    definitely_non_null_ty, function_type_ref_shape, inaccessible_classifier_message, Checker,
+    CheckerScope,
+};
 
 /// The type arguments one use applies an alias to.
 #[derive(Clone, Copy)]
@@ -156,13 +159,81 @@ fn generated_star_argument(ty: Ty) -> bool {
     }
 }
 
+/// Exact alias template selected before substitution.
+#[derive(Clone)]
+pub(super) struct SelectedAliasApplication {
+    pub(super) formals: Vec<String>,
+    pub(super) expansion: Ty,
+    pub(super) expansion_spelling: crate::spelling::Spelled,
+}
+
 /// One alias template applied to the arguments of a single use.
 pub(super) struct AppliedAlias {
     pub(super) ty: Ty,
     pub(super) conflicts: Vec<Span>,
+    /// A later diagnostic walk consumes this semantic handoff instead of resolving the spelling.
+    pub(super) selected: Option<SelectedAliasApplication>,
 }
 
 impl Checker<'_> {
+    /// Retain the exact alias selected for one type occurrence while the authoritative scope walk
+    /// is still in hand. The class-variance post-check reads this bounded side table.
+    pub(super) fn retain_selected_alias_application(
+        &mut self,
+        reference: &TypeRef,
+        applied: &AppliedAlias,
+    ) {
+        if reference.is_import() {
+            return;
+        }
+        if let Some(selected) = &applied.selected {
+            self.selected_type_alias_applications
+                .insert((reference.span.lo, reference.span.hi), selected.clone());
+        }
+    }
+
+    /// Restore alias provenance for a declaration occurrence whose semantic type and spelling were
+    /// finalized by Pass 1. `Spelled::alias` is the qualified identity selected there, so this walk
+    /// never repeats scope lookup from a source name.
+    pub(super) fn retain_finalized_alias_applications(
+        &mut self,
+        reference: &TypeRef,
+        spelled: &crate::spelling::Spelled,
+    ) {
+        self.retain_finalized_type_use_annotations(reference, spelled);
+        if let Some(identity) = spelled.alias {
+            if let Some(binding) = self.source_alias_binding(identity) {
+                self.selected_type_alias_applications.insert(
+                    (reference.span.lo, reference.span.hi),
+                    SelectedAliasApplication {
+                        formals: binding.formals,
+                        expansion: binding.expansion,
+                        expansion_spelling: binding.expansion_spelling,
+                    },
+                );
+            }
+        }
+
+        let references = if function_type_ref_shape(reference).is_some() {
+            reference
+                .fun_params
+                .iter()
+                .chain(reference.arg.as_deref())
+                .collect::<Vec<_>>()
+        } else {
+            reference.targs.iter().collect::<Vec<_>>()
+        };
+        if spelled.alias.is_some() {
+            for (child, (_, child_spelling)) in references.iter().zip(&spelled.alias_args) {
+                self.retain_finalized_alias_applications(child, child_spelling);
+            }
+        } else {
+            for (child, child_spelling) in references.iter().zip(&spelled.args) {
+                self.retain_finalized_alias_applications(child, child_spelling);
+            }
+        }
+    }
+
     /// Resolve a reference to a scoped source `typealias` by substituting the use's type arguments
     /// into the collected expansion. Same-file and cross-file spellings use this one semantic
     /// operation.
@@ -180,23 +251,26 @@ impl Checker<'_> {
                 .map(|ty| AppliedAlias {
                     ty,
                     conflicts: Vec::new(),
+                    selected: None,
                 });
         }
         if let Some(alias) = scope.type_alias(&reference.name) {
-            return Some(self.alias_application_ty(
+            return Some(self.alias_application_ty_with_spelling(
                 scope,
                 alias.formals,
                 alias.expansion,
+                alias.expansion_spelling,
                 &reference.name,
                 AliasArguments::of(reference),
                 reference.span,
             ));
         }
         if let Some(alias) = self.qualified_body_local_type_alias(scope, &reference.name) {
-            return Some(self.alias_application_ty(
+            return Some(self.alias_application_ty_with_spelling(
                 scope,
                 alias.formals,
                 alias.expansion,
+                alias.expansion_spelling,
                 &reference.name,
                 AliasArguments::of(reference),
                 reference.span,
@@ -222,13 +296,22 @@ impl Checker<'_> {
         arguments: AliasArguments<'_>,
         span: Span,
     ) -> AppliedAlias {
-        let Some((formals, expansion)) = self.source_alias_expansion(identity) else {
+        let Some(binding) = self.source_alias_binding(identity) else {
             return AppliedAlias {
                 ty: Ty::Error,
                 conflicts: Vec::new(),
+                selected: None,
             };
         };
-        self.alias_application_ty(scope, formals, expansion, display_name, arguments, span)
+        self.alias_application_ty_with_spelling(
+            scope,
+            binding.formals,
+            binding.expansion,
+            binding.expansion_spelling,
+            display_name,
+            arguments,
+            span,
+        )
     }
 
     pub(super) fn alias_application_ty(
@@ -240,6 +323,32 @@ impl Checker<'_> {
         arguments: AliasArguments<'_>,
         span: Span,
     ) -> AppliedAlias {
+        self.alias_application_ty_with_spelling(
+            scope,
+            formals,
+            expansion,
+            Default::default(),
+            display_name,
+            arguments,
+            span,
+        )
+    }
+
+    pub(super) fn alias_application_ty_with_spelling(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        formals: Vec<String>,
+        expansion: Ty,
+        expansion_spelling: crate::spelling::Spelled,
+        display_name: &str,
+        arguments: AliasArguments<'_>,
+        span: Span,
+    ) -> AppliedAlias {
+        let selected = SelectedAliasApplication {
+            formals: formals.clone(),
+            expansion,
+            expansion_spelling,
+        };
         let arguments = match arguments {
             AliasArguments::Written(arguments) => arguments,
             AliasArguments::StarProjected => {
@@ -249,6 +358,7 @@ impl Checker<'_> {
                         crate::symbol_source::SymbolSource::classifier(&self.fed_source(), owner)
                     }),
                     conflicts: Vec::new(),
+                    selected: Some(selected),
                 };
             }
         };
@@ -265,6 +375,7 @@ impl Checker<'_> {
             return AppliedAlias {
                 ty: Ty::Error,
                 conflicts: Vec::new(),
+                selected: Some(selected),
             };
         }
         if formals.is_empty() {
@@ -272,6 +383,7 @@ impl Checker<'_> {
             return AppliedAlias {
                 ty: expansion,
                 conflicts: Vec::new(),
+                selected: Some(selected),
             };
         }
         // Preserve use-site projections during substitution. Alias parameters cannot declare a
@@ -308,6 +420,7 @@ impl Checker<'_> {
         AppliedAlias {
             ty: resolved,
             conflicts,
+            selected: Some(selected),
         }
     }
 
