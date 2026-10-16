@@ -1728,7 +1728,20 @@ mod tests {
     }
 
     fn plugin_context() -> PluginContext {
-        PluginContext::default().with_target_type_descriptor(jvm_type_descriptor)
+        // These direct body-phase fixtures model an older runtime whose four overridden
+        // declarations carry no return-value status. A real compilation publishes this exact
+        // Pass-1 selection before plugin declaration generation; keep the same contract explicit
+        // here rather than letting the body phase invent a default.
+        PluginContext::default()
+            .with_target_type_descriptor(jvm_type_descriptor)
+            .with_generated_serializer_statuses(
+                crate::types::SerializationGeneratedMemberStatuses::new(
+                    crate::types::ReturnValueStatus::Unspecified,
+                    crate::types::ReturnValueStatus::Unspecified,
+                    crate::types::ReturnValueStatus::Unspecified,
+                    crate::types::ReturnValueStatus::Unspecified,
+                ),
+            )
     }
 
     #[test]

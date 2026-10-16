@@ -5,7 +5,7 @@ use super::{ReturnValueStatus, Ty, TypeName, Visibility};
 /// Return-value statuses of the four overrides every serialization-plugin generated serializer
 /// declares. Pass 1 selects the overridden declarations from their complete semantic shapes; the
 /// closed result crosses common lowering without retaining a provider or reopening member lookup.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SerializationGeneratedMemberStatuses {
     pub(crate) serialize: ReturnValueStatus,
     pub(crate) deserialize: ReturnValueStatus,

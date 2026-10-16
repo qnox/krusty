@@ -1403,7 +1403,7 @@ where
     let pending_streamed = if streamed_index.failures.is_empty() {
         let mut index = streamed_index.index;
         if index.has_generated_classifier_purpose(
-            crate::types::GeneratedClassifierPurpose::SerializationSerializer,
+            crate::fir::GeneratedClassifierPurpose::SerializationSerializer,
         ) {
             match crate::resolve::resolve_serialization_generated_member_statuses(
                 &*symbols.libraries,
