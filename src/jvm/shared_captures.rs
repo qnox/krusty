@@ -148,7 +148,7 @@ pub(crate) fn restore_erased_escaping_capture_holders(ir: &mut IrFile) {
 }
 
 fn restore_body(ir: &mut IrFile, body: ExprId) {
-    let mut declared: HashMap<u32, (Ty, Vec<ExprId>)> = HashMap::new();
+    let mut declared: HashMap<u32, (Ty, Vec<ExprId>)> = HashMap::default();
     let mut captured: Vec<(u32, Option<(u32, u32)>, Ty)> = Vec::new();
     let mut reads: Vec<(ExprId, ExprId, Ty)> = Vec::new();
     let mut writes: Vec<(ExprId, ExprId, Ty)> = Vec::new();
@@ -165,7 +165,7 @@ fn restore_body(ir: &mut IrFile, body: ExprId) {
     // parameter is the holder that edge requires. The semantic type recorded when the capture
     // was built is not that holder: value-class lowering may already have specialized both the
     // cell and the parameter to `IntRef` while the record still names the value class.
-    let mut captures_by_slot: HashMap<u32, Vec<(Option<(u32, u32)>, Ty)>> = HashMap::new();
+    let mut captures_by_slot: HashMap<u32, Vec<(Option<(u32, u32)>, Ty)>> = HashMap::default();
     for (slot, parameter, required) in captured {
         captures_by_slot
             .entry(slot)
