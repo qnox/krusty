@@ -441,6 +441,33 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: klib-test-bins
+      - name: generate one-off KLIB implementation inventory ${{ matrix.version }}
+        # Remove this step and its upload after committing the initial exact backlogs. It reuses the
+        # existing conformance matrix and test binary; it creates no permanent bless lane or build.
+        if: matrix.target != 'jvm'
+        env:
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
+          KRUSTY_REQUIRE_KLIB_IMPLEMENTATION_TARGETS: ${{ matrix.target == 'native' && 'native' || 'wasm-js,wasm-wasi' }}
+          KRUSTY_SHRINK_UNCOVERED_IMPLEMENTATIONS: "1"
+          KRUSTY_TEST_TIMEOUT_SECONDS: "600"
+        run: |
+          set -euo pipefail
+          chmod +x klib-unit-tests
+          export KRUSTY_LANGUAGE_VERSION="${{ matrix.version }}"
+          if [ "${{ matrix.target }}" = native ]; then
+            export KRUSTY_KOTLIN_NATIVE="$(just kotlin-native "${{ matrix.version }}")"
+          else
+            export KRUSTY_KOTLINC="$(just kotlinc "${{ matrix.version }}")"
+          fi
+          timeout 600s ./klib-unit-tests \
+            klib_libraries::tests::implementation_coverage:: --nocapture
+      - name: upload one-off KLIB implementation inventory ${{ matrix.version }}
+        if: matrix.target != 'jvm'
+        uses: actions/upload-artifact@v7
+        with:
+          name: klib-implementation-inventory-${{ matrix.target }}-${{ matrix.version }}
+          path: tests/klib_uncovered_implementations/**/${{ matrix.version }}.txt
+          if-no-files-found: error
       # One box run writes both reports over the same applicable cases: pct.txt is the case report
       # "<pct> <passed> <applicable>" and jvm-byte-equality.txt the JVM byte report
       # "<pct> <matched> <total>" (.class bytes). Printing their badge fields validates each and
