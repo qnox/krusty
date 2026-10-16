@@ -16,13 +16,15 @@
 //! around it.
 //!
 //! A `$default` bridge's mask header is expanded for the call's constant masks before the body is
-//! inlined ([`expand_default_masks`]). Default lambdas and `finally` rewriting are later stages of
-//! the port (see "JVM unified inliner" in `docs/IMPLEMENTATION_PLAN.md`). Bodies on
-//! this route do not fall back to the legacy byte splicer.
+//! inlined ([`expand_default_masks`]), and an omitted inline lambda parameter's default lambda is
+//! inlined from its class ([`load_default_lambda`]). `finally` rewriting is a later stage of the
+//! port (see "JVM unified inliner" in `docs/IMPLEMENTATION_PLAN.md`). Bodies on this route do not
+//! fall back to the legacy byte splicer.
 
 mod anonymous_object;
 mod callee_shape;
 mod class_roles;
+mod default_lambda;
 mod default_masks;
 mod finally_markers;
 mod functional_arguments;
@@ -52,7 +54,10 @@ pub(crate) use callee_shape::{
     requires_empty_stack_on_entry, unsupported_shape, UnsupportedShape,
 };
 pub(crate) use class_roles::ClassRoles;
-pub(crate) use default_masks::{expand as expand_default_masks, DefaultMasks};
+pub(crate) use default_lambda::load as load_default_lambda;
+pub(crate) use default_masks::{
+    expand as expand_default_masks, DefaultMasks, ExtractedDefaultLambda,
+};
 pub(crate) use lambda_expansion::{Lambda, SourceLines};
 pub(crate) use name_generator::ClassNameGenerators;
 pub(crate) use object_regeneration::{AnonymousObjects, ObjectLambda, RegeneratedObject};
@@ -96,6 +101,8 @@ pub(crate) enum InlineError {
     Regeneration(RegenerationError),
     /// `needClassReification` is still paired with a class whose methods use a reified parameter.
     UnreifiedClass,
+    /// An omitted parameter's default lambda is a shape the port does not inline yet.
+    DefaultLambda(&'static str),
 }
 
 /// What one call's inlining reports to its caller (kotlinc's `InliningContext`): where the body's

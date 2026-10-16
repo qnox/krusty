@@ -891,6 +891,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `@InlineOnly` is the declaration's, never the bridge's (`jvm/inliner/default_masks.rs`,
   `jvm/ir_emit/bytecode_inline_call/default_bridge.rs`). A header that is not kotlinc's shape is
   an inline error. Test: `tests/inline_default_bytes_e2e.rs`.
+- **An omitted inline lambda parameter inlines its default lambda from the dependency's lambda
+  class.** kotlinc's `extractDefaultLambdasInfo` takes each kept mask arm of an inline parameter
+  whose default is the class's singleton (`[needClassReification] getstatic C.INSTANCE [checkcast]
+  astore`): the arm's instructions and the parameter's local go, and every `invoke` of the
+  parameter becomes the class's erased `invoke` body (`DefaultLambda`). When that `invoke` is a
+  bridge, the typed `invoke` is copied into it (`inlineBridge`); the lambda object is the skipped
+  receiver, so the body's locals move down a slot, and the body gets the `$i$a$-<function>-<Class>`
+  marker. A `needClassReification` arm specializes the body for the call's reified arguments, so
+  `T::class` in the default resolves to the call's type. The body's lines take their own source-map
+  file entry (`Lib.kt lib/LibKt$f$1`). When its first line is the line in effect, a default lambda
+  in a non-`@InlineOnly` function gets the synthetic `fake.kt` line that kotlinc gives a literal
+  lambda only in an `@InlineOnly` one. The lines of a
+  deleted arm's labels are still written, two entries at one offset when nothing is left between
+  them, as ASM copies `LineNumberNode`s (`jvm/inliner/default_lambda.rs`,
+  `jvm/inliner/default_masks.rs`). A lambda class constructed with captured values is not
+  extracted yet and stays the stored object. Test: `tests/default_lambda_inlining_e2e.rs`.
 - **An inlined `Unit` lambda ends with its closing-brace `nop` before `Unit.INSTANCE`.** kotlinc's
   lambda method returns `void` with the closing brace's line on that return, and the inliner loads
   `Unit.INSTANCE` after it. The lambda's node returns `void` when every return is preceded by a
@@ -1954,7 +1970,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the real method. A top-level `inline` function's stub does not tail-call: after the mask writes, it runs
   the function body. The body's first local reuses the mask slot, so the `$i$f$` marker overwrites
   the mask. The stub records the signature line at pc 0 and the same line again on the body
-  expression after that marker. A default value whose class is narrower than the slot
+  expression after that marker. Each mask test after a default is on the signature line again,
+  and a default that needs class reification opens its own line on the `needClassReification`
+  marker, so an inliner finds the marker right before the lambda's instance load
+  (`tests/default_lambda_inlining_e2e.rs`). A default value whose class is narrower than the slot
   (`String` into `CharSequence`, a lambda class into `FunctionN`) is `checkcast` to the slot;
   `Object` and `null` are not. A default argument that is a lambda is a class (`FileKt$f$1`),
   a singleton when it captures nothing, not an `invokedynamic` — the stub is the non-inline

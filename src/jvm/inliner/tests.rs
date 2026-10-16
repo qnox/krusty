@@ -588,6 +588,7 @@ fn plus_captured() -> Lambda {
         value_class_return: None,
         captured: 0..1,
         capture_names: vec![Some("$base".to_string())],
+        default_class: None,
     }
 }
 

@@ -609,6 +609,7 @@ mod tests {
             start: 2,
             masks: vec![1],
             parameters: vec![(0, 0)],
+            inline_lambdas: Vec::new(),
         };
         assert_eq!(
             bytecode_inline_call::ensure_no_unexpanded_default_masks(None),

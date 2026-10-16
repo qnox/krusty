@@ -50,6 +50,10 @@ pub(crate) struct Lambda {
     /// regenerated object that inlines the lambda names its field after; `None` for a value the
     /// port does not name yet.
     pub capture_names: Vec<Option<String>>,
+    /// For an omitted parameter's default lambda, the dependency class it was read from: its
+    /// lines are that class's (`SourceMapCopier(parent, classSMAP, callSite)`), and one that
+    /// starts on the invoking line is separated from it as an `@InlineOnly` call's lambda is.
+    pub default_class: Option<String>,
 }
 
 impl Lambda {
@@ -76,6 +80,11 @@ pub(crate) trait SourceLines {
     /// the lambda is inlined into the caller itself, and is mapped where a regenerated object
     /// inlines it (`None` drops it).
     fn lambda(&mut self, line: u16) -> Option<u16> {
+        Some(line)
+    }
+    /// A line of a default lambda's `invoke` (`invoke_desc`) in `class`, mapped through that
+    /// class's own source map.
+    fn default_lambda(&mut self, _class: &str, _invoke_desc: &str, line: u16) -> Option<u16> {
         Some(line)
     }
 }
@@ -361,6 +370,15 @@ struct Expansion<'a> {
 }
 
 impl Expansion<'_> {
+    /// Where a line of the lambda's body stands in the caller: a default lambda's through its
+    /// class's source map, a literal's through the caller's.
+    fn lambda_line(&self, lines: &mut dyn SourceLines, line: u16) -> Option<u16> {
+        match &self.lambda.default_class {
+            Some(class) => lines.default_lambda(class, &self.lambda.node.desc, line),
+            None => lines.lambda(line),
+        }
+    }
+
     fn expand(
         &self,
         invoke_desc: &str,
@@ -405,8 +423,9 @@ impl Expansion<'_> {
             _ => None,
         });
         // An `@InlineOnly` call's code all has the call's line, so a lambda starting on that line
-        // would run into it unseen: a synthetic line keeps the two apart for the debugger.
-        if self.context.inline_only
+        // would run into it unseen: a synthetic line keeps the two apart for the debugger. A
+        // default lambda's lines are the declaration's, like the body's, outside such a call.
+        if (self.lambda.default_class.is_some() != self.context.inline_only)
             && self.current_line >= 0
             && first_line == Some(self.current_line)
         {
@@ -434,7 +453,7 @@ impl Expansion<'_> {
         for node in &inlined.nodes {
             out.nodes.push(match node {
                 Node::Label(label) => Node::Label(import.label(*label)),
-                Node::Line { line, start } => match lines.lambda(*line) {
+                Node::Line { line, start } => match self.lambda_line(lines, *line) {
                     Some(line) => Node::Line {
                         line,
                         start: import.label(*start),

@@ -402,10 +402,8 @@ impl CodeBuilder {
             return;
         }
         let pc = self.bytes.len() as u16;
-        if self.line_marks.last() != Some(&(pc, line)) {
-            self.line_marks.push((pc, line));
-            self.inlined_line_marks.push((pc, line));
-        }
+        self.line_marks.push((pc, line));
+        self.inlined_line_marks.push((pc, line));
     }
 
     /// Line marks whose provenance is an inlined body or its caller-line restoration.
@@ -652,7 +650,7 @@ mod tests {
         advance(&mut code);
         code.inlined_line(6);
         code.inlined_line(6);
-        assert_eq!(code.line_marks(), [(0, 6), (1, 6)]);
+        assert_eq!(code.line_marks(), [(0, 6), (1, 6), (1, 6)]);
     }
 
     /// The same line retained and marked again both stay. An unsigned assignment

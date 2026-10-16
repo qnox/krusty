@@ -220,7 +220,7 @@ use metadata_policy::{
 };
 use method_defaults::{
     body_has_reified_markers, emit_default_stub, emit_facade_default_stub,
-    static_default_stub_marker,
+    static_default_stub_marker, DefaultStubSource,
 };
 pub use must_inline_lambdas::mark_must_inline_lambdas;
 use must_inline_lambdas::splice_called_impls;
@@ -1605,12 +1605,14 @@ fn emit_pass(
             let defaults = ir.param_defaults(i as u32).unwrap();
             // A top-level function's `$default` marker is a plain `Object` (kotlinc's function ABI).
             emit_facade_default_stub(
-                ir,
-                i as u32,
+                DefaultStubSource {
+                    ir,
+                    fid: i as u32,
+                    defaults,
+                },
                 StaticOwner::Facade,
                 facade,
                 &mut cw,
-                defaults,
                 env,
                 Ty::obj("java/lang/Object"),
             );
@@ -2303,24 +2305,20 @@ fn emit_scheduled_member(
         if f.is_static {
             let marker = static_default_stub_marker(ir, fid);
             emit_facade_default_stub(
-                ir,
-                fid,
+                DefaultStubSource { ir, fid, defaults },
                 StaticOwner::Class(c.fq_name),
                 fq_name,
                 cw,
-                defaults,
                 env,
                 marker,
             );
         } else {
             emit_default_stub(
-                ir,
-                fid,
+                DefaultStubSource { ir, fid, defaults },
                 Some(StaticOwner::Class(c.fq_name)),
                 fq_name,
                 facade,
                 cw,
-                defaults,
                 env,
                 false,
             );
@@ -3460,13 +3458,15 @@ fn emit_interface_class(
                 // sites go to the holder's copy instead.
                 if bodies_on_interface {
                     emit_default_stub(
-                        ir,
-                        default_fid,
+                        DefaultStubSource {
+                            ir,
+                            fid: default_fid,
+                            defaults,
+                        },
                         Some(StaticOwner::Class(c.fq_name)),
                         &fq_name,
                         facade,
                         &mut cw,
-                        defaults,
                         env,
                         true,
                     );
@@ -3490,13 +3490,15 @@ fn emit_interface_class(
                         default_impls::emit_default_stub_forward(ir, default_fid, &fq_name, di);
                     } else {
                         emit_default_stub(
-                            ir,
-                            default_fid,
+                            DefaultStubSource {
+                                ir,
+                                fid: default_fid,
+                                defaults,
+                            },
                             None,
                             &fq_name,
                             facade,
                             di,
-                            defaults,
                             env,
                             true,
                         );
@@ -4000,13 +4002,11 @@ fn emit_enum_class(
                 // inheritable (an entry body subclasses it), which is why kotlinc guards the stub.
                 if let Some(defaults) = ir.declared_param_defaults(fid) {
                     emit_default_stub(
-                        ir,
-                        fid,
+                        DefaultStubSource { ir, fid, defaults },
                         Some(StaticOwner::Class(c.fq_name)),
                         &fq,
                         facade,
                         cw,
-                        defaults,
                         env,
                         false,
                     );
