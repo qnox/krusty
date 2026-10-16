@@ -412,3 +412,100 @@ fn forbidding_feature_checks_type_operators_and_callable_bounds() {
         ],
     );
 }
+
+const CALLS: &str = "\
+class B<T : Number>
+fun <T : Number> g() {}
+fun <T : Number> f(x: T) {}
+fun <T : Number> f2(x: Int) {}
+fun <T : Number> f3(x: List<T>) {}
+fun <T : Number> f4(): T = TODO()
+fun <T : Comparable<T>> cmp() {}
+class Box<T : Number>(val t: T)
+fun use() {
+    g<String>()
+    f<String>(\"\")
+    f2<String>(1)
+    f3<String>(listOf(\"\"))
+    val z = f4<String>()
+    cmp<Any>()
+    B<String>()
+    Box<String>(\"\")
+    val r = B<String>::toString
+    val l = listOf<B<String>>()
+    val m = mapOf<String, B<String>>()
+}
+";
+
+/// A call's explicit type arguments are checked against its candidate's bounds; a call that also
+/// passes value arguments reports that candidate as inapplicable at the callee.
+#[test]
+fn call_type_arguments_and_callable_references_are_checked() {
+    let function = |position: &str, owner: &str, bound: &str, actual: &str| {
+        violation(position, &format!("T (of {owner})"), bound, actual)
+    };
+    let inapplicable =
+        |position: &str, display: &str| format!("{position}: inapplicable candidate(s): {display}");
+    assert_matches_kotlinc(
+        CALLS,
+        &[],
+        &[
+            function("10:7", "fun <T : Number> g", "Number", "String"),
+            inapplicable("11:5", "fun <T : Number> f(x: T): Unit"),
+            function("11:7", "fun <T : Number> f", "Number", "String"),
+            inapplicable("12:5", "fun <T : Number> f2(x: Int): Unit"),
+            function("12:8", "fun <T : Number> f2", "Number", "String"),
+            inapplicable("13:5", "fun <T : Number> f3(x: List<T>): Unit"),
+            function("13:8", "fun <T : Number> f3", "Number", "String"),
+            function("14:16", "fun <T : Number> f4", "Number", "String"),
+            function(
+                "15:9",
+                "fun <T : Comparable<T>> cmp",
+                "Comparable<Any>",
+                "Any",
+            ),
+            b_violation("16:7", "String"),
+            inapplicable("17:5", "constructor<T : Number>(t: T): Box<T>"),
+            function("17:9", "class Box<T : Number>", "Number", "String"),
+            b_violation("18:15", "String"),
+            b_violation("19:22", "String"),
+            b_violation("20:29", "String"),
+        ],
+    );
+}
+
+const CONSTRUCTOR_CALLS: &str = "\
+class Two<T : Number>(val t: T) { constructor(s: String, t: T) : this(t) }
+class Opt<T : Number>(val t: T? = null)
+fun use() {
+    Two<String>(\"\")
+    Two<String>(\"\", \"\")
+    Opt<String>()
+    Opt<String>(null)
+}
+";
+
+/// A constructor call's explicit type arguments reject the constructor its arguments select,
+/// before those arguments are inferred against it.
+#[test]
+fn constructor_type_arguments_reject_the_selected_constructor() {
+    let two =
+        |position: &str| violation(position, "T (of class Two<T : Number>)", "Number", "String");
+    let opt =
+        |position: &str| violation(position, "T (of class Opt<T : Number>)", "Number", "String");
+    assert_matches_kotlinc(
+        CONSTRUCTOR_CALLS,
+        &[],
+        &[
+            "4:5: inapplicable candidate(s): constructor<T : Number>(t: T): Two<T>".to_string(),
+            two("4:9"),
+            "5:5: inapplicable candidate(s): constructor<T : Number>(s: String, t: T): Two<T>"
+                .to_string(),
+            two("5:9"),
+            opt("6:9"),
+            "7:5: inapplicable candidate(s): constructor<T : Number>(t: T? = ...): Opt<T>"
+                .to_string(),
+            opt("7:9"),
+        ],
+    );
+}

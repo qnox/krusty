@@ -24,6 +24,11 @@ pub(super) enum LibraryConstructorFailure {
     TypeArgumentMismatch {
         expected: Ty,
         actual: Ty,
+        classifier: TypeName,
+        /// The call's explicit type arguments, parallel to the classifier's formals.
+        explicit: Vec<Ty>,
+        /// kotlinc's rendering of the first constructor rejected by the bound.
+        constructor: String,
     },
 }
 
@@ -51,6 +56,33 @@ impl LibraryConstructorFailure {
 }
 
 impl Checker<'_> {
+    /// The bound and argument of the first of a constructor's explicit type arguments `explicit`
+    /// outside its bound, when every one of the classifier's `formals` is given explicitly.
+    pub(super) fn explicit_constructor_bound_violation(
+        &self,
+        formals: &[String],
+        signature: &crate::libraries::GenericSig,
+        explicit: &[Ty],
+    ) -> Option<(Ty, Ty)> {
+        let fully_explicit = explicit.len() == formals.len()
+            && explicit
+                .iter()
+                .all(|argument| !argument.mentions_error() && !argument.mentions_pending());
+        if !fully_explicit {
+            return None;
+        }
+        let bindings = formals
+            .iter()
+            .cloned()
+            .zip(explicit.iter().copied())
+            .collect::<crate::symbol_resolver::GSigBinds>();
+        crate::symbol_resolver::generic_binding_bound_violation(
+            signature,
+            &bindings,
+            |actual, bound| self.generic_bound_admits(actual, bound),
+        )
+    }
+
     /// Report `failure`, the reason no constructor of the called classifier accepted `call`.
     pub(super) fn report_library_constructor_failure(
         &mut self,
@@ -104,8 +136,22 @@ impl Checker<'_> {
                 };
                 self.expect_assignable(expected, actual, self.span(argument), "argument");
             }
-            LibraryConstructorFailure::TypeArgumentMismatch { expected, actual } => {
-                self.expect_assignable(expected, actual, self.span(call), "type argument");
+            LibraryConstructorFailure::TypeArgumentMismatch {
+                expected,
+                actual,
+                classifier,
+                explicit,
+                constructor,
+            } => {
+                if !self.report_explicit_constructor_type_argument_bounds(
+                    call,
+                    classifier,
+                    !args.is_empty(),
+                    &explicit,
+                    &constructor,
+                ) {
+                    self.expect_assignable(expected, actual, self.span(call), "type argument");
+                }
             }
         }
     }
