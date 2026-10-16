@@ -4,6 +4,7 @@
 mod accessor_names;
 mod aggregate_boundaries;
 mod boxed_generic_overrides;
+mod boxing_rewrites;
 mod bridge_names;
 mod bridge_parameters;
 mod bridge_realization;
@@ -23,6 +24,7 @@ mod equality;
 mod function_invocation;
 mod function_references;
 mod hidden_constructors;
+mod inherited_default_calls;
 mod inline_body_slots;
 mod interface_entries;
 mod mangled_calls;
@@ -53,9 +55,11 @@ use crate::jvm::operation_relocation::clone_below_representation_wrapper;
 use crate::jvm::physical_type::ir_ty_to_jvm;
 use crate::libraries::InlineKind;
 use crate::types::{existing_type_name, type_name, SemanticCallRole, Ty, TypeName};
+use boxing_rewrites::{box_wrap, box_wrap_nullable, to_string_wrap};
 use call_results::CallTypes;
 pub(crate) use class_annotations::class_file_annotations;
 pub(crate) use declaration_inventory::record_referenced as record_referenced_value_classes;
+pub(crate) use inherited_default_calls::InheritedDefaultStatics;
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
 pub(crate) use module_members::*;
 use operand_nullness::{operand_nonnull, operand_null_only};
@@ -137,6 +141,8 @@ pub(crate) fn lower_value_classes(
     // Subset whose stable declaration headers describe a value-class shape supported by metadata
     // emission. This is frozen before Pass 2; no sibling body or source coordinate is retained.
     module_readable_value_classes: &crate::fx_hash::HashSet<TypeName>,
+    // The static each of this file's value classes realizes an inherited interface default with.
+    inherited_default_statics: &InheritedDefaultStatics,
     bridge_adaptations: &mut crate::jvm::bridge_adaptations::BridgeAdaptations,
     override_results: &mut crate::jvm::override_results::OverrideResults,
     // What the property-reference pass already selected for each synthesized reference class.
@@ -2290,7 +2296,26 @@ pub(crate) fn lower_value_classes(
                     None
                 }
             }
-            _ => None,
+            // An interface default the receiver's value class inherits without overriding: the
+            // class realizes that fake override as a static over its carrier, which the call takes.
+            call => inherited_default_statics
+                .select(ir, call, |receiver| match repr_ctx.repr(receiver) {
+                    Repr::Unboxed(owner) | Repr::Boxed(owner) => Some(owner),
+                    Repr::NotVc => None,
+                })
+                .map(|call| Rw::ImplCall {
+                    receiver: call.receiver,
+                    owner: call.value_class,
+                    name: call.realized.name.clone(),
+                    parameters: std::iter::once(erase(&under[&call.value_class], &under))
+                        .chain(call.realized.parameters.iter().copied())
+                        .collect(),
+                    result: call.realized.result,
+                    args: call.args.into_iter().map(Some).collect(),
+                    extension_receiver: false,
+                    function: None,
+                    module_target: None,
+                }),
         };
         let rewrite = match rw {
             Some(Rw::Ctor(e)) => Some(e),
@@ -4765,101 +4790,6 @@ fn box_nullable_vc_tail(
             }
         }
     }
-}
-
-/// Replace the expr at `id` with `box-impl(<original expr at id>)`.
-/// Replace the unboxed value at `id` with `X.toString-impl(value)`.
-fn to_string_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
-    let new_id = clone_below_representation_wrapper(ir, id);
-    let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
-    ir.exprs[id as usize] = IrExpr::Call {
-        callee: Callee::Static {
-            owner: x,
-            name: "toString-impl".to_string(),
-            descriptor: format!("({})Ljava/lang/String;", desc(&u)),
-            inline: InlineKind::None,
-        },
-        dispatch_receiver: None,
-        args: vec![new_id],
-    };
-    ir.physical_types.insert(id, Ty::String);
-    // The part is still a value-class operand: its text is appended as that type, not as a String.
-    ir.logical_types.insert(id, Ty::obj_name(x));
-}
-
-fn box_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
-    let new_id = clone_below_representation_wrapper(ir, id);
-    let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
-    let d = desc(&u);
-    let owner_rendered = x.render();
-    ir.exprs[id as usize] = IrExpr::Call {
-        callee: Callee::Static {
-            owner: x,
-            name: "box-impl".to_string(),
-            descriptor: format!("({d})L{owner_rendered};"),
-            inline: InlineKind::None,
-        },
-        dispatch_receiver: None,
-        args: vec![new_id],
-    };
-    ir.physical_types.insert(id, Ty::obj_name(x));
-}
-
-/// Null-safe box: replace the expr at `id` with `{ tmp = <orig>; if (tmp == null) null else box-impl(tmp) }`
-/// — boxing a nullable (reference-underlying) value class without hitting the ctor null-check on `null`.
-/// A carrier recorded physically nullable (a decoded `Int?` for `X(Int)`) is held as that nullable
-/// value, so the test sees its null before `box-impl` takes the primitive.
-fn box_wrap_nullable(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under, slot: u32) {
-    let nullable_carrier = ir
-        .physical_types
-        .get(&id)
-        .is_some_and(|ty| ty.is_nullable());
-    let orig_id = clone_below_representation_wrapper(ir, id);
-    let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
-    let var = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::Variable {
-        index: slot,
-        ty: if nullable_carrier { Ty::nullable(u) } else { u },
-        init: Some(orig_id),
-        named: false,
-    });
-    let get_for_test = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::GetValue(slot));
-    let null1 = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::Const(crate::ir::IrConst::Null));
-    let is_null = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::PrimitiveBinOp {
-        op: crate::ir::IrBinOp::Eq,
-        lhs: get_for_test,
-        rhs: null1,
-    });
-    let null2 = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::Const(crate::ir::IrConst::Null));
-    let get_for_box = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::GetValue(slot));
-    let d = desc(&u);
-    let owner_rendered = x.render();
-    let boxed = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::Call {
-        callee: Callee::Static {
-            owner: x,
-            name: "box-impl".to_string(),
-            descriptor: format!("({d})L{owner_rendered};"),
-            inline: InlineKind::None,
-        },
-        dispatch_receiver: None,
-        args: vec![get_for_box],
-    });
-    let when = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::When {
-        branches: vec![(Some(is_null), null2), (None, boxed)],
-    });
-    ir.null_guards.insert(when);
-    ir.exprs[id as usize] = IrExpr::Block {
-        stmts: vec![var],
-        value: Some(when),
-    };
-    ir.physical_types.insert(id, Ty::obj_name(x));
 }
 
 /// Erase a value-class type to its underlying representation. Non-null `X` → underlying `U`. A nullable

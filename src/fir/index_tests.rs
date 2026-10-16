@@ -85,6 +85,7 @@ fn an_interface_reached_through_the_superclass_publishes_no_inherited_default() 
         [ResolvedInheritedDefault {
             name: InheritedMemberName::Function("direct".into()),
             function,
+            accessor: None,
             declaring_interface: direct,
             dispatch_interface: direct,
             parameters: Box::new([]),
@@ -119,6 +120,7 @@ fn the_nearest_declaration_of_a_slot_wins_and_names_its_direct_superinterface() 
         [ResolvedInheritedDefault {
             name: InheritedMemberName::Function("g".into()),
             function,
+            accessor: None,
             declaring_interface: left,
             dispatch_interface: left,
             parameters: Box::new([]),
@@ -169,6 +171,41 @@ fn a_specializing_supertype_publishes_the_applied_member_shape() {
             crate::types::type_name("sample/I"),
             crate::types::type_name("sample/I")
         )
+    );
+}
+
+#[test]
+fn inherited_property_accessors_publish_their_exact_checked_targets() {
+    let [defaults] = published_inherited_defaults(
+        "package sample\ninterface I { var answer: Int\n get() = 42\n set(value) {} }\nclass C : I\n",
+        "InheritedPropertyTargets",
+        &["C"],
+    )
+    .try_into()
+    .expect("one classifier");
+    let [getter, setter] = defaults.as_slice() else {
+        panic!("a mutable inherited property publishes its getter and setter: {defaults:?}");
+    };
+    let (Some(ResolvedPropertyOverrideTarget::Module(getter)), None) =
+        (getter.accessor, getter.function)
+    else {
+        panic!("the getter must retain its selected module property identity: {getter:?}");
+    };
+    let (Some(ResolvedPropertyOverrideTarget::Module(setter)), None) =
+        (setter.accessor, setter.function)
+    else {
+        panic!("the setter must retain its selected module property identity: {setter:?}");
+    };
+    assert_eq!(getter, setter);
+    assert_eq!(
+        defaults
+            .iter()
+            .map(|default| &default.name)
+            .collect::<Vec<_>>(),
+        [
+            &InheritedMemberName::PropertyGetter("answer".into()),
+            &InheritedMemberName::PropertySetter("answer".into()),
+        ]
     );
 }
 

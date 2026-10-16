@@ -11771,6 +11771,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `W?`. Its coercion to `Any?` has the carrier's type, yet only a recorded read of the class's sole
   property unboxes to the carrier; `result = vc` stores the box as it is, as kotlinc does. Tests:
   `tests/value_class_nullable_any_carrier_e2e.rs`.
+- **A value-class receiver calls its inherited default's `-impl` static.** A call or property
+  access whose dispatch receiver is a value class `V` and whose selected member is an interface
+  default `V` inherits without overriding (`v.doubled()`, `v.y`, `v.y = 1`, `v.echo("q")` through `G<String>`)
+  calls the static `V` writes for that fake override (`V.doubled-impl(I)I`,
+  `V.getY-impl(I)I`, `V.echo-impl(ILjava/lang/String;)Ljava/lang/String;`) on the carrier, as
+  kotlinc does, instead of boxing the carrier for an interface call. A safe call unboxes its
+  receiver on the non-null path first; a call inside the value class calls the static too. The
+  selected function/getter/setter identity gives the same answer when the interface is declared in
+  this file, a sibling file or a dependency, and the module's checked inherited-default snapshot
+  lets a caller file select a sibling value class's static without reopening its provider. A
+  receiver typed as the interface, a call omitting a defaulted argument (the interface's
+  `$default` stub) and a suspend member keep interface dispatch. Under `no-compatibility` there
+  is no forwarder and no static, and the box dispatches (kotlinc names the box,
+  `invokevirtual V.doubled`; krusty still names the interface, a recorded gap). The receiver's value class and the call's selected declaration identity
+  choose the static; the record override resolution selected for the member names it. Tests:
+  `tests/value_class_inherited_default_call_e2e.rs`.
 - **An inherited default call boxes a value-class receiver for an interface's stub.** For
   `value class B(val x: Long) : Sum` overriding `Sum.f(a: Long = 1L)`, `B(2L).f()` calls
   `Sum.f$default(Sum, long, int, Object)`, so the receiver is `B.box-impl`, as kotlinc does. The
