@@ -124,6 +124,12 @@ by resolving an in-scope outer class first (an in-scope type name shadows a pack
 kotlinc), then the trailing segments join with `$`; the fully-qualified form converts `/` → `$`
 from the right until the type exists (`tests/java_nested_static_e2e.rs`).
 
+A Java method's or field's generic `Signature` declares `byte` and `short` as `Byte` and `Short`
+(and `byte[]`/`short[]` as `ByteArray`/`ShortArray`), exactly as its plain descriptor does. They
+are never read as the `Int` the JVM operand stack widens them to, so a Kotlin override of
+`<T> T readValue(byte[] bytes, Class<T> type)` matches it
+(`tests/java_member_narrow_primitive_e2e.rs`).
+
 ## 6. Correctness & compatibility: differential testing vs kotlinc
 
 **Compatibility IS a goal — specifically ABI + `@Metadata`, NOT byte-identity.** A krusty-compiled
