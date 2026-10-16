@@ -2521,7 +2521,7 @@ fn parse_gsig_inner(s: &str, for_field: bool) -> Option<ParsedGsig<'_>> {
         }
         c => {
             let t = match c {
-                b'I' | b'B' | b'S' => Ty::Int,
+                b'I' | b'B' | b'S' => declared_desc_to_ty(&s[..1]),
                 b'J' => Ty::Long,
                 b'F' => Ty::Float,
                 b'D' => Ty::Double,
