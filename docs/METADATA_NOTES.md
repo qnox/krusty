@@ -255,6 +255,11 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   covered: the public visibility and bit 7 kotlinc writes for such a class regenerated from an
   inline function (`xi = 0x3b0`/`0x5b0`), and the pre-release bit (2) under experimental language
   features. Test: `tests/metadata_synthetic_classes_e2e.rs`.
+- A class declared, at any depth, in the body of an `inline` function that is neither private nor
+  a member of a private class (an anonymous object, one nested in it, or one in a lambda there)
+  is part of that function's ABI: kotlinc writes its `k = 1` record with `xi = 48 | 128 = 176`
+  (`METADATA_PUBLIC_ABI_FLAG`). An inlining consumer regenerates only a class carrying the flag.
+  Test: `tests/metadata_inline_object_abi_e2e.rs`.
 - Member visit order (kotlinc 2.4.20): constructors first, then the class's declarations in source
   order, the primary-constructor properties first and enum entries at their declaration position
   (so after those properties and before the body's other members), then the members the compiler

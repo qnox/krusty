@@ -31,6 +31,73 @@ pub(super) const SYNTHETIC_LOCAL: i32 = 5;
 /// function is part of that function's ABI.
 pub(super) const METADATA_PUBLIC_ABI_FLAG: i32 = 1 << 7;
 
+/// `@Metadata.xi` of a class with its own `k=1` record. kotlinc sets
+/// [`METADATA_PUBLIC_ABI_FLAG`] on a class declared, at any depth, in the body of an `inline`
+/// function other code can inline: one that is not private and not a member of a private class.
+/// Only the function's own class counts: a public class nested in a private one still marks its
+/// inline members' objects.
+pub(super) fn class_xi(ir: &crate::ir::IrFile, class: &crate::ir::IrClass) -> i32 {
+    const JVM_IR_AND_STABLE_ABI: i32 = 48;
+    if in_public_inline_scope(ir, class.enclosure) {
+        JVM_IR_AND_STABLE_ABI | METADATA_PUBLIC_ABI_FLAG
+    } else {
+        JVM_IR_AND_STABLE_ABI
+    }
+}
+
+fn in_public_inline_scope(
+    ir: &crate::ir::IrFile,
+    mut enclosure: Option<crate::ir::IrEnclosure>,
+) -> bool {
+    use crate::ir::IrEnclosure;
+    let class_enclosure = |class: crate::types::TypeName| {
+        ir.classes
+            .iter()
+            .find(|candidate| candidate.fq_name == class)
+            .and_then(|candidate| candidate.enclosure)
+    };
+    while let Some(scope) = enclosure {
+        let function = match scope {
+            IrEnclosure::Function(function) => function,
+            IrEnclosure::PropertyAccessor { property, setter } => {
+                match super::enclosure::realized_property_accessor(ir, property, setter) {
+                    Some(function) => function,
+                    None => return false,
+                }
+            }
+            IrEnclosure::Lambda(function) => {
+                enclosure = ir.lambda_enclosures.get(&function).copied();
+                continue;
+            }
+            IrEnclosure::Constructor { class, .. }
+            | IrEnclosure::ClassInitializer(class)
+            | IrEnclosure::Classifier(class) => {
+                enclosure = ir.classes[class as usize].enclosure;
+                continue;
+            }
+            IrEnclosure::File => return false,
+        };
+        let owner = ir.functions[function as usize]
+            .dispatch_receiver
+            .or_else(|| {
+                ir.classes
+                    .iter()
+                    .find(|class| class.methods.contains(&function))
+                    .map(|class| class.fq_name)
+            });
+        if ir.inline_fns.contains(&function) {
+            return !ir.method_visibility(function).is_private()
+                && owner.is_none_or(|owner| {
+                    !ir.class_visibilities
+                        .get(&owner)
+                        .is_some_and(|visibility| visibility.is_private())
+                });
+        }
+        enclosure = owner.and_then(class_enclosure);
+    }
+    false
+}
+
 /// `@Metadata.xi` of a `k=3` synthetic class. Kotlin 2.4.20 packs the class's normalized
 /// visibility into bits 8–10; earlier releases wrote the IR flags alone.
 pub(super) fn synthetic_class_xi(visibility: i32) -> i32 {
