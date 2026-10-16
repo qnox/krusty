@@ -107,7 +107,7 @@ pub(super) fn retain_selected(
 /// failure can diagnose the exact same provider declaration without a second lookup.
 pub(super) fn mapped_rejected_candidate(
     probes: MemberExtensionProbes<'_>,
-    call: MemberExtensionFunctionCall<'_>,
+    call: &MemberExtensionFunctionCall<'_>,
     selection: MemberExtensionSelection,
     shape: &MemberExtensionFunctionShape,
 ) -> Option<(

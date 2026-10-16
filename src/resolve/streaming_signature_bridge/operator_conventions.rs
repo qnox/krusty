@@ -66,7 +66,7 @@ impl ProductionSignatureSemantics<'_> {
                     names: argument_names,
                     ..Default::default()
                 },
-                None,
+                super::super::CallResultConstraint::direct(None),
                 super::super::MemberExtensionSelection::Operators,
             );
             let (result, declaration) = match selected {
@@ -269,6 +269,7 @@ pub(super) fn selects_in_place_assignment(
         integer_literal: None,
         lambda: false,
         contextual_call: false,
+        wrapped_contextual_call: false,
     }];
     semantics
         .select_operator_convention(

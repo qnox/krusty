@@ -86,23 +86,10 @@ impl ProductionSignatureSemantics<'_> {
         )
         .into_iter()
         .map(|shape| {
-            let mut candidate = crate::libraries::FunctionInfo::classifier_member(
-                crate::libraries::FnKind::Extension,
-                shape.owner,
-                shape.member,
-            );
-            crate::symbol_resolver::specialize_member_function(
-                &source,
-                shape.dispatch_receiver.ty,
-                &mut candidate,
-                &shape.class_bindings,
-            );
-            candidate.scope_rank = u32::try_from(shape.priority.dispatch_rank).unwrap_or(u32::MAX);
-            candidate.receiver_rank =
-                u32::try_from(shape.priority.dispatch_depth).unwrap_or(u32::MAX);
+            let dispatch_receiver = shape.dispatch_receiver.ty;
             ReceiverCandidateSource {
-                candidate,
-                dispatch_receiver: Some(shape.dispatch_receiver.ty),
+                candidate: shape.diagnostic_candidate,
+                dispatch_receiver: Some(dispatch_receiver),
                 member_extension_priority: Some(shape.priority),
             }
         })

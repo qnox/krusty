@@ -32735,7 +32735,7 @@ pub(crate) fn member_extension_function_with(
             continue;
         }
         if let Some(candidate) =
-            member_extension_selection::mapped_rejected_candidate(probes, call, selection, &shape)
+            member_extension_selection::mapped_rejected_candidate(probes, &call, selection, &shape)
         {
             rejected_candidates.push(candidate);
         }

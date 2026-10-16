@@ -295,6 +295,25 @@ impl SignatureGraph {
                     pending.push(value);
                     pending.push(call);
                 }
+                Some(SigExpr::CompletionNarrowed {
+                    value,
+                    narrowed,
+                    completions,
+                }) => {
+                    pending.push(value);
+                    pending.push(narrowed);
+                    pending.extend(self.operands(completions));
+                }
+                Some(SigExpr::InPlaceAssignmentNarrowed {
+                    value,
+                    narrowed,
+                    operands,
+                    ..
+                }) => {
+                    pending.push(value);
+                    pending.push(narrowed);
+                    pending.extend(self.operands(operands));
+                }
                 Some(SigExpr::CastNarrowed { value, target, .. }) => {
                     pending.push(value);
                     pending.push(target);
