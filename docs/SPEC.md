@@ -1941,8 +1941,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - Empty file; file with only signatures; forward references between top-level functions.
 - `data class`: `equals`/`hashCode`/`toString`/`componentN` are synthesized (in IR lowering, so all
   backends share them). `equals` compares field-wise with IEEE-aware `Double/Float.compare` and
-  structural reference equality; `hashCode` is the `31*result + fieldHash` fold; `toString` is
-  `Class(p1=v1, p2=v2)`. `copy(p = v)` is supported via the default-argument mechanism (below).
+  structural reference equality, except that an enum-typed property, nullable or not, is compared
+  by reference (`if_acmpne`) as kotlinc's `Equals` lowering does for any enum operand
+  (`tests/data_class_enum_equality_e2e.rs`); `hashCode` is the `31*result + fieldHash` fold;
+  `toString` is `Class(p1=v1, p2=v2)`. `copy(p = v)` is supported via the default-argument mechanism (below).
 - **Default arguments.** A parameter's default *value* is backend-agnostic IR
   (`IrFile.fn_param_defaults`). A call that omits arguments is an ordinary call with holes —
   `IrExpr::MethodCall { args: Vec<Option<ExprId>> }`, `None` = omitted (mirrors Kotlin IR, where an

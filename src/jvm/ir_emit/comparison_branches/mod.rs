@@ -183,7 +183,7 @@ impl Emitter<'_> {
     }
 
     /// Whether `operand`'s type names an enum class (kotlinc's `isEnumValue`), nullable or not.
-    fn is_enum_value(&self, operand: ExprId) -> bool {
+    pub(super) fn is_enum_value(&self, operand: ExprId) -> bool {
         self.value_ty(operand)
             .non_null()
             .obj_internal()
