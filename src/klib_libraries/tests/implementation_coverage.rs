@@ -15,11 +15,12 @@ use std::path::PathBuf;
 
 use super::super::{KlibLibraries, KlibLibraryInput};
 use super::implementation_inventory::{
-    identity, implementation_inventory, DecodedBodyState, ImplementationFact,
+    fixture_property, identity, implementation_inventory, inventory, libraries, property_identity,
+    wasm_intrinsic_tree, DecodedBodyState, ImplementationFact,
 };
 use crate::compilation_target::CompilationTarget;
-use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
-use crate::metadata::id_signature::{KlibNamePath, KlibPublicIdSignature};
+use crate::libraries::{CallablePlacement, KlibDeclarationSignature, KlibDependencyCallable};
+use crate::metadata::id_signature::{KlibNamePath, KlibPublicIdSignature, MetadataAccessor};
 
 fn push_sized(output: &mut String, value: &str) {
     let _ = write!(output, "{}:{value}", value.len());
@@ -190,6 +191,127 @@ fn backlog_keys_keep_the_exact_provider_module() {
     assert_eq!(first.declaration, second.declaration);
     assert_ne!(exact_identity(&first), exact_identity(&second));
     assert!(exact_identity(&first).starts_with("module=5:first public "));
+}
+
+#[test]
+fn implementation_eligibility_is_external_or_decoded_bodyless() {
+    let fact = |external, body| ImplementationFact {
+        placement: CallablePlacement::Package(crate::types::TypeName::ROOT),
+        body,
+        external,
+        has_operation: false,
+    };
+    assert_eq!(
+        [
+            needs_implementation(fact(false, DecodedBodyState::Absent)),
+            needs_implementation(fact(false, DecodedBodyState::Bodyful)),
+            needs_implementation(fact(true, DecodedBodyState::Absent)),
+            needs_implementation(fact(false, DecodedBodyState::Bodyless)),
+            needs_implementation(fact(true, DecodedBodyState::Bodyless)),
+        ],
+        [false, false, true, true, true]
+    );
+}
+
+#[test]
+fn operation_coverage_does_not_cross_equal_declarations_in_distinct_modules() {
+    let declaration = || {
+        let mut function = super::function(
+            "wasm_i32_reinterpret_f32",
+            None,
+            vec![super::class("kotlin/Float", false)],
+        );
+        function.ret = super::class("kotlin/Int", false);
+        function.is_external = true;
+        function
+    };
+    let implemented = identity(
+        "implemented",
+        &["kotlin", "wasm", "internal"],
+        &[],
+        &declaration(),
+    );
+    let unimplemented = identity(
+        "unimplemented",
+        &["kotlin", "wasm", "internal"],
+        &[],
+        &declaration(),
+    );
+    let implemented_trees = wasm_intrinsic_tree(&implemented);
+    let unimplemented_trees = wasm_intrinsic_tree(&unimplemented);
+    let mut declarations = inventory(vec![
+        (
+            super::segments(&["kotlin", "wasm", "internal"]),
+            super::package_of(vec![declaration()]),
+            implemented.module.clone(),
+        ),
+        (
+            super::segments(&["kotlin", "wasm", "internal"]),
+            super::package_of(vec![declaration()]),
+            unimplemented.module.clone(),
+        ),
+    ]);
+    declarations.attach_ir_intrinsics(
+        &implemented.module,
+        Some(super::super::target_intrinsics::TargetIntrinsicPlatform::Wasm),
+        &implemented_trees,
+    );
+    declarations.attach_ir_intrinsics(&unimplemented.module, None, &unimplemented_trees);
+    let libraries = libraries(
+        declarations,
+        vec![
+            (implemented.module.clone(), implemented_trees),
+            (unimplemented.module.clone(), unimplemented_trees),
+        ],
+    );
+
+    assert_eq!(
+        uncovered_implementations(&libraries),
+        BTreeSet::from([exact_identity(&unimplemented)])
+    );
+}
+
+#[test]
+fn backlog_keys_render_the_complete_public_and_accessor_identities() {
+    let function = super::function("same", None, Vec::new());
+    let public = identity("mod:ule", &["pack,age"], &[], &function);
+    let property = fixture_property("value", true);
+    let accessor = property_identity(
+        "mod:ule",
+        &["pack,age"],
+        &[],
+        &property,
+        MetadataAccessor::Setter,
+    );
+    let KlibDeclarationSignature::Public(public_signature) = &public.declaration else {
+        panic!("the fixture function has a public signature")
+    };
+    let KlibDeclarationSignature::Accessor(accessor_signature) = &accessor.declaration else {
+        panic!("the fixture setter has an accessor signature")
+    };
+    assert_eq!(
+        exact_identity(&public),
+        format!(
+            "module=7:mod:ule public package=1[8:pack,age] declaration=1[4:same] member={} mask={}",
+            public_signature
+                .member_id()
+                .expect("a function has a member id"),
+            public_signature.mask()
+        )
+    );
+    assert_eq!(
+        exact_identity(&accessor),
+        format!(
+            "module=7:mod:ule accessor property{{package=1[8:pack,age] declaration=1[5:value] member={} mask={}}} name=11:<set-value> member={} mask={}",
+            accessor_signature
+                .property()
+                .member_id()
+                .expect("a property has a member id"),
+            accessor_signature.property().mask(),
+            accessor_signature.member_id(),
+            accessor_signature.mask()
+        )
+    );
 }
 
 #[test]
