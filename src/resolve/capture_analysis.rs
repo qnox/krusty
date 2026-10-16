@@ -160,12 +160,12 @@ impl<'a> Checker<'a> {
         site: Span,
     ) -> bool {
         write.name == name
-            && (write
-                .local_function
-                .is_some_and(|function| self.file.stmt_spans[function.0 as usize].lo <= site.lo)
-                || write.lambdas.iter().any(|&lambda| {
+            && match write.local_function {
+                Some(function) => self.file.stmt_spans[function.0 as usize].lo <= site.lo,
+                None => write.lambdas.iter().any(|&lambda| {
                     self.span(lambda).lo <= site.lo && !self.lambda_is_inline_spliced(lambda)
-                }))
+                }),
+            }
     }
 
     fn same_materialized_execution(&self, write: &ClosureWrite) -> bool {

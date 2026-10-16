@@ -9,16 +9,17 @@ use super::scope::{Ns, PathRoot};
 use super::{local_class_capture_expressions, Checker, CheckerScope};
 
 /// Resolve a loop's writes to the exact bindings visible at its entry. Definite replacements are
-/// separate from mutable compound assignments: the latter stay provisional until ordinary
-/// operator selection decides whether they are in-place `opAssign` calls. The syntax scan runs
-/// before body checking, so body declarations are removed at their lexical declaration point.
+/// separate from compound assignments: Kotlin retains saved Boolean implications across both the
+/// in-place and replacement compound forms, while ordinary path/local flow still has to account
+/// for the compound's back-edge value. The syntax scan runs before body checking, so body
+/// declarations are removed at their lexical declaration point.
 fn collect_loop_entry_writes(
     file: &File,
     parts: LoopParts<'_>,
     entry: &HashMap<String, LoopEntryBinding>,
 ) -> LoopEntryWrites {
     let written = RefCell::new(HashSet::default());
-    let compound = RefCell::new(HashMap::default());
+    let compound = RefCell::new(HashSet::default());
 
     fn visit_block(
         file: &File,
@@ -26,7 +27,7 @@ fn collect_loop_entry_writes(
         trailing: Option<ExprId>,
         entry: &HashMap<String, LoopEntryBinding>,
         written: &RefCell<HashSet<u32>>,
-        compound: &RefCell<HashMap<u32, usize>>,
+        compound: &RefCell<HashSet<u32>>,
     ) -> HashMap<String, LoopEntryBinding> {
         let mut visible = entry.clone();
         for &statement in statements {
@@ -43,7 +44,7 @@ fn collect_loop_entry_writes(
         expression: ExprId,
         entry: &HashMap<String, LoopEntryBinding>,
         written: &RefCell<HashSet<u32>>,
-        compound: &RefCell<HashMap<u32, usize>>,
+        compound: &RefCell<HashSet<u32>>,
     ) {
         match file.expr(expression) {
             Expr::Block { stmts, trailing } => {
@@ -107,7 +108,7 @@ fn collect_loop_entry_writes(
         statement: StmtId,
         visible: &mut HashMap<String, LoopEntryBinding>,
         written: &RefCell<HashSet<u32>>,
-        compound: &RefCell<HashMap<u32, usize>>,
+        compound: &RefCell<HashSet<u32>>,
     ) {
         match file.stmt(statement) {
             Stmt::Assign { name, value } => {
@@ -118,11 +119,8 @@ fn collect_loop_entry_writes(
                             if matches!(file.expr(*lhs), Expr::Name(lhs) if lhs == name)
                     );
                 if let Some(binding) = visible.get(name) {
-                    if is_compound && binding.reassignable {
-                        *compound
-                            .borrow_mut()
-                            .entry(binding.flow_identity)
-                            .or_default() += 1;
+                    if is_compound {
+                        compound.borrow_mut().insert(binding.flow_identity);
                     } else if !is_compound {
                         written.borrow_mut().insert(binding.flow_identity);
                     }
@@ -349,8 +347,9 @@ fn collect_loop_entry_writes(
 struct LoopEntryWrites {
     /// Writes that replace the binding regardless of later overload selection.
     definite: HashSet<u32>,
-    /// Mutable compound targets whose selected lowering decides whether the binding is replaced.
-    compound: HashMap<u32, usize>,
+    /// Compound targets that invalidate ordinary path/local flow on the loop back edge while
+    /// leaving saved Boolean implications intact.
+    compound: HashSet<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -366,7 +365,6 @@ enum LoopParts<'a> {
 #[derive(Clone, Copy)]
 struct LoopEntryBinding {
     flow_identity: u32,
-    reassignable: bool,
 }
 
 /// Collect every name reassigned (`=`, compound assignment, or inc/dec) anywhere in an expression,
@@ -410,11 +408,7 @@ pub(super) fn collect_all_reassigned(file: &File, expression: ExprId, out: &mut 
 }
 
 impl Checker<'_> {
-    fn clear_narrowings_for_loop_parts(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        parts: LoopParts<'_>,
-    ) -> HashMap<u32, usize> {
+    fn clear_narrowings_for_loop_parts(&mut self, scope: &CheckerScope<'_>, parts: LoopParts<'_>) {
         let mut entry = HashMap::default();
         let mut shadowed = HashSet::default();
         scope.visit_bindings(Ns::Value, |name, binding| {
@@ -424,7 +418,6 @@ impl Checker<'_> {
                         name.to_string(),
                         LoopEntryBinding {
                             flow_identity: local.flow_identity,
-                            reassignable: local.write_ty.is_some(),
                         },
                     );
                 }
@@ -433,7 +426,7 @@ impl Checker<'_> {
         let written = collect_loop_entry_writes(self.file, parts, &entry);
         for (name, binding) in entry {
             let definite = written.definite.contains(&binding.flow_identity);
-            if definite || written.compound.contains_key(&binding.flow_identity) {
+            if definite || written.compound.contains(&binding.flow_identity) {
                 scope.forget_paths_rooted_at(&PathRoot::Value(binding.flow_identity));
                 if definite {
                     self.forget_implied_facts(scope, binding.flow_identity);
@@ -441,7 +434,6 @@ impl Checker<'_> {
                 scope.narrow_local(&name, None);
             }
         }
-        written.compound
     }
 
     /// Drop flow proofs invalidated by a loop's back-edge writes before checking its condition.
@@ -453,7 +445,7 @@ impl Checker<'_> {
         &mut self,
         scope: &CheckerScope<'_>,
         parts: &[ExprId],
-    ) -> HashMap<u32, usize> {
+    ) {
         self.clear_narrowings_for_loop_parts(scope, LoopParts::Independent(parts))
     }
 
@@ -462,7 +454,7 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         body: ExprId,
         condition: ExprId,
-    ) -> HashMap<u32, usize> {
+    ) {
         self.clear_narrowings_for_loop_parts(scope, LoopParts::DoWhile { body, condition })
     }
 }

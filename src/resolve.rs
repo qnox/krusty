@@ -21954,9 +21954,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Return(e, label) => self.stmt_return(scope, s, e, label),
             Stmt::While { cond, body, label } => {
-                let compound_writes =
-                    self.clear_narrowings_a_loop_invalidates(scope, &[cond, body]);
-                self.provisional_loop_compound_writes.push(compound_writes);
+                self.clear_narrowings_a_loop_invalidates(scope, &[cond, body]);
                 let ct = self.expr(scope, cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "while condition");
                 // `while (x != null) …` — the condition holds on body entry, so narrow stable
@@ -21970,14 +21968,9 @@ impl<'a> Checker<'a> {
                     self.apply_condition_exclusions(scope, cond, true);
                     self.check_loop_body(scope, body, &label);
                 }
-                self.provisional_loop_compound_writes
-                    .pop()
-                    .expect("the while-loop compound-write frame is still open");
             }
             Stmt::DoWhile { body, cond, label } => {
-                let compound_writes =
-                    self.clear_narrowings_a_do_while_invalidates(scope, body, cond);
-                self.provisional_loop_compound_writes.push(compound_writes);
+                self.clear_narrowings_a_do_while_invalidates(scope, body, cond);
                 // Unlike a while body, a do-while block and its condition share one lexical scope:
                 // `do { val x = ... } while (x)` is legal Kotlin. Keep that scope alive through
                 // condition checking instead of rebuilding declarations from typed syntax.
@@ -22005,9 +21998,6 @@ impl<'a> Checker<'a> {
                 if label.is_some() {
                     self.loop_labels.pop();
                 }
-                self.provisional_loop_compound_writes
-                    .pop()
-                    .expect("the do-while compound-write frame is still open");
             }
             Stmt::For {
                 name,
@@ -22015,12 +22005,8 @@ impl<'a> Checker<'a> {
                 body,
                 label,
             } => {
-                let compound_writes = self.clear_narrowings_a_loop_invalidates(scope, &[body]);
-                self.provisional_loop_compound_writes.push(compound_writes);
+                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
                 self.stmt_for(scope, s, name, range, body, label);
-                self.provisional_loop_compound_writes
-                    .pop()
-                    .expect("the for-loop compound-write frame is still open");
             }
             Stmt::ForEach {
                 name,
@@ -22028,12 +22014,8 @@ impl<'a> Checker<'a> {
                 body,
                 label,
             } => {
-                let compound_writes = self.clear_narrowings_a_loop_invalidates(scope, &[body]);
-                self.provisional_loop_compound_writes.push(compound_writes);
+                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
                 self.stmt_for_each(scope, s, name, iterable, body, label);
-                self.provisional_loop_compound_writes
-                    .pop()
-                    .expect("the for-each compound-write frame is still open");
             }
             Stmt::Expr(e) => {
                 // A `kotlin.contracts.contract { … }` statement is erased metadata: it is never
@@ -22435,7 +22417,11 @@ impl<'a> Checker<'a> {
         // miscompiled).
         let span = self.file.stmt_spans[s.0 as usize];
         let target_span = self.assignment_target_span(s);
-        self.record_local_write(s, self.lookup(scope, &name));
+        let scoped = self.lookup(scope, &name);
+        if let Some(local) = scoped {
+            self.report_uninitialized_default_parameter_write(s, local.flow_identity);
+        }
+        self.record_local_write(s, scoped);
         let local = self
             .lookup(scope, &name)
             .filter(|local| !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. }))
@@ -22540,12 +22526,20 @@ impl<'a> Checker<'a> {
 
     fn stmt_assign(&mut self, scope: &CheckerScope<'_>, s: StmtId, name: String, value: ExprId) {
         // `name op= rhs` with a user `opAssign` operator → in-place call (legal on a `val`).
+        let compound = !self.file.value_operator_spans.contains_key(&value.0)
+            && matches!(
+                self.file.expr(value),
+                Expr::Binary { lhs, .. }
+                    if matches!(self.file.expr(*lhs), Expr::Name(lhs) if lhs == &name)
+            );
         let in_place = self.try_in_place_assignment(scope, s, value);
-        self.resolve_provisional_loop_compound_write(&name, value);
         if in_place {
             return;
         }
         let scoped = self.lookup(scope, &name);
+        if let Some(local) = scoped {
+            self.report_uninitialized_default_parameter_write(s, local.flow_identity);
+        }
         self.record_local_write(s, scoped);
         let deferred_property = scoped.and_then(|local| match local.origin {
             ReceiverFnValueOrigin::DispatchProperty {
@@ -22694,7 +22688,11 @@ impl<'a> Checker<'a> {
                     // that actually runs will read.
                     if is_var && self.unreachable_statement_depth == 0 {
                         let narrowing = self.assignment_narrowing(&name, lty, vt, target_span);
-                        self.set_local_narrow(scope, &name, narrowing);
+                        if compound {
+                            self.set_local_narrow_preserving_implications(scope, &name, narrowing);
+                        } else {
+                            self.set_local_narrow(scope, &name, narrowing);
+                        }
                         // A write under a live smart-cast shadow must also move the PROOF binding:
                         // reads below the shadow's rung type the variable through it, so a stale
                         // shadow would keep a killed cast alive (`if (t != null) { t = null;
@@ -33136,7 +33134,9 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds::default(),
         next_lexical_capture_identity: 0,
         try_body_writes: Vec::new(),
-        provisional_loop_compound_writes: Vec::new(),
+        uninitialized_default_parameters: HashMap::default(),
+        reported_uninitialized_default_parameter_reads: HashSet::default(),
+        reported_uninitialized_default_parameter_writes: HashSet::default(),
         next_flow_identity: 0,
         checked_local_class_declarations: crate::fx_hash::HashSet::default(),
         checked_local_classifier_identities: HashMap::default(),
@@ -35867,9 +35867,11 @@ struct Checker<'a> {
     next_lexical_capture_identity: u32,
     /// Bindings written by each try body being checked, innermost last.
     try_body_writes: Vec<catch_flow::TryBodyWrites>,
-    /// Mutable loop-entry bindings whose compound assignment has not yet selected between an
-    /// in-place `opAssign` and a replacement `op` call.
-    provisional_loop_compound_writes: Vec<crate::fx_hash::HashMap<u32, usize>>,
+    /// Parameter identities visible before their own declaration point while checking defaults.
+    uninitialized_default_parameters: HashMap<u32, String>,
+    /// Defaults may be revisited while inference settles; diagnostics are source occurrences.
+    reported_uninitialized_default_parameter_reads: HashSet<ExprId>,
+    reported_uninitialized_default_parameter_writes: HashSet<StmtId>,
     next_flow_identity: u32,
     checked_local_class_declarations: crate::fx_hash::HashSet<DeclId>,
     checked_local_classifier_identities: HashMap<crate::fir::DeclarationId, TypeName>,
@@ -51962,7 +51964,17 @@ impl<'a> Checker<'a> {
             let scope = &members_scope;
             if f.receiver.is_none() {
                 for property in props {
-                    self.declare_scoped_property(scope, property, true);
+                    let lexical_value_shadows = body_class_declaration.is_some()
+                        && self.lookup(scope, &property.name).is_some_and(|binding| {
+                            matches!(
+                                binding.origin,
+                                ReceiverFnValueOrigin::Local
+                                    | ReceiverFnValueOrigin::ClassStorage(_)
+                            )
+                        });
+                    if !lexical_value_shadows {
+                        self.declare_scoped_property(scope, property, true);
+                    }
                 }
                 // Synthetic capture fields are immutable storage properties, but a shared-cell
                 // capture exposes the mutability of its source local. Rebind those names after the
@@ -51974,9 +51986,6 @@ impl<'a> Checker<'a> {
                         AnonymousObjectCaptureSource::LexicalValue
                             | AnonymousObjectCaptureSource::ClassStorage { .. }
                     ) && capture.storage_ty.is_none()
-                        && body_class_declaration.is_none_or(|declaration| {
-                            !self.body_class_declares_property_named(declaration, &capture.name)
-                        })
                     {
                         self.declare_class_storage(
                             scope,
@@ -57772,8 +57781,12 @@ impl<'a> Checker<'a> {
                 operator_span,
             ) {
                 self.diags.error(
-                    span,
-                    "krusty: '++'/'--' is only supported on a numeric variable".to_string(),
+                    operator_span,
+                    crate::diagnostic_wording::unresolved_operator_reference_on(
+                        operator_name,
+                        if decrement { "--" } else { "++" },
+                        Some(read_ty.source_name().as_ref()),
+                    ),
                 );
             }
             return None;
@@ -58897,6 +58910,9 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
+        if let Some(local) = lookup {
+            self.report_uninitialized_default_parameter_read(e, local.flow_identity);
         }
         crate::trace_compiler!(
             "name_type",

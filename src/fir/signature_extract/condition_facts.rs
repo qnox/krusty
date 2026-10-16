@@ -391,7 +391,7 @@ impl SignatureConstraintExtractor {
         })
     }
 
-    fn lexical_binding_identity(&self, name: &str) -> Option<CompactBindingIdentity> {
+    pub(super) fn lexical_binding_identity(&self, name: &str) -> Option<CompactBindingIdentity> {
         self.lexical_values
             .iter()
             .enumerate()
@@ -493,9 +493,6 @@ impl SignatureConstraintExtractor {
         let Some(written) = self.lexical_binding_identity(name) else {
             return;
         };
-        let Some(value) = self.compact_value_for_binding(&written) else {
-            return;
-        };
         for writes in &mut self.try_body_writes {
             writes.push(CompactTryWrite::DeferredCompound {
                 binding: written.clone(),
@@ -506,26 +503,6 @@ impl SignatureConstraintExtractor {
                 scope,
                 origin,
             });
-        }
-        let operands = self
-            .graph
-            .add_operands([receiver, argument].into_iter().chain(local_operator));
-        for implication in self.boolean_vals.values_mut() {
-            for fact in implication
-                .when_true
-                .iter_mut()
-                .chain(&mut implication.when_false)
-                .filter(|fact| fact.binding == written)
-            {
-                fact.value = self.graph.add_expr(SigExpr::InPlaceAssignmentNarrowed {
-                    value,
-                    narrowed: fact.value,
-                    operands,
-                    operator,
-                    scope,
-                    origin,
-                });
-            }
         }
     }
 

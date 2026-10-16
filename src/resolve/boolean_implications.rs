@@ -21,47 +21,6 @@ use super::scope::{
 use super::{Checker, CheckerScope};
 
 impl Checker<'_> {
-    fn loop_may_replace_implication_root(&self, path: &NarrowPath) -> bool {
-        let PathRoot::Value(identity) = &path.root else {
-            return false;
-        };
-        self.provisional_loop_compound_writes
-            .iter()
-            .rev()
-            .any(|writes| writes.contains_key(identity))
-    }
-
-    /// One syntactic compound assignment has now gone through ordinary operator selection. Drop
-    /// that pending decision from every enclosing loop's back-edge summary. A later compound write
-    /// to the same root remains pending through its own count; a replacement write separately
-    /// removes the implication when [`Checker::stmt_assign`] commits it.
-    pub(super) fn resolve_provisional_loop_compound_write(&mut self, name: &str, value: ExprId) {
-        if self.file.value_operator_spans.contains_key(&value.0) {
-            return;
-        }
-        let Expr::Binary { lhs, .. } = self.file.expr(value) else {
-            return;
-        };
-        if !matches!(self.file.expr(*lhs), Expr::Name(lhs) if lhs == name) {
-            return;
-        }
-        let Some(path) = self.expr_access_path(*lhs) else {
-            return;
-        };
-        let PathRoot::Value(identity) = path.root else {
-            return;
-        };
-        for writes in &mut self.provisional_loop_compound_writes {
-            let Some(remaining) = writes.get_mut(&identity) else {
-                continue;
-            };
-            *remaining -= 1;
-            if *remaining == 0 {
-                writes.remove(&identity);
-            }
-        }
-    }
-
     /// The implications of a stable local `val` initialized by `init`, computed in the scope the
     /// initializer was checked in. `None` when the val is not a Boolean or implies nothing.
     pub(super) fn boolean_val_implications(
@@ -118,9 +77,7 @@ impl Checker<'_> {
         };
         let site = self.span(condition);
         for (path, ty) in &implications.facts(truth).narrowings {
-            if !self.loop_may_replace_implication_root(path)
-                && self.is_proof_stable_or_decline(scope, path, *ty, declined, site)
-            {
+            if self.is_proof_stable_or_decline(scope, path, *ty, declined, site) {
                 out.push((path.clone(), *ty));
             }
         }
@@ -141,10 +98,7 @@ impl Checker<'_> {
             .facts(truth)
             .exclusions
             .iter()
-            .filter(|(path, _)| {
-                !self.loop_may_replace_implication_root(path)
-                    && self.stable_path_ty(scope, path, site).is_some()
-            })
+            .filter(|(path, _)| self.stable_path_ty(scope, path, site).is_some())
             .cloned()
             .collect()
     }

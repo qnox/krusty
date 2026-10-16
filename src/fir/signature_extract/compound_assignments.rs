@@ -50,6 +50,7 @@ impl SignatureConstraintExtractor {
         } else {
             None
         };
+        let binding = self.lexical_binding_identity(name);
         match deferred {
             Some((receiver, argument, operator, statement_origin)) => {
                 let spelling = match operator {
@@ -69,9 +70,28 @@ impl SignatureConstraintExtractor {
                     local_operator,
                     scope,
                     statement_origin,
-                )
+                );
+                if let Some(binding) = binding {
+                    let operands = self
+                        .graph
+                        .add_operands([receiver, argument].into_iter().chain(local_operator));
+                    let updated = self.graph.add_expr(SigExpr::InPlaceAssignmentNarrowed {
+                        value: effect,
+                        narrowed: receiver,
+                        operands,
+                        operator,
+                        scope,
+                        origin: statement_origin,
+                    });
+                    self.lexical_values[binding.scope].insert(binding.name, updated);
+                }
             }
-            None => self.forget_boolean_vals_depending_on(name),
+            None => {
+                self.forget_boolean_vals_depending_on(name);
+                if let Some(binding) = binding {
+                    self.lexical_values[binding.scope].insert(binding.name, effect);
+                }
+            }
         }
         Ok(effect)
     }

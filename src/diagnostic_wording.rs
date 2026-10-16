@@ -84,6 +84,22 @@ pub fn unresolved_reference_on(name: &str, receiver: Option<&str>) -> String {
     }
 }
 
+/// `UNRESOLVED_REFERENCE` for an operator convention looked up on a receiver. From 2.4.20
+/// kotlinc appends the receiver's type just as it does for an ordinary explicit-receiver lookup.
+pub fn unresolved_operator_reference_on(
+    name: &str,
+    operator: &str,
+    receiver: Option<&str>,
+) -> String {
+    match receiver {
+        Some(receiver) if since(KotlinVersion::V2_4_20) => format!(
+            "unresolved reference '{name}' for operator '{operator}' on receiver of type \
+             '{receiver}'."
+        ),
+        _ => format!("unresolved reference '{name}' for operator '{operator}'."),
+    }
+}
+
 /// Where kotlinc anchors a diagnostic in the source, named after the positioning strategy it uses
 /// (`SourceElementPositioningStrategies`). A table row that moves a diagnostic between releases
 /// returns one of these, and the resolver computes the span from it.
