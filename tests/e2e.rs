@@ -2867,6 +2867,8 @@ mod unsigned_default_store_e2e;
 mod unsigned_equality_e2e;
 #[path = "unsigned_ext_e2e.rs"]
 mod unsigned_ext_e2e;
+#[path = "unsigned_generated_members_e2e.rs"]
+mod unsigned_generated_members_e2e;
 #[path = "unsigned_generic_erasure_e2e.rs"]
 mod unsigned_generic_erasure_e2e;
 #[path = "unsigned_intersection_carrier_e2e.rs"]

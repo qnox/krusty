@@ -692,21 +692,26 @@ fn data_class_member_realization(
     ir: &IrFile,
     owner: TypeName,
     role: IrDataClassMemberRole,
-    source_name: &str,
-    declared_params: &[Ty],
-    declared_ret: Ty,
-    has_definitely_non_null_type: bool,
+    record: &crate::metadata::class_builder::FnMeta,
+    local_classifiers: &crate::fx_hash::HashSet<TypeName>,
 ) -> Option<crate::metadata::class_builder::JvmFunctionSignature> {
     let function = &ir.functions[ir.data_class_member(owner, role)? as usize];
     let physical = ir_method_desc(&function.params, &function.ret);
-    let declared = method_descriptor(declared_params, declared_ret);
-    let has_boxed_primitive = std::iter::once(declared_ret)
-        .chain(declared_params.iter().copied())
-        .any(|ty| ty.is_nullable() && ty.non_null().is_jvm_scalar());
+    // Recorded exactly when a reader cannot rebuild the physical descriptor from the declared
+    // types (kotlinc's `requiresFunctionSignature`): a boxed primitive, or an unsigned type that
+    // the JVM realizes as its carrier.
+    let requires_signature = super::metadata_method_signatures::requires_function_signature(
+        None,
+        record.params.iter().map(|(_, ty)| *ty),
+        record.ret,
+        &physical,
+        local_classifiers,
+    );
+    let has_definitely_non_null_type =
+        crate::metadata::version_requirements::needs_definitely_non_null_type(&record.spellings);
     Some(crate::metadata::class_builder::JvmFunctionSignature {
-        name: (function.name != source_name).then(|| function.name.clone()),
-        desc: (has_boxed_primitive || has_definitely_non_null_type || physical != declared)
-            .then_some(physical),
+        name: (function.name != record.name).then(|| function.name.clone()),
+        desc: (requires_signature || has_definitely_non_null_type).then_some(physical),
     })
 }
 

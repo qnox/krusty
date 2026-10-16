@@ -79,6 +79,14 @@ impl Emitter<'_> {
     ) -> bool {
         if let Some((owner, carrier)) = native_unsigned_impl_target(declared) {
             self.emit_value(value, code);
+            // A nullable unsigned property is held as its box, already tested for null.
+            if !self.value_ty(value).is_jvm_scalar() {
+                let descriptor = method_descriptor(&[], carrier);
+                let method = self
+                    .cw
+                    .methodref(&owner.render(), "unbox-impl", &descriptor);
+                code.invokevirtual(method, 0, slot_words(carrier) as i32);
+            }
             let descriptor = method_descriptor(&[carrier], Ty::Int);
             let method = self
                 .cw
