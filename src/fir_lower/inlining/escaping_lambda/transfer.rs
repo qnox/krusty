@@ -77,7 +77,10 @@ pub(in crate::fir_lower::inlining) fn plan(
             continue;
         }
         let IrExpr::Lambda {
-            impl_fn, captures, ..
+            impl_fn,
+            captures,
+            inline_body,
+            ..
         } = ir.expr(copy)
         else {
             continue;
@@ -91,6 +94,14 @@ pub(in crate::fir_lower::inlining) fn plan(
             })
             .map(|(parameter, &lambda)| InlineCapture { parameter, lambda })
             .collect::<Vec<_>>();
+        if let Some(inline_body) = *inline_body {
+            if !inline_captures.is_empty() {
+                let shape = ir.functions.get(*impl_fn as usize)?;
+                if !inline_capture_splices_are_valid(ir, inline_body, shape, &inline_captures) {
+                    return None;
+                }
+            }
+        }
         let planned = plan_function(
             ir,
             *impl_fn,
@@ -173,6 +184,25 @@ pub(in crate::fir_lower::inlining) fn apply(
             .or_insert(copy);
         if let Some(caller) = state.caller {
             ir.callable_reference_enclosures.insert(copy, caller);
+        }
+        let retained_inline_body = match ir.expr(copy) {
+            IrExpr::Lambda {
+                inline_body: Some(body),
+                ..
+            } if !inline_captures.is_empty() => Some(*body),
+            _ => None,
+        };
+        if let Some(retained_inline_body) = retained_inline_body {
+            let mut inline_shape = ir.functions[implementation as usize].clone();
+            inline_shape.body = Some(retained_inline_body);
+            splice_inline_captures(
+                ir,
+                retained_inline_body,
+                &mut inline_shape,
+                &inline_captures,
+                state.inline_callee_source_name,
+            )
+            .expect("the plan validated the retained captured-lambda splice");
         }
         // The copied lambda's `inline_body` is a separate expression dag from the implementation.
         // Nested lambdas there still name the declaration implementations until this retarget.
@@ -859,7 +889,15 @@ fn splice_captured_lambda_invocation(
     );
     declarations.push(marker);
 
-    let (spliced, _) = crate::ir::clone_expression_dag(ir, inline_body);
+    let (spliced, cloned) = crate::ir::clone_expression_dag(ir, inline_body);
+    if let (Some(source), Some(origin)) = (
+        ir.source_debug.current(),
+        ir.lambda_origins.get(&impl_fn).cloned(),
+    ) {
+        for expression in cloned.values().copied() {
+            ir.record_inline_copy_owner(expression, impl_fn, origin.lexical_owner, source);
+        }
+    }
     let local_base = *next_temporary;
     let local_count = super::super::super::source_calls::rehome_inline_body_values(
         ir,
@@ -868,9 +906,23 @@ fn splice_captured_lambda_invocation(
         local_base,
     )?;
     *next_temporary = local_base.checked_add(local_count)?;
-    ir.exprs[invocation as usize] = IrExpr::Block {
+    // The invocation remains the declaration closure's outer frame. The supplied lambda owns a
+    // nested copied frame, so its stack and source ownership stay distinct from the declaration.
+    let frame = ir.add_expr(IrExpr::Block {
         stmts: declarations,
         value: Some(spliced),
+    });
+    ir.copy_inline_copy_mark(invocation, frame);
+    if let Some(source) = ir.source_debug.current() {
+        let owner = ir
+            .lambda_origins
+            .get(&impl_fn)
+            .and_then(|origin| origin.lexical_owner);
+        ir.record_inline_copy_owner(frame, impl_fn, owner, source);
+    }
+    ir.exprs[invocation as usize] = IrExpr::Block {
+        stmts: Vec::new(),
+        value: Some(frame),
     };
     if let Some(end) = ir.expr_end_lines.get(&lambda).copied() {
         ir.expr_end_lines.insert(invocation, end);
@@ -1132,6 +1184,16 @@ mod tests {
             params: Vec::new(),
             ret: Ty::Unit,
         });
+        ir.record_inline_copy_owner(
+            body,
+            actual_implementation,
+            None,
+            crate::fir::SourceFileId::from_raw(7),
+        );
+        let invocation_provenance = ir
+            .inline_copy_provenance(body)
+            .expect("the declaration invocation is an exact inline copy")
+            .to_vec();
         let mut shape = IrFunction {
             name: "escaping".to_string(),
             params: vec![Ty::String, Ty::fun(Vec::new(), Ty::Unit), Ty::String],
@@ -1167,6 +1229,148 @@ mod tests {
                 Some(crate::ir::IrParameterCheck::NonNull),
             ]
         );
+        let IrExpr::Block {
+            stmts: outer_statements,
+            value: Some(frame),
+        } = ir.expr(body)
+        else {
+            panic!("the declaration invocation remains the outer frame")
+        };
+        assert!(outer_statements.is_empty());
+        let IrExpr::Block {
+            stmts: frame_statements,
+            value: Some(_),
+        } = ir.expr(*frame)
+        else {
+            panic!("the supplied lambda owns a nested value frame")
+        };
+        assert!(frame_statements.iter().any(|&statement| matches!(
+            ir.debug_local_provenance(statement),
+            Some(crate::ir::IrDebugLocalProvenance::LambdaFrameMarker {
+                implementation,
+                ..
+            }) if implementation == actual_implementation
+        )));
+        assert_eq!(
+            ir.inline_copy_provenance(*frame),
+            Some(invocation_provenance.as_slice())
+        );
+    }
+
+    #[test]
+    fn captured_lambda_substitution_refreshes_the_retained_inline_body() {
+        let mut ir = crate::ir::IrFile::default();
+        let actual_body = ir.add_expr(IrExpr::UnitInstance);
+        let actual_implementation = ir.add_fun(IrFunction {
+            name: "actual".to_string(),
+            params: Vec::new(),
+            ret: Ty::Unit,
+            body: Some(actual_body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let actual = ir.add_expr(IrExpr::Lambda {
+            impl_fn: actual_implementation,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: Some(actual_body),
+        });
+        let implementation_read = ir.add_expr(IrExpr::GetValue(0));
+        let implementation_body = ir.add_expr(IrExpr::InvokeFunction {
+            func: implementation_read,
+            args: Vec::new(),
+            params: Vec::new(),
+            ret: Ty::Unit,
+        });
+        let implementation = ir.add_fun(IrFunction {
+            name: "escaping".to_string(),
+            params: vec![Ty::fun(Vec::new(), Ty::Unit)],
+            ret: Ty::Unit,
+            body: Some(implementation_body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let retained_read = ir.add_expr(IrExpr::GetValue(0));
+        let retained_inline_body = ir.add_expr(IrExpr::InvokeFunction {
+            func: retained_read,
+            args: Vec::new(),
+            params: Vec::new(),
+            ret: Ty::Unit,
+        });
+        ir.logical_types.insert(retained_inline_body, Ty::Unit);
+        let copy = ir.add_expr(IrExpr::Lambda {
+            impl_fn: implementation,
+            arity: 0,
+            captures: vec![actual],
+            sam: None,
+            inline_body: Some(retained_inline_body),
+        });
+
+        let plan = plan(
+            &ir,
+            &[(copy, copy)],
+            &HashSet::default(),
+            &HashSet::from_iter([actual]),
+            &HashSet::default(),
+            &HashMap::default(),
+        )
+        .expect("the exact capture-free lambda invocation is transferable");
+        let suppressions = apply(
+            &mut ir,
+            plan,
+            &HashMap::default(),
+            &HashMap::default(),
+            crate::fir::DeclarationId::from_raw(0),
+            None,
+            false,
+            "caller",
+            implementation,
+            None,
+            crate::fir::SourceFileId::from_raw(0),
+            crate::fir::CallableId::from_raw(0),
+            "inlineCall",
+        );
+
+        assert_eq!(suppressions, [actual_implementation]);
+        let IrExpr::Lambda {
+            impl_fn: specialized,
+            captures,
+            inline_body: Some(specialized_inline_body),
+            ..
+        } = ir.expr(copy)
+        else {
+            panic!("the escaping copy remains an inlineable lambda")
+        };
+        assert!(captures.is_empty());
+        assert_ne!(*specialized, implementation);
+        let specialized_body = ir.functions[*specialized as usize]
+            .body
+            .expect("the specialized implementation retains a body");
+        assert_eq!(*specialized_inline_body, retained_inline_body);
+        assert_ne!(*specialized_inline_body, specialized_body);
+        assert_eq!(ir.logical_types[specialized_inline_body], Ty::Unit);
+        let IrExpr::Block {
+            stmts: outer_statements,
+            value: Some(frame),
+        } = ir.expr(*specialized_inline_body)
+        else {
+            panic!("the retained body owns the specialized outer frame")
+        };
+        assert!(outer_statements.is_empty());
+        assert!(matches!(
+            ir.expr(*frame),
+            IrExpr::Block { stmts, value: Some(_) }
+                if stmts.iter().any(|&statement| matches!(
+                    ir.debug_local_provenance(statement),
+                    Some(crate::ir::IrDebugLocalProvenance::LambdaFrameMarker {
+                        implementation,
+                        ..
+                    }) if implementation == actual_implementation
+                ))
+        ));
     }
 
     #[test]

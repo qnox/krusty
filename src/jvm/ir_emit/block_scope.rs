@@ -938,12 +938,7 @@ impl Emitter<'_> {
     }
 
     fn opens_spliced_lambda_frame(&self, stmts: &[u32]) -> bool {
-        stmts.iter().any(|&statement| {
-            matches!(
-                self.ir.debug_local_provenance(statement),
-                Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
-            )
-        })
+        opens_spliced_lambda_frame(self.ir, stmts)
     }
 
     /// Effects of a `Unit` coercion, then the `Unit` value that follows the lambda's closing brace.
@@ -1267,16 +1262,7 @@ impl Emitter<'_> {
         expression: u32,
         stack_height: i32,
     ) -> Option<u32> {
-        if stack_height == 0 {
-            return None;
-        }
-        let IrExpr::Block { stmts, .. } = self.ir.expr(expression) else {
-            return None;
-        };
-        let has_lambda_frame = self.opens_spliced_lambda_frame(stmts);
-        (self.ir.external_inline_expansions.contains(&expression)
-            || (self.ir.is_inline_copy(expression) && has_lambda_frame))
-            .then_some(expression)
+        inline_stack_coercion_owner(self.ir, expression, stack_height)
     }
 
     fn close_or_defer_inline_stack(
@@ -1417,6 +1403,92 @@ impl Emitter<'_> {
             .filter(|local| local.opens_inline_frame)
             .max_by_key(|local| local.start)
             .and_then(|local| local.inline_frame)
+    }
+}
+
+/// Follow effect-free value wrappers to the copied block that owns the physical stack boundary.
+///
+/// Lowering retains these wrappers when a copied inline result crosses a coercion. Since they own
+/// no statements or locals, adapting outside them would also move the coercion outside the copied
+/// stack bracket.
+fn inline_stack_coercion_owner(
+    ir: &crate::ir::IrFile,
+    mut expression: u32,
+    stack_height: i32,
+) -> Option<u32> {
+    if stack_height == 0 {
+        return None;
+    }
+    loop {
+        let IrExpr::Block { stmts, value } = ir.expr(expression) else {
+            return None;
+        };
+        let has_lambda_frame = opens_spliced_lambda_frame(ir, stmts);
+        if ir.external_inline_expansions.contains(&expression)
+            || (ir.is_inline_copy(expression) && has_lambda_frame)
+        {
+            return Some(expression);
+        }
+        match (stmts.is_empty(), value) {
+            (true, Some(value)) => expression = *value,
+            _ => return None,
+        }
+    }
+}
+
+fn opens_spliced_lambda_frame(ir: &crate::ir::IrFile, stmts: &[u32]) -> bool {
+    stmts.iter().any(|&statement| {
+        matches!(
+            ir.debug_local_provenance(statement),
+            Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copied_stack_owner_is_found_through_only_empty_value_wrappers() {
+        let mut ir = crate::ir::IrFile::default();
+        let marker = ir.add_expr(IrExpr::InlineFrameMarker);
+        ir.set_debug_local_provenance(
+            marker,
+            IrDebugLocalProvenance::LambdaFrameMarker {
+                implementation: 0,
+                depth: 1,
+            },
+        );
+        let value = ir.add_expr(IrExpr::UnitInstance);
+        let owner = ir.add_expr(IrExpr::Block {
+            stmts: vec![marker],
+            value: Some(value),
+        });
+        ir.mark_inline_copy(owner);
+
+        assert_eq!(inline_stack_coercion_owner(&ir, owner, 1), Some(owner));
+        assert_eq!(inline_stack_coercion_owner(&ir, owner, 0), None);
+
+        let first_wrapper = ir.add_expr(IrExpr::Block {
+            stmts: Vec::new(),
+            value: Some(owner),
+        });
+        let second_wrapper = ir.add_expr(IrExpr::Block {
+            stmts: Vec::new(),
+            value: Some(first_wrapper),
+        });
+        assert_eq!(
+            inline_stack_coercion_owner(&ir, second_wrapper, 1),
+            Some(owner)
+        );
+
+        let effect = ir.add_expr(IrExpr::UnitInstance);
+        let effectful_wrapper = ir.add_expr(IrExpr::Block {
+            stmts: vec![effect],
+            value: Some(owner),
+        });
+        assert_eq!(inline_stack_coercion_owner(&ir, effectful_wrapper, 1), None);
     }
 }
 
