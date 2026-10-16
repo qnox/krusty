@@ -9375,6 +9375,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   diagnostics name their owner with its written bounds and variance (`T (of fun <A, T : ((Int) ->
   A)?> f)`, `X (of class Box<out X, in Y : Number>)`). Tests: `tests/type_parameter_invoke_e2e.rs`,
   `tests/generic_argument_wildcards_e2e.rs`, `tests/tparam_bounded_by_tparam_e2e.rs`.
+- **A type argument outside its parameter's bounds is `UPPER_BOUND_VIOLATED`.** Each written
+  argument of a classifier application must be a subtype of every declared bound of its parameter,
+  substituted with the same application's arguments: `I<T : Comparable<T>>` written `I<Any>`
+  requires `Comparable<Any>`. The error is at the argument (`String` in `B<String>`), at the `in`/`out`
+  keyword of a projected one, and never for `*`; nested applications (`List<B<String>>`) are checked
+  on their own. kotlinc's message names the parameter with its owner, writes several bounds as their
+  intersection, and numbers same-named type parameters across the bound, the argument, and the
+  parameter, in that order: `type parameter 'T#2 (of class B<T : Number>)' must be subtype of
+  'Number', but actual: 'T#1 (of fun <T> p)'.` Checked positions: property, local-variable,
+  parameter, return, receiver, lambda-parameter, and function-type component types, supertypes
+  (also of an anonymous object), and classifier type-parameter bounds. A type operator's target
+  (`is`/`as`/`as?`, including a `when` branch) and a callable's type-parameter bound
+  (`fun <T : B<String>>`, `where`, a property's or a local function's) check only the
+  applications nested in them: their outermost application is checked once
+  `ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds` is on. A declared type Pass 1
+  finalized is not resolved again; the checker walks its written syntax beside the finalized type
+  and the alias spellings Pass 1 recorded for it. That includes the header of an abstract or
+  interface member, which has no body to check. A builtin classifier's bounds come from its
+  `.kotlin_builtins` declaration, so `Enum<String>` is an error (`E : Enum<E>`). Tests:
+  `tests/upper_bound_violations_e2e.rs`.
 - **A value of a class that implements a function type is invoked through its own member.** `f(x)`
   and `f.invoke(x)` on `f: F` with `class F : (Token) -> Token` select `F`'s `invoke` member, and
   kotlinc calls `F.invoke(LToken;)LToken;` directly; a generic `Same<T> : (T) -> T` calls
@@ -13469,6 +13489,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `UNSUPPORTED_ARRAY_OF_NOTHING_IN_CLASS_LITERAL_LHS` until the feature makes it the plain
     `UNSUPPORTED` error, reported at the complete left-hand side.
     (`tests/class_literal_array_of_nothing_e2e.rs`.)
+  - `ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds`: `UPPER_BOUND_VIOLATED` also
+    checks the outermost application of a type operator's target (`a as B<String>`, `is`, a `when`
+    branch) and of a callable's type-parameter bound (`fun <T : B<String>>`, `where`, a property's
+    or a local function's). It is not a deprecation: with the feature off kotlinc reports nothing
+    there, not a warning. (`tests/upper_bound_violations_e2e.rs`.)
   - `ForbidUselessTypeArgumentsIn25` (KTLC-390): type arguments that select nothing. Each explicit
     call-site list retains its type references and complete `<…>` span as one syntax value owned by
     its expression segment; Pass-1 compaction remaps that owner once.

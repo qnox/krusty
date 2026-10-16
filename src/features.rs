@@ -124,6 +124,7 @@ const MODELED_FEATURES: &[&str] = &[
     "ForbidArrayOfNothingInLhsOfClassLiteral",
     "ForbidExternalEnumEntriesAndPrimaryConstructorProperties",
     "ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects",
+    "ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds",
     "ForbidUselessTypeArgumentsIn25",
     "ForbidValueClassRecursionViaTypeParameters",
     "FullValueClasses",

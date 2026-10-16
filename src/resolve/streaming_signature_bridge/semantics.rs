@@ -556,6 +556,40 @@ impl ProductionSignatureSemantics<'_> {
         self.resolve_signature_type_reference_at(scope, scope, reference, true)
     }
 
+    /// Resolve a callable header bound outside the declaration body's classifier rung while using
+    /// the ordinary diagnostic path. Callable publication may already own the authoritative
+    /// semantic bound shape, but every written reference must still report its own frontend error.
+    pub(super) fn resolve_callable_header_bound(
+        &self,
+        scope: crate::fir::SignatureScope,
+        reference: &TypeRef,
+    ) -> Result<Ty, crate::fir::DiagnosticId> {
+        self.resolve_signature_type_reference_at(scope, scope, reference, false)
+    }
+
+    /// Resolve a classifier bound in the caller's provisional type-parameter scope and retain the
+    /// same precise source diagnostic as the ordinary signature path. The supplied scope is needed
+    /// before the classifier's stable parameter contract exists.
+    pub(super) fn resolve_classifier_header_bound(
+        &self,
+        scope: crate::fir::SignatureScope,
+        lexical: &super::super::CheckerScope<'_>,
+        reference: &TypeRef,
+    ) -> Result<Ty, crate::fir::DiagnosticId> {
+        if let Some(ty) = self.classifier_header_type_ref(scope, lexical, reference) {
+            if !ty.mentions_error() {
+                return Ok(ty);
+            }
+            if let Some(diagnostic) =
+                self.recorded_type_diagnostic(scope.owner, scope.source, reference)
+            {
+                return Err(diagnostic);
+            }
+        }
+        let failed = self.unresolved_signature_type_ref(scope, lexical, reference, false);
+        Err(self.record_failed_type_reference(scope, scope, failed.span, &failed.name))
+    }
+
     fn resolve_signature_type_reference_at(
         &self,
         diagnostic_scope: crate::fir::SignatureScope,

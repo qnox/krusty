@@ -24,6 +24,7 @@ impl Checker<'_> {
         reference: &TypeRef,
         is_vararg: bool,
         semantic: Ty,
+        spelled: &crate::spelling::Spelled,
     ) -> Ty {
         let declaration = if is_vararg {
             semantic.non_null().array_read_elem().unwrap_or(semantic)
@@ -35,6 +36,7 @@ impl Checker<'_> {
         self.resolved_declaration_types
             .insert((reference.span.lo, reference.span.hi), declaration);
         self.check_finalized_type_reference_usage(reference, declaration);
+        self.check_finalized_type_bounds(reference, declaration, spelled);
         semantic
     }
 
@@ -45,12 +47,14 @@ impl Checker<'_> {
         &mut self,
         reference: &TypeRef,
         semantic: Ty,
+        spelled: &crate::spelling::Spelled,
     ) -> Ty {
         self.resolved_type_tys
             .insert((reference.span.lo, reference.span.hi), semantic);
         self.resolved_declaration_types
             .insert((reference.span.lo, reference.span.hi), semantic);
         self.check_finalized_type_reference_usage(reference, semantic);
+        self.check_finalized_type_bounds(reference, semantic, spelled);
         semantic
     }
 }
