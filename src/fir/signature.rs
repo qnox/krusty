@@ -1594,6 +1594,7 @@ pub struct ResolvedPropertyHeader {
     /// type. This is a finalized Pass-1 fact; Pass 2 must not infer it from an initializer.
     pub storage_type: Option<ResolvedTy>,
     pub mutable: bool,
+    pub source_visible: bool,
 }
 
 /// Stable source identity and semantic role of one property context parameter. Properties own
@@ -2908,6 +2909,7 @@ impl ResolvedModuleIndex {
                         extension_receiver,
                         storage_type: None,
                         mutable,
+                        source_visible: true,
                     },
                 )
                 .is_none(),
@@ -2925,6 +2927,13 @@ impl ResolvedModuleIndex {
             property.storage_type.replace(storage_type).is_none(),
             "a property storage type may be published only once"
         );
+    }
+
+    pub fn publish_property_source_hidden(&mut self, id: PropertyId) {
+        self.properties
+            .get_mut(&id)
+            .expect("source visibility requires a published property identity")
+            .source_visible = false;
     }
 
     /// Publish the complete source identity contract for both accessors while the property syntax

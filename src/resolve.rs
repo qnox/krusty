@@ -10588,23 +10588,19 @@ impl ScopeBinding {
     }
 }
 
-/// The checker's lexical scope chain. See [`scope`] — the chain is threaded as a parameter, not
-/// held on the checker, so a scope cannot outlive its parent and cannot be left open by an early
-/// return.
+/// The lexical scope chain is threaded so it cannot outlive its parent or survive an early return.
 type CheckerScope<'p> = scope::Scope<'p, ScopeBinding>;
 
 #[derive(Clone)]
 struct ScopedProperty {
     name: String,
     ty: Ty,
-    /// A narrower explicit backing-field type, visible only inside this declaration's owner.
-    /// The public property type remains `ty` everywhere else.
+    source_visible: bool,
+    /// Narrower backing-field type visible only inside the owner; `ty` remains public.
     owner_storage_ty: Option<Ty>,
     is_var: bool,
     owner: TypeName,
-    /// Exact implicit-receiver rung whose member family contributed this property. A property
-    /// inherited by the current subclass and the same declaration reached through an enclosing
-    /// base-typed receiver have the same owner and type but different runtime identities.
+    /// Exact contributing receiver rung; the same inherited declaration can have distinct runtime identities.
     dispatch_receiver_identity: Option<(usize, usize)>,
     class_storage: Option<u32>,
     enum_entry_property: Option<u32>,
@@ -43468,6 +43464,7 @@ impl<'a> Checker<'a> {
                 dispatch_receiver_identity: None,
                 class_storage: None,
                 enum_entry_property: Some(field as u32),
+                source_visible: true,
                 source_member: None,
                 stable_declaration: None,
             });
@@ -43789,9 +43786,12 @@ impl<'a> Checker<'a> {
                                 source, storage, &bindings,
                             ))
                         });
+                    let source_visible =
+                        checker.class_body_property_source_visible(property.stable_declaration);
                     properties.push(ScopedProperty {
                         name: property.name.clone(),
                         ty,
+                        source_visible,
                         owner_storage_ty,
                         is_var: property.setter.is_some(),
                         owner: property.owner,
@@ -49553,6 +49553,7 @@ impl<'a> Checker<'a> {
                                 .map(|receiver| receiver.identity),
                             class_storage: None,
                             enum_entry_property: None,
+                            source_visible: true,
                             source_member: Some(source_member),
                             stable_declaration,
                         });
@@ -50122,6 +50123,7 @@ impl<'a> Checker<'a> {
                             dispatch_receiver_identity: None,
                             class_storage: Some(field as u32),
                             enum_entry_property: Some(field as u32),
+                            source_visible: true,
                             source_member: None,
                             stable_declaration: None,
                         });
@@ -51896,14 +51898,7 @@ impl<'a> Checker<'a> {
                 );
             }
         }
-        let body_class_declaration = match source_member.as_ref() {
-            Some(crate::libraries::SourceMember::Class { file, owner, .. })
-                if *file == self.file_index =>
-            {
-                Some(DeclId(*owner))
-            }
-            _ => None,
-        };
+        let body_class_declaration = self.body_class_declaration(source_member.as_ref());
         let class_storage_captures = body_class_declaration
             .map(|declaration| self.body_class_storage_captures(declaration))
             .unwrap_or_default();
@@ -51965,6 +51960,7 @@ impl<'a> Checker<'a> {
             if f.receiver.is_none() {
                 for property in props {
                     let lexical_value_shadows = body_class_declaration.is_some()
+                        && property.source_visible
                         && self.lookup(scope, &property.name).is_some_and(|binding| {
                             matches!(
                                 binding.origin,

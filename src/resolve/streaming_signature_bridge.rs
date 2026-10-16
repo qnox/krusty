@@ -4719,19 +4719,10 @@ pub(crate) fn finalized_streamed_signature_index(
                     .map(|capture| capture.shared_cell)
             })
             .unwrap_or(false);
-        index.publish_property_shape(
-            crate::fir::PropertyId::from_raw(stub.id.raw()),
-            stub.id,
-            0,
-            0,
-            None,
-            mutable,
-        );
-        index.publish_property_parameter_identities(
-            crate::fir::PropertyId::from_raw(stub.id.raw()),
-            std::iter::empty(),
-            None,
-        );
+        let property = crate::fir::PropertyId::from_raw(stub.id.raw());
+        index.publish_property_shape(property, stub.id, 0, 0, None, mutable);
+        index.publish_property_source_hidden(property);
+        index.publish_property_parameter_identities(property, std::iter::empty(), None);
     }
     // Publish classifier headers after the full declaration inventory so source order is irrelevant.
     'classifier_publication: for stub in &headers.stubs {
