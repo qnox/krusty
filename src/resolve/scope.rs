@@ -206,13 +206,13 @@ pub(crate) enum FlowExclusion {
 /// The facts one checked condition proves on one of its outcomes: positive narrowings and
 /// negative facts. A cast the stability gate declined where the condition was checked is no fact.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct ConditionFacts {
-    pub(crate) narrowings: Vec<(NarrowPath, Ty)>,
-    pub(crate) exclusions: Vec<(NarrowPath, FlowExclusion)>,
+pub(super) struct ConditionFacts {
+    pub(super) narrowings: Vec<(NarrowPath, Ty)>,
+    pub(super) exclusions: Vec<(NarrowPath, FlowExclusion)>,
 }
 
 impl ConditionFacts {
-    pub(crate) fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.narrowings.is_empty() && self.exclusions.is_empty()
     }
 
@@ -228,26 +228,26 @@ impl ConditionFacts {
 /// facts its initializer proved for `true` and for `false` (Kotlin's data-flow implications bound
 /// to a stable boolean variable).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct FlowExecutionIdentity {
+pub(super) struct FlowExecutionIdentity {
     /// A named local function is a separate execution even though entering it clears the enclosing
     /// lambda chain. Its statement identity cannot collide with a lambda expression identity.
-    pub(crate) local_function: Option<StmtId>,
-    pub(crate) lambdas: Vec<ExprId>,
+    pub(super) local_function: Option<StmtId>,
+    pub(super) lambdas: Vec<ExprId>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct BooleanImplications {
-    pub(crate) when_true: ConditionFacts,
-    pub(crate) when_false: ConditionFacts,
+pub(super) struct BooleanImplications {
+    pub(super) when_true: ConditionFacts,
+    pub(super) when_false: ConditionFacts,
     /// The execution the val was declared in: the materialized (not inline-spliced) lambdas
     /// enclosing it, outermost first. Only a write in this same execution replaces a value under
     /// the val's facts; a write in a nested callable runs at another time and is the stability
     /// gate's business where the val is read.
-    pub(crate) execution: FlowExecutionIdentity,
+    pub(super) execution: FlowExecutionIdentity,
 }
 
 impl BooleanImplications {
-    pub(crate) fn facts(&self, truth: bool) -> &ConditionFacts {
+    pub(super) fn facts(&self, truth: bool) -> &ConditionFacts {
         if truth {
             &self.when_true
         } else {
@@ -1003,7 +1003,7 @@ impl<'p, B> Scope<'p, B> {
 
     /// Drop the Boolean-val facts about `root` that a write in `execution` invalidates: those of
     /// every val declared in that same execution, in the whole chain.
-    pub(crate) fn forget_implied_facts_rooted_at(
+    pub(super) fn forget_implied_facts_rooted_at(
         &self,
         root: &PathRoot,
         execution: &FlowExecutionIdentity,
@@ -1019,7 +1019,7 @@ impl<'p, B> Scope<'p, B> {
     }
 
     /// Bind a stable Boolean `val`'s implications to the frame declaring it.
-    pub(crate) fn record_boolean_implications(
+    pub(super) fn record_boolean_implications(
         &self,
         identity: u32,
         implications: BooleanImplications,
@@ -1032,7 +1032,7 @@ impl<'p, B> Scope<'p, B> {
 
     /// The implications recorded for the val with flow identity `identity`, from the frame that
     /// declared it.
-    pub(crate) fn boolean_implications(&self, identity: u32) -> Option<BooleanImplications> {
+    pub(super) fn boolean_implications(&self, identity: u32) -> Option<BooleanImplications> {
         self.ancestors().find_map(|rung| {
             rung.flow
                 .borrow()

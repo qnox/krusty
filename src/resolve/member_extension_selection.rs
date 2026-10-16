@@ -39,7 +39,7 @@ impl MemberExtensionConventionDiagnosticCandidate {
     }
 }
 
-pub(crate) enum MemberExtensionFunctionSelection {
+pub(super) enum MemberExtensionFunctionSelection {
     /// Boxed: the candidate is ~950 bytes while the diagnostic variants carry only a `Vec`.
     Selected(Box<MemberExtensionFunctionCandidate>),
     None(Box<MemberExtensionRejections>),
@@ -49,9 +49,9 @@ pub(crate) enum MemberExtensionFunctionSelection {
 /// Typed declarations retained by the original member-extension collection when no candidate is
 /// applicable. The caller reports from this result; it never searches providers again after
 /// selection has failed.
-pub(crate) struct MemberExtensionRejections {
-    pub(crate) convention_candidates: Vec<MemberExtensionConventionDiagnosticCandidate>,
-    pub(crate) call_candidates: Vec<crate::libraries::FunctionInfo>,
+pub(super) struct MemberExtensionRejections {
+    pub(super) convention_candidates: Vec<MemberExtensionConventionDiagnosticCandidate>,
+    pub(super) call_candidates: Vec<crate::libraries::FunctionInfo>,
 }
 
 /// Whether this scope-tower rung owns postponed lambda shaping. An ambiguous rung deliberately

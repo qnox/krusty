@@ -73,3 +73,24 @@ fn an_explicit_receiver_rejection_uses_the_retained_body_local_candidate_like_ko
         &[],
     );
 }
+
+/// Safe calls enter the same retained-candidate diagnostic path through separate `String` and
+/// classifier receiver branches. The nullable body-local receiver must keep its local declaration,
+/// while the `String` branch must keep the stdlib extension family; both errors and their order are
+/// compared exactly with kotlinc.
+#[test]
+fn safe_call_rejections_retain_string_and_body_local_candidates_like_kotlinc() {
+    common::assert_errors_match_kotlinc(
+        &[(
+            "Main.kt",
+            "fun enclosing(xs: List<Int>?) {\n\
+             \x20   val text: String? = \"text\"\n\
+             \x20   text?.take(xs)\n\
+             \x20   class Local { fun take(values: List<Int>) {} }\n\
+             \x20   val local: Local? = Local()\n\
+             \x20   local?.take(xs)\n\
+             }\n",
+        )],
+        &[],
+    );
+}
