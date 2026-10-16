@@ -9,20 +9,24 @@
 use super::*;
 pub(crate) use crate::lexical_policy::LexicalPolicy;
 
-/// Resolve each source's file annotation policies once, while Pass 1 still holds the file
-/// annotations' syntax, and publish them for every later checking unit of that source. The
-/// applications' diagnostics belong to the unit that checks them, so this resolution reports none.
-pub(crate) fn publish_file_lexical_policies(
+/// Resolve each source's file annotations once, while Pass 1 still holds their syntax, and publish
+/// their policies and checked applications for every later checking unit and backend of that
+/// source. The applications' diagnostics belong to the unit that checks them, so this resolution
+/// reports none.
+pub(crate) fn publish_file_annotations(
     files: &[File],
     symbols: &SymbolTable,
+    target: crate::compilation_target::CompilationTarget,
     index: &mut crate::fir::ResolvedModuleIndex,
+    diags: &mut DiagSink,
 ) {
+    let unsupported_multifile = crate::types::type_name("kotlin/jvm/JvmMultifileClass");
     for (file_index, file) in files.iter().enumerate() {
         if file.file_annotations.is_empty() {
             continue;
         }
         let mut diagnostics = DiagSink::new();
-        let policies = make_checker_with_index(
+        let mut checker = make_checker_with_index(
             file,
             file_index as u32,
             Some(files),
@@ -31,11 +35,38 @@ pub(crate) fn publish_file_lexical_policies(
             None,
             None,
             &mut diagnostics,
-        )
-        .file_annotation_policies(&CheckerScope::root());
-        index.publish_file_lexical_policies(
+        );
+        let policies = checker.file_annotation_policies(&CheckerScope::root());
+        let applications = file
+            .file_annotations
+            .iter()
+            .filter_map(|(annotation, _)| {
+                let key = (annotation.span.lo, annotation.span.hi);
+                let applied = checker.applied_annotations.get(&key)?;
+                if target == crate::compilation_target::CompilationTarget::Jvm
+                    && applied.internal == unsupported_multifile
+                {
+                    diags.set_file(file_index as u32);
+                    diags.error(
+                        annotation.span,
+                        "@file:JvmMultifileClass is not supported for JVM compilation yet; its \
+                         part classes and delegating facade require distinct physical owners"
+                            .to_string(),
+                    );
+                }
+                Some(crate::types::ResolvedAnnotation {
+                    annotation: applied.internal,
+                    arguments: applied.values.clone(),
+                    facts: applied.facts,
+                })
+            })
+            .collect();
+        index.publish_file_annotations(
             crate::fir::SourceFileId::from_raw(file_index as u32),
-            policies,
+            crate::fir::FileAnnotationFacts {
+                policies: policies.into(),
+                applications,
+            },
         );
     }
 }

@@ -2260,11 +2260,16 @@ pub fn expect_box_run_against_ref(tag: &str, lib_src: &str, main: &str) -> Optio
     ))
 }
 
-/// Compile a dependency with the REFERENCE compiler and return its classpath dir, for tests that
-/// need the classpath rather than a `box()` run (a rejection assertion, say).
+/// Compile a multi-file dependency with the REFERENCE compiler and return its classpath dir, for
+/// tests whose contract is consuming a class-file shape krusty deliberately does not emit.
+pub fn kotlinc_libraries(sources: &[(&str, &str)]) -> Option<PathBuf> {
+    kotlinc_lib_out(sources)
+}
+
+/// Single-file form of [`kotlinc_libraries`].
 #[allow(dead_code)]
 pub fn kotlinc_library(lib_src: &str) -> Option<PathBuf> {
-    kotlinc_lib_out(&[("Lib.kt", lib_src)])
+    kotlinc_libraries(&[("Lib.kt", lib_src)])
 }
 
 /// Run `main`'s `box()` against a dependency compiled by the REFERENCE compiler.

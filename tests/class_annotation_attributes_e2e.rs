@@ -242,3 +242,39 @@ class Holder {
         metadata.unwrap_or_else(|diff| panic!("{class}: {diff}"));
     }
 }
+
+/// A class carrying a BINARY-retained annotation ahead of a RUNTIME-retained one. kotlinc visits
+/// the applications in declaration order and interns each one's constants as it goes, whichever
+/// attribute it lands in; krusty interned every visible one first, so the pool order differed.
+#[test]
+fn mixed_retention_class_annotations_intern_in_declaration_order() {
+    let src = "@Retention(AnnotationRetention.BINARY) annotation class B(val v: String)\n\
+               @Retention(AnnotationRetention.RUNTIME) annotation class R(val v: String)\n\
+               @B(\"b\") @R(\"r\") class C\n";
+    let diff = common::byte_diff_against_kotlinc_cp(
+        "MixedRetentionOrder",
+        src,
+        "C",
+        &[common::stdlib_jar()],
+    )
+    .expect("kotlinc reference");
+    assert_eq!(diff, Ok(()));
+}
+
+/// The same annotations on a method intern every visible one first: kotlinc buffers a method in a
+/// tree node that replays its annotations attribute by attribute, unlike a class's.
+#[test]
+fn mixed_retention_method_annotations_intern_visible_first() {
+    let src = "@Retention(AnnotationRetention.BINARY) annotation class B\n\
+               annotation class V\n\
+               @Retention(AnnotationRetention.RUNTIME) annotation class R\n\
+               @B @V class C { @B @V @R fun m() = 1 }\n";
+    let diff = common::byte_diff_against_kotlinc_cp(
+        "MixedRetentionMethodOrder",
+        src,
+        "C",
+        &[common::stdlib_jar()],
+    )
+    .expect("kotlinc reference");
+    assert_eq!(diff, Ok(()));
+}

@@ -21,8 +21,8 @@ pub(super) enum ModuleRealizationTarget {
     Function(crate::ir::FunId),
 }
 
-fn jvm_field_access(property: &IrModuleProperty, stems: &[String]) -> Option<PropertyAccess> {
-    let (owner, is_static) = jvm_field_storage(property, stems)?;
+fn jvm_field_access(property: &IrModuleProperty, facades: &[String]) -> Option<PropertyAccess> {
+    let (owner, is_static) = jvm_field_storage(property, facades)?;
     Some(PropertyAccess::Field {
         owner,
         name: property.name.clone(),
@@ -37,7 +37,7 @@ fn jvm_field_access(property: &IrModuleProperty, stems: &[String]) -> Option<Pro
 /// makes its storage the declaration's JVM surface.
 pub(super) fn jvm_field_storage(
     property: &IrModuleProperty,
-    stems: &[String],
+    facades: &[String],
 ) -> Option<(TypeName, bool)> {
     if !crate::jvm::property_realizations::jvm_field_eligible(
         &property.annotations,
@@ -57,7 +57,7 @@ pub(super) fn jvm_field_storage(
         (owner, owner_is_singleton(property))
     } else {
         (
-            static_owner(property.placement, property.source, stems)?,
+            static_owner(property.placement, property.source, facades)?,
             true,
         )
     };
@@ -330,7 +330,7 @@ fn realize_local_default_arguments(
 /// and marker operands must use the resulting physical parameter types.
 pub(super) fn realize_default_calls(
     ir: &mut IrFile,
-    stems: &[String],
+    facades: &[String],
     default_call_operands: &mut DefaultCallOperands,
 ) -> Result<(), ModuleRealizationTarget> {
     for raw in 0..ir.exprs.len() {
@@ -411,7 +411,7 @@ pub(super) fn realize_default_calls(
                 let owner = match provider.owner {
                     Some(owner) => owner,
                     None => {
-                        static_owner(provider.placement, provider.source, stems).ok_or(failure)?
+                        static_owner(provider.placement, provider.source, facades).ok_or(failure)?
                     }
                 };
                 let mut stub_boxed =
@@ -711,7 +711,7 @@ pub(super) fn realize_super_calls(
 /// realization and therefore never reads imports, scopes, or overload sets.
 pub(super) fn realize(
     ir: &mut IrFile,
-    stems: &[String],
+    facades: &[String],
     classifiers: &dyn crate::backend::BackendClassifierSource,
     callables: &crate::backend::CheckedBackendCallables,
     property_realizations: &mut PropertyRealizations,
@@ -754,7 +754,7 @@ pub(super) fn realize(
                     return Err(failure);
                 }
                 let owner =
-                    static_owner(callable.placement, callable.source, stems).ok_or(failure)?;
+                    static_owner(callable.placement, callable.source, facades).ok_or(failure)?;
                 Some(IrExpr::Call {
                     callee: Callee::CrossFile {
                         facade: owner,
@@ -792,7 +792,7 @@ pub(super) fn realize(
                         selected_parameters: selected_parameters.into_boxed_slice(),
                     },
                 );
-                if let Some(access) = jvm_field_access(&property, stems) {
+                if let Some(access) = jvm_field_access(&property, facades) {
                     property_realizations.record_physical(raw as ExprId, access);
                     Some(IrExpr::PropertyRead {
                         receiver: dispatch_receiver,
@@ -805,7 +805,7 @@ pub(super) fn realize(
                 } else {
                     let (call, parameters, semantic) = realize_property(
                         &property,
-                        stems,
+                        facades,
                         target,
                         dispatch_receiver,
                         extension_receiver,
@@ -843,7 +843,7 @@ pub(super) fn realize(
                         selected_parameters: selected_parameters.into_boxed_slice(),
                     },
                 );
-                if let Some(access) = jvm_field_access(&property, stems) {
+                if let Some(access) = jvm_field_access(&property, facades) {
                     if !property.mutable {
                         return Err(ModuleRealizationTarget::Property(target));
                     }
@@ -860,7 +860,7 @@ pub(super) fn realize(
                 } else {
                     let (call, parameters, _) = realize_property(
                         &property,
-                        stems,
+                        facades,
                         target,
                         dispatch_receiver,
                         extension_receiver,
@@ -997,7 +997,7 @@ fn prepare_inherited_default_calls(ir: &mut IrFile) -> Result<(), ModuleRealizat
 
 fn realize_property(
     property: &IrModuleProperty,
-    stems: &[String],
+    facades: &[String],
     target: PropertyId,
     dispatch_receiver: Option<crate::ir::ExprId>,
     extension_receiver: Option<crate::ir::ExprId>,
@@ -1078,7 +1078,7 @@ fn realize_property(
         if dispatch_receiver.is_some() {
             return Err(failure);
         }
-        let facade = static_owner(property.placement, property.source, stems).ok_or(failure)?;
+        let facade = static_owner(property.placement, property.source, facades).ok_or(failure)?;
         Ok((
             IrExpr::Call {
                 callee: Callee::CrossFile {
@@ -1099,12 +1099,12 @@ fn realize_property(
 }
 
 /// Resolve each top-level foreign inline template's declaring source unit to its JVM file facade.
-pub(super) fn resolve_foreign_template_facades(ir: &mut IrFile, stems: &[String]) {
-    let facades = ir
+pub(super) fn resolve_foreign_template_facades(ir: &mut IrFile, facades: &[String]) {
+    let templates = ir
         .foreign_template_sources()
-        .filter_map(|(function, source)| Some((function, facade_for(source, stems)?)))
+        .filter_map(|(function, source)| Some((function, facade_for(source, facades)?)))
         .collect::<Vec<_>>();
-    ir.record_foreign_template_facades(facades);
+    ir.record_foreign_template_facades(templates);
 }
 
 /// The class realizing a module declaration with no dispatch owner: its file facade, or the
@@ -1112,18 +1112,19 @@ pub(super) fn resolve_foreign_template_facades(ir: &mut IrFile, stems: &[String]
 pub(super) fn static_owner(
     placement: IrStaticPlacement,
     source: IrModuleSource,
-    stems: &[String],
+    facades: &[String],
 ) -> Option<crate::types::TypeName> {
     match placement {
-        IrStaticPlacement::Package => facade_for(source, stems),
+        IrStaticPlacement::Package => facade_for(source, facades),
         IrStaticPlacement::CompanionBlock { declaring_class } => Some(declaring_class),
     }
 }
 
+/// The facade class of `source`, from each source's facade class simple name.
 pub(super) fn facade_for(
     source: IrModuleSource,
-    stems: &[String],
+    facades: &[String],
 ) -> Option<crate::types::TypeName> {
-    let stem = stems.get(source.source.raw() as usize)?;
-    Some(crate::jvm::names::file_facade_name(source.package, stem))
+    let segment = facades.get(source.source.raw() as usize)?;
+    Some(crate::types::type_name_child(source.package, segment))
 }

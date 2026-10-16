@@ -33,6 +33,8 @@ pub use signature_state::SignatureState;
 mod classifier_headers;
 mod declaration_metadata;
 pub use declaration_metadata::NoArgSuperConstructor;
+mod file_annotations;
+pub(crate) use file_annotations::FileAnnotationFacts;
 mod result_expectation;
 mod source_packages;
 
@@ -1447,9 +1449,9 @@ pub struct ResolvedModuleIndex {
     invisible_reference_suppressions: crate::fx_hash::HashSet<DeclarationId>,
     invisible_member_suppressions: crate::fx_hash::HashSet<DeclarationId>,
     optional_declaration_usage_suppressions: crate::fx_hash::HashSet<DeclarationId>,
-    /// The lexical policies each source's file annotations open, resolved once in Pass 1 from the
-    /// checked applications. Bounded Pass-2 units do not retain the file annotations' syntax.
-    file_lexical_policies: HashMap<SourceFileId, Box<[crate::lexical_policy::LexicalPolicy]>>,
+    /// What each source's file annotations publish, resolved once in Pass 1 from the checked
+    /// applications. Bounded Pass-2 units do not retain the file annotations' syntax.
+    file_annotations: HashMap<SourceFileId, FileAnnotationFacts>,
     /// The sources compiled as common (`dependsOn`) sources of a multiplatform module.
     common_sources: std::collections::HashSet<SourceFileId>,
     /// Resolved source annotation policies keyed by classifier identity. These are declaration
@@ -1856,20 +1858,6 @@ impl ResolvedModuleIndex {
         self.invisible_reference_suppressions.contains(&declaration)
     }
 
-    pub(crate) fn publish_file_lexical_policies(
-        &mut self,
-        source: SourceFileId,
-        policies: Vec<crate::lexical_policy::LexicalPolicy>,
-    ) {
-        let previous = self
-            .file_lexical_policies
-            .insert(source, policies.into_boxed_slice());
-        assert!(
-            previous.is_none(),
-            "a source's file lexical policies are published once"
-        );
-    }
-
     /// Record that `source` is a common source: its references bind to the `expect` headers the
     /// module's `actual` declarations replace.
     pub(crate) fn publish_common_source(&mut self, source: SourceFileId) {
@@ -1893,15 +1881,6 @@ impl ResolvedModuleIndex {
                 self.declaration_header(current)
                     .is_some_and(|header| header.flags.has(DeclarationFlags::ACTUAL))
             })
-    }
-
-    pub(crate) fn file_lexical_policies(
-        &self,
-        source: SourceFileId,
-    ) -> &[crate::lexical_policy::LexicalPolicy] {
-        self.file_lexical_policies
-            .get(&source)
-            .map_or(&[], |policies| &policies[..])
     }
 
     pub(crate) fn declaration_suppresses_invisible_member(
@@ -3171,13 +3150,9 @@ impl ResolvedModuleIndex {
                 + self.optional_declaration_usage_suppressions.len())
                 * std::mem::size_of::<DeclarationId>()
             + self
-                .file_lexical_policies
+                .file_annotations
                 .values()
-                .map(|policies| {
-                    std::mem::size_of::<SourceFileId>()
-                        + policies.len()
-                            * std::mem::size_of::<crate::lexical_policy::LexicalPolicy>()
-                })
+                .map(FileAnnotationFacts::heap_size)
                 .sum::<usize>()
             + self.classifiers.len()
                 * (std::mem::size_of::<DeclarationId>()

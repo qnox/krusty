@@ -141,6 +141,8 @@ pub struct BackendModuleFacts {
     /// its target-representation decision without walking providers or recovering a member name.
     inherited_defaults: HashMap<TypeName, Box<[crate::fir::ResolvedInheritedDefault]>>,
     source_declarations: HashMap<TypeName, SourceDeclaration>,
+    /// Each source's checked file-annotation applications, for sources that declare any.
+    file_annotations: HashMap<crate::fir::SourceFileId, Box<[crate::types::ResolvedAnnotation]>>,
 }
 
 impl BackendModuleFacts {
@@ -333,6 +335,11 @@ impl BackendModuleFacts {
             metadata_readable_value_classes,
             inherited_defaults,
             source_declarations,
+            file_annotations: index
+                .file_annotation_applications()
+                .filter(|(_, applications)| !applications.is_empty())
+                .map(|(source, applications)| (source, Box::from(applications)))
+                .collect(),
         })
     }
 
@@ -366,6 +373,7 @@ impl BackendModuleFacts {
             metadata_readable_value_classes,
             inherited_defaults: HashMap::default(),
             source_declarations: HashMap::default(),
+            file_annotations: HashMap::default(),
         })
     }
 
@@ -402,6 +410,16 @@ impl BackendModuleFacts {
         classifier: TypeName,
     ) -> Option<&[crate::fir::ResolvedInheritedDefault]> {
         self.inherited_defaults.get(&classifier).map(Box::as_ref)
+    }
+
+    /// `source`'s checked file-annotation applications, empty when it declares none.
+    pub fn file_annotations(
+        &self,
+        source: crate::fir::SourceFileId,
+    ) -> &[crate::types::ResolvedAnnotation] {
+        self.file_annotations
+            .get(&source)
+            .map_or(&[], |applications| &applications[..])
     }
 }
 

@@ -32,6 +32,7 @@ mod deferred_local_storage;
 mod enum_when_mappings;
 mod external_calls;
 mod field_compaction;
+mod file_facades;
 pub mod frame_audit;
 mod fresh_storage;
 mod function_argument_arrays;

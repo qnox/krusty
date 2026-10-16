@@ -1461,7 +1461,13 @@ where
             diags,
         );
         crate::resolve::publish_stable_declaration_metadata(&mut index, &symbols);
-        crate::resolve::publish_file_lexical_policies(&files[..inferred_end], &symbols, &mut index);
+        crate::resolve::publish_file_annotations(
+            &files[..inferred_end],
+            &symbols,
+            target,
+            &mut index,
+            diags,
+        );
         crate::resolve::publish_named_class_constructors(
             &files[..inferred_end],
             &mut index,
