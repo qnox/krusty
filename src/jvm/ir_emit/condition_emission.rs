@@ -130,6 +130,22 @@ impl Emitter<'_> {
                 }
                 return false;
             }
+            // An enum property compares by reference, as kotlinc's `Equals` compares any two
+            // operands of which one has an enum type: an enum constant is a singleton.
+            let [left, right] = args.as_slice() else {
+                unreachable!("data-class field equality has two operands")
+            };
+            let (left, right) = (*left, *right);
+            if self.is_enum_value(left) || self.is_enum_value(right) {
+                self.emit_value(left, code);
+                self.emit_value(right, code);
+                if jump_when_true {
+                    code.if_acmpeq(target);
+                } else {
+                    code.if_acmpne(target);
+                }
+                return false;
+            }
         }
         if let IrExpr::PrimitiveBinOp { op, .. } | IrExpr::Equality { op, .. } = *self.ir.expr(cond)
         {
