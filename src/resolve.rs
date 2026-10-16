@@ -32934,7 +32934,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         bound_annotation_identities: HashMap::default(),
         ret_ty: Ty::Unit,
         type_parameter_owners: HashMap::default(),
-        unchecked_bounds_reference: None,
+        upper_bound_violations: Default::default(),
         expected: None,
         callable_reference_literal_constraints: HashMap::default(),
         active_callable_reference: None,
@@ -34185,6 +34185,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         for &declaration_start in &file.type_alias_declaration_starts {
             c.check_declaration_type_parameter_annotations(scope, declaration_start);
         }
+        c.check_file_type_alias_bounds();
     }
 
     if fragment.is_type_use_annotations() {
@@ -35480,9 +35481,7 @@ struct Checker<'a> {
     /// kotlinc's owner wording (`fun <T : B> f`) of each declaration-owned type parameter checked
     /// so far, keyed by semantic identity, solely for diagnostics.
     type_parameter_owners: HashMap<&'static str, String>,
-    /// The type reference whose outermost application is exempt from the upper-bound check while
-    /// it is resolved: a type operator's target or a callable's type-parameter bound.
-    unchecked_bounds_reference: Option<Span>,
+    upper_bound_violations: upper_bound_violations::UpperBoundViolationState,
     /// Expected type for the next expression. Consumed by [`Self::expr`]; result-position
     /// propagation must re-arm it through [`Self::expr_expected`].
     expected: Option<Ty>,
@@ -45859,7 +45858,7 @@ impl<'a> Checker<'a> {
         );
         let declaration_scope = scope.child(ScopeKind::Block);
         declaration_scope.declare_tparams(&alias.type_params, &parameters, |_| false);
-        let expansion = self.type_ref_ty(&declaration_scope, &alias.target);
+        let expansion = self.resolve_alias_declaration_target(&declaration_scope, &alias.target);
         if expansion == Ty::Error {
             self.report_unresolved_type_ref(&alias.target);
             return None;
@@ -48854,6 +48853,7 @@ impl<'a> Checker<'a> {
             .and_then(|classifier| classifier.stable_declaration)
         {
             self.check_finalized_supertype_bounds(cl, declaration);
+            self.check_stable_nested_type_alias_bounds(cl, declaration);
         }
         if !body_local_class && self.active_declarations.is_none() {
             // The retained inspection pipeline keeps the original declaration AST so editor

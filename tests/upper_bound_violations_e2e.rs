@@ -509,3 +509,78 @@ fn constructor_type_arguments_reject_the_selected_constructor() {
         ],
     );
 }
+
+const ALIASES: &str = "\
+class B<T : Number>
+typealias BL<X> = List<B<X>>
+typealias BA<X> = B<X>
+typealias BS = B<String>
+typealias LBS = List<BS>
+typealias LB2<X> = List<B<String>>
+typealias M<X> = Map<X, B<X>>
+typealias W<X> = B<List<X>>
+typealias BB<X> = B<B<X>>
+typealias N<X> = List<List<B<X>>>
+val a1: BL<String>? = null
+val a2: List<BS>? = null
+val a3: LBS? = null
+val a4: BA<BA<String>>? = null
+val a5: LB2<Int>? = null
+val a6: M<String>? = null
+val a7: W<Int>? = null
+val a8: BB<String>? = null
+val a9: N<String>? = null
+val a10: N<Int>? = null
+val a11: BB<Int>? = null
+fun f(x: BL<String>): BA<String>? = null
+";
+
+/// A typealias is checked where it is declared (only its arguments that are neither type
+/// parameters nor carry arguments) and where it is applied: the expansion's own arguments in full,
+/// a nested application only through arguments that are exactly an alias parameter. A violation
+/// is reported at the use-site argument it came from, or else at the alias reference.
+#[test]
+fn typealias_declarations_and_applications_are_checked_through_their_expansion() {
+    assert_matches_kotlinc(
+        ALIASES,
+        &[],
+        &[
+            b_violation("4:18", "String"),
+            b_violation("5:22", "String"),
+            b_violation("6:27", "String"),
+            b_violation("11:12", "String"),
+            b_violation("12:14", "String"),
+            b_violation("14:12", "B<String>"),
+            b_violation("14:15", "String"),
+            b_violation("16:11", "String"),
+            b_violation("17:9", "List<Int>"),
+            b_violation("18:9", "B<String>"),
+            b_violation("18:12", "String"),
+            b_violation("19:11", "String"),
+            b_violation("21:10", "B<Int>"),
+            b_violation("22:13", "String"),
+            b_violation("22:26", "String"),
+        ],
+    );
+}
+
+const STABLE_NESTED_ALIASES: &str = "\
+class B<T : Number>
+class Host {
+    typealias Bad = B<String>
+}
+object Registry {
+    typealias AlsoBad = B<String>
+}
+";
+
+/// A nested alias retained on a stable class/object is checked from its Pass-1 declaration identity
+/// even when no source use applies it.
+#[test]
+fn stable_nested_typealias_declarations_are_checked() {
+    assert_matches_kotlinc(
+        STABLE_NESTED_ALIASES,
+        &["-XXLanguage:+NestedTypeAliases"],
+        &[b_violation("3:23", "String"), b_violation("6:27", "String")],
+    );
+}
