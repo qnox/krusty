@@ -2,16 +2,19 @@
 //!
 //! An `if` or `when` continues only along edges that finish normally. Each of those edges has its
 //! own read type for a `var`: the condition facts that hold on that edge, then the assignments the
-//! edge performs. The continuation keeps a flow type when every such edge agrees on it. A
-//! `return`, `break`, `continue`, or `Nothing` edge does not finish, so it is not part of the
-//! join. Edges that disagree leave the declared type.
+//! edge performs. The continuation reads the common supertype of those edge types, as kotlinc's
+//! `LogicSystem.or` unifies the edges' type statements: `if (x == null) x = ArrayList()` leaves a
+//! `Collection<String>?` local read as `Collection<String>`. A `return`, `break`, `continue`, or
+//! `Nothing` edge does not finish, so it is not part of the join. A join that is the declared
+//! type or `Any?` proves nothing and leaves the declared type. A unanimous `Nothing?` is an exact
+//! flow fact: every completing edge stored `null`.
 
 use crate::fx_hash::HashSet;
 
 use crate::ast::{BinOp, Expr, ExprId};
 use crate::types::Ty;
 
-use super::scope::{FlowSnapshot, Ns, ScopeKind};
+use super::scope::{FlowSnapshot, NarrowPath, Ns, PathRoot, ScopeKind};
 use super::{Checker, CheckerScope, ReceiverFnValueOrigin};
 
 /// One stable local `var` visible at the conditional, in nearest-binding order.
@@ -28,6 +31,8 @@ pub(super) struct LocalFlowExit {
     pub(super) parent_flow: FlowSnapshot,
     /// Read type of each [`StableLocal`], same order.
     pub(super) reads: Vec<Ty>,
+    /// Every incomparable classifier facet proved for each [`StableLocal`], same order.
+    pub(super) intersections: Vec<Vec<Ty>>,
 }
 
 impl Checker<'_> {
@@ -76,6 +81,21 @@ impl Checker<'_> {
             .collect()
     }
 
+    /// Flow-intersection constituents of each stable local on this edge.
+    pub(super) fn local_edge_intersections(
+        &self,
+        scope: &CheckerScope<'_>,
+        locals: &[StableLocal],
+    ) -> Vec<Vec<Ty>> {
+        locals
+            .iter()
+            .map(|local| {
+                let path = NarrowPath::root_only(PathRoot::Value(local.flow_identity));
+                self.lookup_intersection_narrowing(scope, &path)
+            })
+            .collect()
+    }
+
     /// Whether evaluating `branch` can finish and continue after the conditional.
     ///
     /// `Nothing` is the checker's own result for a throw, a `Nothing` call, or a block that
@@ -108,6 +128,7 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         entry: &FlowSnapshot,
         reads: Vec<Ty>,
+        intersections: Vec<Vec<Ty>>,
         completes: bool,
     ) -> LocalFlowExit {
         let parent_flow = scope.flow_snapshot();
@@ -116,24 +137,28 @@ impl Checker<'_> {
             completes,
             parent_flow,
             reads,
+            intersections,
         }
     }
 
     /// Read types on the implicit else of `if (cond)`: the condition is false and nothing is
     /// assigned. The facts live on a temporary frame, so the continuation's own frame stays put.
-    pub(super) fn implicit_false_edge_reads(
+    pub(super) fn implicit_false_edge_state(
         &mut self,
         scope: &CheckerScope<'_>,
         cond: ExprId,
         locals: &[StableLocal],
         entry_reads: &[Ty],
-    ) -> Vec<Ty> {
+    ) -> (Vec<Ty>, Vec<Vec<Ty>>) {
         let (casts, declined) = self.condition_narrowings(scope, cond, false);
         let compound = matches!(self.file.expr(cond), Expr::Binary { op: BinOp::Or, .. });
         let branch_scope = scope.child(ScopeKind::Block);
         self.apply_narrowings(&branch_scope, &casts, &declined, compound);
         self.apply_condition_exclusions(&branch_scope, cond, false);
-        self.local_edge_reads(&branch_scope, locals, entry_reads)
+        (
+            self.local_edge_reads(&branch_scope, locals, entry_reads),
+            self.local_edge_intersections(&branch_scope, locals),
+        )
     }
 
     /// Install the join of `exits` on the continuation.
@@ -161,19 +186,34 @@ impl Checker<'_> {
             .collect::<Vec<_>>();
         scope.restore_common_flow(&parent_flows);
         for (index, local) in locals.iter().enumerate() {
-            let mut agreed = Some(completing[0].reads[index]);
-            for exit in &completing[1..] {
-                if exit.reads[index] != agreed.unwrap() {
-                    agreed = None;
-                    break;
-                }
-            }
+            let reads = completing
+                .iter()
+                .map(|exit| exit.reads[index])
+                .collect::<Vec<_>>();
+            let edge_intersections = completing
+                .iter()
+                .map(|exit| exit.intersections[index].as_slice())
+                .collect::<Vec<_>>();
+            let (joined, intersection) = self.joined_edge_reads(&reads, &edge_intersections);
+            // A declared upper bound remains a representable fallback when the exact common type
+            // is an intersection that `Ty` cannot publish. This is the same fixed-expectation rule
+            // conditional-result joining uses.
+            let declared_non_null = crate::resolve::definitely_non_null_ty(local.declared);
+            let joined = joined
+                .filter(|&ty| self.receiver_is_assignable(ty, local.declared))
+                .or_else(|| {
+                    (declared_non_null != Ty::Error
+                        && !declared_non_null.mentions_pending()
+                        && reads.iter().all(|&read| {
+                            read != Ty::Error
+                                && !read.mentions_pending()
+                                && self.receiver_is_assignable(read, declared_non_null)
+                        }))
+                    .then_some(declared_non_null)
+                });
             let entry_ty = entry_reads[index];
-            let install = agreed.filter(|&ty| {
-                ty != local.declared
-                    && ty != Ty::Error
-                    && !ty.mentions_pending()
-                    && self.receiver_is_assignable(ty, local.declared)
+            let install = joined.filter(|&ty| {
+                ty != local.declared && ty != Ty::nullable(Ty::obj_name(crate::types::wk::any()))
             });
             if let Some(ty) = install {
                 crate::trace_compiler!(
@@ -190,6 +230,50 @@ impl Checker<'_> {
                 );
                 scope.narrow_local(&local.name, None);
             }
+            // A denotable primary view can equal the declaration while another incomparable
+            // common facet is still new information. Publish the complete intersection even when
+            // no narrower single read type was installed.
+            if intersection.len() > 1 {
+                let path = NarrowPath::root_only(PathRoot::Value(local.flow_identity));
+                for constituent in intersection {
+                    scope.narrow_intersection(path.clone(), constituent);
+                }
+            }
         }
+    }
+
+    /// The common read type and every incomparable common classifier facet of completing edges.
+    ///
+    /// A pairwise fold is lossy: `First` and `Second` may initially share both `Source<String>` and
+    /// `Tagged`, which has no single denotable type, while a later `Third` removes `Tagged` and
+    /// leaves the denotable `Source<CharSequence>`. Intersect all applied hierarchies together
+    /// before choosing one read projection, and retain multiple final facets as lexical flow facts.
+    fn joined_edge_reads(&self, reads: &[Ty], intersections: &[&[Ty]]) -> (Option<Ty>, Vec<Ty>) {
+        if reads
+            .iter()
+            .any(|ty| *ty == Ty::Error || ty.mentions_pending())
+        {
+            return (None, Vec::new());
+        }
+        let edge_views = reads
+            .iter()
+            .copied()
+            .zip(intersections)
+            .map(|(read, constituents)| {
+                let mut views = constituents.to_vec();
+                if !views.contains(&read) {
+                    views.push(read);
+                }
+                views
+            })
+            .collect::<Vec<_>>();
+        let intersection = self.minimal_common_classifier_views_for_edges(&edge_views);
+        let joined = intersection.first().copied().or_else(|| {
+            let (&first, rest) = reads.split_first()?;
+            rest.iter().try_fold(first, |joined, &read| {
+                self.semantic_common_supertype(joined, read)
+            })
+        });
+        (joined, intersection)
     }
 }

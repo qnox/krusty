@@ -87,6 +87,7 @@ mod class_body_bindings;
 mod classifier_associated;
 mod classifier_binding;
 mod collection_literals;
+mod common_classifier_views;
 #[cfg(test)]
 mod common_supertype_identity_tests;
 mod compound_assignments;
@@ -36759,64 +36760,6 @@ impl<'a> Checker<'a> {
         semantic_common_supertype(&self.fed_source(), self, a, b)
     }
 
-    /// Every incomparable most-specific common classifier view of two branch results. [`Ty`]
-    /// intentionally has no synthetic intersection variant, so an inferred local retains these as
-    /// lexical flow facets and projects one only when a concrete semantic operation selects it.
-    fn minimal_common_classifier_views(&self, left: Ty, right: Ty) -> Vec<Ty> {
-        self.minimal_common_classifier_views_many(&[left, right])
-    }
-
-    /// Most-specific common classifier intersection for any number of lower constraints. Each
-    /// common owner is joined with its applied type arguments before dominance filtering, so
-    /// `C<String>` and `D<String>` preserve `BBB<String>` alongside an unrelated marker interface.
-    fn minimal_common_classifier_views_many(&self, types: &[Ty]) -> Vec<Ty> {
-        let Some(&first) = types.first() else {
-            return Vec::new();
-        };
-        let source = self.fed_source();
-        let mut common = crate::symbol_resolver::applied_hierarchy(&source, first.non_null())
-            .into_iter()
-            .map(|(owner, applied, _)| (owner, applied))
-            .collect::<HashMap<_, _>>();
-        for &ty in &types[1..] {
-            let next = crate::symbol_resolver::applied_hierarchy(&source, ty.non_null())
-                .into_iter()
-                .map(|(owner, applied, _)| (owner, applied))
-                .collect::<HashMap<_, _>>();
-            common = common
-                .into_iter()
-                .filter_map(|(owner, applied)| {
-                    let next = next.get(&owner).copied()?;
-                    let mut visiting = crate::fx_hash::HashSet::default();
-                    join_applied_classifier(&source, self, owner, applied, next, &mut visiting)
-                        .map(|joined| (owner, joined))
-                })
-                .collect();
-        }
-        let dominated = common
-            .iter()
-            .flat_map(|(owner, _)| {
-                crate::symbol_resolver::applied_hierarchy(&source, Ty::obj_name(*owner))
-                    .into_iter()
-                    .skip(1)
-                    .map(|(ancestor, _, _)| ancestor)
-            })
-            .collect::<crate::fx_hash::HashSet<_>>();
-        let mut views = common
-            .into_iter()
-            .filter(|(owner, _)| !dominated.contains(owner))
-            .map(|(_, joined)| {
-                types.iter().copied().fold(joined, |result, ty| {
-                    common_result_nullability(result, ty, joined)
-                })
-            })
-            .collect::<Vec<_>>();
-        let mut seen = crate::fx_hash::HashSet::default();
-        views.retain(|view| seen.insert(*view));
-        views.sort_by_key(|view| view.source_name());
-        views
-    }
-
     fn inferred_expression_intersection(&self, expression: ExprId) -> Vec<Ty> {
         if let Some(bounds) = self.inferred_expression_intersections.get(&expression) {
             return bounds.clone();
@@ -60657,6 +60600,7 @@ impl<'a> Checker<'a> {
                 .map(|local| local.declared)
                 .collect::<Vec<_>>();
             let entry_reads = self.local_edge_reads(scope, &locals, &declared);
+            let entry_intersections = self.local_edge_intersections(scope, &locals);
             let mut arm_exits = Vec::with_capacity(arms.len());
             let mut fallthrough_casts: Vec<(NarrowPath, Ty)> = Vec::new();
             let mut fallthrough_declined: Vec<(String, Ty)> = Vec::new();
@@ -60774,10 +60718,12 @@ impl<'a> Checker<'a> {
                     this_narrow: arm_this_narrow,
                 });
                 let reads = self.local_edge_reads(&arm_scope, &locals, &entry_reads);
+                let intersections = self.local_edge_intersections(&arm_scope, &locals);
                 arm_exits.push(self.take_local_flow_exit(
                     scope,
                     &entry,
                     reads,
+                    intersections,
                     self.normal_completion(arm.body),
                 ));
             }
@@ -60810,7 +60756,7 @@ impl<'a> Checker<'a> {
                     let mut replaced_exit = None;
                     let rebound =
                         self.rebind_conditional_branch(body, sibling, current, fixed, |c, exp| {
-                            let (ty, reads, completes) = {
+                            let (ty, reads, intersections, completes) = {
                                 let arm_scope = scope.child(ScopeKind::Block);
                                 c.apply_narrowings(
                                     &arm_scope,
@@ -60823,10 +60769,16 @@ impl<'a> Checker<'a> {
                                     c2.expr_result(&arm_scope, body, Some(exp), value_required)
                                 });
                                 let reads = c.local_edge_reads(&arm_scope, &locals, &entry_reads);
-                                (ty, reads, c.normal_completion(body))
+                                let intersections = c.local_edge_intersections(&arm_scope, &locals);
+                                (ty, reads, intersections, c.normal_completion(body))
                             };
-                            replaced_exit =
-                                Some(c.take_local_flow_exit(scope, &entry, reads, completes));
+                            replaced_exit = Some(c.take_local_flow_exit(
+                                scope,
+                                &entry,
+                                reads,
+                                intersections,
+                                completes,
+                            ));
                             ty
                         });
                     arm_results[i].ty = rebound;
@@ -60858,6 +60810,7 @@ impl<'a> Checker<'a> {
                     completes: true,
                     parent_flow: entry.clone(),
                     reads: entry_reads.clone(),
+                    intersections: entry_intersections.clone(),
                 });
             }
             self.publish_joined_local_flow(scope, &locals, &entry_reads, &arm_exits);
