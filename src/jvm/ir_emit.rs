@@ -1575,6 +1575,8 @@ fn emit_pass(
         // gets no bridge; a `suspend fun main` has a continuation parameter after lowering and so is
         // not parameterless here (its bridge needs the coroutine runner and is not emitted yet).
         if f.name == "main" && f.params.is_empty() && matches!(f.ret, Ty::Unit) {
+            // kotlinc visits the bridge's header before its body's call to `main()`.
+            cw.reserve_method_pool("main", "([Ljava/lang/String;)V", None, &[]);
             let mut bridge = CodeBuilder::new(1);
             let target = cw.methodref(facade, "main", "()V");
             bridge.invokestatic(target, 0, 0);
