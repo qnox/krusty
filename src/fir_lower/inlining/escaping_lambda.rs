@@ -6,4 +6,4 @@
 
 mod transfer;
 
-pub(super) use transfer::{apply, expression_facts_use_binding, plan, EscapingLambdaPlan};
+pub(super) use transfer::{apply, expression_facts_use_binding, plan};

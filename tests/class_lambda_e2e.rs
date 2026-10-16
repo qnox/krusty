@@ -8,9 +8,6 @@ use std::path::Path;
 
 use super::common;
 
-#[path = "inline_function_lambda_class_e2e.rs"]
-mod inline_function_lambda_class_e2e;
-
 /// Every shape whose emitted `invoke` differs. `(Int) -> Int` alone is NOT enough: its erased slot
 /// takes the unbox path, which happens to emit the `checkcast` that a plain reference parameter
 /// needs, so a fixture of only that shape hides four separate verification failures. Each entry

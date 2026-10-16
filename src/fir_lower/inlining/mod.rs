@@ -21,7 +21,7 @@ mod escaping_lambda;
 mod lambda_splice_contract;
 mod property_accessors;
 
-use lambda_splice_contract::LambdaParameterBinding;
+pub(super) use lambda_splice_contract::LambdaParameterBinding;
 
 #[cfg(test)]
 mod escaping_inline_object;
