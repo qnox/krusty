@@ -4258,6 +4258,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property assigned inside the block is marked on the assignment statement, including the receiver
   load; the property's declaration line is only the fallback when that store has no statement line.
   `tests/init_block_lines_e2e.rs`.
+- **A static initializer's store opens on its initializer's line.** kotlinc gives a `<clinit>` field
+  store the line of the initializer expression, so `val a: String =\n    make()` stores on the
+  `make()` line. Every line the initializer marks inside itself stays, including an argument on a
+  line of its own at the store's first instruction, where both entries share one offset. File
+  facades and named objects follow the same rule. `tests/static_initializer_line_e2e.rs`.
 - **A `for` loop's generated control carries the loop's line.** kotlinc's `ForLoopsLowering` builds
   a `for` loop's update, exit test and the bottom condition of its `do…while` shape at the loop's
   offsets, and codegen marks them like any other expression, so after the body the `for` line comes

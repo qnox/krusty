@@ -124,39 +124,14 @@ pub(super) fn emit(
             store(Ty::obj(fq_name), receiver, &mut clinit);
             emitter.slots.insert(0, (receiver, Ty::obj(fq_name)));
         }
-        let statements: Option<Vec<crate::ir::ExprId>> = match ir.expr(init_body) {
-            crate::ir::IrExpr::Block { stmts, value } if value.is_none() => stmts
-                .iter()
-                .all(|&statement| matches!(ir.expr(statement), crate::ir::IrExpr::SetField { .. }))
-                .then(|| stmts.clone()),
-            _ => None,
-        };
-        match statements {
-            Some(statements) => {
-                for statement in statements {
-                    let pc = clinit.bytes.len() as u16;
-                    if let crate::ir::IrExpr::SetField { index, .. } = ir.expr(statement) {
-                        let name = &c.fields[*index as usize].name;
-                        if let Some(&line) = ir.prop_decl_lines.get(&(c.fq_name_id(), name.clone()))
-                        {
-                            if line != 0 {
-                                clinit_line_entries.push((pc, line));
-                            }
-                        }
-                    }
-                    emitter.emit(statement, &mut clinit);
-                }
-            }
-            // A block with `init` statements marks its own lines as it goes; keep them.
-            None => {
-                let first = clinit.line_marks().len();
-                emitter.render_initializer_boundaries = true;
-                emitter.emit(init_body, &mut clinit);
-                emitter.render_initializer_boundaries = false;
-                let marks = clinit.line_marks()[first..].iter();
-                clinit_line_entries.extend(marks.map(|&(pc, line)| (pc, u32::from(line))));
-            }
-        }
+        // Each store marks its initializer's line, and the lines its value marks inside itself
+        // stay, as in a constructor; an `init` block marks its own lines as it goes.
+        let first = clinit.line_marks().len();
+        emitter.render_initializer_boundaries = true;
+        emitter.emit(init_body, &mut clinit);
+        emitter.render_initializer_boundaries = false;
+        let marks = clinit.line_marks()[first..].iter();
+        clinit_line_entries.extend(marks.map(|&(pc, line)| (pc, u32::from(line))));
         clinit_line_entries.dedup_by_key(|(_, line)| *line);
         if !c.is_source_declared && c.decl_line != 0 && c.decl_end_line != 0 {
             let start = if c.decl_start_line == 0 {

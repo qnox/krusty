@@ -89,7 +89,7 @@ pub struct IrStatic {
     /// the compiler default.
     pub accessors: IrStaticAccessors,
     /// 1-based source line of the property declaration (0 = unknown). kotlinc maps the accessors'
-    /// LineNumberTables and the `<clinit>` initializer store to this line.
+    /// LineNumberTables to this line; a `<clinit>` store opens on its initializer's own line.
     pub line: u32,
     /// Lines of the written accessors and of the declaration's end, recorded with [`Self::line`].
     pub accessor_lines: IrAccessorLines,
