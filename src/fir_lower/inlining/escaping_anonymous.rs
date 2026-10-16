@@ -1566,7 +1566,7 @@ fn body_uses_values(ir: &crate::ir::IrFile, root: ExprId) -> bool {
         if !seen.insert(expression) {
             continue;
         }
-        if !super::value_indices(ir.expr(expression)).is_empty() {
+        if !super::lambda_splice_contract::value_indices(ir.expr(expression)).is_empty() {
             return true;
         }
         if let IrExpr::Lambda { captures, .. } = ir.expr(expression) {

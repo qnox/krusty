@@ -21,8 +21,9 @@ pub struct IrLambdaClass {
     /// from [`Self::public_inline`]: a private inline default still needs a public JVM class for
     /// cross-package module calls, but does not receive Kotlin's public-ABI metadata flag.
     pub public_inline_abi: bool,
-    /// The class is written inside an `inline` function, so kotlinc gives it the identity source
-    /// map of a class generated for inlining (`visitSMAP(…, intoInline = true)`).
+    /// The class originates in an `inline` function, so kotlinc gives both its declaration class
+    /// and any call-site-regenerated specialization the declaration's identity source map
+    /// (`visitSMAP(…, intoInline = true)`).
     pub inline_origin: bool,
     /// The closure's semantic function type mentions a reified parameter of the inline declaration
     /// that exposes it. The JVM marks both singleton initialization and the default expression that
@@ -48,6 +49,10 @@ pub struct IrLambdaClass {
     pub raw_supertype: bool,
     /// What each field captures, in field order.
     pub captures: Vec<IrLambdaCapture>,
+    /// Exact JVM holder identities of mutable cells among those fields. Lambda realization records
+    /// these before it consumes the shared-capture parameter ordinals; later classfile preparation
+    /// uses the identities without reconstructing them from field names or erased descriptors.
+    pub shared_capture_holders: Vec<TypeName>,
     /// The origins of the implicit receivers the lambda captured, which
     /// [`IrLambdaCapture::Receiver`] indexes; the lambda's own record, which `invoke` no longer has.
     pub captured_receivers: Vec<IrCapturedReceiver>,

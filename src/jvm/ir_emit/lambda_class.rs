@@ -46,18 +46,38 @@ pub(super) fn emit_lambda_class(
             None => cw.set_enclosing_class(&owner),
         }
     }
+    let mut replaced_declaration_enclosure = None;
+    let mut regenerated_inline_class = false;
     if lambda.inline_origin {
-        let lines = u16::try_from(ir.source_line_count)
-            .unwrap_or(u16::MAX)
-            .max(1);
-        cw.start_inline_origin_source_map(lines);
+        match regenerated_inline_origin(ir, env.override_results, lambda.invoke, facade) {
+            Some(origin) => {
+                regenerated_inline_class = true;
+                // AnonymousObjectTransformer visits the declaration class before replacing its
+                // call-site enclosure. Those now-unused constants remain at the front of the
+                // regenerated class's pool.
+                replaced_declaration_enclosure = origin.declaration_enclosure;
+                cw.set_source_file(Some(origin.source_file));
+                cw.start_inline_origin_source_map_at(origin.lines, &origin.path);
+            }
+            None => {
+                let lines = u16::try_from(ir.source_line_count)
+                    .unwrap_or(u16::MAX)
+                    .max(1);
+                cw.start_inline_origin_source_map(lines);
+            }
+        }
     }
     env.inner_classes.register(&mut cw);
     cw.add_interface(&jvm_function_interface(arity));
+    if let Some((owner, Some((name, descriptor)))) = replaced_declaration_enclosure {
+        cw.retain_replaced_enclosing_method(&owner, &name, &descriptor);
+    }
     delegated_property_array::declare(env, c.fq_name, &mut cw);
 
-    // Each captured value's field, typed by the value's declared type: a shared cell is a generic
-    // `Ref$ObjectRef<T>`, whose `Signature` the field and the constructor carry.
+    // Each captured value's field, typed by the value's declared type. A declaration lambda's
+    // shared cell is a generic `Ref$ObjectRef<T>` whose field and constructor carry a `Signature`;
+    // a call-site-regenerated anonymous object deliberately omits those signatures.
+    let regenerated = ir.specialized_functions.contains_key(&lambda.invoke);
     let captures = c
         .fields
         .iter()
@@ -67,8 +87,19 @@ pub(super) fn emit_lambda_class(
                 .expect("every field of a lambda class stores one of its captures"),
             ty: jvm_value_ty(&field.ty),
             descriptor: ir_type_desc(&field.ty),
-            signature: parameterized_sig(&formatter, &field.ty),
-            parameter_signature: parameterized_sig_at(&formatter, &field.ty, Wildcards::Declared),
+            // A call-site-regenerated anonymous object carries the declaration-erased descriptor
+            // but publishes no capture-field or constructor generic signature. Its exact
+            // specialization identity was recorded before its emitted name existed.
+            signature: if regenerated {
+                None
+            } else {
+                parameterized_sig(&formatter, &field.ty)
+            },
+            parameter_signature: if regenerated {
+                None
+            } else {
+                parameterized_sig_at(&formatter, &field.ty, Wildcards::Declared)
+            },
         })
         .collect::<Vec<_>>();
     let constructor = format!(
@@ -204,6 +235,12 @@ pub(super) fn emit_lambda_class(
     if captures.is_empty() {
         add_singleton_instance_field(&mut cw, &class);
     }
+    if regenerated_inline_class {
+        // AnonymousObjectTransformer visits the copied class's InnerClasses rows before it writes
+        // the retained metadata and replaces EnclosingMethod. Seed only the rows this class keeps;
+        // the final writer's later visits then deduplicate them in the same order.
+        cw.seed_inner_class_names();
+    }
     if lambda.public_inline {
         let mut xi =
             super::metadata_policy::synthetic_class_xi(super::metadata_policy::SYNTHETIC_PUBLIC);
@@ -217,6 +254,52 @@ pub(super) fn emit_lambda_class(
     } else {
         finish_local_synthetic_class(cw, env)
     }
+}
+
+struct RegeneratedInlineOrigin {
+    source_file: String,
+    path: String,
+    lines: u16,
+    declaration_enclosure: Option<(String, Option<(String, String)>)>,
+}
+
+/// The declaration source and original enclosure a call-site-specialized lambda class was
+/// regenerated from.
+fn regenerated_inline_origin(
+    ir: &IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
+    mut function: crate::ir::FunId,
+    facade: &str,
+) -> Option<RegeneratedInlineOrigin> {
+    let template = crate::jvm::lambda_classes::specialization_template(ir, function)?;
+    let declaration_facade = ir
+        .foreign_template_facade(template)
+        .map_or(facade, |facade| {
+            crate::jvm::names::classfile_internal_name_of(facade)
+        });
+    let declaration_enclosure = super::enclosure::scope_enclosure(
+        ir,
+        override_results,
+        crate::ir::IrEnclosure::Function(template),
+        declaration_facade,
+    );
+    function = crate::jvm::lambda_classes::specialization_source(ir, function);
+    let source = ir.foreign_template_source(template)?;
+    let debug = ir.source_debug.file(source.source)?;
+    let source_file = debug
+        .name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&debug.name)
+        .to_string();
+    let path = ir.lambda_class_names.get(&function)?.render();
+    let lines = u16::try_from(debug.line_count).unwrap_or(u16::MAX).max(1);
+    Some(RegeneratedInlineOrigin {
+        source_file,
+        path,
+        lines,
+        declaration_enclosure,
+    })
 }
 
 fn emit_initialization(

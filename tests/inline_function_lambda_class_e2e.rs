@@ -3,7 +3,8 @@
 //! rule reaches through an enclosing lambda (`nested$1$1`, enclosed by `nested$1.invoke`) and an
 //! anonymous object's method (`inObject$1$area$1`). Each class is public, and one written directly
 //! in the inline function carries the source map of a class generated for inlining. A caller that
-//! inlines the function, in the same file or another, constructs the declaring file's class.
+//! inlines the function, in the same file or another, constructs the declaring file's class. A
+//! generic mutable capture keeps that foreign constructor's erased `Ref$ObjectRef` contract.
 
 use super::common;
 
@@ -15,9 +16,17 @@ fun interface Shape {
 
 fun take(f: (Int) -> String): String = f(1)
 
+fun runBlock(block: () -> Unit) = block()
+
 inline fun plain(): String = take { "plain$it" }
 
 inline fun capturing(prefix: String): String = take { prefix + it }
+
+inline fun <T> update(initial: T, crossinline transform: (T) -> T): T {
+    var current = initial
+    runBlock { current = transform(current) }
+    return current
+}
 
 inline fun nested(): String = take { outer -> take { "nested$outer$it" } }
 
@@ -37,14 +46,14 @@ fun notInline(): String = take { "indy$it" }
 
 fun box(): String {
     val results = plain() + capturing("c") + nested() + hidden() + inObject() +
-        Holder("m").member() + notInline()
-    return if (results == "plain1c1nested11hidden1object1m1indy1") "OK" else results
+        Holder("m").member() + notInline() + fromAnotherFile()
+    return if (results == "plain1c1nested11hidden1object1m1indy1plain1x1nested112") "OK" else results
 }
 "#;
 
 const CALLER: &str = r#"package inlinescope
 
-fun fromAnotherFile(): String = plain() + capturing("x") + nested()
+fun fromAnotherFile(): String = plain() + capturing("x") + nested() + update(1) { it + 1 }
 "#;
 
 /// Every class both files declare except the anonymous object itself, whose own shape is not this
@@ -53,6 +62,7 @@ const CLASSES: &[&str] = &[
     "inlinescope/InlineScopeKt",
     "inlinescope/InlineScopeKt$plain$1",
     "inlinescope/InlineScopeKt$capturing$1",
+    "inlinescope/InlineScopeKt$update$1",
     "inlinescope/InlineScopeKt$nested$1",
     "inlinescope/InlineScopeKt$nested$1$1",
     "inlinescope/InlineScopeKt$throughParameter$1",
@@ -61,6 +71,7 @@ const CLASSES: &[&str] = &[
     "inlinescope/Holder",
     "inlinescope/Holder$member$1",
     "inlinescope/CallerKt",
+    "inlinescope/CallerKt$fromAnotherFile$$inlined$update$1",
 ];
 
 #[test]
@@ -103,10 +114,12 @@ fn lambdas_in_inline_functions_are_classes_like_kotlinc() {
             common::member_table(&reference),
             "{class}: members"
         );
-        assert!(
-            *emitted == reference,
-            "{class}: class file differs from kotlinc's"
-        );
+        if *emitted != reference {
+            panic!(
+                "{}",
+                common::exact_class_difference(class, &reference, emitted)
+            );
+        }
     }
     let lifted = krusty
         .iter()

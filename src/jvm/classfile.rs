@@ -528,6 +528,9 @@ pub struct ClassWriter {
     coroutines: coroutine_transform::Coroutines,
     /// Owner, method name, and descriptor for the `EnclosingMethod` attribute.
     enclosing_method: Option<(String, String, String)>,
+    /// Pool entries visited from a copied declaration header that a later transformation replaces.
+    /// They remain in ASM's pool even though the emitted class no longer names them.
+    retained_copied_header_entries: Vec<u16>,
     pub internal_name: String,
 }
 
@@ -583,6 +586,7 @@ impl ClassWriter {
             source_map: crate::jvm::source_map::SourceMap::default(),
             coroutines: coroutine_transform::Coroutines::default(),
             enclosing_method: None,
+            retained_copied_header_entries: Vec::new(),
             internal_name: internal_name.to_string(),
         }
     }
@@ -621,16 +625,20 @@ impl ClassWriter {
     /// function (`visitSMAP(…, intoInline = true)`). The map is kept even when the class inlines
     /// nothing else. A map an earlier splice already started is left as it is.
     pub fn start_inline_origin_source_map(&mut self, lines: u16) {
+        let path = self.internal_name.clone();
+        self.start_inline_origin_source_map_at(lines, &path);
+    }
+
+    /// Start a regenerated inline class's identity map under its declaration class path. A
+    /// call-site copy has a different emitted internal name, but its primary source remains the
+    /// declaration lambda class that the inliner regenerated.
+    pub fn start_inline_origin_source_map_at(&mut self, lines: u16, path: &str) {
         if self.source_map.is_unstarted() {
             let Some(source_file) = self.source_file.clone() else {
                 return;
             };
-            let path = self.internal_name.clone();
-            self.source_map = crate::jvm::source_map::SourceMap::for_regenerated_class(
-                &source_file,
-                &path,
-                lines,
-            );
+            self.source_map =
+                crate::jvm::source_map::SourceMap::for_regenerated_class(&source_file, path, lines);
         }
     }
 
@@ -1886,7 +1894,12 @@ impl ClassWriter {
             u4(&mut out, bytes.len() as u32);
             out.extend_from_slice(bytes);
         }
-        pool_layout::relayout(out, &relaid, self.unnamed_entries())
+        pool_layout::relayout(
+            out,
+            &relaid,
+            self.unnamed_entries(),
+            &self.retained_copied_header_entries,
+        )
     }
 }
 
@@ -2674,6 +2687,51 @@ mod tests {
         let info =
             crate::jvm::classreader::parse_class(&string_literal.finish()).expect("parse class");
         assert!(info.inner_classes.is_empty());
+    }
+
+    #[test]
+    fn copied_inline_capture_holder_is_omitted_only_from_recorded_caller() {
+        let holder = InnerClassSpec {
+            inner: "kotlin/jvm/internal/Ref$ObjectRef".to_string(),
+            outer: Some("kotlin/jvm/internal/Ref".to_string()),
+            name: Some("ObjectRef".to_string()),
+            access: ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+        };
+        let mut holders = HashSet::default();
+        holders.insert(holder.inner.clone());
+        let mut omitted = HashMap::default();
+        omitted.insert("CallerKt".to_string(), holders);
+        let omitted = Rc::new(omitted);
+        let independent = Rc::new(HashMap::default());
+
+        let mut caller = ClassWriter::new("CallerKt", "java/lang/Object");
+        caller.add_inner_class(holder.clone());
+        caller.set_copied_inline_capture_holders(omitted.clone(), independent.clone());
+        caller.class_ref(&holder.inner);
+        let caller = crate::jvm::classreader::parse_class(&caller.finish()).expect("parse caller");
+        assert!(caller.inner_classes.is_empty());
+
+        let mut specialized = ClassWriter::new("CallerKt$specialized", "java/lang/Object");
+        specialized.add_inner_class(holder.clone());
+        specialized.set_copied_inline_capture_holders(omitted.clone(), independent);
+        specialized.class_ref(&holder.inner);
+        let specialized = crate::jvm::classreader::parse_class(&specialized.finish())
+            .expect("parse specialized class");
+        assert_eq!(specialized.inner_classes.len(), 1);
+        assert_eq!(specialized.inner_classes[0].inner, holder.inner);
+
+        let mut holders = HashSet::default();
+        holders.insert(holder.inner.clone());
+        let mut independent = HashMap::default();
+        independent.insert("CallerKt".to_string(), holders);
+        let mut mixed = ClassWriter::new("CallerKt", "java/lang/Object");
+        mixed.add_inner_class(holder.clone());
+        mixed.set_copied_inline_capture_holders(omitted, Rc::new(independent));
+        mixed.class_ref(&holder.inner);
+        let mixed = crate::jvm::classreader::parse_class(&mixed.finish())
+            .expect("parse mixed-origin caller");
+        assert_eq!(mixed.inner_classes.len(), 1);
+        assert_eq!(mixed.inner_classes[0].inner, holder.inner);
     }
 
     #[test]

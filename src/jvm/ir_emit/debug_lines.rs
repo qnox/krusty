@@ -211,6 +211,47 @@ impl Emitter<'_> {
                 return u32::from(synthetic);
             }
         }
+        // A class regenerated from a foreign inline declaration keeps that declaration file as
+        // its primary source. Unprovenanced expressions are the caller's lambda body spliced into
+        // the copy; map those under the current source without inventing an inline-call debug
+        // stratum. Expressions cloned from the declaration implementation carry its exact source
+        // identity and retain their raw primary lines.
+        if let Some(primary) = self.regenerated_inline_primary_source() {
+            let provenance = self.ir.inline_copy_provenance(expression);
+            let source = provenance
+                .and_then(|frames| frames.last())
+                .map(|frame| frame.source)
+                .or_else(|| self.ir.source_debug.current());
+            if source == Some(primary) {
+                return line;
+            }
+            if let Some(source) = source {
+                let mapped = if self.ir.source_debug.is_current(source) {
+                    self.ir
+                        .source_debug
+                        .file(source)
+                        .map(|identity| (identity.name.to_string(), self.facade.clone()))
+                } else {
+                    provenance
+                        .and_then(|frames| frames.last())
+                        .and_then(|frame| {
+                            self.copied_inline_file(frame.function, frame.owner, frame.source)
+                        })
+                };
+                if let Some((source_file, path)) = mapped {
+                    if let Some(mapped) = self.cw.source_map_for_inlining(1).and_then(|map| {
+                        map.map_copied_line(
+                            &source_file,
+                            &path,
+                            u16::try_from(line).unwrap_or(u16::MAX),
+                            None,
+                        )
+                    }) {
+                        return u32::from(mapped);
+                    }
+                }
+            }
+        }
         // The source line stays the declaration's raw line. A nested same-module expansion has
         // several semantic frames, but this physical copy is emitted from the outermost body;
         // kotlinc maps that raw line under the outer call instead of recursively feeding an inner
@@ -250,6 +291,14 @@ impl Emitter<'_> {
                 )
             })
             .map_or(line, u32::from)
+    }
+
+    fn regenerated_inline_primary_source(&self) -> Option<crate::fir::SourceFileId> {
+        let function = self.function?;
+        let template = crate::jvm::lambda_classes::specialization_template(self.ir, function)?;
+        self.ir
+            .foreign_template_source(template)
+            .map(|source| source.source)
     }
 
     /// The source file and JVM path a copied inline line is mapped under.

@@ -425,10 +425,10 @@ fn run_backend_passes_after_plugins(
         lambda_modes,
         &mut facts.emit_time_machines,
     );
-    // A specialized reified lambda is already a function class. Its `$$inlined$` name depends on
-    // the caller's lifted spelling, which exists only now.
+    // A call-site-specialized lambda is already a function class. Its `$$inlined$` name depends
+    // on the caller's lifted spelling, which exists only now.
     let closure_names =
-        crate::jvm::lambda_classes::rename_specialized_reified_classes(ir, facade, lambda_modes);
+        crate::jvm::lambda_classes::rename_specialized_lambda_classes(ir, facade, lambda_modes);
     crate::jvm::reified_anonymous::rename(ir, facade, lambda_modes);
     facts
         .property_reference_realizations

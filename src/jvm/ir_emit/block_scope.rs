@@ -27,20 +27,16 @@ impl Emitter<'_> {
             return;
         }
         let inline_stack_height = code.stack_height();
-        let normalizes_inline_stack =
-            self.ir.external_inline_expansions.contains(&block) && inline_stack_height != 0;
+        let has_lambda_frame = self.opens_spliced_lambda_frame(&stmts);
+        let normalizes_inline_stack = inline_stack_height != 0
+            && (self.ir.external_inline_expansions.contains(&block)
+                || (self.ir.is_inline_copy(block) && has_lambda_frame));
         let within_inline_lambda = normalizes_inline_stack && self.within_inline_lambda_frame();
         // A spliced lambda's marker follows evaluation of the inline call's ordinary operands.
         // Preserve the caller stack there so argument temporaries keep kotlinc's slot order. An
         // expansion without a lambda marker (for example an iteration plan) still starts at the
         // block boundary.
-        let delays_stack_normalization = normalizes_inline_stack
-            && stmts.iter().any(|&statement| {
-                matches!(
-                    self.ir.debug_local_provenance(statement),
-                    Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
-                )
-            });
+        let delays_stack_normalization = normalizes_inline_stack && has_lambda_frame;
         if normalizes_inline_stack && !delays_stack_normalization {
             open_inline_stack(code);
         }
@@ -162,16 +158,12 @@ impl Emitter<'_> {
         // begins with caller operands already live, the finished-method FixStack pass derives and
         // restores their complete JVM representation from these markers.
         let inline_stack_height = code.stack_height();
-        let normalizes_inline_stack =
-            self.ir.external_inline_expansions.contains(&block) && inline_stack_height != 0;
+        let has_lambda_frame = self.opens_spliced_lambda_frame(stmts);
+        let normalizes_inline_stack = inline_stack_height != 0
+            && (self.ir.external_inline_expansions.contains(&block)
+                || (self.ir.is_inline_copy(block) && has_lambda_frame));
         let within_inline_lambda = normalizes_inline_stack && self.within_inline_lambda_frame();
-        let delays_stack_normalization = normalizes_inline_stack
-            && stmts.iter().any(|&statement| {
-                matches!(
-                    self.ir.debug_local_provenance(statement),
-                    Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
-                )
-            });
+        let delays_stack_normalization = normalizes_inline_stack && has_lambda_frame;
         if normalizes_inline_stack && !delays_stack_normalization {
             open_inline_stack(code);
         }
@@ -246,7 +238,12 @@ impl Emitter<'_> {
                             if normalizes_inline_stack
                                 && (!delays_stack_normalization || reserved_inline_stack.is_some())
                             {
-                                close_inline_stack(inline_stack_height, code);
+                                self.close_or_defer_inline_stack(
+                                    block,
+                                    inline_stack_height,
+                                    &mut reserved_inline_stack,
+                                    code,
+                                );
                             }
                             self.block_depth -= 1;
                             self.restore_slot_scope(saved);
@@ -281,8 +278,9 @@ impl Emitter<'_> {
                             self.emit_value(value, code);
                         }
                     } else if let Some(result) = self.copied_frame_result(block, value) {
-                        self.emit_copied_frame_result_before_adaptation(result, value, code);
-                        copied_frame_result = Some(result);
+                        copied_frame_result = Some(
+                            self.emit_copied_frame_result_before_adaptation(result, value, code),
+                        );
                     } else {
                         self.emit_value(value, code);
                     }
@@ -309,13 +307,26 @@ impl Emitter<'_> {
         if normalizes_inline_stack
             && (!delays_stack_normalization || reserved_inline_stack.is_some())
         {
-            close_inline_stack(inline_stack_height, code);
+            self.close_or_defer_inline_stack(
+                block,
+                inline_stack_height,
+                &mut reserved_inline_stack,
+                code,
+            );
         }
         // After the lambda locals, including when this block is itself a callable scope and those
         // locals stay open through the return. The `nop` is the inline body's line, not the brace.
         // A `return this` already anchored that line on the load.
         if !anchored_lambda_result {
-            self.close_spliced_lambda_frame(block, false, code);
+            if let Some(pending) = self
+                .pending_inline_stack_coercion
+                .as_mut()
+                .filter(|pending| pending.block == block && pending.saved.is_some())
+            {
+                pending.closes_spliced_frame = true;
+            } else {
+                self.close_spliced_lambda_frame(block, false, code);
+            }
         }
         if let Some((invocation, ret)) = deferred_invocation_result {
             self.finish_function_invocation_result(invocation, ret, code);
@@ -377,6 +388,21 @@ impl Emitter<'_> {
                     invocation: expression,
                     ret,
                     caller_line,
+                })
+            }
+            IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg,
+                type_operand,
+            } if tail.is_owned()
+                && self.erases_copied_frame_result(block)
+                && self.transformed_result(expression).is_none() =>
+            {
+                Some(CopiedFrameResult::Coercion {
+                    expression,
+                    arg,
+                    type_operand,
+                    physical_arg: None,
                 })
             }
             _ => None,
@@ -557,9 +583,12 @@ impl Emitter<'_> {
         result: CopiedFrameResult,
         value: u32,
         code: &mut CodeBuilder,
-    ) {
+    ) -> CopiedFrameResult {
         match result {
-            CopiedFrameResult::Unit => self.emit_discarding(value, code),
+            CopiedFrameResult::Unit => {
+                self.emit_discarding(value, code);
+                result
+            }
             CopiedFrameResult::Invocation {
                 invocation,
                 ret,
@@ -578,10 +607,41 @@ impl Emitter<'_> {
                             .to_string(),
                     );
                 }
+                result
             }
             CopiedFrameResult::ProviderInvocation { invocation, .. } => {
                 self.erased_invocations.insert(invocation);
                 self.emit_value(value, code);
+                result
+            }
+            CopiedFrameResult::Coercion {
+                expression,
+                arg,
+                type_operand,
+                physical_arg: _,
+            } => {
+                if self.deferred_inline_coercions.contains_key(&expression) {
+                    self.run.set_emit_error(
+                        "a copied inline-result coercion recursively reused one expression"
+                            .to_string(),
+                    );
+                    return result;
+                }
+                self.deferred_inline_coercions.insert(expression, None);
+                self.emit_value(value, code);
+                let physical_arg = self.deferred_inline_coercions.remove(&expression).flatten();
+                if physical_arg.is_none() && !code.is_dead() {
+                    self.run.set_emit_error(
+                        "a copied inline-result coercion was not reached through its trailing value"
+                            .to_string(),
+                    );
+                }
+                CopiedFrameResult::Coercion {
+                    expression,
+                    arg,
+                    type_operand,
+                    physical_arg,
+                }
             }
         }
     }
@@ -620,6 +680,16 @@ impl Emitter<'_> {
                     code.forget_line();
                     code.mark_line(caller_line);
                     self.narrow_invocation_result(ret, code);
+                }
+            }
+            CopiedFrameResult::Coercion {
+                expression: _,
+                arg,
+                type_operand,
+                physical_arg,
+            } => {
+                if let Some(physical_arg) = physical_arg.filter(|_| !code.is_dead()) {
+                    self.emit_deferred_inline_coercion(arg, type_operand, physical_arg, code);
                 }
             }
         }
@@ -1192,10 +1262,65 @@ impl Emitter<'_> {
         })
     }
 
+    /// The exact block whose result adaptation must remain inside an inline-stack bracket.
+    pub(super) fn inline_stack_coercion_block(
+        &self,
+        expression: u32,
+        stack_height: i32,
+    ) -> Option<u32> {
+        if stack_height == 0 {
+            return None;
+        }
+        let IrExpr::Block { stmts, .. } = self.ir.expr(expression) else {
+            return None;
+        };
+        let has_lambda_frame = self.opens_spliced_lambda_frame(stmts);
+        (self.ir.external_inline_expansions.contains(&expression)
+            || (self.ir.is_inline_copy(expression) && has_lambda_frame))
+            .then_some(expression)
+    }
+
+    fn close_or_defer_inline_stack(
+        &mut self,
+        block: u32,
+        saved: i32,
+        reserved: &mut Option<Vec<TempSlot>>,
+        code: &mut CodeBuilder,
+    ) {
+        if let Some(pending) = self
+            .pending_inline_stack_coercion
+            .as_mut()
+            .filter(|pending| pending.block == block)
+        {
+            pending.saved = Some(saved);
+            pending.reserved = reserved.take();
+        } else {
+            close_inline_stack(saved, code);
+        }
+    }
+
     fn release_reserved_inline_stack(&mut self, reserved: Option<Vec<TempSlot>>) {
         for slot in reserved.into_iter().flatten().rev() {
             self.frame.leave_temp(slot);
         }
+    }
+
+    /// Close the inline stack bracket that an enclosing coercion kept open so its representation
+    /// adaptation remains inside FixStack's result boundary.
+    pub(super) fn finish_pending_inline_stack_coercion(&mut self, code: &mut CodeBuilder) -> bool {
+        let Some(pending) = self.pending_inline_stack_coercion.take() else {
+            return false;
+        };
+        let Some(saved) = pending.saved else {
+            self.pending_inline_stack_coercion = Some(pending);
+            return false;
+        };
+        close_inline_stack(saved, code);
+        self.release_reserved_inline_stack(pending.reserved);
+        if pending.closes_spliced_frame {
+            self.close_spliced_lambda_frame(pending.block, false, code);
+        }
+        true
     }
 
     pub(super) fn mark_statement_line(&mut self, statement: u32, code: &mut CodeBuilder) {
@@ -1365,6 +1490,14 @@ enum CopiedFrameResult {
         ret: Ty,
         caller_line: u32,
     },
+    /// A same-module copied body physically produces its declaration-erased result inside the
+    /// frame; the caller narrows or unboxes it only after the frame's debug locals end.
+    Coercion {
+        expression: u32,
+        arg: u32,
+        type_operand: Ty,
+        physical_arg: Option<Ty>,
+    },
 }
 
 impl CopiedFrameResult {
@@ -1377,6 +1510,24 @@ impl CopiedFrameResult {
 pub(super) struct PendingPreCloseCopiedResult {
     invocation: u32,
     ret: Ty,
+}
+
+pub(super) struct PendingInlineStackCoercion {
+    pub(super) block: u32,
+    saved: Option<i32>,
+    reserved: Option<Vec<TempSlot>>,
+    closes_spliced_frame: bool,
+}
+
+impl PendingInlineStackCoercion {
+    pub(super) fn new(block: u32) -> Self {
+        Self {
+            block,
+            saved: None,
+            reserved: None,
+            closes_spliced_frame: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

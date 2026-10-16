@@ -11509,8 +11509,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   identity `SourceDebugExtension` source map of a class generated for inlining. A caller that inlines
   the function, in the same file or another, constructs that declaring class
   (`new InlineScopeKt$capturing$1(prefix)`, `InlineScopeKt$plain$1.INSTANCE`) rather than a class of
-  its own. Not yet covered: a lambda in an inline property accessor (`inline val p get() = take {
-  … }`), and the anonymous object's own public-ABI flag and source map. Tests:
+  its own. The exception is a declaration lambda that captures a substituted inline parameter:
+  `crossinline transform` used from `runBlock { transform(value) }` makes a call-site
+  `<caller>$$inlined$<callee>$1` copy. The checked parameter substitution is spliced into that
+  copy's implementation and removed from its captures, so the caller has neither a function-value
+  constructor argument nor a `$lambda$N` helper. Not yet covered: a lambda in an inline property
+  accessor (`inline val p get() = take { … }`), and the anonymous object's own public-ABI flag and
+  source map. Tests:
   `tests/inline_function_lambda_class_e2e.rs` (each class byte for byte against kotlinc, the facades
   of both files included, and the whole source at run time).
 - **A lambda with a `Nothing`/`Nothing?` type the factory cannot adapt is the same class, with a raw

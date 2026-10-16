@@ -4,6 +4,20 @@
 use super::{u2, ClassWriter};
 
 impl ClassWriter {
+    /// Record the declaration enclosure visited before an inline object's copied class is
+    /// regenerated at its call site. AnonymousObjectTransformer replaces the attribute, but ASM's
+    /// constant pool retains the declaration owner's class and method name-and-type entries.
+    pub(in crate::jvm) fn retain_replaced_enclosing_method(
+        &mut self,
+        owner: &str,
+        method: &str,
+        descriptor: &str,
+    ) {
+        let owner = self.cp.class(owner);
+        let method = self.cp.name_and_type(method, descriptor);
+        self.retained_copied_header_entries.extend([owner, method]);
+    }
+
     /// Set the enclosing class and method for a local class.
     pub fn set_enclosing_method(&mut self, owner: &str, method: &str, descriptor: &str) {
         self.enclosing_method = Some((

@@ -148,6 +148,13 @@ pub(crate) fn restore_erased_escaping_capture_holders(ir: &mut IrFile) {
 }
 
 fn restore_body(ir: &mut IrFile, body: ExprId) {
+    let declarations = crate::ir::value_namespace_expressions(ir, body)
+        .into_iter()
+        .filter_map(|expression| match ir.expr(expression) {
+            IrExpr::Variable { index, .. } => Some((*index, expression)),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
     let mut declared: HashMap<u32, (Ty, Vec<ExprId>)> = HashMap::default();
     let mut captured: Vec<(u32, Option<(u32, u32)>, Ty)> = Vec::new();
     let mut reads: Vec<(ExprId, ExprId, Ty)> = Vec::new();
@@ -244,9 +251,14 @@ fn restore_body(ir: &mut IrFile, body: ExprId) {
             continue;
         };
         for holder in holders {
-            let IrExpr::RefNew { elem, .. } = ir.expr(holder) else {
+            let IrExpr::RefNew { elem, init } = ir.expr(holder) else {
                 continue;
             };
+            let operand_declaration = init
+                .and_then(|init| value_slot(ir, init))
+                .and_then(|slot| declarations.get(&slot).copied())
+                .filter(|declaration| ir.call_operand_bindings.contains(declaration))
+                .filter(|declaration| ir.inline_declared_type(*declaration).is_some());
             if holder_class(elem).0 == holder_class(&erased).0 {
                 continue;
             }
@@ -255,6 +267,18 @@ fn restore_body(ir: &mut IrFile, body: ExprId) {
                 "erased shared-cell slot={slot} element={elem:?} holder={erased:?}"
             );
             box_into_erased_holder(ir, holder, erased);
+            // The holder crosses an escaping closure's declaration-erased capture boundary. Its
+            // initializer is the exact materialized inline operand recorded by common lowering;
+            // preserve that declaration type in the physical slot too, so boxing happens at the
+            // inline-call boundary rather than later at the holder write.
+            if let Some(declaration) = operand_declaration {
+                let declared = ir
+                    .inline_declared_type(declaration)
+                    .expect("filtered inline declaration type");
+                if let IrExpr::Variable { ty, .. } = &mut ir.exprs[declaration as usize] {
+                    *ty = declared;
+                }
+            }
         }
     }
 }
@@ -306,6 +330,25 @@ fn retarget_capture_parameter(ir: &mut IrFile, function: u32, ordinal: u32, eras
         if holder_class(&specialized).0 != holder_class(&erased).0 {
             box_into_erased_holder(ir, id, erased);
         }
+    }
+}
+
+/// Reconcile a lambda class's captured parameters with their exact shared-cell contracts before
+/// class realization consumes the parameter ordinals. An inline specialization may specialize the
+/// body access to a primitive while the declaration-owned capture edge remains erased; reads and
+/// writes must be adapted while that stable `(function, ordinal)` identity is still available.
+pub(super) fn realize_lambda_capture_parameters(ir: &mut IrFile, function: u32, captured: usize) {
+    let contracts = (0..captured)
+        .filter_map(|ordinal| {
+            let ordinal = u32::try_from(ordinal).expect("lambda capture ordinal fits u32");
+            ir.shared_capture_parameters
+                .get(&(function, ordinal))
+                .copied()
+                .map(|element| (ordinal, element))
+        })
+        .collect::<Vec<_>>();
+    for (ordinal, element) in contracts {
+        retarget_capture_parameter(ir, function, ordinal, element);
     }
 }
 
@@ -432,6 +475,8 @@ fn collect_body(
                 args,
                 ctor_params,
                 ..
+            // A foreign class publishes its physical constructor parameters on the expression;
+            // a lambda class realized in this file owns the same contract in its capture fields.
             } => match ctor_params
                 .clone()
                 .or_else(|| lambda_class_constructor(ir, *internal))
@@ -630,9 +675,16 @@ mod tests {
         let mut ir = IrFile::default();
         let lambda = ir.add_fun(function("read"));
         let initial = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(1)));
+        let operand = ir.add_expr(IrExpr::Variable {
+            index: 1,
+            ty: Ty::Int,
+            init: Some(initial),
+            named: true,
+        });
+        let operand_read = ir.add_expr(IrExpr::GetValue(1));
         let cell = ir.add_expr(IrExpr::RefNew {
             elem: Ty::Int,
-            init: Some(initial),
+            init: Some(operand_read),
         });
         let declaration = ir.add_expr(IrExpr::Variable {
             index: 0,
@@ -666,7 +718,7 @@ mod tests {
             inline_body: Some(inner),
         });
         let body = ir.add_expr(IrExpr::Block {
-            stmts: vec![declaration, write, lambda_expr],
+            stmts: vec![operand, declaration, write, lambda_expr],
             value: Some(read),
         });
         let caller = ir.add_fun(function("box"));
@@ -674,8 +726,18 @@ mod tests {
         ir.functions[lambda as usize].params = vec![Ty::ty_param("R", Ty::obj("kotlin/Any"))];
         ir.shared_capture_parameters
             .insert((lambda, 0), Ty::ty_param("R", Ty::obj("kotlin/Any")));
+        ir.call_operand_bindings.insert(operand);
+        ir.record_inline_declared_type(operand, Ty::ty_param("R", Ty::obj("kotlin/Any")));
 
         restore_erased_escaping_capture_holders(&mut ir);
+
+        assert!(matches!(
+            ir.expr(operand),
+            IrExpr::Variable {
+                ty: Ty::TyParam(name, _),
+                ..
+            } if *name == "R"
+        ));
 
         let IrExpr::RefNew {
             elem,
@@ -691,7 +753,7 @@ mod tests {
                 op: IrTypeOp::ImplicitCoercion,
                 arg,
                 ..
-            } if *arg == initial
+            } if *arg == operand_read
         ));
         let IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
@@ -760,6 +822,62 @@ mod tests {
         assert!(matches!(
             ir.expr(cell),
             IrExpr::RefNew { elem: Ty::Int, .. }
+        ));
+    }
+
+    #[test]
+    fn copied_generic_temporary_is_not_retyped_as_an_inline_operand() {
+        let mut ir = IrFile::default();
+        let lambda = ir.add_fun(function("read"));
+        ir.functions[lambda as usize].params = vec![Ty::ty_param("R", Ty::obj("kotlin/Any"))];
+        let initial = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(1)));
+        let temporary = ir.add_expr(IrExpr::Variable {
+            index: 1,
+            ty: Ty::Int,
+            init: Some(initial),
+            named: false,
+        });
+        ir.record_inline_declared_type(temporary, Ty::ty_param("R", Ty::obj("kotlin/Any")));
+        let temporary_read = ir.add_expr(IrExpr::GetValue(1));
+        let cell = ir.add_expr(IrExpr::RefNew {
+            elem: Ty::Int,
+            init: Some(temporary_read),
+        });
+        let cell_declaration = ir.add_expr(IrExpr::Variable {
+            index: 0,
+            ty: Ty::Int,
+            init: Some(cell),
+            named: true,
+        });
+        let capture = ir.add_expr(IrExpr::GetValue(0));
+        let lambda_expr = ir.add_expr(IrExpr::Lambda {
+            impl_fn: lambda,
+            arity: 0,
+            captures: vec![capture],
+            sam: None,
+            inline_body: None,
+        });
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![temporary, cell_declaration, lambda_expr],
+            value: None,
+        });
+        let caller = ir.add_fun(function("box"));
+        ir.functions[caller as usize].body = Some(body);
+        ir.shared_capture_parameters
+            .insert((lambda, 0), Ty::ty_param("R", Ty::obj("kotlin/Any")));
+
+        restore_erased_escaping_capture_holders(&mut ir);
+
+        assert!(matches!(
+            ir.expr(temporary),
+            IrExpr::Variable { ty: Ty::Int, .. }
+        ));
+        assert!(matches!(
+            ir.expr(cell),
+            IrExpr::RefNew {
+                elem: Ty::TyParam(name, _),
+                ..
+            } if *name == "R"
         ));
     }
 
@@ -886,6 +1004,60 @@ mod tests {
                 elem: Ty::TyParam(name, _),
                 ..
             } if *name == "R"
+        ));
+    }
+
+    #[test]
+    fn lambda_class_reconciles_shared_accesses_before_consuming_capture_ordinals() {
+        let mut ir = IrFile::default();
+        let lambda = ir.add_fun(function("specialized"));
+        ir.functions[lambda as usize].params = vec![Ty::Int];
+        let read_holder = ir.add_expr(IrExpr::GetValue(0));
+        let read = ir.add_expr(IrExpr::RefGet {
+            holder: read_holder,
+            elem: Ty::Int,
+        });
+        let written = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(2)));
+        let write_holder = ir.add_expr(IrExpr::GetValue(0));
+        let write = ir.add_expr(IrExpr::RefSet {
+            holder: write_holder,
+            elem: Ty::Int,
+            value: written,
+        });
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![write],
+            value: Some(read),
+        });
+        ir.functions[lambda as usize].body = Some(body);
+        let erased = Ty::ty_param("R", Ty::obj("kotlin/Any"));
+        ir.shared_capture_parameters.insert((lambda, 0), erased);
+
+        realize_lambda_capture_parameters(&mut ir, lambda, 1);
+
+        assert_eq!(ir.functions[lambda as usize].params, [erased]);
+        let IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: moved,
+            type_operand: Ty::Int,
+        } = ir.expr(read)
+        else {
+            panic!("specialized read");
+        };
+        assert!(matches!(
+            ir.expr(*moved),
+            IrExpr::RefGet { elem, .. } if *elem == erased
+        ));
+        let IrExpr::RefSet { elem, value, .. } = ir.expr(write) else {
+            panic!("specialized write");
+        };
+        assert_eq!(*elem, erased);
+        assert!(matches!(
+            ir.expr(*value),
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                type_operand,
+            } if *arg == written && *type_operand == erased
         ));
     }
 }

@@ -1306,6 +1306,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
             ir,
             facts.metadata.override_results,
             facade,
+            opts.lambda_modes,
         ),
     };
     emit_all_with_class_meta(ir, facade, &env, facts.metadata.facade, opts, &|_| None)
@@ -5437,6 +5438,12 @@ struct Emitter<'a> {
     suspend_lambda_parameter_reads: HashSet<crate::ir::ExprId>,
     /// Function-value invocations whose consumer takes `invoke`'s erased `Object` as it is.
     erased_invocations: HashSet<crate::ir::ExprId>,
+    /// Inline-result coercions whose erased producer is emitted inside the copied frame while the
+    /// consumer-side narrowing waits until that frame's debug locals have closed.
+    deferred_inline_coercions: HashMap<crate::ir::ExprId, Option<Ty>>,
+    /// A spliced lambda block whose closing FixStack marker waits for the enclosing result
+    /// coercion to materialize the representation that marker carries.
+    pending_inline_stack_coercion: Option<block_scope::PendingInlineStackCoercion>,
     /// The next state's ordinal. A state belongs to an emission SITE, not to an expression: an
     /// inline function that invokes its lambda twice splices the same body twice, and each copy
     /// suspends on its own locals. Both passes emit the same sequence, so both number it alike.
@@ -5590,6 +5597,8 @@ impl<'a> Emitter<'a> {
             transformed_suspensions: Default::default(),
             suspend_lambda_parameter_reads: HashSet::default(),
             erased_invocations: HashSet::default(),
+            deferred_inline_coercions: HashMap::default(),
+            pending_inline_stack_coercion: None,
             machine_next_ordinal: 0,
             machine_entered: false,
             machine_resumes: Vec::new(),

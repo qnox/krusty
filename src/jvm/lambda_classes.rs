@@ -25,6 +25,27 @@
 
 mod inline_scope;
 
+/// The declaration implementation at the root of a chain of call-site specializations.
+pub(super) fn specialization_source(ir: &IrFile, mut function: FunId) -> FunId {
+    let mut seen = crate::fx_hash::HashSet::default();
+    while let Some(copy) = ir.specialized_functions.get(&function) {
+        assert!(
+            seen.insert(function),
+            "a specialized callable has acyclic source provenance"
+        );
+        function = copy.source;
+    }
+    function
+}
+
+/// The retained inline declaration template whose expansion created `function`.
+pub(super) fn specialization_template(ir: &IrFile, function: FunId) -> Option<FunId> {
+    let specialization = ir.specialized_functions.get(&function)?;
+    ir.checked_callable_functions
+        .get(&specialization.inline_callee)
+        .copied()
+}
+
 use crate::ir::{ClassId, ExprId, FunId, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole};
 use crate::types::{Ty, TypeName};
 
@@ -263,7 +284,7 @@ fn site_in_roots(
     };
     // A specialized copy shares the source lambda's naming provenance. Using that name here would
     // declare the call-site class as the declaration class. The copy takes a private identity until
-    // lifted caller names exist; `rename_specialized_reified_classes` applies the `$$inlined$` name.
+    // lifted caller names exist; `rename_specialized_lambda_classes` applies the `$$inlined$` name.
     let class = match class_name {
         Some(class) => class,
         None => crate::jvm::local_class_names::callable_reference_name(ir, node)?,
@@ -523,6 +544,8 @@ fn inline_call_argument(ir: &IrFile, node: ExprId) -> bool {
 struct Capture {
     capture: crate::ir::IrLambdaCapture,
     ty: Ty,
+    /// The exact runtime holder identity when this field stores a shared mutable cell.
+    shared_holder: Option<TypeName>,
 }
 
 /// Realize every lambda whose function type `LambdaMetafactory` cannot adapt as a class of its own.
@@ -559,7 +582,12 @@ pub(super) fn realize(
         let inline_default = inline_default_classes.get(&fid).copied();
         // A lambda an inline call splices, or one an inline expansion took the body of, is no value
         // and has no class.
-        let inline_scope = inline_scopes.inline_scope(ir, fid).filter(|scope| {
+        let inline_scope = if ir.specialized_functions.contains_key(&fid) {
+            inline_scopes.specialization_scope(ir, fid)
+        } else {
+            inline_scopes.inline_scope(ir, fid)
+        }
+        .filter(|scope| {
             ir.functions[fid as usize].body.is_some() && !inline_call_argument(ir, scope.node)
         });
         let inline_scoped = inline_scope.is_some();
@@ -625,7 +653,7 @@ pub(super) fn realize(
         let class_name = ir
             .specialized_functions
             .contains_key(&fid)
-            .then(|| specialized_reified_placeholder(facade, fid));
+            .then(|| specialized_lambda_placeholder(facade, fid));
         if let Some(source) = delegate_source {
             let sites = delegate_sites(ir, fid, class_name)?;
             if sites.is_empty() {
@@ -915,11 +943,22 @@ fn captures(ir: &IrFile, fid: FunId, body: ExprId, site: &Site) -> Option<Vec<Ca
                 }
                 _ => return None,
             };
-            let ty = match ir.shared_capture_parameters.get(&(fid, parameter as u32)) {
-                Some(element) => super::shared_captures::holder_ty(element),
-                None => function.params[parameter],
-            };
-            Some(Capture { capture, ty })
+            let (ty, shared_holder) =
+                match ir.shared_capture_parameters.get(&(fid, parameter as u32)) {
+                    Some(element) => {
+                        let holder = super::shared_captures::holder_ty(element);
+                        let identity = holder
+                            .obj_internal()
+                            .expect("a shared-capture holder has an object identity");
+                        (holder, Some(identity))
+                    }
+                    None => (function.params[parameter], None),
+                };
+            Some(Capture {
+                capture,
+                ty,
+                shared_holder,
+            })
         })
         .collect()
 }
@@ -935,6 +974,7 @@ fn realize_class(
     captures: &[Capture],
     origin: InlineOrigin,
 ) {
+    super::shared_captures::realize_lambda_capture_parameters(ir, fid, captures.len());
     let class = declare_class(ir, fid, site, signature, captures, origin);
     // `invoke` takes `this` and the lambda's own parameters; each captured value is read from its
     // field.
@@ -1121,8 +1161,8 @@ fn declare_class(
         .map(|context| context.root_owner)
         .or(origin.scope.map(|scope| scope.owner));
     let public_inline = inline_owner.is_some();
-    let public_inline_abi =
-        inline_owner.is_some_and(|owner| !ir.method_visibility(owner).is_private());
+    let public_inline_abi = !ir.specialized_functions.contains_key(&fid)
+        && inline_owner.is_some_and(|owner| !ir.method_visibility(owner).is_private());
     let requires_reification = inline_default.is_some_and(|context| {
         inline_default_type_requires_reification(ir, context, site.function_type)
     });
@@ -1149,6 +1189,10 @@ fn declare_class(
             .iter()
             .map(|capture| capture.capture.clone())
             .collect(),
+        shared_capture_holders: captures
+            .iter()
+            .filter_map(|capture| capture.shared_holder)
+            .collect(),
         captured_receivers: ir
             .fn_params
             .get(&fid)
@@ -1161,17 +1205,17 @@ fn declare_class(
     ir.add_class(class)
 }
 
-/// A temporary identity for a specialized reified lambda. `;` cannot occur in a JVM internal name,
+/// A temporary identity for a specialized lambda class. `;` cannot occur in a JVM internal name,
 /// so the placeholder cannot collide with a source class or be emitted.
-fn specialized_reified_placeholder(facade: &str, function: FunId) -> TypeName {
-    crate::types::type_name(&format!("{facade};specialized-reified#{function}"))
+fn specialized_lambda_placeholder(facade: &str, function: FunId) -> TypeName {
+    crate::types::type_name(&format!("{facade};specialized-lambda#{function}"))
 }
 
-/// Name each specialized reified lambda class from the caller's final placement.
+/// Name each specialized lambda class from the caller's final placement.
 ///
 /// Realization runs before lifted names exist, so the class is born under
-/// [`specialized_reified_placeholder`]. Suspend copies are named by their own pass.
-pub(super) fn rename_specialized_reified_classes(
+/// [`specialized_lambda_placeholder`]. Suspend copies are named by their own pass.
+pub(super) fn rename_specialized_lambda_classes(
     ir: &mut IrFile,
     facade: &str,
     modes: crate::jvm::ir_emit::LambdaModes,
@@ -1182,7 +1226,7 @@ pub(super) fn rename_specialized_reified_classes(
         .filter_map(|class| {
             let invoke = class.lambda.as_ref()?.invoke;
             let from = class.fq_name_id();
-            (from == specialized_reified_placeholder(facade, invoke)).then_some((invoke, from))
+            (from == specialized_lambda_placeholder(facade, invoke)).then_some((invoke, from))
         })
         .collect::<Vec<_>>();
     let mut all_names = crate::fx_hash::HashMap::default();
@@ -1321,6 +1365,7 @@ mod method_domain_tests {
             function_type: Ty::fun(vec![], Ty::Unit),
             raw_supertype: false,
             captures: vec![],
+            shared_capture_holders: vec![],
             captured_receivers: vec![],
             lifting_root: None,
             bridge: crate::ir::IrInvokeBridge::logical(vec![], Ty::Unit),

@@ -117,6 +117,14 @@ impl InlineScopes {
             })
     }
 
+    /// The inline declaration that owns the source implementation copied into `lambda`.
+    pub(super) fn specialization_scope(&self, ir: &IrFile, lambda: FunId) -> Option<InlineScope> {
+        let source = super::specialization_source(ir, lambda);
+        (source != lambda)
+            .then(|| self.inline_scope(ir, source))
+            .flatten()
+    }
+
     /// The inline function that `scope` is, or is nested in.
     fn inline_owner(
         &self,

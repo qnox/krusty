@@ -51,6 +51,58 @@ fn semantic_owner(
     }
 }
 
+pub(in crate::jvm) fn class_realized_function_location(
+    ir: &IrFile,
+    function: u32,
+    facade: &str,
+    modes: LambdaModes,
+) -> Option<(String, String)> {
+    let method = ir
+        .lambda_origins
+        .contains_key(&function)
+        .then(|| super::method_access::class_realized_lambda_method(ir, function, modes))
+        .flatten()?;
+    let implementation = ir.functions.get(function as usize)?;
+    let implementation_owner = function_owner(ir, function, facade)?;
+    let (owner, _) = class_name(
+        ir,
+        function,
+        &implementation.name,
+        &implementation_owner,
+        facade,
+        modes,
+    );
+    Some((owner, method.to_string()))
+}
+
+fn class_realized_caller_location(
+    ir: &IrFile,
+    specialization: &crate::ir::IrSpecializedFunction,
+    facade: &str,
+    modes: LambdaModes,
+) -> Option<(String, String)> {
+    let Some(crate::ir::IrEnclosure::Lambda(function)) = specialization.caller else {
+        return None;
+    };
+    class_realized_function_location(ir, function, facade, modes)
+}
+
+/// Final physical class that owns a specialized closure's caller. A missing semantic enclosure is
+/// the recorded file/root case and selects the current facade. A class-mode lambda selects its
+/// generated class through the same finalized mode decision as [`specialization_location`].
+pub(in crate::jvm) fn specialization_owner(
+    ir: &IrFile,
+    specialization: &crate::ir::IrSpecializedFunction,
+    facade: &str,
+    modes: LambdaModes,
+) -> Option<String> {
+    if let Some((owner, _)) = class_realized_caller_location(ir, specialization, facade, modes) {
+        Some(owner)
+    } else {
+        semantic_owner(ir, specialization, facade)
+    }
+}
+
 fn semantic_caller_name(
     ir: &IrFile,
     specialization: &crate::ir::IrSpecializedFunction,
@@ -102,29 +154,12 @@ pub(in crate::jvm) fn specialization_location(
     facade: &str,
     modes: LambdaModes,
 ) -> Option<(String, String)> {
-    if let Some(crate::ir::IrEnclosure::Lambda(function)) = specialization.caller {
-        // A plain lambda realized as a class is only an emit plan, not an IrClass. Its specialized
-        // child therefore nests under the generated caller class and its physical `invoke` method.
-        // Suspend lowering removes the source lambda origin when it creates a real IrClass, so that
-        // already-realized case continues through the ordinary owner/name path below.
-        if let Some(method) = ir
-            .lambda_origins
-            .contains_key(&function)
-            .then(|| super::method_access::class_realized_lambda_method(ir, function, modes))
-            .flatten()
-        {
-            let implementation = ir.functions.get(function as usize)?;
-            let implementation_owner = function_owner(ir, function, facade)?;
-            let (owner, _) = class_name(
-                ir,
-                function,
-                &implementation.name,
-                &implementation_owner,
-                facade,
-                modes,
-            );
-            return Some((owner, method.to_string()));
-        }
+    // A plain lambda realized as a class is only an emit plan, not an IrClass. Its specialized
+    // child therefore nests under the generated caller class and its physical `invoke` method.
+    // Suspend lowering removes the source lambda origin when it creates a real IrClass, so that
+    // already-realized case continues through the ordinary owner/name path below.
+    if let Some(location) = class_realized_caller_location(ir, specialization, facade, modes) {
+        return Some(location);
     }
     Some((
         semantic_owner(ir, specialization, facade)?,
