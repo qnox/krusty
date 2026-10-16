@@ -41,8 +41,12 @@ impl WasmLane {
         scratch: &Path,
         stem: &str,
         suffix: &str,
-        artifacts: Vec<krusty::backend::Artifact>,
+        program: box_lane::CompiledProgram,
     ) -> Outcome {
+        if !program.native_imports.is_empty() {
+            return Outcome::Harness("a Wasm compilation produced Native link inputs".to_string());
+        }
+        let artifacts = program.artifacts;
         if artifacts.is_empty() {
             return Outcome::Frontend(
                 "the frontend produced no checked file and said nothing".to_string(),
@@ -156,7 +160,7 @@ impl Lane for WasmLane {
         directive_source: &str,
     ) -> Outcome {
         let backend = WasmBackend::new(self.target).with_entry(Entry::Box);
-        let artifacts = match box_lane::compile(
+        let program = match box_lane::compile(
             sources,
             directive_source,
             self.libraries(),
@@ -165,10 +169,10 @@ impl Lane for WasmLane {
             "box",
             DECLINE_PREFIX,
         ) {
-            Ok(artifacts) => artifacts,
+            Ok(program) => program,
             Err(outcome) => return outcome,
         };
-        self.run_artifacts(scratch, stem, "single", artifacts)
+        self.run_artifacts(scratch, stem, "single", program)
     }
 
     fn compile_modules_and_run(
@@ -179,7 +183,7 @@ impl Lane for WasmLane {
         directive_source: &str,
     ) -> Outcome {
         let backend = WasmBackend::new(self.target).with_entry(Entry::Box);
-        let artifacts = match box_lane::compile_modules(
+        let program = match box_lane::compile_modules(
             scratch,
             stem,
             modules,
@@ -189,10 +193,10 @@ impl Lane for WasmLane {
             &backend,
             DECLINE_PREFIX,
         ) {
-            Ok(artifacts) => artifacts,
+            Ok(program) => program,
             Err(outcome) => return outcome,
         };
-        self.run_artifacts(scratch, stem, "modules", artifacts)
+        self.run_artifacts(scratch, stem, "modules", program)
     }
 }
 

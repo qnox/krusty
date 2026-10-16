@@ -4769,8 +4769,14 @@ their declarations into an index-based model (`declarations`, `model`), lays rec
 - **Driver (done).** `krusty cinterop` takes Kotlin/Native's `cinterop` options and writes the
   library packed or unpacked, with the link facts of the `linkerOpts` libraries under
   `default/targets/<target>/imports`.
-- **Next.** Building Native programs against these libraries: publishing their declarations to
-  the frontend beside the platform's, and reading their link facts back into the program's link.
+- **Programs against these libraries (done for linux_x64).** The klib provider publishes their
+  declarations as it publishes Kotlin/Native's interop klibs, and `native::interop_link_libraries`
+  reads their link facts back for the program's `link_program_with_libraries`; malformed facts
+  and a klib for another target are refused. `tests/native_cinterop_e2e.rs` builds an interop
+  klib with `krusty cinterop` from a checked-in `.def` file and header, builds the C
+  implementation as a host shared library, and runs a program that calls it through the import.
+- **Next.** Pointer, struct and callback crossings in direct C calls, and the cgo-mode thread
+  start that lifts the linker's refusal of a program that imports and can start threads.
 
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 
