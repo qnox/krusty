@@ -6,7 +6,7 @@
 //! the no-arg method.
 //!
 //! DIFFERENTIAL: the same source goes through the provisioned kotlinc and through krusty, and the
-//! emitted method set is compared.
+//! emitted method set is compared, and the facade byte for byte.
 use super::common;
 
 /// One compiled class file: its internal name and bytes.
@@ -107,4 +107,20 @@ fn a_declared_string_array_main_gets_no_bridge() {
         reference.iter().map(|(n, d, _)| (n, d)).collect::<Vec<_>>(),
         "the facade's method set must match kotlinc's"
     );
+}
+
+/// kotlinc interns the bridge's descriptor before the `main()` reference its body makes, so the
+/// whole facade is byte-identical, constant pool order included.
+#[test]
+fn a_parameterless_main_facade_is_byte_identical() {
+    match common::byte_diff_against_kotlinc_cp(
+        "Bridge",
+        "fun main() { println(1) }\n",
+        "BridgeKt",
+        &[common::stdlib_jar()],
+    ) {
+        None => panic!("reference toolchain unavailable"),
+        Some(Ok(())) => {}
+        Some(Err(e)) => panic!("{e}"),
+    }
 }

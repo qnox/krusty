@@ -12858,7 +12858,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`ResolvedModuleIndex::source_entry_point`, a `CallableId` and its parameter form). When a unit
   declares both forms, `main(args: Array<String>)` is the entry and the parameterless `main()` is
   an ordinary function, as on kotlinc's JVM (no launcher bridge for it) and Kotlin/Native (the
-  array form is chosen first); two functions of one form are conflicting overloads the same pass
+  array form is chosen first). On the JVM a parameterless entry gets kotlinc's synthetic
+  `main([Ljava/lang/String;)V` bridge, its header interned before the `main()` reference in its
+  body so the facade's constant pool matches kotlinc's (`tests/main_entry_point_e2e.rs`); two functions of one form are conflicting overloads the same pass
   reports, and no entry is recorded. Common lowering only maps the recorded callable to its function
   (`IrFile::entry_point`); an unmapped one is an internal error. The entry is a Kotlin rule; a
   harness's `box(): String` is not, but it is selected by the same pass and recorded the same way
