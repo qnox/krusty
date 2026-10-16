@@ -2157,16 +2157,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   visibility machinery produces all of the above. An INTERNAL primary ctor records internal copy
   visibility in `@Metadata` and the JVM method is the public `copy$<module>` (`copy$main` for the
   default module), with `copy$<module>$default` beside it — the same suffix every other internal
-  instance member takes. A PROTECTED primary ctor currently
-  falls back to a public `copy` (kotlinc emits a protected `copy` with a public `copy$default`) —
-  the IR visibility sets model neither, a silent divergence on a rare shape, like a declared
-  `protected fun`. krusty also does not yet ENFORCE the copy's visibility at call sites: an
-  out-of-scope `d.copy()` still compiles where kotlinc reports an error under the flag. The
-  per-class `kotlin.ConsistentCopyVisibility`/`kotlin.ExposedCopyVisibility` annotations are
-  unhandled.
+  instance member takes. A PROTECTED primary ctor gives a protected `copy` beside a public
+  `copy$default`, as kotlinc emits.
+  Per class, `kotlin.ConsistentCopyVisibility` selects the constructor's visibility without the
+  flag and `kotlin.ExposedCopyVisibility` keeps `copy` public under it; both are matched by resolved
+  identity (a type alias or qualified spelling counts, a same-named user class does not). Signature
+  collection owns the decision (`src/resolve/signature_collection/data_class_copy.rs`): the `copy`
+  signature carries it, so call sites are checked against it, and declaration-header publication
+  takes a generated member's visibility from its stable signature identity, so lowering, the JVM
+  method and `@Metadata` agree. Like kotlinc's
+  `FirDataClassConsistentDataCopyAnnotationChecker`, krusty reports both annotations on one data
+  class as incompatible (an error on each entry), either annotation on a non-data classifier as the
+  wrong target, and `@ConsistentCopyVisibility` under the flag as redundant (a warning). The
+  `ErrorAboutDataClassCopyVisibilityChange` deprecation warnings are not modeled here. An ordinary
+  selected-member access diagnostic renders the callable and its recorded parameter roles; a legacy
+  context receiver therefore remains `context(String)`, rather than acquiring a fabricated name.
   Tests: `tests/consistent_copy_visibility_e2e.rs` (normalized `copy`/`copy$default` javap sections
-  differential vs kotlinc with and without the flag, byte-level toggling isolation, internal-ctor
-  pin) plus the flag-modeling tests in `crates/krusty-cli/src/cli.rs` and `src/features.rs`, and the
+  differential vs kotlinc with and without the flag and per annotation, a protected ctor,
+  byte-level toggling isolation, internal-ctor pin, and annotation/call-site diagnostics) plus the
+  flag-modeling tests in `crates/krusty-cli/src/cli.rs` and `src/features.rs`, and the
   Bazel worker acceptance test in `crates/krusty-cli/src/worker.rs`.
   realization and holder bytes vs kotlinc for `disable` AND `enable`, emitted `jvmClassFlags`,
   behavior parity, sub-interface republication, and cross-module consumption in both directions —

@@ -457,7 +457,7 @@ impl Checker<'_> {
         let container = if written {
             "file".to_string()
         } else {
-            format!("'{}'", Self::access_owner_display(classifier))
+            format!("'{}'", access_control::owner_display(classifier))
         };
         let visibility = match property.visibility {
             Visibility::Private => "private",
@@ -577,7 +577,7 @@ impl Checker<'_> {
         let container = if written {
             "file".to_string()
         } else {
-            format!("'{}'", Self::access_owner_display(classifier))
+            format!("'{}'", access_control::owner_display(classifier))
         };
         let visibility = match function.visibility {
             Visibility::Private => "private",

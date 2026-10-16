@@ -11344,11 +11344,9 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if candidate.visibility != Visibility::Public {
-                    self.reject_callable_if_inaccessible(
-                        candidate.visibility,
-                        name,
+                    self.reject_function_if_inaccessible(
+                        &candidate.diagnostic_candidate,
                         candidate.owner,
-                        candidate.external_identity,
                         self.call_callee_name_span(call),
                     );
                 }
@@ -17003,7 +17001,7 @@ impl<'a> Checker<'a> {
                             )
                         {
                             self.reject_package_private_classifier_call(
-                                receiver, call, classifier, &name, &selected,
+                                receiver, call, classifier, &selected,
                             );
                             return Ty::Error;
                         }
@@ -24762,7 +24760,10 @@ fun rejected(owner: Owner) { owner.hidden() }
             true,
         );
 
-        assert_eq!(errors, ["cannot access 'hidden': it is private in 'Owner'"]);
+        assert_eq!(
+            errors,
+            ["cannot access 'fun hidden(): Int': it is private in 'Owner'."]
+        );
     }
 
     #[test]
@@ -30599,6 +30600,11 @@ fun use() {
         );
     }
 
+    fn err_exact(src: &str, expected: &str) {
+        let (errors, _) = check(src);
+        assert_eq!(errors, [expected]);
+    }
+
     // NOTE: `require`/`check`/`error`/`TODO`/`assertEquals`/`assertTrue`/`assertFalse` are no longer
     // hardcoded in the checker — they resolve generically from the classpath (a real stdlib / kotlin.test
     // jar) and are validated by the box-conformance + `feature_box_e2e` suites, not here (these unit
@@ -30651,13 +30657,13 @@ fun use() {
         ok("class C {\n  companion object { private fun make(): Int = 1 }\n  class ZZZ { class Deep { fun f(): Int = C.make() } }\n}");
         // The widening is the COMPANION's alone, and reaches only the containing class. A sibling
         // nested class's private member stays private to itself (kotlinc rejects both directions)…
-        err_contains(
+        err_exact(
             "class C {\n  class Inner { private fun m(): Int = 1 }\n  class ZZZ { fun f(x: C.Inner): Int = x.m() }\n}",
-            "it is private in 'C$Inner'",
+            "cannot access 'fun m(): Int': it is private in 'C.Inner'.",
         );
-        err_contains(
+        err_exact(
             "class C {\n  class Inner { private fun m(): Int = 1 }\n  companion object { fun f(x: C.Inner): Int = x.m() }\n}",
-            "it is private in 'C$Inner'",
+            "cannot access 'fun m(): Int': it is private in 'C.Inner'.",
         );
         // …and an unrelated top-level class still cannot reach the companion's private member.
         err_contains(
@@ -35094,6 +35100,10 @@ pub(crate) struct MemberExtensionFunctionCandidate {
     stable_declaration: Option<crate::fir::DeclarationId>,
     external_identity: Option<crate::fir::ExternalCallableId>,
     external_default_provider: Option<crate::fir::ExternalCallableId>,
+    /// Exact provider-normalized declaration selected for source diagnostics. It is retained with
+    /// the candidate so an access rejection never looks the callable up again or rebuilds it from
+    /// owner/name/arity.
+    diagnostic_candidate: crate::libraries::FunctionInfo,
     priority: MemberExtensionPriority,
     dispatch_receiver: ImplicitReceiver,
     score: (usize, std::cmp::Reverse<usize>, bool),
@@ -63573,44 +63583,22 @@ impl<'a> Checker<'a> {
         if !self.selected_member_accessible(&selected, owner)
             && !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
         {
-            if matches!(
-                selected.member.visibility,
-                Visibility::Internal | Visibility::PackagePrivate | Visibility::Protected
-            ) {
-                let visibility = match selected.member.visibility {
-                    Visibility::Internal => "internal",
-                    Visibility::PackagePrivate => "package-private",
-                    Visibility::Protected => "protected",
-                    Visibility::Private | Visibility::Public => unreachable!(),
-                };
-                self.diags.error(
-                    self.call_callee_name_span(call),
-                    self.callable_access_message(
-                        false,
-                        &selected.member.name,
-                        &selected.member.params,
-                        &selected.member.call_sig.param_names,
-                        selected.member.ret,
-                        owner,
-                        visibility,
-                    ),
-                );
-            } else {
-                let visibility = match selected.member.visibility {
-                    Visibility::Private => "private",
-                    Visibility::Internal => unreachable!(),
-                    Visibility::Public => "public",
-                    Visibility::Protected | Visibility::PackagePrivate => unreachable!(),
-                };
-                self.diags.error(
-                    self.call_callee_name_span(call),
-                    format!(
-                        "cannot access '{}': it is {visibility} in '{}'",
-                        selected.member.name,
-                        owner.render()
-                    ),
-                );
-            }
+            let visibility = match selected.member.visibility {
+                Visibility::Private => "private",
+                Visibility::Internal => "internal",
+                Visibility::PackagePrivate => "package-private",
+                Visibility::Protected => "protected",
+                Visibility::Public => "public",
+            };
+            let source = self.fed_source();
+            let message = access_control::member_callable_message(
+                &source,
+                self.resolved_index,
+                &selected.member,
+                owner,
+                visibility,
+            );
+            self.diags.error(self.call_callee_name_span(call), message);
             return Some(Ty::Error);
         }
         self.reject_non_public_api_from_public_inline(
@@ -64245,11 +64233,9 @@ impl<'a> Checker<'a> {
             candidate.owner,
             candidate.external_identity,
         ) {
-            self.reject_callable_if_inaccessible(
-                candidate.visibility,
-                name,
+            self.reject_function_if_inaccessible(
+                &candidate.diagnostic_candidate,
                 candidate.owner,
-                candidate.external_identity,
                 span,
             );
             return Err(());
@@ -65950,7 +65936,7 @@ impl<'a> Checker<'a> {
         {
             self.diags.error(
                 self.call_callee_name_span(call),
-                Self::constructor_access_message(internal, &member),
+                access_control::constructor_message(internal, &member),
             );
             return Ok(LibraryConstructorSelection::Rejected);
         }
@@ -66824,87 +66810,11 @@ impl<'a> Checker<'a> {
         self.fold_method_annotations_in_temporary_scope(class_scope, function, true);
     }
 
-    fn access_owner_display(owner: TypeName) -> String {
-        owner.render().replace(['/', '$'], ".")
-    }
-
-    fn access_parameter_display(params: &[Ty], names: &[String]) -> String {
-        params
-            .iter()
-            .enumerate()
-            .map(|(index, ty)| {
-                let name = names
-                    .get(index)
-                    .filter(|name| !name.is_empty())
-                    .cloned()
-                    .unwrap_or_else(|| format!("p{index}"));
-                format!("{name}: {}", ty.source_name())
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
-    fn callable_access_message(
-        &self,
-        is_static: bool,
-        name: &str,
-        params: &[Ty],
-        param_names: &[String],
-        ret: Ty,
-        owner: TypeName,
-        visibility: &str,
-    ) -> String {
-        let static_prefix = if is_static { "static " } else { "" };
-        let params = Self::access_parameter_display(params, param_names);
-        let container = self
-            .resolved_index
-            .and_then(|index| {
-                index
-                    .classifier_declaration(owner)
-                    .map(|declaration| (index, declaration))
-            })
-            .and_then(|(index, declaration)| index.declaration_header(declaration))
-            .filter(|header| header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS))
-            .map_or_else(
-                || format!("'{}'", Self::access_owner_display(owner)),
-                |_| "file".to_string(),
-            );
-        format!(
-            "cannot access '{static_prefix}fun {name}({params}): {}': it is {visibility} in {container}.",
-            ret.source_name(),
-        )
-    }
-
-    fn constructor_access_message(
-        owner: TypeName,
-        member: &crate::libraries::LibraryMember,
-    ) -> String {
-        let params = Self::access_parameter_display(&member.params, &member.call_sig.param_names);
-        let visibility = match member.visibility {
-            Visibility::Private => "private",
-            Visibility::Protected => "protected",
-            Visibility::Internal => "internal",
-            Visibility::PackagePrivate => "package-private",
-            Visibility::Public => "public",
-        };
-        let declaration = owner
-            .render()
-            .rsplit('/')
-            .next()
-            .unwrap_or_else(|| owner.nested_segment_ref())
-            .replace('$', ".");
-        format!(
-            "cannot access 'constructor({params}): {declaration}': it is {visibility} in '{}'.",
-            Self::access_owner_display(owner),
-        )
-    }
-
     fn reject_package_private_classifier_call(
         &mut self,
         receiver: ExprId,
         call: ExprId,
         classifier: TypeName,
-        name: &str,
         selected: &SelectedCallable,
     ) {
         if self.resolver().inaccessible_classifier_access(classifier)
@@ -66918,18 +66828,15 @@ impl<'a> Checker<'a> {
                 format!("cannot access '{display}': it is package-private in file."),
             );
         }
-        self.diags.error(
-            self.call_callee_name_span(call),
-            self.callable_access_message(
-                true,
-                name,
-                &selected.semantic_params(),
-                &selected.call_sig.param_names,
-                selected.callable.ret,
-                selected.callable.owner,
-                "package-private",
-            ),
+        let source = self.fed_source();
+        let message = access_control::static_callable_message(
+            &source,
+            self.resolved_index,
+            selected,
+            selected.callable.owner,
+            "package-private",
         );
+        self.diags.error(self.call_callee_name_span(call), message);
     }
 
     /// kotlinc's descriptor rendering of a classifier for an access diagnostic: `class Helper : Any`.
