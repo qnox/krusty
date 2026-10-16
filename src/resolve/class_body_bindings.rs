@@ -3,7 +3,6 @@
 
 use super::{AnonymousObjectCaptureSource, Checker, CheckerScope};
 use crate::ast::{DeclId, PropParam};
-use crate::fir::DeclarationId;
 use crate::types::Ty;
 
 impl Checker<'_> {
@@ -19,25 +18,6 @@ impl Checker<'_> {
             }
             _ => None,
         }
-    }
-
-    /// Whether a selected current-module property participates in Kotlin source lookup. Stable
-    /// identity keeps internal capture storage distinct from a same-named source property.
-    pub(super) fn class_body_property_source_visible(
-        &self,
-        declaration: Option<DeclarationId>,
-    ) -> bool {
-        let Some(declaration) = declaration else {
-            return true;
-        };
-        let index = self
-            .resolved_index
-            .expect("a stable property selection requires the resolved module index");
-        let property = index
-            .property_for_declaration(declaration)
-            .and_then(|property| index.property(property))
-            .expect("a stable current-module property requires a resolved property header");
-        property.source_visible
     }
 
     /// Declare the primary-constructor parameters visible in a property initializer or an `init`

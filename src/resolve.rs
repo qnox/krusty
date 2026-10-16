@@ -27204,6 +27204,7 @@ fun box(): String {
                             receiver_rank: 0,
                             source_key: None,
                             stable_declaration: None,
+                            source_visible: true,
                             getter_declaration: None,
                             setter_declaration: None,
                             source_member: None,
@@ -43786,12 +43787,10 @@ impl<'a> Checker<'a> {
                                 source, storage, &bindings,
                             ))
                         });
-                    let source_visible =
-                        checker.class_body_property_source_visible(property.stable_declaration);
                     properties.push(ScopedProperty {
                         name: property.name.clone(),
                         ty,
-                        source_visible,
+                        source_visible: property.source_visible,
                         owner_storage_ty,
                         is_var: property.setter.is_some(),
                         owner: property.owner,
