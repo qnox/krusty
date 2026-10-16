@@ -274,6 +274,8 @@ mod class_literal_alias_star_projection_e2e;
 mod class_literal_e2e;
 #[path = "class_literal_equality_e2e.rs"]
 mod class_literal_equality_e2e;
+#[path = "class_literal_star_projection_e2e.rs"]
+mod class_literal_star_projection_e2e;
 #[path = "class_member_order_e2e.rs"]
 mod class_member_order_e2e;
 #[path = "class_metadata_roundtrip.rs"]

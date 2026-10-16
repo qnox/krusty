@@ -3568,6 +3568,14 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     &[Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
                 )
             }
+            (Ty::Obj(internal, []), Some((scope, _))) if unbound => {
+                let classifier =
+                    self.with_resolver(scope, |resolver| resolver.classifier(internal))?;
+                super::super::class_literal_receiver::star_projected_class_literal_receiver(
+                    receiver,
+                    &classifier,
+                )
+            }
             (receiver, _) => receiver,
         };
         if !unbound && !receiver.is_reference() && receiver.jvm_boxed_ref().is_none() {

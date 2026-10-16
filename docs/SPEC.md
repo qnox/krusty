@@ -5443,6 +5443,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   method-owned parameters still bind from call arguments. Test:
   `classpath_static_call_inference_e2e::class_literal_binds_nested_java_generic_returns`.
 
+- **A bare class literal of a generic classifier is star-projected.** `H::class` for `class H<T>` is
+  `KClass<H<*>>`, so `H::class.java` is `Class<H<*>>`. The raw `H` is not a Kotlin type: it made
+  `val c: Class<H<*>> = H::class.java` a mismatch and left an implicitly typed property with a
+  classifier missing its arguments. Every type parameter the classifier declares is starred, the
+  captured ones of an `inner` chain included, and each star keeps its declared upper bound as a
+  written `H<*>` does (`class_literal_receiver::star_projected_class_literal_receiver`). The checker
+  and signature solving apply the same operation. A bare `Array::class` keeps its own
+  `BareArrayClassLiteral` rule. Tests: `class_literal_star_projection_e2e`.
+
 - **An unbound class literal on an ARRAY type resolves its spelling as a type, arguments included.**
   `Array<String>::class` / `IntArray::class.java` resolve through the ordinary typeref channel with the
   type arguments the parser attached to the reference node, so the represented type is
