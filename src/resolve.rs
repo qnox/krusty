@@ -209,6 +209,7 @@ mod source_fragment;
 mod source_generic_signatures;
 mod source_signature_display;
 mod source_type_resolution;
+mod static_access_type_arguments;
 mod symbol_display;
 mod type_test_planning;
 mod type_use_annotation_publication;
@@ -11301,7 +11302,7 @@ impl<'a> Checker<'a> {
             .file
             .call_type_args
             .get(&call.0)
-            .cloned()
+            .map(|syntax| syntax.arguments.clone())
             .unwrap_or_default()
             .iter()
             .map(|argument| self.type_ref_ty(scope, argument))
@@ -12476,59 +12477,6 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
-    fn record_associated_property(
-        &mut self,
-        expr: Option<ExprId>,
-        property: crate::libraries::PropertyInfo,
-        report_diagnostics: bool,
-    ) -> Ty {
-        let access_owner = property.associated_access_owner.unwrap_or(property.owner);
-        if property.visibility != Visibility::Public
-            && !self.callable_accessible(
-                property.visibility,
-                access_owner,
-                property.getter.external_identity,
-            )
-        {
-            if let Some(expr) = expr.filter(|_| report_diagnostics) {
-                let span = self.member_name_span(expr, &property.name);
-                self.report_inaccessible_associated_property(&property, span);
-            }
-            return Ty::Error;
-        }
-        if let Some(constant) = property.compile_time_constant.clone() {
-            let ty = constant.ty;
-            if let Some(expr) = expr {
-                self.resolved_constants.insert(expr, constant);
-            }
-            return ty;
-        }
-        if let Some(expr) = expr {
-            if self
-                .resolved_type_name(property.owner)
-                .is_some_and(|ty| ty.is_enum_entry(&property.name))
-            {
-                self.record_enum_entry(expr, property.owner, &property.name);
-            }
-            self.expr_lowers.insert(
-                expr,
-                ExprLowering::AssociatedPropertyRead {
-                    stable_declaration: property.stable_declaration,
-                    external_identity: property.getter.external_property_identity,
-                    singleton_dispatch: property.getter.singleton_dispatch.as_deref().map(
-                        |singleton| SingletonValue {
-                            classifier: singleton.classifier,
-                        },
-                    ),
-                    owner: property.owner,
-                    name: property.name,
-                    metadata_constant_read: property.metadata_constant_read,
-                },
-            );
-        }
-        property.ty
-    }
-
     /// Probe a member read without emitting a diagnostic: returns `Some(ty)` if `recv.name` resolves
     /// and `None` otherwise. Used to resolve a bare name `length` inside a receiver-lambda body
     /// (`this`-relative) for an arbitrary receiver type.
@@ -13125,6 +13073,7 @@ impl<'a> Checker<'a> {
                 selected.callable.ret
             };
             if let Some(implicit) = selected.implicit_classifier_callable {
+                self.record_selected_qualifier_call(call, &selected);
                 let mut member = selected.member_with_return(ret);
                 member.implicit_classifier_callable = Some(implicit);
                 self.resolved_calls
@@ -13421,6 +13370,7 @@ impl<'a> Checker<'a> {
             }
             TopLevelPropertySelection::None => return None,
         };
+        self.record_associated_property_read(expression, &property.property);
         if let Some(ty) = self.record_top_level_source_constant(expression, &property.property) {
             return Some(ty);
         }
@@ -13735,7 +13685,12 @@ impl<'a> Checker<'a> {
             );
         }
         let mut explicit = crate::symbol_resolver::GSigBinds::default();
-        if let Some(refs) = self.file.call_type_args.get(&call.0).cloned() {
+        if let Some(refs) = self
+            .file
+            .call_type_args
+            .get(&call.0)
+            .map(|syntax| syntax.arguments.clone())
+        {
             for (name, type_ref) in plan.type_params.iter().zip(refs.iter()) {
                 let ty = self.type_ref_ty_silent(scope, type_ref);
                 if ty != Ty::Error {
@@ -15318,7 +15273,7 @@ impl<'a> Checker<'a> {
                 .file
                 .call_type_args
                 .get(&call.0)
-                .is_none_or(Vec::is_empty);
+                .is_none_or(|arguments| arguments.is_empty());
         if fi.visibility != Visibility::Public {
             self.reject_callable_if_inaccessible(
                 fi.visibility,
@@ -17097,6 +17052,7 @@ impl<'a> Checker<'a> {
                         let ret = selected.callable.ret;
                         let member = selected.member_with_return(ret);
                         self.record_selected_sam_arguments(scope, args, &selected.applied_params());
+                        self.record_selected_qualifier_call(call, &selected);
                         self.resolved_calls
                             .insert(call, ResolvedCall::Companion(member));
                         return ret;
@@ -17289,7 +17245,7 @@ impl<'a> Checker<'a> {
                     .file
                     .call_type_args
                     .get(&call.0)
-                    .cloned()
+                    .map(|syntax| syntax.arguments.clone())
                     .unwrap_or_default()
                     .iter()
                     .map(|argument| self.type_ref_ty(scope, argument))
@@ -19185,7 +19141,12 @@ impl<'a> Checker<'a> {
                     known_sig.as_ref().and_then(|sig| sig.generic_sig.as_ref())
                 {
                     let mut bindings = crate::symbol_resolver::GSigBinds::default();
-                    if let Some(type_arguments) = self.file.call_type_args.get(&call.0).cloned() {
+                    if let Some(type_arguments) = self
+                        .file
+                        .call_type_args
+                        .get(&call.0)
+                        .map(|syntax| syntax.arguments.clone())
+                    {
                         for (formal, argument) in generic.formals.iter().zip(type_arguments) {
                             if argument.is_inference_placeholder() {
                                 continue;
@@ -19381,7 +19342,7 @@ impl<'a> Checker<'a> {
                         .file
                         .call_type_args
                         .get(&call.0)
-                        .cloned()
+                        .map(|syntax| syntax.arguments.clone())
                         .unwrap_or_default()
                         .iter()
                         .map(|argument| self.type_ref_ty(scope, argument))
@@ -27158,6 +27119,7 @@ fun box(): String {
                             receiver: Some(parameter),
                             associated_classifier: None,
                             associated_access_owner: None,
+                            companion_associated: false,
                             formals: Vec::new(),
                             ty: Ty::String,
                             context_count: 0,
@@ -33095,6 +33057,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         expectation_frames: Vec::new(),
         unreachable_statement_depth: 0,
         discover_anonymous_captures: false,
+        selected_qualifier_accesses: HashMap::default(),
         discovers_captures_at_construction: false,
         finalized_anonymous_captures: crate::fx_hash::HashSet::default(),
         discovered_anonymous_captures: HashMap::default(),
@@ -35818,6 +35781,10 @@ struct Checker<'a> {
     /// This check exists only to discover anonymous-object captures: its diagnostics and results
     /// are discarded. It is also set while an object's body is checked for its captures.
     discover_anonymous_captures: bool,
+    /// Exact qualifier plus receiver-less access kind chosen by qualified selection. This is
+    /// checker-local because its sole consumer is a source diagnostic emitted before FIR handoff.
+    selected_qualifier_accesses:
+        HashMap<ExprId, static_access_type_arguments::SelectedQualifierAccess>,
     /// This authoritative check finds each anonymous object's captures where the object is
     /// constructed: its body is checked once for the captures, then again with them.
     discovers_captures_at_construction: bool,
@@ -41780,6 +41747,7 @@ impl<'a> Checker<'a> {
         ret: Ty,
         context_args: Vec<Option<ResolvedContextArgument>>,
     ) {
+        self.record_selected_qualifier_call(call, selected);
         let source_file = selected.source_key.map(|(file, _)| file);
         let source_decl = selected.source_key.map(|(_, decl)| DeclId(decl));
         let vararg_index = selected.call_sig.vararg_index;
@@ -41803,7 +41771,7 @@ impl<'a> Checker<'a> {
                 .file
                 .call_type_args
                 .get(&call.0)
-                .is_none_or(Vec::is_empty);
+                .is_none_or(|arguments| arguments.is_empty());
         let mut callable = selected.callable.clone();
         callable.ret = ret;
         callable.inline = selected.flags.inline;
@@ -42801,7 +42769,11 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         argument_names: Option<&[Option<String>]>,
     ) -> HashMap<ExprId, Ty> {
-        let explicit_refs = self.file.call_type_args.get(&call.0).cloned();
+        let explicit_refs = self
+            .file
+            .call_type_args
+            .get(&call.0)
+            .map(|syntax| syntax.arguments.clone());
         if self.report_dnn_null_inference(
             call,
             selected,
@@ -53184,7 +53156,12 @@ impl<'a> Checker<'a> {
         // constructor-result constraint on this path; direct classifier calls still read their
         // written arguments below.
         let explicit_refs = (!arguments_name_an_applied_classifier)
-            .then(|| self.file.call_type_args.get(&call.0).cloned())
+            .then(|| {
+                self.file
+                    .call_type_args
+                    .get(&call.0)
+                    .map(|syntax| syntax.arguments.clone())
+            })
             .flatten();
         let mut bindings = vec![Ty::Error; class.type_params.len()];
         let mut explicitly_bound = vec![false; bindings.len()];
@@ -54407,6 +54384,7 @@ impl<'a> Checker<'a> {
             self.expr_inner(scope, e, expected, value_required)
         });
         self.check_expression_usage(scope, e);
+        self.check_static_access_type_arguments(e);
         self.check_expression_missing_supertypes(e);
         self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();
@@ -55392,7 +55370,7 @@ impl<'a> Checker<'a> {
             .file
             .call_type_args
             .get(&argument.0)
-            .is_none_or(Vec::is_empty)
+            .is_none_or(|arguments| arguments.is_empty())
         {
             if let Some(signature) = self.expected_type_callable_signature(argument) {
                 return CallArgKind::ExpectedTypeCallable {
@@ -55449,7 +55427,7 @@ impl<'a> Checker<'a> {
         self.file
             .call_type_args
             .get(&call.0)
-            .cloned()
+            .map(|syntax| syntax.arguments.clone())
             .unwrap_or_default()
             .iter()
             .map(|argument| self.type_ref_ty(scope, argument))
@@ -55590,7 +55568,7 @@ impl<'a> Checker<'a> {
             .file
             .call_type_args
             .get(&call.0)
-            .cloned()
+            .map(|syntax| syntax.arguments.clone())
             .map(|args| {
                 args.iter()
                     .map(|arg| self.type_ref_ty(scope, arg))
@@ -56070,7 +56048,7 @@ impl<'a> Checker<'a> {
             .file
             .call_type_args
             .get(&call.0)
-            .cloned()
+            .map(|syntax| syntax.arguments.clone())
             .unwrap_or_default()
             .iter()
             .map(|argument| self.type_ref_ty(scope, argument))
@@ -58898,6 +58876,11 @@ impl<'a> Checker<'a> {
         }
         let t = match lookup {
             Some(l) => {
+                // The scope tower has committed this value/property binding: lexical locals win
+                // outright, while any nearer implicit receiver was offered above. Explicit type
+                // arguments on this selected value are therefore the generic property-access
+                // error; they must not be reinterpreted as a classifier qualifier later.
+                self.check_selected_property_type_arguments(e);
                 // The binding's recorded type is the marker while that declaration's own type is
                 // being determined. Ask for it BEFORE the origin-specific paths below: each of them
                 // reads the binding or re-selects the member from the symbol table, and both hold
@@ -66140,15 +66123,20 @@ impl<'a> Checker<'a> {
         }) {
             return applied;
         }
-        let partial_explicit_arguments =
-            self.file
-                .call_type_args
-                .get(&call.0)
-                .cloned()
-                .filter(|arguments| {
-                    !arguments.is_empty() && arguments.iter().any(TypeRef::is_inference_placeholder)
-                });
-        if let Some(targs) = self.file.call_type_args.get(&call.0).cloned() {
+        let partial_explicit_arguments = self
+            .file
+            .call_type_args
+            .get(&call.0)
+            .map(|syntax| syntax.arguments.clone())
+            .filter(|arguments| {
+                !arguments.is_empty() && arguments.iter().any(TypeRef::is_inference_placeholder)
+            });
+        if let Some(targs) = self
+            .file
+            .call_type_args
+            .get(&call.0)
+            .map(|syntax| syntax.arguments.clone())
+        {
             if !targs.is_empty() && partial_explicit_arguments.is_none() {
                 return self.classifier_type_with_arguments(scope, internal, &targs);
             }

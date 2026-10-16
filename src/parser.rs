@@ -4050,6 +4050,18 @@ impl<'a> Parser<'a> {
     /// (recursing through `parse_type`, so nested generics like `Map<K, List<V>>` parse correctly).
     /// The arguments are returned for completeness but JVM-erased, so callers may discard them.
     fn parse_type_args(&mut self) -> Vec<TypeRef> {
+        self.parse_type_argument_list().0
+    }
+
+    /// [`Self::parse_type_args`], also returning the span of the written `<…>` list.
+    fn parse_type_argument_list(&mut self) -> (Vec<TypeRef>, Span) {
+        let open = self.tok().span;
+        let args = self.parse_type_argument_list_contents();
+        let close = self.t[self.i.saturating_sub(1)].span;
+        (args, Span::new(open.lo, close.hi.max(open.hi)))
+    }
+
+    fn parse_type_argument_list_contents(&mut self) -> Vec<TypeRef> {
         let mut args = Vec::new();
         if !self.eat(TokenKind::Lt) {
             return args;

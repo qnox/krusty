@@ -2129,6 +2129,10 @@ pub struct PropertyInfo {
     pub associated_classifier: Option<TypeName>,
     /// Classifier whose lexical body owns access to this companion-block declaration.
     pub associated_access_owner: Option<TypeName>,
+    /// Declared with companion syntax: a `companion { … }` block property or a written `companion
+    /// val C.name` (kotlinc's `requiresCompanionBlockOrExtensionLf`). A Java static field or the
+    /// static storage of a companion `@JvmField`, published in the same namespace, is not.
+    pub companion_associated: bool,
     /// The property's own formal type parameters (`val <T> List<T>.foo`); empty for a plain property.
     pub formals: Vec<String>,
     /// The property's declared type.

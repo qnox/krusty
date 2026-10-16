@@ -496,6 +496,8 @@ mod companion_custom_accessor_field_e2e;
 mod companion_e2e;
 #[path = "companion_init_block_e2e.rs"]
 mod companion_init_block_e2e;
+#[path = "companion_initializer_lambda_e2e.rs"]
+mod companion_initializer_lambda_e2e;
 #[path = "companion_member_read_e2e.rs"]
 mod companion_member_read_e2e;
 #[path = "companion_nested_classifier_scope_e2e.rs"]
@@ -1330,6 +1332,8 @@ mod java_instance_e2e;
 #[path = "java_interface_mutable_collection_face_e2e.rs"]
 mod java_interface_mutable_collection_face_e2e;
 mod java_member_modules;
+#[path = "local_function_reference_inference_e2e.rs"]
+mod local_function_reference_inference_e2e;
 java_member_modules::declare!();
 #[path = "java_nested_static_e2e.rs"]
 mod java_nested_static_e2e;
@@ -1669,6 +1673,8 @@ mod source_map_annotation_parts_e2e;
 mod special_collection_bridge_e2e;
 #[path = "splice_nullable_value_class_lambda_e2e.rs"]
 mod splice_nullable_value_class_lambda_e2e;
+#[path = "static_access_type_arguments_e2e.rs"]
+mod static_access_type_arguments_e2e;
 #[path = "string_when_switch_e2e.rs"]
 mod string_when_switch_e2e;
 #[path = "super_delegation_line_e2e.rs"]
@@ -2873,6 +2879,8 @@ mod unsigned_default_store_e2e;
 mod unsigned_equality_e2e;
 #[path = "unsigned_ext_e2e.rs"]
 mod unsigned_ext_e2e;
+#[path = "unsigned_generated_members_e2e.rs"]
+mod unsigned_generated_members_e2e;
 #[path = "unsigned_generic_erasure_e2e.rs"]
 mod unsigned_generic_erasure_e2e;
 #[path = "unsigned_intersection_carrier_e2e.rs"]

@@ -31,6 +31,10 @@ impl WarningName {
                             .is_some()
                     })
                 }
+                krusty::diag::CompilerWarningName::TypeArgumentsNotAllowed => {
+                    FeatureTable::for_version(release)
+                        .is_some_and(|table| table.get("ForbidUselessTypeArgumentsIn25").is_some())
+                }
                 krusty::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters => {
                     FeatureTable::for_version(release).is_some_and(|table| {
                         table

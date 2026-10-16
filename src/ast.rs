@@ -1595,6 +1595,34 @@ pub struct IncDecAccess {
     pub prefix: bool,
 }
 
+/// One explicit `<…>` list owned by the expression segment it applies to.
+///
+/// Type references and the complete list span are one parser product and survive or disappear
+/// together when Pass 1 compacts expression identities. Semantic consumers use the slice view;
+/// source diagnostics use [`Self::span`].
+#[derive(Clone, Debug)]
+pub struct CallTypeArguments {
+    pub arguments: Vec<TypeRef>,
+    pub span: Span,
+}
+
+impl std::ops::Deref for CallTypeArguments {
+    type Target = [TypeRef];
+
+    fn deref(&self) -> &Self::Target {
+        &self.arguments
+    }
+}
+
+impl<'a> IntoIterator for &'a CallTypeArguments {
+    type Item = &'a TypeRef;
+    type IntoIter = std::slice::Iter<'a, TypeRef>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.arguments.iter()
+    }
+}
+
 /// One parsed source file: its package, and arenas for every node kind.
 #[derive(Default)]
 pub struct File {
@@ -1747,10 +1775,11 @@ pub struct File {
     /// ordinary `Member { receiver: a, name: "foo" }`, but resolver/lowering need the source form for
     /// primitive builtin names where Kotlin treats `a rem b` differently from `a.rem(b)`.
     pub infix_calls: crate::fx_hash::HashSet<u32>,
-    /// Explicit type arguments on a call (`Foo<Int>()`, `listOf<String>(…)`), keyed by the call's
-    /// `ExprId`. Lets a constructor call carry its instantiation (`ArrayList<Int>()` → `ArrayList<Int>`)
-    /// so member/element types resolve. Absent ⇒ no explicit type arguments.
-    pub call_type_args: crate::fx_hash::HashMap<u32, Vec<TypeRef>>,
+    /// Explicit type arguments on a call or classifier segment (`Foo<Int>()`, `E<Int>.entries`),
+    /// keyed by the expression that owns the written list. Keeping its type references and exact
+    /// `<…>` span in one retained value prevents compaction from remapping semantic input while
+    /// leaving diagnostic syntax under an obsolete `ExprId`. Absent means no explicit arguments.
+    pub call_type_args: crate::fx_hash::HashMap<u32, CallTypeArguments>,
     pub anonymous_object_classes: crate::fx_hash::HashMap<ExprId, DeclId>,
     /// Anonymous class declaration → exact lexically enclosing source function.
     pub anonymous_object_enclosing_functions:
@@ -1995,6 +2024,11 @@ pub struct File {
     /// `+ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds`: the outermost application of
     /// a type operator's target and of a callable's type-parameter bound is bound-checked too.
     pub forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds: bool,
+    /// `+ForbidUselessTypeArgumentsIn25`: type arguments that select nothing (on a qualifier reaching
+    /// a static member, …) are errors rather than deprecation warnings.
+    pub forbid_useless_type_arguments: bool,
+    /// Exact per-compilation warning text for the useless-type-argument transition.
+    pub type_arguments_not_allowed_warning: Option<String>,
     /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
     /// parameters whose declared upper bounds contain a cycle.
     pub recursive_type_of: bool,

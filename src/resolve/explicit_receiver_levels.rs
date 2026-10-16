@@ -209,7 +209,7 @@ impl Checker<'_> {
             .file
             .call_type_args
             .get(&call.0)
-            .map(Vec::len)
+            .map(|arguments| arguments.len())
             .filter(|count| *count > 0);
         let mut nearest_value_pending = function_values == FunctionValueRungs::InTower;
         for rung in scope.ancestors() {

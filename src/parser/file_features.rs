@@ -46,6 +46,11 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.custom_equals_in_value_classes = features.has("CustomEqualsInValueClasses");
     file.forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds =
         features.has("ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds");
+    file.forbid_useless_type_arguments = features.has("ForbidUselessTypeArgumentsIn25");
+    file.type_arguments_not_allowed_warning = features.deprecation_warning_message(
+        "ForbidUselessTypeArgumentsIn25",
+        "type arguments are not allowed when static member is accessed.",
+    );
     file.recursive_type_of = features.has("JvmSupportRecursiveTypeOf");
     file.opted_in_markers = features.opted_in().map(str::to_string).collect();
 }
@@ -63,11 +68,25 @@ mod tests {
         };
         let mut old = File::default();
         apply_file_features(&mut old, &settings(KotlinVersion::V2_4_0));
+        let mut patch = File::default();
+        apply_file_features(&mut patch, &settings(KotlinVersion::V2_4_10));
         let mut current = File::default();
         apply_file_features(&mut current, &settings(KotlinVersion::V2_4_20));
+        let type_arguments_not_allowed_warning = Some(
+            "type arguments are not allowed when static member is accessed. This will become an \
+             error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-390.",
+        );
 
         assert_eq!(old.value_class_recursion_via_type_parameters_warning, None);
         assert_eq!(old.inapplicable_operator_modifier_warning, None);
+        assert_eq!(
+            old.type_arguments_not_allowed_warning.as_deref(),
+            type_arguments_not_allowed_warning
+        );
+        assert_eq!(
+            patch.type_arguments_not_allowed_warning.as_deref(),
+            type_arguments_not_allowed_warning
+        );
         assert_eq!(
             current.value_class_recursion_via_type_parameters_warning,
             Some(
@@ -84,6 +103,10 @@ mod tests {
                  https://youtrack.jetbrains.com/issue/KT-86143."
                     .to_string()
             )
+        );
+        assert_eq!(
+            current.type_arguments_not_allowed_warning.as_deref(),
+            type_arguments_not_allowed_warning
         );
     }
 }

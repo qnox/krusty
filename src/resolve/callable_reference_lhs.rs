@@ -49,7 +49,7 @@ impl Checker<'_> {
                 .file
                 .call_type_args
                 .get(&expression.0)
-                .cloned()
+                .map(|syntax| syntax.arguments.clone())
                 .unwrap_or_default(),
             span: self.file.expr_spans[expression.0 as usize],
             fun_params: Vec::new(),
@@ -267,7 +267,7 @@ impl Checker<'_> {
             .file
             .call_type_args
             .get(&segment_expression.0)
-            .cloned()
+            .map(|syntax| syntax.arguments.clone())
             .unwrap_or_default();
         let alias_was_applied = alias.is_some();
         let applied = if let Some(alias) = alias {

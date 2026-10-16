@@ -4503,6 +4503,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unsigned follows the member rule too (`value class Z(val x: UInt)` declares `getX-pVg5ArA()I`).
   Test: `tests/unsigned_property_getter_e2e.rs`.
 
+- **Generated members treat an unsigned type as a value class.** A value class over `UInt`
+  compares through `UInt.equals-impl0` and renders through `UInt.toString-impl`, appended as an
+  object, as a string template appends an unsigned value. A value class over another value class
+  compares through that class's `equals-impl0` in both `equals-impl0` and `equals-impl`. A data
+  class hashes a `UInt?` property by unboxing it after the null test and calling
+  `UInt.hashCode-impl`; its metadata records a component's JVM descriptor by kotlinc's
+  `requiresFunctionSignature`, so `component1(): UInt` records `()I` and `component2(): UInt?`
+  records none. A class whose constructor takes a `UInt` or `UInt?` parameter declares that
+  constructor private behind a public `DefaultConstructorMarker` accessor, primary and secondary
+  alike, and every call site uses the accessor. Test: `tests/unsigned_generated_members_e2e.rs`.
+
 - **Unsigned arrays box at a reference supertype.** `UByteArray`/`UShortArray`/`UIntArray`/`ULongArray`
   are inline classes over `byte[]`/`short[]`/`int[]`/`long[]`. The value-class table records that
   carrier. Indexing, `size`, and a function whose parameter or result is the array itself keep the
@@ -13483,6 +13494,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     branch) and of a callable's type-parameter bound (`fun <T : B<String>>`, `where`, a property's
     or a local function's). It is not a deprecation: with the feature off kotlinc reports nothing
     there, not a warning. (`tests/upper_bound_violations_e2e.rs`.)
+  - `ForbidUselessTypeArgumentsIn25` (KTLC-390): type arguments that select nothing. Each explicit
+    call-site list retains its type references and complete `<…>` span as one syntax value owned by
+    its expression segment; Pass-1 compaction remaps that owner once.
+    - Static access (`FirTypeArgumentsNotAllowedExpressionChecker`): after qualifier and member
+      selection, one normalized qualifier-access fact records the selected qualifier and whether the
+      declaration is static or companion-associated. The checker consumes that fact without
+      resolving the qualifier again. A member with no dispatch receiver selected through a
+      classifier qualifier written with type arguments reports "type arguments are not allowed when
+      static member is accessed." on the qualifier's list: an enum entry, an enum's
+      `entries`/`values()`/`valueOf()`, a Java static field or method, and the SAM constructor of a
+      nested functional interface (`E<Int>.X`, `JavaUtils<String>.foo()`, `K<Int>.I { }`), through a
+      typealias too. A `companion { … }` block member or a written `companion fun/val C.name`
+      (kotlinc's `requiresCompanionBlockOrExtensionLf`, published as
+      `PropertyInfo::companion_associated` and `FunctionInfo::associated_classifier`) never accepted
+      the arguments and is always the error. An object or companion member reached through the
+      singleton value is not a static access. (`tests/static_access_type_arguments_e2e.rs`.)
 - **Pre-release output.** As kotlinc's `LanguageVersionSettings.isPreRelease`, a compilation is
   pre-release when its language version is not stable in the release or any explicitly set feature (an
   `@Enables` argument, `-progressive`, `-XXLanguage`, or a `// LANGUAGE:` directive) is enabled and
@@ -14504,6 +14531,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_generic_local_extension_reference_boxes_a_primitive_argument`,
   `a_generic_local_vararg_reference_boxes_a_primitive_element`). Corpus:
   `codegen/box/inline/callableReferenceOfLocalFun.kt`.
+
+- **A local function reference fixes the enclosing call's type arguments with its own shape.** When
+  the expected function type still holds the call's inference variables (`s.let(::rewrite)`,
+  `apply1(s, ::size)`), the selected local function realizes that shape occurrence by occurrence,
+  exactly as a member or top-level reference does: its parameter types become input constraints
+  and its return type the result's lower bound, so `R` infers as `String` or `Int`. The reference's
+  type is that realized shape, never the unsolved expected type. Tests:
+  `tests/local_function_reference_inference_e2e.rs`.
 
 - **Fully-qualified SOURCE class names (`pkg1.Cls`) in type position.** A dotted type name whose path
   matches a class declared in the same module (a sibling file's package, no `import` needed — as

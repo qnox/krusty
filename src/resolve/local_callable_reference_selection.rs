@@ -107,7 +107,11 @@ impl Checker<'_> {
             },
         );
         if let [selected] = maximal.as_slice() {
-            let (statement, _, _, plan, suspend_conversion, _) = &candidates[*selected];
+            let (statement, params, ret, plan, suspend_conversion, _) = &candidates[*selected];
+            // The expected shape may still hold the enclosing call's type variables
+            // (`s.let(::local)`); the reference's type is the shape the local function realizes.
+            let realized =
+                callable_reference_selection::realize_expected_shape(expected, params, *ret, plan);
             if Self::adapted_ref_plan_is_identity(plan) && !suspend_conversion {
                 self.mark_local_function_ref(expression, *statement, false);
             } else {
@@ -117,12 +121,12 @@ impl Checker<'_> {
                         stmt_id: *statement,
                         bound_receiver: false,
                         argument_mapping: plan.clone(),
-                        signature: Ty::Fun(expected),
+                        signature: realized,
                         suspend_conversion: *suspend_conversion,
                     },
                 );
             }
-            return Ty::Fun(expected);
+            return realized;
         }
         let message = if candidates.is_empty() {
             format!("none of the local function candidates for '{name}' is applicable")

@@ -437,6 +437,8 @@ pub(super) fn synth_value_members(
                 dispatch_receiver: None,
                 args: vec![a, boxed],
             })
+        } else if let Some(nested) = nested_value_equals(ir, a, b, u_ir, eu, under) {
+            nested
         } else {
             vc_underlying_eq(ir, a, b, is_ref_under, terminal_underlying)
         };
@@ -592,7 +594,13 @@ pub(super) fn synth_value_members(
             });
             let v = ir.add_expr(IrExpr::GetValue(0));
             let tmp = ir.add_expr(IrExpr::GetValue(TMP));
-            let not_eq = if is_ref_under {
+            // A non-null nested value class compares through its own `equals-impl0`, as a data
+            // class compares such a property; an unsigned one compares its carrier natively.
+            let nested_value_class = !u_ir.is_nullable()
+                && u_ir
+                    .obj_internal()
+                    .is_some_and(|nested| under.contains_key(&nested));
+            let not_eq = if is_ref_under || nested_value_class {
                 // The declared type's own equality, as a data class compares a property: a nested
                 // value class's `equals-impl0`, otherwise `Intrinsics.areEqual`.
                 let eq = ir.add_expr(IrExpr::Call {
@@ -937,6 +945,38 @@ fn vc_underlying_eq(
     })
 }
 
+/// `equals-impl0` over a non-null nested value class or unsigned carrier: that class's own
+/// `equals-impl0` over the shared erased carrier, as kotlinc emits it.
+fn nested_value_equals(
+    ir: &mut IrFile,
+    a: ExprId,
+    b: ExprId,
+    underlying: Ty,
+    carrier: Ty,
+    under: &Under,
+) -> Option<ExprId> {
+    if underlying.is_nullable() {
+        return None;
+    }
+    let owner = if underlying.is_unsigned() {
+        underlying.kotlin_class_internal()?
+    } else {
+        let nested = underlying.obj_internal()?;
+        under.contains_key(&nested).then_some(nested)?
+    };
+    let carrier = super::desc(&carrier);
+    Some(ir.add_expr(IrExpr::Call {
+        callee: Callee::Static {
+            owner,
+            name: "equals-impl0".into(),
+            descriptor: format!("({carrier}{carrier})Z"),
+            inline: InlineKind::None,
+        },
+        dispatch_receiver: None,
+        args: vec![a, b],
+    }))
+}
+
 /// `if (cond) return false`.
 /// `a != b` over a primitive underlying, as kotlinc's value-class `equals-impl` negates it: the
 /// floating-point types through their wrapper's `compare`, everything else by value.
@@ -997,6 +1037,20 @@ fn nested_value_text(
 ) -> ExprId {
     if underlying.is_nullable() {
         return value;
+    }
+    if underlying.is_unsigned() {
+        // kotlinc renders an unsigned carrier through its own `toString-impl`, appended as an
+        // object like a nested value class.
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Intrinsic {
+                operation: crate::ir::IrIntrinsic::UnsignedToString { source: underlying },
+                ret: Ty::String,
+            },
+            dispatch_receiver: Some(value),
+            args: vec![],
+        });
+        rendered_value_class_text.insert(call);
+        return call;
     }
     let Some(nested) = underlying.non_null().obj_internal() else {
         return value;
