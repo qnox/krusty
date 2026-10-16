@@ -405,6 +405,7 @@ fn lambda_metadata(
     let local_classifiers = crate::metadata::local_classifiers::names(ir);
     let enum_entry_bodies = crate::metadata::local_classifiers::enum_entry_bodies(ir);
     let approximate_intersection = |ty| formatter.declaration_approximation(ty);
+    let inner_classifier = |classifier| formatter.inner_classifier(classifier);
     let (bytes, strings) = crate::metadata::lambda_function::build(
         &crate::metadata::lambda_function::LambdaFunction {
             function_name: crate::metadata::lambda_function::function_name(lambda.form),
@@ -417,6 +418,7 @@ fn lambda_metadata(
             local_classifiers: &local_classifiers,
             enum_entry_bodies: &enum_entry_bodies,
             intersection_approximation: &approximate_intersection,
+            inner_classifiers: &inner_classifier,
         },
     )?;
     Ok((crate::metadata::encoding::bytes_to_strings(&bytes), strings))

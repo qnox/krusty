@@ -63,3 +63,72 @@ fn reflective_function_types_require_compiler_1_3_50() {
     assert_identical("ReflectiveRequirement", SRC, "app/ReflectiveRequirementKt");
     assert_identical("reflective_member_requirement", SRC, "app/Holder");
 }
+
+#[test]
+fn a_top_level_property_with_a_definitely_non_null_type_requires_language_1_7() {
+    const SRC: &str = "package app\n\
+        val <T> T.nonNull: T & Any get() = this!!\n";
+    assert_identical("DnnTopLevelProperty", SRC, "app/DnnTopLevelPropertyKt");
+}
+
+#[test]
+fn a_member_property_with_a_definitely_non_null_type_requires_language_1_7() {
+    const SRC: &str = "package app\n\
+        interface Holder<T> { val value: T & Any }\n";
+    assert_identical("DnnMemberProperty", SRC, "app/Holder");
+}
+
+#[test]
+fn a_primary_constructor_owns_its_definitely_non_null_requirement() {
+    const SRC: &str = "package app\n\
+        class Primary<T>(value: T & Any)\n";
+    assert_identical("DnnPrimaryConstructor", SRC, "app/Primary");
+}
+
+#[test]
+fn a_secondary_constructor_owns_its_definitely_non_null_requirement() {
+    const SRC: &str = "package app\n\
+        class Secondary<T> { constructor(value: T & Any) }\n";
+    assert_identical("DnnSecondaryConstructor", SRC, "app/Secondary");
+}
+
+#[test]
+fn a_class_supertype_with_a_definitely_non_null_argument_requires_language_1_7() {
+    const SRC: &str = "package app\n\
+        interface Parent<T>\n\
+        class Child<T> : Parent<T & Any>\n";
+    assert_identical("DnnClassHeader", SRC, "app/Child");
+}
+
+#[test]
+fn a_type_alias_with_a_definitely_non_null_argument_requires_language_1_7() {
+    const SRC: &str = "package app\n\
+        class Box<T>\n\
+        typealias DnnBox<T> = Box<T & Any>\n";
+    assert_identical("DnnTypeAlias", SRC, "app/DnnTypeAliasKt");
+}
+
+#[test]
+fn data_class_generated_members_keep_their_source_property_dnn_spelling() {
+    const SRC: &str = "package app\n\
+        data class Data<T>(val value: T & Any)\n";
+    assert_identical("DnnDataClass", SRC, "app/Data");
+}
+
+#[test]
+fn a_property_context_parameter_with_a_dnn_type_requires_language_1_7() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+        package app\n\
+        class Contextual<T> {\n\
+        \x20   context(value: T & Any)\n\
+        \x20   val answer: Int get() = 1\n\
+        }\n";
+    assert_identical("DnnPropertyContext", SRC, "app/Contextual");
+}
+
+#[test]
+fn a_private_value_class_underlying_dnn_type_is_owned_by_the_class_too() {
+    const SRC: &str = "package app\n\
+        @JvmInline value class PrivateDnn<T>(private val value: T & Any)\n";
+    assert_identical("DnnPrivateValueClass", SRC, "app/PrivateDnn");
+}

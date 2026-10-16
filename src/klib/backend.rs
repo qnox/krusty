@@ -12,13 +12,15 @@ use crate::backend::{
 use crate::compilation_target::CompilationTarget;
 use crate::diag::DiagSink;
 use crate::ir::{IrClass, IrFile};
-use crate::metadata::class_declarations::{ClassTailOptions, PropertyOrigin};
+use crate::metadata::class_declarations::{ClassTailOptions, FunctionOrigin, PropertyOrigin};
 use crate::metadata::declaration_records;
 use crate::metadata::id_signature::{
     package_function_signature, package_property_accessor_signature, MetadataAccessor,
-    MetadataContainer,
+    MetadataClass, MetadataContainer,
 };
-use crate::metadata::klib_fragment::{package_fragment, KlibClass, KlibFileMembers};
+use crate::metadata::klib_fragment::{
+    package_fragment_with_inner_classifiers, KlibClass, KlibFileMembers,
+};
 use crate::metadata::semantic::parse_package_fragment_checked;
 
 use super::write::{KlibPlatform, KlibStamp, KlibWriter};
@@ -155,6 +157,9 @@ impl KlibBackend {
             .iter()
             .map(|record| record.enum_entries())
             .collect::<Vec<_>>();
+        let inner_classifier = |classifier| {
+            crate::metadata::inner_classifiers::inner_classifier(ir, &file.classifiers, classifier)
+        };
         let tails = records
             .iter()
             .zip(secondary_constructors.iter().zip(&nested))
@@ -165,6 +170,7 @@ impl KlibBackend {
                         annotations_in_metadata: self.annotations_in_metadata,
                         compiler_version_requirement: None,
                         intersection: None,
+                        inner_classifiers: &inner_classifier,
                         primary_ctor_annotations: None,
                     },
                     secondary,
@@ -182,11 +188,12 @@ impl KlibBackend {
                 in_source_file: record.has_source_file(),
             })
             .collect::<Vec<_>>();
-        let fragment = package_fragment(
+        let fragment = package_fragment_with_inner_classifiers(
             &segments,
             &members,
             &declarations,
             self.annotations_in_metadata,
+            &inner_classifier,
         );
         let Some(exports) = package_exports(ir, file.module_name, &segments, &fragment, diags)
         else {
@@ -374,7 +381,131 @@ fn package_exports(
             }
         }
     }
+    if let Err(error) =
+        record_class_function_exports(ir, module_name, &package, &decoded, &mut exports)
+    {
+        diags.error(
+            crate::diag::Span::new(0, 0),
+            format!("internal error: cannot sign generated KLIB class function: {error}"),
+        );
+        return None;
+    }
     Some(exports)
+}
+
+/// Record the target bodies behind the exact member-function identities this fragment publishes.
+///
+/// The declaration record and decoded fragment retain the same metadata order. Joining them here
+/// keeps the source `FunId` beside the identity a dependent provider will reconstruct, without
+/// asking a backend to recover a member from its spelling or signature.
+fn record_class_function_exports(
+    ir: &IrFile,
+    module_name: &str,
+    package: &[String],
+    decoded: &crate::metadata::semantic::KotlinPackage,
+    exports: &mut DependencyExportSignatures,
+) -> Result<(), String> {
+    let source_classes = library_classes(ir);
+    if source_classes.len() != decoded.class_order.len() {
+        return Err("generated KLIB metadata changed class declaration order".to_string());
+    }
+    for (source, name) in source_classes.into_iter().zip(&decoded.class_order) {
+        let record = ir
+            .class_declarations
+            .get(&source.fq_name_id())
+            .and_then(Option::as_ref)
+            .ok_or_else(|| format!("class {} has no declaration record", source.fq_name()))?;
+        let class = decoded
+            .classes
+            .get(name)
+            .ok_or_else(|| format!("decoded class {name} is absent"))?;
+        if class.functions.len() != record.method_origins.len() {
+            return Err(format!(
+                "class {name} changed function declaration order ({} decoded, {} recorded)",
+                class.functions.len(),
+                record.method_origins.len()
+            ));
+        }
+        let Some(chain) = metadata_class_chain(package, name, &decoded.classes)? else {
+            continue;
+        };
+        let container = MetadataContainer {
+            package,
+            classes: &chain,
+            native_interop_library: false,
+        };
+        for (declaration, origin) in class.functions.iter().zip(&record.method_origins) {
+            if declaration.visibility == crate::types::Visibility::Private {
+                continue;
+            }
+            let FunctionOrigin::Declared(callable) = origin else {
+                continue;
+            };
+            let function = ir
+                .checked_callable_functions
+                .get(callable)
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "class function {} has no IR body identity",
+                        declaration.name
+                    )
+                })?;
+            if !crate::backend::has_standalone_dependency_code(ir, function) {
+                continue;
+            }
+            let signature = package_function_signature(container, declaration)
+                .map_err(|error| format!("{name}.{}: {error}", declaration.name))?;
+            exports.record_callable(
+                function,
+                crate::libraries::KlibDependencyCallable {
+                    module: module_name.to_owned(),
+                    declaration: crate::libraries::KlibDeclarationSignature::Public(signature),
+                },
+            );
+            if !declaration.is_static {
+                let receiver = ir.functions[function as usize]
+                    .dispatch_receiver
+                    .ok_or_else(|| {
+                        format!(
+                            "class function {} has no dispatch receiver",
+                            declaration.name
+                        )
+                    })?;
+                exports.record_member_receiver(function, crate::types::Ty::Obj(receiver, &[]));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The metadata classifier scopes around `name`, outermost first and including `name`.
+fn metadata_class_chain<'a>(
+    package: &[String],
+    name: &'a str,
+    classes: &'a crate::fx_hash::HashMap<String, crate::metadata::semantic::KotlinClass>,
+) -> Result<Option<Vec<MetadataClass<'a>>>, String> {
+    let prefix = if package.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", package.join("/"))
+    };
+    let local = name
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("class {name} lies outside its package"))?;
+    let segments = local.split('.').collect::<Vec<_>>();
+    let mut chain = Vec::with_capacity(segments.len());
+    for depth in 0..segments.len() {
+        let key = format!("{prefix}{}", segments[..=depth].join("."));
+        let class = classes
+            .get(&key)
+            .ok_or_else(|| format!("enclosing class {key} is absent from its fragment"))?;
+        if class.visibility == crate::types::Visibility::Private {
+            return Ok(None);
+        }
+        chain.push(MetadataClass::of(segments[depth], class));
+    }
+    Ok(Some(chain))
 }
 
 /// The common-IR function of a property's source-declared setter, whose parameter name the

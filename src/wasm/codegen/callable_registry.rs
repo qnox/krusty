@@ -8,8 +8,8 @@
 use crate::fx_hash::HashMap;
 
 use crate::backend::{
-    CheckedBackendCallables, DependencyExportSignatures, KlibDependencyCallable,
-    SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
+    CheckedBackendCallables, DependencyExportSignatures, DependencyMemberReceiver,
+    KlibDependencyCallable, SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
 };
 use crate::fir::{CallableId, ExternalCallableId};
 use crate::ir::{Callee, ExprId, IrExpr, IrFile};
@@ -36,6 +36,7 @@ pub(super) struct CallableRegistry {
     module: HashMap<CallableId, u32>,
     module_defaults: HashMap<CallableId, u32>,
     dependencies: HashMap<KlibDependencyCallable, u32>,
+    member_receivers: HashMap<KlibDependencyCallable, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<KlibDependencyCallable, SingletonMemberReceiver>,
     singleton_extension_unread_receivers:
         HashMap<KlibDependencyCallable, SingletonExtensionUnreadReceiver>,
@@ -45,6 +46,7 @@ pub(super) struct FileCallTargets {
     module: HashMap<CallableId, u32>,
     module_defaults: HashMap<CallableId, u32>,
     external: HashMap<ExternalCallableId, u32>,
+    member_receivers: HashMap<ExternalCallableId, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<ExternalCallableId, SingletonMemberReceiver>,
     singleton_extension_unread_receivers:
         HashMap<ExternalCallableId, SingletonExtensionUnreadReceiver>,
@@ -166,6 +168,7 @@ impl CallableRegistry {
             module: HashMap::default(),
             module_defaults: HashMap::default(),
             external: HashMap::default(),
+            member_receivers: HashMap::default(),
             singleton_member_receivers: HashMap::default(),
             singleton_extension_unread_receivers: HashMap::default(),
         };
@@ -231,15 +234,6 @@ impl CallableRegistry {
                     if !supported_shape && !serialized_companion_candidate {
                         continue;
                     }
-                    if callable.is_member_function()
-                        && !authenticated_singleton_member_call(
-                            *dispatch_receiver,
-                            callables.singleton_dispatch(expression).is_some(),
-                            true,
-                        )
-                    {
-                        continue;
-                    }
                     let identity = callable.dependency_callable.as_ref().ok_or_else(|| {
                         "a dependency callable without an exact module-qualified KLIB identity"
                             .to_string()
@@ -264,6 +258,9 @@ impl CallableRegistry {
                         "a dependency callable whose target code was not emitted".to_string()
                     })?;
                     targets.external.insert(*target, index);
+                    if let Some(receiver) = self.member_receivers.get(identity).copied() {
+                        targets.member_receivers.insert(*target, receiver);
+                    }
                     if let Some(receiver) = self.singleton_member_receivers.get(identity).copied() {
                         targets.singleton_member_receivers.insert(*target, receiver);
                     }
@@ -298,6 +295,16 @@ impl CallableRegistry {
                     return Err("two functions exported one KLIB declaration identity".to_string())
                 }
                 _ => {}
+            }
+            if let Some(receiver) = exports.member_receiver(function) {
+                match self.member_receivers.insert(identity.clone(), receiver) {
+                    Some(previous) if previous != receiver => {
+                        return Err(
+                            "two functions exported incompatible member receiver types".to_string()
+                        )
+                    }
+                    _ => {}
+                }
             }
             if let Some(receiver) = exports.singleton_extension_unread_receiver(function) {
                 match self
@@ -419,6 +426,13 @@ impl FileCallTargets {
 
     pub(super) fn external(&self, target: ExternalCallableId) -> Option<u32> {
         self.external.get(&target).copied()
+    }
+
+    pub(super) fn member_receiver(
+        &self,
+        target: ExternalCallableId,
+    ) -> Option<DependencyMemberReceiver> {
+        self.member_receivers.get(&target).copied()
     }
 
     pub(super) fn singleton_extension_unread_receiver(

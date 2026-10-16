@@ -52,13 +52,31 @@ pub(crate) struct KlibClass<'a> {
 
 /// The `PackageFragment` bytes for one file declaring into `package` (its segments; empty for the
 /// root package): its top-level members and `classes`, in fragment order.
+#[cfg(test)]
 pub(crate) fn package_fragment(
     package: &[&str],
     file: &KlibFileMembers,
     classes: &[KlibClass<'_>],
     annotations_in_metadata: bool,
 ) -> Vec<u8> {
-    let mut st = StringTable::klib();
+    package_fragment_with_inner_classifiers(
+        package,
+        file,
+        classes,
+        annotations_in_metadata,
+        crate::metadata::MetadataTypeLookups::default().inner_classifiers,
+    )
+}
+
+/// Production KLIB fragment emission with the frozen classifier facts its metadata types require.
+pub(crate) fn package_fragment_with_inner_classifiers(
+    package: &[&str],
+    file: &KlibFileMembers,
+    classes: &[KlibClass<'_>],
+    annotations_in_metadata: bool,
+    inner_classifiers: crate::metadata::InnerClassifiers<'_>,
+) -> Vec<u8> {
+    let mut st = StringTable::klib(inner_classifiers);
     let mut requirements = VersionRequirementTable::default();
     let mut contract_types = ContractTypeTable::default();
     let mut package_message = Pb::new();
@@ -211,6 +229,40 @@ mod tests {
         let package = parse_package_fragment_checked(&fragment).expect("a decodable fragment");
         assert_eq!(package.functions.len(), 1);
         assert_eq!(package.properties.len(), 1);
+    }
+
+    #[test]
+    fn an_inner_type_round_trips_its_outer_arguments_through_the_fragment() {
+        let outer = crate::types::type_name("fixture/Outer");
+        let inner = outer.nested_child("Inner");
+        let mut members = file_members();
+        members.functions[0].ret = Ty::obj_args_name(inner, &[Ty::Int, Ty::String]);
+        let lookup = |classifier| {
+            if classifier == inner {
+                Ok(Some(crate::metadata::InnerClassifier {
+                    outer,
+                    own_arguments: 1,
+                }))
+            } else {
+                Ok(None)
+            }
+        };
+
+        let fragment =
+            package_fragment_with_inner_classifiers(&["fixture"], &members, &[], true, &lookup);
+        let package = parse_package_fragment_checked(&fragment).expect("a decodable fragment");
+        assert_eq!(
+            package.functions[0].ret,
+            KotlinType::Class {
+                internal: "fixture/Outer.Inner".to_string(),
+                args: vec![
+                    KotlinType::class("kotlin/Int"),
+                    KotlinType::class("kotlin/String")
+                ],
+                nullable: false,
+                shape: Default::default(),
+            }
+        );
     }
 
     #[test]

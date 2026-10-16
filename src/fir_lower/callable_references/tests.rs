@@ -1213,6 +1213,26 @@ fn ordinary_inner_constructor_keeps_source_property_after_physical_outer_prefix(
     assert_eq!(inner.ctor_args.len(), 2);
     assert_eq!(inner.ctor_args[1].name.as_deref(), Some("value"));
     assert!(inner.ctor_args[1].is_field);
+    let construction = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .find_map(|(id, expression)| match expression {
+            IrExpr::New { internal, args, .. } if internal.matches("Outer$Inner") => {
+                Some((id as u32, args))
+            }
+            _ => None,
+        })
+        .expect("inner construction");
+    let [outer, value] = construction.1.as_slice() else {
+        panic!("inner construction carries its outer prefix and source value")
+    };
+    assert_eq!(ir.checked_type(*outer), Some(Ty::obj("Outer")));
+    assert_eq!(ir.checked_type(*value), Some(Ty::String));
+    assert_eq!(
+        ir.construction_declared_params[&construction.0].as_ref(),
+        [Ty::obj("Outer"), Ty::String]
+    );
 }
 
 #[test]

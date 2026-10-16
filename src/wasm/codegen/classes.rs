@@ -162,7 +162,10 @@ fn check_supported(ir: &IrFile, class: &IrClass) -> Result<(), Unsupported> {
         "an enum class"
     } else if class.is_value {
         "a value class"
-    } else if class.is_inner_class || class.constructor_prefix_count > 0 {
+    // An inner class's enclosing instance is already an ordinary constructor-prefix argument and
+    // field in checked IR, which this object form can carry like every other reference field.
+    // Other captured classes still need their broader closure construction semantics.
+    } else if class.constructor_prefix_count > 0 && !class.is_inner_class {
         "a class capturing its surroundings"
     } else if class.companion_class.is_some() {
         "a class with a companion object"

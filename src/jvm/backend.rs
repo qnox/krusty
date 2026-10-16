@@ -1535,13 +1535,18 @@ pub fn facade_package_metadata_from_ir(
                 .and_then(|declaration| declaration.type_param_variances.get(index).copied())
         })
     };
+    let inner_classifier =
+        |classifier| crate::metadata::inner_classifiers::inner_classifier(ir, symbols, classifier);
     build_facade_metadata(
         functions,
         properties,
         aliases,
         (module_name, locals),
         param_assertions,
-        Some(&approximate),
+        crate::metadata::MetadataTypeLookups {
+            intersection_approximation: Some(&approximate),
+            inner_classifiers: &inner_classifier,
+        },
         metadata_stamp,
         annotations_in_metadata,
     )
@@ -1630,7 +1635,7 @@ fn build_facade_metadata(
     aliases: Vec<crate::metadata::builder::TypeAliasMeta>,
     (module_name, locals): (&str, &[LocalPropertyMeta]),
     param_assertions: bool,
-    intersection_approximation: Option<&dyn Fn(crate::types::Ty) -> Option<crate::types::Ty>>,
+    lookups: crate::metadata::MetadataTypeLookups<'_>,
     metadata_stamp: crate::jvm::classfile::MetadataStamp,
     annotations_in_metadata: bool,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
@@ -1642,7 +1647,7 @@ fn build_facade_metadata(
                 &aliases,
                 ((module_name != "main").then_some(module_name), locals),
                 param_assertions,
-                intersection_approximation,
+                lookups,
                 annotations_in_metadata,
             );
         crate::jvm::ir_emit::KotlinMetadata {

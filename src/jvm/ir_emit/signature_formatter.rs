@@ -286,6 +286,14 @@ impl<'a> JvmSignatureFormatter<'a> {
         })
     }
 
+    /// Checked inner-class application split consumed by Kotlin metadata emission.
+    pub(super) fn inner_classifier(
+        &self,
+        classifier: TypeName,
+    ) -> Result<Option<crate::metadata::InnerClassifier>, TypeName> {
+        crate::metadata::inner_classifiers::inner_classifier(self.ir, self.symbols, classifier)
+    }
+
     fn classifier_is_closed(&self, owner: TypeName) -> Option<bool> {
         if let Some(classifier) = self.current_class(owner) {
             return Some(

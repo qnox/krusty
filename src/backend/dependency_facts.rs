@@ -128,6 +128,14 @@ impl BackendCallableFact {
         self.kind == ExternalCallableKind::Member
     }
 
+    /// Whether this instance-dispatched declaration also has a source extension receiver in its
+    /// parameter list. KLIB normalizes this as a member because dispatch ownership is primary;
+    /// the receiver side fact distinguishes it from an ordinary member without changing the
+    /// provider-wide callable-kind model.
+    pub fn is_member_extension(&self) -> bool {
+        self.is_member_function() && self.source_receiver.is_some()
+    }
+
     /// The serialized receiver coordinate retained by an associated companion extension body.
     /// Source calls have no receiver operand; a target may insert an inert reference only when
     /// this exact provider contract and the lowered body's receiver effect are both present.
@@ -202,6 +210,13 @@ impl BackendCallableFact {
                         && call_params.get(position) == self.source_receiver.as_ref()
                 })
             }
+            (false, false, Some(position), true) if self.is_member_extension() => {
+                usize::try_from(position).ok().is_some_and(|position| {
+                    position == self.context_count
+                        && self.params == call_params
+                        && call_params.get(position) == self.source_receiver.as_ref()
+                })
+            }
             _ => false,
         }
     }
@@ -236,9 +251,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_serialized_extension_call_keeps_its_provider_receiver_coordinate() {
+    fn dependency_extensions_keep_their_provider_receiver_coordinate() {
         let params = vec![Ty::String, Ty::Float, Ty::Int];
-        let fact = BackendCallableFact {
+        let mut fact = BackendCallableFact {
             name: "sample".to_string(),
             physical_name: None,
             reflection_name: None,
@@ -277,6 +292,12 @@ mod tests {
         assert!(fact.matches_dependency_body_call(&params, Some(1), false));
         assert!(!fact.matches_dependency_body_call(&params, Some(0), false));
         assert!(!fact.matches_dependency_body_call(&params, Some(1), true));
+
+        fact.kind = ExternalCallableKind::Member;
+        assert!(fact.is_member_extension());
+        assert!(fact.matches_dependency_body_call(&params, Some(1), true));
+        assert!(!fact.matches_dependency_body_call(&params, Some(0), true));
+        assert!(!fact.matches_dependency_body_call(&params, Some(1), false));
     }
 
     #[test]

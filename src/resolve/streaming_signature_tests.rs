@@ -4669,6 +4669,48 @@ class Outer {
 }
 
 #[test]
+fn compact_inner_type_spellings_keep_definitely_non_null_outer_arguments() {
+    let source = r#"
+class Outer<T> { inner class Inner<U> }
+interface Shape {
+    fun <T> value(value: Outer<T & Any>.Inner<Int>): Outer<T & Any>.Inner<Int>
+}
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("InnerOuterDnnSpelling")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("the explicit function signature must finalize in Pass 1")
+        .module
+        .index();
+    let declaration = index
+        .declarations_named("value")
+        .first()
+        .copied()
+        .expect("value declaration");
+    let spelling = index
+        .declaration_spellings(declaration)
+        .expect("stable function spellings");
+
+    for outer in [spelling.param(0), &spelling.ret] {
+        let [inner, captured_outer] = outer.args.as_slice() else {
+            panic!("inner and captured outer argument spellings")
+        };
+        assert!(inner.is_none());
+        assert!(captured_outer.definitely_non_null);
+    }
+}
+
+#[test]
 fn compact_alias_spellings_preserve_an_alias_used_as_an_alias_argument() {
     let source = r#"
 class Payload

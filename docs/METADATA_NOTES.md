@@ -275,8 +275,13 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   underlying type) names the class's own parameters (`type_parameter_name`) and its members address
   them by id. An inner class addresses an outer class's parameter by id alone, so the outer name never
   enters the inner class's `d2`; a reader resolves the id through the outer class's own metadata, as
-  kotlinc's `TypeDeserializer` chains to its parent. Tests: `tests/metadata_type_reference_e2e.rs`,
-  `tests/inner_class_outer_tparam_e2e.rs`.
+  kotlinc's `TypeDeserializer` chains to its parent. An application of an inner classifier has the
+  opposite, use-site ordering: its flattened semantic arguments and source-spelling sidecars list
+  the inner classifier's own arguments first, followed by the captured outer arguments. Its `Type`
+  message keeps only the own prefix and recursively records the tail on `outer_type`; splitting the
+  spelling sidecar at the same boundary preserves outer-argument abbreviations, type-use annotations
+  and definitely-non-null flags. Tests: `tests/metadata_type_reference_e2e.rs`,
+  `tests/inner_class_outer_tparam_e2e.rs`, `tests/metadata_inner_outer_type_e2e.rs`.
 - Inline parameter modifiers (kotlinc 2.4.20): `ValueParameter.flags` bit 2 for `crossinline` and
   bit 3 for `noinline`, beside `DECLARES_DEFAULT_VALUE` (bit 1). Also written on a nullable
   function type and on extensions. Test: `tests/metadata_inline_parameter_modifiers_e2e.rs`.

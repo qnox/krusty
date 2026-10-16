@@ -3850,6 +3850,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `klib_libraries::tests::analysis::an_omitted_constant_default_is_the_klib_parameter_default` and
   `…_constructor_default_is_the_klib_parameter_default`, plus
   `klib_libraries::parameter_defaults::tests`.
+- **A KLIB member extension publishes both of its receivers.** Its classifier owns the implicit
+  dispatch receiver, while the classifier member record retains the extension receiver after any
+  context parameters and before its value parameters. The callable's source-argument signature
+  still excludes that receiver. This is the same normalized member shape a source classifier
+  publishes, so common candidate collection does not need an origin-specific lookup or fallback.
+  Tests: `klib_libraries::tests::classes::members_publish_their_kind_visibility_and_member_signature`
+  and `klib_class_surface_e2e::a_written_member_extension_is_visible_through_both_receivers`.
 - **A nullable-primitive *field* smart-cast** (`if (value != null) value` where `value: Int?`) unboxes the
   wrapper on read, like the local-variable path — else the `Integer` reaches an `int` context (verify error).
 - **A statement-position `when` may mix `Unit` arms with value arms** — kotlinc coerces every arm of
@@ -11163,6 +11170,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   field-number order, as kotlinc's generated `writeTo` does, and a `Type` refers to a type parameter
   its declaration owns by name and to an enclosing class's by id. Measured against kotlinc 2.4.0,
   2.4.10 and 2.4.20; see `docs/METADATA_NOTES.md`. Test: `tests/metadata_type_reference_e2e.rs`.
+- **An applied inner type separates its own arguments from its enclosing type.** The common type
+  keeps the inner classifier's arguments first and its captured outer arguments after them.
+  Metadata writes only the leading own arguments on that `Type`, then recursively writes the tail
+  on `Type.outer_type`; the parallel source-spelling tree is split at the same boundary so an
+  outer argument keeps its typealias abbreviation, type-use annotations and definitely-non-null
+  flag. Measured against kotlinc 2.4.20; see `docs/METADATA_NOTES.md`. Test:
+  `tests/metadata_inner_outer_type_e2e.rs`.
 - **Inline functions with functional parameters require compiler 1.3.50.** A named, non-private,
   non-suspend inline function whose value parameter or extension receiver has a function type records
   kotlinc's compiler-version requirement 1.3.50 in `@Metadata`, unless parameter assertions are

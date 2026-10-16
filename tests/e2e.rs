@@ -1557,10 +1557,6 @@ mod member_property_inference_e2e;
 mod member_read_on_nullable_call_result_e2e;
 #[path = "metadata_accessor_signature_e2e.rs"]
 mod metadata_accessor_signature_e2e;
-#[path = "metadata_array_signature_e2e.rs"]
-mod metadata_array_signature_e2e;
-#[path = "metadata_captured_type_parameters_e2e.rs"]
-mod metadata_captured_type_parameters_e2e;
 #[path = "metadata_enum_entry_classes_e2e.rs"]
 mod metadata_enum_entry_classes_e2e;
 #[path = "metadata_enum_supertypes_e2e.rs"]
@@ -1591,12 +1587,10 @@ mod metadata_reader_e2e;
 mod metadata_return_types;
 #[path = "metadata_return_value_status_e2e.rs"]
 mod metadata_return_value_status_e2e;
-#[path = "metadata_supertype_order_e2e.rs"]
-mod metadata_supertype_order_e2e;
 #[path = "metadata_synthetic_classes_e2e.rs"]
 mod metadata_synthetic_classes_e2e;
-#[path = "metadata_type_reference_e2e.rs"]
-mod metadata_type_reference_e2e;
+mod metadata_type_modules;
+metadata_type_modules::declare!();
 #[path = "metadata_version_requirement_e2e.rs"]
 mod metadata_version_requirement_e2e;
 #[path = "method_access_flags_e2e.rs"]

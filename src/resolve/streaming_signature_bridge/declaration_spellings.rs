@@ -269,6 +269,7 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                     declared_type,
                     type_parameters,
                     bounds,
+                    context_parameters,
                     ..
                 } => {
                     let (own, scope) = declaration_scope(headers, stub.id, type_parameters)
@@ -286,6 +287,22 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                             )?,
                             None => Spelled::default(),
                         },
+                        params: headers
+                            .syntax
+                            .parameters(context_parameters)
+                            .iter()
+                            .map(|parameter| {
+                                spelling(
+                                    headers,
+                                    &semantics,
+                                    stub.id,
+                                    parameter.ty,
+                                    classes,
+                                    &scope,
+                                    &context,
+                                )
+                            })
+                            .collect::<Option<Vec<_>>>()?,
                         type_param_bounds: bound_spellings(
                             &semantics, stub.id, bounds, &own, classes, &scope, &context,
                         )?,

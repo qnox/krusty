@@ -207,7 +207,7 @@ pub struct FileInput<'a> {
     /// object-local and never enter the source module's C ABI.
     pub unit_kind: crate::backend::CheckedIrUnitKind,
     /// Stable dependency symbols this file must export, keyed by its common-IR callable identity.
-    pub dependency_exports: &'a HashMap<FunId, String>,
+    pub dependency_exports: &'a HashMap<FunId, super::DependencyExportDefinition>,
     /// Stable dependency exports already published by preceding source modules, keyed by the exact
     /// KLIB identity the dependency provider attaches to `Callee::External`.
     pub dependency_symbols:
