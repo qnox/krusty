@@ -11,9 +11,13 @@ const ACCEPTED: &str = "package flow\n\
     \n\
     interface Source<out T> { fun get(): T }\n\
     interface Tagged { fun tag(): Int }\n\
+    interface FacetA { fun a(): Int }\n\
+    interface FacetB { fun b(): Int }\n\
     class First : Source<String>, Tagged { override fun get() = \"a\"; override fun tag() = 1 }\n\
     class Second : Source<String>, Tagged { override fun get() = \"bb\"; override fun tag() = 2 }\n\
     class Third : Source<StringBuilder> { override fun get() = StringBuilder(\"ccc\") }\n\
+    class BothFacets : FacetA, FacetB { override fun a() = 7; override fun b() = 8 }\n\
+    class JustFacetA : FacetA { override fun a() = 9 }\n\
     \n\
     fun collection(text: String): Int {\n\
     \x20   var before: Collection<String>? = null\n\
@@ -66,6 +70,13 @@ const ACCEPTED: &str = "package flow\n\
     \x20   return source.tag()\n\
     }\n\
     \n\
+    fun edgeCarriesEveryIntersectionFacet(replace: Boolean): Int {\n\
+    \x20   var value: Any = BothFacets()\n\
+    \x20   if (value !is FacetA || value !is FacetB) return -1\n\
+    \x20   if (replace) value = JustFacetA()\n\
+    \x20   return value.a()\n\
+    }\n\
+    \n\
     fun box(): String =\n\
     \x20   if (collection(\"ab\") == 2 && subclass() != 0 && inLoop(\"a,b,a\") == 2 &&\n\
     \x20       intersectionThenVariance(0) == 1 && intersectionThenVariance(1) == 2 &&\n\
@@ -74,7 +85,9 @@ const ACCEPTED: &str = "package flow\n\
     \x20       threeEdgeFacetOutlivesAnIntermediateIntersection(1) == 2 &&\n\
     \x20       threeEdgeFacetOutlivesAnIntermediateIntersection(2) == 3 &&\n\
     \x20       finalIntersectionRetainsEveryFacet(true) == 1 &&\n\
-    \x20       finalIntersectionRetainsEveryFacet(false) == 2) \"OK\" else \"FAIL\"\n";
+    \x20       finalIntersectionRetainsEveryFacet(false) == 2 &&\n\
+    \x20       edgeCarriesEveryIntersectionFacet(false) == 7 &&\n\
+    \x20       edgeCarriesEveryIntersectionFacet(true) == 9) \"OK\" else \"FAIL\"\n";
 
 const REJECTED: &str = "fun maybeNull(c: Boolean): Int {\n\
     \x20   var x: String? = null\n\

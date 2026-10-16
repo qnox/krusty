@@ -19,7 +19,7 @@ impl Checker<'_> {
         branch: ExprId,
         then: bool,
         wanted: Wanted,
-    ) -> (Ty, Vec<Ty>, CompletedFlow) {
+    ) -> (Ty, Vec<Ty>, Vec<Vec<Ty>>, CompletedFlow) {
         let locals = self.stable_local_vars(scope);
         let declared = locals
             .iter()
@@ -65,8 +65,9 @@ impl Checker<'_> {
             }
         });
         let reads = self.local_edge_reads(scope, &locals, &entry_reads);
+        let intersections = self.local_edge_intersections(scope, &locals);
         let flow = CompletedFlow::capture(self, scope);
-        (ty, reads, flow)
+        (ty, reads, intersections, flow)
     }
 
     pub(super) fn expr_inner_if(
@@ -88,28 +89,30 @@ impl Checker<'_> {
                 .map(|local| local.declared)
                 .collect::<Vec<_>>();
             let entry_reads = self.local_edge_reads(scope, &locals, &declared);
-            let (tt, then_reads, mut then_flow) =
+            let (tt, then_reads, then_intersections, mut then_flow) =
                 self.if_branch_ty(scope, cond, then_branch, true, wanted);
             let mut then_exit = self.take_local_flow_exit(
                 scope,
                 &entry,
                 then_reads,
+                then_intersections,
                 self.normal_completion(then_branch),
             );
             match else_branch {
                 Some(eb) => {
-                    let (et, else_reads, mut else_flow) =
+                    let (et, else_reads, else_intersections, mut else_flow) =
                         self.if_branch_ty(scope, cond, eb, false, wanted);
                     let mut else_exit = self.take_local_flow_exit(
                         scope,
                         &entry,
                         else_reads,
+                        else_intersections,
                         self.normal_completion(eb),
                     );
                     let fixed = self.expectation_fixes_branches(scope, e, wanted.expected);
                     let tt =
                         self.rebind_conditional_branch(then_branch, et, tt, fixed, |c, exp| {
-                            let (ty, reads, flow) = c.if_branch_ty(
+                            let (ty, reads, intersections, flow) = c.if_branch_ty(
                                 scope,
                                 cond,
                                 then_branch,
@@ -123,13 +126,14 @@ impl Checker<'_> {
                                 scope,
                                 &entry,
                                 reads,
+                                intersections,
                                 c.normal_completion(then_branch),
                             );
                             then_flow = flow;
                             ty
                         });
                     let et = self.rebind_conditional_branch(eb, tt, et, fixed, |c, exp| {
-                        let (ty, reads, flow) = c.if_branch_ty(
+                        let (ty, reads, intersections, flow) = c.if_branch_ty(
                             scope,
                             cond,
                             eb,
@@ -139,8 +143,13 @@ impl Checker<'_> {
                                 value_required: wanted.value_required,
                             },
                         );
-                        else_exit =
-                            c.take_local_flow_exit(scope, &entry, reads, c.normal_completion(eb));
+                        else_exit = c.take_local_flow_exit(
+                            scope,
+                            &entry,
+                            reads,
+                            intersections,
+                            c.normal_completion(eb),
+                        );
                         else_flow = flow;
                         ty
                     });
@@ -173,10 +182,13 @@ impl Checker<'_> {
                 }
                 None => {
                     self.report_unbound_conditional_branch(scope, then_branch);
+                    let (false_reads, false_intersections) =
+                        self.implicit_false_edge_state(scope, cond, &locals, &entry_reads);
                     let else_exit = control_flow_join::LocalFlowExit {
                         completes: true,
                         parent_flow: entry.clone(),
-                        reads: self.implicit_false_edge_reads(scope, cond, &locals, &entry_reads),
+                        reads: false_reads,
+                        intersections: false_intersections,
                     };
                     self.publish_joined_local_flow(
                         scope,

@@ -60599,6 +60599,7 @@ impl<'a> Checker<'a> {
                 .map(|local| local.declared)
                 .collect::<Vec<_>>();
             let entry_reads = self.local_edge_reads(scope, &locals, &declared);
+            let entry_intersections = self.local_edge_intersections(scope, &locals);
             let mut arm_exits = Vec::with_capacity(arms.len());
             let mut fallthrough_casts: Vec<(NarrowPath, Ty)> = Vec::new();
             let mut fallthrough_declined: Vec<(String, Ty)> = Vec::new();
@@ -60716,10 +60717,12 @@ impl<'a> Checker<'a> {
                     this_narrow: arm_this_narrow,
                 });
                 let reads = self.local_edge_reads(&arm_scope, &locals, &entry_reads);
+                let intersections = self.local_edge_intersections(&arm_scope, &locals);
                 arm_exits.push(self.take_local_flow_exit(
                     scope,
                     &entry,
                     reads,
+                    intersections,
                     self.normal_completion(arm.body),
                 ));
             }
@@ -60752,7 +60755,7 @@ impl<'a> Checker<'a> {
                     let mut replaced_exit = None;
                     let rebound =
                         self.rebind_conditional_branch(body, sibling, current, fixed, |c, exp| {
-                            let (ty, reads, completes) = {
+                            let (ty, reads, intersections, completes) = {
                                 let arm_scope = scope.child(ScopeKind::Block);
                                 c.apply_narrowings(
                                     &arm_scope,
@@ -60765,10 +60768,16 @@ impl<'a> Checker<'a> {
                                     c2.expr_result(&arm_scope, body, Some(exp), value_required)
                                 });
                                 let reads = c.local_edge_reads(&arm_scope, &locals, &entry_reads);
-                                (ty, reads, c.normal_completion(body))
+                                let intersections = c.local_edge_intersections(&arm_scope, &locals);
+                                (ty, reads, intersections, c.normal_completion(body))
                             };
-                            replaced_exit =
-                                Some(c.take_local_flow_exit(scope, &entry, reads, completes));
+                            replaced_exit = Some(c.take_local_flow_exit(
+                                scope,
+                                &entry,
+                                reads,
+                                intersections,
+                                completes,
+                            ));
                             ty
                         });
                     arm_results[i].ty = rebound;
@@ -60800,6 +60809,7 @@ impl<'a> Checker<'a> {
                     completes: true,
                     parent_flow: entry.clone(),
                     reads: entry_reads.clone(),
+                    intersections: entry_intersections.clone(),
                 });
             }
             self.publish_joined_local_flow(scope, &locals, &entry_reads, &arm_exits);

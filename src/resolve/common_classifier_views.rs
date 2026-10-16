@@ -19,19 +19,32 @@ impl Checker<'_> {
     /// common owner is joined with all of its applied type arguments before dominance filtering,
     /// so `C<String>` and `D<String>` preserve `BBB<String>` beside an unrelated marker interface.
     pub(super) fn minimal_common_classifier_views_many(&self, types: &[Ty]) -> Vec<Ty> {
-        let Some(&first) = types.first() else {
+        let edges = types.iter().copied().map(|ty| vec![ty]).collect::<Vec<_>>();
+        self.minimal_common_classifier_views_for_edges(&edges)
+    }
+
+    /// Most-specific common classifier intersection across flow edges. One edge can itself carry
+    /// an intersection (`A & B`); its classifier closure is the union of those proven facets, and
+    /// a classifier survives only when every edge has that view.
+    pub(super) fn minimal_common_classifier_views_for_edges(&self, edges: &[Vec<Ty>]) -> Vec<Ty> {
+        let Some(first) = edges.first() else {
             return Vec::new();
         };
         let source = self.fed_source();
-        let mut common = crate::symbol_resolver::applied_hierarchy(&source, first.non_null())
+        let edge_hierarchy = |facets: &[Ty]| {
+            let mut seen = HashSet::default();
+            facets
+                .iter()
+                .flat_map(|ty| crate::symbol_resolver::applied_hierarchy(&source, ty.non_null()))
+                .filter_map(|(owner, applied, _)| seen.insert(owner).then_some((owner, applied)))
+                .collect::<Vec<_>>()
+        };
+        let mut common = edge_hierarchy(first)
             .into_iter()
-            .map(|(owner, applied, _)| (owner, vec![applied]))
+            .map(|(owner, applied)| (owner, vec![applied]))
             .collect::<Vec<_>>();
-        for &ty in &types[1..] {
-            let next = crate::symbol_resolver::applied_hierarchy(&source, ty.non_null())
-                .into_iter()
-                .map(|(owner, applied, _)| (owner, applied))
-                .collect::<HashMap<_, _>>();
+        for edge in &edges[1..] {
+            let next = edge_hierarchy(edge).into_iter().collect::<HashMap<_, _>>();
             common.retain_mut(|(owner, applications)| {
                 let Some(applied) = next.get(owner).copied() else {
                     return false;
@@ -61,7 +74,7 @@ impl Checker<'_> {
                     .then_some(joined)
             })
             .map(|joined| {
-                types.iter().copied().fold(joined, |result, ty| {
+                edges.iter().flatten().copied().fold(joined, |result, ty| {
                     common_result_nullability(result, ty, joined)
                 })
             })
