@@ -1223,7 +1223,7 @@ impl Ty {
 
     /// The containment walk both markers share: the type itself, a nullability/projection wrapper's
     /// inner type, a reference type's arguments, and a function type's parameters and return.
-    fn mentions_marker(self, marker: &dyn Fn(Ty) -> bool) -> bool {
+    pub(crate) fn mentions_marker(self, marker: &dyn Fn(Ty) -> bool) -> bool {
         if marker(self) {
             return true;
         }

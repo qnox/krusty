@@ -300,26 +300,50 @@ fun box(): String {
 
 const MATCHER: &str = r#"package lib
 
+import kotlin.reflect.typeOf
+
 inline fun <reified T> matcher(): (Any?) -> Boolean = object : (Any?) -> Boolean {
     override fun invoke(value: Any?): Boolean = value is T
+}
+
+inline fun <reified T> isA(value: Any?): Boolean = value is T
+
+inline fun <reified T> forwarded(): (Any?) -> Boolean = object : (Any?) -> Boolean {
+    override fun invoke(value: Any?): Boolean = isA<T>(value)
+}
+
+inline fun <reified T> typed(): () -> String = object : () -> String {
+    override fun invoke(): String = typeOf<T>().toString()
+}
+"#;
+
+const MATCHER_USE: &str = r#"import kotlin.reflect.typeOf
+import lib.*
+
+fun box(): String {
+    if (!matcher<String>()("a") || matcher<String>()(1)) return "is"
+    if (!forwarded<String>()("a") || forwarded<String>()(1)) return "forwarded"
+    if (typed<String>()() != typeOf<String>().toString()) return "typeOf"
+    return "OK"
 }
 "#;
 
 #[test]
 fn an_object_in_a_reified_body_keeps_its_markers_for_another_module() {
-    // The consumer regenerates the dependency's own class; without `reifiedOperationMarker` in the
-    // object's method the copy would still test `Object`.
-    let output = common::expect_box_run_against_ref(
-        "reified_object_markers",
-        MATCHER,
-        "import lib.*\n\nfun box(): String = if (matcher<String>()(\"a\") && !matcher<String>()(1)) \"OK\" else \"FAIL\"\n",
-    )
-    .expect("reference kotlinc is provisioned");
+    // The consumer regenerates the dependency's own class; without its markers and the
+    // `needClassReification` guard the copy would still test, forward or describe `Object`.
+    let output = common::expect_box_run_against_ref("reified_object_markers", MATCHER, MATCHER_USE)
+        .expect("reference kotlinc is provisioned");
     assert_eq!(output, "OK");
     let classes = common::classes_against_kotlinc_module(&[("Lib.kt", MATCHER)]);
     assert_eq!(
         classes.reference.keys().collect::<Vec<_>>(),
-        ["lib/LibKt", "lib/LibKt$matcher$1"]
+        [
+            "lib/LibKt",
+            "lib/LibKt$forwarded$1",
+            "lib/LibKt$matcher$1",
+            "lib/LibKt$typed$1",
+        ]
     );
     let differences = classes.differences();
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));

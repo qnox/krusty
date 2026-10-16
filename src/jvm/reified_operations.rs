@@ -322,8 +322,7 @@ fn realize_expression_dag(
     ir: &mut IrFile,
     root: ExprId,
     parameters: &HashMap<String, ReifiedParameter>,
-) -> bool {
-    let mut realized = false;
+) {
     let mut pending = vec![root];
     let mut visited = HashSet::default();
     while let Some(expression) = pending.pop() {
@@ -371,10 +370,54 @@ fn realize_expression_dag(
         };
         if let Some(replacement) = replacement {
             ir.exprs[expression as usize] = replacement;
-            realized = true;
         }
     }
-    realized
+}
+
+/// Whether the code under `root` executes a reification marker once realized: a reified class
+/// token, type operation or catch, a `typeOf` naming a reified parameter, or a call forwarding one
+/// to another reified declaration.
+fn executes_reification(
+    ir: &IrFile,
+    root: ExprId,
+    parameters: &HashMap<String, ReifiedParameter>,
+) -> bool {
+    let reified = |ty: Ty| {
+        ty.mentions_marker(
+            &|ty| matches!(ty, Ty::TyParam(identity, _) if parameters.contains_key(identity)),
+        )
+    };
+    let mut pending = vec![root];
+    let mut visited = HashSet::default();
+    while let Some(expression) = pending.pop() {
+        if !visited.insert(expression) {
+            continue;
+        }
+        let executes = match ir.expr(expression) {
+            IrExpr::ReifiedClassMarker { .. } | IrExpr::ReifiedTypeOp { .. } => true,
+            IrExpr::Call {
+                callee:
+                    crate::ir::Callee::Intrinsic {
+                        operation: crate::ir::IrIntrinsic::TypeOf { ty },
+                        ..
+                    },
+                ..
+            } => reified(*ty),
+            _ => false,
+        } || ir
+            .reified_catch_markers
+            .get(&expression)
+            .is_some_and(|markers| markers.iter().any(Option::is_some))
+            || ir
+                .reified_call_subst
+                .get(&expression)
+                .is_some_and(|substitutions| substitutions.iter().any(|&(_, ty)| reified(ty)));
+        if executes {
+            return true;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    false
 }
 
 pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMethods) {
@@ -385,11 +428,34 @@ pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMe
     // An object declared in a reified body executes the marker too: inlining regenerates its class.
     let parameters = collect_reified_parameters(ir);
     let functions = reified_marker_functions(ir, lambdas);
-    let mut reifying = Vec::new();
+    let classes = (0..ir.classes.len() as ClassId)
+        .filter(|&class| in_reified_body(ir, ir.classes[class as usize].enclosure))
+        .collect::<Vec<_>>();
+    let initializers = classes
+        .iter()
+        .filter_map(|&class| Some((class, ir.classes[class as usize].init_body?)))
+        .collect::<Vec<_>>();
+    let roots = marker_roots(ir, &functions);
+    for root in roots
+        .into_iter()
+        .chain(initializers.iter().map(|&(_, initializer)| initializer))
+    {
+        realize_expression_dag(ir, root, &parameters);
+    }
+    record_reified_catches(ir, &parameters, &functions);
+    let executes = |roots: Vec<ExprId>| {
+        roots
+            .into_iter()
+            .any(|root| executes_reification(ir, root, &parameters))
+    };
+    let mut reifying = initializers
+        .iter()
+        .filter(|&&(_, initializer)| executes(vec![initializer]))
+        .map(|&(class, _)| class)
+        .collect::<Vec<_>>();
     for &function in &functions {
-        let mut realized = false;
-        for root in marker_roots(ir, [&function]) {
-            realized |= realize_expression_dag(ir, root, &parameters);
+        if !executes(marker_roots(ir, [&function])) {
+            continue;
         }
         let owner = super::ir_emit::enclosure::enclosing_functions(
             ir,
@@ -397,23 +463,9 @@ pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMe
         )
         .next()
         .and_then(|(_, owner)| owner);
-        if realized {
-            reifying.extend(owner.and_then(|owner| ir.class_id_by_name(owner)));
-        }
-    }
-    for class in 0..ir.classes.len() as ClassId {
-        let declaration = &ir.classes[class as usize];
-        let Some(initializer) = declaration.init_body else {
-            continue;
-        };
-        if in_reified_body(ir, declaration.enclosure)
-            && realize_expression_dag(ir, initializer, &parameters)
-        {
-            reifying.push(class);
-        }
+        reifying.extend(owner.and_then(|owner| ir.class_id_by_name(owner)));
     }
     record_reifying_classes(ir, reifying);
-    record_reified_catches(ir, &parameters, &functions);
 }
 
 #[cfg(test)]

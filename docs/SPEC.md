@@ -5988,12 +5988,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a lambda node becomes a class value. Closure realization preserves implementation identities
   and their owned nested/helper methods across that boundary; an anonymous object's ordinary
   generic members are not in this lambda domain merely because they use the same semantic parameter.
+  Every function and class initializer declared at any depth in a reified declaration's body is in
+  the marker domain, as kotlinc regenerates such classes per call site
+  (`an_object_in_a_reified_body_keeps_its_markers_for_another_module`).
   The enum-bound anonymous delegate's call-site copy executes its cast without a reification marker
   (`erased_anonymous_delegate_member_is_not_a_reified_closure_method`).
   Those members are still reified operations of the anonymous class. The declaration class keeps
   the marker, and the inline method calls `needClassReification` before constructing it. That
-  guard is the declaration class recorded when the copy is made; emission does not walk the
-  class's bodies again. A same-module inline call copies the class and substitutes the call's
+  guard covers every class in a reified body whose members or initializer execute a marker (a
+  reified class token, type operation or catch, a `typeOf` of a reified parameter, or a call that
+  forwards one), and each enclosing class in the same body; a class a same-module call copies is
+  recorded too. A same-module inline call copies the class and substitutes the call's
   reified arguments, so the copy executes the specialized operation with no marker.   Source
   property overrides leave their accessor functions empty. Accessor functions are materialized
   after the copy, once property layouts exist; the same clone map then records those functions
