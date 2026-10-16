@@ -17,8 +17,11 @@ const DESERIALIZE_PARAMETER_NAMES: [&str; 1] = ["decoder"];
 const WRITE_SELF_KOTLIN_NAME: &str = "write$Self";
 const WRITE_SELF_PARAMETER_NAMES: [&str; 3] = ["self", "output", "serialDesc"];
 
+/// `type_serializers` is the number of trailing type-parameter serializers a generic class's
+/// `write$Self` takes, named `typeSerial<k>`.
 pub(super) fn write_self_publication(
     function: u32,
+    type_serializers: usize,
     owner_line: u32,
 ) -> IrGeneratedMemberPublication {
     IrGeneratedMemberPublication {
@@ -27,7 +30,11 @@ pub(super) fn write_self_publication(
             function,
             parameter_identities: WRITE_SELF_PARAMETER_NAMES
                 .map(crate::ir::IrParameterIdentity::producer_value)
-                .to_vec(),
+                .into_iter()
+                .chain((0..type_serializers).map(|k| {
+                    crate::ir::IrParameterIdentity::producer_value(format!("typeSerial{k}"))
+                }))
+                .collect(),
             metadata: Some(IrGeneratedFunctionMetadata {
                 source_name: WRITE_SELF_KOTLIN_NAME.to_string(),
                 visibility: Visibility::Internal,
@@ -37,10 +44,19 @@ pub(super) fn write_self_publication(
     }
 }
 
-pub(super) fn publish_write_self(ir: &mut IrFile, owner: TypeName, function: u32, owner_line: u32) {
+pub(super) fn publish_write_self(
+    ir: &mut IrFile,
+    owner: TypeName,
+    function: u32,
+    type_serializers: usize,
+    owner_line: u32,
+) {
     ir.function_annotations
         .insert(function, super::annotations::write_self_annotations());
-    ir.publish_generated_members(owner, write_self_publication(function, owner_line));
+    ir.publish_generated_members(
+        owner,
+        write_self_publication(function, type_serializers, owner_line),
+    );
 }
 
 /// The return-value status each generated `$serializer` member inherits from the runtime's
@@ -558,7 +574,7 @@ mod tests {
 
     #[test]
     fn write_self_publication_is_additive_internal_and_uses_canonical_names() {
-        let publication = write_self_publication(7, 23);
+        let publication = write_self_publication(7, 0, 23);
         assert_eq!(
             publication.metadata_scope,
             IrGeneratedFunctionMetadataScope::Additive

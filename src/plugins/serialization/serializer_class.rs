@@ -245,6 +245,7 @@ pub(super) fn complete(
 ) -> Option<PendingChildSerializerCache> {
     let SerializedClass {
         serializer_name,
+        serializer_type_parameters,
         type_params,
         serialized_ty,
         type_serializers,
@@ -506,7 +507,13 @@ pub(super) fn complete(
     super::complete_frontend_serializer_accessor(ir, owner, acc_body);
 
     if plain_data_class(ir, class_id) {
-        add_write_self(plugin, ir, class_id, serialized_ty, owner_start_line);
+        add_write_self(
+            plugin,
+            ir,
+            class_id,
+            &serializer_type_parameters,
+            owner_start_line,
+        );
     }
 
     // `<getter>$annotations()` markers for properties kotlinc preserves the serialization
@@ -601,11 +608,15 @@ pub(super) fn complete(
 
 /// Add `class_id`'s `write$Self`. kotlinc generates it in its IR extension, not its FIR one: a
 /// KLIB's metadata has no record of it, while the JVM publishes it as an internal function.
+///
+/// A generic class's `write$Self` declares its own copy of each class type parameter and takes
+/// one serializer per parameter after the descriptor, which `serialize` passes from its
+/// `typeSerial<k>` fields.
 fn add_write_self(
     plugin: &SerializationPlugin,
     ir: &mut IrFile,
     class_id: ClassId,
-    serialized_ty: Ty,
+    class_type_parameters: &[crate::ir::IrTypeParameter],
     owner_start_line: u32,
 ) {
     // `write$Self` helper — its NAME is ABI-version-dependent (mangled with the module name
@@ -613,6 +624,36 @@ fn add_write_self(
     // (no-op) body so the class stays concrete (an empty-body method would force it abstract).
     // A value class serializes its sole underlying value inline (no `write$Self`), and an object
     // uses an `ObjectSerializer`; kotlinc emits `write$Self` for a plain data class only.
+    let owner = ir.classes[class_id as usize].fq_name_id();
+    let any = Ty::nullable(class_ty("kotlin/Any"));
+    let type_parameters: Vec<crate::ir::IrTypeParameter> = class_type_parameters
+        .iter()
+        .enumerate()
+        .map(|(ordinal, parameter)| crate::ir::IrTypeParameter {
+            name: parameter.name.clone(),
+            semantic_name: crate::types::generated_function_type_parameter(
+                owner,
+                "write$Self",
+                ordinal,
+                &parameter.name,
+            )
+            .to_string(),
+            // kotlinc's copy is bounded by `Any?` whatever the class parameter's bound, and
+            // records that bound explicitly.
+            bounds: vec![(any, false)],
+            variance: crate::types::TypeVariance::Invariant,
+            reified: false,
+        })
+        .collect();
+    let type_arguments: Vec<Ty> = type_parameters
+        .iter()
+        .map(|parameter| Ty::ty_param(&parameter.semantic_name, any))
+        .collect();
+    let leading = [
+        class_ty("kotlinx/serialization/encoding/CompositeEncoder"),
+        class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+    ];
+    let physical_self = Ty::obj_name(owner);
     let ws_ret = ir.add_expr(IrExpr::Return(None));
     let ws_body = ir.add_expr(IrExpr::Block {
         stmts: vec![ws_ret],
@@ -620,21 +661,43 @@ fn add_write_self(
     });
     let write_self = ir.add_fun(IrFunction {
         name: plugin.write_self_name(),
-        params: vec![
-            serialized_ty,
-            class_ty("kotlinx/serialization/encoding/CompositeEncoder"),
-            class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
-        ],
+        params: std::iter::once(physical_self)
+            .chain(leading)
+            .chain(type_arguments.iter().map(|_| class_ty(KSERIALIZER_FQ)))
+            .collect(),
         ret: unit(),
         body: Some(ws_body),
         is_static: true,
         dispatch_receiver: None,
         param_checks: Vec::new(),
     });
+    if !type_parameters.is_empty() {
+        ir.signatures.insert(
+            write_self,
+            crate::ir::IrGenericSig {
+                params: std::iter::once(Ty::obj_args_name(owner, &type_arguments))
+                    .chain(leading)
+                    .chain(
+                        type_arguments
+                            .iter()
+                            .map(|argument| kserializer_of(*argument)),
+                    )
+                    .collect(),
+                type_params: type_parameters,
+                ret: Some(unit()),
+                supers: Vec::new(),
+            },
+        );
+    }
     ir.synthetic_methods.insert(write_self);
     ir.classes[class_id as usize].methods.push(write_self);
-    let owner = ir.classes[class_id as usize].fq_name_id();
-    publish_write_self(ir, owner, write_self, owner_start_line);
+    publish_write_self(
+        ir,
+        owner,
+        write_self,
+        class_type_parameters.len(),
+        owner_start_line,
+    );
     ir.record_generated_function(
         owner,
         IrGeneratedFunctionRole::SerializationWriteSelf,
