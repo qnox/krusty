@@ -31,7 +31,10 @@ pub(in crate::jvm) fn declared_signature(
     side: PropertyAccessorSide,
     override_results: &crate::jvm::override_results::OverrideResults,
 ) -> Option<EmittedAccessorSignature> {
-    if property.is_private || is_jvm_field(class, &property.name) {
+    if property.is_private
+        || is_jvm_field(class, &property.name)
+        || (matches!(side, PropertyAccessorSide::Setter) && property.has_private_default_setter())
+    {
         return None;
     }
     let field = class.fields.get(property.backing_field? as usize)?;

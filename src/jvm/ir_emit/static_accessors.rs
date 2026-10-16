@@ -885,10 +885,10 @@ impl Walk<'_> {
             }
             IrExpr::PropertyRead { .. } => self
                 .hoisted_companion_property(expression, false)
-                .or_else(|| self.private_member_property(expression, true)),
+                .or_else(|| self.cross_class_member_property(expression, true)),
             IrExpr::PropertyWrite { .. } => self
                 .hoisted_companion_property(expression, true)
-                .or_else(|| self.private_member_property(expression, false)),
+                .or_else(|| self.cross_class_member_property(expression, false)),
             _ => None,
         }
     }
@@ -931,10 +931,11 @@ impl Walk<'_> {
         Some((StaticOwner::Class(storage.owner), accessor))
     }
 
-    /// The field accessor a read or write of a private member property uses, when common lowering
-    /// marked the property as reached from another class. A read of a property that declares its
-    /// getter calls that getter instead.
-    fn private_member_property(
+    /// The field accessor a read or write of a private property side uses, when common lowering
+    /// marked the exact declaration as reached from another class. A read of a private property that
+    /// declares its getter calls that getter instead; a public property with only a private default
+    /// setter needs a field bridge for writes and keeps its public getter for reads.
+    fn cross_class_member_property(
         &self,
         expression: crate::ir::ExprId,
         read: bool,
@@ -956,7 +957,7 @@ impl Walk<'_> {
         let crate::ir::IrLocalPropertyLayout::Member {
             class,
             property,
-            private: true,
+            private,
             ..
         } = *self.ir.local_property_layouts.get(target)?
         else {
@@ -964,6 +965,15 @@ impl Walk<'_> {
         };
         let owner = &self.ir.classes[class as usize];
         let declared = owner.properties.get(property as usize)?;
+        let private_default_setter_write = !read
+            && declared.has_private_default_setter()
+            && self
+                .ir
+                .jvm_companion_property_static(owner.fq_name, property)
+                .is_none();
+        if !private && !private_default_setter_write {
+            return None;
+        }
         // A same-class read still needs the accessor when an inline template is copied out.
         // `collect` keeps it only for another class or such a template.
         if declared.backing_field.is_none() {
