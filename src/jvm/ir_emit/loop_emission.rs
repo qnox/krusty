@@ -66,6 +66,7 @@ impl Emitter<'_> {
                 IrExpr::Block { stmts, value } => {
                     let saved = self.open_slot_scope();
                     let emitted = self.emit_open_block(
+                        body,
                         stmts,
                         value,
                         Some(bottom),
@@ -74,6 +75,9 @@ impl Emitter<'_> {
                         code,
                     );
                     debug_assert!(emitted.reserved_inline_stack.is_none());
+                    if emitted.retains_postfix_temporary {
+                        code.nop();
+                    }
                     if let Some(discarded) = emitted.discard_after_close {
                         super::discard(self.value_ty(discarded), code);
                     }

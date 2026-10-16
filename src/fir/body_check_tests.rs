@@ -850,10 +850,28 @@ fn builtin_increment_statements_and_postfix_values_are_explicit_fir_updates() {
     let FirExprKind::Block { statements, .. } = &body.expr(root).unwrap().kind else {
         panic!("function body must be a FIR block")
     };
-    let FirStatementKind::Expression(prefix_write) = body.statement(statements[1]).unwrap().kind
-    else {
-        panic!("prefix statement must be a write")
+    let FirStatementKind::Expression(prefix) = body.statement(statements[1]).unwrap().kind else {
+        panic!("prefix statement must be an expression")
     };
+    let FirExprKind::Block {
+        statements: prefix_statements,
+        result: Some(prefix_result),
+    } = &body.expr(prefix).unwrap().kind
+    else {
+        panic!("prefix statement must write and re-read in a FIR block")
+    };
+    assert!(!body.is_postfix_update(prefix));
+    let [prefix_write] = prefix_statements[..] else {
+        panic!("prefix block must hold only its write")
+    };
+    let FirStatementKind::Expression(prefix_write) = body.statement(prefix_write).unwrap().kind
+    else {
+        panic!("prefix block must start with a write")
+    };
+    assert!(matches!(
+        body.expr(*prefix_result).map(|expression| &expression.kind),
+        Some(FirExprKind::ValueRead(_))
+    ));
     let FirExprKind::ValueWrite {
         value: prefix_value,
         ..
@@ -886,6 +904,7 @@ fn builtin_increment_statements_and_postfix_values_are_explicit_fir_updates() {
     else {
         panic!("postfix increment must preserve its old value in a FIR block")
     };
+    assert!(body.is_postfix_update(postfix));
     assert_eq!(postfix_statements.len(), 2);
 }
 
@@ -1374,8 +1393,21 @@ fn selected_statement_inc_operator_is_a_stable_fir_call_before_writeback() {
     let FirExprKind::Block { statements, .. } = &body.expr(root).unwrap().kind else {
         panic!("function body must be a FIR block")
     };
-    let FirStatementKind::Expression(write) = body.statement(statements[1]).unwrap().kind else {
-        panic!("increment must write back")
+    let FirStatementKind::Expression(postfix) = body.statement(statements[1]).unwrap().kind else {
+        panic!("increment must be an expression statement")
+    };
+    let FirExprKind::Block {
+        statements: postfix_statements,
+        result: Some(_),
+    } = &body.expr(postfix).unwrap().kind
+    else {
+        panic!("postfix increment must keep its old value in a FIR block")
+    };
+    let [_, write] = postfix_statements[..] else {
+        panic!("postfix block must hold its temporary and its write")
+    };
+    let FirStatementKind::Expression(write) = body.statement(write).unwrap().kind else {
+        panic!("increment block must write back")
     };
     let FirExprKind::ValueWrite { value, .. } = body.expr(write).unwrap().kind else {
         panic!("increment must be a value write")

@@ -441,6 +441,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if ir.plain_updates.contains(&source) {
         ir.plain_updates.insert(target);
     }
+    if ir.postfix_updates.contains(&source) {
+        ir.postfix_updates.insert(target);
+    }
     if ir.negations.contains(&source) {
         ir.negations.insert(target);
     }

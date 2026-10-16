@@ -303,17 +303,29 @@ fn smart_cast_increment_publishes_read_and_write_representation_boundaries() {
     else {
         panic!("builtin increment must remain an explicit FIR unary operation")
     };
-    let FirExprKind::ImplicitConversion { value, conversion } =
-        body.expr(operand).expect("checked smart-cast operand").kind
+    let FirExprKind::ValueRead(temporary) =
+        body.expr(operand).expect("checked postfix operand").kind
     else {
-        panic!("the storage read must retain its selected smart cast")
+        panic!("a postfix increment must increment its temporary")
     };
+    let (initializer, read_conversion) = (0..body.statement_count())
+        .filter_map(|raw| body.statement(FirStatementId::from_raw(raw as u32)))
+        .find_map(|statement| match statement.kind {
+            FirStatementKind::Local {
+                target,
+                initializer: Some(initializer),
+                conversion,
+                ..
+            } if target == temporary => Some((initializer, conversion)),
+            _ => None,
+        })
+        .expect("the postfix temporary must be declared");
     assert!(matches!(
-        conversion.kind,
-        FirConversionKind::SmartCast { to } if to.get() == Ty::Int
+        read_conversion.map(|conversion| conversion.kind),
+        Some(FirConversionKind::SmartCast { to }) if to.get() == Ty::Int
     ));
     assert_eq!(
-        body.expr(value).expect("raw storage read").ty.get(),
+        body.expr(initializer).expect("raw storage read").ty.get(),
         Ty::nullable(Ty::Int)
     );
 }

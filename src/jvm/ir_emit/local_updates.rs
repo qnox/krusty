@@ -1,5 +1,6 @@
 //! JVM representation of source-local updates.
 
+use super::{CodeBuilder, Emitter};
 use crate::ir::{IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::types::Ty;
 
@@ -17,7 +18,10 @@ pub(super) fn iinc_delta(
     if local_ty != Ty::Int || ir.plain_updates.contains(&update) {
         return None;
     }
+    iinc_delta_of(ir, value, var)
+}
 
+fn iinc_delta_of(ir: &IrFile, value: u32, var: u32) -> Option<i8> {
     let arithmetic = match *ir.expr(value) {
         IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
@@ -42,4 +46,69 @@ pub(super) fn iinc_delta(
         _ => None,
     }?;
     i8::try_from(delta).ok()
+}
+
+/// A recorded postfix update `{ val old = x; x = old + c; old }` of local `x`.
+fn postfix_update(ir: &IrFile, block: u32) -> Option<(u32, i8)> {
+    if !ir.postfix_updates.contains(&block) {
+        return None;
+    }
+    let IrExpr::Block {
+        stmts,
+        value: Some(value),
+    } = ir.expr(block)
+    else {
+        return None;
+    };
+    let [declaration, update] = stmts[..] else {
+        return None;
+    };
+    let IrExpr::Variable {
+        index: old,
+        init: Some(initializer),
+        ..
+    } = *ir.expr(declaration)
+    else {
+        return None;
+    };
+    let IrExpr::GetValue(target) = *ir.expr(initializer) else {
+        return None;
+    };
+    let IrExpr::SetValue {
+        var: written,
+        value: updated,
+    } = *ir.expr(update)
+    else {
+        return None;
+    };
+    if written != target || !matches!(ir.expr(*value), IrExpr::GetValue(read) if *read == old) {
+        return None;
+    }
+    Some((target, iinc_delta_of(ir, updated, old)?))
+}
+
+impl Emitter<'_> {
+    /// Emit the JVM contraction of a source postfix update after its ordinary block scope has
+    /// opened. The caller still owns every block/debug close step.
+    pub(super) fn emit_postfix_iinc(
+        &mut self,
+        block: u32,
+        discarded: bool,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        let Some((target, delta)) = postfix_update(self.ir, block) else {
+            return false;
+        };
+        let Some(&(slot, ty)) = self.slots.get(&target) else {
+            return false;
+        };
+        if ty != Ty::Int || self.inline_return_frame_result_type(target).is_some() {
+            return false;
+        }
+        if !discarded {
+            code.iload(slot);
+        }
+        code.iinc(slot, delta);
+        true
+    }
 }

@@ -46,6 +46,99 @@ pub(super) fn accessor_property(
 }
 
 impl BodyFirChecker<'_> {
+    /// A statement `field++` in its accessor, or a property update reached through an implicit
+    /// receiver. Local and captured storage is owned by `local_increments`; this boundary returns
+    /// `None` when the name does not select property storage.
+    pub(super) fn property_inc_dec_statement(
+        &mut self,
+        statement: StmtId,
+        decrement: bool,
+        prefix: bool,
+        origin: OriginId,
+    ) -> Result<Option<FirStatementId>, BodyCheckFailure> {
+        if matches!(
+            self.info.stmt_lowers.get(&statement),
+            Some(StmtLowering::BackingFieldWrite { .. })
+        ) {
+            let property = self.enclosing_property_for_statement(statement)?;
+            let span = self
+                .file
+                .stmt_spans
+                .get(statement.0 as usize)
+                .copied()
+                .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+            let resolution = self
+                .info
+                .resolved_inc_dec
+                .get(&IncDecSite::Statement(statement))
+                .copied()
+                .ok_or_else(|| {
+                    self.failure(
+                        Some(span),
+                        BodyCheckFailureKind::UnsupportedStatement(StatementForm::IncDec),
+                    )
+                })?;
+            let dispatch_receiver =
+                self.backing_field_dispatch_receiver(property, origin, Some(span))?;
+            let read = self.body.add_expr(FirExpr {
+                origin,
+                ty: self.resolved_type(span, resolution.receiver_ty)?,
+                kind: FirExprKind::BackingFieldRead {
+                    target: property,
+                    dispatch_receiver,
+                },
+            });
+            let convention = if decrement { "dec" } else { "inc" };
+            let updated_kind = if self
+                .info
+                .resolved_stmt_operator_call(statement, convention)
+                .is_some()
+            {
+                self.zero_arg_statement_operator_call_on_value(statement, convention, read)?
+            } else {
+                FirExprKind::Unary {
+                    operation: if decrement {
+                        FirUnaryOperation::Decrement
+                    } else {
+                        FirUnaryOperation::Increment
+                    },
+                    operand: read,
+                }
+            };
+            let updated = self.body.add_expr(FirExpr {
+                origin,
+                ty: self.resolved_type(span, resolution.updated_ty)?,
+                kind: updated_kind,
+            });
+            let write = self.body.add_expr(FirExpr {
+                origin,
+                ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
+                kind: FirExprKind::BackingFieldWrite {
+                    target: property,
+                    dispatch_receiver,
+                    value: updated,
+                    conversion: None,
+                },
+            });
+            return Ok(Some(self.body.add_statement(FirStatement {
+                origin,
+                kind: FirStatementKind::Expression(write),
+            })));
+        }
+        let Some(kind) = self.implicit_property_inc_dec(statement, decrement, prefix)? else {
+            return Ok(None);
+        };
+        let write = self.body.add_expr(FirExpr {
+            origin,
+            ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
+            kind,
+        });
+        Ok(Some(self.body.add_statement(FirStatement {
+            origin,
+            kind: FirStatementKind::Expression(write),
+        })))
+    }
+
     /// The current-module property whose accessor a `super` property access selected.
     fn super_property(
         &self,
@@ -1837,7 +1930,7 @@ impl BodyFirChecker<'_> {
             });
             let temporary = self.allocate_local();
             let (bound, bound_ty) = if prefix {
-                let updated = self.increment_value(expression, target, decrement)?;
+                let updated = self.property_increment_value(expression, target, decrement)?;
                 (updated, updated_ty)
             } else {
                 (read, read_ty)
@@ -2105,6 +2198,28 @@ impl BodyFirChecker<'_> {
             statements: statements.into_boxed_slice(),
             result: Some(result),
         }))
+    }
+
+    fn property_increment_value(
+        &mut self,
+        expression: ExprId,
+        target: ExprId,
+        decrement: bool,
+    ) -> Result<FirExprId, BodyCheckFailure> {
+        let convention = if decrement { "dec" } else { "inc" };
+        let kind = if self.selected_operator(expression, convention) {
+            self.zero_arg_expression_operator_call(expression, convention, target)?
+        } else {
+            FirExprKind::Unary {
+                operation: if decrement {
+                    FirUnaryOperation::Decrement
+                } else {
+                    FirUnaryOperation::Increment
+                },
+                operand: self.expression(target)?,
+            }
+        };
+        self.add_expression(expression, kind)
     }
 
     pub(super) fn source_property_write(

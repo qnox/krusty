@@ -1906,9 +1906,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   wrapper-masquerade tables (`resolve::nullable_prim_wrapper`/`prim_of_wrapper`) are being retired onto
   this representation (consumer migration in progress).
 - Boolean short-circuit evaluation (`&&`/`||`) side-effect order.
-- **`i++`, `++i`, `i--` and `--i` on an `Int` local in statement position are `iinc`**, like
-  `i += 1`: the lowered increment wraps the same `i + 1` in an identity coercion to its checked
-  result type, which the `iinc` selection looks through. Test: `tests/increment_statement_e2e.rs`.
+- **Local postfix and prefix updates keep their source evaluation shape.** A postfix update is
+  `{ val old = x; x = old.inc(); old }`; a prefix update is `{ x = x.inc(); x }`. The same checked
+  shape is retained when its value is discarded, including captured and local-class-captured
+  storage. Common IR records postfix provenance. JVM emission contracts an `Int` local to `iinc`
+  after entering its ordinary block lifecycle, while other storage keeps the snapshot temporary.
+  Tests: `tests/increment_statement_e2e.rs`, the shared
+  `multimoduleLocalIncrementShapes` JVM/Native/Wasm case, and the checked-FIR increment tests.
 - **`&&`/`||` are laid out as short-circuit jumps**, as kotlinc lays out `ANDAND`/`OROR`. In a
   condition each operand branches on its own: `if (a && b)` is `jumpIfFalse(a, else);
   jumpIfFalse(b, else)`, `if (a || b)` is `jumpIfTrue(a, then); jumpIfFalse(b, else)`, and `!`
@@ -4343,8 +4347,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **`++`/`--` as an expression value** (`val a = i++`, `++i`, and in operand position — a call argument,
   a string template, a `when` subject): a single `Expr::IncDec { target, dec, prefix }` node, usable
   anywhere an expression is; statement position keeps the `Stmt::IncDec` / member-index-assignment desugar.
-  The value lowering uses no temp slot — the update is `i = i ± 1` and the value is the new `i` (prefix) or
-  new `i` ∓ 1 = the old `i` (postfix), valid for every numeric type. `tests/incdec_expr_e2e.rs`.
+  Checked FIR preserves the storage read/write shape described above; a backend may realize the
+  recorded source update in its native representation. `tests/incdec_expr_e2e.rs`.
 - **A narrow integral constant keeps its own WIDTH in common IR.** `FirConstant` has no signed case
   narrower than `Int` and no `UByte`/`UShort` case, so a constant expression's checked TYPE is the
   only thing carrying those widths — which is why `lower_constant` already reads it to tell `UByte`

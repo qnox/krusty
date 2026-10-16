@@ -1199,6 +1199,9 @@ impl BodyLowering<'_> {
                     stmts: lowered_statements,
                     value,
                 });
+                if self.body.is_postfix_update(expression_id) {
+                    self.ir.postfix_updates.insert(block);
+                }
                 if self.root_block == Some(expression_id) {
                     self.lowered_root_block = Some(block);
                 }
