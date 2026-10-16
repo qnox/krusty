@@ -333,8 +333,9 @@ fn realize_expression_dag(
     ir: &mut IrFile,
     root: ExprId,
     parameters: &HashMap<String, ReifiedParameter>,
-) -> bool {
-    let mut emits_marker = false;
+    marker_identities: &[HashSet<String>],
+) -> HashSet<String> {
+    let mut used_parameters = HashSet::default();
     let mut pending = vec![root];
     let mut visited = HashSet::default();
     while let Some(expression) = pending.pop() {
@@ -342,7 +343,7 @@ fn realize_expression_dag(
             continue;
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-        emits_marker |= expression_emits_reified_marker(ir, expression, parameters);
+        used_parameters.extend(marker_identities[expression as usize].iter().cloned());
         let replacement = match ir.expr(expression).clone() {
             IrExpr::KClassLiteral {
                 classifier: Some(classifier),
@@ -385,61 +386,61 @@ fn realize_expression_dag(
             ir.exprs[expression as usize] = replacement;
         }
     }
-    emits_marker
+    used_parameters
 }
 
 /// Whether this exact semantic type occurrence carries a declaration-owned reified parameter that
 /// a JVM marker can consume. Do not inspect a non-reified parameter's bound: `typeOf<S>()` describes
 /// `S` as a runtime type parameter even when one of its bounds mentions a different reified `T`.
-fn type_uses_reified_parameter(ty: Ty, parameters: &HashMap<String, ReifiedParameter>) -> bool {
+fn collect_type_reified_parameters(
+    ty: Ty,
+    parameters: &HashMap<String, ReifiedParameter>,
+    found: &mut HashSet<String>,
+) {
     match ty {
-        Ty::TyParam(identity, _) => parameters.contains_key(identity),
+        Ty::TyParam(identity, _) => {
+            if parameters.contains_key(identity) {
+                found.insert(identity.to_owned());
+            }
+        }
         Ty::Obj(_, arguments) | Ty::Intersection(arguments) => arguments
             .iter()
             .copied()
-            .any(|argument| type_uses_reified_parameter(argument, parameters)),
+            .for_each(|argument| collect_type_reified_parameters(argument, parameters, found)),
         Ty::Fun(signature) => {
-            signature
-                .params
-                .iter()
-                .copied()
-                .any(|parameter| type_uses_reified_parameter(parameter, parameters))
-                || type_uses_reified_parameter(signature.ret, parameters)
+            signature.params.iter().copied().for_each(|parameter| {
+                collect_type_reified_parameters(parameter, parameters, found)
+            });
+            collect_type_reified_parameters(signature.ret, parameters, found);
         }
         Ty::Nullable(inner)
         | Ty::PlatformNullable(inner)
         | Ty::InProjection(inner)
         | Ty::OutProjection(inner)
-        | Ty::DefinitelyNotNull(inner) => type_uses_reified_parameter(*inner, parameters),
+        | Ty::DefinitelyNotNull(inner) => {
+            collect_type_reified_parameters(*inner, parameters, found);
+        }
         // A star's readable bound is semantic information, but `typeOf<C<*>>()` emits
         // `KTypeProjection.star` and no operation for that bound.
-        Ty::StarProjection(_) | Ty::Unit | Ty::Null | Ty::Nothing | Ty::Error | Ty::Pending => {
-            false
-        }
+        Ty::StarProjection(_) | Ty::Unit | Ty::Null | Ty::Nothing | Ty::Error | Ty::Pending => {}
     }
 }
 
-/// All IR-owned sources that emit `Intrinsics.reifiedOperationMarker` in this backend. Ownership of
-/// a generated class is derived from this one plan, so adding a marker producer cannot silently
-/// leave construction without `needClassReification`.
-fn expression_emits_reified_marker(
+/// The declaration-qualified parameters whose JVM markers this exact expression emits. This plan
+/// is built before any expression is replaced with its text-bearing marker form, so shared DAG
+/// roots retain semantic identity even when an earlier root has already been realized.
+fn expression_reified_parameters(
     ir: &IrFile,
     expression: ExprId,
     parameters: &HashMap<String, ReifiedParameter>,
-) -> bool {
-    if ir
-        .reified_call_subst
-        .get(&expression)
-        .is_some_and(|substitutions| {
-            substitutions
-                .iter()
-                .any(|(_, ty)| type_uses_reified_parameter(*ty, parameters))
-        })
-    {
-        return true;
+) -> HashSet<String> {
+    let mut found = HashSet::default();
+    if let Some(substitutions) = ir.reified_call_subst.get(&expression) {
+        for (_, ty) in substitutions {
+            collect_type_reified_parameters(*ty, parameters, &mut found);
+        }
     }
     match ir.expr(expression) {
-        IrExpr::ReifiedClassMarker { .. } | IrExpr::ReifiedTypeOp { .. } => true,
         IrExpr::KClassLiteral {
             classifier: Some(classifier),
             value: None,
@@ -448,10 +449,12 @@ fn expression_emits_reified_marker(
         | IrExpr::TypeOp {
             type_operand: classifier,
             ..
-        } => parameter(*classifier, parameters).is_some(),
-        IrExpr::Try { catches, .. } => catches
-            .iter()
-            .any(|catch| parameter(catch.ty, parameters).is_some()),
+        } => collect_type_reified_parameters(*classifier, parameters, &mut found),
+        IrExpr::Try { catches, .. } => {
+            for catch in catches {
+                collect_type_reified_parameters(catch.ty, parameters, &mut found);
+            }
+        }
         IrExpr::Call {
             callee:
                 crate::ir::Callee::Intrinsic {
@@ -462,9 +465,46 @@ fn expression_emits_reified_marker(
                     ..
                 },
             ..
-        } => type_uses_reified_parameter(*classifier, parameters),
+        } => collect_type_reified_parameters(*classifier, parameters, &mut found),
+        _ => {}
+    }
+    found
+}
+
+/// All IR-owned sources that emit `Intrinsics.reifiedOperationMarker` in this backend. Ownership of
+/// a generated class is derived from this one plan, so adding a marker producer cannot silently
+/// leave construction without `needClassReification`.
+#[cfg(test)]
+fn expression_emits_reified_marker(
+    ir: &IrFile,
+    expression: ExprId,
+    parameters: &HashMap<String, ReifiedParameter>,
+) -> bool {
+    if !expression_reified_parameters(ir, expression, parameters).is_empty() {
+        return true;
+    }
+    match ir.expr(expression) {
+        IrExpr::ReifiedClassMarker { .. } | IrExpr::ReifiedTypeOp { .. } => true,
         _ => false,
     }
+}
+
+fn member_uses_enclosing_reified_parameter(
+    ir: &IrFile,
+    function: FunId,
+    used_parameters: &HashSet<String>,
+) -> bool {
+    let owned = ir
+        .signatures
+        .get(&function)
+        .into_iter()
+        .flat_map(|signature| &signature.type_params)
+        .filter(|parameter| parameter.reified)
+        .map(|parameter| parameter.semantic_name.as_str())
+        .collect::<HashSet<_>>();
+    used_parameters
+        .iter()
+        .any(|identity| !owned.contains(identity.as_str()))
 }
 
 /// Expression roots physically emitted as part of one class rather than one [`IrFunction`].
@@ -508,11 +548,19 @@ pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMe
     // An object declared in a reified body executes the marker too: inlining regenerates its class.
     let parameters = collect_reified_parameters(ir);
     let functions = reified_marker_functions(ir, lambdas);
+    let marker_identities = (0..ir.exprs.len() as ExprId)
+        .map(|expression| expression_reified_parameters(ir, expression, &parameters))
+        .collect::<Vec<_>>();
     let mut reifying = Vec::new();
     for &function in &functions {
-        let mut realized = false;
+        let mut used_parameters = HashSet::default();
         for root in marker_roots(ir, [&function]) {
-            realized |= realize_expression_dag(ir, root, &parameters);
+            used_parameters.extend(realize_expression_dag(
+                ir,
+                root,
+                &parameters,
+                &marker_identities,
+            ));
         }
         let owner = super::ir_emit::enclosure::enclosing_functions(
             ir,
@@ -520,7 +568,7 @@ pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMe
         )
         .next()
         .and_then(|(_, owner)| owner);
-        if realized {
+        if member_uses_enclosing_reified_parameter(ir, function, &used_parameters) {
             reifying.extend(owner.and_then(|owner| ir.class_id_by_name(owner)));
         }
     }
@@ -530,10 +578,16 @@ pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMe
             continue;
         }
         let roots = class_marker_roots(ir, declaration);
-        let emits_marker = roots.into_iter().fold(false, |emits_marker, root| {
-            realize_expression_dag(ir, root, &parameters) || emits_marker
-        });
-        if emits_marker {
+        let mut used_parameters = HashSet::default();
+        for root in roots {
+            used_parameters.extend(realize_expression_dag(
+                ir,
+                root,
+                &parameters,
+                &marker_identities,
+            ));
+        }
+        if !used_parameters.is_empty() {
             reifying.push(class);
         }
     }
@@ -745,6 +799,69 @@ mod tests {
     }
 
     #[test]
+    fn a_member_marks_its_class_only_for_an_enclosing_reified_identity() {
+        let outer_identity = "T@outer";
+        let own_identity = "T@member";
+        let mixed_identity = "R@member";
+        let mut ir = IrFile::default();
+        let unit = ir.add_expr(IrExpr::UnitInstance);
+        function(&mut ir, unit, outer_identity);
+
+        let own_operand = ir.add_expr(IrExpr::GetValue(0));
+        let own_marker = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::InstanceOf,
+            arg: own_operand,
+            type_operand: Ty::ty_param(own_identity, Ty::obj("kotlin/Any")),
+        });
+        let own_class = crate::types::type_name("OwnMarker$1");
+        let mut own_declaration = crate::ir::IrClass::synthetic(own_class);
+        own_declaration.enclosure = Some(IrEnclosure::Function(0));
+        own_declaration.methods.push(1);
+        ir.classes.push(own_declaration);
+        ir.functions.push(IrFunction {
+            name: "ownMarker".to_owned(),
+            params: vec![],
+            ret: Ty::Boolean,
+            body: Some(own_marker),
+            is_static: false,
+            dispatch_receiver: Some(own_class),
+            param_checks: vec![],
+        });
+        ir.signatures.insert(1, reified_signature(own_identity));
+
+        let outer_operand = ir.add_expr(IrExpr::GetValue(0));
+        let outer_marker = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::InstanceOf,
+            arg: outer_operand,
+            type_operand: Ty::ty_param(outer_identity, Ty::obj("kotlin/Any")),
+        });
+        let mixed_class = crate::types::type_name("OuterMarker$1");
+        let mut mixed_declaration = crate::ir::IrClass::synthetic(mixed_class);
+        mixed_declaration.enclosure = Some(IrEnclosure::Function(0));
+        mixed_declaration.methods.push(2);
+        ir.classes.push(mixed_declaration);
+        ir.functions.push(IrFunction {
+            name: "outerMarker".to_owned(),
+            params: vec![],
+            ret: Ty::Boolean,
+            body: Some(outer_marker),
+            is_static: false,
+            dispatch_receiver: Some(mixed_class),
+            param_checks: vec![],
+        });
+        ir.signatures.insert(2, reified_signature(mixed_identity));
+
+        realize(&mut ir, &Default::default());
+
+        assert!(matches!(ir.expr(own_marker), IrExpr::ReifiedTypeOp { .. }));
+        assert!(matches!(
+            ir.expr(outer_marker),
+            IrExpr::ReifiedTypeOp { .. }
+        ));
+        assert_eq!(ir.reified_anonymous_declarations, HashSet::from_iter([1]));
+    }
+
+    #[test]
     fn a_class_initializer_catch_uses_the_same_reified_marker_plan() {
         let identity = "E@owner";
         let parameter_ty = Ty::ty_param(identity, Ty::obj("kotlin/Throwable"));
@@ -768,14 +885,14 @@ mod tests {
         class.enclosure = Some(IrEnclosure::Function(0));
         class.init_body = Some(catch);
         ir.classes.push(class);
-        let parameters = collect_reified_parameters(&ir);
 
-        record_reified_catches(&mut ir, &parameters, &HashSet::default());
+        realize(&mut ir, &Default::default());
 
         assert_eq!(
             ir.reified_catch_markers.get(&catch),
             Some(&vec![Some("T".to_owned())])
         );
+        assert_eq!(ir.reified_anonymous_declarations, HashSet::from_iter([0]));
     }
 
     #[test]

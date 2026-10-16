@@ -5994,10 +5994,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Those members are still reified operations of the anonymous class. Before erasure, the JVM
   reified-operation pass walks the exact recorded enclosure domain once and builds one marker plan
   for every class body. It includes `is`/`as`, class literals, `typeOf`, reified catches, reified
-  enum reflection, already-normalized marker nodes, and checked reified-call substitutions. A
+  enum reflection, marker nodes already normalized through another shared root during that pass,
+  and checked reified-call substitutions. A
   marker in a nested class records that class and each generated enclosing class that must be
   regenerated with it, even when common inline lowering already recorded the directly constructed
-  class. The declaration class keeps the marker, and the inline method calls
+  class. Class ownership follows those declaration-qualified identities: a nested inline member's
+  own reified parameter does not make its containing object depend on an enclosing inline call,
+  even when both parameters have the same source spelling. A member that also uses an enclosing
+  reified parameter still records the class after subtracting only its own identities, and a class
+  initializer has no member-owned identities to subtract. The declaration class keeps the marker,
+  and the inline method calls
   `needClassReification` before constructing it. The emitter consumes that class ownership and the
   per-operation plans; it does not search bodies again or recover an owner or parameter from a JVM
   name. A same-module inline call copies the class and substitutes the call's reified arguments, so

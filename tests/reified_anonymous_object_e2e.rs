@@ -400,3 +400,37 @@ fun box(): String {
     let differences = classes.differences();
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
 }
+
+#[test]
+fn a_nested_inline_members_own_reified_catch_does_not_reify_its_object() {
+    // This is the upstream `nestedReifiedCatch.kt` corpus case verbatim. The repository regression
+    // asserts its exact `OK`; the JVM conformance matrix supplies the kotlinc differential oracle.
+    common::expect_box_ok_with_stdlib(
+        r#"// LANGUAGE: +AllowReifiedTypeInCatchClause
+
+inline fun <reified E : Throwable> f(): String {
+    try {
+        return object {
+            inline fun <reified E : Throwable> throwAndCatch(): String {
+                try {
+                    throw IllegalStateException("Fail 1")
+                    return "Fail 2"
+                } catch (e: E) {
+                    return "OK"
+                }
+            }
+
+            fun g(): String = throwAndCatch<IllegalStateException>()
+        }.g()
+    } catch (e: E) {
+        return "Fail 3"
+    }
+}
+
+fun box(): String {
+    return f<AssertionError>()
+}
+"#,
+        "NestedReifiedCatchInAnonymousObject",
+    );
+}
