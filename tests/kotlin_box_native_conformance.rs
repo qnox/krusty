@@ -126,10 +126,11 @@ impl NativeLane {
         scratch: &Path,
         stem: &str,
         suffix: &str,
-        artifacts: Vec<krusty::backend::Artifact>,
+        program: box_lane::CompiledProgram,
     ) -> Outcome {
         let target = self.target.expect("checked by `unavailable`");
-        let objects = artifacts
+        let objects = program
+            .artifacts
             .into_iter()
             .filter_map(|(name, object)| name.ends_with(".o").then_some(object))
             .collect::<Vec<_>>();
@@ -139,7 +140,11 @@ impl NativeLane {
             );
         }
         let object_refs = objects.iter().map(Vec::as_slice).collect::<Vec<_>>();
-        let image = match krusty::native::link_program(&object_refs, target) {
+        let image = match krusty::native::link_program_with_libraries(
+            &object_refs,
+            &program.native_imports,
+            target,
+        ) {
             Ok(image) => image,
             Err(error) => return Outcome::Failed(format!("link: {error}")),
         };
@@ -207,7 +212,7 @@ impl Lane for NativeLane {
         let backend = CraneliftBackend::new(target)
             .with_entry(Entry::Box)
             .verified();
-        let artifacts = match box_lane::compile(
+        let program = match box_lane::compile(
             sources,
             directive_source,
             LIBRARIES,
@@ -216,10 +221,10 @@ impl Lane for NativeLane {
             "box",
             DECLINE_PREFIX,
         ) {
-            Ok(artifacts) => artifacts,
+            Ok(program) => program,
             Err(outcome) => return outcome,
         };
-        self.run_artifacts(scratch, stem, "single", artifacts)
+        self.run_artifacts(scratch, stem, "single", program)
     }
 
     fn compile_modules_and_run(
@@ -233,7 +238,7 @@ impl Lane for NativeLane {
         let backend = CraneliftBackend::new(target)
             .with_entry(Entry::Box)
             .verified();
-        let artifacts = match box_lane::compile_modules(
+        let program = match box_lane::compile_modules(
             scratch,
             stem,
             modules,
@@ -243,10 +248,10 @@ impl Lane for NativeLane {
             &backend,
             DECLINE_PREFIX,
         ) {
-            Ok(artifacts) => artifacts,
+            Ok(program) => program,
             Err(outcome) => return outcome,
         };
-        self.run_artifacts(scratch, stem, "modules", artifacts)
+        self.run_artifacts(scratch, stem, "modules", program)
     }
 }
 

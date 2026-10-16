@@ -192,6 +192,17 @@ pub enum Libraries {
     StdlibKlib,
 }
 
+struct PlatformLibraries {
+    semantics: Box<dyn krusty::libraries::SemanticPlatform>,
+    native_imports: Vec<krusty::native::ImportLibrary>,
+}
+
+/// Target artifacts and the frozen Native library facts selected by the same compilation inputs.
+pub struct CompiledProgram {
+    pub artifacts: Vec<Artifact>,
+    pub native_imports: Vec<krusty::native::ImportLibrary>,
+}
+
 impl Libraries {
     /// Whether this host has the libraries a `target` case is analyzed against.
     pub fn available(self, target: TestTarget) -> bool {
@@ -212,16 +223,21 @@ impl Libraries {
         target: krusty::compilation_target::CompilationTarget,
         dependencies: &[PathBuf],
         friend_dependencies: &[PathBuf],
-    ) -> Box<dyn krusty::libraries::SemanticPlatform> {
+    ) -> PlatformLibraries {
         match self {
             Self::JvmArtifacts if !dependencies.is_empty() || !friend_dependencies.is_empty() => {
                 panic!("JVM box libraries cannot ingest KLIB dependency modules")
             }
-            Self::JvmArtifacts => Box::new(
-                krusty::jvm::jvm_libraries::JvmLibraries::new(CLASSPATH.with(std::rc::Rc::clone))
+            Self::JvmArtifacts => PlatformLibraries {
+                semantics: Box::new(
+                    krusty::jvm::jvm_libraries::JvmLibraries::new(
+                        CLASSPATH.with(std::rc::Rc::clone),
+                    )
                     .expect("JVM provider initialization"),
-            ),
-            Self::StdlibKlib => Box::new(STDLIB_KLIBS.with(|opened| {
+                ),
+                native_imports: Vec::new(),
+            },
+            Self::StdlibKlib => STDLIB_KLIBS.with(|opened| {
                 if !dependencies.is_empty() {
                     let mut libraries = dependencies
                         .iter()
@@ -238,27 +254,39 @@ impl Libraries {
                             .expect("checked by `Libraries::available`"),
                         klib_stdlib_semantics(target),
                     ));
-                    return krusty::klib_libraries::KlibLibraries::open(&libraries).unwrap_or_else(
-                        |error| panic!("opening the {target:?} dependency KLIBs: {error}"),
-                    );
+                    let (libraries, native_imports) = open_klib_inputs(target, &libraries)
+                        .unwrap_or_else(|error| {
+                            panic!("opening the {target:?} dependency KLIBs: {error}")
+                        });
+                    return PlatformLibraries {
+                        semantics: Box::new(libraries),
+                        native_imports,
+                    };
                 }
                 let mut opened = opened.borrow_mut();
-                if let Some((_, libraries)) = opened.iter().find(|(opened, _)| *opened == target) {
-                    return libraries.for_compilation();
+                if let Some((_, libraries, native_imports)) =
+                    opened.iter().find(|(opened, _, _)| *opened == target)
+                {
+                    return PlatformLibraries {
+                        semantics: Box::new(libraries.for_compilation()),
+                        native_imports: native_imports.clone(),
+                    };
                 }
                 let stdlib = krusty::toolchain::kotlin_stdlib_klib(target)
                     .expect("checked by `Libraries::available`");
-                let libraries = krusty::klib_libraries::KlibLibraries::open(&[
-                    krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
-                        stdlib,
-                        klib_stdlib_semantics(target),
-                    ),
-                ])
-                .unwrap_or_else(|error| panic!("opening the {target:?} stdlib KLIB: {error}"));
-                let compilation = libraries.for_compilation();
-                opened.push((target, libraries));
+                let inputs = [krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
+                    stdlib,
+                    klib_stdlib_semantics(target),
+                )];
+                let (libraries, native_imports) = open_klib_inputs(target, &inputs)
+                    .unwrap_or_else(|error| panic!("opening the {target:?} stdlib KLIB: {error}"));
+                let compilation = PlatformLibraries {
+                    semantics: Box::new(libraries.for_compilation()),
+                    native_imports: native_imports.clone(),
+                };
+                opened.push((target, libraries, native_imports));
                 compilation
-            })),
+            }),
         }
     }
 }
@@ -275,6 +303,28 @@ fn klib_stdlib_semantics(
         CompilationTarget::Js => KlibStdlibSemantics::Plain,
         CompilationTarget::Jvm => panic!("JVM box libraries cannot ingest a KLIB stdlib"),
     }
+}
+
+fn open_klib_inputs(
+    target: krusty::compilation_target::CompilationTarget,
+    inputs: &[krusty::klib_libraries::KlibLibraryInput],
+) -> Result<
+    (
+        krusty::klib_libraries::KlibLibraries,
+        Vec<krusty::native::ImportLibrary>,
+    ),
+    String,
+> {
+    if target == krusty::compilation_target::CompilationTarget::Native {
+        let native_target = krusty::native::NativeTarget::host()
+            .ok_or_else(|| "the host has no Native target".to_string())?;
+        return krusty::native::NativeKlibInputs::open(inputs, native_target)
+            .map(krusty::native::NativeKlibInputs::into_parts)
+            .map_err(|error| error.to_string());
+    }
+    krusty::klib_libraries::KlibLibraries::open(inputs)
+        .map(|libraries| (libraries, Vec::new()))
+        .map_err(|error| error.to_string())
 }
 
 thread_local! {
@@ -296,7 +346,11 @@ thread_local! {
     /// Each target's stdlib KLIB, opened once per worker thread: opening decodes and signs every
     /// declaration, which `for_compilation` then shares with each case.
     static STDLIB_KLIBS: std::cell::RefCell<
-        Vec<(krusty::compilation_target::CompilationTarget, krusty::klib_libraries::KlibLibraries)>,
+        Vec<(
+            krusty::compilation_target::CompilationTarget,
+            krusty::klib_libraries::KlibLibraries,
+            Vec<krusty::native::ImportLibrary>,
+        )>,
     > = const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -316,7 +370,7 @@ pub fn compile<B: Backend>(
     backend: &B,
     module_name: &str,
     decline_prefix: &str,
-) -> Result<Vec<Artifact>, Outcome> {
+) -> Result<CompiledProgram, Outcome> {
     let inputs = sources
         .iter()
         .map(|(stem, source)| SourceInput::kotlin(source).with_file_stem(stem))
@@ -331,10 +385,11 @@ pub fn compile<B: Backend>(
             "the {target:?} corpus lane received a {compilation_target:?} backend"
         )));
     }
-    let platform = krusty::frontend::PlatformProvider::new(
-        compilation_target,
-        libraries.platform(compilation_target, &[], &[]),
-    );
+    let PlatformLibraries {
+        semantics,
+        native_imports,
+    } = libraries.platform(compilation_target, &[], &[]);
+    let platform = krusty::frontend::PlatformProvider::new(compilation_target, semantics);
     let features = krusty::features::LangFeatures::from_source(directive_source);
     let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
@@ -357,7 +412,10 @@ pub fn compile<B: Backend>(
     if let Some(first) = first_error(&diags, 0) {
         return Err(Outcome::Frontend(first.msg.clone()));
     }
-    Ok(artifacts)
+    Ok(CompiledProgram {
+        artifacts,
+        native_imports,
+    })
 }
 
 /// Analyze one independently built corpus module against the exact KLIB artifacts of its
@@ -383,7 +441,14 @@ pub fn analyze_module(
     target: TestTarget,
     backend_target: krusty::compilation_target::CompilationTarget,
     diags: &mut DiagSink,
-) -> Result<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>), Outcome> {
+) -> Result<
+    (
+        krusty::frontend::StreamingSourceSetAnalysis,
+        Vec<String>,
+        Vec<krusty::native::ImportLibrary>,
+    ),
+    Outcome,
+> {
     if backend_target != target.compilation_target() {
         return Err(Outcome::Harness(format!(
             "the {target:?} corpus lane received a {backend_target:?} backend"
@@ -407,10 +472,11 @@ pub fn analyze_module(
         .iter()
         .map(|(stem, _)| stem.clone())
         .collect::<Vec<_>>();
-    let platform = krusty::frontend::PlatformProvider::new(
-        backend_target,
-        libraries.platform(backend_target, dependency_klibs, friend_klibs),
-    );
+    let PlatformLibraries {
+        semantics,
+        native_imports,
+    } = libraries.platform(backend_target, dependency_klibs, friend_klibs);
+    let platform = krusty::frontend::PlatformProvider::new(backend_target, semantics);
     let features = module_features(directive_source, unit.common_file_count);
     let diagnostics_start = diags.diags.len();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_module(
@@ -419,7 +485,7 @@ pub fn analyze_module(
     if let Some(first) = first_error(diags, diagnostics_start) {
         return Err(Outcome::Frontend(first.msg.clone()));
     }
-    Ok((analysis, stems))
+    Ok((analysis, stems, native_imports))
 }
 
 /// Analyze each source module against only its declared dependency KLIB closure, emit all target
@@ -433,7 +499,7 @@ pub fn compile_modules<B: Backend>(
     target: TestTarget,
     backend: &B,
     decline_prefix: &str,
-) -> Result<Vec<Artifact>, Outcome> {
+) -> Result<CompiledProgram, Outcome> {
     #[derive(Clone)]
     struct GeneratedDependency {
         archive: PathBuf,
@@ -536,6 +602,7 @@ pub fn compile_modules<B: Backend>(
     let mut session = krusty::compiler::EmissionSession::new(backend);
     let mut diags = DiagSink::new();
     let mut generated = BTreeMap::<String, GeneratedDependency>::new();
+    let mut native_imports = Vec::new();
     for (ordinal, unit) in modules.iter().enumerate() {
         let mut dependency_klibs = Vec::new();
         let mut friend_klibs = Vec::new();
@@ -555,7 +622,7 @@ pub fn compile_modules<B: Backend>(
                 friend_klibs.push(archive.archive.clone());
             }
         }
-        let (analysis, stems) = analyze_module(
+        let (analysis, stems, module_imports) = analyze_module(
             unit,
             &dependency_klibs,
             &friend_klibs,
@@ -565,6 +632,7 @@ pub fn compile_modules<B: Backend>(
             compilation_target,
             &mut diags,
         )?;
+        native_imports.extend(module_imports);
         let Some(dependency) =
             session.emit_module(analysis, &stems, &metadata, &unit.name, &mut diags)
         else {
@@ -587,7 +655,10 @@ pub fn compile_modules<B: Backend>(
     if let Some(outcome) = outcome {
         return Err(outcome);
     }
-    Ok(artifacts)
+    Ok(CompiledProgram {
+        artifacts,
+        native_imports,
+    })
 }
 
 /// Run a program with the lane's deadline; its framed verdict.

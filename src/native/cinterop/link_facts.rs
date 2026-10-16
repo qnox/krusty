@@ -6,8 +6,8 @@
 //! it exports at their default versions, which is all krusty's linker needs (`ImportLibrary`). The
 //! facts are written into the library, beside its metadata, under
 //! `default/targets/<target>/imports` ([`entry`]), so a program built against the library later
-//! links with no C library on the build machine. See `docs/NATIVE.md`, "What a link needs from a
-//! library".
+//! links with no C library on the build machine: the program's link reads them back ([`decode`])
+//! and never the C library itself. See `docs/NATIVE.md`, "What a link needs from a library".
 //!
 //! Today the library files are read from the build machine's own library directories, so an
 //! interop library is made where its C libraries are installed.
@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use super::library::CinteropError;
-use crate::native::linker::{ExportKind, ImportLibrary};
+use crate::native::linker::{Export, ExportKind, ImportLibrary, ProgramLinkError};
 use crate::native::target::{Arch, NativeTarget};
 
 /// The library-relative path of the captured facts for the Kotlin/Native target `konan_target`.
@@ -121,29 +121,94 @@ fn read(path: &Path, arch: Arch) -> Result<ImportLibrary, CinteropError> {
 
 /// The facts as the library carries them: per library, a `library <soname>` line, then one
 /// `function <name> [<version>]` or `data <name> [<version>]` line per export, in name order.
-pub(crate) fn encode(libraries: &[ImportLibrary]) -> Vec<u8> {
+/// Fields are separated by spaces, so a soname, export or version containing whitespace is
+/// refused rather than written as facts [`decode`] would misread.
+pub(crate) fn encode(libraries: &[ImportLibrary]) -> Result<Vec<u8>, CinteropError> {
+    let field = |text: &str, what: &str, soname: &str| {
+        if text.chars().any(char::is_whitespace) {
+            Err(CinteropError(format!(
+                "{soname}: the {what} {text:?} contains whitespace, which an interop library \
+                 cannot record"
+            )))
+        } else {
+            Ok(())
+        }
+    };
     let mut out = String::new();
     for library in libraries {
-        out.push_str(&format!("library {}\n", library.soname()));
+        let soname = library.soname();
+        field(soname, "soname", soname)?;
+        out.push_str(&format!("library {soname}\n"));
         for (name, export) in library.exports() {
+            field(name, "export", soname)?;
             let kind = match export.kind {
                 ExportKind::Function => "function",
                 ExportKind::Data => "data",
             };
             out.push_str(&format!("{kind} {name}"));
             if let Some(version) = &export.version {
+                field(version, "symbol version", soname)?;
                 out.push_str(&format!(" {version}"));
             }
             out.push('\n');
         }
     }
-    out.into_bytes()
+    Ok(out.into_bytes())
+}
+
+/// Read the facts [`encode`] wrote. `what` names the library that carries them, in errors. A line
+/// that is not one [`encode`] writes is refused, never skipped: the facts are all the link knows.
+pub(crate) fn decode(bytes: &[u8], what: &str) -> Result<Vec<ImportLibrary>, ProgramLinkError> {
+    let malformed = |detail: String| {
+        ProgramLinkError::InvalidLibrary(format!("the link facts of {what} {detail}"))
+    };
+    let text = std::str::from_utf8(bytes).map_err(|_| malformed("are not UTF-8".to_string()))?;
+    let mut libraries = Vec::new();
+    let mut current: Option<(String, Vec<(String, Export)>)> = None;
+    for (index, line) in text.lines().enumerate() {
+        let line_number = index + 1;
+        match line.split(' ').collect::<Vec<_>>().as_slice() {
+            ["library", soname] => {
+                if let Some((soname, exports)) = current.take() {
+                    libraries.push(ImportLibrary::new(soname, exports)?);
+                }
+                current = Some((soname.to_string(), Vec::new()));
+            }
+            [kind @ ("function" | "data"), name, version @ ..] if version.len() <= 1 => {
+                let Some((_, exports)) = current.as_mut() else {
+                    return Err(malformed(format!(
+                        "name an export before any library on line {line_number}"
+                    )));
+                };
+                let kind = if *kind == "function" {
+                    ExportKind::Function
+                } else {
+                    ExportKind::Data
+                };
+                exports.push((
+                    name.to_string(),
+                    Export {
+                        kind,
+                        version: version.first().map(|version| version.to_string()),
+                    },
+                ));
+            }
+            _ => {
+                return Err(malformed(format!(
+                    "have a malformed line {line_number}: {line:?}"
+                )))
+            }
+        }
+    }
+    if let Some((soname, exports)) = current {
+        libraries.push(ImportLibrary::new(soname, exports)?);
+    }
+    Ok(libraries)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::linker::Export;
 
     fn words(text: &str) -> Vec<String> {
         text.split(' ').map(str::to_string).collect()
@@ -174,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn facts_are_written_as_text_one_line_per_library_and_export() {
+    fn facts_round_trip_through_their_text_one_line_per_library_and_export() {
         let library = |soname: &str, exports: &[(&str, ExportKind, Option<&str>)]| {
             ImportLibrary::new(
                 soname.to_string(),
@@ -203,10 +268,71 @@ mod tests {
                 &[("environ", ExportKind::Data, Some("GLIBC_2.2.5"))],
             ),
         ];
+        let text = encode(&libraries).expect("encodes");
         assert_eq!(
-            String::from_utf8(encode(&libraries)).expect("UTF-8"),
+            String::from_utf8(text.clone()).expect("UTF-8"),
             "library libz.so.1\nfunction compressBound\nfunction deflate ZLIB_1.2.0\n\
              library libc.so.6\ndata environ GLIBC_2.2.5\n"
+        );
+        assert_eq!(decode(&text, "zlib.klib").expect("decodes"), libraries);
+        assert_eq!(decode(b"", "zlib.klib").expect("decodes"), Vec::new());
+    }
+
+    #[test]
+    fn facts_with_whitespace_are_refused_when_the_library_is_made() {
+        let export = |version: Option<&str>| Export {
+            kind: ExportKind::Function,
+            version: version.map(str::to_string),
+        };
+        let refused = |soname: &str, name: &str, version: Option<&str>| {
+            let library =
+                ImportLibrary::new(soname.to_string(), [(name.to_string(), export(version))])
+                    .expect("a valid library");
+            encode(&[library]).expect_err("refused").0
+        };
+        assert_eq!(
+            refused("libz so.1", "deflate", None),
+            "libz so.1: the soname \"libz so.1\" contains whitespace, which an interop library \
+             cannot record"
+        );
+        assert_eq!(
+            refused("libz.so.1", "de flate", None),
+            "libz.so.1: the export \"de flate\" contains whitespace, which an interop library \
+             cannot record"
+        );
+        assert_eq!(
+            refused("libz.so.1", "deflate", Some("ZLIB\t1")),
+            "libz.so.1: the symbol version \"ZLIB\\t1\" contains whitespace, which an interop \
+             library cannot record"
+        );
+    }
+
+    #[test]
+    fn malformed_facts_are_refused_with_their_line() {
+        let refused = |text: &[u8]| match decode(text, "zlib.klib").expect_err("refused") {
+            ProgramLinkError::InvalidLibrary(detail) => detail,
+            other => panic!("refused as {other:?}"),
+        };
+        assert_eq!(
+            refused(b"function deflate\n"),
+            "the link facts of zlib.klib name an export before any library on line 1"
+        );
+        assert_eq!(
+            refused(b"library libz.so.1\nsymbol deflate\n"),
+            "the link facts of zlib.klib have a malformed line 2: \"symbol deflate\""
+        );
+        assert_eq!(
+            refused(b"library libz.so.1\nfunction deflate ZLIB_1.2.0 extra\n"),
+            "the link facts of zlib.klib have a malformed line 2: \
+             \"function deflate ZLIB_1.2.0 extra\""
+        );
+        assert_eq!(
+            refused(b"library libz.so.1\nfunction deflate\nfunction deflate\n"),
+            "libz.so.1 exports `deflate` twice"
+        );
+        assert_eq!(
+            refused(b"library \xff\n"),
+            "the link facts of zlib.klib are not UTF-8"
         );
     }
 }

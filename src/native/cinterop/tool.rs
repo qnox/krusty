@@ -131,7 +131,7 @@ pub fn build_interop_library(options: &CinteropOptions) -> Result<PathBuf, Cinte
     if !imports.is_empty() {
         writer.add_file(
             &link_facts::entry(konan_target),
-            link_facts::encode(&imports),
+            link_facts::encode(&imports)?,
         );
     }
 

@@ -53,6 +53,10 @@ fn semantic_entry(entry: &str) -> bool {
         || entry.starts_with("default/ir/")
 }
 
+fn native_import_entry(entry: &str) -> bool {
+    entry.starts_with("default/targets/") && entry.ends_with("/imports")
+}
+
 /// One `.knm` metadata fragment, resolved to the package it declares into.
 ///
 /// A package's declarations are split across numbered fragments by the serializer, so several
@@ -73,10 +77,14 @@ pub struct KlibArchive {
     /// a zip klib records them and an unpacked one does not, and no caller distinguishes a library
     /// by which shape it came from.
     entries: Vec<String>,
-    /// Immutable bytes of every declaration/body channel this compiler consumes. The fingerprint
-    /// and every decoder read this same snapshot, so replacing an unpacked KLIB in place cannot
-    /// authenticate one generation while publishing declarations from another.
+    /// Immutable bytes of every selected channel this compiler consumes: declarations and bodies,
+    /// plus Native import facts when Native input assembly opened it. The fingerprint and every
+    /// decoder read this same snapshot, so replacing an unpacked KLIB in place cannot authenticate
+    /// one generation while publishing declarations or link facts from another.
     semantic_entries: BTreeMap<String, Vec<u8>>,
+    /// Native input assembly widens the selected snapshot with its target import facts. Other
+    /// KLIB consumers do not let a Native-only entry perturb their semantic/body generation.
+    native_imports_frozen: bool,
 }
 
 enum Source {
@@ -266,6 +274,15 @@ impl KlibArchive {
     /// Open `path` as a klib, accepting either a zip file or an unpacked directory.
     ///
     pub fn open(path: &Path) -> Result<Self, KlibError> {
+        Self::open_snapshot(path, false)
+    }
+
+    /// Open a Native compiler input, freezing its import facts beside semantic/body channels.
+    pub(crate) fn open_with_native_imports(path: &Path) -> Result<Self, KlibError> {
+        Self::open_snapshot(path, true)
+    }
+
+    fn open_snapshot(path: &Path, native_imports_frozen: bool) -> Result<Self, KlibError> {
         let metadata = std::fs::symlink_metadata(path).map_err(|source| KlibError::Io {
             operation: "inspect",
             path: path.to_path_buf(),
@@ -297,6 +314,7 @@ impl KlibArchive {
                 source: Source::Directory { canonical_root },
                 entries,
                 semantic_entries: BTreeMap::new(),
+                native_imports_frozen,
             };
             archive.freeze_semantic_entries()?;
             return Ok(archive);
@@ -376,6 +394,7 @@ impl KlibArchive {
             source: Source::Zip(Mutex::new(archive)),
             entries,
             semantic_entries: BTreeMap::new(),
+            native_imports_frozen,
         };
         archive.freeze_semantic_entries()?;
         Ok(archive)
@@ -391,13 +410,13 @@ impl KlibArchive {
         &self.entries
     }
 
-    /// A shape-independent digest of every semantic/body entry in this opened KLIB.
+    /// A shape-independent digest of every selected semantic/body/import entry in this opened KLIB.
     ///
     /// Provider snapshots use this to distinguish an archive rebuilt in place from the archive an
     /// earlier independently analyzed module selected. Length-delimited fields make the encoding
     /// injective before SHA-256 is applied, and sorted entry names make zip and directory KLIBs
     /// with the same contents agree. Target binaries and resources are deliberately excluded: they
-    /// cannot change declaration/body selection and can be substantially larger than the semantic
+    /// cannot change declaration/body/link selection and can be substantially larger than the
     /// channels this compiler consumes.
     pub(crate) fn content_fingerprint(&self) -> Result<[u8; 32], KlibError> {
         use sha2::{Digest as _, Sha256};
@@ -410,6 +429,11 @@ impl KlibArchive {
             digest.update(&bytes);
         }
         Ok(digest.finalize().into())
+    }
+
+    /// Reopen `path` with the same selected channels as this archive snapshot.
+    pub(crate) fn reopen_selected(&self, path: &Path) -> Result<Self, KlibError> {
+        Self::open_snapshot(path, self.native_imports_frozen)
     }
 
     /// Read one entry's bytes. Missing or unreadable entries are corruption, never an empty symbol
@@ -436,7 +460,9 @@ impl KlibArchive {
         let entries = self
             .entries
             .iter()
-            .filter(|entry| semantic_entry(entry))
+            .filter(|entry| {
+                semantic_entry(entry) || (self.native_imports_frozen && native_import_entry(entry))
+            })
             .cloned()
             .collect::<Vec<_>>();
         for entry in entries {
