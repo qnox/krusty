@@ -319,9 +319,9 @@ impl Emitter<'_> {
         // A `return this` already anchored that line on the load.
         if !anchored_lambda_result {
             if let Some(pending) = self
-                .pending_inline_stack_coercion
-                .as_mut()
-                .filter(|pending| pending.block == block && pending.saved.is_some())
+                .inline_coercions
+                .pending_for(block)
+                .filter(|pending| pending.saved.is_some())
             {
                 pending.closes_spliced_frame = true;
             } else {
@@ -485,7 +485,7 @@ impl Emitter<'_> {
         if !self.opens_spliced_lambda_frame(stmts) {
             return;
         }
-        let Some(pending) = self.pending_pre_close_copied_result else {
+        let Some(pending) = self.inline_coercions.pre_close else {
             return;
         };
         let Some(mut tail) = value else {
@@ -493,7 +493,7 @@ impl Emitter<'_> {
         };
         loop {
             if tail == pending.invocation {
-                self.pending_pre_close_copied_result = None;
+                self.inline_coercions.pre_close = None;
                 if !code.is_dead() {
                     self.narrow_invocation_result(pending.ret, code);
                 }
@@ -595,12 +595,12 @@ impl Emitter<'_> {
                 adapts_before_lambda_close,
             } => {
                 self.erased_invocations.insert(invocation);
-                let enclosing = self.pending_pre_close_copied_result.take();
-                self.pending_pre_close_copied_result = adapts_before_lambda_close
+                let enclosing = self.inline_coercions.pre_close.take();
+                self.inline_coercions.pre_close = adapts_before_lambda_close
                     .then_some(PendingPreCloseCopiedResult { invocation, ret });
                 self.emit_value(value, code);
-                let unconsumed = self.pending_pre_close_copied_result.take();
-                self.pending_pre_close_copied_result = enclosing;
+                let unconsumed = self.inline_coercions.pre_close.take();
+                self.inline_coercions.pre_close = enclosing;
                 if unconsumed.is_some() && !code.is_dead() {
                     self.run.set_emit_error(
                         "a safe-call copied result did not reach its trailing lambda frame"
@@ -620,16 +620,15 @@ impl Emitter<'_> {
                 type_operand,
                 physical_arg: _,
             } => {
-                if self.deferred_inline_coercions.contains_key(&expression) {
+                if !self.inline_coercions.begin_deferred(expression) {
                     self.run.set_emit_error(
                         "a copied inline-result coercion recursively reused one expression"
                             .to_string(),
                     );
                     return result;
                 }
-                self.deferred_inline_coercions.insert(expression, None);
                 self.emit_value(value, code);
-                let physical_arg = self.deferred_inline_coercions.remove(&expression).flatten();
+                let physical_arg = self.inline_coercions.finish_deferred(expression);
                 if physical_arg.is_none() && !code.is_dead() {
                     self.run.set_emit_error(
                         "a copied inline-result coercion was not reached through its trailing value"
@@ -1287,11 +1286,7 @@ impl Emitter<'_> {
         reserved: &mut Option<Vec<TempSlot>>,
         code: &mut CodeBuilder,
     ) {
-        if let Some(pending) = self
-            .pending_inline_stack_coercion
-            .as_mut()
-            .filter(|pending| pending.block == block)
-        {
+        if let Some(pending) = self.inline_coercions.pending_for(block) {
             pending.saved = Some(saved);
             pending.reserved = reserved.take();
         } else {
@@ -1308,11 +1303,11 @@ impl Emitter<'_> {
     /// Close the inline stack bracket that an enclosing coercion kept open so its representation
     /// adaptation remains inside FixStack's result boundary.
     pub(super) fn finish_pending_inline_stack_coercion(&mut self, code: &mut CodeBuilder) -> bool {
-        let Some(pending) = self.pending_inline_stack_coercion.take() else {
+        let Some(pending) = self.inline_coercions.take_pending() else {
             return false;
         };
         let Some(saved) = pending.saved else {
-            self.pending_inline_stack_coercion = Some(pending);
+            self.inline_coercions.restore_pending(Some(pending));
             return false;
         };
         close_inline_stack(saved, code);
@@ -1507,9 +1502,72 @@ impl CopiedFrameResult {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct PendingPreCloseCopiedResult {
+struct PendingPreCloseCopiedResult {
     invocation: u32,
     ret: Ty,
+}
+
+/// Deferred representation adaptations owned by copied inline block emission.
+///
+/// The erased producer runs while the copied frame is open, while narrowing and the closing
+/// FixStack marker wait until that frame's debug locals have closed.
+#[derive(Default)]
+pub(super) struct InlineCoercionState {
+    /// An erased copied result whose safe-call selector owns adaptation, but whose trailing
+    /// spliced lambda must perform it before closing its locals and inline frame.
+    pre_close: Option<PendingPreCloseCopiedResult>,
+    deferred: HashMap<crate::ir::ExprId, Option<Ty>>,
+    pending: Option<PendingInlineStackCoercion>,
+}
+
+impl InlineCoercionState {
+    pub(super) fn begin_deferred(&mut self, expression: crate::ir::ExprId) -> bool {
+        if self.deferred.contains_key(&expression) {
+            return false;
+        }
+        self.deferred.insert(expression, None);
+        true
+    }
+
+    pub(super) fn is_deferred(&self, expression: crate::ir::ExprId) -> bool {
+        self.deferred.contains_key(&expression)
+    }
+
+    pub(super) fn record_deferred_result(&mut self, expression: crate::ir::ExprId, physical: Ty) {
+        *self
+            .deferred
+            .get_mut(&expression)
+            .expect("a deferred inline coercion remains registered while it emits") =
+            Some(physical);
+    }
+
+    pub(super) fn finish_deferred(&mut self, expression: crate::ir::ExprId) -> Option<Ty> {
+        self.deferred.remove(&expression).flatten()
+    }
+
+    pub(super) fn replace_pending(
+        &mut self,
+        block: Option<u32>,
+    ) -> Option<PendingInlineStackCoercion> {
+        std::mem::replace(
+            &mut self.pending,
+            block.map(PendingInlineStackCoercion::new),
+        )
+    }
+
+    pub(super) fn restore_pending(&mut self, pending: Option<PendingInlineStackCoercion>) {
+        self.pending = pending;
+    }
+
+    fn pending_for(&mut self, block: u32) -> Option<&mut PendingInlineStackCoercion> {
+        self.pending
+            .as_mut()
+            .filter(|pending| pending.block == block)
+    }
+
+    fn take_pending(&mut self) -> Option<PendingInlineStackCoercion> {
+        self.pending.take()
+    }
 }
 
 pub(super) struct PendingInlineStackCoercion {
@@ -1520,7 +1578,7 @@ pub(super) struct PendingInlineStackCoercion {
 }
 
 impl PendingInlineStackCoercion {
-    pub(super) fn new(block: u32) -> Self {
+    fn new(block: u32) -> Self {
         Self {
             block,
             saved: None,

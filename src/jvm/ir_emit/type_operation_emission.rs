@@ -48,28 +48,21 @@ impl Emitter<'_> {
                 value.map(|expression| (expression, self.ir.expr(expression))),
             );
         }
-        if op == IrTypeOp::ImplicitCoercion
-            && self.deferred_inline_coercions.contains_key(&expression)
-        {
+        if op == IrTypeOp::ImplicitCoercion && self.inline_coercions.is_deferred(expression) {
             let physical = if self.emit_erased_suspension_result(arg, jvm_ty, code) {
                 Ty::obj("java/lang/Object")
             } else {
                 self.emit_implicit_coercion_operand(arg, type_operand, code)
                     .0
             };
-            *self
-                .deferred_inline_coercions
-                .get_mut(&expression)
-                .expect("a deferred inline coercion remains registered while it emits") =
-                Some(physical);
+            self.inline_coercions
+                .record_deferred_result(expression, physical);
             return;
         }
         let inline_stack_block = (op == IrTypeOp::ImplicitCoercion)
             .then(|| self.inline_stack_coercion_block(arg, code.stack_height()))
             .flatten();
-        let enclosing = self.pending_inline_stack_coercion.take();
-        self.pending_inline_stack_coercion =
-            inline_stack_block.map(super::block_scope::PendingInlineStackCoercion::new);
+        let enclosing = self.inline_coercions.replace_pending(inline_stack_block);
         self.emit_type_operation_now(expression, op, arg, type_operand, jvm_ty, &internal, code);
         if inline_stack_block.is_some()
             && !self.finish_pending_inline_stack_coercion(code)
@@ -79,7 +72,7 @@ impl Emitter<'_> {
                 "an inline-result coercion did not reach its spliced lambda block".to_string(),
             );
         }
-        self.pending_inline_stack_coercion = enclosing;
+        self.inline_coercions.restore_pending(enclosing);
     }
 
     fn emit_type_operation_now(
