@@ -42,8 +42,16 @@ impl MemberExtensionConventionDiagnosticCandidate {
 pub(crate) enum MemberExtensionFunctionSelection {
     /// Boxed: the candidate is ~950 bytes while the diagnostic variants carry only a `Vec`.
     Selected(Box<MemberExtensionFunctionCandidate>),
-    None(Vec<MemberExtensionConventionDiagnosticCandidate>),
+    None(Box<MemberExtensionRejections>),
     Ambiguous(Vec<MemberExtensionFunctionCandidate>),
+}
+
+/// Typed declarations retained by the original member-extension collection when no candidate is
+/// applicable. The caller reports from this result; it never searches providers again after
+/// selection has failed.
+pub(crate) struct MemberExtensionRejections {
+    pub(crate) convention_candidates: Vec<MemberExtensionConventionDiagnosticCandidate>,
+    pub(crate) call_candidates: Vec<crate::libraries::FunctionInfo>,
 }
 
 /// Whether this scope-tower rung owns postponed lambda shaping. An ambiguous rung deliberately
@@ -92,6 +100,97 @@ pub(super) fn retain_selected(
     if selection == MemberExtensionSelection::Operators {
         candidates.retain(|candidate| candidate.is_operator);
     }
+}
+
+/// Retain a declaration whose source arguments have a valid structural mapping. This runs while
+/// the normalized selection shape is still in hand, before applicability is attempted, so a later
+/// failure can diagnose the exact same provider declaration without a second lookup.
+pub(super) fn mapped_rejected_candidate(
+    probes: MemberExtensionProbes<'_>,
+    call: MemberExtensionFunctionCall<'_>,
+    selection: MemberExtensionSelection,
+    shape: &MemberExtensionFunctionShape,
+) -> Option<(
+    MemberExtensionPriority,
+    crate::libraries::FunctionInfo,
+    bool,
+)> {
+    if selection == MemberExtensionSelection::Operators && !shape.is_operator {
+        return None;
+    }
+    let candidate = shape.diagnostic_candidate.clone();
+    let signature = candidate.semantic_signature();
+    let type_arity_matches = call.explicit_type_args.is_empty()
+        || signature.formals.len() == call.explicit_type_args.len();
+    let visible = match contextual_call_shape_with(
+        probes.explicit_context_arguments,
+        probes.select_context_arguments,
+        &signature.params,
+        &candidate.call_sig,
+        candidate.context_count,
+        call.arg_names,
+    ) {
+        Ok(shape) => (shape.params.len(), shape.call_sig),
+        Err(_) => {
+            let context_count = candidate.context_count.min(signature.params.len());
+            let explicitly_named = |parameter: usize| {
+                probes.explicit_context_arguments
+                    && candidate
+                        .call_sig
+                        .param_names
+                        .get(parameter)
+                        .is_some_and(|parameter| {
+                            call.arg_names.is_some_and(|names| {
+                                names.iter().flatten().any(|argument| argument == parameter)
+                            })
+                        })
+            };
+            let indices = (context_count..signature.params.len())
+                .chain((0..context_count).filter(|&parameter| explicitly_named(parameter)))
+                .collect::<Vec<_>>();
+            (
+                indices.len(),
+                candidate.call_sig.select_parameters(&indices),
+            )
+        }
+    };
+    call_argument_parameter_indices(
+        call.args.len(),
+        visible.0,
+        call.arg_names,
+        call.trailing_lambda,
+        &visible.1,
+    )?;
+    Some((shape.priority, candidate, type_arity_matches))
+}
+
+pub(super) fn finish_rejected_candidates(
+    oracle: &dyn crate::assignable::TypeOracle,
+    mut candidates: Vec<(
+        MemberExtensionPriority,
+        crate::libraries::FunctionInfo,
+        bool,
+    )>,
+) -> Vec<crate::libraries::FunctionInfo> {
+    // A structurally mapped declaration fixes the dispatch rung even if its explicit type-argument
+    // arity is wrong. Arity filters only within that rung and cannot expose a farther receiver.
+    if let Some(nearest_dispatch) = candidates
+        .iter()
+        .map(|(priority, ..)| priority.dispatch_rank)
+        .min()
+    {
+        candidates.retain(|(priority, ..)| priority.dispatch_rank == nearest_dispatch);
+    }
+    if candidates
+        .iter()
+        .any(|(_, _, type_arity_matches)| *type_arity_matches)
+    {
+        candidates.retain(|(_, _, type_arity_matches)| *type_arity_matches);
+    }
+    maximal_member_extensions(oracle, &candidates, |candidate| candidate.0)
+        .into_iter()
+        .map(|index| candidates[index].1.clone())
+        .collect()
 }
 
 /// Member-extension dispatch prefers an ordinary implicit receiver over a context-parameter
@@ -265,18 +364,6 @@ pub(super) fn candidate(
     }
 }
 
-impl MemberExtensionFunctionSelection {
-    pub(super) fn into_checker_result(
-        self,
-    ) -> Result<Option<MemberExtensionFunctionCandidate>, ()> {
-        match self {
-            Self::Selected(selected) => Ok(Some(*selected)),
-            Self::None(_) => Ok(None),
-            Self::Ambiguous(_) => Err(()),
-        }
-    }
-}
-
 impl MemberExtensionFunctionCandidate {
     pub(super) fn resolved_call(
         &self,
@@ -350,9 +437,9 @@ impl Checker<'_> {
             request,
             MemberExtensionSelection::Operators,
         ) {
-            Ok(Some(candidate)) => candidate,
-            Ok(None) => return Ok(None),
-            Err(()) => {
+            MemberExtensionFunctionSelection::Selected(candidate) => *candidate,
+            MemberExtensionFunctionSelection::None(_) => return Ok(None),
+            MemberExtensionFunctionSelection::Ambiguous(_) => {
                 self.diags.error(
                     span,
                     format!("overload resolution ambiguity for operator '{name}'"),

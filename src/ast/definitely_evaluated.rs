@@ -7,6 +7,179 @@
 
 use super::{BinOp, Expr, ExprId, File, Stmt, StmtId, TemplatePart};
 
+/// Whether structural control flow has at least one path that reaches the expression's
+/// continuation. This intentionally knows no checked types or call contracts; those semantic
+/// exits remain the checker's responsibility.
+pub(crate) fn expression_may_complete_normally(file: &File, expression: ExprId) -> bool {
+    match file.expr(expression) {
+        Expr::Throw { .. } | Expr::Return { .. } | Expr::Break { .. } | Expr::Continue { .. } => {
+            false
+        }
+        Expr::Block { stmts, trailing } => {
+            stmts
+                .iter()
+                .all(|statement| statement_may_complete_normally(file, *statement))
+                && trailing.is_none_or(|trailing| expression_may_complete_normally(file, trailing))
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expression_may_complete_normally(file, *cond)
+                && (expression_may_complete_normally(file, *then_branch)
+                    || else_branch.is_none_or(|else_branch| {
+                        expression_may_complete_normally(file, else_branch)
+                    }))
+        }
+        Expr::When { subject, arms } => {
+            subject.is_none_or(|subject| expression_may_complete_normally(file, subject))
+                && (arms.iter().all(|arm| !arm.conditions.is_empty())
+                    || arms
+                        .iter()
+                        .any(|arm| expression_may_complete_normally(file, arm.body)))
+        }
+        Expr::Try {
+            body,
+            catches,
+            finally,
+        } => {
+            finally.is_none_or(|finally| expression_may_complete_normally(file, finally))
+                && (expression_may_complete_normally(file, *body)
+                    || catches
+                        .iter()
+                        .any(|catch| expression_may_complete_normally(file, catch.body)))
+        }
+        Expr::Call { callee, args } => {
+            expression_may_complete_normally(file, *callee)
+                && args
+                    .iter()
+                    .all(|argument| expression_may_complete_normally(file, *argument))
+        }
+        Expr::AnnotationArrayLiteral(elements) => elements
+            .iter()
+            .all(|element| expression_may_complete_normally(file, *element)),
+        Expr::NotNull { operand }
+        | Expr::Is { operand, .. }
+        | Expr::As { operand, .. }
+        | Expr::IncDec {
+            target: operand, ..
+        }
+        | Expr::Unary { operand, .. }
+        | Expr::Member {
+            receiver: operand, ..
+        } => expression_may_complete_normally(file, *operand),
+        Expr::Template(parts) => parts.iter().all(|part| match part {
+            TemplatePart::Str(_) => true,
+            TemplatePart::Expr(expression) => expression_may_complete_normally(file, *expression),
+        }),
+        // A short-circuit/safe/null branch can skip the conditional operand, so a normally
+        // completing receiver/left side is itself a possible normal exit.
+        Expr::Elvis { lhs, .. }
+        | Expr::SafeCall { receiver: lhs, .. }
+        | Expr::SafeIndex { receiver: lhs, .. }
+        | Expr::SafeIndexIncDec { receiver: lhs, .. } => {
+            expression_may_complete_normally(file, *lhs)
+        }
+        Expr::Binary {
+            op: BinOp::And | BinOp::Or,
+            lhs,
+            ..
+        } => expression_may_complete_normally(file, *lhs),
+        Expr::Binary { lhs, rhs, .. }
+        | Expr::RangeTo {
+            lo: lhs, hi: rhs, ..
+        } => {
+            expression_may_complete_normally(file, *lhs)
+                && expression_may_complete_normally(file, *rhs)
+        }
+        Expr::InRange {
+            value, start, end, ..
+        } => {
+            expression_may_complete_normally(file, *value)
+                && expression_may_complete_normally(file, *start)
+                && expression_may_complete_normally(file, *end)
+        }
+        Expr::ExtensionAccess { receiver, callable } => {
+            expression_may_complete_normally(file, *receiver)
+                && expression_may_complete_normally(file, *callable)
+        }
+        Expr::Index { array, indices } => {
+            expression_may_complete_normally(file, *array)
+                && indices
+                    .iter()
+                    .all(|index| expression_may_complete_normally(file, *index))
+        }
+        Expr::CallableRef { receiver, .. } => {
+            receiver.is_none_or(|receiver| expression_may_complete_normally(file, receiver))
+        }
+        Expr::IntLit(_)
+        | Expr::LongLit(_)
+        | Expr::UIntLit(_)
+        | Expr::ULongLit(_)
+        | Expr::DoubleLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_)
+        | Expr::StringLit(_)
+        | Expr::CharLit(_)
+        | Expr::NullLit
+        | Expr::UnsupportedAnnotationArgument(_)
+        | Expr::Name(_)
+        | Expr::Lambda { .. } => true,
+    }
+}
+
+pub(crate) fn statement_may_complete_normally(file: &File, statement: StmtId) -> bool {
+    match file.stmt(statement) {
+        Stmt::Return(..) | Stmt::Break(..) | Stmt::Continue(..) => false,
+        Stmt::Local { init, .. }
+        | Stmt::LocalDelegate { delegate: init, .. }
+        | Stmt::Destructure { init, .. }
+        | Stmt::Assign { value: init, .. }
+        | Stmt::Expr(init) => expression_may_complete_normally(file, *init),
+        Stmt::AssignMember {
+            receiver,
+            value,
+            safe,
+            ..
+        } => {
+            expression_may_complete_normally(file, *receiver)
+                && (*safe || expression_may_complete_normally(file, *value))
+        }
+        Stmt::AssignIndex {
+            array,
+            indices,
+            value,
+        } => {
+            expression_may_complete_normally(file, *array)
+                && indices
+                    .iter()
+                    .all(|index| expression_may_complete_normally(file, *index))
+                && expression_may_complete_normally(file, *value)
+        }
+        Stmt::AssignSafeIndex { receiver, .. } => expression_may_complete_normally(file, *receiver),
+        Stmt::CompoundAssign { target, value, .. } => {
+            expression_may_complete_normally(file, *target)
+                && expression_may_complete_normally(file, *value)
+        }
+        Stmt::While { cond, .. } => expression_may_complete_normally(file, *cond),
+        Stmt::DoWhile { body, cond, .. } => {
+            expression_may_complete_normally(file, *body)
+                && expression_may_complete_normally(file, *cond)
+        }
+        Stmt::For { range, .. } => {
+            expression_may_complete_normally(file, range.start)
+                && expression_may_complete_normally(file, range.end)
+        }
+        Stmt::ForEach { iterable, .. } => expression_may_complete_normally(file, *iterable),
+        Stmt::LocalLateinit { .. }
+        | Stmt::IncDec { .. }
+        | Stmt::LocalFun(_)
+        | Stmt::LocalClass(_)
+        | Stmt::LocalTypeAlias(_) => true,
+    }
+}
+
 /// Visit expressions in evaluation order when every normally completing path through `statement`
 /// evaluated them. The callback attaches phase-owned facts; this AST boundary owns only traversal.
 pub(crate) fn for_each_in_statement(

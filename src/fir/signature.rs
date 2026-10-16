@@ -14,6 +14,7 @@ use super::header::{
 use super::{DefaultArgumentStore, InlineBodyStore, ResolvedCallableHeader};
 use super::{ResolvedInterfaceDelegation, ResolvedParameterIdentity};
 
+mod arena_ranges;
 mod call_arguments;
 mod call_result_constraints;
 mod expressions;
@@ -21,6 +22,7 @@ mod postponed_argument_transaction;
 mod resolved_types;
 mod selections;
 mod signature_state;
+pub use arena_ranges::{CallArgumentRange, OperandRange, SubstitutionRange};
 pub use call_arguments::{ResolvedSigCallArgument, SigCallArgument, SigCallArgumentProbe};
 pub use call_result_constraints::SignatureCallResultConstraint;
 pub use classifier_headers::ResolvedClassifierHeader;
@@ -54,27 +56,6 @@ pub struct ResolvedTypeUseSerializerConstruction {
     pub parameters: Box<[ResolvedTy]>,
     pub operands: Box<[u32]>,
     pub target: ResolvedCustomSerializerConstructorTarget,
-}
-
-/// A half-open slice in the signature graph's shared operand arena.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct OperandRange {
-    start: u32,
-    len: u32,
-}
-
-/// A half-open slice in the signature graph's packed call-argument arena.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct CallArgumentRange {
-    start: u32,
-    len: u32,
-}
-
-/// A half-open slice in the signature graph's shared substitution arena.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct SubstitutionRange {
-    start: u32,
-    len: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -843,6 +824,22 @@ pub trait SignatureSemantics: PostponedArgumentTransaction {
         rhs: ResolvedTy,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId>;
+
+    /// Select the `opAssign` convention for a simple-name augmented assignment without emitting a
+    /// fallback diagnostic. `false` means ordinary `op` replacement semantics; the body checker
+    /// remains responsible for reporting an invalid assignment.
+    fn selects_in_place_assignment(
+        &self,
+        _scope: SignatureScope,
+        _operator: SigBinaryOperator,
+        _origin: OriginId,
+        _receiver: ResolvedTy,
+        _argument: ResolvedTy,
+        _local_operator: Option<ResolvedTy>,
+        _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+    ) -> bool {
+        false
+    }
 
     /// Fold a binary integer constant only after [`Self::select_binary`] has semantically accepted
     /// the operator and produced `result`. The graph evaluator never infers an operator from parser

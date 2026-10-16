@@ -1214,8 +1214,8 @@ impl ProductionSignatureSemantics<'_> {
                     declaration: selected.stable_declaration,
                 }
             }
-            super::super::MemberExtensionFunctionSelection::None(candidates) => {
-                SignatureMemberExtensionCallSelection::None(candidates)
+            super::super::MemberExtensionFunctionSelection::None(rejections) => {
+                SignatureMemberExtensionCallSelection::None(rejections.convention_candidates)
             }
             super::super::MemberExtensionFunctionSelection::Ambiguous(candidates) => {
                 SignatureMemberExtensionCallSelection::Ambiguous(candidates)

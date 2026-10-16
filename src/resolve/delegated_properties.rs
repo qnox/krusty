@@ -1490,7 +1490,9 @@ impl Checker<'_> {
                     MemberExtensionFunctionSelection::Selected(selected) => {
                         (Some(selected), Vec::new())
                     }
-                    MemberExtensionFunctionSelection::None(candidates) => (None, candidates),
+                    MemberExtensionFunctionSelection::None(rejections) => {
+                        (None, rejections.convention_candidates)
+                    }
                     MemberExtensionFunctionSelection::Ambiguous(candidates) => {
                         return if optional {
                             DelegateOperatorSelection::None

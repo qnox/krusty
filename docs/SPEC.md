@@ -13861,6 +13861,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   to kotlinc 2.4.20 for package, member, member-extension, companion and object shapes, including
   generic extension receivers (whose generated delegate-method slots use their JVM erasure).
   Tests: `tests/in_place_delegate_e2e.rs`.
+- **A stable local `Boolean` `val` carries its condition's facts.** `val ok = x != null` binds what
+  the initializer proves for `true` and for `false` to `ok`, so `if (ok) x.length` narrows `x` as
+  `if (x != null)` would. Negation, `&&`/`||`, `is`/`!is`, contracts (`val empty =
+  s.isNullOrEmpty()` proves `s != null` when `empty` is false) and another such val (`val again =
+  ok`) all carry through. The facts are computed where the initializer is checked and live in the
+  flow frame that declares the val. A write to the value a fact talks about drops that fact, on a
+  branch too (`if (w != null) y = w` leaves `if (ok) y.length` rejected after the join). Each fact
+  passes the ordinary stability gate again where the val is read: a closure declared after the val
+  that mutates the root does not drop the fact but makes the cast impossible at that read
+  (SMARTCAST_IMPOSSIBLE), while a root a closure already mutates where the val is declared gives no
+  fact at all (the plain unsafe-call error). A `var`, a property (member or other
+  receiver's) and a non-local val carry nothing. Reads inside inline and non-inline lambdas and
+  local functions keep the facts, as in kotlinc. Verified against kotlinc 2.4.20.
+  (`tests/boolean_val_implications_e2e.rs`.)
+- **A bare call to an inapplicable implicit-receiver member is an inapplicable call.** When no
+  candidate accepts a bare call and its only same-named functions are members (or member
+  extensions) of an implicit receiver, the nearest receiver that has any owns the diagnostic,
+  exactly as an explicit `this.name(...)` call would: the argument type mismatch of the one
+  candidate the arguments map onto (even beside an inherited overload of another arity such as
+  `Any.notify()`), a mapping failure every candidate shares, or NONE_APPLICABLE. It is never an
+  unresolved reference. The expected type in that message substitutes only the callable's own
+  type parameters: an enclosing class's `T` stays `T`, it is not read as its bound
+  (`List<T (of class Generic<T>)>`, not `List<Any>`). Verified against kotlinc 2.4.20.
+  (`tests/implicit_receiver_inapplicable_call_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 

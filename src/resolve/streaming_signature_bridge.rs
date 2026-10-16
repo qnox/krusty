@@ -29,6 +29,7 @@ mod implicit_context_candidates;
 mod integer_constants;
 mod local_signatures;
 mod lookups;
+mod operator_conventions;
 mod postponed_calls;
 mod qualified_calls;
 mod receiver_member_level;
@@ -45,6 +46,7 @@ mod value_parameter_publication;
 mod value_selection;
 mod vararg_constructor_property;
 
+use implicit_context_candidates::SignatureImplicitReceiver;
 use value_selection::{SelectedEnumEntry, SelectedValue};
 
 pub(super) use declaration_aliases::publish_compact_nested_aliases;
@@ -102,28 +104,6 @@ struct ProductionSignatureSemantics<'a> {
     /// every class looking for a member-extension property that almost never matched.
     property_type_parameters_by_declaration:
         RefCell<Option<HashMap<crate::fir::DeclarationId, DeclarationTypeParameters>>>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SignatureImplicitReceiver {
-    ty: Ty,
-    context_parameter: bool,
-}
-
-impl SignatureImplicitReceiver {
-    fn ordinary(ty: Ty) -> Self {
-        Self {
-            ty,
-            context_parameter: false,
-        }
-    }
-
-    fn context_parameter(ty: Ty) -> Self {
-        Self {
-            ty,
-            context_parameter: true,
-        }
-    }
 }
 
 #[derive(Clone)]

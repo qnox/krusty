@@ -20,14 +20,15 @@ fn compose_out_projection(inner: Ty) -> Ty {
 
 /// Substitute semantic type parameters throughout one type shape. This belongs to the type model:
 /// providers, overload selection, checking, and lowering all consume the same transformation.
-fn substitute_type_parameters<F>(
+fn substitute_type_parameters<F, P>(
     ty: Ty,
     lookup: F,
-    preserve_unbound: bool,
+    preserve_unbound: P,
     enforce_bound_nullability: bool,
 ) -> Ty
 where
     F: Fn(&str) -> Option<Ty> + Copy,
+    P: Fn(&str) -> bool + Copy,
 {
     match ty {
         Ty::TyParam(name, bound) => lookup(name)
@@ -39,7 +40,7 @@ where
                 }
             })
             .unwrap_or_else(|| {
-                if preserve_unbound {
+                if preserve_unbound(name) {
                     ty
                 } else {
                     bound.non_null()
@@ -74,7 +75,7 @@ where
         Ty::DefinitelyNotNull(inner) => match *inner {
             Ty::TyParam(name, bound) => match lookup(name) {
                 Some(binding) => binding.contributed_through_nullable_formal(),
-                None if preserve_unbound => Ty::DefinitelyNotNull(inner),
+                None if preserve_unbound(name) => Ty::DefinitelyNotNull(inner),
                 None => bound.contributed_through_nullable_formal(),
             },
             other => substitute_type_parameters(
@@ -151,7 +152,7 @@ fn recorded_binding(bindings: &HashMap<String, Ty>, name: &str) -> Option<Ty> {
 }
 
 pub(crate) fn ty_subst(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
-    substitute_type_parameters(ty, |name| recorded_binding(bindings, name), false, true)
+    substitute_type_parameters(ty, |name| recorded_binding(bindings, name), |_| false, true)
 }
 
 /// Apply a typealias template to its use-site arguments.
@@ -214,6 +215,19 @@ pub(crate) fn ty_subst_alias_expansion(ty: Ty, bindings: &HashMap<String, Ty>) -
     }
 
     normalize(ty_subst(ty, bindings))
+}
+
+/// Substitute a callable's own `formals`, reading an unbound one as its bound as [`ty_subst`]
+/// does. Every other type parameter belongs to a declaration enclosing the call (`T` of the class
+/// whose member is called through `this`); it is in scope at the call site, not a variable of the
+/// call, so it stays as written.
+pub(crate) fn ty_subst_formals(ty: Ty, formals: &[String], bindings: &HashMap<String, Ty>) -> Ty {
+    substitute_type_parameters(
+        ty,
+        |name| recorded_binding(bindings, name),
+        |name| !formals.iter().any(|formal| formal == name),
+        true,
+    )
 }
 
 pub(crate) fn ty_subst_all(types: &[Ty], bindings: &HashMap<String, Ty>) -> Vec<Ty> {
@@ -383,7 +397,7 @@ pub(crate) fn ty_canonicalize_params(ty: Ty, formals: &[String]) -> Ty {
 }
 
 pub(crate) fn ty_subst_keep_unbound(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
-    substitute_type_parameters(ty, |name| recorded_binding(bindings, name), true, true)
+    substitute_type_parameters(ty, |name| recorded_binding(bindings, name), |_| true, true)
 }
 
 /// Apply arguments from an already-validated classifier use without narrowing them against the
@@ -393,7 +407,7 @@ pub(crate) fn ty_subst_applied_lookup<F>(ty: Ty, lookup: F) -> Ty
 where
     F: Fn(&str) -> Option<Ty> + Copy,
 {
-    substitute_type_parameters(ty, lookup, true, false)
+    substitute_type_parameters(ty, lookup, |_| true, false)
 }
 
 pub(crate) fn ty_subst_applied_arguments(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {

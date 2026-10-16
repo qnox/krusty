@@ -5,6 +5,29 @@
 //! it must not erase the declaration's identity and turn the call into an unresolved name.
 
 use super::*;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct SignatureImplicitReceiver {
+    pub(super) ty: Ty,
+    pub(super) context_parameter: bool,
+}
+
+impl SignatureImplicitReceiver {
+    pub(super) fn ordinary(ty: Ty) -> Self {
+        Self {
+            ty,
+            context_parameter: false,
+        }
+    }
+
+    pub(super) fn context_parameter(ty: Ty) -> Self {
+        Self {
+            ty,
+            context_parameter: true,
+        }
+    }
+}
+
 impl ProductionSignatureSemantics<'_> {
     /// Bind every context parameter that the current receiver tower can supply, even when another
     /// context parameter is missing. An unavailable context rejects the call, but its available

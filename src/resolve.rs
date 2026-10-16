@@ -41,6 +41,7 @@ mod annotation_applications;
 mod annotation_argument_constness;
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
+mod boolean_implications;
 mod dependency_annotation_defaults;
 use anonymous_object_capture::{
     record_anonymous_construction_captures, AnonymousCaptureCandidate,
@@ -91,6 +92,7 @@ mod common_classifier_views;
 #[cfg(test)]
 mod common_supertype_identity_tests;
 mod compound_assignments;
+mod condition_exclusions;
 mod conditional_branch;
 mod constant_evaluation;
 mod context_capture;
@@ -10841,19 +10843,35 @@ fn member_extension_function_shapes_in(
                     .iter()
                     .map(|parameter| crate::symbol_resolver::ty_subst(*parameter, &class_bindings))
                     .collect::<Vec<_>>();
+                let priority = MemberExtensionPriority {
+                    dispatch_rank,
+                    dispatch_depth,
+                    owner,
+                    declared_receiver,
+                    generic_receiver,
+                    receiver_domain,
+                };
+                let mut diagnostic_candidate = crate::libraries::FunctionInfo::classifier_member(
+                    crate::libraries::FnKind::Extension,
+                    owner,
+                    member,
+                );
+                crate::symbol_resolver::specialize_member_function(
+                    source,
+                    dispatch_receiver.ty,
+                    &mut diagnostic_candidate,
+                    &class_bindings,
+                );
+                diagnostic_candidate.scope_rank =
+                    u32::try_from(priority.dispatch_rank).unwrap_or(u32::MAX);
+                diagnostic_candidate.receiver_rank =
+                    u32::try_from(priority.dispatch_depth).unwrap_or(u32::MAX);
                 shapes.push(MemberExtensionFunctionShape {
-                    priority: MemberExtensionPriority {
-                        dispatch_rank,
-                        dispatch_depth,
-                        owner,
-                        declared_receiver,
-                        generic_receiver,
-                        receiver_domain,
-                    },
+                    priority,
                     dispatch_receiver,
                     is_operator: function.signature.is_operator(),
                     function: function.clone(),
-                    member,
+                    diagnostic_candidate,
                     class_bindings: class_bindings.clone(),
                     declared_params,
                     owner,
@@ -11412,7 +11430,8 @@ impl<'a> Checker<'a> {
             None => self.member_extension_function(scope, request, selection),
         };
         match selected {
-            Ok(Some(candidate)) => {
+            MemberExtensionFunctionSelection::Selected(candidate) => {
+                let candidate = *candidate;
                 for &(parameter, source) in &candidate.argument_parameters {
                     let (Some(&expected), Some(&actual)) =
                         (candidate.visible_params.get(parameter), arg_tys.get(source))
@@ -11477,17 +11496,8 @@ impl<'a> Checker<'a> {
                 self.mark_extension_receiver_used(call, candidate.dispatch_receiver);
                 Some(candidate.ret)
             }
-            Ok(None) => {
-                let candidates = self.rejected_member_extension_candidates(
-                    scope,
-                    call,
-                    args.len(),
-                    extension_receiver,
-                    name,
-                    selection,
-                    receivers,
-                );
-                self.report_single_mapped_candidate_type_errors(
+            MemberExtensionFunctionSelection::None(rejections) => self
+                .report_single_mapped_candidate_type_errors(
                     scope,
                     call,
                     name,
@@ -11498,10 +11508,9 @@ impl<'a> Checker<'a> {
                         receiver: extension_receiver,
                         expected: result_constraint.expected(),
                     },
-                    &candidates,
-                )
-            }
-            Err(_) => {
+                    &rejections.call_candidates,
+                ),
+            MemberExtensionFunctionSelection::Ambiguous(_) => {
                 self.diags.error(
                     self.call_callee_name_span(call),
                     format!("overload resolution ambiguity for member '{name}'"),
@@ -21831,6 +21840,21 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                if !had_rejected_callable
+                    && self.report_inapplicable_implicit_receiver_call(
+                        scope,
+                        CallArgs {
+                            call,
+                            args,
+                            arg_tys: &arg_tys,
+                        },
+                        &fname,
+                        &callee_receivers,
+                        expected,
+                    )
+                {
+                    return Ty::Error;
+                }
                 let (message, identity, diagnostic_span) = if had_rejected_callable {
                     (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None, span)
                 } else if let Some((internal, access)) = self.inaccessible_classifier(scope, &fname)
@@ -21981,7 +22005,9 @@ impl<'a> Checker<'a> {
             }
             Stmt::Return(e, label) => self.stmt_return(scope, s, e, label),
             Stmt::While { cond, body, label } => {
-                self.clear_narrowings_a_loop_invalidates(scope, &[cond, body]);
+                let compound_writes =
+                    self.clear_narrowings_a_loop_invalidates(scope, &[cond, body]);
+                self.provisional_loop_compound_writes.push(compound_writes);
                 let ct = self.expr(scope, cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "while condition");
                 // `while (x != null) …` — the condition holds on body entry, so narrow stable
@@ -21995,9 +22021,14 @@ impl<'a> Checker<'a> {
                     self.apply_condition_exclusions(scope, cond, true);
                     self.check_loop_body(scope, body, &label);
                 }
+                self.provisional_loop_compound_writes
+                    .pop()
+                    .expect("the while-loop compound-write frame is still open");
             }
             Stmt::DoWhile { body, cond, label } => {
-                self.clear_narrowings_a_loop_invalidates(scope, &[body, cond]);
+                let compound_writes =
+                    self.clear_narrowings_a_do_while_invalidates(scope, body, cond);
+                self.provisional_loop_compound_writes.push(compound_writes);
                 // Unlike a while body, a do-while block and its condition share one lexical scope:
                 // `do { val x = ... } while (x)` is legal Kotlin. Keep that scope alive through
                 // condition checking instead of rebuilding declarations from typed syntax.
@@ -22025,6 +22056,9 @@ impl<'a> Checker<'a> {
                 if label.is_some() {
                     self.loop_labels.pop();
                 }
+                self.provisional_loop_compound_writes
+                    .pop()
+                    .expect("the do-while compound-write frame is still open");
             }
             Stmt::For {
                 name,
@@ -22032,8 +22066,12 @@ impl<'a> Checker<'a> {
                 body,
                 label,
             } => {
-                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
-                self.stmt_for(scope, s, name, range, body, label)
+                let compound_writes = self.clear_narrowings_a_loop_invalidates(scope, &[body]);
+                self.provisional_loop_compound_writes.push(compound_writes);
+                self.stmt_for(scope, s, name, range, body, label);
+                self.provisional_loop_compound_writes
+                    .pop()
+                    .expect("the for-loop compound-write frame is still open");
             }
             Stmt::ForEach {
                 name,
@@ -22041,8 +22079,12 @@ impl<'a> Checker<'a> {
                 body,
                 label,
             } => {
-                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
-                self.stmt_for_each(scope, s, name, iterable, body, label)
+                let compound_writes = self.clear_narrowings_a_loop_invalidates(scope, &[body]);
+                self.provisional_loop_compound_writes.push(compound_writes);
+                self.stmt_for_each(scope, s, name, iterable, body, label);
+                self.provisional_loop_compound_writes
+                    .pop()
+                    .expect("the for-each compound-write frame is still open");
             }
             Stmt::Expr(e) => {
                 // A `kotlin.contracts.contract { … }` statement is erased metadata: it is never
@@ -22336,6 +22378,10 @@ impl<'a> Checker<'a> {
         };
         // An explicitly typed callable-reference local has already adapted to its target shape.
         // Keep that shape instead of reopening the raw reference and undoing the adaptation.
+        // Computed before the val is declared: `val x = x != null` talks about the OUTER `x`.
+        let boolean_implications = (!is_var)
+            .then(|| self.boolean_val_implications(scope, init, bound_ty))
+            .flatten();
         let flow_identity = if let Some(function_type) = declared
             .filter(|ty| matches!(ty, Ty::Fun(_)))
             .or_else(|| self.callable_reference_types.get(&init).copied())
@@ -22354,6 +22400,9 @@ impl<'a> Checker<'a> {
         }
         if let Some(origin) = safe_call_origin {
             self.attach_safe_call_origin(scope, &name, origin);
+        }
+        if let Some(implications) = boolean_implications {
+            scope.record_boolean_implications(flow_identity, implications);
         }
         if declared.is_none() && !is_var {
             if let Some(path) = self.visible_value_path(scope, &name) {
@@ -22542,7 +22591,9 @@ impl<'a> Checker<'a> {
 
     fn stmt_assign(&mut self, scope: &CheckerScope<'_>, s: StmtId, name: String, value: ExprId) {
         // `name op= rhs` with a user `opAssign` operator → in-place call (legal on a `val`).
-        if self.try_in_place_assignment(scope, s, value) {
+        let in_place = self.try_in_place_assignment(scope, s, value);
+        self.resolve_provisional_loop_compound_write(&name, value);
+        if in_place {
             return;
         }
         let scoped = self.lookup(scope, &name);
@@ -23256,6 +23307,7 @@ impl<'a> Checker<'a> {
     /// functions are lifted to private static methods; captures become leading parameters.
     fn check_local_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, stmt_id: StmtId) {
         let enclosing_return_frame = self.lambda_returns.enter_function(Some(f.name.clone()));
+        let enclosing_execution = self.local_function_execution.replace(stmt_id);
         self.local_function_receivers
             .extend(f.receiver.as_ref().map(|receiver| receiver.span));
         let suppression_depth = self.check_local_function_annotation_applications(scope, f);
@@ -23311,30 +23363,41 @@ impl<'a> Checker<'a> {
         );
         self.lexical_type_parameter_bounds
             .record(&f.type_params, &semantic_tparams);
-        // Collect outer local names (everything currently in scope that isn't one of f's params).
+        // Collect outer local names. A parameter hides an outer same-spelled binding only after
+        // its own default has been checked, so capture discovery applies that declaration order
+        // below instead of removing every parameter up front.
         let own_params: crate::fx_hash::HashSet<String> =
             f.params.iter().map(|p| p.name.clone()).collect();
         // The nearest binding wins. A member reached through the receiver hides an outer local of
         // the same spelling, including the constructor parameter a stored property shadows.
         let outer_names = Self::capturable_local_names(scope, &own_params);
+        let default_outer_names =
+            Self::capturable_local_names(scope, &crate::fx_hash::HashSet::default());
 
         // Captured outer locals become extra leading parameters. Parameter defaults run in the
         // lifted callable's `$default` body, so they capture like the function body itself.
         let mut captured_locals: Vec<(String, Ty, bool)> = Vec::new();
-        if !outer_names.is_empty() {
+        if !default_outer_names.is_empty() {
             let body = match &f.body {
                 FunBody::Expr(expression) | FunBody::Block(expression) => Some(*expression),
                 FunBody::None => None,
             };
-            for n in &outer_names {
+            for n in &default_outer_names {
                 let single: crate::fx_hash::HashSet<String> = std::iter::once(n.clone()).collect();
-                let used = body.is_some_and(|expression| {
-                    local_fun_body_uses_any(self.file, expression, &single)
-                }) || f
-                    .params
-                    .iter()
-                    .filter_map(|parameter| parameter.default)
-                    .any(|default| local_fun_body_uses_any(self.file, default, &single));
+                let used_in_body = outer_names.contains(n)
+                    && body.is_some_and(|expression| {
+                        local_fun_body_uses_any(self.file, expression, &single)
+                    });
+                let mut hidden = false;
+                let used_in_default = f.params.iter().any(|parameter| {
+                    let used = !hidden
+                        && parameter.default.is_some_and(|default| {
+                            local_fun_body_uses_any(self.file, default, &single)
+                        });
+                    hidden |= parameter.name == *n;
+                    used
+                });
+                let used = used_in_body || used_in_default;
                 if used {
                     let ty = self.lookup(scope, n).map(|l| l.ty).unwrap_or(Ty::Error);
                     captured_locals.push((n.clone(), ty, false));
@@ -23777,6 +23840,7 @@ impl<'a> Checker<'a> {
             })),
         );
         self.active_lexical_policies.truncate(suppression_depth);
+        self.local_function_execution = enclosing_execution;
         self.lambda_returns.leave_function(enclosing_return_frame);
     }
 }
@@ -32659,12 +32723,21 @@ pub(crate) fn member_extension_function_with(
         trailing_lambda,
         inference_bindings,
     } = call;
-    let (mut candidates, mut excluded) = (Vec::new(), Vec::new());
+    let (mut candidates, mut convention_candidates, mut rejected_candidates) =
+        (Vec::new(), Vec::new(), Vec::new());
     let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
     for shape in member_extension_function_shapes_in(source, receivers, extension_receiver, name) {
-        if member_extension_selection::exclude_delegate_convention(&shape, selection, &mut excluded)
-        {
+        if member_extension_selection::exclude_delegate_convention(
+            &shape,
+            selection,
+            &mut convention_candidates,
+        ) {
             continue;
+        }
+        if let Some(candidate) =
+            member_extension_selection::mapped_rejected_candidate(probes, call, selection, &shape)
+        {
+            rejected_candidates.push(candidate);
         }
         let Some(instantiated) = instantiate_member_extension_with(
             probes,
@@ -32684,7 +32757,7 @@ pub(crate) fn member_extension_function_with(
             member_extension_selection::retain_inapplicable_delegate_convention(
                 &shape,
                 selection,
-                &mut excluded,
+                &mut convention_candidates,
             );
             continue;
         };
@@ -32696,7 +32769,15 @@ pub(crate) fn member_extension_function_with(
             candidate.priority
         });
     if maximal.is_empty() {
-        return MemberExtensionFunctionSelection::None(excluded);
+        return MemberExtensionFunctionSelection::None(Box::new(
+            member_extension_selection::MemberExtensionRejections {
+                convention_candidates,
+                call_candidates: member_extension_selection::finish_rejected_candidates(
+                    oracle,
+                    rejected_candidates,
+                ),
+            },
+        ));
     }
     let best = maximal
         .iter()
@@ -33106,6 +33187,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds::default(),
         next_lexical_capture_identity: 0,
         try_body_writes: Vec::new(),
+        provisional_loop_compound_writes: Vec::new(),
         next_flow_identity: 0,
         checked_local_class_declarations: crate::fx_hash::HashSet::default(),
         checked_local_classifier_identities: HashMap::default(),
@@ -33117,6 +33199,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         loop_depth: 0,
         return_allowed: true,
         lambda_returns: LambdaReturnScopes::default(),
+        local_function_execution: None,
         lambda_body_results: HashMap::default(),
     };
     if resolved_index.is_none() {
@@ -35163,9 +35246,10 @@ struct MemberExtensionFunctionShape {
     priority: MemberExtensionPriority,
     dispatch_receiver: ImplicitReceiver,
     function: MemberExtFunSig,
-    /// Exact provider declaration that produced `function`. Signature recovery carries this
-    /// identity forward instead of searching the classifier a second time by a partial key.
-    member: crate::libraries::LibraryMember,
+    /// Provider-normalized callable retained at collection time for rejected-call diagnostics.
+    /// Selection failure must not trigger another symbol lookup or reconstruct this declaration
+    /// from its owner/name/arity.
+    diagnostic_candidate: crate::libraries::FunctionInfo,
     class_bindings: HashMap<String, Ty>,
     /// Applied declaration parameter types, retained beside the receiver so inherited `operator`
     /// capability can be matched without re-reading either provider's source representation.
@@ -35834,6 +35918,9 @@ struct Checker<'a> {
     next_lexical_capture_identity: u32,
     /// Bindings written by each try body being checked, innermost last.
     try_body_writes: Vec<crate::fx_hash::HashSet<lexical_bindings::BindingIdentity>>,
+    /// Mutable loop-entry bindings whose compound assignment has not yet selected between an
+    /// in-place `opAssign` and a replacement `op` call.
+    provisional_loop_compound_writes: Vec<crate::fx_hash::HashMap<u32, usize>>,
     next_flow_identity: u32,
     checked_local_class_declarations: crate::fx_hash::HashSet<DeclId>,
     checked_local_classifier_identities: HashMap<crate::fir::DeclarationId, TypeName>,
@@ -35856,6 +35943,9 @@ struct Checker<'a> {
     /// Resolver-owned return labels, targets, expected/result types, and active lambda nesting for
     /// the body currently being checked.
     lambda_returns: LambdaReturnScopes,
+    /// The named local function currently being checked. Unlike an inline-spliced lambda, its body
+    /// executes only when called and must not mutate the enclosing body's implication state.
+    local_function_execution: Option<StmtId>,
     /// Every checked lambda body's inferred result before coercion to the selected function type's
     /// return, keyed by the lambda expression. A rechecked lambda's committed result overwrites a
     /// probing one. Body state (`take_body_state`) deliberately does not swap this published fact.
@@ -35879,6 +35969,7 @@ struct BodyState {
     ret_ty: Ty,
     return_allowed: bool,
     lambda_returns: LambdaReturnScopes,
+    local_function_execution: Option<StmtId>,
     loop_labels: Vec<String>,
     loop_depth: usize,
     this_unavailable: bool,
@@ -36379,6 +36470,7 @@ impl<'a> Checker<'a> {
             ret_ty: std::mem::replace(&mut self.ret_ty, Ty::Unit),
             return_allowed: std::mem::replace(&mut self.return_allowed, true),
             lambda_returns: std::mem::take(&mut self.lambda_returns),
+            local_function_execution: self.local_function_execution.take(),
             // A `break`/`continue` inside a local class's member cannot target an enclosing loop.
             loop_labels: std::mem::take(&mut self.loop_labels),
             loop_depth: std::mem::replace(&mut self.loop_depth, 0),
@@ -36409,6 +36501,7 @@ impl<'a> Checker<'a> {
         self.ret_ty = saved.ret_ty;
         self.return_allowed = saved.return_allowed;
         self.lambda_returns = saved.lambda_returns;
+        self.local_function_execution = saved.local_function_execution;
         self.loop_labels = saved.loop_labels;
         self.loop_depth = saved.loop_depth;
         self.this_unavailable = saved.this_unavailable;
@@ -46892,161 +46985,6 @@ impl<'a> Checker<'a> {
         (result, declined)
     }
 
-    /// Negative value/classifier facts established when `cond` evaluates to `truth`. Only stable
-    /// access paths participate; a computed property or mutable captured value may change before a
-    /// later `when` and therefore cannot make that `when` exhaustive.
-    fn condition_exclusions(
-        &self,
-        scope: &CheckerScope<'_>,
-        cond: ExprId,
-        truth: bool,
-    ) -> Vec<(NarrowPath, FlowExclusion)> {
-        if let Expr::Unary {
-            op: UnOp::Not,
-            operand,
-        } = self.file.expr(cond).clone()
-        {
-            return self.condition_exclusions(scope, operand, !truth);
-        }
-        if let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(cond).clone() {
-            let combines = (truth && op == BinOp::And) || (!truth && op == BinOp::Or);
-            if combines {
-                let mut exclusions = self.condition_exclusions(scope, lhs, truth);
-                exclusions.extend(self.condition_exclusions(scope, rhs, truth));
-                return exclusions;
-            }
-            // Equality against a Boolean literal is a truth projection, even when the other
-            // operand is itself a condition. For example, normal continuation after
-            // `if ((b == true) == false) return` proves `(b == true)`, hence `b` is neither false
-            // nor null. Keep this recursive and semantic instead of recognizing that source
-            // spelling: every checked Boolean expression can receive the projected truth value.
-            if matches!(op, BinOp::Eq | BinOp::Ne) {
-                for (condition, literal) in [(lhs, rhs), (rhs, lhs)] {
-                    let Expr::BoolLit(literal) = self.file.expr(literal) else {
-                        continue;
-                    };
-                    if self.expr_types[condition.0 as usize].non_null() != Ty::Boolean {
-                        continue;
-                    }
-                    let condition_truth = if (op == BinOp::Eq) == truth {
-                        *literal
-                    } else {
-                        !*literal
-                    };
-                    return self.boolean_value_exclusions(scope, condition, condition_truth);
-                }
-            }
-            let excludes_equality = (op == BinOp::Eq && !truth) || (op == BinOp::Ne && truth);
-            if excludes_equality {
-                for (path_expression, value_expression) in [(lhs, rhs), (rhs, lhs)] {
-                    let Some(path) = self.expr_access_path(path_expression) else {
-                        continue;
-                    };
-                    if self
-                        .stable_path_ty(scope, &path, self.span(path_expression))
-                        .is_none()
-                    {
-                        continue;
-                    }
-                    if let Some(exclusion) = self.flow_exclusion_value(value_expression) {
-                        return vec![(path, exclusion)];
-                    }
-                }
-            }
-            return Vec::new();
-        }
-        if let Expr::Is {
-            operand,
-            ty,
-            negated,
-        } = self.file.expr(cond).clone()
-        {
-            if negated != truth {
-                return Vec::new();
-            }
-            let Some(path) = self.expr_access_path(operand) else {
-                return Vec::new();
-            };
-            if self
-                .stable_path_ty(scope, &path, self.span(operand))
-                .is_none()
-            {
-                return Vec::new();
-            }
-            let resolved = self
-                .resolved_type_tys
-                .get(&(ty.span.lo, ty.span.hi))
-                .copied()
-                .unwrap_or_else(|| self.type_ref_ty_silent(scope, &ty));
-            return resolved
-                .non_null()
-                .obj_internal()
-                .map(|classifier| (path, FlowExclusion::Classifier(classifier)))
-                .into_iter()
-                .collect();
-        }
-        let Some(path) = self.expr_access_path(cond) else {
-            return Vec::new();
-        };
-        if self.expr_types[cond.0 as usize] != Ty::Boolean
-            || self.stable_path_ty(scope, &path, self.span(cond)).is_none()
-        {
-            return Vec::new();
-        }
-        vec![(path, FlowExclusion::Boolean(!truth))]
-    }
-
-    /// Facts implied by a checked Boolean expression having the exact value `truth`. Equality can
-    /// establish such a value for a nullable Boolean path even though that path cannot itself be
-    /// used as an `if` condition; the successful comparison also excludes null.
-    fn boolean_value_exclusions(
-        &self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-        truth: bool,
-    ) -> Vec<(NarrowPath, FlowExclusion)> {
-        if let Some(path) = self.expr_access_path(expression) {
-            let ty = self.expr_types[expression.0 as usize];
-            if ty.non_null() == Ty::Boolean
-                && self
-                    .stable_path_ty(scope, &path, self.span(expression))
-                    .is_some()
-            {
-                let mut exclusions = vec![(path.clone(), FlowExclusion::Boolean(!truth))];
-                if ty.is_nullable() {
-                    exclusions.push((path, FlowExclusion::Null));
-                }
-                return exclusions;
-            }
-        }
-        self.condition_exclusions(scope, expression, truth)
-    }
-
-    fn flow_exclusion_value(&self, expression: ExprId) -> Option<FlowExclusion> {
-        if let Some(entry) = self.resolved_enum_entries.get(&expression) {
-            return Some(FlowExclusion::EnumEntry {
-                classifier: entry.classifier,
-                name: entry.name.clone(),
-            });
-        }
-        match self.file.expr(expression) {
-            Expr::BoolLit(value) => Some(FlowExclusion::Boolean(*value)),
-            Expr::NullLit => Some(FlowExclusion::Null),
-            _ => match self.expr_lowers.get(&expression) {
-                Some(ExprLowering::SingletonValue(singleton)) => {
-                    Some(FlowExclusion::Singleton(singleton.classifier))
-                }
-                _ => None,
-            },
-        }
-    }
-
-    fn apply_condition_exclusions(&self, scope: &CheckerScope<'_>, cond: ExprId, truth: bool) {
-        for (path, exclusion) in self.condition_exclusions(scope, cond, truth) {
-            scope.exclude(path, exclusion);
-        }
-    }
-
     fn collect_condition_narrowings(
         &self,
         scope: &CheckerScope<'_>,
@@ -47067,6 +47005,29 @@ impl<'a> Checker<'a> {
             return;
         }
         if let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(cond).clone() {
+            if matches!(op, BinOp::Eq | BinOp::Ne) {
+                for (condition, literal) in [(lhs, rhs), (rhs, lhs)] {
+                    let Expr::BoolLit(literal) = self.file.expr(literal) else {
+                        continue;
+                    };
+                    if self.expr_types[condition.0 as usize].non_null() != Ty::Boolean {
+                        continue;
+                    }
+                    let condition_truth = if (op == BinOp::Eq) == truth {
+                        *literal
+                    } else {
+                        !*literal
+                    };
+                    self.collect_condition_narrowings(
+                        scope,
+                        condition,
+                        condition_truth,
+                        out,
+                        declined,
+                    );
+                    return;
+                }
+            }
             let combines = (truth && op == BinOp::And) || (!truth && op == BinOp::Or);
             if combines {
                 self.collect_condition_narrowings(scope, lhs, truth, out, declined);
@@ -47075,6 +47036,7 @@ impl<'a> Checker<'a> {
             }
         }
         self.contract_condition_narrowings(scope, cond, truth, out, declined);
+        self.implied_condition_narrowings(scope, cond, truth, out, declined);
         out.extend(self.smartcast_narrowings(scope, cond, !truth, declined));
         self.as_cast_narrowings(scope, cond, out);
     }
@@ -57408,7 +57370,11 @@ impl<'a> Checker<'a> {
             let (bt, written) = self.try_body_written_bindings(|checker| {
                 checker.expr_result(scope, body, wanted.expected, wanted.value_required)
             });
-            let mut exit_flows = vec![scope.flow_snapshot()];
+            let mut exit_flows = self
+                .normal_completion(body)
+                .then(|| scope.flow_snapshot())
+                .into_iter()
+                .collect::<Vec<_>>();
             let mut result = bt;
             let mut branch_types = vec![(body, bt)];
             for c in &catches {
@@ -57453,7 +57419,9 @@ impl<'a> Checker<'a> {
                     self.declare(scope, &c.name, cty, false);
                     self.expr_result(scope, c.body, wanted.expected, wanted.value_required)
                 };
-                exit_flows.push(scope.flow_snapshot());
+                if self.normal_completion(c.body) {
+                    exit_flows.push(scope.flow_snapshot());
+                }
                 branch_types.push((c.body, ht));
                 // In VALUE position, REFERENCE branches use the same full join as other conditional
                 // expressions: `try { x } catch { null }` is `T?`, and different reference classes
@@ -58679,38 +58647,22 @@ impl<'a> Checker<'a> {
                 );
                 if !candidates.is_empty() {
                     let type_args = self.resolved_explicit_type_args(scope, e);
-                    reported_inapplicable = self.report_member_and_extensions_inapplicable(
-                        e,
+                    self.report_inapplicable_receiver_candidates(
+                        scope,
+                        CallArgs {
+                            call: e,
+                            args: args.as_deref().unwrap_or_default(),
+                            arg_tys: &checked_arg_tys,
+                        },
                         &name,
-                        args.as_deref().unwrap_or_default(),
+                        CallConstraints {
+                            type_args: &type_args,
+                            receiver: safe_rt,
+                            expected,
+                        },
                         &candidates,
-                    ) || self.report_inapplicable_member_mapping_error(
-                        e,
-                        &name,
-                        args.as_deref().unwrap_or_default(),
-                        &candidates,
-                    ) || self
-                        .report_single_mapped_candidate_type_errors(
-                            scope,
-                            e,
-                            &name,
-                            args.as_deref().unwrap_or_default(),
-                            &checked_arg_tys,
-                            CallConstraints {
-                                type_args: &type_args,
-                                receiver: safe_rt,
-                                expected,
-                            },
-                            &candidates,
-                        )
-                        .is_some();
-                    if !reported_inapplicable {
-                        self.diags.error(
-                            self.call_callee_name_span(e),
-                            self.inapplicable_member_candidates_message(&name, &candidates),
-                        );
-                        reported_inapplicable = true;
-                    }
+                    );
+                    reported_inapplicable = true;
                 }
             }
             if result == Ty::Error
@@ -64449,9 +64401,9 @@ impl<'a> Checker<'a> {
             },
             MemberExtensionSelection::All,
         ) {
-            Ok(Some(candidate)) => candidate,
-            Ok(None) => return Ok(None),
-            Err(()) => {
+            MemberExtensionFunctionSelection::Selected(candidate) => *candidate,
+            MemberExtensionFunctionSelection::None(_) => return Ok(None),
+            MemberExtensionFunctionSelection::Ambiguous(_) => {
                 self.diags.error(
                     span,
                     format!("overload resolution ambiguity for member '{name}'"),
@@ -67367,7 +67319,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         call: MemberExtensionFunctionCall<'_>,
         selection: MemberExtensionSelection,
-    ) -> Result<Option<MemberExtensionFunctionCandidate>, ()> {
+    ) -> MemberExtensionFunctionSelection {
         self.member_extension_function_with_receivers(
             scope,
             &self.implicit_receivers(scope),
@@ -67382,7 +67334,7 @@ impl<'a> Checker<'a> {
         receivers: &[ImplicitReceiver],
         call: MemberExtensionFunctionCall<'_>,
         selection: MemberExtensionSelection,
-    ) -> Result<Option<MemberExtensionFunctionCandidate>, ()> {
+    ) -> MemberExtensionFunctionSelection {
         let receivers =
             member_extension_selection::ordinary_dispatch_first(scope, receivers.to_vec());
         self.with_member_extension_probes(scope, call.args, |probes| {
@@ -67395,6 +67347,5 @@ impl<'a> Checker<'a> {
                 selection,
             )
         })
-        .into_checker_result()
     }
 }

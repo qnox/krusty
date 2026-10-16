@@ -29,6 +29,7 @@ impl Checker<'_> {
         }
         if let Some(local) = self.lookup(scope, name) {
             scope.forget_paths_rooted_at(&PathRoot::Value(local.flow_identity));
+            self.forget_implied_facts(scope, local.flow_identity);
             if let Some(identity) = local.lexical_capture_identity {
                 for written in &mut self.try_body_writes {
                     written.insert(BindingIdentity::new(identity));
@@ -61,6 +62,7 @@ impl Checker<'_> {
         for &identity in written {
             if let Some((name, local)) = self.visible_local_binding(scope, identity) {
                 scope.forget_paths_rooted_at(&PathRoot::Value(local.flow_identity));
+                self.forget_implied_facts(scope, local.flow_identity);
                 scope.narrow_local(&name, None);
             }
         }

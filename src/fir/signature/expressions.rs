@@ -149,6 +149,26 @@ pub enum SigExpr {
         /// is a `returns() implies <argument>` effect (`assertTrue(x != null)`).
         condition: bool,
     },
+    /// A smart-cast fact invalidated only on branches whose result may still resolve to `Nothing`.
+    /// The fact reaches the continuation when any branch in this disjunctive clause is
+    /// non-completing; nested nodes represent conjunctions of clauses.
+    CompletionNarrowed {
+        value: SigExprId,
+        narrowed: SigExprId,
+        completions: OperandRange,
+    },
+    /// A compact smart-cast fact after `x op= rhs`. The parser represents a simple-name compound
+    /// assignment as an ordinary assignment whose value is `x op rhs`; only semantic call
+    /// selection can decide whether `opAssign` preserved the binding or `op` replaced it.
+    InPlaceAssignmentNarrowed {
+        value: SigExprId,
+        narrowed: SigExprId,
+        /// Receiver, explicit argument, and optionally the exact lexical local operator candidate.
+        operands: OperandRange,
+        operator: SigBinaryOperator,
+        scope: SignatureScopeId,
+        origin: OriginId,
+    },
     /// A lexical value after a successful non-null `as` cast that has already run. Evaluation
     /// keeps `value`'s type when it is already `target` or a subtype, and uses `target` only
     /// when the cast actually narrows.
