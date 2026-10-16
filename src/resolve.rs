@@ -41,6 +41,7 @@ mod annotation_applications;
 mod annotation_argument_constness;
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
+mod boolean_implications;
 mod dependency_annotation_defaults;
 use anonymous_object_capture::{
     record_anonymous_construction_captures, AnonymousCaptureCandidate,
@@ -91,6 +92,7 @@ mod common_classifier_views;
 #[cfg(test)]
 mod common_supertype_identity_tests;
 mod compound_assignments;
+mod condition_exclusions;
 mod conditional_branch;
 mod constant_evaluation;
 mod context_capture;
@@ -126,6 +128,7 @@ pub(crate) mod function_type_parameters;
 mod function_value_conversions;
 mod generic_call_bindings;
 mod if_expression;
+mod implicit_receiver_calls;
 mod implicit_rungs;
 mod inline_access;
 mod inner_constructor_calls;
@@ -280,7 +283,10 @@ use call_diagnostics::RejectedCallOwner;
 use call_result_constraint::CallResultConstraint;
 pub use callable_reference_selection::AdaptedRefArgument;
 use callable_reference_selection::CallableRefSpecialization;
-use capture_analysis::{local_class_declarations, local_fun_body_uses_any, used_names};
+use capture_analysis::{
+    collect_closure_reassigned, local_class_declarations, local_fun_body_uses_any, used_names,
+    ClosureWrite,
+};
 use capture_storage::{
     anonymous_descendant_writes_name, local_class_capture_expressions, AnonymousSuperReadProvenance,
 };
@@ -314,9 +320,7 @@ use lambda_returns::{call_implicit_lambda_label, LambdaResultConstraint, LambdaR
 use local_class_scope::EnclosingTypeParameterDeclaration;
 pub(crate) use local_class_scope::{pass_one_local_class_context, PassOneLocalClassContext};
 use loop_flow::collect_all_reassigned;
-pub(crate) use member_extension_selection::{
-    MemberExtensionFunctionSelection, MemberExtensionSelection,
-};
+use member_extension_selection::{MemberExtensionFunctionSelection, MemberExtensionSelection};
 pub(crate) use named_class_constructors::publish_named_class_constructors;
 pub(crate) use override_plans::publish_override_plans;
 use postponed_constraints::PostponedCallConstraints;
@@ -4495,78 +4499,6 @@ fn collect_lambda_outer_writes(
         }
     }
     ce(file, e, outer_names, out);
-}
-
-/// One closure-captured write: the variable's name, the enclosing-lambda stack at the write, and
-/// the assigned value when the write is an assignment (`None` for inc/dec).
-type ClosureWrite = (String, Vec<ExprId>, Option<ExprId>);
-
-/// Collect captured writes and the lambda chain that controls when each write can execute.
-fn collect_closure_reassigned(file: &File, e: ExprId, out: &mut Vec<ClosureWrite>) {
-    // The child walk takes two closures at once, so the accumulators go through `RefCell`s; the
-    // lambda stack keeps its push/pop discipline because every borrow ends inside the recursive
-    // call that took it.
-    let cell = std::cell::RefCell::new(std::mem::take(out));
-    let stack = std::cell::RefCell::new(Vec::new());
-    fn ce(
-        file: &File,
-        e: ExprId,
-        stack: &std::cell::RefCell<Vec<ExprId>>,
-        cell: &std::cell::RefCell<Vec<ClosureWrite>>,
-    ) {
-        let is_lambda = matches!(file.expr(e), Expr::Lambda { .. });
-        if is_lambda {
-            stack.borrow_mut().push(e);
-        }
-        if !stack.borrow().is_empty() {
-            if let Expr::IncDec { target, .. } = file.expr(e) {
-                if let Expr::Name(n) = file.expr(*target) {
-                    cell.borrow_mut()
-                        .push((n.clone(), stack.borrow().clone(), None));
-                }
-            }
-        }
-        file.any_child_expr(
-            e,
-            &mut |c| {
-                ce(file, c, stack, cell);
-                false
-            },
-            &mut |s| {
-                cs(file, s, stack, cell);
-                false
-            },
-        );
-        if is_lambda {
-            stack.borrow_mut().pop();
-        }
-    }
-    fn cs(
-        file: &File,
-        s: StmtId,
-        stack: &std::cell::RefCell<Vec<ExprId>>,
-        cell: &std::cell::RefCell<Vec<ClosureWrite>>,
-    ) {
-        if !stack.borrow().is_empty() {
-            match file.stmt(s) {
-                Stmt::Assign { name, value } => {
-                    cell.borrow_mut()
-                        .push((name.clone(), stack.borrow().clone(), Some(*value)));
-                }
-                Stmt::IncDec { name, .. } => {
-                    cell.borrow_mut()
-                        .push((name.clone(), stack.borrow().clone(), None));
-                }
-                _ => {}
-            }
-        }
-        file.any_child_stmt(s, &mut |c| {
-            ce(file, c, stack, cell);
-            false
-        });
-    }
-    ce(file, e, &stack, &cell);
-    *out = cell.into_inner();
 }
 
 fn fun_body_expr(body: &FunBody) -> Option<ExprId> {
@@ -10656,23 +10588,19 @@ impl ScopeBinding {
     }
 }
 
-/// The checker's lexical scope chain. See [`scope`] — the chain is threaded as a parameter, not
-/// held on the checker, so a scope cannot outlive its parent and cannot be left open by an early
-/// return.
+/// The lexical scope chain is threaded so it cannot outlive its parent or survive an early return.
 type CheckerScope<'p> = scope::Scope<'p, ScopeBinding>;
 
 #[derive(Clone)]
 struct ScopedProperty {
     name: String,
     ty: Ty,
-    /// A narrower explicit backing-field type, visible only inside this declaration's owner.
-    /// The public property type remains `ty` everywhere else.
+    source_visible: bool,
+    /// Narrower backing-field type visible only inside the owner; `ty` remains public.
     owner_storage_ty: Option<Ty>,
     is_var: bool,
     owner: TypeName,
-    /// Exact implicit-receiver rung whose member family contributed this property. A property
-    /// inherited by the current subclass and the same declaration reached through an enclosing
-    /// base-typed receiver have the same owner and type but different runtime identities.
+    /// Exact contributing receiver rung; the same inherited declaration can have distinct runtime identities.
     dispatch_receiver_identity: Option<(usize, usize)>,
     class_storage: Option<u32>,
     enum_entry_property: Option<u32>,
@@ -10841,19 +10769,35 @@ fn member_extension_function_shapes_in(
                     .iter()
                     .map(|parameter| crate::symbol_resolver::ty_subst(*parameter, &class_bindings))
                     .collect::<Vec<_>>();
+                let priority = MemberExtensionPriority {
+                    dispatch_rank,
+                    dispatch_depth,
+                    owner,
+                    declared_receiver,
+                    generic_receiver,
+                    receiver_domain,
+                };
+                let mut diagnostic_candidate = crate::libraries::FunctionInfo::classifier_member(
+                    crate::libraries::FnKind::Extension,
+                    owner,
+                    member,
+                );
+                crate::symbol_resolver::specialize_member_function(
+                    source,
+                    dispatch_receiver.ty,
+                    &mut diagnostic_candidate,
+                    &class_bindings,
+                );
+                diagnostic_candidate.scope_rank =
+                    u32::try_from(priority.dispatch_rank).unwrap_or(u32::MAX);
+                diagnostic_candidate.receiver_rank =
+                    u32::try_from(priority.dispatch_depth).unwrap_or(u32::MAX);
                 shapes.push(MemberExtensionFunctionShape {
-                    priority: MemberExtensionPriority {
-                        dispatch_rank,
-                        dispatch_depth,
-                        owner,
-                        declared_receiver,
-                        generic_receiver,
-                        receiver_domain,
-                    },
+                    priority,
                     dispatch_receiver,
                     is_operator: function.signature.is_operator(),
                     function: function.clone(),
-                    member,
+                    diagnostic_candidate,
                     class_bindings: class_bindings.clone(),
                     declared_params,
                     owner,
@@ -11412,7 +11356,8 @@ impl<'a> Checker<'a> {
             None => self.member_extension_function(scope, request, selection),
         };
         match selected {
-            Ok(Some(candidate)) => {
+            MemberExtensionFunctionSelection::Selected(candidate) => {
+                let candidate = *candidate;
                 for &(parameter, source) in &candidate.argument_parameters {
                     let (Some(&expected), Some(&actual)) =
                         (candidate.visible_params.get(parameter), arg_tys.get(source))
@@ -11477,17 +11422,8 @@ impl<'a> Checker<'a> {
                 self.mark_extension_receiver_used(call, candidate.dispatch_receiver);
                 Some(candidate.ret)
             }
-            Ok(None) => {
-                let candidates = self.rejected_member_extension_candidates(
-                    scope,
-                    call,
-                    args.len(),
-                    extension_receiver,
-                    name,
-                    selection,
-                    receivers,
-                );
-                self.report_single_mapped_candidate_type_errors(
+            MemberExtensionFunctionSelection::None(rejections) => self
+                .report_single_mapped_candidate_type_errors(
                     scope,
                     call,
                     name,
@@ -11498,10 +11434,9 @@ impl<'a> Checker<'a> {
                         receiver: extension_receiver,
                         expected: result_constraint.expected(),
                     },
-                    &candidates,
-                )
-            }
-            Err(_) => {
+                    &rejections.call_candidates,
+                ),
+            MemberExtensionFunctionSelection::Ambiguous(_) => {
                 self.diags.error(
                     self.call_callee_name_span(call),
                     format!("overload resolution ambiguity for member '{name}'"),
@@ -12786,6 +12721,7 @@ impl<'a> Checker<'a> {
             .chain(&extension_overloads)
             .cloned()
             .collect::<Vec<_>>();
+        let rejected_candidates = overloads.clone();
 
         let selection = self.select_callable_candidate(
             scope,
@@ -12808,6 +12744,7 @@ impl<'a> Checker<'a> {
                             overloads: extension_overloads,
                         },
                         member_mapping_failure: None,
+                        rejected_candidates,
                     };
                 }
                 if let Some((internal, alias_target)) =
@@ -12831,6 +12768,7 @@ impl<'a> Checker<'a> {
                         overloads: extension_overloads,
                     },
                     member_mapping_failure: None,
+                    rejected_candidates,
                 };
             }
             Some(CallableCandidateSelection::MissingContext(_)) if tower_rung.is_implicit() => {
@@ -12845,6 +12783,7 @@ impl<'a> Checker<'a> {
                         overloads: extension_overloads,
                     },
                     member_mapping_failure: None,
+                    rejected_candidates,
                 };
             }
             Some(CallableCandidateSelection::MissingContext(selected)) => {
@@ -12859,6 +12798,7 @@ impl<'a> Checker<'a> {
                             overloads: extension_overloads,
                         },
                         member_mapping_failure: None,
+                        rejected_candidates,
                     };
                 }
                 self.report_callable_ambiguity(call, name, &candidates);
@@ -12882,6 +12822,7 @@ impl<'a> Checker<'a> {
                         overloads: extension_overloads,
                     },
                     member_mapping_failure: mapping_failure,
+                    rejected_candidates,
                 };
             }
         };
@@ -17754,6 +17695,7 @@ impl<'a> Checker<'a> {
                 // therefore handled by their own rungs below before the imported-extension family.
                 let mut member_mapping_failure = None;
                 let mut extension_rung = None;
+                let mut rejected_member_candidates = receiver_callables.functions().to_vec();
                 if crate::symbol_resolver::supports_member_lookup(rt) {
                     match self.record_member_call_with_slots(
                         scope,
@@ -17769,8 +17711,10 @@ impl<'a> Checker<'a> {
                         MemberSlotCall::ExtensionRung {
                             extension,
                             member_mapping_failure: failure,
+                            rejected_candidates,
                         } => {
                             member_mapping_failure = failure;
+                            rejected_member_candidates = rejected_candidates;
                             extension_rung = Some(extension);
                         }
                     }
@@ -17861,12 +17805,8 @@ impl<'a> Checker<'a> {
                 // more specific extension (`rejected_call_owner`).
                 let member_owns_failure =
                     extension_rung.selection.is_none() && member_mapping_failure.is_some() && {
-                        let candidates = self
-                            .stable_receiver_callables(rt, &name)
-                            .functions()
-                            .to_vec();
                         !matches!(
-                            self.rejected_call_owner(call, args, &candidates),
+                            self.rejected_call_owner(call, args, &rejected_member_candidates),
                             RejectedCallOwner::Extension(_)
                         )
                     };
@@ -18051,10 +17991,7 @@ impl<'a> Checker<'a> {
                         return Ty::Error;
                     }
                 }
-                let mut inapplicable_candidates = self
-                    .stable_receiver_callables(rt, &name)
-                    .functions()
-                    .to_vec();
+                let mut inapplicable_candidates = rejected_member_candidates;
                 // This is the constraint-collection visit of a postponed builder call. The
                 // enclosing invocation rechecks the lambda after solving its variables; member
                 // applicability is only final during that concrete visit.
@@ -21332,7 +21269,7 @@ impl<'a> Checker<'a> {
                 // receiver-less declaration (`run { }` in a member is `this.run { }`), wherever
                 // either is declared. Applicability within the receiver tower is evaluated one
                 // implicit receiver at a time.
-                let mut retained_receiver_call_failure = None;
+                let mut retained_receiver_call_rejections = None;
                 let top_level_owns_the_name = matches!(
                     &top_level,
                     Some(CallableCandidateSelection::Selected(_))
@@ -21357,7 +21294,7 @@ impl<'a> Checker<'a> {
                         MemberCallTowerRung::implicit(implicit_receiver),
                         &fname,
                         expected,
-                        &mut retained_receiver_call_failure,
+                        &mut retained_receiver_call_rejections,
                     ) {
                         return ret;
                     }
@@ -21703,8 +21640,24 @@ impl<'a> Checker<'a> {
                 ) {
                     return Ty::Error;
                 }
-                if let Some(retained) = retained_receiver_call_failure {
-                    self.report_retained_member_mapping_failure(call, &fname, args, retained);
+                if retained_receiver_call_rejections
+                    .as_ref()
+                    .is_some_and(|rejections| rejections.has_mapping_failure())
+                {
+                    let retained = retained_receiver_call_rejections
+                        .take()
+                        .expect("a retained mapping failure belongs to one receiver rung");
+                    self.report_rejected_implicit_receiver_call(
+                        scope,
+                        CallArgs {
+                            call,
+                            args,
+                            arg_tys: &arg_tys,
+                        },
+                        &fname,
+                        expected,
+                        retained,
+                    );
                     return Ty::Error;
                 }
                 if let Some((arguments, candidates, class_name, internal)) =
@@ -21829,6 +21782,22 @@ impl<'a> Checker<'a> {
                             );
                             return Ty::Error;
                         }
+                    }
+                }
+                if !had_rejected_callable {
+                    if let Some(rejections) = retained_receiver_call_rejections {
+                        self.report_rejected_implicit_receiver_call(
+                            scope,
+                            CallArgs {
+                                call,
+                                args,
+                                arg_tys: &arg_tys,
+                            },
+                            &fname,
+                            expected,
+                            rejections,
+                        );
+                        return Ty::Error;
                     }
                 }
                 let (message, identity, diagnostic_span) = if had_rejected_callable {
@@ -21997,7 +21966,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::DoWhile { body, cond, label } => {
-                self.clear_narrowings_a_loop_invalidates(scope, &[body, cond]);
+                self.clear_narrowings_a_do_while_invalidates(scope, body, cond);
                 // Unlike a while body, a do-while block and its condition share one lexical scope:
                 // `do { val x = ... } while (x)` is legal Kotlin. Keep that scope alive through
                 // condition checking instead of rebuilding declarations from typed syntax.
@@ -22033,7 +22002,7 @@ impl<'a> Checker<'a> {
                 label,
             } => {
                 self.clear_narrowings_a_loop_invalidates(scope, &[body]);
-                self.stmt_for(scope, s, name, range, body, label)
+                self.stmt_for(scope, s, name, range, body, label);
             }
             Stmt::ForEach {
                 name,
@@ -22042,7 +22011,7 @@ impl<'a> Checker<'a> {
                 label,
             } => {
                 self.clear_narrowings_a_loop_invalidates(scope, &[body]);
-                self.stmt_for_each(scope, s, name, iterable, body, label)
+                self.stmt_for_each(scope, s, name, iterable, body, label);
             }
             Stmt::Expr(e) => {
                 // A `kotlin.contracts.contract { … }` statement is erased metadata: it is never
@@ -22336,6 +22305,10 @@ impl<'a> Checker<'a> {
         };
         // An explicitly typed callable-reference local has already adapted to its target shape.
         // Keep that shape instead of reopening the raw reference and undoing the adaptation.
+        // Computed before the val is declared: `val x = x != null` talks about the OUTER `x`.
+        let boolean_implications = (!is_var)
+            .then(|| self.boolean_val_implications(scope, init, bound_ty))
+            .flatten();
         let flow_identity = if let Some(function_type) = declared
             .filter(|ty| matches!(ty, Ty::Fun(_)))
             .or_else(|| self.callable_reference_types.get(&init).copied())
@@ -22354,6 +22327,9 @@ impl<'a> Checker<'a> {
         }
         if let Some(origin) = safe_call_origin {
             self.attach_safe_call_origin(scope, &name, origin);
+        }
+        if let Some(implications) = boolean_implications {
+            scope.record_boolean_implications(flow_identity, implications);
         }
         if declared.is_none() && !is_var {
             if let Some(path) = self.visible_value_path(scope, &name) {
@@ -22437,7 +22413,11 @@ impl<'a> Checker<'a> {
         // miscompiled).
         let span = self.file.stmt_spans[s.0 as usize];
         let target_span = self.assignment_target_span(s);
-        self.record_local_write(s, self.lookup(scope, &name));
+        let scoped = self.lookup(scope, &name);
+        if let Some(local) = scoped {
+            self.report_uninitialized_default_parameter_write(s, local.flow_identity);
+        }
+        self.record_local_write(s, scoped);
         let local = self
             .lookup(scope, &name)
             .filter(|local| !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. }))
@@ -22542,10 +22522,20 @@ impl<'a> Checker<'a> {
 
     fn stmt_assign(&mut self, scope: &CheckerScope<'_>, s: StmtId, name: String, value: ExprId) {
         // `name op= rhs` with a user `opAssign` operator → in-place call (legal on a `val`).
-        if self.try_in_place_assignment(scope, s, value) {
+        let compound = !self.file.value_operator_spans.contains_key(&value.0)
+            && matches!(
+                self.file.expr(value),
+                Expr::Binary { lhs, .. }
+                    if matches!(self.file.expr(*lhs), Expr::Name(lhs) if lhs == &name)
+            );
+        let in_place = self.try_in_place_assignment(scope, s, value);
+        if in_place {
             return;
         }
         let scoped = self.lookup(scope, &name);
+        if let Some(local) = scoped {
+            self.report_uninitialized_default_parameter_write(s, local.flow_identity);
+        }
         self.record_local_write(s, scoped);
         let deferred_property = scoped.and_then(|local| match local.origin {
             ReceiverFnValueOrigin::DispatchProperty {
@@ -22694,7 +22684,11 @@ impl<'a> Checker<'a> {
                     // that actually runs will read.
                     if is_var && self.unreachable_statement_depth == 0 {
                         let narrowing = self.assignment_narrowing(&name, lty, vt, target_span);
-                        self.set_local_narrow(scope, &name, narrowing);
+                        if compound {
+                            self.set_local_narrow_preserving_implications(scope, &name, narrowing);
+                        } else {
+                            self.set_local_narrow(scope, &name, narrowing);
+                        }
                         // A write under a live smart-cast shadow must also move the PROOF binding:
                         // reads below the shadow's rung type the variable through it, so a stale
                         // shadow would keep a killed cast alive (`if (t != null) { t = null;
@@ -23256,6 +23250,7 @@ impl<'a> Checker<'a> {
     /// functions are lifted to private static methods; captures become leading parameters.
     fn check_local_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, stmt_id: StmtId) {
         let enclosing_return_frame = self.lambda_returns.enter_function(Some(f.name.clone()));
+        let enclosing_execution = self.local_function_execution.replace(stmt_id);
         self.local_function_receivers
             .extend(f.receiver.as_ref().map(|receiver| receiver.span));
         let suppression_depth = self.check_local_function_annotation_applications(scope, f);
@@ -23311,30 +23306,41 @@ impl<'a> Checker<'a> {
         );
         self.lexical_type_parameter_bounds
             .record(&f.type_params, &semantic_tparams);
-        // Collect outer local names (everything currently in scope that isn't one of f's params).
+        // Collect outer local names. A parameter hides an outer same-spelled binding only after
+        // its own default has been checked, so capture discovery applies that declaration order
+        // below instead of removing every parameter up front.
         let own_params: crate::fx_hash::HashSet<String> =
             f.params.iter().map(|p| p.name.clone()).collect();
         // The nearest binding wins. A member reached through the receiver hides an outer local of
         // the same spelling, including the constructor parameter a stored property shadows.
         let outer_names = Self::capturable_local_names(scope, &own_params);
+        let default_outer_names =
+            Self::capturable_local_names(scope, &crate::fx_hash::HashSet::default());
 
         // Captured outer locals become extra leading parameters. Parameter defaults run in the
         // lifted callable's `$default` body, so they capture like the function body itself.
         let mut captured_locals: Vec<(String, Ty, bool)> = Vec::new();
-        if !outer_names.is_empty() {
+        if !default_outer_names.is_empty() {
             let body = match &f.body {
                 FunBody::Expr(expression) | FunBody::Block(expression) => Some(*expression),
                 FunBody::None => None,
             };
-            for n in &outer_names {
+            for n in &default_outer_names {
                 let single: crate::fx_hash::HashSet<String> = std::iter::once(n.clone()).collect();
-                let used = body.is_some_and(|expression| {
-                    local_fun_body_uses_any(self.file, expression, &single)
-                }) || f
-                    .params
-                    .iter()
-                    .filter_map(|parameter| parameter.default)
-                    .any(|default| local_fun_body_uses_any(self.file, default, &single));
+                let used_in_body = outer_names.contains(n)
+                    && body.is_some_and(|expression| {
+                        local_fun_body_uses_any(self.file, expression, &single)
+                    });
+                let mut hidden = false;
+                let used_in_default = f.params.iter().any(|parameter| {
+                    let used = !hidden
+                        && parameter.default.is_some_and(|default| {
+                            local_fun_body_uses_any(self.file, default, &single)
+                        });
+                    hidden |= parameter.name == *n;
+                    used
+                });
+                let used = used_in_body || used_in_default;
                 if used {
                     let ty = self.lookup(scope, n).map(|l| l.ty).unwrap_or(Ty::Error);
                     captured_locals.push((n.clone(), ty, false));
@@ -23777,6 +23783,7 @@ impl<'a> Checker<'a> {
             })),
         );
         self.active_lexical_policies.truncate(suppression_depth);
+        self.local_function_execution = enclosing_execution;
         self.lambda_returns.leave_function(enclosing_return_frame);
     }
 }
@@ -27197,6 +27204,7 @@ fun box(): String {
                             receiver_rank: 0,
                             source_key: None,
                             stable_declaration: None,
+                            source_visible: true,
                             getter_declaration: None,
                             setter_declaration: None,
                             source_member: None,
@@ -32640,7 +32648,7 @@ impl<'a> Checker<'a> {
 }
 
 /// Select one member-extension function using caller-owned source, receivers, and call probes.
-pub(crate) fn member_extension_function_with(
+fn member_extension_function_with(
     source: &dyn SymbolSource,
     oracle: &dyn crate::assignable::TypeOracle,
     receivers: &[ImplicitReceiver],
@@ -32659,12 +32667,21 @@ pub(crate) fn member_extension_function_with(
         trailing_lambda,
         inference_bindings,
     } = call;
-    let (mut candidates, mut excluded) = (Vec::new(), Vec::new());
+    let (mut candidates, mut convention_candidates, mut rejected_candidates) =
+        (Vec::new(), Vec::new(), Vec::new());
     let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
     for shape in member_extension_function_shapes_in(source, receivers, extension_receiver, name) {
-        if member_extension_selection::exclude_delegate_convention(&shape, selection, &mut excluded)
-        {
+        if member_extension_selection::exclude_delegate_convention(
+            &shape,
+            selection,
+            &mut convention_candidates,
+        ) {
             continue;
+        }
+        if let Some(candidate) =
+            member_extension_selection::mapped_rejected_candidate(probes, &call, selection, &shape)
+        {
+            rejected_candidates.push(candidate);
         }
         let Some(instantiated) = instantiate_member_extension_with(
             probes,
@@ -32684,7 +32701,7 @@ pub(crate) fn member_extension_function_with(
             member_extension_selection::retain_inapplicable_delegate_convention(
                 &shape,
                 selection,
-                &mut excluded,
+                &mut convention_candidates,
             );
             continue;
         };
@@ -32696,7 +32713,15 @@ pub(crate) fn member_extension_function_with(
             candidate.priority
         });
     if maximal.is_empty() {
-        return MemberExtensionFunctionSelection::None(excluded);
+        return MemberExtensionFunctionSelection::None(Box::new(
+            member_extension_selection::MemberExtensionRejections {
+                convention_candidates,
+                call_candidates: member_extension_selection::finish_rejected_candidates(
+                    oracle,
+                    rejected_candidates,
+                ),
+            },
+        ));
     }
     let best = maximal
         .iter()
@@ -33106,6 +33131,9 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds::default(),
         next_lexical_capture_identity: 0,
         try_body_writes: Vec::new(),
+        uninitialized_default_parameters: HashMap::default(),
+        reported_uninitialized_default_parameter_reads: HashSet::default(),
+        reported_uninitialized_default_parameter_writes: HashSet::default(),
         next_flow_identity: 0,
         checked_local_class_declarations: crate::fx_hash::HashSet::default(),
         checked_local_classifier_identities: HashMap::default(),
@@ -33117,6 +33145,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         loop_depth: 0,
         return_allowed: true,
         lambda_returns: LambdaReturnScopes::default(),
+        local_function_execution: None,
         lambda_body_results: HashMap::default(),
     };
     if resolved_index.is_none() {
@@ -35163,9 +35192,10 @@ struct MemberExtensionFunctionShape {
     priority: MemberExtensionPriority,
     dispatch_receiver: ImplicitReceiver,
     function: MemberExtFunSig,
-    /// Exact provider declaration that produced `function`. Signature recovery carries this
-    /// identity forward instead of searching the classifier a second time by a partial key.
-    member: crate::libraries::LibraryMember,
+    /// Provider-normalized callable retained at collection time for rejected-call diagnostics.
+    /// Selection failure must not trigger another symbol lookup or reconstruct this declaration
+    /// from its owner/name/arity.
+    diagnostic_candidate: crate::libraries::FunctionInfo,
     class_bindings: HashMap<String, Ty>,
     /// Applied declaration parameter types, retained beside the receiver so inherited `operator`
     /// capability can be matched without re-reading either provider's source representation.
@@ -35762,7 +35792,7 @@ struct Checker<'a> {
     /// reassigned `var` as effectively final (passed by value).
     fn_reassigned: crate::fx_hash::HashSet<String>,
     /// Captured writes, with their enclosing lambdas and assigned expression when one exists.
-    fn_closure_reassigned: Vec<(String, Vec<ExprId>, Option<ExprId>)>,
+    fn_closure_reassigned: Vec<ClosureWrite>,
     /// Current type-checking recursion depth — guards against a stack overflow on a pathologically
     /// deep expression; past the limit, the expression types as `Error` (the file is skipped).
     expr_depth: u32,
@@ -35833,7 +35863,12 @@ struct Checker<'a> {
     receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds,
     next_lexical_capture_identity: u32,
     /// Bindings written by each try body being checked, innermost last.
-    try_body_writes: Vec<crate::fx_hash::HashSet<lexical_bindings::BindingIdentity>>,
+    try_body_writes: Vec<catch_flow::TryBodyWrites>,
+    /// Parameter identities visible before their own declaration point while checking defaults.
+    uninitialized_default_parameters: HashMap<u32, String>,
+    /// Defaults may be revisited while inference settles; diagnostics are source occurrences.
+    reported_uninitialized_default_parameter_reads: HashSet<ExprId>,
+    reported_uninitialized_default_parameter_writes: HashSet<StmtId>,
     next_flow_identity: u32,
     checked_local_class_declarations: crate::fx_hash::HashSet<DeclId>,
     checked_local_classifier_identities: HashMap<crate::fir::DeclarationId, TypeName>,
@@ -35856,6 +35891,9 @@ struct Checker<'a> {
     /// Resolver-owned return labels, targets, expected/result types, and active lambda nesting for
     /// the body currently being checked.
     lambda_returns: LambdaReturnScopes,
+    /// The named local function currently being checked. Unlike an inline-spliced lambda, its body
+    /// executes only when called and must not mutate the enclosing body's implication state.
+    local_function_execution: Option<StmtId>,
     /// Every checked lambda body's inferred result before coercion to the selected function type's
     /// return, keyed by the lambda expression. A rechecked lambda's committed result overwrites a
     /// probing one. Body state (`take_body_state`) deliberately does not swap this published fact.
@@ -35879,6 +35917,7 @@ struct BodyState {
     ret_ty: Ty,
     return_allowed: bool,
     lambda_returns: LambdaReturnScopes,
+    local_function_execution: Option<StmtId>,
     loop_labels: Vec<String>,
     loop_depth: usize,
     this_unavailable: bool,
@@ -35889,7 +35928,7 @@ struct BodyState {
     allow_lambda_mutation: bool,
     symbolic_signature_inference: bool,
     fn_reassigned: crate::fx_hash::HashSet<String>,
-    fn_closure_reassigned: Vec<(String, Vec<ExprId>, Option<ExprId>)>,
+    fn_closure_reassigned: Vec<ClosureWrite>,
     lexical_class_context: Vec<TypeName>,
     exact_anonymous_class_roots: crate::fx_hash::HashSet<TypeName>,
 }
@@ -35901,6 +35940,10 @@ enum MemberSlotCall {
     ExtensionRung {
         extension: ExtensionRungSelection,
         member_mapping_failure: Option<Box<MemberMappingFailure>>,
+        /// The normalized member-level family that produced this rejected extension rung. A
+        /// terminal diagnostic consumes these exact declarations instead of querying providers a
+        /// second time after selection has failed.
+        rejected_candidates: Vec<crate::libraries::FunctionInfo>,
     },
 }
 
@@ -36379,6 +36422,7 @@ impl<'a> Checker<'a> {
             ret_ty: std::mem::replace(&mut self.ret_ty, Ty::Unit),
             return_allowed: std::mem::replace(&mut self.return_allowed, true),
             lambda_returns: std::mem::take(&mut self.lambda_returns),
+            local_function_execution: self.local_function_execution.take(),
             // A `break`/`continue` inside a local class's member cannot target an enclosing loop.
             loop_labels: std::mem::take(&mut self.loop_labels),
             loop_depth: std::mem::replace(&mut self.loop_depth, 0),
@@ -36409,6 +36453,7 @@ impl<'a> Checker<'a> {
         self.ret_ty = saved.ret_ty;
         self.return_allowed = saved.return_allowed;
         self.lambda_returns = saved.lambda_returns;
+        self.local_function_execution = saved.local_function_execution;
         self.loop_labels = saved.loop_labels;
         self.loop_depth = saved.loop_depth;
         self.this_unavailable = saved.this_unavailable;
@@ -43420,6 +43465,7 @@ impl<'a> Checker<'a> {
                 dispatch_receiver_identity: None,
                 class_storage: None,
                 enum_entry_property: Some(field as u32),
+                source_visible: true,
                 source_member: None,
                 stable_declaration: None,
             });
@@ -43744,6 +43790,7 @@ impl<'a> Checker<'a> {
                     properties.push(ScopedProperty {
                         name: property.name.clone(),
                         ty,
+                        source_visible: property.source_visible,
                         owner_storage_ty,
                         is_var: property.setter.is_some(),
                         owner: property.owner,
@@ -43841,77 +43888,6 @@ impl<'a> Checker<'a> {
         .then_some(flow)
     }
 
-    /// Whether a non-inline lambda that exists by `site` can mutate `name` outside the execution
-    /// currently being checked. Writes in the same materialized lambda chain are ordinary
-    /// straight-line writes: the assignment itself replaces the flow fact, and a later read may
-    /// use that exact assigned type. A sibling or nested escaping closure can run between proof and
-    /// use and therefore still makes the variable unstable. Inline-spliced lambdas do not add an
-    /// execution boundary on either side of the comparison.
-    fn closure_reassigned_before(&self, name: &str, site: Span) -> bool {
-        self.fn_closure_reassigned.iter().any(|(n, chain, _)| {
-            self.capturing_closure_write_exists_before(n, chain, name, site)
-                && !self.same_materialized_lambda_chain(chain)
-        })
-    }
-
-    /// Whether a materialized capturing closure containing a write exists by `site`, irrespective
-    /// of which closure body the checker is currently visiting. This is the enclosing scope's
-    /// invalidation question; [`Self::closure_reassigned_before`] is the current-execution stability
-    /// question.
-    fn capturing_closure_reassigned_before(&self, name: &str, site: Span) -> bool {
-        self.fn_closure_reassigned
-            .iter()
-            .any(|(n, chain, _)| self.capturing_closure_write_exists_before(n, chain, name, site))
-    }
-
-    fn capturing_closure_write_exists_before(
-        &self,
-        recorded_name: &str,
-        chain: &[ExprId],
-        name: &str,
-        site: Span,
-    ) -> bool {
-        recorded_name == name
-            && chain.iter().any(|&lambda| {
-                self.span(lambda).lo <= site.lo && !self.lambda_is_inline_spliced(lambda)
-            })
-    }
-
-    fn same_materialized_lambda_chain(&self, recorded: &[ExprId]) -> bool {
-        recorded
-            .iter()
-            .copied()
-            .filter(|&lambda| !self.lambda_is_inline_spliced(lambda))
-            .eq(self
-                .lambda_returns
-                .active_chain()
-                .iter()
-                .copied()
-                .filter(|&lambda| !self.lambda_is_inline_spliced(lambda)))
-    }
-
-    /// Whether every relevant capturing-lambda write stores the null literal.
-    fn closure_writes_only_null(&self, name: &str, site: Span) -> bool {
-        self.fn_closure_reassigned
-            .iter()
-            .filter(|(n, chain, _)| {
-                n == name
-                    && chain.iter().any(|&lambda| {
-                        self.span(lambda).lo <= site.lo && !self.lambda_is_inline_spliced(lambda)
-                    })
-                    && !self.same_materialized_lambda_chain(chain)
-            })
-            .all(|(_, _, value)| value.is_some_and(|v| matches!(self.file.expr(v), Expr::NullLit)))
-    }
-
-    /// The checker's recorded capture decision for a lambda expression (set when the enclosing
-    /// call is checked against an inline callee).
-    fn lambda_is_inline_spliced(&self, e: ExprId) -> bool {
-        matches!(
-            self.expr_lowers.get(&e),
-            Some(ExprLowering::Lambda(info)) if info.capture == LambdaCapture::InlineSplice
-        )
-    }
     /// Whether `name` is already declared in the *innermost* (current) scope — a conflicting
     /// redeclaration (kotlinc rejects it). A declaration in an *outer* scope is legal shadowing.
     fn declared_in_current_scope(&self, scope: &CheckerScope<'_>, name: &str) -> bool {
@@ -46892,161 +46868,6 @@ impl<'a> Checker<'a> {
         (result, declined)
     }
 
-    /// Negative value/classifier facts established when `cond` evaluates to `truth`. Only stable
-    /// access paths participate; a computed property or mutable captured value may change before a
-    /// later `when` and therefore cannot make that `when` exhaustive.
-    fn condition_exclusions(
-        &self,
-        scope: &CheckerScope<'_>,
-        cond: ExprId,
-        truth: bool,
-    ) -> Vec<(NarrowPath, FlowExclusion)> {
-        if let Expr::Unary {
-            op: UnOp::Not,
-            operand,
-        } = self.file.expr(cond).clone()
-        {
-            return self.condition_exclusions(scope, operand, !truth);
-        }
-        if let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(cond).clone() {
-            let combines = (truth && op == BinOp::And) || (!truth && op == BinOp::Or);
-            if combines {
-                let mut exclusions = self.condition_exclusions(scope, lhs, truth);
-                exclusions.extend(self.condition_exclusions(scope, rhs, truth));
-                return exclusions;
-            }
-            // Equality against a Boolean literal is a truth projection, even when the other
-            // operand is itself a condition. For example, normal continuation after
-            // `if ((b == true) == false) return` proves `(b == true)`, hence `b` is neither false
-            // nor null. Keep this recursive and semantic instead of recognizing that source
-            // spelling: every checked Boolean expression can receive the projected truth value.
-            if matches!(op, BinOp::Eq | BinOp::Ne) {
-                for (condition, literal) in [(lhs, rhs), (rhs, lhs)] {
-                    let Expr::BoolLit(literal) = self.file.expr(literal) else {
-                        continue;
-                    };
-                    if self.expr_types[condition.0 as usize].non_null() != Ty::Boolean {
-                        continue;
-                    }
-                    let condition_truth = if (op == BinOp::Eq) == truth {
-                        *literal
-                    } else {
-                        !*literal
-                    };
-                    return self.boolean_value_exclusions(scope, condition, condition_truth);
-                }
-            }
-            let excludes_equality = (op == BinOp::Eq && !truth) || (op == BinOp::Ne && truth);
-            if excludes_equality {
-                for (path_expression, value_expression) in [(lhs, rhs), (rhs, lhs)] {
-                    let Some(path) = self.expr_access_path(path_expression) else {
-                        continue;
-                    };
-                    if self
-                        .stable_path_ty(scope, &path, self.span(path_expression))
-                        .is_none()
-                    {
-                        continue;
-                    }
-                    if let Some(exclusion) = self.flow_exclusion_value(value_expression) {
-                        return vec![(path, exclusion)];
-                    }
-                }
-            }
-            return Vec::new();
-        }
-        if let Expr::Is {
-            operand,
-            ty,
-            negated,
-        } = self.file.expr(cond).clone()
-        {
-            if negated != truth {
-                return Vec::new();
-            }
-            let Some(path) = self.expr_access_path(operand) else {
-                return Vec::new();
-            };
-            if self
-                .stable_path_ty(scope, &path, self.span(operand))
-                .is_none()
-            {
-                return Vec::new();
-            }
-            let resolved = self
-                .resolved_type_tys
-                .get(&(ty.span.lo, ty.span.hi))
-                .copied()
-                .unwrap_or_else(|| self.type_ref_ty_silent(scope, &ty));
-            return resolved
-                .non_null()
-                .obj_internal()
-                .map(|classifier| (path, FlowExclusion::Classifier(classifier)))
-                .into_iter()
-                .collect();
-        }
-        let Some(path) = self.expr_access_path(cond) else {
-            return Vec::new();
-        };
-        if self.expr_types[cond.0 as usize] != Ty::Boolean
-            || self.stable_path_ty(scope, &path, self.span(cond)).is_none()
-        {
-            return Vec::new();
-        }
-        vec![(path, FlowExclusion::Boolean(!truth))]
-    }
-
-    /// Facts implied by a checked Boolean expression having the exact value `truth`. Equality can
-    /// establish such a value for a nullable Boolean path even though that path cannot itself be
-    /// used as an `if` condition; the successful comparison also excludes null.
-    fn boolean_value_exclusions(
-        &self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-        truth: bool,
-    ) -> Vec<(NarrowPath, FlowExclusion)> {
-        if let Some(path) = self.expr_access_path(expression) {
-            let ty = self.expr_types[expression.0 as usize];
-            if ty.non_null() == Ty::Boolean
-                && self
-                    .stable_path_ty(scope, &path, self.span(expression))
-                    .is_some()
-            {
-                let mut exclusions = vec![(path.clone(), FlowExclusion::Boolean(!truth))];
-                if ty.is_nullable() {
-                    exclusions.push((path, FlowExclusion::Null));
-                }
-                return exclusions;
-            }
-        }
-        self.condition_exclusions(scope, expression, truth)
-    }
-
-    fn flow_exclusion_value(&self, expression: ExprId) -> Option<FlowExclusion> {
-        if let Some(entry) = self.resolved_enum_entries.get(&expression) {
-            return Some(FlowExclusion::EnumEntry {
-                classifier: entry.classifier,
-                name: entry.name.clone(),
-            });
-        }
-        match self.file.expr(expression) {
-            Expr::BoolLit(value) => Some(FlowExclusion::Boolean(*value)),
-            Expr::NullLit => Some(FlowExclusion::Null),
-            _ => match self.expr_lowers.get(&expression) {
-                Some(ExprLowering::SingletonValue(singleton)) => {
-                    Some(FlowExclusion::Singleton(singleton.classifier))
-                }
-                _ => None,
-            },
-        }
-    }
-
-    fn apply_condition_exclusions(&self, scope: &CheckerScope<'_>, cond: ExprId, truth: bool) {
-        for (path, exclusion) in self.condition_exclusions(scope, cond, truth) {
-            scope.exclude(path, exclusion);
-        }
-    }
-
     fn collect_condition_narrowings(
         &self,
         scope: &CheckerScope<'_>,
@@ -47067,6 +46888,33 @@ impl<'a> Checker<'a> {
             return;
         }
         if let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(cond).clone() {
+            if matches!(op, BinOp::Eq | BinOp::Ne) {
+                for (condition, literal) in [(lhs, rhs), (rhs, lhs)] {
+                    let Expr::BoolLit(literal) = self.file.expr(literal) else {
+                        continue;
+                    };
+                    if self.expr_types[condition.0 as usize].non_null() != Ty::Boolean {
+                        continue;
+                    }
+                    let condition_truth = if (op == BinOp::Eq) == truth {
+                        *literal
+                    } else {
+                        !*literal
+                    };
+                    self.collect_condition_narrowings(
+                        scope,
+                        condition,
+                        condition_truth,
+                        out,
+                        declined,
+                    );
+                    // Projecting the Boolean value must not discard facts established by the
+                    // equality expression itself. In particular, a true `x?.p == true` also
+                    // proves that the safe-call receiver `x` was non-null.
+                    out.extend(self.smartcast_narrowings(scope, cond, !truth, declined));
+                    return;
+                }
+            }
             let combines = (truth && op == BinOp::And) || (!truth && op == BinOp::Or);
             if combines {
                 self.collect_condition_narrowings(scope, lhs, truth, out, declined);
@@ -47075,6 +46923,7 @@ impl<'a> Checker<'a> {
             }
         }
         self.contract_condition_narrowings(scope, cond, truth, out, declined);
+        self.implied_condition_narrowings(scope, cond, truth, out, declined);
         out.extend(self.smartcast_narrowings(scope, cond, !truth, declined));
         self.as_cast_narrowings(scope, cond, out);
     }
@@ -49703,6 +49552,7 @@ impl<'a> Checker<'a> {
                                 .map(|receiver| receiver.identity),
                             class_storage: None,
                             enum_entry_property: None,
+                            source_visible: true,
                             source_member: Some(source_member),
                             stable_declaration,
                         });
@@ -50272,6 +50122,7 @@ impl<'a> Checker<'a> {
                             dispatch_receiver_identity: None,
                             class_storage: Some(field as u32),
                             enum_entry_property: Some(field as u32),
+                            source_visible: true,
                             source_member: None,
                             stable_declaration: None,
                         });
@@ -52046,14 +51897,10 @@ impl<'a> Checker<'a> {
                 );
             }
         }
-        let class_storage_captures = match source_member.as_ref() {
-            Some(crate::libraries::SourceMember::Class { file, owner, .. })
-                if *file == self.file_index =>
-            {
-                self.body_class_storage_captures(DeclId(*owner))
-            }
-            _ => Vec::new(),
-        };
+        let body_class_declaration = self.body_class_declaration(source_member.as_ref());
+        let class_storage_captures = body_class_declaration
+            .map(|declaration| self.body_class_storage_captures(declaration))
+            .unwrap_or_default();
         let infer_ret = (!self.signature_defaults_only || default_owned_method)
             && f.ret.is_none()
             && matches!(&f.body, FunBody::Expr(_))
@@ -52111,7 +51958,18 @@ impl<'a> Checker<'a> {
             let scope = &members_scope;
             if f.receiver.is_none() {
                 for property in props {
-                    self.declare_scoped_property(scope, property, true);
+                    let lexical_value_shadows = body_class_declaration.is_some()
+                        && property.source_visible
+                        && self.lookup(scope, &property.name).is_some_and(|binding| {
+                            matches!(
+                                binding.origin,
+                                ReceiverFnValueOrigin::Local
+                                    | ReceiverFnValueOrigin::ClassStorage(_)
+                            )
+                        });
+                    if !lexical_value_shadows {
+                        self.declare_scoped_property(scope, property, true);
+                    }
                 }
                 // Synthetic capture fields are immutable storage properties, but a shared-cell
                 // capture exposes the mutability of its source local. Rebind those names after the
@@ -57408,7 +57266,12 @@ impl<'a> Checker<'a> {
             let (bt, written) = self.try_body_written_bindings(|checker| {
                 checker.expr_result(scope, body, wanted.expected, wanted.value_required)
             });
-            let mut exit_flows = vec![scope.flow_snapshot()];
+            let mut all_exit_writes = catch_flow::TryBodyWrites::default();
+            let mut exit_flows = self
+                .normal_completion(body)
+                .then(|| scope.flow_snapshot())
+                .into_iter()
+                .collect::<Vec<_>>();
             let mut result = bt;
             let mut branch_types = vec![(body, bt)];
             for c in &catches {
@@ -57447,13 +57310,16 @@ impl<'a> Checker<'a> {
                     );
                     Ty::Error
                 };
-                let ht = {
+                let (ht, catch_writes) = self.try_body_written_bindings(|checker| {
                     let catch_scope = scope.child(ScopeKind::Block);
                     let scope = &catch_scope;
-                    self.declare(scope, &c.name, cty, false);
-                    self.expr_result(scope, c.body, wanted.expected, wanted.value_required)
-                };
-                exit_flows.push(scope.flow_snapshot());
+                    checker.declare(scope, &c.name, cty, false);
+                    checker.expr_result(scope, c.body, wanted.expected, wanted.value_required)
+                });
+                all_exit_writes.extend(catch_writes);
+                if self.normal_completion(c.body) {
+                    exit_flows.push(scope.flow_snapshot());
+                }
                 branch_types.push((c.body, ht));
                 // In VALUE position, REFERENCE branches use the same full join as other conditional
                 // expressions: `try { x } catch { null }` is `T?`, and different reference classes
@@ -57484,8 +57350,33 @@ impl<'a> Checker<'a> {
                 result,
             );
             scope.restore_common_flow(&exit_flows);
+            let normal_continuation = scope.flow_snapshot();
+            all_exit_writes.extend(written);
             if let Some(f) = finally {
-                self.expr_statement(scope, f);
+                // A finalizer runs after every try/catch exit, including an abrupt return, throw,
+                // break, or continue. Start it from the try entry with every binding written on
+                // any reachable exit cleared; branch-only facts from a normal exit are not valid
+                // on an abrupt one. Then project the finalizer's single checked flow delta onto
+                // the normal-only continuation instead of checking its body a second time.
+                scope.restore_flow(&entry_flow);
+                self.clear_narrowings_a_try_body_writes(scope, &all_exit_writes);
+                let finalizer_entry = scope.flow_snapshot();
+                let (_, finalizer_writes) =
+                    self.try_body_written_bindings(|checker| checker.expr_statement(scope, f));
+                let finalizer_local_flow = self.written_local_flow(scope, &finalizer_writes);
+                let finalizer_exit = scope.flow_snapshot();
+                scope.restore_flow_with_delta(
+                    &normal_continuation,
+                    &finalizer_entry,
+                    &finalizer_exit,
+                );
+                // The delta carries every flow facet established by the finalizer: local read
+                // types, path/intersection facts, exclusions, and saved Boolean implications.
+                // Reapply exact local write results as well: a finalizer assignment dominates the
+                // normal continuation even when it left the same fact as the conservative entry.
+                for (name, narrowing) in finalizer_local_flow {
+                    scope.narrow_local(&name, narrowing);
+                }
             }
             result
         };
@@ -57885,8 +57776,12 @@ impl<'a> Checker<'a> {
                 operator_span,
             ) {
                 self.diags.error(
-                    span,
-                    "krusty: '++'/'--' is only supported on a numeric variable".to_string(),
+                    operator_span,
+                    crate::diagnostic_wording::unresolved_operator_reference_on(
+                        operator_name,
+                        if decrement { "--" } else { "++" },
+                        Some(read_ty.source_name().as_ref()),
+                    ),
                 );
             }
             return None;
@@ -58340,6 +58235,7 @@ impl<'a> Checker<'a> {
             // AFTER the receiver so a receiver-only diagnostic doesn't mask an unresolved member.
             let checkpoint = self.diags.diags.len();
             let mut checked_arg_tys = Vec::new();
+            let mut rejected_safe_call_candidates = None;
             let mut result = match &args {
                 // A function value's explicit `invoke` spelling is the invoke-operator convention,
                 // not a failed ordinary member lookup. Select that semantic path up front so the
@@ -58415,48 +58311,56 @@ impl<'a> Checker<'a> {
                             MemberSlotCall::ExtensionRung {
                                 extension,
                                 member_mapping_failure,
-                            } => self
-                                .record_scope_level_receiver_call(
-                                    scope,
-                                    CallArgs {
-                                        call: e,
-                                        args: a,
-                                        arg_tys,
-                                    },
-                                    receiver,
-                                    recv,
-                                    &name,
-                                    FunctionValueRungs::InTower,
-                                )
-                                .or_else(|| {
-                                    let call_args = CallArgs {
-                                        call: e,
-                                        args: a,
-                                        arg_tys,
-                                    };
-                                    let owned = match member_mapping_failure {
-                                        Some(failure) if extension.selection.is_none() => self
-                                            .report_owned_member_failure(
-                                                call_args, &name, recv, *failure,
-                                            ),
-                                        _ => None,
-                                    };
-                                    owned.or_else(|| {
-                                        self.record_extension_selection(
-                                            scope,
-                                            call_args,
-                                            &name,
-                                            CallConstraints {
-                                                type_args: &type_args,
-                                                receiver: recv,
-                                                expected,
-                                            },
-                                            extension,
-                                        )
+                                rejected_candidates,
+                            } => {
+                                let result = self
+                                    .record_scope_level_receiver_call(
+                                        scope,
+                                        CallArgs {
+                                            call: e,
+                                            args: a,
+                                            arg_tys,
+                                        },
+                                        receiver,
+                                        recv,
+                                        &name,
+                                        FunctionValueRungs::InTower,
+                                    )
+                                    .or_else(|| {
+                                        let call_args = CallArgs {
+                                            call: e,
+                                            args: a,
+                                            arg_tys,
+                                        };
+                                        let owned = match member_mapping_failure {
+                                            Some(failure) if extension.selection.is_none() => self
+                                                .report_owned_member_failure(
+                                                    call_args,
+                                                    &name,
+                                                    &rejected_candidates,
+                                                    *failure,
+                                                ),
+                                            _ => None,
+                                        };
+                                        owned.or_else(|| {
+                                            self.record_extension_selection(
+                                                scope,
+                                                call_args,
+                                                &name,
+                                                CallConstraints {
+                                                    type_args: &type_args,
+                                                    receiver: recv,
+                                                    expected,
+                                                },
+                                                extension,
+                                            )
+                                        })
                                     })
-                                })
-                                .or_else(|| self.report_unmapped_labelled_call(e, a))
-                                .unwrap_or(Ty::Error),
+                                    .or_else(|| self.report_unmapped_labelled_call(e, a))
+                                    .unwrap_or(Ty::Error);
+                                rejected_safe_call_candidates = Some(rejected_candidates);
+                                result
+                            }
                         }
                     } else if recv == Ty::Nothing
                         || crate::symbol_resolver::supports_member_lookup(recv)
@@ -58477,48 +58381,56 @@ impl<'a> Checker<'a> {
                             MemberSlotCall::ExtensionRung {
                                 extension,
                                 member_mapping_failure,
-                            } => self
-                                .record_scope_level_receiver_call(
-                                    scope,
-                                    CallArgs {
-                                        call: e,
-                                        args: a,
-                                        arg_tys,
-                                    },
-                                    receiver,
-                                    recv,
-                                    &name,
-                                    FunctionValueRungs::InTower,
-                                )
-                                .or_else(|| {
-                                    let call_args = CallArgs {
-                                        call: e,
-                                        args: a,
-                                        arg_tys,
-                                    };
-                                    let owned = match member_mapping_failure {
-                                        Some(failure) if extension.selection.is_none() => self
-                                            .report_owned_member_failure(
-                                                call_args, &name, recv, *failure,
-                                            ),
-                                        _ => None,
-                                    };
-                                    owned.or_else(|| {
-                                        self.record_extension_selection(
-                                            scope,
-                                            call_args,
-                                            &name,
-                                            CallConstraints {
-                                                type_args: &type_args,
-                                                receiver: recv,
-                                                expected,
-                                            },
-                                            extension,
-                                        )
+                                rejected_candidates,
+                            } => {
+                                let result = self
+                                    .record_scope_level_receiver_call(
+                                        scope,
+                                        CallArgs {
+                                            call: e,
+                                            args: a,
+                                            arg_tys,
+                                        },
+                                        receiver,
+                                        recv,
+                                        &name,
+                                        FunctionValueRungs::InTower,
+                                    )
+                                    .or_else(|| {
+                                        let call_args = CallArgs {
+                                            call: e,
+                                            args: a,
+                                            arg_tys,
+                                        };
+                                        let owned = match member_mapping_failure {
+                                            Some(failure) if extension.selection.is_none() => self
+                                                .report_owned_member_failure(
+                                                    call_args,
+                                                    &name,
+                                                    &rejected_candidates,
+                                                    *failure,
+                                                ),
+                                            _ => None,
+                                        };
+                                        owned.or_else(|| {
+                                            self.record_extension_selection(
+                                                scope,
+                                                call_args,
+                                                &name,
+                                                CallConstraints {
+                                                    type_args: &type_args,
+                                                    receiver: recv,
+                                                    expected,
+                                                },
+                                                extension,
+                                            )
+                                        })
                                     })
-                                })
-                                .or_else(|| self.report_unmapped_labelled_call(e, a))
-                                .unwrap_or(Ty::Error),
+                                    .or_else(|| self.report_unmapped_labelled_call(e, a))
+                                    .unwrap_or(Ty::Error);
+                                rejected_safe_call_candidates = Some(rejected_candidates);
+                                result
+                            }
                         }
                     } else {
                         // Every non-`String`, non-`Obj` receiver reaches one semantic plan after
@@ -58529,7 +58441,8 @@ impl<'a> Checker<'a> {
                         // library/source extension indexes. In particular, generic library
                         // extensions such as `takeIf` must not disappear only for the non-null form.
                         let receiver_callables = self.stable_receiver_callables(recv, &name);
-                        if let Some(ret) = self.check_builtin_operator_method(
+                        let rejected_candidates = receiver_callables.functions().to_vec();
+                        let result = if let Some(ret) = self.check_builtin_operator_method(
                             e,
                             recv,
                             &name,
@@ -58568,7 +58481,9 @@ impl<'a> Checker<'a> {
                             })
                             .or_else(|| self.report_unmapped_labelled_call(e, a))
                             .unwrap_or(Ty::Error)
-                        }
+                        };
+                        rejected_safe_call_candidates = Some(rejected_candidates);
+                        result
                     }
                 }
             };
@@ -58667,10 +58582,7 @@ impl<'a> Checker<'a> {
             // stay a silent `Ty::Error` so the backend bail reports the gap honestly.
             let mut reported_inapplicable = false;
             if result == Ty::Error && self.diags.diags.len() == checkpoint {
-                let candidates = self
-                    .stable_receiver_callables(safe_rt, &name)
-                    .functions()
-                    .to_vec();
+                let candidates = rejected_safe_call_candidates.unwrap_or_default();
                 crate::trace_compiler!(
                     "resolve",
                     "safe-call inapplicable receiver={:?} name={name} candidates={} result={result:?}",
@@ -58679,38 +58591,22 @@ impl<'a> Checker<'a> {
                 );
                 if !candidates.is_empty() {
                     let type_args = self.resolved_explicit_type_args(scope, e);
-                    reported_inapplicable = self.report_member_and_extensions_inapplicable(
-                        e,
+                    self.report_inapplicable_receiver_candidates(
+                        scope,
+                        CallArgs {
+                            call: e,
+                            args: args.as_deref().unwrap_or_default(),
+                            arg_tys: &checked_arg_tys,
+                        },
                         &name,
-                        args.as_deref().unwrap_or_default(),
+                        CallConstraints {
+                            type_args: &type_args,
+                            receiver: safe_rt,
+                            expected,
+                        },
                         &candidates,
-                    ) || self.report_inapplicable_member_mapping_error(
-                        e,
-                        &name,
-                        args.as_deref().unwrap_or_default(),
-                        &candidates,
-                    ) || self
-                        .report_single_mapped_candidate_type_errors(
-                            scope,
-                            e,
-                            &name,
-                            args.as_deref().unwrap_or_default(),
-                            &checked_arg_tys,
-                            CallConstraints {
-                                type_args: &type_args,
-                                receiver: safe_rt,
-                                expected,
-                            },
-                            &candidates,
-                        )
-                        .is_some();
-                    if !reported_inapplicable {
-                        self.diags.error(
-                            self.call_callee_name_span(e),
-                            self.inapplicable_member_candidates_message(&name, &candidates),
-                        );
-                        reported_inapplicable = true;
-                    }
+                    );
+                    reported_inapplicable = true;
                 }
             }
             if result == Ty::Error
@@ -59009,6 +58905,9 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
+        if let Some(local) = lookup {
+            self.report_uninitialized_default_parameter_read(e, local.flow_identity);
         }
         crate::trace_compiler!(
             "name_type",
@@ -64018,83 +63917,6 @@ impl<'a> Checker<'a> {
         )
     }
 
-    fn this_member_call_ret(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call_args: CallArgs<'_>,
-        tower_rung: MemberCallTowerRung,
-        name: &str,
-        expected: Option<Ty>,
-        retained: &mut Option<MemberMappingFailure>,
-    ) -> Option<Ty> {
-        let receiver = tower_rung
-            .receiver
-            .expect("this-member selection requires an implicit-receiver rung");
-        let CallArgs { call, args, .. } = call_args;
-        let rt = self.apply_postponed_call_bindings(receiver.ty);
-        let type_args = self.resolved_explicit_type_args(scope, call);
-        let mut extension_rung = None;
-        if rt == Ty::String || matches!(rt, Ty::Obj(..) | Ty::TyParam(..)) {
-            match self
-                .record_member_call_with_slots(scope, call, rt, name, args, tower_rung, expected)
-            {
-                MemberSlotCall::Resolved(ret) => {
-                    self.mark_implicit_receiver_selection(call, receiver);
-                    return Some(ret);
-                }
-                MemberSlotCall::Ambiguous | MemberSlotCall::Rejected => {
-                    return Some(Ty::Error);
-                }
-                MemberSlotCall::ExtensionRung {
-                    extension,
-                    member_mapping_failure,
-                } => {
-                    if extension.selection.is_none() {
-                        if let Some(failure) = member_mapping_failure {
-                            retained.get_or_insert(*failure);
-                        }
-                    }
-                    extension_rung = Some(extension);
-                }
-            }
-        }
-        let rung = match extension_rung {
-            Some(extension) => extension,
-            None => {
-                let callables = self.stable_receiver_callables(rt, name);
-                self.select_extension_rung(scope, call_args, rt, &type_args, expected, &callables)
-            }
-        };
-        if rung.selection.is_none() {
-            if let Some((failure, candidate)) = self.unanimous_callable_mapping_failure(
-                scope,
-                call,
-                args,
-                &type_args,
-                &rung.overloads,
-            ) {
-                retained.get_or_insert(MemberMappingFailure { failure, candidate });
-            }
-            return None;
-        }
-        let ret = self.record_extension_selection(
-            scope,
-            call_args,
-            name,
-            CallConstraints {
-                type_args: &type_args,
-                receiver: rt,
-                expected,
-            },
-            rung,
-        );
-        if let Some(ret) = ret {
-            self.mark_implicit_receiver_selection(call, receiver);
-            return Some(ret);
-        }
-        None
-    }
-
     fn inferred_member_ret(&self, receiver: Ty, name: &str, params: &[Ty]) -> Option<Ty> {
         let internal = receiver.obj_internal()?;
         self.inferred_method_rets
@@ -64449,9 +64271,9 @@ impl<'a> Checker<'a> {
             },
             MemberExtensionSelection::All,
         ) {
-            Ok(Some(candidate)) => candidate,
-            Ok(None) => return Ok(None),
-            Err(()) => {
+            MemberExtensionFunctionSelection::Selected(candidate) => *candidate,
+            MemberExtensionFunctionSelection::None(_) => return Ok(None),
+            MemberExtensionFunctionSelection::Ambiguous(_) => {
                 self.diags.error(
                     span,
                     format!("overload resolution ambiguity for member '{name}'"),
@@ -67367,7 +67189,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         call: MemberExtensionFunctionCall<'_>,
         selection: MemberExtensionSelection,
-    ) -> Result<Option<MemberExtensionFunctionCandidate>, ()> {
+    ) -> MemberExtensionFunctionSelection {
         self.member_extension_function_with_receivers(
             scope,
             &self.implicit_receivers(scope),
@@ -67382,7 +67204,7 @@ impl<'a> Checker<'a> {
         receivers: &[ImplicitReceiver],
         call: MemberExtensionFunctionCall<'_>,
         selection: MemberExtensionSelection,
-    ) -> Result<Option<MemberExtensionFunctionCandidate>, ()> {
+    ) -> MemberExtensionFunctionSelection {
         let receivers =
             member_extension_selection::ordinary_dispatch_first(scope, receivers.to_vec());
         self.with_member_extension_probes(scope, call.args, |probes| {
@@ -67395,6 +67217,5 @@ impl<'a> Checker<'a> {
                 selection,
             )
         })
-        .into_checker_result()
     }
 }

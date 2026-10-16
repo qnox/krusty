@@ -29,6 +29,7 @@ mod implicit_context_candidates;
 mod integer_constants;
 mod local_signatures;
 mod lookups;
+mod operator_conventions;
 mod postponed_calls;
 mod qualified_calls;
 mod receiver_member_level;
@@ -45,6 +46,7 @@ mod value_parameter_publication;
 mod value_selection;
 mod vararg_constructor_property;
 
+use implicit_context_candidates::SignatureImplicitReceiver;
 use value_selection::{SelectedEnumEntry, SelectedValue};
 
 pub(super) use declaration_aliases::publish_compact_nested_aliases;
@@ -102,28 +104,6 @@ struct ProductionSignatureSemantics<'a> {
     /// every class looking for a member-extension property that almost never matched.
     property_type_parameters_by_declaration:
         RefCell<Option<HashMap<crate::fir::DeclarationId, DeclarationTypeParameters>>>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SignatureImplicitReceiver {
-    ty: Ty,
-    context_parameter: bool,
-}
-
-impl SignatureImplicitReceiver {
-    fn ordinary(ty: Ty) -> Self {
-        Self {
-            ty,
-            context_parameter: false,
-        }
-    }
-
-    fn context_parameter(ty: Ty) -> Self {
-        Self {
-            ty,
-            context_parameter: true,
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -4739,19 +4719,10 @@ pub(crate) fn finalized_streamed_signature_index(
                     .map(|capture| capture.shared_cell)
             })
             .unwrap_or(false);
-        index.publish_property_shape(
-            crate::fir::PropertyId::from_raw(stub.id.raw()),
-            stub.id,
-            0,
-            0,
-            None,
-            mutable,
-        );
-        index.publish_property_parameter_identities(
-            crate::fir::PropertyId::from_raw(stub.id.raw()),
-            std::iter::empty(),
-            None,
-        );
+        let property = crate::fir::PropertyId::from_raw(stub.id.raw());
+        index.publish_property_shape(property, stub.id, 0, 0, None, mutable);
+        index.publish_property_source_hidden(property);
+        index.publish_property_parameter_identities(property, std::iter::empty(), None);
     }
     // Publish classifier headers after the full declaration inventory so source order is irrelevant.
     'classifier_publication: for stub in &headers.stubs {

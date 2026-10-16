@@ -9,7 +9,8 @@ use crate::ast::{BinOp, Expr, ExprId, File};
 use crate::diag::Span;
 
 use super::{
-    ExpressionForm, OriginId, SigExpr, SigExprId, SignatureConstraintExtractor, SignatureScopeId,
+    CompactSmartcastFact, ExpressionForm, OriginId, SigExpr, SignatureConstraintExtractor,
+    SignatureScopeId,
 };
 
 impl SignatureConstraintExtractor {
@@ -20,11 +21,28 @@ impl SignatureConstraintExtractor {
         condition: ExprId,
         scope: SignatureScopeId,
         origin: &mut impl FnMut(Span) -> OriginId,
-    ) -> Result<Vec<(Box<str>, SigExprId)>, ExpressionForm> {
-        let mut bindings = self.positive_smartcast_facts(file, condition, scope, origin)?;
+    ) -> Result<Vec<CompactSmartcastFact>, ExpressionForm> {
+        let mut bindings = self.smartcast_facts(file, condition, true, scope, origin)?;
         // A true `&&` recurses into both operands, and each operand records its own casts.
         // Walking the conjunction here would see only its left operand.
         if !matches!(file.expr(condition), Expr::Binary { op: BinOp::And, .. }) {
+            bindings.extend(self.evaluated_as_cast_bindings(file, condition, scope, origin)?);
+        }
+        Ok(bindings)
+    }
+
+    /// Facts established by a false condition, plus non-null `as` casts that ran while evaluating
+    /// it. Cast effects do not depend on the condition's result.
+    pub(super) fn negative_smartcasts(
+        &mut self,
+        file: &File,
+        condition: ExprId,
+        scope: SignatureScopeId,
+        origin: &mut impl FnMut(Span) -> OriginId,
+    ) -> Result<Vec<CompactSmartcastFact>, ExpressionForm> {
+        let mut bindings = self.smartcast_facts(file, condition, false, scope, origin)?;
+        // A false `||` recurses into both operands, and each operand records its own casts.
+        if !matches!(file.expr(condition), Expr::Binary { op: BinOp::Or, .. }) {
             bindings.extend(self.evaluated_as_cast_bindings(file, condition, scope, origin)?);
         }
         Ok(bindings)
@@ -37,7 +55,7 @@ impl SignatureConstraintExtractor {
         expression: ExprId,
         scope: SignatureScopeId,
         origin: &mut impl FnMut(Span) -> OriginId,
-    ) -> Result<Vec<(Box<str>, SigExprId)>, ExpressionForm> {
+    ) -> Result<Vec<CompactSmartcastFact>, ExpressionForm> {
         let mut evaluated = Vec::new();
         crate::ast::definitely_evaluated::for_each_in_expression(
             file,
@@ -53,8 +71,8 @@ impl SignatureConstraintExtractor {
         evaluated: &[ExprId],
         scope: SignatureScopeId,
         origin: &mut impl FnMut(Span) -> OriginId,
-    ) -> Result<Vec<(Box<str>, SigExprId)>, ExpressionForm> {
-        let mut bindings: Vec<(Box<str>, SigExprId)> = Vec::new();
+    ) -> Result<Vec<CompactSmartcastFact>, ExpressionForm> {
+        let mut bindings = Vec::new();
         for &expression in evaluated {
             let Expr::As {
                 operand,
@@ -71,16 +89,16 @@ impl SignatureConstraintExtractor {
                 continue;
             };
             let target = self.smartcast_type(file, *operand, ty, scope, origin)?;
+            let Some(binding) = self.binding_for_reference(*operand, name) else {
+                continue;
+            };
             let previous = bindings
                 .iter()
                 .rev()
-                .find_map(|(bound, value)| (bound.as_ref() == name.as_str()).then_some(*value))
-                .or_else(|| {
-                    self.lexical_values
-                        .iter()
-                        .rev()
-                        .find_map(|values| values.get(name.as_str()).copied())
-                });
+                .find_map(|fact: &CompactSmartcastFact| {
+                    (fact.binding == binding).then_some(fact.value)
+                })
+                .or_else(|| self.compact_value_for_binding(&binding));
             let narrowed = match previous {
                 Some(value) => self.graph.add_expr(SigExpr::CastNarrowed {
                     value,
@@ -89,7 +107,11 @@ impl SignatureConstraintExtractor {
                 }),
                 None => target,
             };
-            bindings.push((name.clone().into_boxed_str(), narrowed));
+            bindings.push(CompactSmartcastFact {
+                binding,
+                value: narrowed,
+                completion_clauses: Vec::new(),
+            });
         }
         Ok(bindings)
     }

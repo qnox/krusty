@@ -874,6 +874,7 @@ impl<'a> ModuleSymbols<'a> {
                 receiver_rank: 0,
                 source_key: None,
                 stable_declaration: declaration.stable_declaration(),
+                source_visible: true,
                 getter_declaration: None,
                 setter_declaration: None,
                 source_member: declaration.source_member(),
@@ -1232,6 +1233,7 @@ fn source_property(
         receiver_rank,
         source_key: None,
         stable_declaration: property.stable_declaration,
+        source_visible: property.source_visible,
         getter_declaration: None,
         setter_declaration: None,
         source_member: property.source_member,
@@ -1490,6 +1492,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                 receiver_rank: 0,
                 source_key: Some(source),
                 stable_declaration: property.stable_declaration,
+                source_visible: true,
                 getter_declaration: None,
                 setter_declaration: None,
                 source_member: None,
@@ -1585,6 +1588,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                     receiver_rank: 0,
                     source_key: Some(property.source),
                     stable_declaration: property.stable_declaration,
+                    source_visible: true,
                     getter_declaration: None,
                     setter_declaration: None,
                     source_member: None,
@@ -1845,6 +1849,52 @@ mod tests {
                 value: crate::libraries::LibConst::Str("const".into()),
             })
         );
+    }
+
+    #[test]
+    fn normalized_property_carries_visibility_without_reopening_its_stable_identity() {
+        let mut symbols = FrontendSymbols::default();
+        let mut holder = class("sample/Holder");
+        let declaration = crate::fir::DeclarationId::from_raw(u32::MAX);
+        holder.declared_callable_order.push("value".to_string());
+        holder.declared_props.insert(
+            "value".to_string(),
+            crate::resolve::DeclaredPropertySig {
+                ty: Ty::Int,
+                storage_ty: None,
+                visibility: Visibility::Public,
+                source_visible: true,
+                is_const: false,
+                annotations: Vec::new(),
+                getter_name: "getValue".to_string(),
+                setter_name: None,
+                setter_parameter_name: None,
+                setter_visibility: None,
+                has_custom_getter: false,
+                is_abstract: false,
+                is_open: false,
+                context_params: Vec::new(),
+                context_param_names: Vec::new(),
+                context_parameter_identities: Vec::new(),
+                source_member: None,
+                stable_declaration: Some(declaration),
+            },
+        );
+        symbols.insert_class(holder);
+
+        let shape = ModuleSymbols::new(&symbols)
+            .classifier(type_name("sample/Holder"))
+            .expect("source classifier");
+        let [property] = shape
+            .declared_callables
+            .get("value")
+            .expect("normalized property")
+            .properties()
+        else {
+            panic!("one normalized property")
+        };
+        assert_eq!(property.stable_declaration, Some(declaration));
+        assert!(property.source_visible);
     }
 
     #[test]

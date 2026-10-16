@@ -3,14 +3,22 @@
 //! This is a structural pass only. It records compact operations and deferred lookups; ordinary
 //! resolver/checker semantics remain behind `SignatureSemantics` during graph evaluation.
 
+mod compound_assignments;
+mod condition_facts;
 mod evaluated_casts;
 mod integer_literals;
 mod qualified_calls;
 mod safe_index;
+mod try_flow;
 
 use crate::ast::{BinOp, Expr, ExprId, File, Stmt, TrFlags, TypeRef, UnOp};
 use crate::fx_hash::{HashMap, HashSet};
 use crate::types::Ty;
+
+use condition_facts::{
+    CompactBindingIdentity, CompactBooleanValue, CompactCompletion, CompactSmartcastFact,
+    CompactTryWrite,
+};
 
 use super::coverage::ExpressionForm;
 use super::signature_source::{source_function, source_property, source_signature_expression};
@@ -40,6 +48,20 @@ pub struct SignatureConstraintExtractor {
     lexical_values: Vec<HashMap<Box<str>, SigExprId>>,
     lexical_callables: Vec<HashMap<Box<str>, CompactLexicalCallable>>,
     lexical_types: Vec<HashMap<Box<str>, CompactLexicalType>>,
+    /// The condition a stable local `Boolean` binding holds and the exact lexical bindings that
+    /// condition narrows. A copied val can share its compact value node with its initializer, so
+    /// the binding identity—not that graph node—owns the implication.
+    boolean_vals: HashMap<CompactBindingIdentity, CompactBooleanValue>,
+    /// Exact outer bindings written while each active try body is extracted. An exceptional edge
+    /// into a catch can begin after any such write, including one on a non-completing branch.
+    try_body_writes: Vec<Vec<CompactTryWrite>>,
+    /// Statements after an unconditional structural transfer are still extracted for diagnostics,
+    /// but their writes never run and therefore cannot invalidate a catch or finalizer entry.
+    unreachable_statement_depth: usize,
+    /// Exact binding selected by each compact lexical name expression. Replaying a saved condition
+    /// after entering a nested scope must not redirect either an alias or a condition root to a
+    /// same-spelled newer declaration.
+    resolved_name_bindings: HashMap<ExprId, CompactBindingIdentity>,
     local_classifier_stack: Vec<crate::ast::DeclId>,
     captured_local_classifier_headers: HashSet<DeclarationId>,
     extracting_local_effects: HashSet<DeclarationId>,
@@ -57,6 +79,7 @@ struct CompactLocalTypeAlias {
 struct CompactLexicalCallable {
     value: SigExprId,
     has_receiver: bool,
+    operator: bool,
 }
 
 #[derive(Clone)]
@@ -223,6 +246,8 @@ impl SignatureConstraintExtractor {
             self.lexical_values.clear();
             self.lexical_callables.clear();
             self.lexical_types.clear();
+            self.boolean_vals.clear();
+            self.resolved_name_bindings.clear();
             self.local_classifier_stack.clear();
             self.extracting_local_effects.clear();
             let mut parameters = HashMap::default();
@@ -240,6 +265,7 @@ impl SignatureConstraintExtractor {
                             CompactLexicalCallable {
                                 value,
                                 has_receiver: true,
+                                operator: false,
                             },
                         );
                     }
@@ -329,20 +355,18 @@ impl SignatureConstraintExtractor {
                     by_origin,
                 }
             });
-            if let Some(function) = function {
-                if let Some((_, _, classifier)) = enclosing_classifier {
-                    if let Some(declaration) =
-                        self.source_classifiers.get(&classifier.span).copied()
-                    {
-                        let receiver = self
-                            .graph
-                            .add_expr(SigExpr::ClassifierType { declaration, scope });
-                        parameters.insert("this".into(), receiver);
-                        if let Some(label) = classifier.name.rsplit('.').next() {
-                            parameters.insert(format!("this@{label}").into_boxed_str(), receiver);
-                        }
+            if let Some((_, _, classifier)) = enclosing_classifier {
+                if let Some(declaration) = self.source_classifiers.get(&classifier.span).copied() {
+                    let receiver = self
+                        .graph
+                        .add_expr(SigExpr::ClassifierType { declaration, scope });
+                    parameters.insert("this".into(), receiver);
+                    if let Some(label) = classifier.name.rsplit('.').next() {
+                        parameters.insert(format!("this@{label}").into_boxed_str(), receiver);
                     }
                 }
+            }
+            if let Some(function) = function {
                 if let Some(receiver) = function
                     .receiver
                     .as_ref()
@@ -350,6 +374,15 @@ impl SignatureConstraintExtractor {
                 {
                     parameters.insert("this".into(), receiver);
                     parameters.insert(format!("this@{}", function.name).into_boxed_str(), receiver);
+                }
+            } else if let Some(property) = source_property(file, stub.range) {
+                if let Some(receiver) = property
+                    .receiver
+                    .as_ref()
+                    .map(|receiver| self.compact_type(receiver, scope, &mut origin))
+                {
+                    parameters.insert("this".into(), receiver);
+                    parameters.insert(format!("this@{}", property.name).into_boxed_str(), receiver);
                 }
             }
             if let Some((_, declaration, _)) = enclosing_classifier {
@@ -1154,31 +1187,6 @@ impl SignatureConstraintExtractor {
         ))
     }
 
-    fn smartcast_branch(
-        &mut self,
-        file: &File,
-        expression: ExprId,
-        scope: SignatureScopeId,
-        origin: &mut impl FnMut(crate::diag::Span) -> OriginId,
-        name: Box<str>,
-        ty: SigExprId,
-    ) -> Result<SigExprId, ExpressionForm> {
-        let refines_implicit_receiver = name.as_ref() == "this";
-        self.lexical_values.push(HashMap::from_iter([(name, ty)]));
-        let result = self.expression(file, expression, scope, origin);
-        self.lexical_values.pop();
-        let result = result?;
-        Ok(if refines_implicit_receiver {
-            self.graph.add_expr(SigExpr::ScopedReceiver {
-                receiver: ty,
-                result,
-                scope,
-            })
-        } else {
-            result
-        })
-    }
-
     /// Evaluate a value that is consumed inside the inferred expression rather than exposed as the
     /// declaration's result. A public declaration approximates an anonymous object only when that
     /// object escapes through its signature; its local members remain visible while the expression
@@ -1203,18 +1211,55 @@ impl SignatureConstraintExtractor {
         expression: ExprId,
         scope: SignatureScopeId,
         origin: &mut impl FnMut(crate::diag::Span) -> OriginId,
-        bindings: Vec<(Box<str>, SigExprId)>,
+        mut bindings: Vec<CompactSmartcastFact>,
     ) -> Result<SigExprId, ExpressionForm> {
         if bindings.is_empty() {
             return self.expression(file, expression, scope, origin);
         }
+        for fact in &mut bindings {
+            if fact.completion_clauses.is_empty() {
+                continue;
+            }
+            let Some(value) = self.compact_value_for_binding(&fact.binding) else {
+                continue;
+            };
+            for clause in fact.completion_clauses.drain(..) {
+                let completions = self.graph.add_operands(clause);
+                fact.value = self.graph.add_expr(SigExpr::CompletionNarrowed {
+                    value,
+                    narrowed: fact.value,
+                    completions,
+                });
+            }
+        }
         let receiver = bindings
             .iter()
             .rev()
-            .find_map(|(name, ty)| (name.as_ref() == "this").then_some(*ty));
-        self.lexical_values.push(bindings.into_iter().collect());
+            .find_map(|fact| (fact.binding.name.as_ref() == "this").then_some(fact.value));
+        let mut previous = Vec::with_capacity(bindings.len());
+        for fact in bindings {
+            let values = self
+                .lexical_values
+                .get_mut(fact.binding.scope)
+                .expect("a compact smart-cast binding must remain in lexical scope");
+            let old = values.insert(fact.binding.name.clone(), fact.value);
+            previous.push((fact.binding, old));
+        }
         let result = self.expression(file, expression, scope, origin);
-        self.lexical_values.pop();
+        for (binding, old) in previous.into_iter().rev() {
+            let values = self
+                .lexical_values
+                .get_mut(binding.scope)
+                .expect("a compact smart-cast binding must remain in lexical scope");
+            match old {
+                Some(value) => {
+                    values.insert(binding.name, value);
+                }
+                None => {
+                    values.remove(binding.name.as_ref());
+                }
+            }
+        }
         let result = result?;
         Ok(receiver.map_or(result, |receiver| {
             self.graph.add_expr(SigExpr::ScopedReceiver {
@@ -1223,107 +1268,6 @@ impl SignatureConstraintExtractor {
                 scope,
             })
         }))
-    }
-
-    /// Compact smart-cast facts established when `condition` is true. Semantic compatibility is
-    /// still decided by the ordinary resolver/checker adapter when these expression types evaluate.
-    fn positive_smartcast_facts(
-        &mut self,
-        file: &File,
-        condition: ExprId,
-        scope: SignatureScopeId,
-        origin: &mut impl FnMut(crate::diag::Span) -> OriginId,
-    ) -> Result<Vec<(Box<str>, SigExprId)>, ExpressionForm> {
-        match file.expr(condition) {
-            Expr::Is {
-                operand,
-                ty,
-                negated: false,
-            } => match file.expr(*operand) {
-                Expr::Name(name) => Ok(vec![(
-                    name.clone().into_boxed_str(),
-                    self.smartcast_type(file, *operand, ty, scope, origin)?,
-                )]),
-                _ => Ok(Vec::new()),
-            },
-            Expr::Binary {
-                op: BinOp::And,
-                lhs,
-                rhs,
-                ..
-            } => {
-                let mut bindings = self.positive_smartcasts(file, *lhs, scope, origin)?;
-                bindings.extend(self.positive_smartcasts(file, *rhs, scope, origin)?);
-                Ok(bindings)
-            }
-            // `x?.p == literal` and `x?.p != null` hold only when `x` is non-null.
-            Expr::Binary { op, lhs, rhs, .. }
-                if matches!(op, BinOp::Eq | BinOp::RefEq | BinOp::Ne | BinOp::RefNe)
-                    && matches!(
-                        (file.expr(*lhs), file.expr(*rhs)),
-                        (Expr::SafeCall { .. }, _) | (_, Expr::SafeCall { .. })
-                    ) =>
-            {
-                let (receiver, other) = match (file.expr(*lhs), file.expr(*rhs)) {
-                    (Expr::SafeCall { receiver, .. }, other) => (*receiver, other),
-                    (other, Expr::SafeCall { receiver, .. }) => (*receiver, other),
-                    _ => return Ok(Vec::new()),
-                };
-                let proves = match op {
-                    BinOp::Eq | BinOp::RefEq => matches!(
-                        other,
-                        Expr::BoolLit(_)
-                            | Expr::IntLit(_)
-                            | Expr::LongLit(_)
-                            | Expr::StringLit(_)
-                            | Expr::CharLit(_)
-                    ),
-                    _ => matches!(other, Expr::NullLit),
-                };
-                let Expr::Name(name) = file.expr(receiver) else {
-                    return Ok(Vec::new());
-                };
-                Ok(proves
-                    .then(|| {
-                        let value = self
-                            .lexical_values
-                            .iter()
-                            .rev()
-                            .find_map(|values| values.get(name.as_str()).copied())?;
-                        let non_null = self.graph.add_expr(SigExpr::NonNullable(value));
-                        Some((name.clone().into_boxed_str(), non_null))
-                    })
-                    .flatten()
-                    .into_iter()
-                    .collect())
-            }
-            Expr::Binary {
-                op: BinOp::Ne | BinOp::RefNe,
-                lhs,
-                rhs,
-                ..
-            } => {
-                let name = match (file.expr(*lhs), file.expr(*rhs)) {
-                    (Expr::Name(name), Expr::NullLit) | (Expr::NullLit, Expr::Name(name)) => {
-                        Some(name)
-                    }
-                    _ => None,
-                };
-                Ok(name
-                    .and_then(|name| {
-                        let value = self
-                            .lexical_values
-                            .iter()
-                            .rev()
-                            .find_map(|values| values.get(name.as_str()).copied())?;
-                        let non_null = self.graph.add_expr(SigExpr::NonNullable(value));
-                        Some((name.clone().into_boxed_str(), non_null))
-                    })
-                    .into_iter()
-                    .collect())
-            }
-            _ => Ok(Vec::new()),
-        }
     }
 
     /// After an expression-statement call `f(x, …)` where `x` names a lexical value, later reads
@@ -1341,27 +1285,24 @@ impl SignatureConstraintExtractor {
         for (index, argument) in args.iter().enumerate() {
             // The value itself (`requireNotNull(x)`), or the condition `x != null`
             // (`assertTrue(x != null)`), whose callee may promise `returns() implies actual`.
-            let (name, condition) = match file.expr(*argument) {
-                Expr::Name(name) => (name, false),
+            let (reference, name, condition) = match file.expr(*argument) {
+                Expr::Name(name) => (*argument, name, false),
                 Expr::Binary {
                     op: BinOp::Ne | BinOp::RefNe,
                     lhs,
                     rhs,
                     ..
                 } => match (file.expr(*lhs), file.expr(*rhs)) {
-                    (Expr::Name(name), Expr::NullLit) | (Expr::NullLit, Expr::Name(name)) => {
-                        (name, true)
-                    }
+                    (Expr::Name(name), Expr::NullLit) => (*lhs, name, true),
+                    (Expr::NullLit, Expr::Name(name)) => (*rhs, name, true),
                     _ => continue,
                 },
                 _ => continue,
             };
-            let Some(value) = self
-                .lexical_values
-                .iter()
-                .rev()
-                .find_map(|values| values.get(name.as_str()).copied())
-            else {
+            let Some(binding) = self.binding_for_reference(reference, name) else {
+                continue;
+            };
+            let Some(value) = self.compact_value_for_binding(&binding) else {
                 continue;
             };
             let narrowed = self.graph.add_expr(SigExpr::ContractNarrowed {
@@ -1370,10 +1311,7 @@ impl SignatureConstraintExtractor {
                 argument: u32::try_from(index).expect("too many call arguments"),
                 condition,
             });
-            self.lexical_values
-                .last_mut()
-                .expect("block scope must exist")
-                .insert(name.clone().into_boxed_str(), narrowed);
+            self.lexical_values[binding.scope].insert(binding.name, narrowed);
         }
     }
 
@@ -1400,25 +1338,19 @@ impl SignatureConstraintExtractor {
             let Expr::Name(name) = file.expr(*operand) else {
                 continue;
             };
-            let Some(value) = self
-                .lexical_values
-                .iter()
-                .rev()
-                .find_map(|values| values.get(name.as_str()).copied())
-            else {
+            let Some(binding) = self.binding_for_reference(*operand, name) else {
+                continue;
+            };
+            let Some(value) = self.compact_value_for_binding(&binding) else {
                 continue;
             };
             let non_null = self.graph.add_expr(SigExpr::NonNullable(value));
-            self.lexical_values
-                .last_mut()
-                .expect("block scope must exist")
-                .insert(name.clone().into_boxed_str(), non_null);
+            self.lexical_values[binding.scope].insert(binding.name, non_null);
         }
         let casts = self.evaluated_as_cast_bindings_from(file, &evaluated, scope, origin)?;
-        self.lexical_values
-            .last_mut()
-            .expect("block scope must exist")
-            .extend(casts);
+        for fact in casts {
+            self.lexical_values[fact.binding.scope].insert(fact.binding.name, fact.value);
+        }
         Ok(())
     }
 
@@ -1547,12 +1479,32 @@ impl SignatureConstraintExtractor {
                 }
             }
             Expr::Name(spelling) => {
-                if let Some(value) = self
-                    .lexical_values
-                    .iter()
-                    .rev()
-                    .find_map(|values| values.get(spelling.as_str()).copied())
+                if let Some(binding) = self.resolved_name_bindings.get(&expression) {
+                    if let Some(value) = self
+                        .lexical_values
+                        .get(binding.scope)
+                        .and_then(|values| values.get(binding.name.as_ref()))
+                    {
+                        return Ok(*value);
+                    }
+                }
+                if let Some((binding_scope, value)) =
+                    self.lexical_values.iter().enumerate().rev().find_map(
+                        |(binding_scope, values)| {
+                            values
+                                .get(spelling.as_str())
+                                .copied()
+                                .map(|value| (binding_scope, value))
+                        },
+                    )
                 {
+                    self.resolved_name_bindings.insert(
+                        expression,
+                        CompactBindingIdentity {
+                            scope: binding_scope,
+                            name: spelling.clone().into(),
+                        },
+                    );
                     return Ok(value);
                 }
                 let spelling = self.graph.intern_name(spelling);
@@ -1702,12 +1654,12 @@ impl SignatureConstraintExtractor {
             Expr::Binary { op, lhs, rhs, .. } => {
                 let lhs_expression = *lhs;
                 let lhs = self.expression(file, lhs_expression, scope, origin)?;
-                let bindings = if *op == BinOp::And {
-                    self.positive_smartcasts(file, lhs_expression, scope, origin)?
-                } else {
-                    // `||` and every eager operator evaluate the left operand before the right,
-                    // so a cast there has run. `&&` uses the stronger positive-condition facts.
-                    self.evaluated_as_cast_bindings(file, lhs_expression, scope, origin)?
+                let bindings = match op {
+                    BinOp::And => self.positive_smartcasts(file, lhs_expression, scope, origin)?,
+                    BinOp::Or => self.negative_smartcasts(file, lhs_expression, scope, origin)?,
+                    // Every eager operator evaluates the left operand before the right, so a cast
+                    // there has run even though no truth value controls the right operand.
+                    _ => self.evaluated_as_cast_bindings(file, lhs_expression, scope, origin)?,
                 };
                 let rhs = self.smartcast_bindings_branch(file, *rhs, scope, origin, bindings)?;
                 let operator = match op {
@@ -2027,127 +1979,124 @@ impl SignatureConstraintExtractor {
                 then_branch,
                 else_branch,
             } => {
-                // The condition does not contribute to the `if` result type, but it can contain a
-                // local/anonymous classifier whose stable header must be finalized before Pass 2.
-                // Walk it for those structural declarations without making unrelated condition
-                // calls dependencies of the enclosing declaration's inferred result.
                 let _ = self.expression(file, *cond, scope, origin);
                 let positive = self.positive_smartcasts(file, *cond, scope, origin)?;
-                let smartcast = match file.expr(*cond) {
-                    Expr::Is {
-                        operand,
-                        ty,
-                        negated,
-                    } => match file.expr(*operand) {
-                        Expr::Name(name) => Some((
-                            name.clone().into_boxed_str(),
-                            self.smartcast_type(file, *operand, ty, scope, origin)?,
-                            !*negated,
-                        )),
-                        _ => None,
-                    },
-                    Expr::Binary { op, lhs, rhs, .. }
-                        if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::RefEq | BinOp::RefNe) =>
-                    {
-                        let name = match (file.expr(*lhs), file.expr(*rhs)) {
-                            (Expr::Name(name), Expr::NullLit)
-                            | (Expr::NullLit, Expr::Name(name)) => Some(name),
-                            _ => None,
-                        };
-                        name.and_then(|name| {
-                            let value = self
-                                .lexical_values
-                                .iter()
-                                .rev()
-                                .find_map(|values| values.get(name.as_str()).copied())?;
-                            let non_null = self.graph.add_expr(SigExpr::NonNullable(value));
-                            Some((
-                                name.clone().into_boxed_str(),
-                                non_null,
-                                matches!(op, BinOp::Ne | BinOp::RefNe),
-                            ))
-                        })
-                    }
-                    _ => None,
-                };
-                let then_branch = if !positive.is_empty() {
-                    self.smartcast_bindings_branch(file, *then_branch, scope, origin, positive)?
-                } else if let Some((name, ty, true)) = smartcast.as_ref() {
-                    self.smartcast_branch(file, *then_branch, scope, origin, name.clone(), *ty)?
+                let negative = self.negative_smartcasts(file, *cond, scope, origin)?;
+                let branch_entry = self.boolean_vals.clone();
+                let then_result = if !positive.is_empty() {
+                    self.smartcast_bindings_branch(file, *then_branch, scope, origin, positive)
                 } else {
-                    self.expression(file, *then_branch, scope, origin)?
+                    self.expression(file, *then_branch, scope, origin)
                 };
-                let else_branch = match else_branch {
+                let then_state = std::mem::replace(&mut self.boolean_vals, branch_entry.clone());
+                let then_value = then_result?;
+                let else_result = match else_branch {
                     Some(else_branch) => {
-                        if let Some((name, ty, false)) = smartcast.as_ref() {
-                            self.smartcast_branch(
+                        if !negative.is_empty() {
+                            self.smartcast_bindings_branch(
                                 file,
                                 *else_branch,
                                 scope,
                                 origin,
-                                name.clone(),
-                                *ty,
-                            )?
+                                negative,
+                            )
                         } else {
-                            self.expression(file, *else_branch, scope, origin)?
+                            self.expression(file, *else_branch, scope, origin)
                         }
                     }
-                    None => self.known(Ty::Unit),
+                    None => Ok(self.known(Ty::Unit)),
                 };
-                let operands = self.graph.add_operands([then_branch, else_branch]);
+                let else_state = std::mem::replace(&mut self.boolean_vals, branch_entry);
+                let else_value = else_result?;
+                let then_completion = self.compact_completion(file, *then_branch, then_value);
+                let else_completion = else_branch
+                    .as_ref()
+                    .map_or(CompactCompletion::Always, |branch| {
+                        self.compact_completion(file, *branch, else_value)
+                    });
+                self.join_boolean_vals(&[
+                    (then_completion, then_state),
+                    (else_completion, else_state),
+                ]);
+                let operands = self.graph.add_operands([then_value, else_value]);
                 self.graph.add_expr(SigExpr::Join {
                     operands,
                     scope,
                     origin: node_origin,
                 })
             }
-            Expr::Try { body, catches, .. } => {
-                let mut results = Vec::with_capacity(catches.len() + 1);
-                results.push(self.expression(file, *body, scope, origin)?);
-                for catch in catches {
-                    let ty = self.compact_type(&catch.ty, scope, origin);
-                    self.lexical_values.push(HashMap::from_iter([(
-                        catch.name.clone().into_boxed_str(),
-                        ty,
-                    )]));
-                    let result = self.expression(file, catch.body, scope, origin);
-                    self.lexical_values.pop();
-                    results.push(result?);
+            Expr::Try {
+                body,
+                catches,
+                finally,
+            } => self.try_expression(file, *body, catches, *finally, scope, origin, node_origin)?,
+            Expr::When { subject, arms } => {
+                if let Some(subject) = subject {
+                    let _ = self.expression(file, *subject, scope, origin);
                 }
-                let operands = self.graph.add_operands(results);
-                self.graph.add_expr(SigExpr::Join {
-                    operands,
-                    scope,
-                    origin: node_origin,
-                })
-            }
-            Expr::When { arms, .. } => {
                 let mut results = Vec::with_capacity(arms.len());
+                let mut declined = Vec::new();
+                let branch_entry = self.boolean_vals.clone();
+                let mut exits = Vec::with_capacity(arms.len() + 1);
+                let mut has_else = false;
                 for arm in arms {
-                    let smartcast = match arm.conditions.as_slice() {
-                        [condition] => match file.expr(condition.expression()) {
-                            Expr::Is {
-                                operand,
-                                ty,
-                                negated: false,
-                            } => match file.expr(*operand) {
-                                Expr::Name(name) => Some((
-                                    name.clone().into_boxed_str(),
-                                    self.smartcast_type(file, *operand, ty, scope, origin)?,
-                                )),
-                                _ => None,
-                            },
-                            _ => None,
-                        },
-                        [] | [_, _, ..] => None,
+                    let positive = match arm.conditions.as_slice() {
+                        [condition] if condition.is_predicate() => {
+                            self.positive_smartcasts(file, condition.expression(), scope, origin)?
+                        }
+                        [crate::ast::WhenCondition::SubjectEquals(candidate)] => {
+                            match (subject, file.expr(*candidate)) {
+                                (Some(subject), Expr::BoolLit(truth)) => {
+                                    self.smartcast_facts(file, *subject, *truth, scope, origin)?
+                                }
+                                _ => Vec::new(),
+                            }
+                        }
+                        [] | [_] | [_, _, ..] => Vec::new(),
                     };
-                    if let Some((name, ty)) = smartcast {
-                        results
-                            .push(self.smartcast_branch(file, arm.body, scope, origin, name, ty)?);
+                    let mut current_declined = Vec::new();
+                    for condition in &arm.conditions {
+                        let negative = if condition.is_predicate() {
+                            self.negative_smartcasts(file, condition.expression(), scope, origin)?
+                        } else {
+                            match (subject, condition) {
+                                (
+                                    Some(subject),
+                                    crate::ast::WhenCondition::SubjectEquals(candidate),
+                                ) => match file.expr(*candidate) {
+                                    Expr::BoolLit(truth) => self
+                                        .smartcast_facts(file, *subject, !*truth, scope, origin)?,
+                                    _ => Vec::new(),
+                                },
+                                _ => Vec::new(),
+                            }
+                        };
+                        current_declined.extend(negative);
+                    }
+                    has_else |= arm.conditions.is_empty();
+                    let mut smartcasts = declined.clone();
+                    smartcasts.extend(positive);
+                    let result = if smartcasts.is_empty() {
+                        self.expression(file, arm.body, scope, origin)
                     } else {
-                        results.push(self.expression(file, arm.body, scope, origin)?);
+                        self.smartcast_bindings_branch(file, arm.body, scope, origin, smartcasts)
+                    };
+                    let branch_state =
+                        std::mem::replace(&mut self.boolean_vals, branch_entry.clone());
+                    let result = result?;
+                    exits.push((
+                        self.compact_completion(file, arm.body, result),
+                        branch_state,
+                    ));
+                    results.push(result);
+                    if arm.guard.is_none() {
+                        declined.extend(current_declined);
                     }
                 }
+                if !has_else {
+                    exits.push((CompactCompletion::Always, branch_entry));
+                }
+                self.join_boolean_vals(&exits);
                 let operands = self.graph.add_operands(results);
                 self.graph.add_expr(SigExpr::Join {
                     operands,
@@ -2161,38 +2110,62 @@ impl SignatureConstraintExtractor {
                 self.lexical_types.push(HashMap::default());
                 let mut effects = Vec::new();
                 let mut terminal_lambda_return = false;
+                let mut prefix_reachable = true;
                 for (statement_index, statement) in stmts.iter().enumerate() {
+                    let previous_unreachable_depth = self.unreachable_statement_depth;
+                    let statement_reachable = prefix_reachable && previous_unreachable_depth == 0;
+                    if !statement_reachable {
+                        self.unreachable_statement_depth =
+                            self.unreachable_statement_depth.saturating_add(1);
+                    }
                     match file.stmt(*statement) {
                         Stmt::Local {
                             name,
                             ty: None,
                             init,
-                            ..
+                            is_var,
                         } => {
                             let value = self.consumed_expression(file, *init, scope, origin)?;
                             effects.push(value);
+                            if !is_var {
+                                self.record_boolean_val(file, name, *init, scope, origin)?;
+                            }
                             self.lexical_values
                                 .last_mut()
                                 .expect("block scope must exist")
                                 .insert(name.clone().into_boxed_str(), value);
                         }
                         local @ (Stmt::Local { ty: Some(_), .. } | Stmt::LocalLateinit { .. }) => {
-                            let (name, ty, initializer) = match local {
+                            let (name, ty, initializer, stable) = match local {
                                 Stmt::Local {
                                     name,
                                     ty: Some(ty),
                                     init,
-                                    ..
-                                } => (name, ty, Some(*init)),
-                                Stmt::LocalLateinit { name, ty } => (name, ty, None),
+                                    is_var,
+                                } => (name, ty, Some(*init), !is_var),
+                                Stmt::LocalLateinit { name, ty } => (name, ty, None, false),
                                 _ => unreachable!("the outer pattern admits only typed locals"),
                             };
                             let value = self.compact_type(ty, scope, origin);
                             if let Some(initializer) = initializer {
-                                let initializer =
+                                let initializer_value =
                                     self.expression(file, initializer, scope, origin)?;
-                                self.graph.apply_result_expectation(initializer, value);
-                                effects.push(self.graph.expected_value(initializer, value, scope));
+                                self.graph
+                                    .apply_result_expectation(initializer_value, value);
+                                effects.push(self.graph.expected_value(
+                                    initializer_value,
+                                    value,
+                                    scope,
+                                ));
+                                if stable {
+                                    self.record_boolean_val(
+                                        file,
+                                        name,
+                                        initializer,
+                                        scope,
+                                        origin,
+                                    )?;
+                                }
                             }
                             if ty.fun_has_receiver() {
                                 self.lexical_callables
@@ -2203,6 +2176,7 @@ impl SignatureConstraintExtractor {
                                         CompactLexicalCallable {
                                             value,
                                             has_receiver: true,
+                                            operator: false,
                                         },
                                     );
                             }
@@ -2231,8 +2205,10 @@ impl SignatureConstraintExtractor {
                                     .insert(entry.name.clone().into_boxed_str(), value);
                             }
                         }
-                        Stmt::Assign { value, .. } => {
-                            effects.push(self.expression(file, *value, scope, origin)?);
+                        Stmt::Assign { name, value } => {
+                            effects.push(
+                                self.simple_name_assignment(file, name, *value, scope, origin)?,
+                            );
                         }
                         Stmt::AssignMember {
                             receiver, value, ..
@@ -2310,7 +2286,10 @@ impl SignatureConstraintExtractor {
                             self.lexical_values.pop();
                             effects.push(body?);
                         }
-                        Stmt::IncDec { .. } | Stmt::Break(_) | Stmt::Continue(_) => {}
+                        Stmt::IncDec { name, .. } => {
+                            self.forget_boolean_vals_depending_on(name);
+                        }
+                        Stmt::Break(_) | Stmt::Continue(_) => {}
                         Stmt::Return(value, label)
                             if self.lambda_return_matches(label.as_deref()) =>
                         {
@@ -2406,6 +2385,7 @@ impl SignatureConstraintExtractor {
                                         CompactLexicalCallable {
                                             value,
                                             has_receiver: function.receiver.is_some(),
+                                            operator: function.is_operator(),
                                         },
                                     );
                             }
@@ -2465,7 +2445,14 @@ impl SignatureConstraintExtractor {
                             }
                         }
                     }
-                    self.narrow_after_normal_completion(file, *statement, scope, origin)?;
+                    self.unreachable_statement_depth = previous_unreachable_depth;
+                    if statement_reachable {
+                        self.narrow_after_normal_completion(file, *statement, scope, origin)?;
+                    }
+                    prefix_reachable &=
+                        crate::ast::definitely_evaluated::statement_may_complete_normally(
+                            file, *statement,
+                        );
                 }
                 let result = if terminal_lambda_return {
                     self.known(Ty::Nothing)
@@ -2475,6 +2462,7 @@ impl SignatureConstraintExtractor {
                         None => self.known(Ty::Unit),
                     }
                 };
+                self.leave_boolean_val_scope();
                 self.lexical_values.pop();
                 self.lexical_callables.pop();
                 self.lexical_types.pop();
@@ -2647,6 +2635,7 @@ impl SignatureConstraintExtractor {
                     CompactLexicalCallable {
                         value: ty,
                         has_receiver: true,
+                        operator: false,
                     },
                 );
             }
@@ -2995,6 +2984,7 @@ impl SignatureConstraintExtractor {
                     CompactLexicalCallable {
                         value,
                         has_receiver: true,
+                        operator: false,
                     },
                 );
             }

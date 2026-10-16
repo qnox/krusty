@@ -2,10 +2,24 @@
 //! initializers see and the storage of values a local class captures.
 
 use super::{AnonymousObjectCaptureSource, Checker, CheckerScope};
-use crate::ast::{Decl, DeclId, PropParam};
+use crate::ast::{DeclId, PropParam};
 use crate::types::Ty;
 
 impl Checker<'_> {
+    pub(super) fn body_class_declaration(
+        &self,
+        source: Option<&crate::libraries::SourceMember>,
+    ) -> Option<DeclId> {
+        match source {
+            Some(crate::libraries::SourceMember::Class { file, owner, .. })
+                if *file == self.file_index =>
+            {
+                Some(DeclId(*owner))
+            }
+            _ => None,
+        }
+    }
+
     /// Declare the primary-constructor parameters visible in a property initializer or an `init`
     /// block. Kotlin 2 resolves a `val`/`var` parameter named there to the property it declares, so
     /// only plain parameters become values of this rung; supertype arguments, delegation
@@ -21,15 +35,6 @@ impl Checker<'_> {
                 self.declare(scope, &parameter.name, ty, parameter.is_var);
             }
         }
-    }
-
-    fn body_class_declares_property_named(&self, declaration: DeclId, name: &str) -> bool {
-        matches!(self.file.decl(declaration), Decl::Class(class) if class
-            .props
-            .iter()
-            .map(|property| property.name.as_str())
-            .chain(class.body_props.iter().map(|property| property.name.as_str()))
-            .any(|property| property == name))
     }
 
     /// Bind the lexical capture selected for one property's own initializer. That initializer is
@@ -69,8 +74,8 @@ impl Checker<'_> {
 
     /// Shadow synthetic immutable capture properties with their semantic source bindings. A shared
     /// cell remains writable inside methods and accessors even though the field holding the cell is
-    /// itself final. A source property keeps its dispatch identity; only its own initializer may
-    /// explicitly select the same-named enclosing capture above that rung.
+    /// itself final. Kotlin's scope tower also keeps a function-local value ahead of a same-named
+    /// member of a local class, so a colliding capture remains visible in member bodies.
     pub(super) fn declare_body_class_storage_captures(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -86,7 +91,6 @@ impl Checker<'_> {
                 AnonymousObjectCaptureSource::LexicalValue
                     | AnonymousObjectCaptureSource::ClassStorage { .. }
             ) && capture.storage_ty.is_none()
-                && !self.body_class_declares_property_named(declaration, &capture.name)
             {
                 self.declare_class_storage(
                     scope,

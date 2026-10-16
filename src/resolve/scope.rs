@@ -14,6 +14,7 @@
 //! The flow frame is concrete: narrowings are a property of lexical scopes, so they live here.
 
 use super::receiver_capture_identity::{LambdaReceiverSlot, ReceiverDeclarationRole};
+use crate::ast::{ExprId, StmtId};
 use crate::diag::Span;
 use crate::fx_hash::{HashMap, HashSet};
 use crate::types::{Ty, TypeName};
@@ -202,6 +203,62 @@ pub(crate) enum FlowExclusion {
     Null,
 }
 
+/// The facts one checked condition proves on one of its outcomes: positive narrowings and
+/// negative facts. A cast the stability gate declined where the condition was checked is no fact.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct ConditionFacts {
+    pub(super) narrowings: Vec<(NarrowPath, Ty)>,
+    pub(super) exclusions: Vec<(NarrowPath, FlowExclusion)>,
+}
+
+impl ConditionFacts {
+    pub(super) fn is_empty(&self) -> bool {
+        self.narrowings.is_empty() && self.exclusions.is_empty()
+    }
+
+    /// Drop the facts about `root`: a write replaced that value, so what the condition said about
+    /// the old one says nothing about the new one.
+    fn forget_root(&mut self, root: &PathRoot) {
+        self.narrowings.retain(|(path, _)| path.root != *root);
+        self.exclusions.retain(|(path, _)| path.root != *root);
+    }
+}
+
+/// What a stable local `Boolean` `val` implies about other values, by the value it holds: the
+/// facts its initializer proved for `true` and for `false` (Kotlin's data-flow implications bound
+/// to a stable boolean variable).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct FlowExecutionIdentity {
+    /// A named local function is a separate execution even though entering it clears the enclosing
+    /// lambda chain. Its statement identity cannot collide with a lambda expression identity.
+    pub(super) local_function: Option<StmtId>,
+    /// Source lambda chain, including lambdas later selected for inline splicing. Keeping the full
+    /// chain makes the identity stable while overload selection is still deciding capture mode;
+    /// comparisons normalize both sides with the final inline decisions.
+    pub(super) lambdas: Vec<ExprId>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct BooleanImplications {
+    pub(super) when_true: ConditionFacts,
+    pub(super) when_false: ConditionFacts,
+    /// The execution the val was declared in: the materialized (not inline-spliced) lambdas
+    /// enclosing it, outermost first. Only a write in this same execution replaces a value under
+    /// the val's facts; a write in a nested callable runs at another time and is the stability
+    /// gate's business where the val is read.
+    pub(super) execution: FlowExecutionIdentity,
+}
+
+impl BooleanImplications {
+    pub(super) fn facts(&self, truth: bool) -> &ConditionFacts {
+        if truth {
+            &self.when_true
+        } else {
+            &self.when_false
+        }
+    }
+}
+
 /// Flow facts proven within one scope. Both kinds live HERE rather than on the binding they talk
 /// about, which is what makes them die with the scope that proved them — in both directions, with
 /// no reset step. A fact about a binding declared further out is still the inner scope's fact.
@@ -228,6 +285,9 @@ pub(crate) struct Flow {
     /// later nullable-receiver use reports kotlinc's SMARTCAST_IMPOSSIBLE instead of the plain
     /// unsafe-call error.
     declined: Vec<(String, Ty)>,
+    /// Implications of stable Boolean `val`s declared in this frame, by the val's flow identity.
+    /// They live as long as the val and lose a fact when the value it talks about is written.
+    boolean_implications: HashMap<u32, BooleanImplications>,
 }
 
 /// A short-lived copy of the flow frames on one lexical scope chain. Control-flow constructs use
@@ -454,9 +514,93 @@ impl<'p, B> Scope<'p, B> {
                     .locals
                     .retain(|name, ty| other.locals.get(name) == Some(ty));
                 frame.declined.retain(|fact| other.declined.contains(fact));
+                frame.boolean_implications.retain(|identity, implications| {
+                    other.boolean_implications.get(identity) == Some(implications)
+                });
             }
         }
         self.restore_flow(&common);
+    }
+
+    /// Install `base`, then apply exactly the flow changes made between `effect_entry` and
+    /// `effect_exit`.
+    ///
+    /// A `finally` is checked from facts safe on every normal or abrupt try/catch exit, while its
+    /// effects run again on the normal-only continuation after the try. Rechecking the finalizer
+    /// would duplicate semantic work and diagnostics; this key-wise delta projects its removals,
+    /// replacements, and newly proved facts onto that continuation instead.
+    pub(crate) fn restore_flow_with_delta(
+        &self,
+        base: &FlowSnapshot,
+        effect_entry: &FlowSnapshot,
+        effect_exit: &FlowSnapshot,
+    ) {
+        assert_eq!(
+            base.frames.len(),
+            effect_entry.frames.len(),
+            "flow delta entry must share the base scope chain"
+        );
+        assert_eq!(
+            effect_entry.frames.len(),
+            effect_exit.frames.len(),
+            "flow delta exit must share the entry scope chain"
+        );
+
+        fn apply_map_delta<K, V>(
+            target: &mut HashMap<K, V>,
+            entry: &HashMap<K, V>,
+            exit: &HashMap<K, V>,
+        ) where
+            K: Clone + Eq + std::hash::Hash,
+            V: Clone + Eq,
+        {
+            for (key, entry_value) in entry {
+                if exit.get(key) == Some(entry_value) {
+                    continue;
+                }
+                if let Some(exit_value) = exit.get(key) {
+                    target.insert(key.clone(), exit_value.clone());
+                } else {
+                    target.remove(key);
+                }
+            }
+            for (key, exit_value) in exit {
+                if !entry.contains_key(key) {
+                    target.insert(key.clone(), exit_value.clone());
+                }
+            }
+        }
+
+        let mut projected = base.clone();
+        for ((target, entry), exit) in projected
+            .frames
+            .iter_mut()
+            .zip(&effect_entry.frames)
+            .zip(&effect_exit.frames)
+        {
+            apply_map_delta(&mut target.paths, &entry.paths, &exit.paths);
+            apply_map_delta(
+                &mut target.intersections,
+                &entry.intersections,
+                &exit.intersections,
+            );
+            apply_map_delta(&mut target.exclusions, &entry.exclusions, &exit.exclusions);
+            apply_map_delta(&mut target.locals, &entry.locals, &exit.locals);
+            apply_map_delta(
+                &mut target.boolean_implications,
+                &entry.boolean_implications,
+                &exit.boolean_implications,
+            );
+            target
+                .declined
+                .retain(|fact| !entry.declined.contains(fact) || exit.declined.contains(fact));
+            for fact in &exit.declined {
+                if !entry.declined.contains(fact) && !target.declined.contains(fact) {
+                    target.declined.push(fact.clone());
+                }
+            }
+        }
+        self.restore_flow(&projected);
     }
 
     pub(crate) fn function_child(
@@ -858,6 +1002,61 @@ impl<'p, B> Scope<'p, B> {
             flow.intersections.retain(|path, _| path.root != *root);
             flow.exclusions.retain(|path, _| path.root != *root);
         }
+    }
+
+    /// Drop the Boolean-val facts about `root` that a write in `execution` invalidates: those of
+    /// every val declared in that same execution, in the whole chain.
+    pub(super) fn forget_implied_facts_rooted_at(
+        &self,
+        root: &PathRoot,
+        execution: &FlowExecutionIdentity,
+        is_inline_spliced: impl Fn(ExprId) -> bool,
+    ) {
+        for rung in self.ancestors() {
+            for implications in rung.flow.borrow_mut().boolean_implications.values_mut() {
+                let same_execution = implications.execution.local_function
+                    == execution.local_function
+                    && implications
+                        .execution
+                        .lambdas
+                        .iter()
+                        .copied()
+                        .filter(|&lambda| !is_inline_spliced(lambda))
+                        .eq(execution
+                            .lambdas
+                            .iter()
+                            .copied()
+                            .filter(|&lambda| !is_inline_spliced(lambda)));
+                if same_execution {
+                    implications.when_true.forget_root(root);
+                    implications.when_false.forget_root(root);
+                }
+            }
+        }
+    }
+
+    /// Bind a stable Boolean `val`'s implications to the frame declaring it.
+    pub(super) fn record_boolean_implications(
+        &self,
+        identity: u32,
+        implications: BooleanImplications,
+    ) {
+        self.flow
+            .borrow_mut()
+            .boolean_implications
+            .insert(identity, implications);
+    }
+
+    /// The implications recorded for the val with flow identity `identity`, from the frame that
+    /// declared it.
+    pub(super) fn boolean_implications(&self, identity: u32) -> Option<BooleanImplications> {
+        self.ancestors().find_map(|rung| {
+            rung.flow
+                .borrow()
+                .boolean_implications
+                .get(&identity)
+                .cloned()
+        })
     }
 
     /// Record a continuation fact on THIS frame only. A control-flow join uses this for a type

@@ -2,9 +2,211 @@
 
 use crate::fx_hash::HashSet;
 
+use super::{Checker, ExprLowering, LambdaCapture};
 use crate::ast::{
     ClassDecl, ClassInit, CtorDelegation, Decl, DeclId, Expr, ExprId, File, FunBody, Stmt, StmtId,
 };
+use crate::diag::Span;
+
+/// One closure-captured write and the execution in which its assignment runs.
+///
+/// A local function remains a distinct execution even when it contains no materialized lambda.
+/// Keeping that declaration identity beside the lambda chain prevents the enclosing function and
+/// the local function from being mistaken for the same execution during smart-cast stability
+/// checks.
+pub(super) struct ClosureWrite {
+    name: String,
+    local_function: Option<StmtId>,
+    lambdas: Vec<ExprId>,
+    /// Assigned value for an assignment; `None` for inc/dec.
+    value: Option<ExprId>,
+}
+
+/// Collect captured writes and the lambda chain that controls when each write can execute.
+pub(super) fn collect_closure_reassigned(
+    file: &File,
+    expression: ExprId,
+    out: &mut Vec<ClosureWrite>,
+) {
+    // The child walk takes two closures at once, so the accumulators go through `RefCell`s; the
+    // lambda stack keeps its push/pop discipline because every borrow ends inside the recursive
+    // call that took it.
+    let writes = std::cell::RefCell::new(std::mem::take(out));
+    let lambdas = std::cell::RefCell::new(Vec::new());
+    let local_functions = std::cell::RefCell::new(Vec::new());
+
+    fn visit_expression(
+        file: &File,
+        expression: ExprId,
+        lambdas: &std::cell::RefCell<Vec<ExprId>>,
+        local_functions: &std::cell::RefCell<Vec<StmtId>>,
+        writes: &std::cell::RefCell<Vec<ClosureWrite>>,
+    ) {
+        let is_lambda = matches!(file.expr(expression), Expr::Lambda { .. });
+        if is_lambda {
+            lambdas.borrow_mut().push(expression);
+        }
+        if !lambdas.borrow().is_empty() || !local_functions.borrow().is_empty() {
+            if let Expr::IncDec { target, .. } = file.expr(expression) {
+                if let Expr::Name(name) = file.expr(*target) {
+                    writes.borrow_mut().push(ClosureWrite {
+                        name: name.clone(),
+                        local_function: local_functions.borrow().last().copied(),
+                        lambdas: lambdas.borrow().clone(),
+                        value: None,
+                    });
+                }
+            }
+        }
+        file.any_child_expr(
+            expression,
+            &mut |child| {
+                visit_expression(file, child, lambdas, local_functions, writes);
+                false
+            },
+            &mut |statement| {
+                visit_statement(file, statement, lambdas, local_functions, writes);
+                false
+            },
+        );
+        if is_lambda {
+            lambdas.borrow_mut().pop();
+        }
+    }
+
+    fn visit_statement(
+        file: &File,
+        statement: StmtId,
+        lambdas: &std::cell::RefCell<Vec<ExprId>>,
+        local_functions: &std::cell::RefCell<Vec<StmtId>>,
+        writes: &std::cell::RefCell<Vec<ClosureWrite>>,
+    ) {
+        match file.stmt(statement) {
+            Stmt::LocalFun(function) => {
+                local_functions.borrow_mut().push(statement);
+                for default in function
+                    .params
+                    .iter()
+                    .filter_map(|parameter| parameter.default)
+                {
+                    visit_expression(file, default, lambdas, local_functions, writes);
+                }
+                if let FunBody::Expr(body) | FunBody::Block(body) = &function.body {
+                    visit_expression(file, *body, lambdas, local_functions, writes);
+                }
+                local_functions.borrow_mut().pop();
+                return;
+            }
+            Stmt::Assign { name, value }
+                if !lambdas.borrow().is_empty() || !local_functions.borrow().is_empty() =>
+            {
+                writes.borrow_mut().push(ClosureWrite {
+                    name: name.clone(),
+                    local_function: local_functions.borrow().last().copied(),
+                    lambdas: lambdas.borrow().clone(),
+                    value: Some(*value),
+                });
+            }
+            Stmt::IncDec { name, .. }
+                if !lambdas.borrow().is_empty() || !local_functions.borrow().is_empty() =>
+            {
+                writes.borrow_mut().push(ClosureWrite {
+                    name: name.clone(),
+                    local_function: local_functions.borrow().last().copied(),
+                    lambdas: lambdas.borrow().clone(),
+                    value: None,
+                });
+            }
+            _ => {}
+        }
+        file.any_child_stmt(statement, &mut |child| {
+            visit_expression(file, child, lambdas, local_functions, writes);
+            false
+        });
+    }
+
+    visit_expression(file, expression, &lambdas, &local_functions, &writes);
+    *out = writes.into_inner();
+}
+
+impl<'a> Checker<'a> {
+    /// Whether a captured write that exists by `site` can mutate `name` outside the execution
+    /// currently being checked. Writes in the same local-function/materialized-lambda execution
+    /// are ordinary straight-line writes: the assignment itself replaces the flow fact, and a
+    /// later read may use that exact assigned type. A sibling or nested escaping callable can run
+    /// between proof and use and therefore still makes the variable unstable. Inline-spliced
+    /// lambdas do not add an execution boundary on either side of the comparison.
+    pub(super) fn closure_reassigned_before(&self, name: &str, site: Span) -> bool {
+        self.fn_closure_reassigned.iter().any(|write| {
+            self.capturing_closure_write_exists_before(write, name, site)
+                && !self.same_materialized_execution(write)
+        })
+    }
+
+    /// Whether a materialized capturing closure containing a write exists by `site`, irrespective
+    /// of which closure body the checker is currently visiting. This is the enclosing scope's
+    /// invalidation question; [`Self::closure_reassigned_before`] is the current-execution stability
+    /// question.
+    pub(super) fn capturing_closure_reassigned_before(&self, name: &str, site: Span) -> bool {
+        self.fn_closure_reassigned
+            .iter()
+            .any(|write| self.capturing_closure_write_exists_before(write, name, site))
+    }
+
+    fn capturing_closure_write_exists_before(
+        &self,
+        write: &ClosureWrite,
+        name: &str,
+        site: Span,
+    ) -> bool {
+        write.name == name
+            && match write.local_function {
+                Some(function) => self.file.stmt_spans[function.0 as usize].lo <= site.lo,
+                None => write.lambdas.iter().any(|&lambda| {
+                    self.span(lambda).lo <= site.lo && !self.lambda_is_inline_spliced(lambda)
+                }),
+            }
+    }
+
+    fn same_materialized_execution(&self, write: &ClosureWrite) -> bool {
+        write.local_function == self.local_function_execution
+            && write
+                .lambdas
+                .iter()
+                .copied()
+                .filter(|&lambda| !self.lambda_is_inline_spliced(lambda))
+                .eq(self
+                    .lambda_returns
+                    .active_chain()
+                    .iter()
+                    .copied()
+                    .filter(|&lambda| !self.lambda_is_inline_spliced(lambda)))
+    }
+
+    /// Whether every relevant capturing-lambda write stores the null literal.
+    pub(super) fn closure_writes_only_null(&self, name: &str, site: Span) -> bool {
+        self.fn_closure_reassigned
+            .iter()
+            .filter(|write| {
+                self.capturing_closure_write_exists_before(write, name, site)
+                    && !self.same_materialized_execution(write)
+            })
+            .all(|write| {
+                write
+                    .value
+                    .is_some_and(|value| matches!(self.file.expr(value), Expr::NullLit))
+            })
+    }
+
+    /// The checker's recorded capture decision for a lambda expression (set when the enclosing
+    /// call is checked against an inline callee).
+    pub(super) fn lambda_is_inline_spliced(&self, expression: ExprId) -> bool {
+        matches!(
+            self.expr_lowers.get(&expression),
+            Some(ExprLowering::Lambda(info)) if info.capture == LambdaCapture::InlineSplice
+        )
+    }
+}
 
 /// Hoisted statement-position local classes lexically contained by an expression subtree.
 ///
@@ -116,12 +318,27 @@ pub(super) fn local_fun_body_uses_any(
                 class_active.remove(name);
             }
         }
+        // Constructor parameters enter scope only after their own defaults. An outer `x` is still
+        // the binding in `class C(x: T = run { use(x) })`, while a later parameter default and the
+        // completed class header see the newly declared constructor parameter.
+        let mut constructor_active = active.clone();
+        for parameter in &class.context_params {
+            constructor_active.remove(&parameter.name);
+        }
+        for parameter in &class.props {
+            if parameter
+                .default
+                .is_some_and(|default| expression_uses(file, default, &constructor_active))
+            {
+                return true;
+            }
+            constructor_active.remove(&parameter.name);
+        }
         if class
             .base_args
             .iter()
             .copied()
-            .chain(class.props.iter().filter_map(|property| property.default))
-            .any(|expression| expression_uses(file, expression, &class_active))
+            .any(|expression| expression_uses(file, expression, &constructor_active))
         {
             return true;
         }
@@ -162,6 +379,12 @@ pub(super) fn local_fun_body_uses_any(
         for method in &class.methods {
             let mut method_active = class_active.clone();
             for parameter in &method.params {
+                if parameter
+                    .default
+                    .is_some_and(|default| expression_uses(file, default, &method_active))
+                {
+                    return true;
+                }
                 method_active.remove(&parameter.name);
             }
             if let FunBody::Expr(body) | FunBody::Block(body) = method.body {
@@ -173,6 +396,12 @@ pub(super) fn local_fun_body_uses_any(
         for constructor in &class.secondary_ctors {
             let mut constructor_active = class_active.clone();
             for parameter in &constructor.params {
+                if parameter
+                    .default
+                    .is_some_and(|default| expression_uses(file, default, &constructor_active))
+                {
+                    return true;
+                }
                 constructor_active.remove(&parameter.name);
             }
             let arguments = match &constructor.delegation {
@@ -180,11 +409,9 @@ pub(super) fn local_fun_body_uses_any(
                 CtorDelegation::This(call) | CtorDelegation::Super(call) => call.args.as_slice(),
             };
             if constructor
-                .params
-                .iter()
-                .filter_map(|parameter| parameter.default)
+                .body
+                .into_iter()
                 .chain(arguments.iter().copied())
-                .chain(constructor.body)
                 .any(|expression| expression_uses(file, expression, &constructor_active))
             {
                 return true;
