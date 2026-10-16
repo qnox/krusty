@@ -14456,6 +14456,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_generic_local_vararg_reference_boxes_a_primitive_element`). Corpus:
   `codegen/box/inline/callableReferenceOfLocalFun.kt`.
 
+- **A local function reference fixes the enclosing call's type arguments with its own shape.** When
+  the expected function type still holds the call's inference variables (`s.let(::rewrite)`,
+  `apply1(s, ::size)`), the selected local function realizes that shape occurrence by occurrence,
+  exactly as a member or top-level reference does: its parameter types become input constraints
+  and its return type the result's lower bound, so `R` infers as `String` or `Int`. The reference's
+  type is that realized shape, never the unsolved expected type. Tests:
+  `tests/local_function_reference_inference_e2e.rs`.
+
 - **Fully-qualified SOURCE class names (`pkg1.Cls`) in type position.** A dotted type name whose path
   matches a class declared in the same module (a sibling file's package, no `import` needed — as
   kotlinc accepts) resolves to that source class, shadowing any classpath type of the same path. The
