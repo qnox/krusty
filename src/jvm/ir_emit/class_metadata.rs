@@ -439,6 +439,7 @@ impl<'a> JvmClassRealization<'a> {
                 backing.and_then(|field| {
                     (!visibility.is_private()
                         && property.is_var
+                        && !property.has_private_default_setter()
                         && !is_jvm_field(c, &property.name))
                     .then(|| (default_setter, format!("({})V", desc(field.ty))))
                 })

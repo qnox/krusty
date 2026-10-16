@@ -67,9 +67,12 @@ impl Emitter<'_> {
         // non-private inline function reaches a non-private property through its getter or setter,
         // as kotlinc does in a public inline scope. A private property keeps its exported field
         // accessor. A writable `val` remains a direct deferred-initialization write because it has
-        // no setter.
+        // no setter. A private default setter has no method either: select its field so emission can
+        // replace that field access with the planned export bridge.
         if self.export_private_calls
-            && declared.is_some_and(|p| !p.is_private && (!writable || p.is_var))
+            && declared.is_some_and(|p| {
+                !p.is_private && (!writable || (p.is_var && !p.has_private_default_setter()))
+            })
         {
             return false;
         }
@@ -82,7 +85,11 @@ impl Emitter<'_> {
             return false;
         }
         class.fq_name_matches(&self.owner)
-            && !declared.is_some_and(|p| p.is_open && !p.is_private && (!writable || p.is_var))
+            && !declared.is_some_and(|p| {
+                p.is_open
+                    && !p.is_private
+                    && (!writable || (p.is_var && !p.has_private_default_setter()))
+            })
     }
 
     /// The write through a setter declared in this compilation. A value class's computed setter is
@@ -237,9 +244,12 @@ impl Emitter<'_> {
             });
         }
         // A private property reached from outside its class goes through the synthetic bridge; there is no
-        // accessor and the field itself is unreachable.
+        // accessor and the field itself is unreachable. A write may have marked a public property whose
+        // default setter alone is private; its reads still use the public getter.
         if let Some(declared) = declared.filter(|p| {
-            p.needs_access_bridge && self.static_owner != Some(StaticOwner::Class(class.fq_name))
+            p.is_private
+                && p.needs_access_bridge
+                && self.static_owner != Some(StaticOwner::Class(class.fq_name))
         }) {
             let ty = declared
                 .backing_field
@@ -293,6 +303,133 @@ impl Emitter<'_> {
                 descriptor: method_descriptor(&[], return_ty),
                 is_static: false,
                 is_interface: interface,
+                static_receiver: None,
+            });
+        }
+        Some(PropertyAccess::Field {
+            owner,
+            name: instance_field_jvm_name(self.ir, self.run, class, field_index),
+            descriptor: type_descriptor(jvm_value_ty(&field.ty)),
+            // A static-storage object's backing fields are JVM statics (kotlinc's shape).
+            is_static: static_storage(self.ir, class),
+        })
+    }
+
+    pub(super) fn local_property_write_access(
+        &self,
+        target: crate::fir::PropertyId,
+    ) -> Option<crate::jvm::inline::PropertyAccess> {
+        let crate::ir::IrLocalPropertyLayout::Member {
+            class,
+            owner,
+            name,
+            property,
+            ..
+        } = self.ir.local_property_layouts.get(&target)?
+        else {
+            return None;
+        };
+        let class = self.ir.classes.get(*class as usize)?;
+        debug_assert_eq!(class.fq_name, *owner);
+        let index = *property as usize;
+        let declared = class.properties.get(index)?;
+        self.realize_declared_property_write_access(class, *owner, name, Some((index, declared)))
+    }
+
+    /// The write analogue of [`Self::declared_property_read_access`] for a node that carries no
+    /// stable local [`crate::fir::PropertyId`]. Checked local operations use
+    /// [`Self::local_property_write_access`] and never enter this source-spelling lookup.
+    pub(super) fn declared_property_write_access(
+        &self,
+        owner: TypeName,
+        name: &str,
+    ) -> Option<crate::jvm::inline::PropertyAccess> {
+        let class = self.ir.classes.iter().find(|c| c.fq_name == owner)?;
+        let declared = class
+            .properties
+            .iter()
+            .position(|property| property.name == name)
+            .map(|index| (index, &class.properties[index]));
+        self.realize_declared_property_write_access(class, owner, name, declared)
+    }
+
+    fn realize_declared_property_write_access(
+        &self,
+        class: &crate::ir::IrClass,
+        owner: TypeName,
+        name: &str,
+        declared: Option<(usize, &crate::ir::IrProperty)>,
+    ) -> Option<crate::jvm::inline::PropertyAccess> {
+        use crate::jvm::inline::PropertyAccess;
+        if let Some((index, _)) = declared {
+            if let Some(access) =
+                self.hoisted_companion_property_access(class.fq_name, index as u32, true)
+            {
+                return Some(access);
+            }
+        }
+        // The write analogue: a declared setter is user code and must not be bypassed.
+        let declared = declared.map(|(_, property)| property);
+        let direct_field = self.direct_field_access(class, declared, true);
+        if let Some(declared) = declared.filter(|p| {
+            p.needs_access_bridge && self.static_owner != Some(StaticOwner::Class(class.fq_name))
+        }) {
+            let ty = declared
+                .backing_field
+                .and_then(|i| class.fields.get(i as usize))
+                .map_or(declared.ty, |f| f.ty);
+            let d = type_descriptor(jvm_declared_ty(&ty));
+            return Some(static_accessors::member_property_access_bridge(
+                self.ir, class, owner, declared, &d, false,
+            ));
+        }
+        if let Some(setter) = declared.and_then(|p| p.setter) {
+            if self.reaches_through_bridge(class.fq_name, setter) {
+                return Some(access_bridges::private_member_accessor_access(
+                    self.ir, setter, owner,
+                ));
+            }
+            return Some(self.declared_setter_access(class, owner, setter));
+        }
+        let field = property_access::declared_property_field(class, declared, name);
+        let setter_name = declared
+            .and_then(|p| p.setter_jvm_name.clone())
+            .unwrap_or_else(|| crate::names::property_setter_name(name));
+        let setter = declared
+            .is_none()
+            .then(|| {
+                class.methods.iter().find_map(|&fid| {
+                    let f = &self.ir.functions[fid as usize];
+                    let named = f.name == setter_name
+                        || f.name
+                            .strip_prefix(&setter_name)
+                            .is_some_and(|rest| rest.starts_with('-'));
+                    (named && f.params.len() == 1).then_some(f)
+                })
+            })
+            .flatten();
+        // Outside the declaring class the backing field is private, so the write goes through the setter
+        // — and a property with no backing field at all (a custom setter, a delegated one) is written
+        // through it from anywhere.
+        let accessor = |f: &crate::ir::IrFunction| PropertyAccess::Accessor {
+            owner,
+            name: f.name.clone(),
+            descriptor: method_descriptor(&[jvm_declared_ty(&f.params[0])], Ty::Unit),
+            is_static: false,
+            is_interface: is_jvm_interface(class),
+            static_receiver: None,
+        };
+        if let Some(setter) = setter.filter(|_| !direct_field || field.is_none()) {
+            return Some(accessor(setter));
+        }
+        let (field_index, field) = field?;
+        if !direct_field {
+            return Some(PropertyAccess::Accessor {
+                owner,
+                name: setter_name,
+                descriptor: method_descriptor(&[jvm_value_ty(&field.ty)], Ty::Unit),
+                is_static: false,
+                is_interface: is_jvm_interface(class),
                 static_receiver: None,
             });
         }

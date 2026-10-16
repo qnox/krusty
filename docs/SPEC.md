@@ -6027,8 +6027,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   while another file streams through the backend, so the JVM value-class pass records an accessor's
   mangled JVM spelling in a JVM-only side table before erasure; the emitter consults that spelling only
   as its declaration-less fallback. The semantic node continues to name the Kotlin property.
-  Default accessor synthesis also preserves declaration visibility: a `private set` remains private in
-  both frontend access checking and the synthesized JVM method flags.
+  Default accessor synthesis also preserves declaration visibility. A bodiless `private set` remains
+  private in frontend access checking and realizes no JVM setter method, as kotlinc does. The declaring
+  class writes the backing field; a lambda, inner class, or companion writes it through the declaring
+  class's field bridge, while reads still call the public getter. The property's
+  `JvmPropertySignature` names no setter. Common IR records this as the stable combination of a mutable
+  declaration, a compiler-default setter, and resolved private setter visibility; it does not infer the
+  fact from a backend-materialized function. A source-written or delegated private setter remains a
+  real method. The JVM write path consumes the exact selected property identity before choosing its
+  field, accessor, or bridge and never reselects that source property by spelling. Tests:
+  `private_set_e2e::a_default_private_setter_has_no_method_like_kotlinc`,
+  `private_set_e2e::an_override_and_a_hoisted_companion_private_default_setter_write_storage`,
+  `private_set_e2e::declared_private_setters_remain_methods`.
   The node carries the property's DECLARED type: substituting it to the type the site sees stays in the
   IR as before, because a pass that rewrites the read away still needs that bridging. And nothing ever
   narrows to a value class — it has no runtime type of its own, its values ARE the erased underlying — in

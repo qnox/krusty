@@ -333,14 +333,23 @@ pub struct IrProperty {
     /// value classes; `None` means the ordinary spelling applies.
     pub getter_jvm_name: Option<String>,
     pub setter_jvm_name: Option<String>,
-    /// Some use of this PRIVATE property reaches it from outside the declaring class — an `inline`
-    /// function's body, spliced into its caller. The declaring class must then expose a synthetic
-    /// accessor for it (`access$get<X>$p` on the JVM); without one the splice would be illegal, and
-    /// silently degrading the `inline` call instead would change what the program does.
+    /// Some use of a private property side reaches it from outside the declaring class — either the
+    /// whole property is private, or a write reaches a private default setter. A target records the
+    /// representation bridge that preserves that checked access; silently changing the call or
+    /// storage path instead would change what the program does.
     pub needs_access_bridge: bool,
     /// Annotations written on this property's accessors, whether source declared each accessor or
     /// a backend realizes its default.
     pub accessor_annotations: super::AccessorAnnotations,
+}
+
+impl IrProperty {
+    /// Whether this mutable declaration has a compiler-default setter whose resolved visibility is
+    /// private. This is a stable Kotlin declaration fact: it does not depend on whether a backend has
+    /// materialized an accessor function.
+    pub(crate) fn has_private_default_setter(&self) -> bool {
+        self.is_var && !self.modifiers.declared_setter && self.setter_visibility.is_private()
+    }
 }
 
 /// A property declared by another file of the module, as the file's code selects it.

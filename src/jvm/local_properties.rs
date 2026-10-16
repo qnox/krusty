@@ -70,7 +70,7 @@ fn property_declaration_type(layout: &IrLocalPropertyLayout) -> Option<Ty> {
     }
 }
 
-/// A Kotlin-private member reached from a different source classifier needs a JVM access bridge.
+/// A private property side reached from a different source classifier needs a JVM access bridge.
 /// The decision consumes the exact operation and declaration layout; it performs no member lookup.
 /// A read of a property with a declared getter, and a write of one with a declared setter, reaches
 /// that exact accessor. Bridge collection reads the recorded function and does not scan by name.
@@ -84,12 +84,20 @@ fn mark_private_cross_class_access(
     let IrLocalPropertyLayout::Member {
         class,
         property,
-        private: true,
+        private,
         ..
     } = layout
     else {
         return;
     };
+    let private_default_setter = !read
+        && ir.classes[*class as usize]
+            .properties
+            .get(*property as usize)
+            .is_some_and(crate::ir::IrProperty::has_private_default_setter);
+    if !*private && !private_default_setter {
+        return;
+    }
     let declaring = ir.classes[*class as usize].fq_name;
     if !in_suspend_lambda && ir.expression_owners.get(&operation).copied() == Some(declaring) {
         return;
