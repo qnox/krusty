@@ -50,6 +50,11 @@ impl Checker<'_> {
             }
             FunBody::None => {}
         }
+        if let (FunBody::Expr(body) | FunBody::Block(body), false) =
+            (&function.body, self.signature_defaults_only)
+        {
+            self.finish_executable_root(*body);
+        }
     }
 
     pub(super) fn report_inferred_nothing_return(

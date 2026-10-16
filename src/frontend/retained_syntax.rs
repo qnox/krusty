@@ -1180,6 +1180,10 @@ pub(super) fn compact(file: &mut File) {
         .into_iter()
         .filter_map(|(old, line)| statements.get(&StmtId(old)).map(|new| (new.0, line)))
         .collect();
+    file.deferred_val_declarations = std::mem::take(&mut file.deferred_val_declarations)
+        .into_iter()
+        .filter_map(|old| statements.get(&old).copied())
+        .collect();
     file.statement_labels = std::mem::take(&mut file.statement_labels)
         .into_iter()
         .filter_map(|(old, label)| statements.get(&old).copied().map(|new| (new, label)))

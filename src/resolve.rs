@@ -148,6 +148,7 @@ mod local_callable_reference_selection;
 mod local_capture_dependencies;
 mod local_class_scope;
 mod local_extension_applicability;
+mod local_initialization;
 mod local_method_dependencies;
 mod loop_flow;
 mod member_extension_properties;
@@ -164,6 +165,8 @@ use operator_calls::{range_operator, ResolvedInRangeComparison, SelectedBuiltinO
 mod enhanced_values;
 mod overload_diagnostics;
 mod override_plans;
+mod parameter_defaults;
+use parameter_defaults::ParameterDefaultFlow;
 mod platform_value_narrowing;
 mod value_classes;
 pub use platform_value_narrowing::PlatformNarrowing;
@@ -22339,6 +22342,9 @@ impl<'a> Checker<'a> {
             self.declare_inferred(scope, &name, bound_ty, is_var, error_provenance)
         };
         self.annotation_argument_locals.record(flow_identity);
+        if deferred {
+            self.local_initialization.declare_deferred(s, flow_identity);
+        }
         if declared.is_none() {
             self.record_enhanced_local(flow_identity, init);
         }
@@ -22427,6 +22433,7 @@ impl<'a> Checker<'a> {
         // miscompiled).
         let span = self.file.stmt_spans[s.0 as usize];
         let target_span = self.assignment_target_span(s);
+        self.record_local_write(s, self.lookup(scope, &name));
         let local = self
             .lookup(scope, &name)
             .filter(|local| !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. }))
@@ -22535,6 +22542,7 @@ impl<'a> Checker<'a> {
             return;
         }
         let scoped = self.lookup(scope, &name);
+        self.record_local_write(s, scoped);
         let deferred_property = scoped.and_then(|local| match local.origin {
             ReceiverFnValueOrigin::DispatchProperty {
                 owner,
@@ -23405,6 +23413,7 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|parameter| (parameter.name.as_str(), parameter.default)),
                 &semantic_params,
+                ParameterDefaultFlow::Function,
             );
         }
 
@@ -33021,6 +33030,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         implicit_receiver_identities: HashMap::default(),
         read_flow_roots: HashMap::default(),
         annotation_argument_locals: Default::default(),
+        local_initialization: Default::default(),
         read_callable_reference_types: HashMap::default(),
         anonymous_super_read_provenance: HashMap::default(),
         stable_property_reads: crate::fx_hash::HashSet::default(),
@@ -34386,6 +34396,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         c.in_script_body = true;
         c.with_ret_allowed(Ty::Unit, false, |c| {
             c.expr_statement(scope, body);
+            c.finish_executable_root(body);
         });
         c.in_script_body = false;
     }
@@ -35675,6 +35686,7 @@ struct Checker<'a> {
     /// The flow root each checked lexical-value or `this` read resolved to.
     read_flow_roots: HashMap<ExprId, scope::PathRoot>,
     annotation_argument_locals: annotation_argument_constness::LocalPropertyIdentities,
+    local_initialization: local_initialization::InitializationRecords,
     /// The exact function shape of a callable reference a checked name read is bound to.
     read_callable_reference_types: HashMap<ExprId, Ty>,
     /// Exact selected value/receiver identity for a bare read that an anonymous object's constructor
@@ -36737,59 +36749,6 @@ impl<'a> Checker<'a> {
                 let shadow = self.lookup(scope, "this")?.ty;
                 (shadow != declared).then_some(shadow)
             })
-    }
-
-    fn expect_default_argument(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-        expected: Ty,
-    ) {
-        let has_receiver = matches!(expected, Ty::Fun(function) if function.has_receiver);
-        let actual = self.check_argument_expected(scope, expression, expected, has_receiver, None);
-        // A default fills its parameter. A platform result committed to a parameter that rejects
-        // null is guarded in the `$default` method, the same transition a call argument guards.
-        if !expected.upper_bound_admits_null() {
-            self.narrow_platform_value(expected, expression, PlatformNarrowing::Argument);
-        }
-        self.expect_assignable(
-            expected,
-            actual,
-            self.value_diagnostic_span(expression, actual),
-            "default argument",
-        );
-    }
-
-    /// Check one callable's defaults in declaration order and publish each parameter only after its
-    /// own default has been checked. Kotlin permits a default to read preceding parameters, but a
-    /// parameter is not in scope in its own default and later parameters must not leak backwards.
-    /// Callers choose the receiver context (`this` available for functions, unavailable for
-    /// constructors); the ordering rule itself is shared by every callable kind.
-    fn check_parameter_defaults<'p>(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        parameters: impl ExactSizeIterator<Item = (&'p str, Option<ExprId>)>,
-        parameter_types: &[Ty],
-    ) {
-        assert_eq!(
-            parameters.len(),
-            parameter_types.len(),
-            "checked parameter declarations and semantic types must stay aligned"
-        );
-        for ((name, default), &ty) in parameters.zip(parameter_types) {
-            if let Some(default) = default {
-                if self.signature_defaults_only {
-                    self.signature_default_expression_depth += 1;
-                    self.expect_default_argument(scope, default, ty);
-                    self.signature_default_expression_depth -= 1;
-                } else {
-                    self.expect_default_argument(scope, default, ty);
-                }
-            }
-            if name != "_" {
-                self.declare(scope, name, ty, false);
-            }
-        }
     }
 
     /// The arg-binding call-resolution layer over this checker's [`SymbolSource`]. Cheap to construct.
@@ -47888,6 +47847,7 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|parameter| (parameter.name.as_str(), parameter.default)),
                 &parameter_types,
+                ParameterDefaultFlow::Function,
             );
         }
         {
@@ -47921,6 +47881,7 @@ impl<'a> Checker<'a> {
             } else if infer_ret {
                 if let FunBody::Expr(e) = &f.body {
                     let inferred = self.expr(scope, *e);
+                    self.finish_executable_root(*e);
                     if inferred != Ty::Error {
                         self.ret_ty = inferred;
                         if let Some(declaration) = source_decl {
@@ -48272,7 +48233,7 @@ impl<'a> Checker<'a> {
                         c.check_expression_getter(scope, *e, prop_ty, p.ty.is_some());
                     }
                     FunBody::Block(b) => {
-                        let _ = c.expr_statement(scope, *b);
+                        c.check_executable_body(scope, *b);
                     }
                     FunBody::None => {}
                 });
@@ -48293,7 +48254,7 @@ impl<'a> Checker<'a> {
                     c.declare(scope, &pname, prop_ty, true);
                     match body {
                         FunBody::Expr(g) | FunBody::Block(g) => {
-                            let _ = c.expr_statement(scope, *g);
+                            c.check_executable_body(scope, *g);
                         }
                         FunBody::None => {}
                     }
@@ -48332,6 +48293,7 @@ impl<'a> Checker<'a> {
             if p.is_var {
                 self.record_delegate_setvalue(scope, de, dt, this_ref, resolved_property_ty, site);
             }
+            self.finish_executable_root(de);
         }
         if let Some(init) = p.init.filter(|_| check_ordinary_property_body) {
             let declared = if p.explicit_backing_field.is_some() {
@@ -48396,6 +48358,7 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
+            self.finish_executable_root(init);
         }
         // The signature passes leave the type `Error` without a diagnostic; the checker reports the
         // inference failure only when neither the getter nor the initializer diagnosed itself — the
@@ -50342,6 +50305,9 @@ impl<'a> Checker<'a> {
                             );
                             self.expect_assignable(declared, it, sp, "property initializer");
                         }
+                        if let Some(initializer) = bp.init {
+                            self.finish_executable_root(initializer);
+                        }
                         let owner = current_owner.expect("enum class must have a source owner");
                         self.declare_enum_entry_property_storage(
                             entry_scope,
@@ -50428,7 +50394,7 @@ impl<'a> Checker<'a> {
                                         );
                                     }
                                     FunBody::Block(body) => {
-                                        let _ = checker.expr_statement(&accessor_scope, *body);
+                                        checker.check_executable_body(&accessor_scope, *body);
                                     }
                                     FunBody::None => {}
                                 }
@@ -50449,8 +50415,7 @@ impl<'a> Checker<'a> {
                                         checker.declare(&setter_scope, &parameter, ty, true);
                                         match body {
                                             FunBody::Expr(body) | FunBody::Block(body) => {
-                                                let _ =
-                                                    checker.expr_statement(&setter_scope, *body);
+                                                checker.check_executable_body(&setter_scope, *body);
                                             }
                                             FunBody::None => {}
                                         }
@@ -50529,7 +50494,7 @@ impl<'a> Checker<'a> {
                     }
                     for step in &entry.init_order {
                         if let ClassInit::Block(body) = step {
-                            self.expr_statement(&entry_init_scope, *body);
+                            self.check_executable_body(&entry_init_scope, *body);
                         }
                     }
                     self.this_labels.truncate(label_depth);
@@ -50784,6 +50749,7 @@ impl<'a> Checker<'a> {
                             .iter()
                             .map(|parameter| (parameter.name.as_str(), parameter.default)),
                         &semantic_params[context_count..],
+                        ParameterDefaultFlow::Constructor,
                     );
                 });
                 if self.signature_defaults_only && !default_owned_class {
@@ -50905,10 +50871,18 @@ impl<'a> Checker<'a> {
                     }
                     CtorDelegation::None => {}
                 });
+                for argument in match &sc.delegation {
+                    CtorDelegation::This(call) | CtorDelegation::Super(call) => {
+                        call.args.as_slice()
+                    }
+                    CtorDelegation::None => &[],
+                } {
+                    self.finish_executable_root(*argument);
+                }
                 self.static_companion_this = previous_static_this;
                 if let Some(body) = sc.body {
                     self.with_ret(Ty::Unit, |c| {
-                        c.expr_statement(scope, body);
+                        c.check_executable_body(scope, body);
                     });
                 }
                 self.active_lexical_policies
@@ -50941,6 +50915,7 @@ impl<'a> Checker<'a> {
                             .iter()
                             .map(|parameter| (parameter.name.as_str(), parameter.default)),
                         &source_primary_params,
+                        ParameterDefaultFlow::Constructor,
                     );
                 });
                 self.active_lexical_policies
@@ -51180,6 +51155,11 @@ impl<'a> Checker<'a> {
                         if is_anonymous_object {
                             c.publish_anonymous_super_forwards(d, &cl.base_args);
                         }
+                        if !is_anonymous_object {
+                            for &argument in &cl.base_args {
+                                c.finish_executable_root(argument);
+                            }
+                        }
                     });
                     self.static_companion_this = previous_static_this;
                     self.static_singleton_this = previous_singleton_this;
@@ -51238,6 +51218,9 @@ impl<'a> Checker<'a> {
                                 delegation.value,
                                 actual,
                             );
+                        }
+                        if !is_anonymous_object {
+                            self.finish_executable_root(delegation.value);
                         }
                     }
                     if let Some(labels) = anonymous_labels {
@@ -51492,6 +51475,9 @@ impl<'a> Checker<'a> {
                                 "property initializer",
                             );
                         }
+                        if prechecked_storage.is_none() {
+                            self.finish_executable_root(init);
+                        }
                     }
                     // A delegated member property's delegate expression (`by Del()`) — type-check it so
                     // its (and its sub-expressions') types are recorded for the `x$delegate` field lowering.
@@ -51544,6 +51530,7 @@ impl<'a> Checker<'a> {
                                 site,
                             );
                         }
+                        self.finish_executable_root(de);
                     }
                     // A property's accessor bodies are checked like methods, with `field` bound to
                     // the backing-field type (the implicit-`this` scope of props is already active).
@@ -51654,7 +51641,7 @@ impl<'a> Checker<'a> {
                                     c.check_expression_getter(scope, *g, prop_ty, bp.ty.is_some());
                                 }
                                 FunBody::Block(g) => {
-                                    let _ = c.expr_statement(scope, *g);
+                                    c.check_executable_body(scope, *g);
                                 }
                                 FunBody::None => {}
                             });
@@ -51674,7 +51661,7 @@ impl<'a> Checker<'a> {
                                     c.declare(scope, &pname, prop_ty, true);
                                     match body {
                                         FunBody::Expr(g) | FunBody::Block(g) => {
-                                            let _ = c.expr_statement(scope, *g);
+                                            c.check_executable_body(scope, *g);
                                         }
                                         FunBody::None => {}
                                     }
@@ -51729,7 +51716,7 @@ impl<'a> Checker<'a> {
                                         .is_some_and(|span| selected.contains(&span))
                                 });
                         if selected {
-                            self.expr_statement(scope, *b);
+                            self.check_executable_body(scope, *b);
                         }
                     }
                 }
@@ -51813,6 +51800,9 @@ impl<'a> Checker<'a> {
                                 cl.name
                             ),
                         );
+                        for &argument in &entry.args {
+                            self.finish_executable_root(argument);
+                        }
                         continue;
                     }
                     SourceConstructorSelection::Ambiguous => {
@@ -51823,6 +51813,9 @@ impl<'a> Checker<'a> {
                                 entry.name
                             ),
                         );
+                        for &argument in &entry.args {
+                            self.finish_executable_root(argument);
+                        }
                         continue;
                     }
                 };
@@ -51852,6 +51845,9 @@ impl<'a> Checker<'a> {
                             "enum entry argument",
                         );
                     }
+                }
+                for &argument in &entry.args {
+                    self.finish_executable_root(argument);
                 }
                 let (primary, stable_declaration) = match &selected.target {
                     ResolvedCtorDelegationTarget::ThisPrimary { .. } => (
@@ -52200,6 +52196,7 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|parameter| (parameter.name.as_str(), parameter.default)),
                 &parameter_types,
+                ParameterDefaultFlow::Function,
             );
             let params_scope = scope.parameter_child();
             let scope = &params_scope;
@@ -52244,6 +52241,7 @@ impl<'a> Checker<'a> {
                     } else {
                         self.expr(scope, *e)
                     };
+                    self.finish_executable_root(*e);
                     crate::trace_compiler!(
                         "lower",
                         "checked method inference name={} dispatch={dispatch_this:?} inferred={inferred:?} source={source_member:?}",

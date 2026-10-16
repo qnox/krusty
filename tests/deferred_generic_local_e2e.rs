@@ -131,7 +131,8 @@ fn a_deferred_local_captured_by_a_closure_is_assigned() {
         var a: Int\n\
         a = 12\n\
         fun readA(): Int = a\n\
-        val x: Int\n\
+        var x: Int\n\
+        x = 0\n\
         run { x = 7 }\n\
         if (readA() != 12) return \"fail fun\"\n\
         if (x != 7) return \"fail lambda\"\n\
