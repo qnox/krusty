@@ -3,8 +3,8 @@
 use super::element_serializer::unsupported_element_serializer;
 use super::{
     build_field_serializer_instance, class_ty, contextual_serializer_for, declared_serializer_of,
-    decode_element_method, inline_prim_methods, is_nullable, property_is_contextual,
-    value_class_underlying, virtual_iface,
+    decode_element_method, is_nullable, property_is_contextual, value_class_underlying,
+    virtual_iface,
 };
 use crate::ir::{ClassId, ExprId, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::kt_string::KtString;
@@ -28,6 +28,17 @@ struct ElementDecode<'a> {
         u32,
         &'a super::child_serializer_cache::ChildSerializerCachePlan,
     )>,
+}
+
+/// The type of the local an element is decoded into. A value-class element (an unsigned one
+/// included) is held as its nullable type, as kotlinc holds it: the local starts `null`, and a
+/// decoded box is unboxed null-safely.
+fn decode_local_ty(ir: &IrFile, ty: Ty) -> Ty {
+    if value_class_underlying(ir, &ty).is_some() || ty.is_unsigned() {
+        Ty::nullable(ty.non_null())
+    } else {
+        ty
+    }
 }
 
 /// Narrow a serializer operand to the interface the element call declares.
@@ -102,7 +113,7 @@ impl ElementDecode<'_> {
         ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::Cast,
             arg: raw,
-            type_operand: ty,
+            type_operand: decode_local_ty(ir, ty),
         })
     }
 
@@ -224,56 +235,6 @@ impl DeserializeBody<'_> {
         } = self;
         let ser_idx = serializer_class as usize;
         let class_id = foo_id;
-        if ir.classes[foo_id as usize].is_value
-            && fields
-                .first()
-                .and_then(|(_, ty)| inline_prim_methods(ty))
-                .is_some()
-        {
-            // A `@JvmInline value class`: deserialize inline —
-            //   return new Foo(decoder.decodeInline(this.descriptor).decode<U>())
-            let uty = fields[0].1;
-            let (_, _, dec_name, dec_desc) = inline_prim_methods(&uty).unwrap();
-            let this = ir.add_expr(IrExpr::GetValue(0));
-            let desc = ir.add_expr(IrExpr::GetField {
-                receiver: this,
-                class: ser_idx as u32,
-                index: 0,
-            });
-            let dec = ir.add_expr(IrExpr::GetValue(1));
-            let inline_dec = ir.add_expr(IrExpr::Call {
-                callee: virtual_iface(
-                    "kotlinx/serialization/encoding/Decoder",
-                    "decodeInline",
-                    "(Lkotlinx/serialization/descriptors/SerialDescriptor;)Lkotlinx/serialization/encoding/Decoder;",
-                ),
-                dispatch_receiver: Some(dec),
-                args: vec![desc],
-            });
-            let u = ir.add_expr(IrExpr::Call {
-                callee: virtual_iface("kotlinx/serialization/encoding/Decoder", dec_name, dec_desc),
-                dispatch_receiver: Some(inline_dec),
-                args: vec![],
-            });
-            let foo_internal = ir.classes[foo_id as usize].fq_name_id();
-            let new = ir.add_expr(IrExpr::New {
-                internal: foo_internal,
-                args: vec![u],
-                ctor_params: None,
-                ctor_desc: None,
-                external_target: None,
-                defaults: Box::new([]),
-                default_prefix_count: 0,
-            });
-            let ret = ir.add_expr(IrExpr::Return(Some(new)));
-            let body = ir.add_expr(IrExpr::Block {
-                stmts: vec![ret],
-                value: None,
-            });
-            super::complete_generated_body(ir, fid, body);
-            return;
-        }
-
         // deserialize(decoder=1):
         //   val c = decoder.beginStructure(descriptor)            [local 2]
         //   var f0 = <default>; var f1 = <default>                 [locals 4, 5, ...]
@@ -438,11 +399,12 @@ impl DeserializeBody<'_> {
             // Field locals start at their JVM zero. Optional defaults belong solely to
             // the synthetic constructor and must not be evaluated before decoding.
             for (k, (_, ty)) in fields.iter().enumerate() {
-                let dc = IrConst::zero_for_value_type(*ty);
+                let ty = decode_local_ty(ir, *ty);
+                let dc = IrConst::zero_for_value_type(ty);
                 let init = ir.add_expr(IrExpr::Const(dc));
                 stmts.push(ir.add_expr(IrExpr::Variable {
                     index: field_locals[k],
-                    ty: *ty,
+                    ty,
                     init: Some(init),
                     named: false,
                 }));
@@ -606,16 +568,8 @@ impl DeserializeBody<'_> {
             for &seen_local in &seen_locals {
                 args.push(ir.add_expr(IrExpr::GetValue(seen_local)));
             }
-            for (index, &local) in field_locals.iter().enumerate() {
+            for &local in &field_locals {
                 let argument = ir.add_expr(IrExpr::GetValue(local));
-                let parameter = synthetic_ctor_params[mask_count + index];
-                if value_class_underlying(ir, &parameter).is_some() {
-                    // The decode local carries the unboxed underlying while this exact
-                    // serialization ABI parameter is boxed. Preserve both facts for
-                    // target representation lowering.
-                    ir.logical_types.insert(argument, parameter);
-                    ir.physical_types.insert(argument, fields[index].1);
-                }
                 args.push(argument);
             }
             for _ in 0..marker_count {

@@ -14,7 +14,6 @@
 use crate::ir::{ClassId, IrConst, IrFile};
 use crate::types::{type_name, Ty};
 
-use super::value_class_types::element_underlying;
 use super::{serializer_name, TRANSIENT_FQ};
 
 /// The backing-field index of each serial element, in element (declaration) order.
@@ -85,12 +84,7 @@ impl SerializedProperties {
         let fields: Vec<(String, Ty)> = class
             .fields
             .iter()
-            .map(|field| {
-                (
-                    field.name.clone(),
-                    element_underlying(ir, &field.ty).unwrap_or(field.ty),
-                )
-            })
+            .map(|field| (field.name.clone(), field.ty))
             .collect();
         let serializer_types = class
             .fields
@@ -103,7 +97,7 @@ impl SerializedProperties {
                     .find(|property| property.backing_field == Some(index as u32))
                     .map(|property| property.ty)
                     .unwrap_or(field.ty);
-                element_underlying(ir, &declared).unwrap_or(declared)
+                declared
             })
             .collect();
         let constant_defaults = class.fields.iter().map(|f| f.default.clone()).collect();

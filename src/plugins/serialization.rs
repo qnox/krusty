@@ -36,6 +36,7 @@ mod synthesized_accessor;
 mod transient_initializer;
 mod type_argument_serializers;
 mod type_parameter_serializers;
+mod value_class_body;
 mod value_class_types;
 
 use crate::ir::{
@@ -71,7 +72,8 @@ use serialize_body::SerializeBody;
 use std::sync::Mutex;
 pub(super) use type_argument_serializers::named_serializers;
 use type_parameter_serializers::TypeParameterSerializers;
-use value_class_types::{inline_prim_methods, value_class_underlying};
+use value_class_body::ValueClassBody;
+use value_class_types::value_class_underlying;
 
 mod child_serializer_cache;
 use child_serializer_cache::{
@@ -1528,59 +1530,24 @@ impl IrPlugin for SerializationPlugin {
                         complete_generated_body(ir, fid, body);
                     }
                     crate::ir::IrGeneratedFunctionRole::SerializationSerialize
-                        if ir.classes[foo_id as usize].is_value
-                            && fields
-                                .first()
-                                .and_then(|(_, t)| inline_prim_methods(t))
-                                .is_some() =>
+                    | crate::ir::IrGeneratedFunctionRole::SerializationDeserialize
+                        if ir.classes[foo_id as usize].is_value =>
                     {
-                        // A `@JvmInline value class`: serialize inline, no CompositeEncoder —
-                        //   encoder.encodeInline(this.descriptor).encode<U>(value.get<prop>())
-                        let (pname, uty) = fields[0].clone();
-                        let (enc_name, enc_desc, _, _) = inline_prim_methods(&uty).unwrap();
-                        let this = ir.add_expr(IrExpr::GetValue(0));
-                        let desc = ir.add_expr(IrExpr::GetField {
-                            receiver: this,
-                            class: ser_idx,
-                            index: 0,
-                        });
-                        let enc = ir.add_expr(IrExpr::GetValue(1));
-                        let inline_enc = ir.add_expr(IrExpr::Call {
-                            callee: virtual_iface(
-                                "kotlinx/serialization/encoding/Encoder",
-                                "encodeInline",
-                                "(Lkotlinx/serialization/descriptors/SerialDescriptor;)Lkotlinx/serialization/encoding/Encoder;",
-                            ),
-                            dispatch_receiver: Some(enc),
-                            args: vec![desc],
-                        });
-                        let vrecv = ir.add_expr(IrExpr::GetValue(2));
-                        let Some(getter_desc) = ty_descriptor(ctx, &uty) else {
+                        let Some(property) = fields.first() else {
                             continue;
                         };
-                        let v = synthesized_accessor::getter(
-                            ir,
-                            vrecv,
-                            class_classifier,
-                            &pname,
-                            getter_desc,
-                            (foo_id, 0),
-                        );
-                        let call = ir.add_expr(IrExpr::Call {
-                            callee: virtual_iface(
-                                "kotlinx/serialization/encoding/Encoder",
-                                enc_name,
-                                enc_desc,
-                            ),
-                            dispatch_receiver: Some(inline_enc),
-                            args: vec![v],
-                        });
-                        let ret = ir.add_expr(IrExpr::Return(None));
-                        let body = ir.add_expr(IrExpr::Block {
-                            stmts: vec![call, ret],
-                            value: None,
-                        });
-                        complete_generated_body(ir, fid, body);
+                        let body = ValueClassBody {
+                            function: fid,
+                            serializer_class: ser_idx,
+                            serialized_class: foo_id,
+                            property,
+                            type_parameter_serializers,
+                        };
+                        if role == crate::ir::IrGeneratedFunctionRole::SerializationSerialize {
+                            body.serialize(ir, ctx);
+                        } else {
+                            body.deserialize(ir, ctx);
+                        }
                     }
                     crate::ir::IrGeneratedFunctionRole::SerializationSerialize => {
                         SerializeBody {
@@ -2273,7 +2240,8 @@ mod tests {
             [
                 ("seen0".to_string(), Ty::Int),
                 ("f0".to_string(), Ty::Int),
-                ("f1".to_string(), class_ty("kotlin/String")),
+                // kotlinc declares every non-primitive parameter nullable.
+                ("f1".to_string(), Ty::nullable(class_ty("kotlin/String"))),
                 (
                     "serializationConstructorMarker".to_string(),
                     Ty::nullable(class_ty(

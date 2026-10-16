@@ -184,6 +184,26 @@ fn builtin_serializers() -> &'static [BuiltinSerializer] {
                 false,
             ),
             (
+                "kotlin/UByte",
+                "kotlinx/serialization/internal/UByteSerializer",
+                false,
+            ),
+            (
+                "kotlin/UShort",
+                "kotlinx/serialization/internal/UShortSerializer",
+                false,
+            ),
+            (
+                "kotlin/UInt",
+                "kotlinx/serialization/internal/UIntSerializer",
+                false,
+            ),
+            (
+                "kotlin/ULong",
+                "kotlinx/serialization/internal/ULongSerializer",
+                false,
+            ),
+            (
                 "kotlin/uuid/Uuid",
                 "kotlinx/serialization/internal/UuidSerializer",
                 true,
@@ -242,14 +262,6 @@ fn builtin_element_serializer(ty: &Ty) -> Option<BuiltinSerializer> {
         .iter()
         .find(|entry| entry.classifier == classifier)
         .copied()
-}
-
-/// Serializer identity for a builtin whose declaration is guaranteed by every supported runtime.
-/// Runtime-dependent entries deliberately cannot escape through this helper; they must go through
-/// [`element_serializer_plan`], which verifies the active classpath first.
-pub(super) fn always_available_builtin_serializer(ty: &Ty) -> Option<TypeName> {
-    let builtin = builtin_element_serializer(ty)?;
-    (!builtin.requires_runtime_declaration).then_some(builtin.serializer)
 }
 
 /// If `ty` names a `@JvmInline value class` defined in this IR, its TERMINAL underlying type — how

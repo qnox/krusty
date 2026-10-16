@@ -1269,16 +1269,8 @@ pub(crate) fn lower_value_classes(
     // A NON-value class whose primary ctor has a value-class-typed param gets kotlinc's private-primary +
     // synthetic marker accessor ABI — recorded BEFORE erasure loses the value-class identity of the param.
     // Which slots count is `hidden_constructors::selecting_slots`.
-    let serialization_deserialization_ctors = (0..ir.classes.len())
-        .map(|class| {
-            ir.generated_secondary_constructor(
-                class as crate::ir::ClassId,
-                crate::ir::IrSecondaryConstructorRole::SerializationDeserialization,
-            )
-        })
-        .collect::<Vec<_>>();
     let mut value_param_ctors: Vec<(TypeName, Vec<Ty>)> = Vec::new();
-    for (class, c) in ir.classes.iter_mut().enumerate() {
+    for c in ir.classes.iter_mut() {
         if !c.is_value
             && !c.is_object
             && !c.is_interface
@@ -1315,7 +1307,7 @@ pub(crate) fn lower_value_classes(
         // A regular class's secondary-`<init>` value-class params erase too (`Test(x: String, s: S)` →
         // `(String, String)`); a value class's own secondary ctors were already consumed into static
         // `constructor-impl`s by `synth_value_members`, so this only touches regular classes.
-        for (constructor, sc) in c.secondary_ctors.iter_mut().enumerate() {
+        for sc in c.secondary_ctors.iter_mut() {
             // Record the value-class fact BEFORE erasure: it drives kotlinc's private+marker ABI for
             // this constructor (a synthetic marker-disambiguated ctor keeps its own convention).
             if !sc.synthetic && sc.params.iter().any(is_vc_ty) {
@@ -1325,15 +1317,7 @@ pub(crate) fn lower_value_classes(
             for parameter in &mut sc.prefix_params {
                 *parameter = erase(parameter, &under);
             }
-            let serialization_deserialization =
-                serialization_deserialization_ctors[class] == Some(constructor as u32);
             for p in &mut sc.params {
-                // A SYNTHETIC marker ctor (the serialization deser ctor, disambiguated by a trailing
-                // `SerializationConstructorMarker`) keeps every value-class parameter BOXED. Its
-                // exact producer-recorded role distinguishes it from unrelated synthetic ctors.
-                if serialization_deserialization && is_vc_ty(p) {
-                    continue;
-                }
                 *p = erase(p, &under);
             }
             let target_params = match &mut sc.delegate {
@@ -1499,11 +1483,19 @@ pub(crate) fn lower_value_classes(
                 }
                 let _ = keep_box;
             }
+            // The serialization plugin's deserialization constructor declares its parameters as
+            // the representation its arguments already have, so a call to it only erases them.
+            IrExpr::New {
+                ctor_params: Some(ps),
+                ..
+            } if serialization_constructor_calls.contains(&(i as u32)) => {
+                ps.iter_mut().for_each(|p| *p = erase(p, &under));
+            }
             IrExpr::New {
                 internal,
                 ctor_params: Some(ps),
                 ..
-            } if !serialization_constructor_calls.contains(&(i as u32)) => {
+            } => {
                 // Preserve the exact selected declaration fact before erasure. It applies uniformly
                 // to local secondary and sibling-file constructors; owner origin is irrelevant.
                 // A value class's own construction is `constructor-impl`, not the hidden-marker ABI
@@ -1749,16 +1741,6 @@ pub(crate) fn lower_value_classes(
         } = &ir.exprs[i]
         {
             if serialization_constructor_calls.contains(&id) {
-                value_member_constructor_ops.extend(
-                    constructor_arguments::deserialization_argument_boxes(
-                        &repr_ctx,
-                        args,
-                        ctor_params
-                            .as_deref()
-                            .expect("generated constructor call retains its exact parameters"),
-                        &under,
-                    ),
-                );
                 continue;
             }
             let fields;

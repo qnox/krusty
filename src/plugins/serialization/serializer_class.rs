@@ -348,112 +348,80 @@ pub(super) fn complete(
     ];
 
     // Build the `descriptor` field in <init>: `descriptor = PluginGeneratedSerialDescriptor(
-    // "<fqname>", null, <n>)` then `descriptor.addElement("<prop>", false)` per property.
-    // Build in a local typed as PluginGeneratedSerialDescriptor (so `addElement` —
-    // invokevirtual on PGSD — has a correctly-typed receiver), then store to the field:
-    //   val d = PluginGeneratedSerialDescriptor("<fq>", null, n)   [local 1, this=0]
+    // "<fqname>", INSTANCE, <n>)` then `descriptor.addElement("<prop>", false)` per property.
+    // Build in a local typed as the descriptor class (so `addElement` has a correctly-typed
+    // receiver), then store to the field:
+    //   val d = PluginGeneratedSerialDescriptor("<fq>", INSTANCE, n)   [local 1, this=0]
     //   d.addElement("<prop>", false) ...
     //   this.descriptor = d
-    // A value class uses the inline descriptor ONLY when its underlying is a directly-supported
-    // primitive/String — the same condition the inline serialize/deserialize arms require, so an
-    // unsupported underlying falls back consistently to the PGSD path (never a mismatched mix).
-    let is_value = ir.classes[class_id as usize].is_value
-        && element_fields
-            .first()
-            .and_then(|(_, t)| inline_prim_methods(t))
-            .is_some();
+    let is_value = ir.classes[class_id as usize].is_value;
     let pgsd_internal = "kotlinx/serialization/internal/PluginGeneratedSerialDescriptor";
     // The `descriptor` local index: `this` is 0 and the `N` constructor params (type-param
     // serializers) are `1..=N`, so the descriptor temporary lives at `N+1` (just `1` when N==0).
     let desc_local = n_tp as u32 + 1;
-    let mut init_stmts;
-    if is_value {
-        // A `@JvmInline value class`: the descriptor is `InlinePrimitiveDescriptor(name,
-        // <Underlying>Serializer.INSTANCE)` — `isInline == true`, one element (the underlying).
-        let name = ir.add_expr(IrExpr::Const(IrConst::String(
-            annotations::class_serial_name(ir, class_id),
-        )));
-        let under_ser = element_fields
-            .first()
-            .and_then(|(_, t)| element_serializer::always_available_builtin_serializer(t));
-        let ser_inst = match under_ser {
-            Some(serializer) => ir.add_expr(IrExpr::ExternalStaticInstance {
-                owner: serializer,
-                ty: serializer,
-                field: "INSTANCE".to_string(),
-            }),
-            // Unsupported underlying (e.g. a nested @Serializable) — leave the default below.
-            None => ir.add_expr(IrExpr::Const(IrConst::Null)),
-        };
-        let d = ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
-                    owner: type_name("kotlinx/serialization/internal/InlineClassDescriptorKt"),
-                    name: "InlinePrimitiveDescriptor".to_string(),
-                    descriptor: "(Ljava/lang/String;Lkotlinx/serialization/KSerializer;)Lkotlinx/serialization/descriptors/SerialDescriptor;".to_string(),
-                    inline: InlineKind::None,
-                },
-                dispatch_receiver: None,
-                args: vec![name, ser_inst],
-            });
-        init_stmts = vec![ir.add_expr(IrExpr::Variable {
-            index: desc_local,
-            ty: class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
-            init: Some(d),
-            named: false,
-        })];
+    // A value class's descriptor is an `InlineClassDescriptor`, a `PluginGeneratedSerialDescriptor`
+    // that reports `isInline` and takes no element count. It is built and populated the same way.
+    let (descriptor_internal, descriptor_constructor) = if is_value {
+        (
+            "kotlinx/serialization/internal/InlineClassDescriptor",
+            "(Ljava/lang/String;Lkotlinx/serialization/internal/GeneratedSerializer;)V",
+        )
     } else {
-        let pgsd_name = ir.add_expr(IrExpr::Const(IrConst::String(
-            annotations::class_serial_name(ir, class_id),
-        )));
-        // Pass the `$serializer` (a `GeneratedSerializer`) so the descriptor can derive element
-        // descriptors from `childSerializers()` (`getElementDescriptor`/introspection).
-        //
-        // A SINGLETON serializer names itself by its own `INSTANCE`, read at the use site.
-        // Reading `this` instead made the JVM emitter hoist `INSTANCE` into a local for the
-        // class initializer, which is one store, one load and one extra local that kotlinc
-        // does not have. A GENERIC serializer is a real instance built by its constructor,
-        // where `this` IS the value. Any JVM reference-boundary cast remains an emission fact.
-        let pgsd_self = if is_generic {
-            ir.add_expr(IrExpr::GetValue(0))
-        } else {
-            ir.add_expr(IrExpr::ExternalStaticInstance {
-                owner: serializer_name,
-                ty: serializer_name,
-                field: "INSTANCE".to_string(),
-            })
-        };
-        let pgsd_n = ir.add_expr(IrExpr::Const(IrConst::Int(element_fields.len() as i32)));
-        let pgsd = ir.new_external(
+        (
             pgsd_internal,
             "(Ljava/lang/String;Lkotlinx/serialization/internal/GeneratedSerializer;I)V",
-            vec![pgsd_name, pgsd_self, pgsd_n],
-        );
-        let dvar = ir.add_expr(IrExpr::Variable {
-            index: desc_local,
-            ty: class_ty(pgsd_internal),
-            init: Some(pgsd),
-            named: false,
-        });
-        init_stmts = vec![dvar];
-        for (i, (pname, _)) in element_fields.iter().enumerate() {
-            let d = ir.add_expr(IrExpr::GetValue(desc_local));
-            let element_name = serial_name_of(ctx, ir, class_id, pname)
-                .unwrap_or_else(|| KtString::from(pname.clone()));
-            let nm = ir.add_expr(IrExpr::Const(IrConst::String(element_name)));
-            let is_optional = foo_optional.get(i).copied().unwrap_or(false);
-            let opt = ir.add_expr(IrExpr::Const(IrConst::Boolean(is_optional)));
-            init_stmts.push(ir.add_expr(IrExpr::Call {
-                callee: Callee::realized_virtual(
-                    type_name(pgsd_internal),
-                    "addElement".to_string(),
-                    "(Ljava/lang/String;Z)V".to_string(),
-                    None,
-                    false,
-                ),
-                dispatch_receiver: Some(d),
-                args: vec![nm, opt],
-            }));
-        }
+        )
+    };
+    let pgsd_name = ir.add_expr(IrExpr::Const(IrConst::String(
+        annotations::class_serial_name(ir, class_id),
+    )));
+    // Pass the `$serializer` (a `GeneratedSerializer`) so the descriptor can derive element
+    // descriptors from `childSerializers()` (`getElementDescriptor`/introspection).
+    //
+    // A SINGLETON serializer names itself by its own `INSTANCE`, read at the use site.
+    // Reading `this` instead made the JVM emitter hoist `INSTANCE` into a local for the
+    // class initializer, which is one store, one load and one extra local that kotlinc
+    // does not have. A GENERIC serializer is a real instance built by its constructor,
+    // where `this` IS the value. Any JVM reference-boundary cast remains an emission fact.
+    let pgsd_self = if is_generic {
+        ir.add_expr(IrExpr::GetValue(0))
+    } else {
+        ir.add_expr(IrExpr::ExternalStaticInstance {
+            owner: serializer_name,
+            ty: serializer_name,
+            field: "INSTANCE".to_string(),
+        })
+    };
+    let mut arguments = vec![pgsd_name, pgsd_self];
+    if !is_value {
+        arguments.push(ir.add_expr(IrExpr::Const(IrConst::Int(element_fields.len() as i32))));
+    }
+    let pgsd = ir.new_external(descriptor_internal, descriptor_constructor, arguments);
+    let dvar = ir.add_expr(IrExpr::Variable {
+        index: desc_local,
+        ty: class_ty(descriptor_internal),
+        init: Some(pgsd),
+        named: false,
+    });
+    let mut init_stmts = vec![dvar];
+    for (i, (pname, _)) in element_fields.iter().enumerate() {
+        let d = ir.add_expr(IrExpr::GetValue(desc_local));
+        let element_name = serial_name_of(ctx, ir, class_id, pname)
+            .unwrap_or_else(|| KtString::from(pname.clone()));
+        let nm = ir.add_expr(IrExpr::Const(IrConst::String(element_name)));
+        let is_optional = foo_optional.get(i).copied().unwrap_or(false);
+        let opt = ir.add_expr(IrExpr::Const(IrConst::Boolean(is_optional)));
+        init_stmts.push(ir.add_expr(IrExpr::Call {
+            callee: Callee::realized_virtual(
+                type_name(descriptor_internal),
+                "addElement".to_string(),
+                "(Ljava/lang/String;Z)V".to_string(),
+                None,
+                false,
+            ),
+            dispatch_receiver: Some(d),
+            args: vec![nm, opt],
+        }));
     }
     let this0 = ir.add_expr(IrExpr::GetValue(0));
     let dval = ir.add_expr(IrExpr::GetValue(desc_local));
@@ -615,8 +583,9 @@ pub(super) fn complete(
     }
 
     // The `$childSerializers` cache is built in a SECOND pass — see
-    // `add_child_serializer_cache`, which explains why it cannot be built here.
-    plain_data_class.then(|| {
+    // `add_child_serializer_cache`, which explains why it cannot be built here. A value class
+    // caches its underlying element too; only its own `serialize`/`deserialize` build it afresh.
+    (!ir.classes[class_id as usize].is_object).then(|| {
         (
             class_id,
             ir.classes[class_id as usize].fq_name_id(),
