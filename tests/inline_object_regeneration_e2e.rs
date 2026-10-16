@@ -195,3 +195,179 @@ fn an_object_whose_methods_name_their_parameters_is_regenerated() {
     let differences = classes.differences();
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
 }
+
+const SITES_LIB: &str = r#"
+package lib
+
+inline fun <reified T : Any> named(): () -> String = object : () -> String {
+    override fun invoke(): String = T::class.java.simpleName
+}
+"#;
+
+const SITES_MAIN: &str = r#"
+import kotlin.coroutines.*
+import lib.*
+
+fun plain(f: () -> String): String = f()
+
+object Done : Continuation<Unit> {
+    override val context: CoroutineContext get() = EmptyCoroutineContext
+
+    override fun resumeWith(result: Result<Unit>) {
+        result.getOrThrow()
+    }
+}
+
+fun launch(block: suspend () -> Unit) {
+    block.startCoroutine(Done)
+}
+
+fun inLambda(suffix: Int, unused: Long): String = plain { named<Int>()() + suffix }
+
+class Holder {
+    fun nested(suffix: String): String = plain { plain { named<Short>()() + suffix } }
+}
+
+suspend fun inSuspend(): String = named<Byte>()()
+
+fun box(): String {
+    var result = ""
+    launch { result = named<Long>()() + inSuspend() }
+    result += inLambda(1, 2L) + Holder().nested("!")
+    return if (result == "LongByteInteger1Short!") "OK" else "FAIL " + result
+}
+"#;
+
+/// A copy made in a lambda's method is numbered under that method and names the function the
+/// lambda is written in as its `EnclosingMethod`. One made in a suspend function or a suspend
+/// lambda's `invokeSuspend` is numbered under and encloses that method itself.
+#[test]
+fn objects_inlined_into_lambdas_and_suspend_bodies_are_the_reference_compilers_classes() {
+    let output = common::expect_box_run_against_ref("inline_object_sites", SITES_LIB, SITES_MAIN)
+        .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+    let classes =
+        common::classes_against_kotlinc_lib("Sites", &[("Lib.kt", SITES_LIB)], SITES_MAIN)
+            .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        [
+            "Done",
+            "Holder",
+            "Holder$nested$lambda$0$0$$inlined$named$1",
+            "SitesKt",
+            "SitesKt$box$1",
+            "SitesKt$box$1$invokeSuspend$$inlined$named$1",
+            "SitesKt$inLambda$lambda$0$$inlined$named$1",
+            "SitesKt$inSuspend$$inlined$named$1",
+        ]
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+const INITIALIZER_MAIN: &str = r#"
+import lib.*
+
+fun plain(f: () -> String): String = f()
+
+val top = plain { named<Int>()() }
+
+class Holder {
+    val member = plain { named<Long>()() }
+}
+
+object Single {
+    val value = plain { named<Byte>()() }
+}
+
+fun box(): String {
+    val result = top + Holder().member + Single.value
+    return if (result == "IntegerLongByte") "OK" else "FAIL " + result
+}
+"#;
+
+/// A copy made in a lambda of a property initializer encloses the initializer that runs it:
+/// `<clinit>` for a top-level or object property, and the constructor for a member.
+#[test]
+fn objects_inlined_into_initializer_lambdas_are_the_reference_compilers_classes() {
+    let output = common::expect_box_run_against_ref(
+        "inline_object_initializers",
+        SITES_LIB,
+        INITIALIZER_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+    let classes = common::classes_against_kotlinc_lib(
+        "Initializers",
+        &[("Lib.kt", SITES_LIB)],
+        INITIALIZER_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        [
+            "Holder",
+            "Holder$member$lambda$0$$inlined$named$1",
+            "InitializersKt",
+            "InitializersKt$top$lambda$0$$inlined$named$1",
+            "Single",
+            "Single$value$lambda$0$$inlined$named$1",
+        ]
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+const VALUE_CONSTRUCTOR_MAIN: &str = r#"
+import lib.*
+
+var result = ""
+
+fun plain(f: () -> String): String = f()
+
+@JvmInline
+value class ValueSite(val value: String) {
+    init {
+        result += plain { named<Int>()() }
+    }
+}
+
+fun box(): String {
+    ValueSite("value")
+    return if (result == "Integer") "OK" else "FAIL " + result
+}
+"#;
+
+/// A lambda in a value-class `init` block is emitted in its static `constructor-impl`. An object
+/// regenerated in that lambda therefore names `constructor-impl`, not the nonexistent `<init>`, as
+/// its `EnclosingMethod`.
+#[test]
+fn an_object_inlined_into_a_value_class_constructor_lambda_has_the_reference_enclosure() {
+    let output = common::expect_box_run_against_ref(
+        "inline_object_value_constructor",
+        SITES_LIB,
+        VALUE_CONSTRUCTOR_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+    let classes = common::classes_against_kotlinc_lib(
+        "ValueConstructor",
+        &[("Lib.kt", SITES_LIB)],
+        VALUE_CONSTRUCTOR_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    let expected = [
+        "ValueConstructorKt",
+        "ValueSite",
+        "ValueSite$constructor_impl$lambda$0$$inlined$named$1",
+    ];
+    assert_eq!(classes.reference.keys().collect::<Vec<_>>(), expected);
+    assert_eq!(classes.krusty.keys().collect::<Vec<_>>(), expected);
+    let regenerated = "ValueSite$constructor_impl$lambda$0$$inlined$named$1";
+    assert_eq!(
+        classes.krusty.get(regenerated),
+        classes.reference.get(regenerated),
+        "the regenerated class, including its EnclosingMethod, is byte-identical to kotlinc's"
+    );
+}

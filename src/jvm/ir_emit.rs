@@ -4630,7 +4630,7 @@ fn emit_placed_method(
         fid,
         holder_receiver.is_none(),
         &reserved_desc,
-        env.signature_symbols,
+        env,
     );
     let signature_formatter = JvmSignatureFormatter::new(ir, env);
     // The cache's compiler-invented factories and accessor record no generic `Signature`: the
