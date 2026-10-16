@@ -6,6 +6,18 @@
 use super::{bottom_values, slot_words, CodeBuilder, Emitter, IrExpr, Ty};
 
 impl Emitter<'_> {
+    fn discards_copied_frame_result(&self, expression: u32) -> bool {
+        matches!(
+            self.ir.expr(expression),
+            IrExpr::Block {
+                stmts,
+                value: Some(value),
+            } if self
+                .discarded_copied_frame_result(expression, stmts, *value)
+                .is_some()
+        )
+    }
+
     pub(super) fn emit_discarding(&mut self, expression: u32, code: &mut CodeBuilder) {
         let node = self.ir.expr(expression).clone();
         self.emitting(expression, |emitter| {
@@ -99,6 +111,21 @@ impl Emitter<'_> {
                     value: Some(value), ..
                 } if matches!(self.ir.expr(*value), IrExpr::When { .. }) => {
                     self.emit(expression, code);
+                    return;
+                }
+                // A copied inline frame owns the trailing value until its locals end. Run that
+                // frame as a statement so its emitter can pop the physical result after the
+                // boundary, without the coercion a consumer would need.
+                IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg,
+                    ..
+                } if self.discards_copied_frame_result(*arg) => {
+                    let IrExpr::Block { stmts, value } = self.ir.expr(*arg) else {
+                        unreachable!("a copied result boundary is a block");
+                    };
+                    let (stmts, value) = (stmts.clone(), *value);
+                    self.emit_statement_block(*arg, stmts, value, code);
                     return;
                 }
                 // A property assignment is `Unit` even when the Java setter returns the receiver

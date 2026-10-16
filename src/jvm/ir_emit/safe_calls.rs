@@ -182,6 +182,9 @@ impl Emitter<'_> {
         // that read report the bound, so the member call does not `checkcast` back to it.
         let previous_type = erased_receiver.then(|| self.var_types.insert(plan.temporary, slot_ty));
         self.stack_resident_value = Some(plan.temporary);
+        let selector_boundary = safe_call_selector_boundary(self.ir, plan.selector);
+        let enclosing_safe_call_selector =
+            self.active_safe_call_selector.replace(selector_boundary);
         let selector_diverges = if discarded {
             self.emit_discarding(plan.selector, code);
             self.discarding_diverges(plan.selector)
@@ -189,6 +192,7 @@ impl Emitter<'_> {
             self.emit_value(plan.selector, code);
             self.diverges(plan.selector)
         };
+        self.active_safe_call_selector = enclosing_safe_call_selector;
         if let Some(previous_type) = previous_type {
             match previous_type {
                 Some(previous) => {
@@ -220,6 +224,29 @@ impl Emitter<'_> {
         }
         self.bind(end, code);
         true
+    }
+}
+
+/// The value boundary inside the exact coercion shape that common lowering puts around every
+/// safe-call selector. This strips only that contract: a nullable result has an implicit
+/// coercion, while a `Unit` result is `{ selector; Unit }`.
+pub(super) fn safe_call_selector_boundary(ir: &crate::ir::IrFile, expression: u32) -> u32 {
+    match ir.expr(expression) {
+        IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            ..
+        } => *arg,
+        IrExpr::Block {
+            stmts,
+            value: Some(value),
+        } if matches!(ir.expr(*value), IrExpr::UnitInstance) => {
+            let [effect] = stmts.as_slice() else {
+                return expression;
+            };
+            *effect
+        }
+        _ => expression,
     }
 }
 

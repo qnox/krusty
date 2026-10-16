@@ -41,6 +41,10 @@ pub(super) struct InlineExpansions {
     /// expressions carry the specialized semantic type. A backend may use the declaration type
     /// for physical storage and debug representation.
     declared_inline_types: HashMap<ExprId, Ty>,
+    /// Same-module inline-expansion blocks whose trailing value crosses the copied function's
+    /// frame boundary. The copied body produces the physical value; its caller adapts or discards
+    /// that value only after the frame's debug locals have ended.
+    result_boundaries: HashSet<ExprId>,
     /// Discarded copied `Unit` values whose source closing line must remain physically anchored.
     /// Other copied `Unit` nodes carry source-map provenance without inventing an instruction.
     retained_unit_lines: HashSet<ExprId>,
@@ -104,6 +108,7 @@ impl IrFile {
     pub(crate) fn unmark_inline_copy(&mut self, expression: ExprId) {
         self.inline_expansions.copies.remove(&expression);
         self.inline_expansions.provenance.remove(&expression);
+        self.inline_expansions.result_boundaries.remove(&expression);
         self.inline_expansions
             .retained_unit_lines
             .remove(&expression);
@@ -123,6 +128,9 @@ impl IrFile {
         }
         if let Some(ty) = self.inline_declared_type(source) {
             self.record_inline_declared_type(target, ty);
+        }
+        if self.is_inline_result_boundary(source) {
+            self.mark_inline_result_boundary(target);
         }
         if self.retains_inline_unit_line(source) {
             self.retain_inline_unit_line(target);
@@ -170,6 +178,16 @@ impl IrFile {
         self.inline_expansions
             .declared_inline_types
             .get_mut(&declaration)
+    }
+
+    pub(crate) fn mark_inline_result_boundary(&mut self, expression: ExprId) {
+        self.inline_expansions.result_boundaries.insert(expression);
+    }
+
+    pub(crate) fn is_inline_result_boundary(&self, expression: ExprId) -> bool {
+        self.inline_expansions
+            .result_boundaries
+            .contains(&expression)
     }
 
     pub(crate) fn retain_inline_unit_line(&mut self, expression: ExprId) {
