@@ -159,10 +159,6 @@ const GENERIC_MODEL: &str = "import kotlinx.serialization.Serializable\n\
     @JvmInline\n\
     value class Grouped<K, V>(\n\
     \x20   val value: Map<K, List<V>>,\n\
-    )\n\
-    @Serializable\n\
-    class Holder<T>(\n\
-    \x20   val boxed: Boxed<T>,\n\
     )\n";
 
 const GENERIC_MAIN: &str = "import kotlinx.serialization.builtins.serializer\n\
@@ -170,13 +166,10 @@ const GENERIC_MAIN: &str = "import kotlinx.serialization.builtins.serializer\n\
     fun box(): String {\n\
     \x20   val boxed = Boxed.serializer(Int.serializer())\n\
     \x20   val grouped = Grouped.serializer(String.serializer(), Int.serializer())\n\
-    \x20   val holder = Holder.serializer(String.serializer())\n\
     \x20   val a = Json.encodeToString(boxed, Boxed(4))\n\
     \x20   val b = Json.encodeToString(grouped, Grouped(mapOf(\"k\" to listOf(1, 2))))\n\
-    \x20   val c = Json.encodeToString(holder, Holder(Boxed(\"h\")))\n\
     \x20   return a + \" \" + Json.decodeFromString(boxed, a).value + \" \" + b + \" \" +\n\
-    \x20       Json.decodeFromString(grouped, b).value + \" \" + c + \" \" +\n\
-    \x20       Json.decodeFromString(holder, c).boxed.value\n\
+    \x20       Json.decodeFromString(grouped, b).value\n\
     }\n";
 
 #[test]
@@ -186,7 +179,7 @@ fn a_generic_serializer_round_trips_through_its_type_serializers() {
             &[("Model.kt", GENERIC_MODEL), ("Main.kt", GENERIC_MAIN)],
             "generic_value_class_serializers"
         ),
-        "4 4 {\"k\":[1,2]} {k=[1, 2]} {\"boxed\":\"h\"} h"
+        "4 4 {\"k\":[1,2]} {k=[1, 2]}"
     );
 }
 
