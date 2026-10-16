@@ -171,35 +171,15 @@ pub(super) fn declare(
         )
         .with_is_final(true),
     );
-    for (k, parameter) in type_parameter_tys.iter().copied().enumerate() {
+    // kotlinc keeps each type-parameter serializer in compiler-generated storage typed
+    // `KSerializer<*>`; only the public constructor that fills it names the parameter.
+    for k in 0..n_tp {
         ser.fields.push(
-            crate::ir::IrField::new(format!("typeSerial{k}"), kserializer_of(parameter))
-                .with_is_final(true),
+            crate::ir::IrField::new(format!("typeSerial{k}"), star_kserializer())
+                .with_is_final(true)
+                .with_compiler_generated(true),
         );
     }
-    ser.ctor_param_count = n_tp as u32;
-    // The N constructor params are type-param serializers (`is_field=false`): stored manually in
-    // <init> to fields `1..=N`; field 0 is the descriptor, built in <init>.
-    ser.ctor_args = type_parameter_tys
-        .iter()
-        .copied()
-        .map(|parameter| IrCtorArg {
-            name: None,
-            context_kind: crate::types::ContextParameterKind::None,
-            ty: kserializer_of(parameter),
-            declared_ty: None,
-            is_field: false,
-            field_index: None,
-            has_default: false,
-            is_vararg: false,
-            type_param: None,
-            check: None,
-            anonymous_super_forward: None,
-            capture: None,
-            provenance: crate::ir::IrCtorParameterProvenance::Value,
-            capture_identity: None,
-        })
-        .collect();
     // kotlinc's `$serializer` member order is `<init>`, `serialize`, `deserialize`,
     // `getDescriptor`, `childSerializers`, `typeParametersSerializers`, then the bridges.
     // `getDescriptor` is DECLARED first — the descriptor field it returns is built in
@@ -220,6 +200,18 @@ pub(super) fn declare(
     ir.mark_synthetic_class(serializer_identity);
     ir.mark_deprecated_class(serializer_identity);
     let serializer_class = ir.add_class(ser);
+    if is_generic {
+        // A generic serializer's primary constructor only builds the descriptor and is private;
+        // the public constructor takes the type-parameter serializers and delegates to it.
+        ir.ctor_visibilities
+            .insert(serializer_identity, crate::types::Visibility::Private);
+        declare_type_serializer_constructor(
+            ir,
+            serializer_class,
+            &type_parameter_tys,
+            (owner_start_line, owner_end_line),
+        );
+    }
     ir.record_generated_class(
         class_name,
         IrGeneratedClassRole::SerializationSerializer,
@@ -257,6 +249,7 @@ pub(super) fn complete(
         serialized_ty,
         type_serializers,
         owner_start_line,
+        owner_end_line,
         foo_fields,
         elements,
         element_fields,
@@ -362,9 +355,8 @@ pub(super) fn complete(
     //   this.descriptor = d
     let is_value = ir.classes[class_id as usize].is_value;
     let pgsd_internal = "kotlinx/serialization/internal/PluginGeneratedSerialDescriptor";
-    // The `descriptor` local index: `this` is 0 and the `N` constructor params (type-param
-    // serializers) are `1..=N`, so the descriptor temporary lives at `N+1` (just `1` when N==0).
-    let desc_local = n_tp as u32 + 1;
+    // The `descriptor` local follows `this`: the constructor that builds it takes no parameters.
+    let desc_local = 1;
     // A value class's descriptor is an `InlineClassDescriptor`, a `PluginGeneratedSerialDescriptor`
     // that reports `isInline` and takes no element count. It is built and populated the same way.
     let (descriptor_internal, descriptor_constructor) = if is_value {
@@ -437,23 +429,30 @@ pub(super) fn complete(
         index: 0,
         value: dval,
     }));
-    // Store each constructor type-param serializer (`GetValue(1..=N)`) to its field (`1..=N`).
-    for k in 0..n_tp {
-        let this_k = ir.add_expr(IrExpr::GetValue(0));
-        let pv = ir.add_expr(IrExpr::GetValue(k as u32 + 1));
-        init_stmts.push(ir.add_expr(IrExpr::SetField {
-            receiver: this_k,
-            class: ser_id,
-            index: k as u32 + 1,
-            value: pv,
-        }));
-    }
     let init = ir.add_expr(IrExpr::Block {
         stmts: init_stmts,
         value: None,
     });
+    // A generic serializer builds its descriptor in its private constructor, as one initializer
+    // spanning the class declaration: it closes on the declaration's last line, and the
+    // constructor returns on its first.
+    let init = if is_generic {
+        ir.initializer_blocks.insert(init);
+        ir.expr_source_lines.insert(init, owner_start_line);
+        ir.expr_end_lines.insert(init, owner_end_line);
+        ir.add_expr(IrExpr::Block {
+            stmts: vec![init],
+            value: None,
+        })
+    } else {
+        init
+    };
     let ser_idx = ser_id as usize;
     ir.classes[ser_idx].init_body = Some(init);
+    if is_generic {
+        complete_type_serializer_constructor(ir, ser_id, n_tp);
+        add_type_serializer_getters(ir, ser_id, n_tp, owner_start_line);
+    }
 
     // `serializer()` accessor. Non-generic returns the `$serializer` singleton
     // (`Foo$serializer.INSTANCE`). Generic form creates a fresh serializer with type
@@ -641,4 +640,133 @@ fn add_write_self(
         IrGeneratedFunctionRole::SerializationWriteSelf,
         write_self,
     );
+}
+
+/// `KSerializer<*>`, the type of a generic serializer's type-parameter serializer storage.
+fn star_kserializer() -> Ty {
+    kserializer_of(Ty::star_projection(Ty::nullable(class_ty("kotlin/Any"))))
+}
+
+/// Declare a generic `$serializer`'s public constructor: it takes one serializer per type
+/// parameter, delegates to the private descriptor-building primary constructor and stores them.
+fn declare_type_serializer_constructor(
+    ir: &mut IrFile,
+    serializer: ClassId,
+    type_parameter_tys: &[Ty],
+    (start_line, end_line): (u32, u32),
+) {
+    let params: Vec<Ty> = type_parameter_tys
+        .iter()
+        .map(|parameter| kserializer_of(*parameter))
+        .collect();
+    let class = &mut ir.classes[serializer as usize];
+    assert!(
+        class.secondary_ctors.is_empty(),
+        "a generated $serializer declares one secondary constructor"
+    );
+    class.secondary_ctors.push(crate::ir::IrSecondaryCtor {
+        // kotlinc declares it in FIR, so it is an ordinary constructor spanning the class
+        // declaration: its delegation maps to the declaration's start and its return to its end,
+        // and its tables, signature and nullability are a declared constructor's.
+        lines: crate::ir::IrSecondaryCtorLines {
+            decl_line: start_line,
+            delegation_line: start_line,
+            decl_end_line: end_line,
+            defaults: Vec::new(),
+        },
+        annotations: crate::ir::DeclarationAnnotations::default(),
+        source_order: u32::MAX,
+        prefix_params: Vec::new(),
+        vararg_index: None,
+        named_params: params
+            .iter()
+            .enumerate()
+            .map(|(k, ty)| (format!("typeSerial{k}"), *ty))
+            .collect(),
+        param_checks: vec![Some(crate::ir::IrParameterCheck::NonNull); params.len()],
+        params,
+        declared_spellings: Default::default(),
+        metadata_visibility: Some(crate::types::Visibility::Public),
+        generated_debug: crate::ir::IrGeneratedDeclarationDebug::None,
+        defaults: vec![],
+        delegate_prelude: Vec::new(),
+        delegate_args: vec![],
+        default_parameters: Vec::new(),
+        body: None,
+        delegate: crate::ir::CtorDelegateTarget::This {
+            target_params: vec![],
+            target: crate::ir::IrConstructorTarget {
+                ordinal: 0,
+                access: crate::ir::IrConstructorAccess::Private,
+            },
+            default_masks: vec![],
+        },
+        synthetic: false,
+        vc_params: false,
+    });
+}
+
+/// The public constructor's body: store each serializer argument (`1..=N`) to its field.
+fn complete_type_serializer_constructor(ir: &mut IrFile, serializer: ClassId, n_tp: usize) {
+    let stmts = (1..=n_tp as u32)
+        .map(|k| {
+            let receiver = ir.add_expr(IrExpr::GetValue(0));
+            let value = ir.add_expr(IrExpr::GetValue(k));
+            ir.add_expr(IrExpr::SetField {
+                receiver,
+                class: serializer,
+                index: k,
+                value,
+            })
+        })
+        .collect();
+    let body = ir.add_expr(IrExpr::Block { stmts, value: None });
+    ir.classes[serializer as usize].secondary_ctors[0].body = Some(body);
+}
+
+/// kotlinc's private synthetic `getTypeSerial<k>()` readers. Nothing calls them; its IR plugin adds
+/// them after the class's declared members, so they follow the public constructor in the class
+/// file, and they are absent from `@Metadata`.
+fn add_type_serializer_getters(ir: &mut IrFile, serializer: ClassId, n_tp: usize, line: u32) {
+    let owner = ir.classes[serializer as usize].fq_name_id();
+    for k in 0..n_tp {
+        let receiver = ir.add_expr(IrExpr::GetValue(0));
+        let read = ir.add_expr(IrExpr::GetField {
+            receiver,
+            class: serializer,
+            index: k as u32 + 1,
+        });
+        let returned = ir.add_expr(IrExpr::Return(Some(read)));
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![returned],
+            value: None,
+        });
+        let getter = ir.add_fun(IrFunction {
+            name: format!("getTypeSerial{k}"),
+            params: Vec::new(),
+            ret: star_kserializer(),
+            body: Some(body),
+            is_static: false,
+            dispatch_receiver: Some(owner),
+            param_checks: Vec::new(),
+        });
+        ir.synthetic_methods.insert(getter);
+        ir.method_visibilities
+            .insert(getter, crate::types::Visibility::Private);
+        ir.classes[serializer as usize].methods.push(getter);
+        ir.record_generated_function(
+            owner,
+            IrGeneratedFunctionRole::SerializationTypeSerializerGetter(k as u32),
+            getter,
+        );
+        ir.publish_generated_debug_function(
+            owner,
+            crate::ir::IrGeneratedFunctionPublication {
+                function: getter,
+                parameter_identities: Vec::new(),
+                metadata: None,
+                debug: crate::ir::IrGeneratedDeclarationDebug::declaration_line(line),
+            },
+        );
+    }
 }
