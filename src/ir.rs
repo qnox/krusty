@@ -1988,6 +1988,9 @@ pub struct IrFile {
     /// source update has (kotlinc's `index = index + 1` in `WithIndexLoopHeader`). A target emits
     /// them as the plain arithmetic and store they are, never as a fused increment.
     pub plain_updates: crate::fx_hash::HashSet<ExprId>,
+    /// Local-storage blocks originating from postfix `++`/`--`:
+    /// `val old = x; x = old.inc(); old`.
+    pub postfix_updates: crate::fx_hash::HashSet<ExprId>,
     /// Boolean negations (kotlinc's `not`), spelled as `operand == false`; see `negations`.
     pub negations: crate::fx_hash::HashSet<ExprId>,
     /// Pre-test loops whose body block is a transparent scope, as the body of a `for` loop kotlinc's

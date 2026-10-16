@@ -55,6 +55,7 @@ impl Emitter<'_> {
         self.block_depth += 1;
         let EmittedBlock {
             discard_after_close,
+            retains_postfix_temporary,
             reserved_inline_stack,
             close_lambda_before_locals,
             emit_after_frame_close,
@@ -65,6 +66,7 @@ impl Emitter<'_> {
             self.statement_line = enclosing_statement_line;
             EmittedBlock {
                 discard_after_close: None,
+                retains_postfix_temporary: false,
                 reserved_inline_stack: None,
                 close_lambda_before_locals: false,
                 emit_after_frame_close: None,
@@ -80,7 +82,7 @@ impl Emitter<'_> {
                 discarded_frame_result: value
                     .and_then(|value| self.discarded_copied_frame_tail(block, &stmts, value)),
             };
-            self.emit_open_block(stmts, value, terminal_target, entry, true, code)
+            self.emit_open_block(block, stmts, value, terminal_target, entry, true, code)
         };
         self.mark_initializer_line(block, true, code);
         if !self.ir.callable_scopes.contains(&block) {
@@ -122,6 +124,11 @@ impl Emitter<'_> {
             .is_some_and(|unit| self.has_retained_mapped_inline_unit_line(unit));
         if !self.ir.callable_scopes.contains(&block) && !unit_wrote_body_line {
             self.close_spliced_lambda_frame(block, false, code);
+        }
+        if retains_postfix_temporary {
+            // kotlinc closes the postfix block between its result load and discard. Keep that
+            // ordering through the trivial-load sweep; the final nop sweep removes this anchor.
+            code.nop();
         }
         if let Some(discarded) = discard_after_close {
             super::discard(self.value_ty(discarded), code);
@@ -170,7 +177,10 @@ impl Emitter<'_> {
         let mut anchored_lambda_result = false;
         let mut deferred_invocation_result = None;
         let mut copied_frame_result = None;
-        if !self.try_emit_duplicated_safe_call(block, stmts, value, false, code) {
+        let optimized_postfix = self.emit_postfix_iinc(block, false, code);
+        if !optimized_postfix
+            && !self.try_emit_duplicated_safe_call(block, stmts, value, false, code)
+        {
             let mut normalize_at_lambda_frame = delays_stack_normalization;
             let opening = self.external_inline_body_opening(block, stmts);
             for &statement in stmts {
@@ -886,6 +896,7 @@ impl Emitter<'_> {
     /// pop-backward step removes both.
     pub(super) fn emit_open_block(
         &mut self,
+        block: u32,
         stmts: Vec<u32>,
         value: Option<u32>,
         terminal_target: Option<Label>,
@@ -929,7 +940,11 @@ impl Emitter<'_> {
         if let Some(index) = discarded_result {
             self.discarded_inline_results.insert(index);
         }
-        for (index, statement) in stmts.into_iter().enumerate() {
+        let optimized_postfix = self.emit_postfix_iinc(block, true, code);
+        for (index, statement) in stmts.iter().copied().enumerate() {
+            if optimized_postfix {
+                break;
+            }
             self.open_external_inline_body(opening, statement, code);
             // FixStack replaces the opening marker with the saved caller stack. Keep that
             // generated store inside the lambda frame's mapped line interval.
@@ -956,11 +971,12 @@ impl Emitter<'_> {
             code.set_stack(base.max(0) as u16);
         }
         let mut discard_after_frame_close = None;
+        let mut retains_postfix_temporary = false;
         let mut close_lambda_before_locals = false;
         let mut emit_after_frame_close = None;
         let mut discard_after_frame = None;
         let mut close_discarded_provider_frame = None;
-        if !dead {
+        if !dead && !optimized_postfix {
             if let Some(value) = value {
                 self.mark_statement_line(value, code);
                 if let Some(result) = discarded_frame_result {
@@ -978,6 +994,10 @@ impl Emitter<'_> {
                     }
                     close_lambda_before_locals = true;
                     emit_after_frame_close = Some(unit);
+                } else if self.ir.postfix_updates.contains(&block) {
+                    self.emit_value(value, code);
+                    discard_after_frame_close = Some(value);
+                    retains_postfix_temporary = true;
                 } else if opens_lambda_frame {
                     self.emit_value(value, code);
                     discard_after_frame_close = Some(value);
@@ -996,6 +1016,7 @@ impl Emitter<'_> {
         self.statement_line = enclosing_statement_line;
         EmittedBlock {
             discard_after_close: discard_after_frame_close,
+            retains_postfix_temporary,
             reserved_inline_stack,
             close_lambda_before_locals,
             emit_after_frame_close,
@@ -1215,6 +1236,8 @@ impl CopiedFrameTail {
 
 pub(super) struct EmittedBlock {
     pub(super) discard_after_close: Option<u32>,
+    /// A non-`iinc` postfix statement keeps its old-value temporary through block close.
+    pub(super) retains_postfix_temporary: bool,
     pub(super) reserved_inline_stack: Option<Vec<TempSlot>>,
     /// A statement-position spliced lambda whose `Unit` value follows its effects closes on the
     /// brace while its frame locals are still live, before the surrounding lexical scope ends.

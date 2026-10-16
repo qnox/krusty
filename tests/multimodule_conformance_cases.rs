@@ -94,6 +94,20 @@ pub const LOCAL_FUNCTION_SYMBOLS: Case = Case {
              }\n",
 };
 
+pub const LOCAL_INCREMENT_SHAPES: Case = Case {
+    stem: "multimoduleLocalIncrementShapes",
+    source: "// MODULE: lib\n\
+             fun exerciseUpdates(): String {\n\
+             \x20   var local = 1\n\
+             \x20   val oldLocal = local++\n\
+             \x20   ++local\n\
+             \x20   if (oldLocal != 1 || local != 3) return \"local\"\n\
+             \x20   return \"OK\"\n\
+             }\n\
+             // MODULE: main(lib)\n\
+             fun box() = exerciseUpdates()\n",
+};
+
 pub const DEPENDENCY_FUNCTION_IMPLEMENTATION_MARKERS: Case = Case {
     stem: "multimoduleDependencyFunctionImplementationMarkers",
     source: "// TARGET_BACKEND: NATIVE\n\
@@ -186,6 +200,7 @@ pub const ALL: &[Case] = &[
     PROPERTY_IDS,
     FORWARD_PROPERTY_IDS,
     LOCAL_FUNCTION_SYMBOLS,
+    LOCAL_INCREMENT_SHAPES,
     DEPENDENCY_FUNCTION_IMPLEMENTATION_MARKERS,
     NATIVE_ABI_SYMBOLS,
     FLOATING_BITS,
