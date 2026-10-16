@@ -25,6 +25,28 @@ pub(in crate::jvm) fn class_enclosure(
     scope_enclosure(ir, override_results, c.enclosure?, facade)
 }
 
+/// The scope the lambda implemented by `function` is written in, realized as for a class it
+/// declares: a lambda is no scope of its own, so this is the scope around it.
+pub(in crate::jvm) fn lambda_body_enclosure(
+    ir: &IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
+    function: crate::ir::FunId,
+    facade: &str,
+) -> Option<(String, Option<(String, String)>)> {
+    let mut scopes = ir
+        .callable_reference_enclosures
+        .iter()
+        .filter(|(&node, _)| {
+            matches!(ir.exprs.get(node as usize), Some(crate::ir::IrExpr::Lambda { impl_fn, .. }) if *impl_fn == function)
+        })
+        .map(|(_, &scope)| scope);
+    let scope = scopes.next()?;
+    if !scopes.all(|other| other == scope) {
+        return None;
+    }
+    scope_enclosure(ir, override_results, scope, facade)
+}
+
 /// Resolve a source property's accessor role to the exact finalized IR function the JVM emits.
 ///
 /// Common IR keeps the semantic property identity and side. The finalized layout is the JVM
