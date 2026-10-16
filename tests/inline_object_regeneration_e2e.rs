@@ -195,3 +195,72 @@ fn an_object_whose_methods_name_their_parameters_is_regenerated() {
     let differences = classes.differences();
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
 }
+
+const SITES_LIB: &str = r#"
+package lib
+
+inline fun <reified T : Any> named(): () -> String = object : () -> String {
+    override fun invoke(): String = T::class.java.simpleName
+}
+"#;
+
+const SITES_MAIN: &str = r#"
+import kotlin.coroutines.*
+import lib.*
+
+fun plain(f: () -> String): String = f()
+
+object Done : Continuation<Unit> {
+    override val context: CoroutineContext get() = EmptyCoroutineContext
+
+    override fun resumeWith(result: Result<Unit>) {
+        result.getOrThrow()
+    }
+}
+
+fun launch(block: suspend () -> Unit) {
+    block.startCoroutine(Done)
+}
+
+fun inLambda(suffix: Int, unused: Long): String = plain { named<Int>()() + suffix }
+
+class Holder {
+    fun nested(suffix: String): String = plain { plain { named<Short>()() + suffix } }
+}
+
+suspend fun inSuspend(): String = named<Byte>()()
+
+fun box(): String {
+    var result = ""
+    launch { result = named<Long>()() + inSuspend() }
+    result += inLambda(1, 2L) + Holder().nested("!")
+    return if (result == "LongByteInteger1Short!") "OK" else "FAIL " + result
+}
+"#;
+
+/// A copy made in a lambda's method is numbered under that method and names the function the
+/// lambda is written in as its `EnclosingMethod`. One made in a suspend function or a suspend
+/// lambda's `invokeSuspend` is numbered under and encloses that method itself.
+#[test]
+fn objects_inlined_into_lambdas_and_suspend_bodies_are_the_reference_compilers_classes() {
+    let output = common::expect_box_run_against_ref("inline_object_sites", SITES_LIB, SITES_MAIN)
+        .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+    let classes = common::classes_against_kotlinc_lib("Sites", &[("Lib.kt", SITES_LIB)], SITES_MAIN)
+        .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        [
+            "Done",
+            "Holder",
+            "Holder$nested$lambda$0$0$$inlined$named$1",
+            "SitesKt",
+            "SitesKt$box$1",
+            "SitesKt$box$1$invokeSuspend$$inlined$named$1",
+            "SitesKt$inLambda$lambda$0$$inlined$named$1",
+            "SitesKt$inSuspend$$inlined$named$1",
+        ]
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}

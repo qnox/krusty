@@ -33,30 +33,51 @@ pub(in crate::jvm::ir_emit) struct RegenerationSite<'a> {
 }
 
 impl<'a> RegenerationSite<'a> {
-    /// The site of the declared function `function`, emitted as its own method under `descriptor`.
-    /// This stage regenerates objects only there: not in a `$DefaultImpls` copy (`own_method`
-    /// false), an accessor, a lambda, a suspend function, or an inline function, whose copies
-    /// kotlinc names or writes differently. A constructor is [`Self::constructor`].
+    /// The site of the function `function`, emitted as its own method under `descriptor`: a
+    /// declared function, a suspend lambda's `invokeSuspend`, or a lambda's implementation method.
+    /// kotlinc numbers each copy under the emitted method's name and points its `EnclosingMethod`
+    /// at that method, except from a lambda's method, where it names the function the lambda is
+    /// written in. This stage regenerates objects nowhere else: not in a `$DefaultImpls` copy
+    /// (`own_method` false), an accessor, or an inline function, whose copies kotlinc names or
+    /// writes differently. A constructor is [`Self::constructor`].
     pub(in crate::jvm::ir_emit) fn of_function(
         ir: &IrFile,
         function: u32,
         own_method: bool,
         descriptor: &str,
-        symbols: &'a dyn BackendClassifierSource,
+        env: &EmitEnv<'a>,
     ) -> Option<RegenerationSite<'a>> {
-        let name = &ir.functions[function as usize].name;
+        if !own_method || ir.inline_fns.contains(&function) {
+            return None;
+        }
+        let declaration = &ir.functions[function as usize];
+        let name = &declaration.name;
         let declared = ir.fn_decl_lines.contains_key(&function)
             && ir.fn_source_names.get(&function) == Some(name);
-        (own_method
-            && declared
-            && !ir.suspend_funs.contains(&function)
-            && !ir.inline_fns.contains(&function))
-        .then(|| RegenerationSite {
-            method: name.clone(),
-            descriptor: descriptor.to_string(),
+        let suspend_lambda_body = declaration
+            .dispatch_receiver
+            .and_then(|class| env.emit_time_machines.suspend_lambda(class))
+            .is_some_and(|lambda| lambda.invoke_suspend == function);
+        let (method, descriptor) = if declared || suspend_lambda_body {
+            (name.clone(), descriptor.to_string())
+        } else if ir.lambda_origins.contains_key(&function) {
+            let facade = env.facade_class.render();
+            let (_, method) = super::super::enclosure::lambda_body_enclosure(
+                ir,
+                env.override_results,
+                function,
+                &facade,
+            )?;
+            method?
+        } else {
+            return None;
+        };
+        Some(RegenerationSite {
+            method,
+            descriptor,
             function: name.clone(),
             special: false,
-            symbols,
+            symbols: env.signature_symbols,
         })
     }
 
