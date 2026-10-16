@@ -562,12 +562,20 @@ impl<'a> Body<'a> {
 
     /// Evaluate `id` and convert its value to the carrier of `target`.
     fn value(&mut self, id: u32, target: Ty) -> Result<(), Unsupported> {
-        let target_ty = target;
         let source_ty = self.type_of(id)?;
         self.expression(id)?;
         let Some(source) = source_ty else {
             return Ok(());
         };
+        self.coerce_emitted_value(source, target)
+    }
+
+    /// Convert the value already on the Wasm stack from its emitted declaration type to the type
+    /// the checked use selected. Dependency bodies in particular retain a declaration type
+    /// parameter while an independently analyzed caller sees its concrete substitution.
+    fn coerce_emitted_value(&mut self, source_ty: Ty, target_ty: Ty) -> Result<(), Unsupported> {
+        let source = source_ty;
+        let target = target_ty;
         let Some(target) = carrier(target)? else {
             if carrier(source)?.is_some() {
                 self.code.drop_();
@@ -581,7 +589,7 @@ impl<'a> Body<'a> {
             // An `Int` stored where a `Byte`, `Short` or `Char` is declared (`b++` on a `Byte`)
             // wraps to that width: the 32-bit carrier must hold the narrow value's own bits.
             let narrowing = match (source_ty, target_ty) {
-                (Some(from), to) if from == to => None,
+                (from, to) if from == to => None,
                 (_, Ty::Byte) => Some(0xc0),
                 (_, Ty::Short) => Some(0xc1),
                 (_, Ty::Char) => Some(0),
@@ -804,6 +812,7 @@ impl<'a> Body<'a> {
                     Callee::External {
                         target,
                         params,
+                        ret,
                         defaults,
                         extension_receiver_parameter,
                         ..
@@ -818,6 +827,7 @@ impl<'a> Body<'a> {
                 let callable = self.callables.callable(target).ok_or_else(|| {
                     "a dependency callable without frozen callable facts".to_string()
                 })?;
+                let emitted_ret = callable.declared_ret.unwrap_or(callable.ret);
                 if let Some(receiver_position) = callable.klib_body_companion_receiver_position() {
                     let receiver_ty = self
                         .calls
@@ -870,12 +880,14 @@ impl<'a> Body<'a> {
                 } else {
                     self.direct_call(function, &params, &args)?;
                 }
+                self.coerce_emitted_value(emitted_ret, ret)?;
             }
             IrExpr::Call {
                 callee:
                     Callee::External {
                         target,
                         params,
+                        ret,
                         defaults,
                         extension_receiver_parameter: None,
                         ..
@@ -908,6 +920,7 @@ impl<'a> Body<'a> {
                 let callable = self.callables.callable(target).ok_or_else(|| {
                     "a dependency extension without frozen callable facts".to_string()
                 })?;
+                let emitted_ret = callable.declared_ret.unwrap_or(callable.ret);
                 let (function, receiver_ty, receiver_position) =
                     Self::dependency_extension_call(function, callable, &params, &args)?;
                 let effect = self
@@ -930,12 +943,14 @@ impl<'a> Body<'a> {
                     &params,
                     &args,
                 )?;
+                self.coerce_emitted_value(emitted_ret, ret)?;
             }
             IrExpr::Call {
                 callee:
                     Callee::External {
                         target,
                         params,
+                        ret,
                         defaults,
                         extension_receiver_parameter: None,
                         ..
@@ -943,6 +958,7 @@ impl<'a> Body<'a> {
                 dispatch_receiver: Some(receiver),
                 args,
             } if defaults.is_empty()
+                && self.calls.singleton_member_receiver(target).is_some()
                 && super::callable_registry::authenticated_singleton_member_call(
                     Some(receiver),
                     self.callables.singleton_dispatch(id).is_some(),
@@ -960,6 +976,10 @@ impl<'a> Body<'a> {
                     .calls
                     .external(target)
                     .ok_or_else(|| "an unregistered dependency singleton member".to_string())?;
+                let callable = self.callables.callable(target).ok_or_else(|| {
+                    "a dependency member without frozen callable facts".to_string()
+                })?;
+                let emitted_ret = callable.declared_ret.unwrap_or(callable.ret);
                 let selected = self
                     .callables
                     .singleton_dispatch(id)
@@ -981,12 +1001,61 @@ impl<'a> Body<'a> {
                     self.statement(receiver)?;
                 }
                 self.direct_call(function, &params, &args)?;
+                self.coerce_emitted_value(emitted_ret, ret)?;
             }
             IrExpr::Call {
                 callee:
                     Callee::External {
                         target,
                         params,
+                        ret,
+                        defaults,
+                        extension_receiver_parameter: None,
+                        ..
+                    },
+                dispatch_receiver: Some(receiver),
+                args,
+            } if defaults.is_empty()
+                && self
+                    .callables
+                    .callable(target)
+                    .is_some_and(BackendCallableFact::is_member_function) =>
+            {
+                let function = self
+                    .calls
+                    .external(target)
+                    .ok_or_else(|| "an unregistered dependency member identity".to_string())?;
+                let callable = self.callables.callable(target).ok_or_else(|| {
+                    "a dependency member without frozen callable facts".to_string()
+                })?;
+                let emitted_ret = callable.declared_ret.unwrap_or(callable.ret);
+                let receiver_ty = self
+                    .calls
+                    .member_receiver(target)
+                    .ok_or_else(|| {
+                        "an ordinary dependency member without its exported receiver type"
+                            .to_string()
+                    })?
+                    .semantic_type();
+                if params.len() != args.len() {
+                    return Err(
+                        "a dependency member whose arguments do not match its parameters"
+                            .to_string(),
+                    );
+                }
+                self.value(receiver, receiver_ty)?;
+                for (&argument, &parameter) in args.iter().zip(&params) {
+                    self.value(argument, parameter)?;
+                }
+                self.code.call(function);
+                self.coerce_emitted_value(emitted_ret, ret)?;
+            }
+            IrExpr::Call {
+                callee:
+                    Callee::External {
+                        target,
+                        params,
+                        ret,
                         defaults,
                         extension_receiver_parameter: None,
                         ..
@@ -1001,6 +1070,7 @@ impl<'a> Body<'a> {
                 let callable = self.callables.callable(target).ok_or_else(|| {
                     "a dependency extension without frozen callable facts".to_string()
                 })?;
+                let emitted_ret = callable.declared_ret.unwrap_or(callable.ret);
                 let (function, receiver_ty, receiver_position) =
                     Self::dependency_extension_call(function, callable, &params, &args)?;
                 self.direct_extension_call(
@@ -1011,6 +1081,59 @@ impl<'a> Body<'a> {
                     &params,
                     &args,
                 )?;
+                self.coerce_emitted_value(emitted_ret, ret)?;
+            }
+            IrExpr::Call {
+                callee:
+                    Callee::External {
+                        target,
+                        params,
+                        ret,
+                        defaults,
+                        extension_receiver_parameter: Some(extension_receiver_parameter),
+                        ..
+                    },
+                dispatch_receiver: Some(dispatch_receiver),
+                args,
+            } if defaults.is_empty()
+                && self.calls.member_receiver(target).is_some()
+                && self
+                    .callables
+                    .callable(target)
+                    .is_some_and(BackendCallableFact::is_member_extension) =>
+            {
+                let function = self
+                    .calls
+                    .external(target)
+                    .ok_or_else(|| "an unregistered dependency member extension".to_string())?;
+                let callable = self.callables.callable(target).ok_or_else(|| {
+                    "a dependency member extension without frozen callable facts".to_string()
+                })?;
+                let receiver_position =
+                    usize::try_from(extension_receiver_parameter).map_err(|_| {
+                        "a dependency member extension with an invalid receiver coordinate"
+                    })?;
+                if params.len() != args.len()
+                    || receiver_position != callable.context_count
+                    || callable.params.as_slice() != params.as_slice()
+                    || callable.source_receiver != params.get(receiver_position).copied()
+                {
+                    return Err(
+                        "a dependency member extension whose receiver contract disagrees with its call"
+                            .to_string(),
+                    );
+                }
+                let dispatch_receiver_ty = self
+                    .calls
+                    .member_receiver(target)
+                    .expect("guarded dependency member extension receiver")
+                    .semantic_type();
+                self.value(dispatch_receiver, dispatch_receiver_ty)?;
+                for (&argument, &parameter) in args.iter().zip(&params) {
+                    self.value(argument, parameter)?;
+                }
+                self.code.call(function);
+                self.coerce_emitted_value(callable.declared_ret.unwrap_or(callable.ret), ret)?;
             }
             IrExpr::Call {
                 callee: Callee::Intrinsic { operation, .. },

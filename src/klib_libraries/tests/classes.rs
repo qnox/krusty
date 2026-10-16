@@ -417,6 +417,8 @@ fn members_publish_their_kind_visibility_and_member_signature() {
     assert_eq!(scaled.kind, FnKind::Extension);
     assert_eq!(scaled.semantic_receiver(), Some(Ty::Int));
     assert!(base.members[2].is_member_extension());
+    assert_eq!(base.members[2].params, [Ty::Int]);
+    assert_eq!(base.members[2].semantic_extension_receiver(), Some(Ty::Int));
     assert_eq!(
         base.members[2].external_identity,
         scaled.callable.external_identity

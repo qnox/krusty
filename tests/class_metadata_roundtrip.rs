@@ -113,7 +113,7 @@ fn value_class_constructor_realization_name_round_trips() {
         &[],
         &[],
         &ClassTail {
-            inline_underlying: Some(("value", Some(Ty::String))),
+            inline_underlying: Some(("value", Some((Ty::String, &Default::default())))),
             ..Default::default()
         },
         &JvmClassSignatures {

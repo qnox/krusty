@@ -32,8 +32,16 @@ use super::target::NativeTarget;
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DependencyExport {
     symbol: String,
+    member_receiver: Option<crate::backend::DependencyMemberReceiver>,
     singleton_member_receiver: Option<crate::backend::SingletonMemberReceiver>,
     singleton_extension_receiver: Option<crate::backend::SingletonExtensionUnreadReceiver>,
+}
+
+/// One source function this target must publish for dependent source modules.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DependencyExportDefinition {
+    symbol: String,
+    member_receiver: Option<crate::backend::DependencyMemberReceiver>,
 }
 
 /// The symbol every program object must define for the runtime's `_start` to call.
@@ -227,6 +235,7 @@ impl Backend for CraneliftBackend {
             state.next_dependency_symbol += 1;
             let export = DependencyExport {
                 symbol: symbol.clone(),
+                member_receiver: file.dependency_exports.member_receiver(callable),
                 singleton_member_receiver: file
                     .dependency_exports
                     .singleton_member_receiver(callable),
@@ -245,7 +254,13 @@ impl Backend for CraneliftBackend {
                 );
                 return Vec::new();
             }
-            dependency_exports.insert(callable, symbol);
+            dependency_exports.insert(
+                callable,
+                DependencyExportDefinition {
+                    symbol,
+                    member_receiver: file.dependency_exports.member_receiver(callable),
+                },
+            );
         }
         let lowered = match lower::lower_file(
             lower::FileInput {

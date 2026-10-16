@@ -21,6 +21,15 @@ pub struct VersionRequirement {
 }
 
 impl VersionRequirement {
+    pub const fn language(major: u8, minor: u8, patch: u8) -> Self {
+        VersionRequirement {
+            major,
+            minor,
+            patch,
+            kind: VersionKind::LanguageVersion,
+        }
+    }
+
     pub const fn compiler(major: u8, minor: u8, patch: u8) -> Self {
         VersionRequirement {
             major,
@@ -60,6 +69,45 @@ impl VersionRequirement {
 /// Since Kotlin 1.4 an inline function checks its parameters with `Intrinsics.checkNotNullParameter`,
 /// which compilers older than 1.3.50 cannot inline through a functional parameter.
 pub const INLINE_PARAMETER_NULL_CHECK: VersionRequirement = VersionRequirement::compiler(1, 3, 50);
+
+/// Definitely-non-null types (`T & Any`) became a stable metadata shape in Kotlin 1.7. A
+/// declaration that uses the shape names this language requirement so an older metadata reader
+/// does not silently interpret it as an ordinary type-parameter occurrence.
+pub(crate) const DEFINITELY_NON_NULL_TYPE: VersionRequirement =
+    VersionRequirement::language(1, 7, 0);
+
+/// Whether one declaration's source spelling contains an explicit definitely-non-null occurrence.
+/// This fact cannot be recovered from the semantic `Ty`: `<T : Any> T` has the same tightened
+/// occurrence bound but must not acquire the language requirement.
+pub(crate) fn spelling_contains_definitely_non_null_type(
+    spelling: &crate::spelling::Spelled,
+) -> bool {
+    spelling.definitely_non_null
+        || spelling
+            .alias_args
+            .iter()
+            .any(|(_, argument)| spelling_contains_definitely_non_null_type(argument))
+        || spelling
+            .args
+            .iter()
+            .any(spelling_contains_definitely_non_null_type)
+}
+
+pub(crate) fn needs_definitely_non_null_type(
+    spellings: &crate::spelling::DeclaredSpellings,
+) -> bool {
+    spelling_contains_definitely_non_null_type(&spellings.ret)
+        || spelling_contains_definitely_non_null_type(&spellings.receiver)
+        || spellings
+            .params
+            .iter()
+            .any(spelling_contains_definitely_non_null_type)
+        || spellings
+            .type_param_bounds
+            .iter()
+            .flatten()
+            .any(spelling_contains_definitely_non_null_type)
+}
 
 /// kotlinc's `FirJvmSerializerExtension.needsInlineParameterNullCheckRequirement`: a named, non-private,
 /// non-suspend inline function with a value parameter or extension receiver of a function type
@@ -135,6 +183,16 @@ mod tests {
         assert_eq!(
             bytes,
             [0x0a, 0x05, 0x08, 0x99, 0x32, 0x30, 0x01, 0x0a, 0x04, 0x08, 0x21, 0x30, 0x01]
+        );
+    }
+
+    #[test]
+    fn definitely_non_null_uses_the_kotlin_1_7_language_requirement() {
+        let mut table = VersionRequirementTable::default();
+        assert_eq!(table.index(DEFINITELY_NON_NULL_TYPE), 0);
+        assert_eq!(
+            table.encode().expect("a used table encodes").as_bytes(),
+            [0x0a, 0x02, 0x08, 0x39]
         );
     }
 }

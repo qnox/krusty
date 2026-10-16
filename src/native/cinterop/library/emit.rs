@@ -11,6 +11,7 @@
 
 use crate::metadata::protobuf::Pb;
 use crate::metadata::type_encoder::StringTable;
+use crate::metadata::InnerClassifiers;
 use crate::types::TypeName;
 
 use super::kotlin_type::{Argument, Head, KotlinType};
@@ -25,6 +26,21 @@ const CALLABLES_PER_FRAGMENT: usize = 128;
 /// The fragments of `package` (dotted), in the order the library numbers them.
 pub(super) fn fragments(package: &str, contents: &Package) -> Vec<Vec<u8>> {
     let segments: Vec<&str> = package.split('.').filter(|s| !s.is_empty()).collect();
+    let inner_classifiers = |classifier: TypeName| {
+        if classifier.nested_owner().is_none()
+            || contents
+                .classes
+                .iter()
+                .flatten()
+                .any(|class| class.name == classifier)
+        {
+            // C declarations nested for namespacing are Kotlin nested classes, not `inner`
+            // classes: they capture no enclosing instance or type arguments.
+            Ok(None)
+        } else {
+            Err(classifier)
+        }
+    };
     enum Classifier<'a> {
         Classes(&'a [Class]),
         Alias(&'a TypeAlias),
@@ -45,7 +61,14 @@ pub(super) fn fragments(package: &str, contents: &Package) -> Vec<Vec<u8>> {
                 Classifier::Alias(alias) => aliases.push(*alias),
             }
         }
-        fragments.push(fragment(&segments, &aliases, &[], &[], &classes));
+        fragments.push(fragment(
+            &segments,
+            &inner_classifiers,
+            &aliases,
+            &[],
+            &[],
+            &classes,
+        ));
     }
     enum Callable<'a> {
         Function(&'a Function),
@@ -66,10 +89,17 @@ pub(super) fn fragments(package: &str, contents: &Package) -> Vec<Vec<u8>> {
                 Callable::Property(property) => properties.push(*property),
             }
         }
-        fragments.push(fragment(&segments, &[], &functions, &properties, &[]));
+        fragments.push(fragment(
+            &segments,
+            &inner_classifiers,
+            &[],
+            &functions,
+            &properties,
+            &[],
+        ));
     }
     if fragments.is_empty() {
-        fragments.push(fragment(&segments, &[], &[], &[], &[]));
+        fragments.push(fragment(&segments, &inner_classifiers, &[], &[], &[], &[]));
     }
     fragments
 }
@@ -87,12 +117,13 @@ pub(super) fn empty_fragment(package: &str) -> Vec<u8> {
 
 fn fragment(
     package: &[&str],
+    inner_classifiers: InnerClassifiers<'_>,
     aliases: &[&TypeAlias],
     functions: &[&Function],
     properties: &[&Property],
     classes: &[&Class],
 ) -> Vec<u8> {
-    let mut st = StringTable::klib();
+    let mut st = StringTable::klib(inner_classifiers);
     let mut package_message = Pb::new();
     st.open_type_table();
     for alias in aliases {

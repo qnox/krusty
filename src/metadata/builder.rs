@@ -3,15 +3,17 @@
 //! names use `predefinedIndex` into `JvmNameResolverBase.PREDEFINED_STRINGS` (see METADATA_NOTES.md).
 
 use super::version_requirements::{
-    needs_inline_parameter_null_check, VersionRequirementTable, INLINE_PARAMETER_NULL_CHECK,
+    needs_definitely_non_null_type, needs_inline_parameter_null_check,
+    spelling_contains_definitely_non_null_type, VersionRequirementTable, DEFINITELY_NON_NULL_TYPE,
+    INLINE_PARAMETER_NULL_CHECK,
 };
 use crate::metadata::local_properties::{
     local_property_pb, LocalPropertyMeta, LOCAL_VARIABLE_FIELD,
 };
 use crate::metadata::type_encoder::{
     encode_declared_type, encode_metadata_type_parameter, encode_type, encode_type_parameter,
-    semantic_named_type_parameters, MetadataTypeParameter, StringTable, TypeParameterRef,
-    TypeParameters,
+    semantic_named_type_parameters, MetadataTypeLookups, MetadataTypeParameter, StringTable,
+    TypeParameterRef, TypeParameters,
 };
 use crate::metadata::{property_flags, protobuf::Pb};
 use crate::types::Ty;
@@ -695,6 +697,9 @@ fn function_pb(
     if needs_inline_parameter_null_check(flags, f.has_function_typed_parameter, param_assertions) {
         p.field_varint(31, requirements.index(INLINE_PARAMETER_NULL_CHECK));
     }
+    if needs_definitely_non_null_type(&f.spellings) {
+        p.field_varint(31, requirements.index(DEFINITELY_NON_NULL_TYPE));
+    }
     // The declared contract (Function.contract = 32) — `returns(…) implies …` / `callsInPlace`
     // effects a separate compilation applies at call sites.
     if let Some(contract) = &f.contract {
@@ -832,7 +837,11 @@ fn visibility_bits(visibility: crate::types::Visibility) -> u64 {
     }
 }
 
-pub(crate) fn type_alias_pb(st: &mut StringTable<'_>, alias: &TypeAliasMeta) -> Pb {
+pub(crate) fn type_alias_pb(
+    st: &mut StringTable<'_>,
+    alias: &TypeAliasMeta,
+    requirements: &mut VersionRequirementTable,
+) -> Pb {
     let mut p = Pb::new();
     let vis = visibility_bits(alias.visibility);
     if vis != 3 {
@@ -868,6 +877,9 @@ pub(crate) fn type_alias_pb(st: &mut StringTable<'_>, alias: &TypeAliasMeta) -> 
     st.put_type(&mut p, 4, 5, &underlying); // TypeAlias.underlying_type(_id) = 4 / 5
     let expanded = type_pb_declared(st, alias.expansion, &alias.expansion_spelling, &tps);
     st.put_type(&mut p, 6, 7, &expanded); // TypeAlias.expanded_type(_id) = 6 / 7
+    if spelling_contains_definitely_non_null_type(&alias.expansion_spelling) {
+        p.field_varint(31, requirements.index(DEFINITELY_NON_NULL_TYPE));
+    }
     p
 }
 
@@ -926,7 +938,12 @@ fn jvm_method_sig(st: &mut StringTable<'_>, name: &str, desc: &str) -> Pb {
     p
 }
 
-fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: bool) -> Pb {
+fn property_pb(
+    st: &mut StringTable<'_>,
+    m: &PropMeta,
+    requirements: &mut VersionRequirementTable,
+    annotations_in_metadata: bool,
+) -> Pb {
     let mut p = Pb::new();
     assert_eq!(
         m.semantic_type_params.len(),
@@ -1017,10 +1034,10 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: 
         p.field_message(6, parameter); // Property.setter_value_parameter = 6
     }
     let mut context_receiver_ids = Vec::new();
-    for (name, kind, ty) in &m.context_params {
+    for (index, (name, kind, ty)) in m.context_params.iter().enumerate() {
         // Kotlin keeps the type-only compatibility list for every context entry, including a
         // named context parameter that is also published below as `context_parameter`.
-        let ty = type_pb_declared(st, *ty, crate::spelling::Spelled::NONE, &tps);
+        let ty = type_pb_declared(st, *ty, m.spellings.param(index), &tps);
         match st.type_id(&ty) {
             Some(id) => context_receiver_ids.push(u64::from(id)),
             None => p.repeated_message(12, &ty), // Property.context_receiver_type = 12
@@ -1085,6 +1102,9 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: 
     }
     if let Some(setter_flags) = words.setter {
         p.field_varint(8, setter_flags); // Property.setter_flags = 8
+    }
+    if needs_definitely_non_null_type(&m.spellings) {
+        p.field_varint(31, requirements.index(DEFINITELY_NON_NULL_TYPE));
     }
     if !st.is_klib() {
         jvm_property_signature(st, &mut p, m);
@@ -1237,11 +1257,16 @@ pub(crate) fn write_package_members(
             ),
             PackageMember::Property(index) => (
                 &mut prop_pbs[index],
-                property_pb(st, &members.properties[index], annotations_in_metadata),
+                property_pb(
+                    st,
+                    &members.properties[index],
+                    tables.requirements,
+                    annotations_in_metadata,
+                ),
             ),
             PackageMember::Alias(index) => (
                 &mut alias_pbs[index],
-                type_alias_pb(st, &members.aliases[index]),
+                type_alias_pb(st, &members.aliases[index], tables.requirements),
             ),
         };
         finish(st, member, &mut record);
@@ -1272,7 +1297,7 @@ pub fn build_package(
         aliases,
         (module_name, locals),
         param_assertions,
-        None,
+        MetadataTypeLookups::default(),
         true,
     )
 }
@@ -1283,13 +1308,16 @@ pub(crate) fn build_package_with_intersection_approximation(
     aliases: &[TypeAliasMeta],
     (module_name, locals): (Option<&str>, &[LocalPropertyMeta]),
     param_assertions: bool,
-    intersection_approximation: Option<&dyn Fn(Ty) -> Option<Ty>>,
+    lookups: MetadataTypeLookups<'_>,
     // kotlinc's `LanguageFeature.AnnotationsInMetadata` (since 2.4): `false` keeps every
     // `HAS_ANNOTATIONS` flag bit but writes no annotation records. Selected from the finalized
     // source-language feature set.
     annotations_in_metadata: bool,
 ) -> (Vec<u8>, Vec<String>) {
-    let mut st = StringTable::with_intersection_approximation(intersection_approximation);
+    let mut st = StringTable::with_intersection_approximation(
+        lookups.intersection_approximation,
+        lookups.inner_classifiers,
+    );
     let mut requirements = VersionRequirementTable::default();
     let mut contract_types = ContractTypeTable::default();
     let mut package = Pb::new();
@@ -1432,14 +1460,16 @@ mod tests {
         }
 
         let mut strings = StringTable::default();
-        let plain = property_pb(&mut strings, &property(false), true);
+        let mut requirements = VersionRequirementTable::default();
+        let plain = property_pb(&mut strings, &property(false), &mut requirements, true);
         assert!(
             !plain.as_bytes().contains(&0x58),
             "a plain val must omit Property.flags at the protobuf default"
         );
 
         let mut strings = StringTable::default();
-        let constant = property_pb(&mut strings, &property(true), true);
+        let mut requirements = VersionRequirementTable::default();
+        let constant = property_pb(&mut strings, &property(true), &mut requirements, true);
         assert!(
             constant
                 .as_bytes()

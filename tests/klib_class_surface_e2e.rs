@@ -280,6 +280,46 @@ fn every_supported_class_shape_reads_back_in_declaration_order() {
 }
 
 #[test]
+fn a_written_member_extension_is_visible_through_both_receivers() {
+    let Some((messages, mut packages)) = written_packages(&[(
+        "Host",
+        "class Host { fun String.decorate(suffix: String): String = this + suffix }\n",
+    )]) else {
+        return;
+    };
+    assert_eq!(messages, Vec::<String>::new());
+    assert_eq!(packages.len(), 1, "the source emits one package fragment");
+    let package = packages.pop().expect("one package fragment");
+    let host = &package.classes["Host"];
+    let [decorate] = host.functions.as_slice() else {
+        panic!("Host publishes one function");
+    };
+    assert_eq!(decorate.receiver, Some(KotlinType::class("kotlin/String")));
+    assert_eq!(decorate.params, [KotlinType::class("kotlin/String")]);
+
+    let libraries =
+        krusty::klib_libraries::KlibLibraries::from_packages(vec![(Vec::new(), package)])
+            .expect("the emitted declarations are signable");
+    let mut diags = DiagSink::new();
+    let _ = krusty::frontend::analyze_source(
+        "fun Host.decorateOk(): String = \"K\".decorate(\"!\")\n",
+        krusty::frontend::PlatformProvider::new(
+            krusty::compilation_target::CompilationTarget::Native,
+            Box::new(libraries),
+        ),
+        &mut diags,
+    );
+    assert_eq!(
+        diags
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>(),
+        Vec::<&str>::new()
+    );
+}
+
+#[test]
 fn executable_dependency_support_does_not_become_a_klib_fragment() {
     let Some((messages, packages)) = written_packages_with_native_stdlib(&[(
         "Bits",

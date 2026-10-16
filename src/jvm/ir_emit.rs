@@ -695,6 +695,7 @@ fn data_class_member_realization(
     source_name: &str,
     declared_params: &[Ty],
     declared_ret: Ty,
+    has_definitely_non_null_type: bool,
 ) -> Option<crate::metadata::class_builder::JvmFunctionSignature> {
     let function = &ir.functions[ir.data_class_member(owner, role)? as usize];
     let physical = ir_method_desc(&function.params, &function.ret);
@@ -704,7 +705,8 @@ fn data_class_member_realization(
         .any(|ty| ty.is_nullable() && ty.non_null().is_jvm_scalar());
     Some(crate::metadata::class_builder::JvmFunctionSignature {
         name: (function.name != source_name).then(|| function.name.clone()),
-        desc: (has_boxed_primitive || physical != declared).then_some(physical),
+        desc: (has_boxed_primitive || has_definitely_non_null_type || physical != declared)
+            .then_some(physical),
     })
 }
 

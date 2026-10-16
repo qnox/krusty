@@ -96,7 +96,7 @@ pub(crate) struct ClassDeclarationRecord {
     ctor_param_defaults: Vec<bool>,
     ctor_param_tparams: Vec<Option<u32>>,
     ctor_param_annotations: Vec<MetadataAnnotations>,
-    inline_underlying: Option<(String, Option<Ty>)>,
+    inline_underlying: Option<(String, Option<(Ty, crate::spelling::Spelled)>)>,
     ctor_vararg_index: Option<usize>,
     /// Whether the class records a primary constructor at all.
     pub(crate) emit_primary_ctor: bool,
@@ -187,8 +187,9 @@ impl ClassDeclarationRecord {
             annotations(&mut constructor.annotations);
         }
         self.ctor_param_annotations.iter_mut().for_each(annotations);
-        if let Some((_, Some(underlying))) = &mut self.inline_underlying {
+        if let Some((_, Some((underlying, spelling)))) = &mut self.inline_underlying {
             *underlying = renaming.ty(*underlying);
+            renaming.spelled(spelling);
         }
         renaming.type_parameters(&mut self.type_param_bounds);
         self.sealed_subclasses
@@ -225,6 +226,7 @@ pub(crate) struct ClassTailOptions<'a> {
     pub(crate) compiler_version_requirement:
         Option<crate::metadata::version_requirements::VersionRequirement>,
     pub(crate) intersection: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
+    pub(crate) inner_classifiers: crate::metadata::InnerClassifiers<'a>,
     /// The primary constructor's annotations in the order the target lists them; the record's own
     /// (source) order when `None`.
     pub(crate) primary_ctor_annotations: Option<&'a MetadataAnnotations>,
@@ -240,6 +242,7 @@ impl ClassDeclarationRecord {
     ) -> ClassTail<'a> {
         ClassTail {
             intersection_approximation: options.intersection,
+            inner_classifiers: options.inner_classifiers,
             spellings: self.spellings.clone(),
             supertype_spellings: &self.supertype_spellings,
             type_params: &self.type_params,
@@ -257,10 +260,12 @@ impl ClassDeclarationRecord {
             flags: self.flags,
             primary_ctor_flags: self.primary_ctor_flags,
             ctor_param_defaults: &self.ctor_param_defaults,
-            inline_underlying: self
-                .inline_underlying
-                .as_ref()
-                .map(|(name, ty)| (name.as_str(), *ty)),
+            inline_underlying: self.inline_underlying.as_ref().map(|(name, ty)| {
+                (
+                    name.as_str(),
+                    ty.as_ref().map(|(ty, spelling)| (*ty, spelling)),
+                )
+            }),
             emit_primary_ctor: self.emit_primary_ctor,
             compiler_version_requirement: options.compiler_version_requirement,
             param_assertions: options.param_assertions,
@@ -743,7 +748,21 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         .iter()
         .map(|(&callable, &function)| (function, callable))
         .collect();
-    let class_ty = Ty::obj_name(c.fq_name);
+    let class_type_arguments = ir
+        .class_signature(&c.fq_name())
+        .map(|signature| {
+            signature
+                .type_params
+                .iter()
+                .map(crate::ir::IrTypeParameter::ty)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let class_ty = if class_type_arguments.is_empty() {
+        Ty::obj_name(c.fq_name)
+    } else {
+        Ty::obj_args_name(c.fq_name, &class_type_arguments)
+    };
     let declared_method_list = declared_fids
         .iter()
         .filter_map(|&fid| {
@@ -858,7 +877,14 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
             .expect("a value class must retain its semantic underlying property");
         (
             property.name.clone(),
-            (!property.visibility.is_public_api()).then_some(property.ty),
+            (!property.visibility.is_public_api()).then(|| {
+                let spelling = ir
+                    .prop_declared_spellings
+                    .get(&(c.fq_name_id(), property.source_order))
+                    .map(|spellings| spellings.ret.clone())
+                    .unwrap_or_default();
+                (property.ty, spelling)
+            }),
         )
     });
     let (supertypes, spellings, supertype_spellings) = declared_supertypes(ir, c);
@@ -1134,6 +1160,11 @@ fn data_class_functions(
         ir.data_class_member(owner, role)?;
         let mut record = FnMeta::plain(format!("component{}", i + 1), Vec::new(), property.ty);
         record.flags = data_component_flags(ir, c, i as u32)?;
+        record.spellings.ret = ir
+            .prop_declared_spellings
+            .get(&(owner, property.source_order))
+            .map(|spellings| spellings.ret.clone())
+            .unwrap_or_default();
         methods.push((record, FunctionOrigin::DataMember(role)));
     }
     // A `data object` is a SINGLETON: kotlinc gives it `equals`/`hashCode`/`toString` ONLY —
@@ -1150,6 +1181,15 @@ fn data_class_functions(
         );
         record.flags = data_copy_flags(ir, c);
         record.params_have_defaults = true;
+        record.spellings.params = components
+            .iter()
+            .map(|property| {
+                ir.prop_declared_spellings
+                    .get(&(owner, property.source_order))
+                    .map(|spellings| spellings.ret.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
         methods.push((
             record,
             FunctionOrigin::DataMember(IrDataClassMemberRole::Copy),

@@ -316,6 +316,16 @@ pub(crate) fn member_record(function: &FunctionInfo) -> LibraryMember {
     // Use the common complete projection so the classifier view cannot silently lose contracts,
     // return-value policy, provider identity, or any future callable fact.
     let mut member = function.member_with_return(function.callable.ret);
+    // A FunctionInfo's semantic parameter list is the source-call argument list, which excludes
+    // an extension receiver. A classifier member record has to retain that second receiver so
+    // common candidate collection can distinguish the dispatch owner from extension applicability.
+    // Context parameters precede the receiver in both source and dependency classifier shapes.
+    if function.kind == FnKind::Extension {
+        let receiver = function
+            .semantic_receiver()
+            .expect("an extension member has a declared receiver");
+        member.params.insert(function.context_count, receiver);
+    }
     member.set_ret_nullable(function.callable.ret.is_nullable());
     member.set_is_member_extension(function.kind == FnKind::Extension);
     member.associated_classifier = function.associated_classifier;

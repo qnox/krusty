@@ -62,7 +62,6 @@ pub(crate) const PREDEFINED_STRINGS: &[&str] = &[
     "kotlin/collections/MutableListIterator",
 ];
 
-#[derive(Default)]
 pub(crate) struct StringTable<'a> {
     strings: Vec<String>,
     records: Vec<Pb>,
@@ -86,6 +85,9 @@ pub(crate) struct StringTable<'a> {
     /// classifier context of its own, so a target that emits intersections must supply the checked
     /// semantic lookup at the serialization boundary; absence is an error, never invariant fallback.
     intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
+    /// Checked declaration lookup for `inner` classifiers. It distinguishes a known non-inner
+    /// declaration from a classifier missing at the backend boundary.
+    inner_classifiers: InnerClassifiers<'a>,
     /// `Some` when the messages are written for a KLIB `PackageFragment` rather than a JVM
     /// `@Metadata` annotation: the two carry the same declaration schema but name classes and
     /// place types differently (see [`KlibTables`]).
@@ -122,35 +124,102 @@ enum QualifiedNameKind {
     Package = 1,
 }
 
+/// Where an `inner` classifier's flattened semantic application splits: its own leading
+/// `own_arguments`, then the arguments of `outer`, the class whose instance it captures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InnerClassifier {
+    pub outer: TypeName,
+    pub own_arguments: usize,
+}
+
+/// Checked declaration lookup for a metadata type's classifier. `Ok(None)` is a known non-inner
+/// declaration; `Err(classifier)` is an absent backend fact and must stop emission.
+pub type InnerClassifiers<'a> = &'a dyn Fn(TypeName) -> Result<Option<InnerClassifier>, TypeName>;
+
+fn no_inner_classifiers(_: TypeName) -> Result<Option<InnerClassifier>, TypeName> {
+    Ok(None)
+}
+
+/// Checked type facts supplied by a metadata-emitting target.
+#[derive(Clone, Copy)]
+pub(crate) struct MetadataTypeLookups<'a> {
+    pub(crate) intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
+    pub(crate) inner_classifiers: InnerClassifiers<'a>,
+}
+
+impl Default for MetadataTypeLookups<'_> {
+    fn default() -> Self {
+        Self {
+            intersection_approximation: None,
+            // Standalone metadata-builder tests declare no inner classifiers. Production emitters
+            // replace this with their frozen checked classifier view.
+            inner_classifiers: &no_inner_classifiers,
+        }
+    }
+}
+
+impl Default for StringTable<'_> {
+    fn default() -> Self {
+        Self {
+            strings: Vec::new(),
+            records: Vec::new(),
+            names: HashMap::default(),
+            local_names: Vec::new(),
+            record_starts: Vec::new(),
+            local_classifiers: Default::default(),
+            enum_entry_bodies: Default::default(),
+            intersection_approximation: None,
+            inner_classifiers: &no_inner_classifiers,
+            klib: None,
+        }
+    }
+}
+
 impl<'a> StringTable<'a> {
     pub(crate) fn with_local_classifiers(
         local_classifiers: &crate::fx_hash::HashSet<TypeName>,
         enum_entry_bodies: &crate::fx_hash::HashSet<TypeName>,
         intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
+        inner_classifiers: InnerClassifiers<'a>,
     ) -> Self {
         StringTable {
             local_classifiers: local_classifiers.clone(),
             enum_entry_bodies: enum_entry_bodies.clone(),
             intersection_approximation,
+            inner_classifiers,
             ..StringTable::default()
         }
     }
 
     pub(crate) fn with_intersection_approximation(
         approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
+        inner_classifiers: InnerClassifiers<'a>,
     ) -> Self {
         Self {
             intersection_approximation: approximation,
+            inner_classifiers,
             ..Self::default()
         }
     }
 
     /// A table for a KLIB `PackageFragment`: plain strings, qualified names and type tables.
-    pub(crate) fn klib() -> Self {
+    pub(crate) fn klib(inner_classifiers: InnerClassifiers<'a>) -> Self {
         Self {
+            inner_classifiers,
             klib: Some(KlibTables::default()),
             ..Self::default()
         }
+    }
+
+    /// How `classifier`'s application splits when it is an `inner` class. A missing frozen
+    /// classifier fact is an emission error, never permission to serialize the flattened shape.
+    fn inner_classifier(
+        &self,
+        classifier: TypeName,
+    ) -> Result<Option<InnerClassifier>, TypeEncodeError> {
+        (self.inner_classifiers)(classifier)
+            .map(|inner| inner.filter(|inner| !self.local_classifiers.contains(&inner.outer)))
+            .map_err(TypeEncodeError::MissingClassifier)
     }
 
     pub(crate) fn is_klib(&self) -> bool {
@@ -462,10 +531,17 @@ fn is_class_id(classifier: TypeName, class_id: &str) -> bool {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TypeEncodeError {
     MissingTypeParameter(String),
+    MissingClassifier(TypeName),
     MissingIntersectionApproximation(Ty),
     NonMetadataType(Ty),
     /// A declaration whose type the resolution engine never determined reached `@Metadata`.
     NotDetermined,
+    /// An inner classifier's application supplies fewer arguments than the classifier declares.
+    InnerClassifierArity {
+        classifier: TypeName,
+        arguments: usize,
+        own: usize,
+    },
 }
 
 impl fmt::Display for TypeEncodeError {
@@ -480,6 +556,11 @@ impl fmt::Display for TypeEncodeError {
                     "type parameter '{name}' is absent from the declaration table"
                 )
             }
+            Self::MissingClassifier(classifier) => write!(
+                f,
+                "classifier '{}' is absent from checked metadata facts",
+                classifier.render()
+            ),
             Self::MissingIntersectionApproximation(ty) => {
                 write!(
                     f,
@@ -494,6 +575,15 @@ impl fmt::Display for TypeEncodeError {
                     ty.source_name()
                 )
             }
+            Self::InnerClassifierArity {
+                classifier,
+                arguments,
+                own,
+            } => write!(
+                f,
+                "inner classifier '{}' declares {own} own type parameters but its application has {arguments} arguments",
+                classifier.render()
+            ),
         }
     }
 }
@@ -825,22 +915,55 @@ fn encode_type_with_parameter(
             let annotations = type_annotations(strings, spelled);
             add_type_annotations(&mut message, strings, annotations);
         }
-        Ty::Obj(classifier, arguments) => {
+        Ty::Obj(classifier_name, arguments) => {
             // kotlinc interns the enclosing classifier before recursively interning its arguments,
             // even though protobuf field order writes `argument` before `class_name`.
-            let classifier = strings.class_id(classifier);
+            let classifier = strings.class_id(classifier_name);
+            let inner = strings.inner_classifier(classifier_name)?;
+            let own_arguments = inner.map_or(arguments.len(), |inner| inner.own_arguments);
+            if own_arguments > arguments.len() {
+                return Err(TypeEncodeError::InnerClassifierArity {
+                    classifier: classifier_name,
+                    arguments: arguments.len(),
+                    own: own_arguments,
+                });
+            }
+            let (own, outer_arguments) = arguments.split_at(own_arguments);
             encode_arguments(
                 &mut message,
                 strings,
-                arguments,
+                own,
                 spelled,
                 type_parameters,
                 expansion,
             )?;
+            // The semantic and spelling trees use the same flattened order: this classifier's
+            // arguments first, then each enclosing inner classifier's. The recursive outer node
+            // owns the spelling tail so aliases, type-use annotations and definitely-non-null
+            // flags stay attached to the captured outer arguments.
+            let outer_spelling = Spelled {
+                args: spelled.args.iter().skip(own_arguments).cloned().collect(),
+                ..Spelled::default()
+            };
+            let outer = inner
+                .map(|inner| {
+                    encode_type_with_parameter(
+                        strings,
+                        Ty::obj_args_name(inner.outer, outer_arguments),
+                        &outer_spelling,
+                        type_parameters,
+                        None,
+                        expansion,
+                    )
+                })
+                .transpose()?;
             if nullable {
                 message.field_varint(3, 1);
             }
             message.field_varint(6, classifier as u64);
+            if let Some(outer) = &outer {
+                strings.put_type(&mut message, 10, 11, outer); // Type.outer_type(_id) = 10 / 11
+            }
             let annotations = type_annotations(strings, spelled);
             if expansion == Expansion::Expanded {
                 encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
@@ -1295,6 +1418,53 @@ mod tests {
             panic!("an undeclared type parameter was encoded")
         };
         assert_eq!(error, TypeEncodeError::MissingTypeParameter("T".into()));
+    }
+
+    #[test]
+    fn a_missing_checked_classifier_fact_is_an_error() {
+        let missing = |classifier| Err(classifier);
+        let mut strings = StringTable::with_intersection_approximation(None, &missing);
+        let classifier = crate::types::type_name("sample/Missing");
+
+        let Err(error) = encode_type(
+            &mut strings,
+            Ty::obj_args_name(classifier, &[Ty::String]),
+            &TypeParameters::new(),
+        ) else {
+            panic!("a type without checked classifier facts was encoded")
+        };
+        assert_eq!(error, TypeEncodeError::MissingClassifier(classifier));
+    }
+
+    #[test]
+    fn an_inner_application_cannot_omit_its_own_arguments() {
+        let outer = crate::types::type_name("sample/Outer");
+        let inner = outer.nested_child("Inner");
+        let lookup = |classifier| {
+            (classifier == inner)
+                .then_some(Some(InnerClassifier {
+                    outer,
+                    own_arguments: 2,
+                }))
+                .ok_or(classifier)
+        };
+        let mut strings = StringTable::with_intersection_approximation(None, &lookup);
+
+        let Err(error) = encode_type(
+            &mut strings,
+            Ty::obj_args_name(inner, &[Ty::String]),
+            &TypeParameters::new(),
+        ) else {
+            panic!("an inner type without its own arguments was encoded")
+        };
+        assert_eq!(
+            error,
+            TypeEncodeError::InnerClassifierArity {
+                classifier: inner,
+                arguments: 1,
+                own: 2,
+            }
+        );
     }
 
     #[test]

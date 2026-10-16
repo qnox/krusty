@@ -111,6 +111,7 @@ pub(super) fn build_class_metadata_with_facts(
     };
     let signatures = realization.signatures(record, opts, locals);
     let approximate_intersection = |ty| signature_formatter.declaration_approximation(ty);
+    let inner_classifier = |classifier| signature_formatter.inner_classifier(classifier);
     // The JVM lists the primary constructor's annotations in its classfile order: the runtime-
     // visible ones first.
     let primary_ctor_annotations = crate::metadata::MetadataAnnotations::with_records(
@@ -139,6 +140,7 @@ pub(super) fn build_class_metadata_with_facts(
                     crate::metadata::version_requirements::VersionRequirement::compiler(1, 4, 0),
                 ),
             intersection: Some(&approximate_intersection),
+            inner_classifiers: &inner_classifier,
             primary_ctor_annotations: Some(&primary_ctor_annotations),
         },
         &secondary_ctors,
@@ -297,6 +299,9 @@ impl<'a> JvmClassRealization<'a> {
                 &record.name,
                 &record.params.iter().map(|(_, ty)| *ty).collect::<Vec<_>>(),
                 record.ret,
+                crate::metadata::version_requirements::needs_definitely_non_null_type(
+                    &record.spellings,
+                ),
             )
             .unwrap_or_default(),
             // A data class's `equals`/`hashCode`/`toString` keep `Any`'s derivable signatures.

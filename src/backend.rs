@@ -23,8 +23,8 @@ pub(crate) use dependency_metadata::{
     inert_staged_singleton_bindings,
 };
 pub use dependency_metadata::{
-    DependencyExportSignatures, DependencyMetadata, SingletonExtensionUnreadReceiver,
-    SingletonMemberReceiver,
+    DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata,
+    SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
 };
 
 /// The parameter form [`Entry::selected`] reports beside the selected function.

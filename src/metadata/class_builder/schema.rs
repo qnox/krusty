@@ -10,7 +10,9 @@ use crate::metadata::type_encoder::{
     TypeParameters,
 };
 use crate::metadata::version_requirements::{
-    needs_inline_parameter_null_check, VersionRequirementTable, INLINE_PARAMETER_NULL_CHECK,
+    needs_definitely_non_null_type, needs_inline_parameter_null_check,
+    spelling_contains_definitely_non_null_type, VersionRequirementTable, DEFINITELY_NON_NULL_TYPE,
+    INLINE_PARAMETER_NULL_CHECK,
 };
 use crate::metadata::{property_flags, protobuf::Pb};
 use crate::types::{Ty, TypeName, Visibility};
@@ -210,6 +212,7 @@ fn build_ctor(
     carrier: &dyn ClassCarrier,
     shape: CtorShape<'_>,
     type_parameters: &TypeParameters,
+    requirements: &mut VersionRequirementTable,
 ) -> Pb {
     let mut ctor = Pb::new();
     // `HAS_ANNOTATIONS` (bit 0) follows from the declaration's annotations, exactly like a
@@ -311,6 +314,13 @@ fn build_ctor(
     let annotation_field = carrier.annotation_field(AnnotationSite::Constructor);
     for annotation in &annotations {
         ctor.repeated_message(annotation_field, annotation);
+    }
+    if shape
+        .param_spellings
+        .iter()
+        .any(spelling_contains_definitely_non_null_type)
+    {
+        ctor.field_varint(31, requirements.index(DEFINITELY_NON_NULL_TYPE));
     }
     ctor.append(&extensions);
     ctor
@@ -496,6 +506,10 @@ pub(crate) fn class_message(
         None => true,
     });
 
+    // Constructors are serialized before members, so their requirements take the first table
+    // indices too.
+    let mut requirements = VersionRequirementTable::default();
+
     // f8 = constructors: the primary (flags 0), then any secondary constructors — each interning in
     // order (kotlinc emits the ctor JVM name `<init>` explicitly, not omitted).
     let ctor_param_tparams = tail
@@ -521,6 +535,7 @@ pub(crate) fn class_message(
                 annotations_in_metadata,
             },
             &class_type_parameters.member(0).0,
+            &mut requirements,
         )]
     } else {
         Vec::new()
@@ -542,10 +557,13 @@ pub(crate) fn class_message(
                 annotations_in_metadata,
             },
             &class_type_parameters.member(0).0,
+            &mut requirements,
         ));
     }
 
-    let build_prop = |st: &mut StringTable<'_>, index: usize| {
+    let build_prop = |st: &mut StringTable<'_>,
+                      requirements: &mut VersionRequirementTable,
+                      index: usize| {
         let p = &props[index];
         let mut prop = Pb::new();
         // kotlinc's serializer names a type parameter the declaration being written owns
@@ -644,15 +662,10 @@ pub(crate) fn class_message(
             prop.field_message(6, parameter); // Property.setter_value_parameter = 6
         }
         let mut context_receiver_ids = Vec::new();
-        for (name, kind, ty) in &p.context_params {
+        for (index, (name, kind, ty)) in p.context_params.iter().enumerate() {
             // Kotlin keeps the type-only compatibility list for every context entry, including a
             // named context parameter that is also published below as `context_parameter`.
-            let ty = type_pb_declared(
-                st,
-                *ty,
-                crate::spelling::Spelled::NONE,
-                &property_type_parameters,
-            );
+            let ty = type_pb_declared(st, *ty, p.spellings.param(index), &property_type_parameters);
             match st.type_id(&ty) {
                 Some(id) => context_receiver_ids.push(u64::from(id)),
                 None => prop.repeated_message(12, &ty), // Property.context_receiver_type = 12
@@ -755,6 +768,9 @@ pub(crate) fn class_message(
             for annotation in records {
                 prop.repeated_message(field, annotation);
             }
+        }
+        if needs_definitely_non_null_type(&p.spellings) {
+            prop.field_varint(31, requirements.index(DEFINITELY_NON_NULL_TYPE));
         }
         prop.append(&extensions);
         let trailer = carrier.property_trailer(st, index);
@@ -993,6 +1009,9 @@ pub(crate) fn class_message(
         ) {
             func.field_varint(31, requirements.index(INLINE_PARAMETER_NULL_CHECK));
         }
+        if needs_definitely_non_null_type(&m.spellings) {
+            func.field_varint(31, requirements.index(DEFINITELY_NON_NULL_TYPE));
+        }
         if let Some(contract) = &contract {
             func.field_message(32, contract); // Function.contract = 32
         }
@@ -1002,7 +1021,6 @@ pub(crate) fn class_message(
         func
     };
     // Members add their requirements in serialization order; the class's own follow them.
-    let mut requirements = VersionRequirementTable::default();
     let mut contract_types = ContractTypeTable::default();
 
     // kotlinc adds each record to its list as it builds it, so a list serializes in build order,
@@ -1019,7 +1037,10 @@ pub(crate) fn class_message(
             ClassMemberOrder::Property(index)
                 if index < props.len() && prop_msgs[index].is_none() =>
             {
-                prop_msgs[index] = Some((built.next().expect("unbounded"), build_prop(st, index)));
+                prop_msgs[index] = Some((
+                    built.next().expect("unbounded"),
+                    build_prop(st, &mut requirements, index),
+                ));
             }
             ClassMemberOrder::Function(index)
                 if index < methods.len() && func_msgs[index].is_none() =>
@@ -1034,7 +1055,11 @@ pub(crate) fn class_message(
             {
                 alias_msgs[index] = Some((
                     built.next().expect("unbounded"),
-                    crate::metadata::builder::type_alias_pb(st, &tail.type_aliases[index]),
+                    crate::metadata::builder::type_alias_pb(
+                        st,
+                        &tail.type_aliases[index],
+                        &mut requirements,
+                    ),
                 ));
             }
             ClassMemberOrder::EnumEntry(index)
@@ -1054,7 +1079,10 @@ pub(crate) fn class_message(
     // Preserve their established property-then-function order after all explicitly ordered members.
     for index in 0..props.len() {
         if prop_msgs[index].is_none() {
-            prop_msgs[index] = Some((built.next().expect("unbounded"), build_prop(st, index)));
+            prop_msgs[index] = Some((
+                built.next().expect("unbounded"),
+                build_prop(st, &mut requirements, index),
+            ));
         }
     }
     for index in 0..methods.len() {
@@ -1069,7 +1097,7 @@ pub(crate) fn class_message(
         if alias_msgs[index].is_none() {
             alias_msgs[index] = Some((
                 built.next().expect("unbounded"),
-                crate::metadata::builder::type_alias_pb(st, alias),
+                crate::metadata::builder::type_alias_pb(st, alias, &mut requirements),
             ));
         }
     }
@@ -1098,8 +1126,8 @@ pub(crate) fn class_message(
     // A KLIB references the type by id (19) instead of carrying it inline (18).
     let inline_underlying: Option<(u32, Option<Pb>)> = tail.inline_underlying.map(|(name, ty)| {
         let name = st.local(name);
-        let ty = ty.map(|ty| {
-            let encoded = type_pb(st, ty, &class_header_type_parameters);
+        let ty = ty.map(|(ty, spelling)| {
+            let encoded = type_pb_declared(st, ty, spelling, &class_header_type_parameters);
             let mut field = Pb::new();
             st.put_type(&mut field, 18, 19, &encoded);
             field
@@ -1198,6 +1226,20 @@ pub(crate) fn class_message(
     if let Some(requirement) = tail.compiler_version_requirement {
         // Class.versionRequirement (f31) indexes Class.versionRequirementTable (f32).
         class.field_varint(31, requirements.index(requirement));
+    }
+    let class_header_uses_definitely_non_null = tail
+        .spellings
+        .type_param_bounds
+        .iter()
+        .flatten()
+        .chain(tail.supertype_spellings.iter())
+        .any(spelling_contains_definitely_non_null_type)
+        || tail
+            .inline_underlying
+            .and_then(|(_, underlying)| underlying)
+            .is_some_and(|(_, spelling)| spelling_contains_definitely_non_null_type(spelling));
+    if class_header_uses_definitely_non_null {
+        class.field_varint(31, requirements.index(DEFINITELY_NON_NULL_TYPE));
     }
     // Class.type_table = 30: a KLIB class's own types, or the types `@Metadata` contracts name.
     if let Some(table) = st.close_type_table().or_else(|| contract_types.encode()) {

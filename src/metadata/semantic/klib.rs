@@ -446,6 +446,11 @@ struct SemanticTables<'a> {
     first_nullable: Option<usize>,
 }
 
+struct DecodedTypeEdges {
+    flexible_upper: Option<metadata::KotlinType>,
+    outer: Option<metadata::KotlinType>,
+}
+
 impl SemanticTables<'_> {
     fn validate_type_edges(
         &self,
@@ -453,7 +458,7 @@ impl SemanticTables<'_> {
         type_parameters: &TypeParameterScope,
         depth: u32,
         context: &str,
-    ) -> Result<Option<metadata::KotlinType>, PackageFragmentDecodeError> {
+    ) -> Result<DecodedTypeEdges, PackageFragmentDecodeError> {
         let mut cursor = Cursor::new(body, 0);
         let mut flexible_inline = Vec::new();
         let mut flexible_ids = Vec::new();
@@ -530,10 +535,13 @@ impl SemanticTables<'_> {
                     ))),
                 }
             };
-        let flexible = decode_edge(flexible_inline, flexible_ids, "flexible upper type")?;
-        decode_edge(outer_inline, outer_ids, "outer type")?;
+        let flexible_upper = decode_edge(flexible_inline, flexible_ids, "flexible upper type")?;
+        let outer = decode_edge(outer_inline, outer_ids, "outer type")?;
         decode_edge(abbreviated_inline, abbreviated_ids, "abbreviated type")?;
-        Ok(flexible)
+        Ok(DecodedTypeEdges {
+            flexible_upper,
+            outer,
+        })
     }
 
     fn ty(
@@ -550,7 +558,7 @@ impl SemanticTables<'_> {
         }
         let node = parse_type_node(body)
             .ok_or_else(|| semantic_error(format!("invalid semantic type in {context}")))?;
-        let flexible_upper = self.validate_type_edges(body, type_parameters, depth, context)?;
+        let edges = self.validate_type_edges(body, type_parameters, depth, context)?;
         let shape = self.function_type_shape(&node, context)?;
         let mut arguments = Vec::with_capacity(node.arguments.len());
         for argument in node.arguments {
@@ -577,17 +585,35 @@ impl SemanticTables<'_> {
             )));
         }
         let nullable = node.nullable
-            || flexible_upper
+            || edges
+                .flexible_upper
                 .as_ref()
                 .is_some_and(metadata::KotlinType::nullable);
         let nullable = nullable && !node.definitely_non_null;
         if let Some(id) = node.class_id.or(node.type_alias_id) {
+            if let Some(outer) = edges.outer {
+                let metadata::KotlinType::Class {
+                    args: outer_arguments,
+                    ..
+                } = outer
+                else {
+                    return Err(semantic_error(format!(
+                        "outer type in {context} is not a classifier"
+                    )));
+                };
+                arguments.extend(outer_arguments);
+            }
             return Ok(metadata::KotlinType::Class {
                 internal: semantic_qname(self.strings, self.qnames, id, context)?,
                 args: arguments,
                 nullable,
                 shape,
             });
+        }
+        if edges.outer.is_some() {
+            return Err(semantic_error(format!(
+                "non-classifier type in {context} carries an outer type"
+            )));
         }
         let (id, name) = if let Some(id) = node.type_parameter_id {
             let name = type_parameters.by_id.get(&id).cloned().ok_or_else(|| {
@@ -2134,6 +2160,12 @@ mod tests {
         ty
     }
 
+    fn type_argument_id(id: u64) -> Vec<u8> {
+        let mut argument = Vec::new();
+        int_field(&mut argument, 3, id);
+        argument
+    }
+
     fn type_table(types: &[Vec<u8>], first_nullable: Option<u64>) -> Vec<u8> {
         let mut table = Vec::new();
         for ty in types {
@@ -2240,6 +2272,45 @@ mod tests {
         assert_eq!(package.functions.len(), 1);
         assert_eq!(package.functions[0].ret.internal(), Some("kotlin/String"));
         assert!(package.functions[0].ret.nullable());
+    }
+
+    #[test]
+    fn an_inner_type_appends_its_outer_type_arguments() {
+        let strings = ["f", "p", "Outer", "Inner", "kotlin", "String", "Int"];
+        let qnames = [
+            qname(1, None, 1),
+            qname(2, Some(0), 0),
+            qname(3, Some(1), 0),
+            qname(4, None, 1),
+            qname(5, Some(3), 0),
+            qname(6, Some(3), 0),
+        ];
+        let mut outer = class_type(1);
+        bytes_field(&mut outer, 2, &type_argument_id(0));
+        let mut inner = class_type(2);
+        bytes_field(&mut inner, 2, &type_argument_id(1));
+        int_field(&mut inner, 11, 2);
+        let table = type_table(&[class_type(4), class_type(5), outer, inner], None);
+        let function = function_with_return(None, Some(3));
+        let bytes = fragment(
+            &strings,
+            &qnames,
+            &package_with_function(&function, Some(&table)),
+        );
+
+        let package = parse_package_fragment_checked(&bytes).expect("valid inner type");
+        assert_eq!(
+            package.functions[0].ret,
+            crate::metadata::semantic::KotlinType::Class {
+                internal: "p/Outer.Inner".to_string(),
+                args: vec![
+                    crate::metadata::semantic::KotlinType::class("kotlin/Int"),
+                    crate::metadata::semantic::KotlinType::class("kotlin/String"),
+                ],
+                nullable: false,
+                shape: Default::default(),
+            }
+        );
     }
 
     #[test]

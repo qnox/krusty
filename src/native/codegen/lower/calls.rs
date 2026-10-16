@@ -32,6 +32,11 @@ fn direct_dependency_export<'a>(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DependencyExportCall {
     TopLevel,
+    /// An ordinary instance member whose exported ABI keeps its dispatch receiver first.
+    Member,
+    /// A member extension whose ABI keeps the class dispatch receiver first and the source
+    /// extension receiver at its declared parameter coordinate.
+    MemberExtension,
     /// A singleton member body emitted as a receiver-erased support export. The call still
     /// evaluates its checked receiver expression before invoking that export.
     SingletonMember,
@@ -68,6 +73,7 @@ fn dependency_export_call(
     has_dispatch_receiver: bool,
     unread_receiver: Option<Ty>,
     companion_receiver_position: Option<usize>,
+    member_receiver: Option<Ty>,
     receiver_is_exact_singleton: bool,
 ) -> Result<DependencyExportCall, Unsupported> {
     match (unread_receiver, companion_receiver_position) {
@@ -124,8 +130,28 @@ fn dependency_export_call(
         has_dispatch_receiver,
     ) {
         (true, false, None, false) => Ok(DependencyExportCall::TopLevel),
-        (false, false, None, true) if receiver_is_exact_singleton => {
-            Ok(DependencyExportCall::SingletonMember)
+        (false, false, None, true) => match (member_receiver, receiver_is_exact_singleton) {
+            (None, true) => Ok(DependencyExportCall::SingletonMember),
+            (Some(_), false) => Ok(DependencyExportCall::Member),
+            _ => Err(declined!(
+                "an emitted dependency callable whose checked receiver shape changed"
+            )),
+        },
+        (false, false, Some(receiver_position), true) => {
+            let receiver_position = usize::try_from(receiver_position).map_err(|_| {
+                declined!("a dependency member extension with an invalid receiver coordinate")
+            })?;
+            if member_receiver.is_none()
+                || receiver_position != context_count
+                || emitted_params != call_params
+                || source_receiver.is_none()
+                || emitted_params.get(receiver_position) != source_receiver.as_ref()
+            {
+                return Err(declined!(
+                    "a dependency member extension whose receiver contract disagrees with its call"
+                ));
+            }
+            Ok(DependencyExportCall::MemberExtension)
         }
         (false, true, None, true) => {
             let receiver = source_receiver.ok_or_else(|| {
@@ -173,6 +199,39 @@ fn dependency_export_call(
             "an emitted dependency callable whose checked receiver shape changed"
         )),
     }
+}
+
+/// Unit-test entry for shapes that have no retained ordinary member receiver. Keeping that frozen
+/// ABI fact out of the source-extension slot prevents the two receiver roles from satisfying each
+/// other's validation.
+#[cfg(test)]
+fn dependency_export_call_without_member(
+    is_top_level_function: bool,
+    is_extension: bool,
+    source_receiver: Option<Ty>,
+    context_count: usize,
+    emitted_params: &[Ty],
+    call_params: &[Ty],
+    extension_receiver_parameter: Option<u32>,
+    has_dispatch_receiver: bool,
+    unread_receiver: Option<Ty>,
+    companion_receiver_position: Option<usize>,
+    receiver_is_exact_singleton: bool,
+) -> Result<DependencyExportCall, Unsupported> {
+    dependency_export_call(
+        is_top_level_function,
+        is_extension,
+        source_receiver,
+        context_count,
+        emitted_params,
+        call_params,
+        extension_receiver_parameter,
+        has_dispatch_receiver,
+        unread_receiver,
+        companion_receiver_position,
+        None,
+        receiver_is_exact_singleton,
+    )
 }
 
 impl BodyLowering<'_, '_, '_> {
@@ -382,9 +441,13 @@ impl BodyLowering<'_, '_, '_> {
                         dispatch_receiver.is_some(),
                         unread_receiver,
                         realization.klib_body_companion_receiver_position(),
-                        receiver_is_exact_singleton,
+                        export
+                            .member_receiver
+                            .map(|receiver| receiver.semantic_type()),
+                        receiver_is_exact_singleton && export.singleton_member_receiver.is_some(),
                     )?;
                     let mut companion_abi_params = Vec::new();
+                    let mut member_abi_params = Vec::new();
                     let (abi_params, arguments) = match call {
                         DependencyExportCall::TopLevel
                         | DependencyExportCall::SerializedExtension => {
@@ -406,6 +469,24 @@ impl BodyLowering<'_, '_, '_> {
                                 }
                             }
                             (params.as_ref(), self.arguments(args, params)?)
+                        }
+                        DependencyExportCall::Member | DependencyExportCall::MemberExtension => {
+                            let Some(dispatch_receiver) = dispatch_receiver else {
+                                unreachable!("validated dependency member has a receiver")
+                            };
+                            let receiver_ty = export.member_receiver.ok_or_else(|| {
+                                declined!(
+                                    "an ordinary dependency member without its exported receiver type"
+                                )
+                            })?.semantic_type();
+                            let receiver = self
+                                .coerce(dispatch_receiver, receiver_ty)?
+                                .ok_or_else(|| declined!("a `Unit` dependency member receiver"))?;
+                            let mut arguments = vec![receiver];
+                            arguments.extend(self.arguments(args, params)?);
+                            member_abi_params.push(receiver_ty);
+                            member_abi_params.extend(params.iter().copied());
+                            (member_abi_params.as_slice(), arguments)
                         }
                         DependencyExportCall::SerializedClassifierAssociated { receiver } => {
                             if self.carrier(receiver) != Carrier::Ref {
@@ -1052,7 +1133,11 @@ impl BodyLowering<'_, '_, '_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{dependency_export_call, direct_dependency_export, DependencyExportCall};
+    use super::{
+        dependency_export_call as dependency_export_call_with_member,
+        dependency_export_call_without_member as dependency_export_call, direct_dependency_export,
+        DependencyExportCall,
+    };
     use crate::native::codegen::DependencyExport;
     use crate::types::Ty;
 
@@ -1060,6 +1145,7 @@ mod tests {
     fn an_exact_dependency_export_never_receives_too_few_arguments() {
         let export = DependencyExport {
             symbol: "kt_klib_export_0".to_string(),
+            member_receiver: None,
             singleton_member_receiver: None,
             singleton_extension_receiver: None,
         };
@@ -1117,6 +1203,24 @@ mod tests {
             .expect_err("a member receiver cannot be erased without the exact per-call fact")
             .construct(),
             "an emitted dependency callable whose checked receiver shape changed",
+        );
+        assert_eq!(
+            dependency_export_call_with_member(
+                false,
+                false,
+                None,
+                0,
+                &[Ty::Int],
+                &[Ty::Int],
+                None,
+                true,
+                None,
+                None,
+                Some(Ty::obj("demo/Member")),
+                false,
+            )
+            .expect("an ordinary member requires its independently exported dispatch receiver"),
+            DependencyExportCall::Member,
         );
     }
 
@@ -1238,6 +1342,30 @@ mod tests {
             .expect_err("an extension cannot silently become top-level")
             .construct(),
             "an emitted dependency callable whose checked receiver shape changed",
+        );
+    }
+
+    #[test]
+    fn a_member_extension_export_keeps_both_receiver_roles() {
+        let params = [Ty::String, Ty::Int];
+
+        assert_eq!(
+            dependency_export_call_with_member(
+                false,
+                false,
+                Some(Ty::String),
+                0,
+                &params,
+                &params,
+                Some(0),
+                true,
+                None,
+                None,
+                Some(Ty::obj("kotlin/Any")),
+                false,
+            )
+            .expect("the class dispatch receiver and extension receiver stay independent"),
+            DependencyExportCall::MemberExtension,
         );
     }
 

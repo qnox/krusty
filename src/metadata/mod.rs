@@ -15,6 +15,7 @@ pub mod encoding;
 #[cfg(test)]
 pub(crate) mod fragment_text;
 pub mod id_signature;
+pub(crate) mod inner_classifiers;
 pub mod klib_fragment;
 pub mod klib_ir;
 pub(crate) mod lambda_function;
@@ -27,6 +28,8 @@ pub mod semantic;
 mod value_parameter_flags;
 pub use value_parameter_flags::DeclaredValueParameter;
 pub(crate) mod type_encoder;
+pub(crate) use type_encoder::MetadataTypeLookups;
+pub use type_encoder::{InnerClassifier, InnerClassifiers};
 pub mod version_requirements;
 
 /// Canonical `ProtoBuf.Property.flags` layout shared by metadata readers and writers. Property flags

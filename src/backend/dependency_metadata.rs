@@ -160,6 +160,20 @@ pub struct SingletonMemberReceiver {
     evaluate_source: bool,
 }
 
+/// Exact semantic dispatch receiver retained by an emitted ordinary dependency member.
+///
+/// Backends receive this as a closed handoff fact rather than importing the common type system in
+/// their module/registry facades. The lowering boundary may project the semantic type when it
+/// constructs the target ABI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DependencyMemberReceiver(crate::types::Ty);
+
+impl DependencyMemberReceiver {
+    pub fn semantic_type(self) -> crate::types::Ty {
+        self.0
+    }
+}
+
 impl SingletonMemberReceiver {
     pub fn classifier(self) -> crate::types::TypeName {
         self.classifier
@@ -178,6 +192,7 @@ impl SingletonMemberReceiver {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DependencyExportSignatures {
     callables: HashMap<FunId, KlibDependencyCallable>,
+    member_receivers: HashMap<FunId, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<FunId, SingletonMemberReceiver>,
     singleton_extension_unread_receivers: HashMap<FunId, SingletonExtensionUnreadReceiver>,
 }
@@ -212,12 +227,27 @@ impl DependencyExportSignatures {
         self.singleton_member_receivers.get(&callable).copied()
     }
 
+    /// Exact semantic dispatch receiver retained by an emitted ordinary member body.
+    pub fn member_receiver(&self, callable: FunId) -> Option<DependencyMemberReceiver> {
+        self.member_receivers.get(&callable).copied()
+    }
+
     /// Record one declaration at the metadata owner that computed its exact identity.
     pub(crate) fn record_callable(&mut self, callable: FunId, identity: KlibDependencyCallable) {
         let previous = self.callables.insert(callable, identity);
         assert!(
             previous.is_none(),
             "one common-IR callable cannot export two KLIB declaration identities"
+        );
+    }
+
+    pub(crate) fn record_member_receiver(&mut self, callable: FunId, receiver: crate::types::Ty) {
+        let previous = self
+            .member_receivers
+            .insert(callable, DependencyMemberReceiver(receiver));
+        assert!(
+            previous.is_none(),
+            "one common-IR callable cannot publish two member receiver types"
         );
     }
 
