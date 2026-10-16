@@ -1699,6 +1699,8 @@ mod suspend_value_class_delegation_e2e;
 mod suspend_value_class_results_e2e;
 #[path = "suspending_concat_operands_e2e.rs"]
 mod suspending_concat_operands_e2e;
+#[path = "type_parameter_nullability_annotations_e2e.rs"]
+mod type_parameter_nullability_annotations_e2e;
 #[path = "unit_expression_body_return_line_e2e.rs"]
 mod unit_expression_body_return_line_e2e;
 #[path = "unsigned_operations_e2e.rs"]
