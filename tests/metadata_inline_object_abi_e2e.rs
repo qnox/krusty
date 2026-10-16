@@ -1,7 +1,8 @@
 //! `@Metadata.xi` of a class declared in an `inline` function's body, measured against kotlinc
 //! 2.4.20. Code that inlines the function copies the class, so kotlinc marks it public ABI
 //! (`METADATA_PUBLIC_ABI_FLAG`) at any depth below an `inline` function that is neither private nor
-//! a member of a private class. A class outside every such function is not marked.
+//! a member of a private class; only the function's own class counts, not one it is nested in. A
+//! class outside every such function is not marked.
 
 use super::common;
 
@@ -52,6 +53,22 @@ private class Closed {
     }
 }
 
+private class Outer {
+    class Nested {
+        inline fun member(): Greeter = object : Greeter {
+            override fun greet() = "nested in private"
+        }
+    }
+}
+
+class Shell {
+    private class Inner {
+        inline fun member(): Greeter = object : Greeter {
+            override fun greet() = "private nested"
+        }
+    }
+}
+
 fun plain(): Greeter = object : Greeter {
     override fun greet() = "plain"
 }
@@ -73,6 +90,8 @@ fn a_class_in_an_inline_body_is_marked_public_abi_like_kotlinc() {
             "app/InlineObjectsKt$inLambda$1$1$1",
             "app/Open$member$1",
             "app/Closed$member$1",
+            "app/Outer$Nested$member$1",
+            "app/Shell$Inner$member$1",
             "app/InlineObjectsKt$plain$1",
         ],
         &classpath,

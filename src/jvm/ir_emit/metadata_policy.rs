@@ -34,6 +34,8 @@ pub(super) const METADATA_PUBLIC_ABI_FLAG: i32 = 1 << 7;
 /// `@Metadata.xi` of a class with its own `k=1` record. kotlinc sets
 /// [`METADATA_PUBLIC_ABI_FLAG`] on a class declared, at any depth, in the body of an `inline`
 /// function other code can inline: one that is not private and not a member of a private class.
+/// Only the function's own class counts: a public class nested in a private one still marks its
+/// inline members' objects.
 pub(super) fn class_xi(ir: &crate::ir::IrFile, class: &crate::ir::IrClass) -> i32 {
     const JVM_IR_AND_STABLE_ABI: i32 = 48;
     if in_public_inline_scope(ir, class.enclosure) {
@@ -85,25 +87,13 @@ fn in_public_inline_scope(
             });
         if ir.inline_fns.contains(&function) {
             return !ir.method_visibility(function).is_private()
-                && owner.is_none_or(|owner| !effectively_private(ir, owner));
+                && owner.is_none_or(|owner| {
+                    !ir.class_visibilities
+                        .get(&owner)
+                        .is_some_and(|visibility| visibility.is_private())
+                });
         }
         enclosure = owner.and_then(class_enclosure);
-    }
-    false
-}
-
-/// Whether `class`, or a classifier it is nested in, is private.
-fn effectively_private(ir: &crate::ir::IrFile, class: crate::types::TypeName) -> bool {
-    let mut current = Some(class);
-    while let Some(class) = current {
-        if ir
-            .class_visibilities
-            .get(&class)
-            .is_some_and(|visibility| visibility.is_private())
-        {
-            return true;
-        }
-        current = class.parent();
     }
     false
 }
