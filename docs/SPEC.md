@@ -2286,10 +2286,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`get$lambda$1` after another object's `get$lambda$0`). The frontend walk
   (`frontend::local_function_names`) records each callable's position; checking decides whether a
   lambda is lifted (its type); the JVM backend numbers every sequence of the file whole and renames
-  the lowered functions once they are placed, keeping a method's previous name only where the
-  lifted name and descriptor are already taken in the class it lands in (an enum entry's argument
-  lambdas are placed in the enum rather than the entry class kotlinc uses, so they are numbered
-  with the enum's) (`tests/lifted_callable_names_e2e.rs`).
+  the lowered functions once they are placed. When JVM placement moves a companion initializer's
+  outermost lambda into its enclosing class, it records that lambda's final implementation ordinal
+  by exact function identity; lifted naming substitutes only the first path segment for that moved
+  callable and everything nested beneath it, rather than reconstructing the move from a name or
+  owner. A method keeps its previous name only where the lifted name and descriptor are already
+  taken in the class it lands in (an enum entry's argument lambdas are placed in the enum rather
+  than the entry class kotlinc uses, so they are numbered with the enum's). Tests:
+  `tests/lifted_callable_names_e2e.rs`,
+  `tests/companion_initializer_lambda_e2e.rs::a_nested_moved_lambda_uses_its_parents_physical_ordinal`.
 - **What a suspend lambda declares is lifted into the lambda's class.** kotlinc makes the suspend
   lambda a `SuspendLambda` class before it lifts local declarations, so a lambda or local function
   the body declares is a private static of that class, named after `invokeSuspend` and numbered

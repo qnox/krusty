@@ -73,6 +73,10 @@ pub(crate) struct BackendPassFacts {
     /// Physical constructions selected for Kotlin function-value SAM wrappers.
     sam_wrapper_realizations: crate::jvm::sam_wrappers::SamWrapperRealizations,
     local_delegate_access: crate::jvm::local_delegate_accessors::HelperAccess,
+    /// Final implementation ordinals of top-level lambdas whose companion initializer was moved
+    /// into its enclosing class. Lifted naming consumes this explicit placement fact so a nested
+    /// callable keeps its moved parent's physical path.
+    physical_top_lambda_ordinals: crate::jvm::lifted_names::PhysicalTopLambdaOrdinals,
     /// The lifted names of the callables suspend lambdas declare, within their classes.
     suspend_lambda_scoped_names: crate::jvm::lifted_names::SuspendLambdaScopedNames,
     lambda_methods: crate::jvm::lambda_classes::LambdaMethods,
@@ -230,7 +234,11 @@ fn run_backend_passes_after_plugins(
     crate::jvm::in_place_delegates::realize(ir);
     // Companion backing-field hoisting is a JVM storage choice. Common IR retains the ordinary
     // property declaration and semantic initializer; this pass selects the outer-static realization.
-    crate::jvm::companion::lower_companion_properties(ir, &facts.property_realizations);
+    crate::jvm::companion::lower_companion_properties(
+        ir,
+        &facts.property_realizations,
+        &mut facts.physical_top_lambda_ordinals,
+    );
     // A generated delegated-property array shares its owner's static namespace with companion
     // backing fields. Allocate and rewrite its operands only after hoisting has made that namespace
     // complete, while every generated element still participates in the representation passes
@@ -336,8 +344,11 @@ fn run_backend_passes_after_plugins(
     // Every body of the file is lowered, so each lifting sequence is whole, and the value-class
     // pass has named the functions kotlinc names their lifted callables after: name those callables
     // before any pass renders a debug name from them.
-    facts.suspend_lambda_scoped_names =
-        crate::jvm::lifted_names::number(ir, &facts.local_delegate_access);
+    facts.suspend_lambda_scoped_names = crate::jvm::lifted_names::number(
+        ir,
+        &facts.local_delegate_access,
+        &facts.physical_top_lambda_ordinals,
+    );
     // Generic erasure and value-class projection have now fixed every declaration parameter's JVM
     // carrier. Consume and retarget the exact call-owned adapters before default/suspend/inline
     // transforms clone or wrap those calls; the provenance is a one-shot representation contract.
