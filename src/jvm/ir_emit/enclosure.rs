@@ -44,19 +44,6 @@ pub(in crate::jvm) fn lambda_body_enclosure(
     if !scopes.all(|other| other == scope) {
         return None;
     }
-    // A value class's constructor and `init` blocks are realized as its static `constructor-impl`,
-    // not as the `<init>` its source declaration names, so they are no enclosure here.
-    let mut written_in = scope;
-    while let crate::ir::IrEnclosure::Lambda(outer) = written_in {
-        written_in = *ir.lambda_enclosures.get(&outer)?;
-    }
-    if let crate::ir::IrEnclosure::Constructor { class, .. }
-    | crate::ir::IrEnclosure::ClassInitializer(class) = written_in
-    {
-        if ir.classes[class as usize].is_value {
-            return None;
-        }
-    }
     scope_enclosure(ir, override_results, scope, facade)
 }
 

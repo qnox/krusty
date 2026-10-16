@@ -318,3 +318,56 @@ fn objects_inlined_into_initializer_lambdas_are_the_reference_compilers_classes(
     let differences = classes.differences();
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
 }
+
+const VALUE_CONSTRUCTOR_MAIN: &str = r#"
+import lib.*
+
+var result = ""
+
+fun plain(f: () -> String): String = f()
+
+@JvmInline
+value class ValueSite(val value: String) {
+    init {
+        result += plain { named<Int>()() }
+    }
+}
+
+fun box(): String {
+    ValueSite("value")
+    return if (result == "Integer") "OK" else "FAIL " + result
+}
+"#;
+
+/// A lambda in a value-class `init` block is emitted in its static `constructor-impl`. An object
+/// regenerated in that lambda therefore names `constructor-impl`, not the nonexistent `<init>`, as
+/// its `EnclosingMethod`.
+#[test]
+fn an_object_inlined_into_a_value_class_constructor_lambda_has_the_reference_enclosure() {
+    let output = common::expect_box_run_against_ref(
+        "inline_object_value_constructor",
+        SITES_LIB,
+        VALUE_CONSTRUCTOR_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+    let classes = common::classes_against_kotlinc_lib(
+        "ValueConstructor",
+        &[("Lib.kt", SITES_LIB)],
+        VALUE_CONSTRUCTOR_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    let expected = [
+        "ValueConstructorKt",
+        "ValueSite",
+        "ValueSite$constructor_impl$lambda$0$$inlined$named$1",
+    ];
+    assert_eq!(classes.reference.keys().collect::<Vec<_>>(), expected);
+    assert_eq!(classes.krusty.keys().collect::<Vec<_>>(), expected);
+    let regenerated = "ValueSite$constructor_impl$lambda$0$$inlined$named$1";
+    assert_eq!(
+        classes.krusty.get(regenerated),
+        classes.reference.get(regenerated),
+        "the regenerated class, including its EnclosingMethod, is byte-identical to kotlinc's"
+    );
+}

@@ -49,7 +49,9 @@ impl SynthesizedValueMembers {
 /// for an `init` block, as kotlinc's `EnclosingMethod` names it: the instance constructor does not
 /// exist on the JVM. A callable lifted
 /// out of a constructor or an `init` block is likewise contained by that `constructor-impl`, whose
-/// name kotlinc gives it (`constructor_impl$lambda$0`).
+/// name kotlinc gives it (`constructor_impl$lambda$0`). The lambda node's own enclosure and a
+/// suspend lambda's recorded outer scope must name that same realized function so declarations
+/// nested through either edge never reconstruct the nonexistent instance constructor.
 pub(super) fn enclose_in_constructor_impls(ir: &mut IrFile, realized: &SynthesizedValueMembers) {
     let names = ir
         .classes
@@ -70,6 +72,15 @@ pub(super) fn enclose_in_constructor_impls(ir: &mut IrFile, realized: &Synthesiz
     for declaration in &mut ir.classes {
         if let Some(function) = constructor_impl(declaration.enclosure) {
             declaration.enclosure = Some(crate::ir::IrEnclosure::Function(function));
+        }
+    }
+    for enclosure in ir
+        .callable_reference_enclosures
+        .values_mut()
+        .chain(ir.lambda_enclosures.values_mut())
+    {
+        if let Some(function) = constructor_impl(Some(*enclosure)) {
+            *enclosure = crate::ir::IrEnclosure::Function(function);
         }
     }
     for entry in ir
@@ -1073,6 +1084,41 @@ pub(super) fn shift_slots(ir: &mut IrFile, root: ExprId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn value_constructor_realization_rebinds_lambda_enclosure_edges() {
+        let mut ir = IrFile::default();
+        let owner = crate::types::type_name("sample/Value");
+        let class = ir.add_class(crate::ir::IrClass::synthetic(owner));
+        let primary_impl = 17;
+        let secondary_impl = 23;
+        ir.callable_reference_enclosures
+            .insert(1, crate::ir::IrEnclosure::Constructor { class, ordinal: 1 });
+        ir.callable_reference_enclosures
+            .insert(3, crate::ir::IrEnclosure::Lambda(2));
+        ir.lambda_enclosures
+            .insert(2, crate::ir::IrEnclosure::ClassInitializer(class));
+        let mut realized = SynthesizedValueMembers::default();
+        realized.constructor_impls.insert((owner, 0), primary_impl);
+        realized
+            .constructor_impls
+            .insert((owner, 1), secondary_impl);
+
+        enclose_in_constructor_impls(&mut ir, &realized);
+
+        assert_eq!(
+            ir.callable_reference_enclosures.get(&1),
+            Some(&crate::ir::IrEnclosure::Function(secondary_impl))
+        );
+        assert_eq!(
+            ir.lambda_enclosures.get(&2),
+            Some(&crate::ir::IrEnclosure::Function(primary_impl))
+        );
+        assert_eq!(
+            ir.callable_reference_enclosures.get(&3),
+            Some(&crate::ir::IrEnclosure::Lambda(2))
+        );
+    }
 
     fn override_edge(
         owner: TypeName,
