@@ -47,55 +47,18 @@ pub(super) fn class_xi(ir: &crate::ir::IrFile, class: &crate::ir::IrClass) -> i3
 
 fn in_public_inline_scope(
     ir: &crate::ir::IrFile,
-    mut enclosure: Option<crate::ir::IrEnclosure>,
+    enclosure: Option<crate::ir::IrEnclosure>,
 ) -> bool {
-    use crate::ir::IrEnclosure;
-    let class_enclosure = |class: crate::types::TypeName| {
-        ir.classes
-            .iter()
-            .find(|candidate| candidate.fq_name == class)
-            .and_then(|candidate| candidate.enclosure)
-    };
-    while let Some(scope) = enclosure {
-        let function = match scope {
-            IrEnclosure::Function(function) => function,
-            IrEnclosure::PropertyAccessor { property, setter } => {
-                match super::enclosure::realized_property_accessor(ir, property, setter) {
-                    Some(function) => function,
-                    None => return false,
-                }
-            }
-            IrEnclosure::Lambda(function) => {
-                enclosure = ir.lambda_enclosures.get(&function).copied();
-                continue;
-            }
-            IrEnclosure::Constructor { class, .. }
-            | IrEnclosure::ClassInitializer(class)
-            | IrEnclosure::Classifier(class) => {
-                enclosure = ir.classes[class as usize].enclosure;
-                continue;
-            }
-            IrEnclosure::File => return false,
-        };
-        let owner = ir.functions[function as usize]
-            .dispatch_receiver
-            .or_else(|| {
-                ir.classes
-                    .iter()
-                    .find(|class| class.methods.contains(&function))
-                    .map(|class| class.fq_name)
-            });
-        if ir.inline_fns.contains(&function) {
-            return !ir.method_visibility(function).is_private()
+    super::enclosure::enclosing_functions(ir, enclosure)
+        .find(|&(function, _)| ir.inline_fns.contains(&function))
+        .is_some_and(|(function, owner)| {
+            !ir.method_visibility(function).is_private()
                 && owner.is_none_or(|owner| {
                     !ir.class_visibilities
                         .get(&owner)
                         .is_some_and(|visibility| visibility.is_private())
-                });
-        }
-        enclosure = owner.and_then(class_enclosure);
-    }
-    false
+                })
+        })
 }
 
 /// `@Metadata.xi` of a `k=3` synthetic class. Kotlin 2.4.20 packs the class's normalized
