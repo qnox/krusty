@@ -165,17 +165,27 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
             && conformance.contains("      fail-fast: false\n")
             && conformance
                 .contains("        version: ${{ fromJson(needs.versions.outputs.matrix) }}\n")
-            && conformance.contains("        target: [jvm]\n")
+            && conformance.contains("        target: [jvm, wasm]\n")
             && conformance.contains("    steps: &conformance-steps\n")
             && !conformance.contains("build-klib-test-bins"),
-        "JVM conformance must start without waiting for the focused KLIB binaries: {conformance}"
+        "JVM and Wasm conformance must start without waiting for the focused KLIB binaries: {conformance}"
     );
     assert!(
         klib_conformance.contains(
             "    needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins, versions]\n"
-        ) && klib_conformance.contains("        target: [native, wasm]\n")
+        ) && klib_conformance.contains("        target: [native]\n")
             && klib_conformance.contains("    steps: *conformance-steps\n"),
-        "Native and Wasm alone wait for KLIB binaries while reusing the shared inventory: {klib_conformance}"
+        "Native alone waits for focused KLIB binaries while reusing the shared inventory: {klib_conformance}"
+    );
+    assert_eq!(
+        workflow.matches("        target: [jvm, wasm]\n").count(),
+        1,
+        "the early matrix owns exactly the JVM and Wasm rows"
+    );
+    assert_eq!(
+        workflow.matches("        target: [native]\n").count(),
+        1,
+        "the focused-KLIB-dependent matrix owns exactly the Native rows"
     );
     let conformance_build = job(&workflow, "build-conformance-bin");
     assert!(
