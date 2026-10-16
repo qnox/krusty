@@ -564,6 +564,31 @@ fn pass_two_checks_inline_owned_anonymous_members_from_compact_capture_context()
         .streamed
         .as_ref()
         .expect("the inline owner must be retained in Pass 1");
+    let index = streamed.module.index();
+    let hidden_capture = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .find(|declaration| {
+            index
+                .property_for_declaration(*declaration)
+                .and_then(|property| index.property(property))
+                .is_some_and(|property| !property.source_visible)
+        })
+        .expect("the retained anonymous object must publish its hidden capture storage");
+    let owner = index
+        .declaration_header(hidden_capture)
+        .and_then(|header| header.owner)
+        .and_then(|owner| index.classifier_identity(owner))
+        .expect("capture storage must retain its owning classifier identity");
+    let provider = crate::fir::StreamedModuleSymbols::for_file(index, 0);
+    let classifier = crate::symbol_source::SymbolSource::classifier(&provider, owner)
+        .expect("the finalized owner must project through the common symbol boundary");
+    let capture = classifier
+        .declared_callables
+        .values()
+        .flat_map(crate::libraries::Callables::properties)
+        .find(|property| property.stable_declaration == Some(hidden_capture))
+        .expect("capture storage must retain its normalized property candidate");
+    assert!(!capture.source_visible);
     assert_eq!(streamed.module.inline_bodies().len(), 1);
     assert!(analysis.files.is_empty());
     assert!(analysis.types.is_empty());

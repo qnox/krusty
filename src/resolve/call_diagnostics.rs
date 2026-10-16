@@ -81,129 +81,6 @@ fn rejected_candidate_argument_shape(
 }
 
 impl Checker<'_> {
-    /// Exact declaration family used when member-extension selection rejects every candidate by
-    /// argument type or unavailable context. Recovery keeps the provider declaration carried by
-    /// the selection shape and applies the same dispatch receiver/class bindings; it never searches
-    /// the classifier again or reconstructs a declaration from its spelling.
-    pub(super) fn rejected_member_extension_candidates(
-        &self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        argument_count: usize,
-        extension_receiver: Ty,
-        name: &str,
-        selection: MemberExtensionSelection,
-        receivers: Option<&[ImplicitReceiver]>,
-    ) -> Vec<crate::libraries::FunctionInfo> {
-        let source = self.fed_source();
-        let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
-        let type_argument_count = self.file.call_type_args.get(&call.0).map_or(0, Vec::len);
-        let receivers = member_extension_selection::ordinary_dispatch_first(
-            scope,
-            receivers
-                .map(<[ImplicitReceiver]>::to_vec)
-                .unwrap_or_else(|| self.implicit_receivers(scope)),
-        );
-        let mut mapped =
-            member_extension_function_shapes_in(&source, &receivers, extension_receiver, name)
-                .into_iter()
-                .filter_map(|shape| {
-                    if selection == MemberExtensionSelection::Operators && !shape.is_operator {
-                        return None;
-                    }
-                    let mut candidate = crate::libraries::FunctionInfo::classifier_member(
-                        crate::libraries::FnKind::Extension,
-                        shape.owner,
-                        shape.member,
-                    );
-                    crate::symbol_resolver::specialize_member_function(
-                        &source,
-                        shape.dispatch_receiver.ty,
-                        &mut candidate,
-                        &shape.class_bindings,
-                    );
-                    candidate.scope_rank =
-                        u32::try_from(shape.priority.dispatch_rank).unwrap_or(u32::MAX);
-                    candidate.receiver_rank =
-                        u32::try_from(shape.priority.dispatch_depth).unwrap_or(u32::MAX);
-                    let signature = candidate.semantic_signature();
-                    let type_arity_matches =
-                        type_argument_count == 0 || signature.formals.len() == type_argument_count;
-                    let visible = match self.contextual_call_shape_result(
-                        scope,
-                        &signature.params,
-                        &candidate.call_sig,
-                        candidate.context_count,
-                        argument_names,
-                    ) {
-                        Ok(shape) => (shape.params.len(), shape.call_sig),
-                        Err(_) => {
-                            let context_count = candidate.context_count.min(signature.params.len());
-                            let explicitly_named = |parameter: usize| {
-                                self.file.explicit_context_arguments
-                                    && candidate.call_sig.param_names.get(parameter).is_some_and(
-                                        |parameter| {
-                                            argument_names.is_some_and(|names| {
-                                                names
-                                                    .iter()
-                                                    .flatten()
-                                                    .any(|argument| argument == parameter)
-                                            })
-                                        },
-                                    )
-                            };
-                            let indices = (context_count..signature.params.len())
-                                .chain(
-                                    (0..context_count)
-                                        .filter(|&parameter| explicitly_named(parameter)),
-                                )
-                                .collect::<Vec<_>>();
-                            (
-                                indices.len(),
-                                candidate.call_sig.select_parameters(&indices),
-                            )
-                        }
-                    };
-                    call_argument_parameter_indices(
-                        argument_count,
-                        visible.0,
-                        argument_names,
-                        trailing_lambda,
-                        &visible.1,
-                    )?;
-                    Some((shape.priority, candidate, type_arity_matches))
-                })
-                .collect::<Vec<_>>();
-        // A value-argument-mapped declaration fixes the dispatch rung even when its explicit
-        // type-argument arity is wrong. Only after that tower choice can arity remove declarations;
-        // it must not expose a farther receiver.
-        if let Some(nearest_dispatch) = mapped
-            .iter()
-            .map(|(priority, ..)| priority.dispatch_rank)
-            .min()
-        {
-            mapped.retain(|(priority, ..)| priority.dispatch_rank == nearest_dispatch);
-        }
-        // Type arity selects within the chosen dispatch rung, but a rung with no matching arity
-        // remains the diagnostic owner. Preserve that family for the shared reporter instead of
-        // turning it into `None` and continuing to a farther top-level extension.
-        if mapped
-            .iter()
-            .any(|(_, _, type_arity_matches)| *type_arity_matches)
-        {
-            mapped.retain(|(_, _, type_arity_matches)| *type_arity_matches);
-        }
-        let maximal =
-            member_extension_selection::maximal_member_extensions(self, &mapped, |candidate| {
-                candidate.0
-            });
-        maximal
-            .into_iter()
-            .map(|index| mapped[index].1.clone())
-            .collect()
-    }
-
     /// When overload selection rejects a family by type but exactly one declaration has a valid
     /// source-argument mapping, report that declaration's mapped argument errors. This diagnostic
     /// step is origin-neutral: top-level and extension candidates carry the same semantic shape and
@@ -230,8 +107,13 @@ impl Checker<'_> {
                 let type_arity_matches =
                     type_args.is_empty() || signature.formals.len() == type_args.len();
                 let mut bindings = constraints.bindings(&self.fed_source(), &signature);
-                let initial_params =
-                    crate::symbol_resolver::ty_subst_all(&signature.params, &bindings);
+                let initial_params = signature
+                    .params
+                    .iter()
+                    .map(|&parameter| {
+                        crate::types::ty_subst_formals(parameter, &signature.formals, &bindings)
+                    })
+                    .collect::<Vec<_>>();
                 let (mut shape, missing_context) = match self.contextual_call_shape_result(
                     scope,
                     &initial_params,
@@ -302,7 +184,13 @@ impl Checker<'_> {
                     let declared = *signature.params.get(parameter)?;
                     unify_member_extension_slot(declared, *actual, &[], &mut bindings);
                 }
-                let params = crate::symbol_resolver::ty_subst_all(&signature.params, &bindings);
+                let params = signature
+                    .params
+                    .iter()
+                    .map(|&parameter| {
+                        crate::types::ty_subst_formals(parameter, &signature.formals, &bindings)
+                    })
+                    .collect::<Vec<_>>();
                 shape.params = shape
                     .parameter_indices
                     .iter()
@@ -754,14 +642,10 @@ impl Checker<'_> {
         &mut self,
         call_args: CallArgs<'_>,
         name: &str,
-        receiver: Ty,
+        candidates: &[crate::libraries::FunctionInfo],
         failure: MemberMappingFailure,
     ) -> Option<Ty> {
-        let candidates = self
-            .stable_receiver_callables(receiver, name)
-            .functions()
-            .to_vec();
-        match self.rejected_call_owner(call_args.call, call_args.args, &candidates) {
+        match self.rejected_call_owner(call_args.call, call_args.args, candidates) {
             RejectedCallOwner::Extension(_) => return None,
             RejectedCallOwner::Member => self.report_retained_member_mapping_failure(
                 call_args.call,
@@ -839,6 +723,43 @@ impl Checker<'_> {
                     .map(|(candidate, _, _)| candidate.clone())
                     .collect(),
             ),
+        }
+    }
+
+    /// Report a receiver call none of whose same-named `candidates` accepts the arguments: tied
+    /// member and extension contenders, a mapping failure every candidate shares, the type
+    /// mismatches of the one candidate the arguments map onto, or else NONE_APPLICABLE.
+    pub(super) fn report_inapplicable_receiver_candidates(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call_args: CallArgs<'_>,
+        name: &str,
+        constraints: CallConstraints<'_>,
+        candidates: &[crate::libraries::FunctionInfo],
+    ) {
+        let CallArgs {
+            call,
+            args,
+            arg_tys,
+        } = call_args;
+        let reported = self.report_member_and_extensions_inapplicable(call, name, args, candidates)
+            || self.report_inapplicable_member_mapping_error(call, name, args, candidates)
+            || self
+                .report_single_mapped_candidate_type_errors(
+                    scope,
+                    call,
+                    name,
+                    args,
+                    arg_tys,
+                    constraints,
+                    candidates,
+                )
+                .is_some();
+        if !reported {
+            self.diags.error(
+                self.call_callee_name_span(call),
+                self.inapplicable_member_candidates_message(name, candidates),
+            );
         }
     }
 

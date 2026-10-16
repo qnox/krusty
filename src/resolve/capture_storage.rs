@@ -155,6 +155,12 @@ pub(super) fn class_capture_expressions(class: &ClassDecl) -> Vec<ExprId> {
         }))
         .chain(class.base_args.iter().copied())
         .chain(class.props.iter().filter_map(|property| property.default))
+        .chain(class.methods.iter().flat_map(|method| {
+            method
+                .params
+                .iter()
+                .filter_map(|parameter| parameter.default)
+        }))
         .chain(class.init_order.iter().filter_map(|step| match step {
             ClassInit::Block(body) => Some(*body),
             ClassInit::PropInit(_) => None,
@@ -509,7 +515,6 @@ impl Checker<'_> {
                 .iter()
                 .map(|delegation| delegation.value),
         );
-        construction_bodies.extend(cl.props.iter().filter_map(|p| p.default));
         let mut everything = outer.clone();
         everything.extend(unsupported.iter().cloned());
         everything.extend(through_outer.iter().cloned());
@@ -546,21 +551,29 @@ impl Checker<'_> {
                     }
                 }
             };
+        let mut primary_default_visible = everything.clone();
+        for parameter in &cl.context_params {
+            primary_default_visible.remove(&parameter.name);
+        }
+        for parameter in &cl.props {
+            if let Some(default) = parameter.default {
+                record_construction_uses(default, &primary_default_visible, false);
+            }
+            primary_default_visible.remove(&parameter.name);
+        }
         for ctor in &cl.secondary_ctors {
             let mut visible = everything.clone();
             for p in &ctor.params {
+                if let Some(default) = p.default {
+                    record_construction_uses(default, &visible, false);
+                }
                 visible.remove(&p.name);
             }
             let delegation_args = match &ctor.delegation {
                 CtorDelegation::None => &[][..],
                 CtorDelegation::This(call) | CtorDelegation::Super(call) => call.args.as_slice(),
             };
-            for body in ctor
-                .body
-                .into_iter()
-                .chain(ctor.params.iter().filter_map(|p| p.default))
-                .chain(delegation_args.iter().copied())
-            {
+            for body in ctor.body.into_iter().chain(delegation_args.iter().copied()) {
                 record_construction_uses(body, &visible, false);
             }
         }
@@ -662,31 +675,23 @@ impl Checker<'_> {
         for body in local_class_capture_expressions(cl) {
             collect_all_reassigned(self.file, body, &mut class_reassigned);
         }
-        // Member bodies (including a computed property's accessors, which are methods) may capture.
-        let mut member_bodies: Vec<(Vec<String>, ExprId)> = Vec::new();
+        // Member defaults and bodies may capture. A parameter enters scope only after its own
+        // default is checked, then remains hidden for later defaults and the body.
         for m in &cl.methods {
+            let mut visible = everything.clone();
+            for parameter in &m.params {
+                if let Some(default) = parameter.default {
+                    record_construction_uses(default, &visible, false);
+                }
+                visible.remove(&parameter.name);
+            }
             if let FunBody::Expr(e) | FunBody::Block(e) = m.body {
-                member_bodies.push((m.params.iter().map(|p| p.name.clone()).collect(), e));
+                record_construction_uses(e, &visible, false);
             }
         }
         for p in &cl.body_props {
             if let Some(FunBody::Expr(e) | FunBody::Block(e)) = p.getter {
-                member_bodies.push((Vec::new(), e));
-            }
-        }
-        for (params, body) in member_bodies {
-            let mut visible = everything.clone();
-            for p in &params {
-                visible.remove(p);
-            }
-            for name in used_names(self.file, body, &visible) {
-                if unsupported.contains(&name) {
-                    result.unsupported.get_or_insert(name);
-                } else if through_outer.contains(&name) {
-                    needs_outer = true;
-                } else if !captured.contains(&name) {
-                    captured.push(name);
-                }
+                record_construction_uses(e, &everything, false);
             }
         }
         if anonymous_object {

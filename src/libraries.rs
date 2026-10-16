@@ -2185,6 +2185,10 @@ pub struct PropertyInfo {
     /// Stable declaration identity for a property from the current compilation. Checked FIR keeps
     /// this identity; parser-arena source keys remain transient resolver input only.
     pub stable_declaration: Option<crate::fir::DeclarationId>,
+    /// Whether this normalized declaration participates in Kotlin source lookup. Compiler-owned
+    /// capture storage can retain a stable declaration for signature/body handoff without becoming
+    /// a source property. Consumers must use this fact directly instead of reopening its provider.
+    pub source_visible: bool,
     /// Exact source callable implementing an accessor-derived read. Declared Kotlin properties use
     /// `stable_declaration`; a property synthesized from accessor conventions has no property
     /// declaration and therefore keeps the getter identity separately.

@@ -14,6 +14,7 @@ use super::header::{
 use super::{DefaultArgumentStore, InlineBodyStore, ResolvedCallableHeader};
 use super::{ResolvedInterfaceDelegation, ResolvedParameterIdentity};
 
+mod arena_ranges;
 mod call_arguments;
 mod call_result_constraints;
 mod expressions;
@@ -21,6 +22,7 @@ mod postponed_argument_transaction;
 mod resolved_types;
 mod selections;
 mod signature_state;
+pub use arena_ranges::{CallArgumentRange, OperandRange, SubstitutionRange};
 pub use call_arguments::{ResolvedSigCallArgument, SigCallArgument, SigCallArgumentProbe};
 pub use call_result_constraints::SignatureCallResultConstraint;
 pub use classifier_headers::ResolvedClassifierHeader;
@@ -54,27 +56,6 @@ pub struct ResolvedTypeUseSerializerConstruction {
     pub parameters: Box<[ResolvedTy]>,
     pub operands: Box<[u32]>,
     pub target: ResolvedCustomSerializerConstructorTarget,
-}
-
-/// A half-open slice in the signature graph's shared operand arena.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct OperandRange {
-    start: u32,
-    len: u32,
-}
-
-/// A half-open slice in the signature graph's packed call-argument arena.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct CallArgumentRange {
-    start: u32,
-    len: u32,
-}
-
-/// A half-open slice in the signature graph's shared substitution arena.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct SubstitutionRange {
-    start: u32,
-    len: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -844,6 +825,22 @@ pub trait SignatureSemantics: PostponedArgumentTransaction {
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
+    /// Select the `opAssign` convention for a simple-name augmented assignment without emitting a
+    /// fallback diagnostic. `false` means ordinary `op` replacement semantics; the body checker
+    /// remains responsible for reporting an invalid assignment.
+    fn selects_in_place_assignment(
+        &self,
+        _scope: SignatureScope,
+        _operator: SigBinaryOperator,
+        _origin: OriginId,
+        _receiver: ResolvedTy,
+        _argument: ResolvedTy,
+        _local_operator: Option<ResolvedTy>,
+        _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+    ) -> bool {
+        false
+    }
+
     /// Fold a binary integer constant only after [`Self::select_binary`] has semantically accepted
     /// the operator and produced `result`. The graph evaluator never infers an operator from parser
     /// syntax; implementations may return `None` when the selected operation is not a foldable
@@ -1597,6 +1594,7 @@ pub struct ResolvedPropertyHeader {
     /// type. This is a finalized Pass-1 fact; Pass 2 must not infer it from an initializer.
     pub storage_type: Option<ResolvedTy>,
     pub mutable: bool,
+    pub source_visible: bool,
 }
 
 /// Stable source identity and semantic role of one property context parameter. Properties own
@@ -2911,6 +2909,7 @@ impl ResolvedModuleIndex {
                         extension_receiver,
                         storage_type: None,
                         mutable,
+                        source_visible: true,
                     },
                 )
                 .is_none(),
@@ -2928,6 +2927,13 @@ impl ResolvedModuleIndex {
             property.storage_type.replace(storage_type).is_none(),
             "a property storage type may be published only once"
         );
+    }
+
+    pub fn publish_property_source_hidden(&mut self, id: PropertyId) {
+        self.properties
+            .get_mut(&id)
+            .expect("source visibility requires a published property identity")
+            .source_visible = false;
     }
 
     /// Publish the complete source identity contract for both accessors while the property syntax

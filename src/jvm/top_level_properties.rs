@@ -98,6 +98,7 @@ pub(super) fn merge_metadata_const(
         receiver_rank: 0,
         source_key: None,
         stable_declaration: None,
+        source_visible: true,
         getter_declaration: None,
         setter_declaration: None,
         source_member: None,

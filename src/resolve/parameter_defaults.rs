@@ -1,8 +1,8 @@
 //! Parameter-default checking in declaration order.
 //!
-//! Defaults share type checking and left-to-right parameter publication across callable kinds,
-//! while their definite-assignment rule depends on the declaration owner: kotlinc checks
-//! constructor defaults and deliberately omits that diagnostic for ordinary function defaults.
+//! Defaults share type checking and left-to-right parameter initialization across callable kinds.
+//! Every parameter identity is in scope throughout the default list, but the current and later
+//! parameters are uninitialized until their declaration point has been crossed.
 
 use super::{Checker, CheckerScope, PlatformNarrowing};
 use crate::ast::ExprId;
@@ -42,10 +42,9 @@ impl Checker<'_> {
         );
     }
 
-    /// Check one callable's defaults in declaration order and publish each parameter only after its
-    /// own default has been checked. A parameter is not in scope in its own default and later
-    /// parameters must not leak backwards. The caller supplies the receiver context and owner kind;
-    /// this operation owns the ordering and the complete body-check boundary.
+    /// Check one callable's defaults in declaration order. All parameter identities shadow outer
+    /// values from the beginning of the list, while reads or writes before a parameter's own
+    /// declaration point report that exact parameter as uninitialized.
     pub(super) fn check_parameter_defaults<'p>(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -58,7 +57,22 @@ impl Checker<'_> {
             parameter_types.len(),
             "checked parameter declarations and semantic types must stay aligned"
         );
-        for ((name, default), &ty) in parameters.zip(parameter_types) {
+        let parameters = parameters.collect::<Vec<_>>();
+        let identities = parameters
+            .iter()
+            .zip(parameter_types)
+            .map(|(&(name, _), &ty)| {
+                (name != "_").then(|| {
+                    let identity = self.declare(scope, name, ty, false);
+                    self.uninitialized_default_parameters
+                        .insert(identity, name.to_string());
+                    identity
+                })
+            })
+            .collect::<Vec<_>>();
+        for (((_name, default), &ty), identity) in
+            parameters.into_iter().zip(parameter_types).zip(identities)
+        {
             if let Some(default) = default {
                 if self.signature_defaults_only {
                     self.signature_default_expression_depth += 1;
@@ -71,9 +85,55 @@ impl Checker<'_> {
                     self.signature_default_expression_depth -= 1;
                 }
             }
-            if name != "_" {
-                self.declare(scope, name, ty, false);
+            if let Some(identity) = identity {
+                self.uninitialized_default_parameters.remove(&identity);
             }
+        }
+    }
+
+    pub(super) fn report_uninitialized_default_parameter_read(
+        &mut self,
+        expression: ExprId,
+        flow_identity: u32,
+    ) {
+        let Some(name) = self
+            .uninitialized_default_parameters
+            .get(&flow_identity)
+            .cloned()
+        else {
+            return;
+        };
+        if self
+            .reported_uninitialized_default_parameter_reads
+            .insert(expression)
+        {
+            self.diags.error(
+                self.span(expression),
+                format!("parameter '{name}' is uninitialized here."),
+            );
+        }
+    }
+
+    pub(super) fn report_uninitialized_default_parameter_write(
+        &mut self,
+        statement: crate::ast::StmtId,
+        flow_identity: u32,
+    ) {
+        let Some(name) = self
+            .uninitialized_default_parameters
+            .get(&flow_identity)
+            .cloned()
+        else {
+            return;
+        };
+        if self
+            .reported_uninitialized_default_parameter_writes
+            .insert(statement)
+        {
+            self.diags.error(
+                self.assignment_target_span(statement),
+                format!("parameter '{name}' is uninitialized here."),
+            );
         }
     }
 }

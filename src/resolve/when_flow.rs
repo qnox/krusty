@@ -100,6 +100,10 @@ impl Checker<'_> {
         truth: bool,
     ) -> WhenNarrowings {
         if let (Some(subject), WhenCondition::SubjectEquals(candidate)) = (subject, condition) {
+            if let Expr::BoolLit(candidate) = self.file.expr(candidate) {
+                let subject_truth = if truth { *candidate } else { !*candidate };
+                return self.condition_narrowings(scope, subject, subject_truth);
+            }
             if matches!(self.file.expr(candidate), Expr::NullLit) {
                 let mut casts = Vec::new();
                 let mut declined = Vec::new();

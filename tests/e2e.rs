@@ -136,6 +136,8 @@ mod block_slot_reuse_e2e;
 mod boolean_literal_equality_e2e;
 #[path = "boolean_not_call_e2e.rs"]
 mod boolean_not_call_e2e;
+#[path = "boolean_val_implications_e2e.rs"]
+mod boolean_val_implications_e2e;
 #[path = "bound_expr_ref_e2e.rs"]
 mod bound_expr_ref_e2e;
 #[path = "bound_library_ref_e2e.rs"]
@@ -1079,14 +1081,8 @@ mod ieee754_inline_equality_e2e;
 mod implicit_any_super_method_e2e;
 #[path = "implicit_integer_coercion_e2e.rs"]
 mod implicit_integer_coercion_e2e;
-#[path = "implicit_receiver_extension_tower_e2e.rs"]
-mod implicit_receiver_extension_tower_e2e;
-#[path = "implicit_receiver_member_shadow_e2e.rs"]
-mod implicit_receiver_member_shadow_e2e;
-#[path = "implicit_receiver_named_args_e2e.rs"]
-mod implicit_receiver_named_args_e2e;
-#[path = "implicit_receiver_tower_lambda_shape_e2e.rs"]
-mod implicit_receiver_tower_lambda_shape_e2e;
+#[path = "e2e/implicit_receiver.rs"]
+mod implicit_receiver;
 #[path = "implicit_this_callable_ref_e2e.rs"]
 mod implicit_this_callable_ref_e2e;
 #[path = "implicit_this_member_hof_lambda_e2e.rs"]
