@@ -67,7 +67,7 @@ impl HelperAccess {
 pub(crate) fn realize(
     ir: &mut IrFile,
     current_source: IrModuleSource,
-    stems: &[String],
+    facades: &[String],
     classifiers: &crate::backend::CheckedBackendClassifiers<'_>,
 ) -> Result<HelperAccess, ()> {
     let closure_plans = super::local_delegate_closures::bind(ir)?;
@@ -124,7 +124,7 @@ pub(crate) fn realize(
             .then(|| {
                 let classifier = match owner {
                     Some(owner) => owner,
-                    None => crate::jvm::module_calls::facade_for(plan.reference.source, stems)
+                    None => crate::jvm::module_calls::facade_for(plan.reference.source, facades)
                         .ok_or(())?,
                 };
                 let is_interface = match owner {

@@ -22,9 +22,9 @@ pub(crate) fn realize_calls(
     classpath: &Classpath,
     dependencies: &dyn crate::symbol_source::SymbolSource,
 ) {
-    let stems = stems
+    let facades = stems
         .iter()
-        .map(|stem| (*stem).to_owned())
+        .map(|stem| super::names::file_facade_segment(stem))
         .collect::<Vec<_>>();
     let mut property_realizations = super::property_realizations::PropertyRealizations::default();
     super::local_properties::realize(ir, &mut property_realizations)
@@ -37,7 +37,7 @@ pub(crate) fn realize_calls(
     let classifiers = crate::backend::CheckedBackendClassifiers::new(&module, dependencies);
     super::module_calls::realize(
         ir,
-        &stems,
+        &facades,
         &classifiers,
         &callables,
         &mut property_realizations,

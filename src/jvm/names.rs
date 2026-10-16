@@ -56,12 +56,8 @@ pub fn file_class_name(file_stem: &str, package: Option<&str>) -> String {
     }
 }
 
-/// The file facade as a [`TypeName`]: `package` plus the facade segment, without rendering `package`.
-pub(super) fn file_facade_name(package: TypeName, file_stem: &str) -> TypeName {
-    crate::types::type_name_child(package, &file_facade_segment(file_stem))
-}
-
-fn file_facade_segment(file_stem: &str) -> String {
+/// kotlinc's package-part class name for a file named `file_stem`: `box` → `BoxKt`.
+pub(super) fn file_facade_segment(file_stem: &str) -> String {
     let sanitized: String = file_stem
         .chars()
         .map(|character| {
@@ -597,23 +593,8 @@ mod tests {
             ("_u", "_uKt"),
         ] {
             assert_eq!(file_class_name(stem, None), facade, "{stem}");
-            assert_eq!(
-                file_facade_name(TypeName::ROOT, stem),
-                crate::types::type_name(facade),
-                "{stem}"
-            );
+            assert_eq!(file_facade_segment(stem), facade, "{stem}");
         }
-    }
-
-    #[test]
-    fn file_facade_name_appends_the_segment_under_the_package_identity() {
-        let package = crate::types::type_name("sample/facades");
-        let facade = file_facade_name(package, "entries");
-        assert_eq!(facade, crate::types::type_name("sample/facades/EntriesKt"));
-        assert_eq!(
-            facade,
-            crate::types::type_name(&file_class_name("entries", Some("sample/facades")))
-        );
     }
 
     #[test]

@@ -62,21 +62,21 @@ impl ClassWriter {
         body
     }
 
-    /// Encode retained declaration annotations in class-file attribute order: all visible entries,
-    /// then all invisible entries. Common IR carries no JVM attribute split.
+    /// Encode the retained annotations of a class or field in declaration order, which is the order
+    /// kotlinc's writer interns their constants. Common IR carries no JVM attribute split.
     pub(super) fn encode_declaration_annotations(
         &mut self,
         annotations: &crate::ir::DeclarationAnnotations,
     ) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
-        let (visible, invisible) = split_declaration_annotations(annotations);
-        let visible = visible
-            .iter()
-            .map(|annotation| self.encode_annotation(annotation))
-            .collect();
-        let invisible = invisible
-            .iter()
-            .map(|annotation| self.encode_annotation(annotation))
-            .collect();
+        let (mut visible, mut invisible) = (Vec::new(), Vec::new());
+        for retained in annotations.iter() {
+            let attribute = match retained.retention {
+                crate::types::AnnotationRetention::Binary => &mut invisible,
+                crate::types::AnnotationRetention::Source => continue,
+                _ => &mut visible,
+            };
+            attribute.push(self.encode_annotation(&retained.annotation));
+        }
         (visible, invisible)
     }
 

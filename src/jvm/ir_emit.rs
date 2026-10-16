@@ -1656,8 +1656,8 @@ fn emit_pass(
     // (or a facade `@Metadata` payload). A file of only classes/objects gets no facade — emitting an
     // empty one is an ABI divergence (spurious extra class). A facade static is owner-less.
     let facade_has_static = ir.statics.iter().any(|s| s.is_facade_owned());
-    let facade_needed = facade_has_method || facade_has_static || metadata.is_some();
-    if facade_needed {
+    if facade_has_method || facade_has_static || metadata.is_some() {
+        cw.set_class_annotations(&ir.file_annotations);
         if let Some(m) = metadata {
             cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
         }

@@ -156,7 +156,7 @@ pub(crate) fn run_backend_passes(
     classifiers: &CheckedBackendClassifiers<'_>,
     callables: &mut crate::backend::CheckedBackendCallables,
     classpath: &crate::jvm::classpath::Classpath,
-    stems: &[String],
+    facades: &[String],
     lambda_modes: crate::jvm::ir_emit::LambdaModes,
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
@@ -183,7 +183,7 @@ pub(crate) fn run_backend_passes(
         classifiers,
         callables,
         classpath,
-        Some(stems),
+        Some(facades),
         lambda_modes,
         facts,
     )
@@ -196,7 +196,7 @@ fn run_backend_passes_after_plugins(
     classifiers: &CheckedBackendClassifiers<'_>,
     callables: &crate::backend::CheckedBackendCallables,
     classpath: &crate::jvm::classpath::Classpath,
-    stems: Option<&[String]>,
+    facades: Option<&[String]>,
     lambda_modes: crate::jvm::ir_emit::LambdaModes,
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
@@ -352,11 +352,11 @@ fn run_backend_passes_after_plugins(
     // declaration stores recorded by exact ExprId; common IR and other targets keep them. Runs
     // after value-class lowering, so each field's type is the physical slot the JVM zero-fills.
     crate::jvm::property_storage::elide_default_property_stores(ir);
-    if let Some(stems) = stems {
-        crate::jvm::module_calls::resolve_foreign_template_facades(ir, stems);
+    if let Some(facades) = facades {
+        crate::jvm::module_calls::resolve_foreign_template_facades(ir, facades);
         crate::jvm::module_calls::realize_default_calls(
             ir,
-            stems,
+            facades,
             &mut facts.default_call_operands,
         )
         .map_err(|_| SkipReason::DefaultCalls)?;
@@ -887,6 +887,29 @@ pub struct JvmState {
     /// One compilation emits many files against one frozen module. The inner-class attribute map
     /// depends only on that module, so building it again on every file is quadratic.
     inner_class_resolver: Option<crate::jvm::classfile::InnerClassResolver>,
+    /// Each source's facade class simple name. Every file of the module reads every source's, so
+    /// they are derived once.
+    facades: Option<std::sync::Arc<[String]>>,
+}
+
+impl JvmState {
+    fn facades(
+        &mut self,
+        stems: &[String],
+        module: &crate::backend::BackendModuleFacts,
+    ) -> std::sync::Arc<[String]> {
+        self.facades
+            .get_or_insert_with(|| crate::jvm::file_facades::facade_segments(stems, module).into())
+            .clone()
+    }
+}
+
+/// A facade's internal name: its simple name under the file's package (`p/q/FooKt`).
+fn facade_class_name(segment: &str, package: &Option<String>) -> String {
+    match package.as_deref() {
+        Some(package) if !package.is_empty() => format!("{}/{segment}", package.replace('.', "/")),
+        _ => segment.to_string(),
+    }
 }
 
 /// A checked file after every JVM representation pass has selected its physical facts. Keeping the
@@ -911,6 +934,7 @@ impl JvmBackend {
     fn emit_streamed_ir(
         &self,
         file: crate::backend::CheckedIrFile<'_>,
+        facades: &[String],
         property_realizations: crate::jvm::property_realizations::PropertyRealizations,
         mut pass_facts: BackendPassFacts,
         state: &mut JvmState,
@@ -930,7 +954,7 @@ impl JvmBackend {
         } = file;
         let stem = &stems[source.raw() as usize];
         let package = ir.package.clone().unwrap_or_default();
-        let facade_name = file_class_name(stem, ir.package.as_deref());
+        let facade_name = facade_class_name(&facades[source.raw() as usize], &ir.package);
         let facade_class = crate::types::type_name(&facade_name);
         pass_facts.property_realizations = property_realizations;
         if let Err(reason) = run_backend_passes(
@@ -943,7 +967,7 @@ impl JvmBackend {
             &classifiers,
             &mut callables,
             &self.cp,
-            stems,
+            facades,
             self.lambda_modes,
             &mut pass_facts,
         ) {
@@ -1188,12 +1212,11 @@ impl Backend for JvmBackend {
         state: &mut JvmState,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
-        let stem = &file.stems[file.source.raw() as usize];
-        let facade = file_class_name(stem, file.ir.package.as_deref());
+        let facades = state.facades(file.stems, file.classifiers.module());
+        let facade = facade_class_name(&facades[file.source.raw() as usize], &file.ir.package);
         let facade_class = type_name(&facade);
-        let stems = &file.stems;
         crate::jvm::local_class_names::realize(&mut file.ir, |source| {
-            crate::jvm::module_calls::facade_for(source, stems)
+            crate::jvm::module_calls::facade_for(source, &facades)
                 .expect("a local classifier's declaring source has a file stem")
         });
         if let Err(error) = crate::jvm::ranges::realize(&mut file.ir, self.cp.clone()) {
@@ -1208,7 +1231,7 @@ impl Backend for JvmBackend {
             &file.callables,
             crate::jvm::function_references::Facades {
                 current: &facade,
-                stems,
+                facades: &facades,
             },
         ) {
             diags.error(
@@ -1247,7 +1270,7 @@ impl Backend for JvmBackend {
         let local_delegate_access = match crate::jvm::local_delegate_accessors::realize(
             &mut file.ir,
             current_source,
-            file.stems,
+            &facades,
             &file.classifiers,
         ) {
             Ok(access) => access,
@@ -1259,9 +1282,9 @@ impl Backend for JvmBackend {
                 return Vec::new();
             }
         };
-        let mut property_reference_realizations = match crate::jvm::property_references::realize(
+        let property_reference_realizations = match crate::jvm::property_references::realize(
             &mut file.ir,
-            file.stems,
+            &facades,
             &file.callables,
             &facade,
             &local_delegate_access,
@@ -1297,7 +1320,7 @@ impl Backend for JvmBackend {
         }
         if let Err(target) = crate::jvm::module_calls::realize(
             &mut file.ir,
-            file.stems,
+            &facades,
             &file.classifiers,
             &file.callables,
             &mut property_realizations,
@@ -1324,6 +1347,7 @@ impl Backend for JvmBackend {
         }
         self.emit_streamed_ir(
             file,
+            &facades,
             property_realizations,
             BackendPassFacts {
                 property_reference_realizations,

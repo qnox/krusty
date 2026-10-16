@@ -926,6 +926,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   helper` lib, then krusty resolves + runs a caller against it → 43
   (`tests/suspend_e2e.rs::krusty_compiled_suspend_dep_is_consumable`); the real kotlinc 2.4.0 also reads
   the annotation and compiles the same caller without error.
+- **File facade name — `@file:JvmName`.** A file's top-level declarations live in kotlinc's
+  package part `FooKt` (named after the file), unless the file carries a checked
+  `@file:JvmName("Facade")`, which names the class `Facade` exactly. The frontend publishes each
+  source's checked file-annotation applications in Pass 1; the JVM backend reads the `JvmName`
+  value by its resolved identity, so every cross-file call, reference and default stub names the
+  same facade, and the facade carries the file's BINARY/RUNTIME annotations as kotlinc writes them
+  (`tests/file_jvm_name_e2e.rs`). `@file:JvmMultifileClass` is rejected in the frontend until the
+  JVM handoff carries two physical owners per source, emission can aggregate each public facade in
+  module finalization, and the metadata/module-index writers represent its part-to-facade mapping.
 - **`@Metadata` writer — plain top-level PROPERTY records.** The facade `Package` proto used to
   record extension properties only; plain top-level `val`/`var`s resolved through krusty's OWN
   static-field fallback, but the REAL kotlinc resolves an `import demo.greeting` exclusively from a

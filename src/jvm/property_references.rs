@@ -102,21 +102,21 @@ pub(super) enum PropertyReferenceRealizationTarget {
 
 pub(super) fn realize(
     ir: &mut IrFile,
-    stems: &[String],
+    facades: &[String],
     callables: &crate::backend::CheckedBackendCallables,
     current_facade: &str,
     delegate_helpers: &super::local_delegate_accessors::HelperAccess,
 ) -> Result<PropertyReferenceRealizations, PropertyReferenceRealizationTarget> {
     let mut realizations = PropertyReferenceRealizations::default();
     realizations.local_delegated =
-        local_delegated_properties::LocalDelegatedProperties::collect(ir, stems)
+        local_delegated_properties::LocalDelegatedProperties::collect(ir, facades)
             .ok_or(PropertyReferenceRealizationTarget::Invalid)?;
     let mut delegated_operands = Vec::new();
     let expression_count = ir.exprs.len();
     for raw in 0..expression_count {
         if let IrExpr::LocalPropertyReference(reference) = &ir.exprs[raw] {
             let reference = reference.clone();
-            let (declaration, element) = local_property_reference(ir, stems, &reference)?;
+            let (declaration, element) = local_property_reference(ir, facades, &reference)?;
             let owner = match delegate_helpers.closure_property_owner(raw as u32) {
                 Some(closure) => closure,
                 None => declaration,
@@ -191,7 +191,7 @@ pub(super) fn realize(
                 };
                 module_property(
                     declaration,
-                    stems,
+                    facades,
                     target,
                     mutable,
                     declared,
@@ -212,7 +212,7 @@ pub(super) fn realize(
                 ir.referenced_module_properties
                     .get(&property)
                     .ok_or(PropertyReferenceRealizationTarget::Module(property))?,
-                stems,
+                facades,
                 property,
                 mutable,
                 declared_accessors(ir, property),
@@ -293,7 +293,7 @@ pub(super) fn realize(
                 .getter
                 .ok_or(PropertyReferenceRealizationTarget::Module(target))?;
             let (owner, element, signature) =
-                synthesize_delegated(ir, stems, target, &declaration, property, mutable)?;
+                synthesize_delegated(ir, facades, target, &declaration, property, mutable)?;
             realizations.record_delegated_getter_signature(signature, getter);
             delegated_operands.push(delegated_arrays::DelegatedOperand {
                 operand: raw as u32,
@@ -339,7 +339,7 @@ pub(crate) fn place_delegated_arrays(
 /// IR; this function chooses only their JVM representation.
 fn synthesize_delegated(
     ir: &mut IrFile,
-    stems: &[String],
+    facades: &[String],
     target: PropertyId,
     declaration: &IrModuleProperty,
     property: PropRef,
@@ -362,7 +362,7 @@ fn synthesize_delegated(
     // top-level declaration's is its file facade, an extension's too, never the receiver's class.
     let container = match declaration.owner {
         Some(owner) => owner,
-        None => super::module_calls::facade_for(declaration.source, stems).ok_or(failure)?,
+        None => super::module_calls::facade_for(declaration.source, facades).ok_or(failure)?,
     };
     let owner = ir.add_expr(IrExpr::ClassConst {
         internal: Some(container),
@@ -410,12 +410,12 @@ fn synthesize_delegated(
 /// declaration's file facade, flagged as such), and receiver-less.
 fn local_property_reference(
     ir: &mut IrFile,
-    stems: &[String],
+    facades: &[String],
     reference: &crate::ir::IrLocalPropertyReference,
 ) -> Result<(TypeName, IrExpr), PropertyReferenceRealizationTarget> {
     let container = match reference.class {
         Some(class) => class,
-        None => super::module_calls::facade_for(reference.source, stems)
+        None => super::module_calls::facade_for(reference.source, facades)
             .ok_or(PropertyReferenceRealizationTarget::Invalid)?,
     };
     let owner = ir.add_expr(IrExpr::ClassConst {
@@ -794,7 +794,7 @@ fn referenced_member_dispatch(
 
 fn module_property(
     property: &IrModuleProperty,
-    stems: &[String],
+    facades: &[String],
     target: PropertyId,
     reference_mutable: bool,
     declared: DeclaredAccessors,
@@ -813,7 +813,7 @@ fn module_property(
         None
     };
     let static_owner =
-        super::module_calls::static_owner(property.placement, property.source, stems)
+        super::module_calls::static_owner(property.placement, property.source, facades)
             .ok_or(failure)?;
     let enclosing = property.owner;
     let companion_associated = property.companion_associated;
@@ -925,7 +925,7 @@ fn module_property(
     // `@JvmField` makes the declaration's storage its JVM surface. A compile-time constant instead
     // returns its semantic payload directly, matching kotlinc without choosing a field owner.
     let field = (getter_constant.is_none() && !access_bridge)
-        .then(|| super::module_calls::jvm_field_storage(property, stems))
+        .then(|| super::module_calls::jvm_field_storage(property, facades))
         .flatten()
         .map(|(owner, is_static)| PropertyFieldAccess {
             owner,
