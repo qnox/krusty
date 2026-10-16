@@ -561,6 +561,12 @@ impl<'a> JvmSignatureFormatter<'a> {
                 let approximated = self.declaration_approximation(*ty)?;
                 self.ty_at(&approximated, wildcards)
             }
+            // A primitive specialized array is class-shaped in the semantic model but is a JVM
+            // array in descriptors and generic signatures alike. It has no type arguments to
+            // drive the general classifier path below.
+            Ty::Obj(owner, _) if crate::types::prim_array_element(owner).is_some() => {
+                Some(ir_type_desc(ty))
+            }
             // `kotlin.Array<E>` has no JVM class: its realization is the ARRAY type `[E`, and that is
             // how a signature must spell it. Writing `Lkotlin/Array<…>;` names a class no loader can
             // resolve, so any reader of the attribute (reflection, a Java consumer, a decompiler)

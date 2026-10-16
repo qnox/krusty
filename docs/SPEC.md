@@ -2917,6 +2917,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   arguments into a fresh array (`newarray`/`anewarray` + per-element store) and passes it, like kotlinc.
   Spread (`*arr`) is not modeled. `for (x in arr)` over an array iterates by index
   (`i = 0; while (i < arr.size) { x = arr[i]; …; i++ }`, array and size hoisted).
+- **An indexed loop copies its iterable only when the value can change while it runs.** kotlinc's
+  `ForLoopsLowering` stores an array or `String` loop's subject in a temporary unless it cannot
+  change during execution (`canChangeValueDuringExecution`): a read of a `val`, a parameter, or an
+  extension, context or dispatch receiver is re-read for each element, so the loop declares only its
+  index and the cached length. A lambda or local function reading such a value it captured re-reads
+  it too; a captured `var` is still copied. Common lowering carries whether each capture's
+  declaration is stable from the body that supplies it. An iteration plan for a library `forEach`
+  over an array or a `CharSequence` follows the library body the same way: it reads the frame's
+  `$this$forEach` local, declares its cursor first, and marks the cursor with the body's invocation
+  line.
+  Tests: `tests/for_loop_iterable_slot_e2e.rs`,
+  `tests/classpath_inline_plan_parity_e2e.rs` (`an_indexed_iteration_reads_the_frames_receiver_local`).
 - A `for` loop using the iterator convention evaluates its subject once as the direct receiver of the
   checker-selected `iterator()` call. The resulting iterator is the loop state reused by `hasNext()`
   and `next()`; common IR does not invent a separate local for the subject.
