@@ -587,6 +587,7 @@ mod tests {
                                     receiver: None,
                                     associated_classifier: None,
                                     associated_access_owner: None,
+                                    companion_associated: false,
                                     formals: Vec::new(),
                                     ty: Ty::Int,
                                     context_count: 0,

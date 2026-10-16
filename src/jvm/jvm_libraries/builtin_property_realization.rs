@@ -68,6 +68,7 @@ impl JvmLibraries {
             receiver: Some(recv),
             associated_classifier: None,
             associated_access_owner: None,
+            companion_associated: false,
             formals: Vec::new(),
             ty,
             context_count: 0,

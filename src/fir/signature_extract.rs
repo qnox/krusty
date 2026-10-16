@@ -1129,7 +1129,7 @@ impl SignatureConstraintExtractor {
                     arguments.push(
                         file.call_type_args
                             .get(&expression.0)
-                            .cloned()
+                            .map(|syntax| syntax.arguments.clone())
                             .unwrap_or_default(),
                     );
                     true
@@ -1146,7 +1146,7 @@ impl SignatureConstraintExtractor {
                     arguments.push(
                         file.call_type_args
                             .get(&expression.0)
-                            .cloned()
+                            .map(|syntax| syntax.arguments.clone())
                             .unwrap_or_default(),
                     );
                     true

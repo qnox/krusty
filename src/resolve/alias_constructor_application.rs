@@ -47,7 +47,7 @@ impl Checker<'_> {
             .file
             .call_type_args
             .get(&call.0)
-            .cloned()
+            .map(|syntax| syntax.arguments.clone())
             .unwrap_or_default();
         // Constructor syntax may omit a generic alias's arguments and infer them from value
         // arguments (`AliasedCell(MyClass())`). This early probe exists only to recognize aliases

@@ -47,6 +47,64 @@ pub(super) struct AssociatedCallSite<'a> {
 }
 
 impl Checker<'_> {
+    /// Record one selected property from a classifier-associated namespace. Selection has already
+    /// fixed the declaration identity; this step enforces access and publishes its lowering facts.
+    pub(super) fn record_associated_property(
+        &mut self,
+        expr: Option<ExprId>,
+        property: crate::libraries::PropertyInfo,
+        report_diagnostics: bool,
+    ) -> Ty {
+        if let Some(expression) = expr {
+            self.record_associated_property_read(expression, &property);
+        }
+        let access_owner = property.associated_access_owner.unwrap_or(property.owner);
+        if property.visibility != Visibility::Public
+            && !self.callable_accessible(
+                property.visibility,
+                access_owner,
+                property.getter.external_identity,
+            )
+        {
+            if let Some(expr) = expr.filter(|_| report_diagnostics) {
+                let span = self.member_name_span(expr, &property.name);
+                self.report_inaccessible_associated_property(&property, span);
+            }
+            return Ty::Error;
+        }
+        if let Some(constant) = property.compile_time_constant.clone() {
+            let ty = constant.ty;
+            if let Some(expr) = expr {
+                self.resolved_constants.insert(expr, constant);
+            }
+            return ty;
+        }
+        if let Some(expr) = expr {
+            if self
+                .resolved_type_name(property.owner)
+                .is_some_and(|ty| ty.is_enum_entry(&property.name))
+            {
+                self.record_enum_entry(expr, property.owner, &property.name);
+            }
+            self.expr_lowers.insert(
+                expr,
+                ExprLowering::AssociatedPropertyRead {
+                    stable_declaration: property.stable_declaration,
+                    external_identity: property.getter.external_property_identity,
+                    singleton_dispatch: property.getter.singleton_dispatch.as_deref().map(
+                        |singleton| SingletonValue {
+                            classifier: singleton.classifier,
+                        },
+                    ),
+                    owner: property.owner,
+                    name: property.name,
+                    metadata_constant_read: property.metadata_constant_read,
+                },
+            );
+        }
+        property.ty
+    }
+
     /// Classifiers whose static scope is lexically open here, innermost first: the classifier of an
     /// enclosing companion-associated declaration, then the enclosing classes.
     pub(super) fn static_scope_classifiers(&self, scope: &CheckerScope<'_>) -> Vec<TypeName> {

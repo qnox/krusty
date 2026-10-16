@@ -137,6 +137,7 @@ impl JvmLibraries {
         let mut property = properties.pop()?;
         property.associated_classifier = Some(internal);
         property.associated_access_owner = Some(internal);
+        property.companion_associated = true;
         self.register_external_property(
             &mut property,
             Some(SemanticCallableOwner::Classifier(internal)),
@@ -329,6 +330,7 @@ impl JvmLibraries {
             receiver: None,
             associated_classifier: None,
             associated_access_owner: None,
+            companion_associated: false,
             formals: Vec::new(),
             ty: field.ty,
             context_count: 0,
@@ -595,6 +597,7 @@ impl JvmLibraries {
             receiver,
             associated_classifier: None,
             associated_access_owner: None,
+            companion_associated: false,
             formals: property_gsig
                 .as_ref()
                 .map(|gsig| gsig.formals.clone())

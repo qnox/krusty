@@ -69,6 +69,7 @@ pub(super) fn merge_metadata_const(
         receiver: None,
         associated_classifier: None,
         associated_access_owner: None,
+        companion_associated: false,
         formals: metadata
             .generic_sig
             .as_ref()

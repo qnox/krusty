@@ -282,6 +282,7 @@ pub(crate) fn declared_property(
         receiver,
         associated_classifier,
         associated_access_owner,
+        companion_associated: associated_classifier.is_some(),
         formals: generic_sig.formals,
         ty,
         context_count: property.context_count,
