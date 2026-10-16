@@ -2569,8 +2569,7 @@ fn emit_class(
     // an ABI refinement, not a runtime difference).
     // Backing fields are private; access goes through the synthesized `getX()`/`setX()` accessors
     // (kotlinc does the same) — for both normal classes and objects.
-    // A static-storage object's field table leads with INSTANCE (kotlinc's order) — its backing
-    // fields are added in the object block below, after the INSTANCE field.
+    // A static-storage object's field table leads with INSTANCE, then its backing fields.
     let mut field_order: Vec<(usize, &crate::ir::IrField)> = if static_storage(ir, c) {
         Vec::new()
     } else {
@@ -2678,7 +2677,7 @@ fn emit_class(
             version: metadata.v,
         });
     }
-    static_fields::emit_class_static_fields(ir, c, &fq_name, &signature_formatter, &mut cw);
+    static_fields::declare(ir, env.run, c, &fq_name, &signature_formatter, &mut cw);
     // Constructor: super(); store each ctor *parameter* into its field; then run `init_body`
     // (body-property initializers + `init {}` blocks). Fields past `ctor_param_count` are body
     // properties — not parameters — so the descriptor covers only the leading parameter fields.

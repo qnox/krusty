@@ -541,19 +541,20 @@ fn emit_default_static_setter(
     );
 }
 
-/// A `companion object`'s `const val`s live on THIS (outer) class as `public static final` +
-/// `ConstantValue` fields (kotlinc's layout); they have no `<clinit>` store (the JVM initializes them).
-/// FIELD-TABLE order follows source lines across companion-object and `companion {}` shapes. Within
-/// one line, the frontend's recorded declaration order disambiguates declarations that lowering
-/// discovered in separate shape passes. This ordering is deliberately not reused for `<clinit>`:
-/// kotlinc gives block initialization its own precedence.
-pub(super) fn emit_class_static_fields(
+/// Declare class-owned static storage in field-table order: a named object's backing fields first,
+/// then its other statics. A `companion object`'s `const val`s live on the outer class as
+/// `public static final` + `ConstantValue`; source lines and declaration order restore the ordering
+/// that common lowering's separate shape passes cannot retain. This ordering is deliberately not
+/// reused for `<clinit>`: kotlinc gives block initialization its own precedence.
+pub(super) fn declare(
     ir: &IrFile,
+    run: &EmitRun,
     c: &IrClass,
     fq_name: &str,
     signature_formatter: &JvmSignatureFormatter<'_>,
     cw: &mut ClassWriter,
 ) {
+    object_static_initialization::declare_fields(ir, run, c, signature_formatter, fq_name, cw);
     let mut owner_statics: Vec<(u32, &crate::ir::IrStatic)> = ir
         .statics
         .iter()
