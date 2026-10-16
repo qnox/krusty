@@ -4545,7 +4545,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `requiresFunctionSignature`, so `component1(): UInt` records `()I` and `component2(): UInt?`
   records none. A class whose constructor takes a `UInt` or `UInt?` parameter declares that
   constructor private behind a public `DefaultConstructorMarker` accessor, primary and secondary
-  alike, and every call site uses the accessor. Test: `tests/unsigned_generated_members_e2e.rs`.
+  alike, and every call site uses the accessor. A `Lkotlin/UInt;` descriptor slot holds the box,
+  so a value class over `ULong?` passes it to `constructor-impl`, `hashCode-impl` and the other
+  static members without unboxing it. Every value class's `constructor-impl` returns `@NotNull`,
+  since it returns the value class, even when its `@Nullable` parameter is a nullable carrier. A
+  condition over `x != 3u` with a `UInt?` `x` jumps on the `==` result with the opposite sense
+  instead of materializing the negation. Test: `tests/unsigned_generated_members_e2e.rs`.
 
 - **Unsigned arrays box at a reference supertype.** `UByteArray`/`UShortArray`/`UIntArray`/`ULongArray`
   are inline classes over `byte[]`/`short[]`/`int[]`/`long[]`. The value-class table records that

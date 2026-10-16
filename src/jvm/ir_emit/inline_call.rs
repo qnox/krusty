@@ -1,6 +1,5 @@
 //! Small boundary types and adapters shared by JVM inline-call emission paths.
 
-use super::parse_physical_method_desc;
 use crate::jvm::classfile::CodeBuilder;
 use crate::types::Ty;
 
@@ -22,7 +21,7 @@ pub(super) struct InlineStaticTarget<'a> {
 }
 
 pub(super) fn parse_descriptor_params(desc: &str) -> Option<Vec<Ty>> {
-    parse_physical_method_desc(desc).map(|(params, _)| params)
+    crate::jvm::physical_type::method_operand_tys(desc).map(|(parameters, _)| parameters)
 }
 
 /// Attach already-relocated inline exception-table entries to their caller labels.

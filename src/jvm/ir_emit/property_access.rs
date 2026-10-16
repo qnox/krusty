@@ -307,7 +307,7 @@ impl Emitter<'_> {
                         .expect("a planned property accessor has a valid JVM descriptor")
                         .0
                         .iter()
-                        .map(|parameter| slot_words(ty_from_field_descriptor(parameter)) as i32)
+                        .map(|parameter| crate::jvm::physical_type::field_slot(parameter).words())
                         .sum();
                     code.invokestatic(m, arguments, words);
                 } else if is_interface {
