@@ -4969,11 +4969,8 @@ pub(crate) fn finalized_streamed_signature_index(
             );
             stop_with_failure!(stub.id);
         };
-        // Callable collection has already resolved the declaration in its complete lexical scope,
-        // including enclosing classifier formals. Reuse that semantic generic contract when it is
-        // available: rebuilding `fun <T : S>` from an isolated own-parameter scope erases `S`,
-        // while resolving `fun <T : Bound<T>>` through an already bounded `T` recursively expands
-        // the bound an extra level.
+        // Reuse callable collection's semantic generic contract from its complete lexical scope:
+        // rebuilding `T : S` erases outer `S`, while re-resolving bounded `T` expands recursively.
         let stable_generic = matches!(
             declaration.kind,
             crate::fir::HeaderDeclarationKind::Callable { .. }
@@ -4981,7 +4978,7 @@ pub(crate) fn finalized_streamed_signature_index(
         .then(|| stable_function(table, headers, &classifier_types, stub.id))
         .flatten()
         .and_then(|(signature, _)| signature.generic_sig.as_ref());
-        let symbolic = type_parameter_publication::symbolic(
+        let Ok(symbolic) = type_parameter_publication::symbolic(
             &index,
             stub.id,
             &declared_names,
@@ -4989,7 +4986,9 @@ pub(crate) fn finalized_streamed_signature_index(
             &semantics,
             stub.source,
             declaration_start,
-        );
+        ) else {
+            stop_with_failure!(stub.id);
+        };
         for (ordinal, (source_name, parameter)) in declared_names.iter().zip(packed).enumerate() {
             let semantic = symbolic.bound(source_name);
             let semantic_name = type_parameter_publication::semantic_name(
