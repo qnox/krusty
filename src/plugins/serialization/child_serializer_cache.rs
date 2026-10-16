@@ -492,13 +492,28 @@ impl ChildSerializersBody<'_> {
                     &serializer_field_types[i],
                 ) {
                     cached
-                } else if let Some(inst) = super::contextual_serializer_for(
-                    ir,
-                    property_is_contextual(ctx, ir, declaring_class, &fields[i].0),
-                    &serializer_field_types[i],
-                ) {
-                    // `@Contextual` / file-level `@UseContextualSerialization` property.
-                    inst
+                } else if property_is_contextual(ctx, ir, declaring_class, &fields[i].0) {
+                    // An uncached contextual property mentions a class type parameter, so build
+                    // it where the generated `$serializer` can read that parameter's serializer.
+                    let annotated = super::type_argument_serializers::declared_type_spelling(
+                        ctx,
+                        ir,
+                        declaring_class,
+                        &fields[i].0,
+                    );
+                    super::element_serializer::contextual_property_serializer(
+                        ir,
+                        ctx,
+                        &serializer_field_types[i],
+                        type_parameter_serializers,
+                        &annotated,
+                    )
+                    .unwrap_or_else(|| {
+                        super::element_serializer::unsupported_element_serializer(
+                            ir,
+                            serializer_field_types[i],
+                        )
+                    })
                 } else if let Some(internal) =
                     declared_serializer_of(ctx, ir, declaring_class, &fields[i].0)
                 {
