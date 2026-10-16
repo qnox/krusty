@@ -86,6 +86,7 @@ mod class_body_bindings;
 mod classifier_associated;
 mod classifier_binding;
 mod collection_literals;
+mod common_classifier_views;
 #[cfg(test)]
 mod common_supertype_identity_tests;
 mod compound_assignments;
@@ -36756,64 +36757,6 @@ impl<'a> Checker<'a> {
     /// its own assignability oracle.
     fn semantic_common_supertype(&self, a: Ty, b: Ty) -> Option<Ty> {
         semantic_common_supertype(&self.fed_source(), self, a, b)
-    }
-
-    /// Every incomparable most-specific common classifier view of two branch results. [`Ty`]
-    /// intentionally has no synthetic intersection variant, so an inferred local retains these as
-    /// lexical flow facets and projects one only when a concrete semantic operation selects it.
-    fn minimal_common_classifier_views(&self, left: Ty, right: Ty) -> Vec<Ty> {
-        self.minimal_common_classifier_views_many(&[left, right])
-    }
-
-    /// Most-specific common classifier intersection for any number of lower constraints. Each
-    /// common owner is joined with its applied type arguments before dominance filtering, so
-    /// `C<String>` and `D<String>` preserve `BBB<String>` alongside an unrelated marker interface.
-    fn minimal_common_classifier_views_many(&self, types: &[Ty]) -> Vec<Ty> {
-        let Some(&first) = types.first() else {
-            return Vec::new();
-        };
-        let source = self.fed_source();
-        let mut common = crate::symbol_resolver::applied_hierarchy(&source, first.non_null())
-            .into_iter()
-            .map(|(owner, applied, _)| (owner, applied))
-            .collect::<HashMap<_, _>>();
-        for &ty in &types[1..] {
-            let next = crate::symbol_resolver::applied_hierarchy(&source, ty.non_null())
-                .into_iter()
-                .map(|(owner, applied, _)| (owner, applied))
-                .collect::<HashMap<_, _>>();
-            common = common
-                .into_iter()
-                .filter_map(|(owner, applied)| {
-                    let next = next.get(&owner).copied()?;
-                    let mut visiting = crate::fx_hash::HashSet::default();
-                    join_applied_classifier(&source, self, owner, applied, next, &mut visiting)
-                        .map(|joined| (owner, joined))
-                })
-                .collect();
-        }
-        let dominated = common
-            .iter()
-            .flat_map(|(owner, _)| {
-                crate::symbol_resolver::applied_hierarchy(&source, Ty::obj_name(*owner))
-                    .into_iter()
-                    .skip(1)
-                    .map(|(ancestor, _, _)| ancestor)
-            })
-            .collect::<crate::fx_hash::HashSet<_>>();
-        let mut views = common
-            .into_iter()
-            .filter(|(owner, _)| !dominated.contains(owner))
-            .map(|(_, joined)| {
-                types.iter().copied().fold(joined, |result, ty| {
-                    common_result_nullability(result, ty, joined)
-                })
-            })
-            .collect::<Vec<_>>();
-        let mut seen = crate::fx_hash::HashSet::default();
-        views.retain(|view| seen.insert(*view));
-        views.sort_by_key(|view| view.source_name());
-        views
     }
 
     fn inferred_expression_intersection(&self, expression: ExprId) -> Vec<Ty> {
