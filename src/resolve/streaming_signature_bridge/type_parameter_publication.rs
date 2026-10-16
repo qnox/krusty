@@ -199,6 +199,7 @@ pub(super) fn symbolic(
     declaration: crate::fir::DeclarationId,
     declared_names: &[String],
     declared_bounds: &[(String, TypeRef)],
+    reuse_callable_contract: bool,
     semantics: &super::ProductionSignatureSemantics<'_>,
     source: crate::fir::SourceFileId,
     declaration_start: u32,
@@ -229,6 +230,14 @@ pub(super) fn symbolic(
         source.raw(),
         declaration_start,
     );
+    // Callable collection has already resolved this declaration in its complete lexical scope.
+    // Re-entering that scope with the collected F-bound as the parameter's readable type unfolds
+    // `T : Bound<T>` once more (`Bound<T : Bound<T : Bound<T>>>`). The caller combines this
+    // provisional, cycle-bounded local shape with the collected contract below; only declarations
+    // without that authoritative contract need ordinary header-type resolution here.
+    if reuse_callable_contract {
+        return Ok(provisional);
+    }
     let resolved_bounds =
         with_classifier_bound_scope(semantics, scope, &provisional, declared_names, |lexical| {
             declared_bounds

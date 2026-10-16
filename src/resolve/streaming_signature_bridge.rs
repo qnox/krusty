@@ -4969,8 +4969,7 @@ pub(crate) fn finalized_streamed_signature_index(
             );
             stop_with_failure!(stub.id);
         };
-        // Reuse callable collection's semantic generic contract from its complete lexical scope:
-        // rebuilding `T : S` erases outer `S`, while re-resolving bounded `T` expands recursively.
+        // Reuse callable collection's semantic generic contract from its complete lexical scope.
         let stable_generic = matches!(
             declaration.kind,
             crate::fir::HeaderDeclarationKind::Callable { .. }
@@ -4983,6 +4982,7 @@ pub(crate) fn finalized_streamed_signature_index(
             stub.id,
             &declared_names,
             &declared_bounds,
+            stable_generic.is_some(),
             &semantics,
             stub.source,
             declaration_start,
