@@ -1,8 +1,8 @@
 //! `@Serializable` properties of value-class type where a null is in play: a nullable property
 //! (`Label?`, `Stamp?`) and a value class whose own carrier is nullable (`Stamp(val raw: String?)`).
 //!
-//! Krusty writes and reads a value-class element as its underlying value. Each place that crosses
-//! between that underlying value and the class's own representation failed to verify:
+//! Krusty once wrote and read a value-class element as its underlying value. Each place that
+//! crossed between that underlying value and the class's own representation failed to verify:
 //!
 //! ```text
 //! Envelope.<init>(I…Label…SerializationConstructorMarker): Type 'Label' (current frame,
