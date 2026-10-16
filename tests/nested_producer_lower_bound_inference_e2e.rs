@@ -59,6 +59,24 @@ fun box(): String {
 }
 
 #[test]
+fn a_contravariant_receiver_binding_stays_an_upper_bound() {
+    common::expect_box_same_as_kotlinc(
+        r#"
+interface Sink<in T>
+object Anything : Sink<Collection<Any>>
+fun <T> Sink<T>.take(value: T): T = value
+fun <E> producer(): List<E> = emptyList()
+
+fun box(): String {
+    val taken: List<Any> = Anything.take(producer())
+    return if (taken.isEmpty()) "OK" else "taken $taken"
+}
+"#,
+        "ContravariantReceiverBound",
+    );
+}
+
+#[test]
 fn the_joined_variable_is_not_the_narrower_bound() {
     let source = "fun <T> same(actual: T, expected: T): T = actual\n\
                   \n\

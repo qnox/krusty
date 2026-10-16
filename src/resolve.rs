@@ -39259,6 +39259,8 @@ impl<'a> Checker<'a> {
                 if open_formal.is_some() {
                     nested_producer_bindings::join_lower_bounds(
                         &source,
+                        &signature,
+                        &receiver_bindings,
                         &mut bindings,
                         &mut inferred_nested,
                     );

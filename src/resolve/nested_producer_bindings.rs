@@ -71,12 +71,28 @@ pub(super) fn open_variable_bindings(
 /// Join a nested producer's lower bounds into the outer call's existing bindings. Each outer
 /// variable takes the common supertype of what the other arguments and the producer require; a
 /// joined formal leaves `nested`, so a later merge cannot widen the join again.
+///
+/// A binding that came from the extension receiver is a lower bound only where the formal occurs
+/// covariantly in the declared receiver. Through `Sink<in T>` it is an upper bound, and through an
+/// invariant position an equation; those formals stay in `nested` for the receiver-aware merge.
 pub(super) fn join_lower_bounds(
     source: &dyn crate::symbol_source::SymbolSource,
+    signature: &GenericSig,
+    receiver_bindings: &crate::symbol_resolver::GSigBinds,
     bindings: &mut crate::symbol_resolver::GSigBinds,
     nested: &mut crate::symbol_resolver::GSigBinds,
 ) {
+    let receiver_lower_bound = |formal: &str| {
+        !receiver_bindings.contains_key(formal)
+            || signature.receiver.is_some_and(|receiver| {
+                crate::symbol_resolver::formal_variance_in_type(source, receiver, formal)
+                    == Some(crate::types::TypeVariance::Out)
+            })
+    };
     nested.retain(|formal, actual| {
+        if !receiver_lower_bound(formal) {
+            return true;
+        }
         let Some(current) = bindings.get_mut(formal) else {
             return true;
         };

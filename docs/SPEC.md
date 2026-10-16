@@ -9653,6 +9653,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `real: Provider<Builder>` and `class Unimpl<T> : Provider<T>`, solves `Unimpl<Builder>`, and the
   element type joins to `Provider<Builder>`. A `vararg` parameter relates each producer to its
   element type, not to the array.
+  Only lower-bound evidence joins: a binding the extension receiver supplied through
+  `Sink<in T>` is an upper bound, so `sink.take(producer())` with `sink: Sink<Collection<Any>>`
+  and expected `List<Any>` keeps `T = List<Any>` rather than widening it to `Collection<Any>`.
   Because `T` is the join, `val joined = same(list, emptyList())` has type `List<String>`, and
   assigning `joined` to a `MutableList<String>` is an initializer type mismatch. Test:
   `tests/nested_producer_lower_bound_inference_e2e.rs`.
