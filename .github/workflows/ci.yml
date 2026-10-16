@@ -282,14 +282,14 @@ jobs:
 
   conformance:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
-    # JVM consumes neither focused KLIB test binary. Keep it off that producer's critical path;
-    # the Native/Wasm rows below reuse this exact step inventory after the KLIB artifact exists.
+    # JVM and Wasm consume neither focused KLIB test binary. Keep them off that producer's critical
+    # path; the Native rows below reuse this exact step inventory after the artifact exists.
     needs: [build-conformance-bin, build-tool-bins, versions]
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJson(needs.versions.outputs.matrix) }}
-        target: [jvm]
+        target: [jvm, wasm]
     runs-on: ubuntu-latest
     steps: &conformance-steps
       - uses: actions/checkout@v7
@@ -581,8 +581,8 @@ jobs:
           path: jvm-byte-equality.txt
           if-no-files-found: error
 
-  # GitHub resolves `needs` before expanding a matrix, so target-specific producer dependencies
-  # require a second scheduler job. Both jobs execute the one anchored conformance step inventory;
+  # GitHub resolves `needs` before expanding a matrix, so Native's focused-test producer dependency
+  # requires a second scheduler job. Both jobs execute the one anchored conformance step inventory;
   # this is not a separate semantic suite or target-specific case list.
   conformance-klib:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
@@ -591,7 +591,7 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJson(needs.versions.outputs.matrix) }}
-        target: [native, wasm]
+        target: [native]
     runs-on: ubuntu-latest
     steps: *conformance-steps
 

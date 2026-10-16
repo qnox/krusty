@@ -707,10 +707,10 @@ fn ci_starts_jvm_without_waiting_for_native_test_binaries() {
             .matches("name: conformance (${{ matrix.version }}, ${{ matrix.target }})")
             .count()
             == 2
-            && workflow.contains("target: [jvm]")
-            && workflow.contains("target: [native, wasm]")
-            && workflow.contains("steps: &conformance-steps")
-            && workflow.contains("steps: *conformance-steps"),
+            && workflow.matches("        target: [jvm, wasm]\n").count() == 1
+            && workflow.matches("        target: [native]\n").count() == 1
+            && workflow.matches("steps: &conformance-steps").count() == 1
+            && workflow.matches("steps: *conformance-steps").count() == 1,
         "each exact Kotlin version must expose JVM, Native and Wasm rows from one shared inventory"
     );
     let box_run = workflow[matrix..]
