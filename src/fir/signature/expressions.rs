@@ -157,6 +157,14 @@ pub enum SigExpr {
         target: SigExprId,
         scope: SignatureScopeId,
     },
+    /// A value that flows into a declared type no generic call owns (`val c: Chan<R> = this`).
+    /// Evaluation yields `value`'s type and relates it to `expected` in any active builder
+    /// inference frame; the declared type itself is checked by the body check.
+    ExpectedValue {
+        value: SigExprId,
+        expected: SigExprId,
+        scope: SignatureScopeId,
+    },
     Substitute {
         base: SigExprId,
         substitutions: SubstitutionRange,
@@ -164,6 +172,19 @@ pub enum SigExpr {
 }
 
 impl SignatureGraph {
+    pub(in crate::fir) fn expected_value(
+        &mut self,
+        value: SigExprId,
+        expected: SigExprId,
+        scope: SignatureScopeId,
+    ) -> SigExprId {
+        self.add_expr(SigExpr::ExpectedValue {
+            value,
+            expected,
+            scope,
+        })
+    }
+
     /// Whether `root` reaches one of `targets` through value-expression edges. Signature
     /// extraction binds a lambda-parameter read directly to its parameter node, so this separates
     /// a parameter declaration from a body that actually reads it.
@@ -258,6 +279,7 @@ impl SignatureGraph {
                     pending.push(value);
                     pending.push(target);
                 }
+                Some(SigExpr::ExpectedValue { value, .. }) => pending.push(value),
                 Some(
                     SigExpr::Known(_)
                     | SigExpr::IntegerLiteral(_)

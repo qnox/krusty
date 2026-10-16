@@ -2192,7 +2192,7 @@ impl SignatureConstraintExtractor {
                                 let initializer =
                                     self.expression(file, initializer, scope, origin)?;
                                 self.graph.apply_result_expectation(initializer, value);
-                                effects.push(initializer);
+                                effects.push(self.graph.expected_value(initializer, value, scope));
                             }
                             if ty.fun_has_receiver() {
                                 self.lexical_callables

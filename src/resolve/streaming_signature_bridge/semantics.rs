@@ -9,6 +9,7 @@ mod constructor_expectations;
 mod result_approximation;
 mod result_constraints;
 pub(super) mod scoped_constraint_frames;
+mod value_flow_constraints;
 
 pub(super) use constructor_expectations::ReceiverLevelCall;
 use result_approximation::denotable_signature_result;
@@ -141,80 +142,6 @@ impl ProductionSignatureSemantics<'_> {
             )?;
         }
         Ok(Some(receiver))
-    }
-
-    pub(super) fn record_scoped_argument_constraints(
-        &self,
-        scope: crate::fir::SignatureScope,
-        parameters: &[Ty],
-        arguments: &[Ty],
-    ) {
-        let constraint_frame = self.active_scoped_constraint_frame(scope.owner);
-        crate::trace_compiler!(
-            "signature",
-            "scoped argument owner lookup scope={:?} active={constraint_frame:?} parameters={parameters:?} arguments={arguments:?}",
-            scope.owner,
-        );
-        let Some((constraint_owner, constraint_index)) = constraint_frame else {
-            return;
-        };
-        let active_formals = self
-            .scoped_constraint_inputs
-            .borrow()
-            .get(&constraint_owner)
-            .and_then(|stack| stack.get(constraint_index))
-            .map(|inputs| {
-                let mut formals = crate::fx_hash::HashSet::default();
-                for input in inputs {
-                    super::postponed_calls::collect_type_parameters(*input, &mut formals);
-                }
-                formals
-            })
-            .unwrap_or_default();
-        if active_formals.is_empty() {
-            return;
-        }
-        let mut all = self.scoped_constraints.borrow_mut();
-        let Some(active) = all
-            .get_mut(&constraint_owner)
-            .and_then(|stack| stack.get_mut(constraint_index))
-        else {
-            return;
-        };
-        crate::trace_compiler!(
-            "signature",
-            "scoped argument constraints owner={:?} parameters={parameters:?} arguments={arguments:?} before={active:?}",
-            constraint_owner,
-        );
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
-        for (&parameter, &argument) in parameters.iter().zip(arguments) {
-            let constraints =
-                crate::symbol_resolver::collect_assignability_constraints_from_symbols(
-                    &source, parameter, argument,
-                );
-            let mut inferred = constraints.lower;
-            for (formal, upper) in constraints.upper {
-                for actual in upper {
-                    inferred
-                        .entry(formal.clone())
-                        .and_modify(|known| {
-                            *known = crate::symbol_resolver::merge_inferred_ty(Some(*known), actual)
-                        })
-                        .or_insert(actual);
-                }
-            }
-            inferred.retain(|formal, _| active_formals.contains(formal.as_str()));
-            Self::merge_scoped_constraints_from_symbols(&source, active, inferred);
-        }
-        crate::trace_compiler!(
-            "signature",
-            "scoped argument constraints owner={:?} after={active:?}",
-            constraint_owner,
-        );
     }
 
     fn record_scoped_member_constraints(
@@ -2235,8 +2162,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             .iter()
                             .map(|parameter| parameter.get())
                             .collect::<Vec<_>>();
-                        self.record_scoped_argument_constraints(
+                        self.record_selected_source_call_constraints(
                             scope,
+                            &callable,
                             &parameters,
                             &selected_argument_types,
                         );
@@ -4618,6 +4546,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             {
                 return Err(Self::failure());
             }
+            self.record_function_value_invoke_constraints(
+                scope,
+                signature,
+                implicit_prefix,
+                accepts_explicit_shape,
+                arguments,
+            );
             return crate::fir::ResolvedTy::new(signature.ret).map_err(|_| Self::failure());
         }
 
