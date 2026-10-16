@@ -2044,6 +2044,8 @@ mod nested_generic_constructor_e2e;
 mod nested_hof_capture_e2e;
 #[path = "nested_lambda_capture_e2e.rs"]
 mod nested_lambda_capture_e2e;
+#[path = "nested_producer_lower_bound_inference_e2e.rs"]
+mod nested_producer_lower_bound_inference_e2e;
 #[path = "nested_string_template_e2e.rs"]
 mod nested_string_template_e2e;
 #[path = "nested_try_finally_e2e.rs"]

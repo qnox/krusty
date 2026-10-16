@@ -9640,6 +9640,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   argument would fix the outer result to `Any`. Test:
   `tests/nested_concrete_argument_inference_e2e.rs`.
 
+- **A nested producer is one more lower bound for an outer variable that another argument
+  already bound.** `fun <T> same(actual: T, expected: T): T` called as
+  `same(list, emptyList())` with `list: MutableList<String>` gives `T` the lower bound
+  `MutableList<String>` from the first argument. `emptyList<E>(): List<E>` cannot equal that type,
+  so the producer is solved against the `List` supertype of the existing bound (`E = String`), and
+  `T` becomes the common supertype of both lower bounds, `List<String>`, matching kotlinc. The
+  same applies to `T?` parameters and extension receivers (`values shouldBe emptyList()`). An
+  explicit type argument fixes the variable instead, and then the producer is checked against it.
+  When the expected result also bounds the variable from above, the producer is solved under that
+  bound first: `listOf(real, Unimpl("x"))` expected as `List<Provider<Builder>>`, with
+  `real: Provider<Builder>` and `class Unimpl<T> : Provider<T>`, solves `Unimpl<Builder>`, and the
+  element type joins to `Provider<Builder>`. A `vararg` parameter relates each producer to its
+  element type, not to the array.
+  Because `T` is the join, `val joined = same(list, emptyList())` has type `List<String>`, and
+  assigning `joined` to a `MutableList<String>` is an initializer type mismatch. Test:
+  `tests/nested_producer_lower_bound_inference_e2e.rs`.
+
 - **A Java constructor infers the class's type parameters, and an invariant expected result
   fixes them.** A JVM constructor `Signature` names only type parameters the constructor itself
   declares (`(TV;)V` has none) and returns `void`. The constructed classifier's type parameters
