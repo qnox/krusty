@@ -4549,11 +4549,19 @@ pub(crate) fn finalized_streamed_signature_index(
                 &semantics.diagnostics.borrow()[solver_diagnostics..],
             )
         };
+        ($declaration:expr) => {
+            diagnostics::emit_publication_failure(
+                diags,
+                &semantics.diagnostics.borrow()[solver_diagnostics..],
+                $declaration,
+            )
+        };
     }
     macro_rules! stop_with_failure {
         ($declaration:expr) => {{
-            emit_publication_diagnostics!();
-            failed.push($declaration);
+            let declaration = $declaration;
+            emit_publication_diagnostics!(declaration);
+            failed.push(declaration);
             failed.sort_by_key(|declaration| declaration.raw());
             failed.dedup();
             return StreamedSignatureIndex {

@@ -230,26 +230,33 @@ pub(super) fn symbolic(
         source.raw(),
         declaration_start,
     );
-    // Callable collection has already resolved this declaration in its complete lexical scope.
-    // Re-entering that scope with the collected F-bound as the parameter's readable type unfolds
-    // `T : Bound<T>` once more (`Bound<T : Bound<T : Bound<T>>>`). The caller combines this
-    // provisional, cycle-bounded local shape with the collected contract below; only declarations
-    // without that authoritative contract need ordinary header-type resolution here.
+    // Callable collection already owns the stable semantic shape. Re-resolving a successful
+    // F-bound through a provisional local parameter unfolds it once more, but skipping the written
+    // bounds entirely also skips their diagnostics. Validate each source reference through the
+    // ordinary header path, retain every diagnostic, and keep the authoritative callable shape.
     if reuse_callable_contract {
-        return Ok(provisional);
+        let mut first_failure = None;
+        for (_, bound) in declared_bounds {
+            if let Err(diagnostic) = semantics.resolve_callable_header_bound(scope, bound) {
+                first_failure.get_or_insert(diagnostic);
+            }
+        }
+        return first_failure.map_or(Ok(provisional), Err);
     }
     let resolved_bounds =
         with_classifier_bound_scope(semantics, scope, &provisional, declared_names, |lexical| {
-            declared_bounds
-                .iter()
-                .map(|(owner, bound)| {
-                    semantics
-                        .classifier_header_type_ref(scope, lexical, bound)
-                        .map(|bound| (owner.clone(), bound))
-                })
-                .collect::<Option<Vec<_>>>()
-        })?
-        .ok_or_else(super::ProductionSignatureSemantics::failure)?;
+            let mut first_failure = None;
+            let mut resolved = Vec::with_capacity(declared_bounds.len());
+            for (owner, bound) in declared_bounds {
+                match semantics.resolve_classifier_header_bound(scope, lexical, bound) {
+                    Ok(bound) => resolved.push((owner.clone(), bound)),
+                    Err(diagnostic) => {
+                        first_failure.get_or_insert(diagnostic);
+                    }
+                }
+            }
+            first_failure.map_or(Ok(resolved), Err)
+        })??;
 
     Ok(symbolic_from_resolved_bounds(
         declared_names,
