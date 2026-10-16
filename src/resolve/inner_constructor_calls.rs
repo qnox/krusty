@@ -266,7 +266,7 @@ impl Checker<'_> {
         }
         let constructor = constructors.pop().expect("one constructor");
         let parameters =
-            Self::access_parameter_display(&constructor.params, &constructor.call_sig.param_names);
+            access_control::parameter_display(&constructor.call_sig, &constructor.params, 0);
         if !self.silent_error_exprs.insert(expression) {
             return true;
         }

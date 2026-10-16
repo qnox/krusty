@@ -110,6 +110,7 @@ impl FunctionInfo {
         callable.reflection_name = Some(member.name.clone());
 
         let mut candidate = FunctionInfo::plain(kind, None, callable);
+        candidate.receiver = member.semantic_extension_receiver();
         candidate.ret = ReturnInfo::new(member.ret_nullable(), member.declared_ret);
         candidate.visibility = member.visibility;
         candidate.generic_sig = member.generic_sig.clone();

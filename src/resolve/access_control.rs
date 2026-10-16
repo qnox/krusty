@@ -2,6 +2,13 @@
 
 use super::*;
 
+mod diagnostics;
+
+pub(super) use diagnostics::{
+    constructor_message, member_callable_message, owner_display, parameter_display,
+    static_callable_message,
+};
+
 /// Whether the current compilation module declares `classifier` as an ordinary classifier.
 ///
 /// This deliberately reads the module provider alone, not the federated resolver: dependency
@@ -261,6 +268,40 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Emit an access rejection for one already-selected semantic function declaration.
+    pub(super) fn reject_function_if_inaccessible(
+        &mut self,
+        function: &crate::libraries::FunctionInfo,
+        owner: TypeName,
+        span: Span,
+    ) -> bool {
+        if self.callable_accessible(
+            function.visibility,
+            owner,
+            function.callable.external_identity,
+        ) || self.suppresses_diagnostic("INVISIBLE_REFERENCE")
+        {
+            return false;
+        }
+        let visibility = match function.visibility {
+            Visibility::Private => "private",
+            Visibility::Protected => "protected",
+            Visibility::Internal => "internal",
+            Visibility::PackagePrivate => "package-private",
+            Visibility::Public => "public",
+        };
+        let source = self.fed_source();
+        let message = diagnostics::function_callable_message(
+            &source,
+            self.resolved_index,
+            function,
+            owner,
+            visibility,
+        );
+        self.diags.error(span, message);
+        true
+    }
+
     /// Render an already-established semantic property-access rejection. The caller owns receiver
     /// and lexical accessibility; the provider contributes only the declaration label used by the
     /// diagnostic (for example Java's `field name: Type!`).
@@ -295,7 +336,7 @@ impl<'a> Checker<'a> {
             span,
             format!(
                 "cannot access '{label}': it is {visibility} in '{}'.",
-                Self::access_owner_display(owner),
+                owner_display(owner),
             ),
         );
     }

@@ -323,18 +323,6 @@ fn member_extension_function_resolution() {
             None,
         ),
         (
-            "private extension remains inaccessible in an external dispatch scope",
-            r#"
-                class Item
-                class Mapper {
-                    private fun Item.render(): String = "OK"
-                }
-                fun convert(mapper: Mapper, item: Item): String =
-                    mapper.run { item.render() }
-            "#,
-            Some("cannot access 'render'"),
-        ),
-        (
             "override requires the same extension receiver",
             r#"
                 class Item
@@ -382,6 +370,27 @@ fn member_extension_function_resolution() {
             ),
         }
     }
+}
+
+#[test]
+fn private_extension_remains_inaccessible_in_an_external_dispatch_scope() {
+    let source = r#"
+        class Item
+        class Mapper {
+            private fun Item.render(): String = "OK"
+        }
+        fun convert(mapper: Mapper, item: Item): String =
+            mapper.run { item.render() }
+    "#;
+    let diagnostics = common::front_end_diagnostics_files(
+        &[source],
+        &[common::stdlib_jar()],
+        Some(common::jdk_modules().as_path()),
+    );
+    assert_eq!(
+        diagnostics,
+        ["cannot access 'fun Item.render(): String': it is private in 'Mapper'."]
+    );
 }
 
 #[test]

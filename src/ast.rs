@@ -1987,8 +1987,8 @@ pub struct File {
     pub implicit_signed_to_unsigned_integer_conversion: bool,
     /// `+DataClassCopyRespectsConstructorVisibility` (`-Xconsistent-data-class-copy-visibility`):
     /// a data class's synthesized `copy`/`copy$default` take the primary constructor's visibility
-    /// instead of being unconditionally public. The per-class `kotlin.ConsistentCopyVisibility` /
-    /// `kotlin.ExposedCopyVisibility` annotation overrides are unhandled.
+    /// instead of being unconditionally public. Signature collection combines it with the per-class
+    /// `kotlin.ConsistentCopyVisibility` / `kotlin.ExposedCopyVisibility` annotations.
     pub data_copy_respects_ctor_visibility: bool,
     /// `+UnitConversionsOnArbitraryExpressions`: a call argument whose function value returns
     /// non-`Unit` may be converted to a function type returning `Unit`.

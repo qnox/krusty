@@ -185,6 +185,6 @@ fn private_component_is_hidden_from_another_file() {
     .expect("stdlib and JDK are provisioned");
     assert_eq!(
         diagnostics,
-        ["cannot access 'component1': it is private in 'sample/File'"]
+        ["cannot access 'fun component1(): String': it is private in 'sample.File'."]
     );
 }

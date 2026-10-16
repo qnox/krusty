@@ -24,6 +24,7 @@ mod delegates;
 mod demanded_source_call;
 mod diagnostics;
 mod file_import_scopes;
+mod generated_member_header;
 mod header_projection;
 mod implicit_context_candidates;
 mod integer_constants;
@@ -3392,17 +3393,6 @@ pub(crate) struct StreamedSignatureIndex {
     pub(crate) failures: Vec<crate::fir::DeclarationId>,
 }
 
-/// The receiver a member extension's signature carries: its generic receiver when the signature
-/// is generic, else the declared receiver type.
-fn member_extension_receiver(function: &super::MemberExtFunSig) -> Ty {
-    function
-        .signature()
-        .generic_sig
-        .as_ref()
-        .and_then(|generic| generic.receiver)
-        .unwrap_or_else(|| function.receiver_ty())
-}
-
 /// The Pass-1 signature published for a stable FUNCTION declaration, with the receiver a member
 /// extension carries.
 ///
@@ -3461,7 +3451,7 @@ fn stable_function_signature<'a>(
                     {
                         return Some((
                             function.signature(),
-                            Some(member_extension_receiver(function)),
+                            Some(stable_function_index::member_extension_receiver(function)),
                         ));
                     }
                 }
@@ -3510,7 +3500,7 @@ fn stable_function_signature<'a>(
         .map(|function| {
             (
                 function.signature(),
-                Some(member_extension_receiver(function)),
+                Some(stable_function_index::member_extension_receiver(function)),
             )
         })
 }
@@ -4592,13 +4582,16 @@ pub(crate) fn finalized_streamed_signature_index(
                 flags = flags.with(crate::fir::DeclarationFlags::FULL_VALUE, true);
             }
         }
+        let Some(visibility) = generated_member_header::visibility(&semantics, stub) else {
+            stop_with_failure!(stub.id);
+        };
         index.publish_declaration_header(
             stub.id,
             crate::fir::ResolvedDeclarationHeader {
                 kind: stub.kind,
                 owner: anchor.owner,
                 name: None,
-                visibility: stub.visibility,
+                visibility,
                 flags,
                 initialization_order: stub.initialization_order,
             },

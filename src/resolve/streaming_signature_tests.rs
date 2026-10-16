@@ -79,6 +79,11 @@ fn generated_data_class_copy_publishes_its_complete_callable_header() {
     let signature = index
         .signature(copy)
         .expect("resolved generated copy signature");
+    assert!(index
+        .declaration_header(copy)
+        .expect("generated copy declaration header")
+        .flags
+        .has(crate::fir::DeclarationFlags::DATA_CLASS_COPY));
     assert_eq!(signature.parameters.len(), 2);
     let callable = index
         .callable_for_declaration(copy)
@@ -95,6 +100,46 @@ fn generated_data_class_copy_publishes_its_complete_callable_header() {
             .flags()
             .has_default());
     }
+}
+
+#[test]
+fn suppressed_value_class_members_do_not_stop_later_header_publication() {
+    let (Some(stdlib), Some(jdk)) = (
+        crate::toolchain::stdlib_jar(),
+        crate::toolchain::jdk_modules(),
+    ) else {
+        return;
+    };
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]));
+    let inputs =
+        [
+            SourceInput::kotlin("@JvmInline value class Wrapped(val value: Int)\nclass Following")
+                .with_file_stem("SuppressedValueClassMembers"),
+        ];
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        crate::frontend::PlatformProvider::jvm(Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        )),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("suppressed value-class members must not stop publication")
+        .module
+        .index();
+    assert!(index
+        .classifier_declaration(crate::types::type_name("Wrapped"))
+        .is_some());
+    assert!(index
+        .classifier_declaration(crate::types::type_name("Following"))
+        .is_some());
 }
 
 #[test]

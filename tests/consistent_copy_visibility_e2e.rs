@@ -10,7 +10,8 @@
 //! compare the feature's exact surface against kotlinc: the normalized `javap -v` sections of
 //! `copy`/`copy$default` (flags, body dispatch, annotations, debug tables) and the decoded
 //! `@Metadata` function visibility. The per-class `kotlin.ConsistentCopyVisibility` /
-//! `kotlin.ExposedCopyVisibility` annotation overrides are unhandled (no user in the target project).
+//! `kotlin.ExposedCopyVisibility` annotations select the same two shapes per class, and both the
+//! annotations' misuse and an out-of-scope `copy` call are diagnosed exactly as kotlinc does.
 
 use super::common;
 use krusty::jvm::classreader::parse_class;
@@ -286,4 +287,189 @@ data class E internal constructor(val x: Int)
         krusty::types::Visibility::Internal,
         "@Metadata must record the copy Function as internal"
     );
+}
+
+/// Compile `src` with both compilers (kotlinc gets `kotlinc_args`; krusty reads the source's
+/// `// LANGUAGE:` directive) and assert they reject it with the identical error ledger.
+fn assert_rejected_like_kotlinc(src: &str, kotlinc_args: &[&str], tag: &str) {
+    let args = kotlinc_args
+        .iter()
+        .map(|argument| (*argument).to_string())
+        .collect::<Vec<_>>();
+    let result = common::compiler_diagnostics_with_reference_args(&[("Main.kt", src)], &[], &args);
+    common::expect_identical_rejection(&result, tag);
+}
+
+/// The annotations' own checks: both on one data class are incompatible (reported on each entry),
+/// and on anything but a data class the `@ConsistentCopyVisibility` entry is the wrong target
+/// (kotlinc names it even when written second, and reads a qualified spelling by identity). A
+/// `data object` is a data class to the check, so it is accepted.
+#[test]
+fn annotation_misuse_matches_kotlinc() {
+    let src = "\
+package demo
+
+@ConsistentCopyVisibility @ExposedCopyVisibility data class D private constructor(val x: Int)
+@ConsistentCopyVisibility class E(val x: Int)
+@ExposedCopyVisibility class F(val x: Int)
+@ExposedCopyVisibility @ConsistentCopyVisibility class G(val x: Int)
+@kotlin.ConsistentCopyVisibility interface I
+@ConsistentCopyVisibility data object O
+";
+    assert_rejected_like_kotlinc(src, &[], "annotation misuse");
+}
+
+/// Without the flag, `@ConsistentCopyVisibility` alone makes `copy` follow the constructor: private
+/// and protected copies are rejected outside the class, an internal one (here spelled through a type
+/// alias) is reachable in the module, and an unannotated private-ctor class keeps a public `copy`.
+/// Inside the class, and from a nested class's own body, a private `copy` stays callable.
+#[test]
+fn annotated_copy_access_matches_kotlinc_without_the_flag() {
+    let src = "\
+package demo
+
+typealias Consistent = ConsistentCopyVisibility
+
+@ConsistentCopyVisibility data class A private constructor(val x: Int) {
+    fun bump() = copy(x = x + 1)
+    companion object { fun make() = A(1) }
+}
+@ConsistentCopyVisibility data class Q protected constructor(val x: Int) {
+    companion object { fun make() = Q(1) }
+}
+@Consistent data class P internal constructor(val x: Int)
+data class C private constructor(val x: Int) {
+    companion object { fun make() = C(1) }
+}
+class Outer {
+    @ConsistentCopyVisibility data class N private constructor(val x: Int) {
+        fun again() = copy(x = 3)
+    }
+    fun f(n: N) = n.copy()
+}
+
+fun use(p: P) {
+    A.make().copy(x = 2)
+    Q.make().copy()
+    p.copy(x = 2)
+    C.make().copy(x = 2)
+}
+";
+    assert_rejected_like_kotlinc(src, &[], "annotated copy access");
+}
+
+/// Under the flag every non-public-ctor `copy` is restricted unless the class says
+/// `@ExposedCopyVisibility`, which keeps it public.
+#[test]
+fn flagged_copy_access_matches_kotlinc() {
+    let src = "\
+// LANGUAGE: +DataClassCopyRespectsConstructorVisibility
+package demo
+
+data class C private constructor(val x: Int) {
+    companion object { fun make() = C(1) }
+}
+@ExposedCopyVisibility data class X private constructor(val x: Int) {
+    companion object { fun make() = X(1) }
+}
+
+fun use() {
+    C.make().copy(x = 2)
+    X.make().copy(x = 2)
+}
+";
+    assert_rejected_like_kotlinc(
+        src,
+        &["-Xconsistent-data-class-copy-visibility"],
+        "flagged copy access",
+    );
+}
+
+/// Under the flag `@ConsistentCopyVisibility` restates the default: kotlinc warns that it is
+/// redundant on every data class, public constructor and `data object` included.
+#[test]
+fn redundant_consistent_annotation_warning_matches_kotlinc() {
+    let src = "\
+// LANGUAGE: +DataClassCopyRespectsConstructorVisibility
+package demo
+
+@ConsistentCopyVisibility data class A private constructor(val x: Int)
+@ConsistentCopyVisibility data class B(val x: Int)
+@ConsistentCopyVisibility data object O
+@ExposedCopyVisibility data class X private constructor(val x: Int)
+";
+    let args = ["-Xconsistent-data-class-copy-visibility".to_string()];
+    let result = common::compiler_diagnostics_with_reference_args(&[("Main.kt", src)], &[], &args);
+    assert_eq!(
+        result.reference_code, 0,
+        "kotlinc: {}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        result.krusty_code, 0,
+        "krusty: {}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
+    let reference = common::compiler_warnings(&result.reference_stderr);
+    assert_eq!(reference.len(), 3, "kotlinc: {}", result.reference_stderr);
+    assert_eq!(common::compiler_warnings(&result.krusty_stderr), reference);
+}
+
+/// `@ConsistentCopyVisibility` without the flag gives the exact flagged shape: a private, unguarded,
+/// un-annotated `copy` and a package-private `copy$default` dispatching via `invokespecial`.
+#[test]
+fn consistent_annotation_copy_sections_match_kotlinc() {
+    let src = "\
+package demo
+
+@ConsistentCopyVisibility
+data class D private constructor(val s: String, val n: Int) {
+    companion object {
+        fun make(s: String, n: Int) = D(s, n)
+    }
+}
+";
+    assert_copy_sections_match(src, "D", "demo/D", &[]);
+    let bytes = krusty_bytes(src, "D", "demo/D");
+    let ci = parse_class(&bytes).expect("krusty's class parses back");
+    let meta_copy = class_functions(&ci)
+        .iter()
+        .find(|function| function.kotlin_name == "copy")
+        .expect("@Metadata must list `copy`");
+    assert_eq!(meta_copy.visibility, krusty::types::Visibility::Private);
+}
+
+/// `@ExposedCopyVisibility` under the flag keeps kotlinc's public shape.
+#[test]
+fn exposed_annotation_copy_sections_match_kotlinc_with_the_flag() {
+    let src = "\
+// LANGUAGE: +DataClassCopyRespectsConstructorVisibility
+package demo
+
+@ExposedCopyVisibility
+data class D private constructor(val s: String, val n: Int) {
+    companion object {
+        fun make(s: String, n: Int) = D(s, n)
+    }
+}
+";
+    assert_copy_sections_match(
+        src,
+        "D",
+        "demo/D",
+        &["-Xconsistent-data-class-copy-visibility"],
+    );
+}
+
+/// A PROTECTED primary ctor under `@ConsistentCopyVisibility`: kotlinc emits a protected `copy`
+/// beside a public `copy$default`.
+#[test]
+fn protected_ctor_copy_sections_match_kotlinc() {
+    let src = "\
+package demo
+
+@ConsistentCopyVisibility
+data class Q protected constructor(val s: String, val n: Int)
+";
+    assert_copy_sections_match(src, "Q", "demo/Q", &[]);
 }
