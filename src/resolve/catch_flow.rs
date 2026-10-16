@@ -115,23 +115,4 @@ impl Checker<'_> {
             }
         }
     }
-
-    /// The final read fact left by each binding a finalizer writes. Capturing it before restoring
-    /// the normal try continuation lets that write overwrite the continuation even when it happened
-    /// to leave the same fact that was present at the conservative finalizer entry.
-    pub(super) fn written_local_flow(
-        &self,
-        scope: &CheckerScope<'_>,
-        written: &TryBodyWrites,
-    ) -> Vec<(String, Option<Ty>)> {
-        written
-            .all
-            .iter()
-            .filter_map(|&identity| {
-                let (name, _) = self.visible_local_binding(scope, identity)?;
-                let narrowing = scope.local_narrowing(&name);
-                Some((name, narrowing))
-            })
-            .collect()
-    }
 }

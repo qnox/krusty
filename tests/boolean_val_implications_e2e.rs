@@ -203,6 +203,11 @@ fn a_stable_boolean_val_carries_its_conditions_facts_like_kotlinc() {
          \x20   try { 0 } finally { y = \"ready\" }\n\
          \x20   y.length\n\
          }\n\
+         fun finalizerWriteAndGuardProjectsItsFullExit(v: Any?) {\n\
+         \x20   var y: Any? = null\n\
+         \x20   try { 0 } finally { y = v; if (y !is String) return }\n\
+         \x20   y.length\n\
+         }\n\
          fun abruptTryWriteStaysOffNormalContinuation(x: String?, stop: Boolean) = run {\n\
          \x20   var y = x\n\
          \x20   val ok = y != null\n\

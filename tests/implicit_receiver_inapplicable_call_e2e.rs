@@ -57,3 +57,19 @@ fn a_rejected_body_local_member_uses_the_retained_candidate_like_kotlinc() {
         &[],
     );
 }
+
+/// The explicit-receiver path must consume the same retained body-local candidate family. The
+/// immutable module provider cannot reproduce a local classifier's methods after selection.
+#[test]
+fn an_explicit_receiver_rejection_uses_the_retained_body_local_candidate_like_kotlinc() {
+    common::assert_errors_match_kotlinc(
+        &[(
+            "Main.kt",
+            "fun enclosing(xs: List<Int>?) {\n\
+             \x20   class Local { fun take(values: List<Int>) {} }\n\
+             \x20   Local().take(xs)\n\
+             }\n",
+        )],
+        &[],
+    );
+}
