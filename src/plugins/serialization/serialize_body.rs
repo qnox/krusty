@@ -28,6 +28,36 @@ fn record_serialize_lines(
     }
 }
 
+/// `output.<method>(descriptor, index, serializer, value)`, one of `CompositeEncoder`'s
+/// serializable-element writes. Their `value` is declared `T`, a reference slot, so a value class
+/// reaches it as its box whatever its carrier, as it does at a source call of the same method.
+fn encode_serializable_element(
+    ir: &mut IrFile,
+    method: &str,
+    output: ExprId,
+    args: [ExprId; 4],
+) -> ExprId {
+    let call = ir.add_expr(IrExpr::Call {
+        callee: virtual_iface(
+            "kotlinx/serialization/encoding/CompositeEncoder",
+            method,
+            "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
+        ),
+        dispatch_receiver: Some(output),
+        args: args.to_vec(),
+    });
+    ir.call_declared_params.insert(
+        call,
+        Box::new([
+            class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+            Ty::Int,
+            class_ty("kotlinx/serialization/SerializationStrategy"),
+            Ty::nullable(class_ty("kotlin/Any")),
+        ]),
+    );
+    call
+}
+
 pub(super) struct SerializeBody<'a> {
     pub(super) function: u32,
     pub(super) serializer_class: ClassId,
@@ -182,15 +212,12 @@ impl SerializeBody<'_> {
                     inst,
                     "kotlinx/serialization/SerializationStrategy",
                 );
-                stmts.push(ir.add_expr(IrExpr::Call {
-                    callee: virtual_iface(
-                        "kotlinx/serialization/encoding/CompositeEncoder",
-                        method,
-                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
-                    ),
-                    dispatch_receiver: Some(c),
-                    args: vec![d, idx, inst, v],
-                }));
+                stmts.push(encode_serializable_element(
+                    ir,
+                    method,
+                    c,
+                    [d, idx, inst, v],
+                ));
             } else if let Some(internal) = declared_serializer_of(ctx, ir, class_id, pname) {
                 // An explicit per-property serializer takes precedence over the property's type.
                 let annotated = super::type_argument_serializers::declared_type_spelling(
@@ -214,15 +241,12 @@ impl SerializeBody<'_> {
                     inst,
                     "kotlinx/serialization/SerializationStrategy",
                 );
-                stmts.push(ir.add_expr(IrExpr::Call {
-                    callee: virtual_iface(
-                        "kotlinx/serialization/encoding/CompositeEncoder",
-                        method,
-                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
-                    ),
-                    dispatch_receiver: Some(c),
-                    args: vec![d, idx, inst, v],
-                }));
+                stmts.push(encode_serializable_element(
+                    ir,
+                    method,
+                    c,
+                    [d, idx, inst, v],
+                ));
             } else if nested[field].is_some()
                 || ty
                     .non_null()
@@ -249,15 +273,12 @@ impl SerializeBody<'_> {
                     inst,
                     "kotlinx/serialization/SerializationStrategy",
                 );
-                stmts.push(ir.add_expr(IrExpr::Call {
-                    callee: virtual_iface(
-                        "kotlinx/serialization/encoding/CompositeEncoder",
-                        method,
-                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
-                    ),
-                    dispatch_receiver: Some(c),
-                    args: vec![d, idx, inst, v],
-                }));
+                stmts.push(encode_serializable_element(
+                    ir,
+                    method,
+                    c,
+                    [d, idx, inst, v],
+                ));
             } else if is_nullable(ty) {
                 // Any derivable nullable element — builtin, interface-polymorphic, sealed, or
                 // nested — uses the nullable serializable call so the encoder can write JSON null.
@@ -267,15 +288,12 @@ impl SerializeBody<'_> {
                         inst,
                         "kotlinx/serialization/SerializationStrategy",
                     );
-                    stmts.push(ir.add_expr(IrExpr::Call {
-                        callee: virtual_iface(
-                            "kotlinx/serialization/encoding/CompositeEncoder",
-                            "encodeNullableSerializableElement",
-                            "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
-                        ),
-                        dispatch_receiver: Some(c),
-                        args: vec![d, idx, inst, v],
-                    }));
+                    stmts.push(encode_serializable_element(
+                        ir,
+                        "encodeNullableSerializableElement",
+                        c,
+                        [d, idx, inst, v],
+                    ));
                 } else {
                     bail = true;
                     break;
@@ -298,15 +316,12 @@ impl SerializeBody<'_> {
                     inst,
                     "kotlinx/serialization/SerializationStrategy",
                 );
-                stmts.push(ir.add_expr(IrExpr::Call {
-                    callee: virtual_iface(
-                        "kotlinx/serialization/encoding/CompositeEncoder",
-                        "encodeSerializableElement",
-                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
-                    ),
-                    dispatch_receiver: Some(c),
-                    args: vec![d, idx, inst, v],
-                }));
+                stmts.push(encode_serializable_element(
+                    ir,
+                    "encodeSerializableElement",
+                    c,
+                    [d, idx, inst, v],
+                ));
             } else {
                 bail = true;
                 break;
