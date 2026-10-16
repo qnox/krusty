@@ -68,7 +68,9 @@ impl<'a> RegenerationSite<'a> {
                 function,
                 &facade,
             )?;
-            method?
+            // A lambda with no enclosing method is written in a static initializer: a top-level,
+            // object, or companion property. kotlinc encloses its copies in `<clinit>`.
+            method.unwrap_or_else(|| ("<clinit>".to_string(), "()V".to_string()))
         } else {
             return None;
         };

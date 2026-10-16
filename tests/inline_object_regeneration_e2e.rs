@@ -265,3 +265,56 @@ fn objects_inlined_into_lambdas_and_suspend_bodies_are_the_reference_compilers_c
     let differences = classes.differences();
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
 }
+
+const INITIALIZER_MAIN: &str = r#"
+import lib.*
+
+fun plain(f: () -> String): String = f()
+
+val top = plain { named<Int>()() }
+
+class Holder {
+    val member = plain { named<Long>()() }
+}
+
+object Single {
+    val value = plain { named<Byte>()() }
+}
+
+fun box(): String {
+    val result = top + Holder().member + Single.value
+    return if (result == "IntegerLongByte") "OK" else "FAIL " + result
+}
+"#;
+
+/// A copy made in a lambda of a property initializer encloses the initializer that runs it:
+/// `<clinit>` for a top-level or object property, and the constructor for a member.
+#[test]
+fn objects_inlined_into_initializer_lambdas_are_the_reference_compilers_classes() {
+    let output = common::expect_box_run_against_ref(
+        "inline_object_initializers",
+        SITES_LIB,
+        INITIALIZER_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+    let classes = common::classes_against_kotlinc_lib(
+        "Initializers",
+        &[("Lib.kt", SITES_LIB)],
+        INITIALIZER_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        [
+            "Holder",
+            "Holder$member$lambda$0$$inlined$named$1",
+            "InitializersKt",
+            "InitializersKt$top$lambda$0$$inlined$named$1",
+            "Single",
+            "Single$value$lambda$0$$inlined$named$1",
+        ]
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
