@@ -40,7 +40,7 @@ impl Emitter<'_> {
         self.emit_value(holder, code);
         let (class, descriptor) = ref_class(&elem);
         let field = self.cw.fieldref(class, "element", descriptor);
-        let slot = ty_from_field_descriptor(descriptor);
+        let slot = crate::jvm::physical_type::descriptor_operand_ty(descriptor);
         code.getfield(field, slot_words(slot) as i32);
         if materialize {
             self.narrow_shared_cell_element(elem, code)

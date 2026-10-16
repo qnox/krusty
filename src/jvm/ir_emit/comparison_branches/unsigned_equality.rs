@@ -6,7 +6,8 @@
 //! - a carrier on the left and a box on the right calls `equals-impl(carrier, Object)`;
 //! - a box on the left and a carrier on the right null-checks the box (`null` is not equal) and
 //!   compares the unboxed carrier with the right operand;
-//! - `!=` negates that result.
+//! - `!=` negates that result: a value materializes the negation, and a condition jumps on the
+//!   `==` result with the opposite sense.
 //!
 //! Two carriers stay on the numeric comparison, and two boxes stay on `Intrinsics.areEqual`. When
 //! the right operand must be stored, the left value is stored first, including a local: that
@@ -71,28 +72,13 @@ impl Emitter<'_> {
         let Some(shape) = self.unsigned_mixed(lhs, rhs) else {
             return false;
         };
-        match shape {
-            // `equals-impl` already yields the `==` Boolean, so `!=` and the condition invert the
-            // test instead of materializing a second one.
-            UnsignedMixed::EqualsImpl { semantic } => {
-                self.emit_unsigned_equals_impl(lhs, rhs, semantic, code);
-                if (op == IrBinOp::Eq) == jt {
-                    code.ifne(target);
-                } else {
-                    code.ifeq(target);
-                }
-            }
-            UnsignedMixed::UnboxLeft { semantic } => {
-                self.emit_unsigned_unbox_equality(lhs, rhs, semantic, code);
-                if op == IrBinOp::Ne {
-                    self.negate_material_bool(code);
-                }
-                if jt {
-                    code.ifne(target);
-                } else {
-                    code.ifeq(target);
-                }
-            }
+        // Either shape yields the `==` Boolean, so `!=` and the condition invert the test instead
+        // of materializing a second one, as kotlinc's `Not` jumps on its operand.
+        self.emit_unsigned_equal(lhs, rhs, &shape, code);
+        if (op == IrBinOp::Eq) == jt {
+            code.ifne(target);
+        } else {
+            code.ifeq(target);
         }
         true
     }
