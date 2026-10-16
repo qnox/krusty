@@ -10214,13 +10214,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   operand's static type is a concrete serializer class, and nothing where it already is
   `KSerializer`.
   Known gaps, all independent of which elements are derivable:
-  - kotlinc's generic `write$Self` takes the type-parameter serializers as parameters, and its
-    `$serializer` keeps a private no-argument constructor beside the public one.
+  - kotlinc's generic `write$Self` takes the type-parameter serializers as parameters.
   - kotlinc declares and initializes a generic class's `$childSerializers` before its
     `$cachedDescriptor`, while krusty does it after.
   Tests: `tests/serialization_type_parameter_elements_e2e.rs` (same-file and sibling-file runtime,
   plus `childSerializers`/`deserialize`/`typeParametersSerializers` and child-cache factory bodies,
   cross-checked against the reference compiler).
+- **A generic `$serializer` has two constructors.** The private no-argument primary constructor
+  builds the descriptor as one initializer spanning the class declaration: it closes on the
+  declaration's last line and returns on its first. The public constructor, a declared
+  constructor with a `Signature` and a `@NotNull` parameter per type parameter, checks each
+  `typeSerialK` argument, delegates to it and stores the argument. The `typeSerialK` fields are
+  `private final synthetic` and typed `KSerializer<*>`, and a private synthetic `getTypeSerialK()`
+  per field follows the public constructor in the class file and is absent from `@Metadata`.
+  krusty gave the class a single public constructor taking the serializers and `KSerializer<T>`
+  fields, so every generic `$serializer` differed from kotlinc's.
+  Tests: `tests/serializable_value_class_e2e.rs` (a box run and byte comparisons of one- and
+  two-parameter value-class serializers).
 - **A `@Serializable` value class is coded by its own serializer.** As in kotlinc, a value class's
   `$$serializer` describes it with an `InlineClassDescriptor` and codes the underlying value through
   `encodeInline`/`decodeInline`: a non-null primitive or `String` directly (`encodeInt`), any other

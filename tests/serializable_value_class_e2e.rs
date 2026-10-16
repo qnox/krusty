@@ -149,6 +149,68 @@ fn every_carrier_round_trips() {
     );
 }
 
+const GENERIC_MODEL: &str = "import kotlinx.serialization.Serializable\n\
+    @Serializable\n\
+    @JvmInline\n\
+    value class Boxed<T>(\n\
+    \x20   val value: T,\n\
+    )\n\
+    @Serializable\n\
+    @JvmInline\n\
+    value class Grouped<K, V>(\n\
+    \x20   val value: Map<K, List<V>>,\n\
+    )\n\
+    @Serializable\n\
+    class Holder<T>(\n\
+    \x20   val boxed: Boxed<T>,\n\
+    )\n";
+
+const GENERIC_MAIN: &str = "import kotlinx.serialization.builtins.serializer\n\
+    import kotlinx.serialization.json.Json\n\
+    fun box(): String {\n\
+    \x20   val boxed = Boxed.serializer(Int.serializer())\n\
+    \x20   val grouped = Grouped.serializer(String.serializer(), Int.serializer())\n\
+    \x20   val holder = Holder.serializer(String.serializer())\n\
+    \x20   val a = Json.encodeToString(boxed, Boxed(4))\n\
+    \x20   val b = Json.encodeToString(grouped, Grouped(mapOf(\"k\" to listOf(1, 2))))\n\
+    \x20   val c = Json.encodeToString(holder, Holder(Boxed(\"h\")))\n\
+    \x20   return a + \" \" + Json.decodeFromString(boxed, a).value + \" \" + b + \" \" +\n\
+    \x20       Json.decodeFromString(grouped, b).value + \" \" + c + \" \" +\n\
+    \x20       Json.decodeFromString(holder, c).boxed.value\n\
+    }\n";
+
+#[test]
+fn a_generic_serializer_round_trips_through_its_type_serializers() {
+    assert_eq!(
+        both_compilers_box_files(
+            &[("Model.kt", GENERIC_MODEL), ("Main.kt", GENERIC_MAIN)],
+            "generic_value_class_serializers"
+        ),
+        "4 4 {\"k\":[1,2]} {k=[1, 2]} {\"boxed\":\"h\"} h"
+    );
+}
+
+/// A generic serializer's private constructor builds the descriptor; the public one takes the
+/// type-parameter serializers, delegates to it and stores them in synthetic `KSerializer<*>`
+/// fields, which private synthetic getters read.
+#[test]
+fn a_generic_value_class_serializer_is_kotlincs() {
+    assert_class_matches_kotlinc_in(
+        "SerializableGenericValueClassBoxed",
+        GENERIC_MODEL,
+        "Boxed$$serializer",
+    );
+}
+
+#[test]
+fn a_two_parameter_value_class_serializer_is_kotlincs() {
+    assert_class_matches_kotlinc_in(
+        "SerializableGenericValueClassGrouped",
+        GENERIC_MODEL,
+        "Grouped$$serializer",
+    );
+}
+
 const UNSIGNED_MODEL: &str = "import kotlinx.serialization.Serializable\n\
     @Serializable\n\
     @JvmInline\n\

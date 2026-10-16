@@ -39,9 +39,7 @@ mod type_parameter_serializers;
 mod value_class_body;
 mod value_class_types;
 
-use crate::ir::{
-    Callee, ClassId, ExprId, IrConst, IrCtorArg, IrExpr, IrFile, IrFunction, IrTypeOp,
-};
+use crate::ir::{Callee, ClassId, ExprId, IrConst, IrExpr, IrFile, IrFunction, IrTypeOp};
 use crate::kt_string::KtString;
 use crate::libraries::InlineKind;
 use crate::names::property_getter_name;
@@ -1676,8 +1674,9 @@ impl IrPlugin for SerializationPlugin {
                         type_parameter_serializers.install_member_body(ir, fid);
                     }
                     crate::ir::IrGeneratedFunctionRole::SerializationTypeParameterSerializers => {}
-                    crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf => {
-                        unreachable!("the serializer member ledger contains no write$Self")
+                    crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf
+                    | crate::ir::IrGeneratedFunctionRole::SerializationTypeSerializerGetter(_) => {
+                        unreachable!("the serializer member ledger holds only its declared members")
                     }
                 }
             }

@@ -912,7 +912,7 @@ fn attach_synth_nullability(
         cw.set_method_param_annotations("<init>", &ctor_desc, &user);
     }
     // Accessors: a reference getter annotates its return; a `var` reference setter its parameter.
-    for f in &c.fields {
+    for f in c.fields.iter().filter(|f| !f.is_compiler_generated()) {
         let Some(a) = ann(f.ty) else {
             continue;
         };
