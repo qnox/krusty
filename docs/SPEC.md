@@ -3298,6 +3298,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `MutableList<Frame<*>>` argument. Tests: `tests/classpath_star_projection_bound_e2e.rs` (run
   against krusty- and kotlinc-built dependencies; classes byte-identical to kotlinc's) and
   `a_star_projection_contains_every_argument_whatever_bound_it_carries` in `src/assignable.rs`.
+- **A platform-typed implicit receiver exposes its members.** In
+  `KeyPairGenerator.getInstance("RSA").apply { initialize(1024) }` the `apply` receiver is the
+  flexible `KeyPairGenerator!`. A bare `initialize` selects the member exactly as
+  `this.initialize` does; the flexible type is usable as its non-null bound for member calls through
+  an implicit receiver, as it is on an explicit one. Test:
+  `tests/platform_implicit_receiver_member_e2e.rs`.
+
 - **A lexical local or parameter beats an implicit receiver's member of the same name, even a
   receiver introduced inside its scope.** `val headers = authHeaders(); client.get(url) {
   headers.forEach { (k, v) -> header(k, v) } }` reads the local map, not
