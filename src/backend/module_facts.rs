@@ -130,6 +130,8 @@ impl BackendClassifierFact {
 pub struct BackendModuleFacts {
     classifiers: HashMap<TypeName, Arc<BackendClassifierFact>>,
     generated_classifiers: Box<[crate::types::GeneratedClassifierFact]>,
+    serialization_generated_member_statuses:
+        Option<crate::types::SerializationGeneratedMemberStatuses>,
     /// Stable identities of classifiers declared inside ordinary bodies. Their completed semantic
     /// shape belongs to the active Pass-2 IR file, never to the pre-Pass-2 module snapshot. Keeping
     /// only the identity prevents an accidental lookup of a same-named dependency classifier.
@@ -330,6 +332,8 @@ impl BackendModuleFacts {
         Ok(Self {
             classifiers,
             generated_classifiers: generated_classifiers.into_boxed_slice(),
+            serialization_generated_member_statuses: index
+                .serialization_generated_member_statuses(),
             body_local_classifiers,
             source_value_classes,
             metadata_readable_value_classes,
@@ -368,6 +372,7 @@ impl BackendModuleFacts {
         Ok(Self {
             classifiers,
             generated_classifiers: Box::default(),
+            serialization_generated_member_statuses: None,
             body_local_classifiers: body_local_classifiers.into_iter().collect(),
             source_value_classes,
             metadata_readable_value_classes,
@@ -389,6 +394,12 @@ impl BackendModuleFacts {
 
     pub fn generated_classifiers(&self) -> &[crate::types::GeneratedClassifierFact] {
         &self.generated_classifiers
+    }
+
+    pub(crate) fn serialization_generated_member_statuses(
+        &self,
+    ) -> Option<crate::types::SerializationGeneratedMemberStatuses> {
+        self.serialization_generated_member_statuses
     }
 
     pub fn is_body_local(&self, classifier: TypeName) -> bool {

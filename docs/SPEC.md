@@ -11224,6 +11224,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   of a classifier that declares none, so `toString`/`equals`/`hashCode` overrides have override
   edges like any other. Measured against kotlinc 2.4.0, 2.4.10 and 2.4.20. Test:
   `tests/metadata_return_value_status_e2e.rs`.
+- **A serialization `$serializer`'s generated overrides inherit their status too.** `serialize`,
+  `deserialize`, `childSerializers` and `typeParametersSerializers` take the status the runtime's
+  overridden declaration records, read from the `GeneratedSerializer` hierarchy on the classpath:
+  must-use against kotlinx.serialization 1.11, none against 1.9. Measured against kotlinc 2.4.20.
+  Test: `tests/serializer_return_value_status_e2e.rs`.
 - **`@Metadata` field order and own type parameters.** Messages serialize fields in ascending
   field-number order, as kotlinc's generated `writeTo` does, and a `Type` refers to a type parameter
   its declaration owns by name and to an enclosing class's by id. Measured against kotlinc 2.4.0,

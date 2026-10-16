@@ -37,7 +37,13 @@ pub(super) fn checked_ir_file<'a>(
     diags: &mut DiagSink,
 ) -> Option<CheckedIrFile<'a>> {
     // Plugin-generated declarations are part of the file every target receives.
-    crate::plugins::declare_enabled(&mut ir, symbols.native_plugins(), module.module_name);
+    crate::plugins::declare_enabled(
+        &mut ir,
+        symbols.native_plugins(),
+        module.module_name,
+        module_facts.serialization_generated_member_statuses(),
+    );
+    let classifiers = CheckedBackendClassifiers::new(module_facts, symbols.semantic_platform());
     let callables = match CheckedBackendCallables::freeze(&ir, symbols.semantic_platform()) {
         Ok(callables) => callables,
         Err(error) => {
@@ -54,7 +60,7 @@ pub(super) fn checked_ir_file<'a>(
         ir,
         kind: CheckedIrUnitKind::Source,
         source,
-        classifiers: CheckedBackendClassifiers::new(module_facts, symbols.semantic_platform()),
+        classifiers,
         callables,
         dependency_exports: Default::default(),
         native_plugins: symbols.native_plugins(),
