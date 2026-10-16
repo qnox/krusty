@@ -107,12 +107,19 @@ fn class_serial_name_override(ir: &IrFile, class_id: ClassId) -> Option<KtString
     }
 }
 
+/// Whether a property is serialized with a `ContextualSerializer`: it is marked `@Contextual`, or
+/// its type is named by the file's `@UseContextualSerialization`. A serializer the declaration names
+/// itself (`@Serializable(with = S::class)` on the property or its type) takes precedence over both,
+/// as kotlinc consults a property's own serializer before the contextual rules.
 pub(super) fn property_is_contextual(
     ctx: &PluginContext,
     ir: &IrFile,
     class_id: ClassId,
     property: &str,
 ) -> bool {
+    if declared_serializer_of(ctx, ir, class_id, property).is_some() {
+        return false;
+    }
     if ctx.property_has_annotation(ir, class_id, property, type_name(CONTEXTUAL_FQ)) {
         return true;
     }

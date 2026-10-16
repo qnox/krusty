@@ -792,10 +792,35 @@ fn contextual_serializer_for(ir: &mut IrFile, is_contextual: bool, ty: &Ty) -> O
 /// whose type is named in `@file:UseContextualSerialization`). Its descriptor `kind` is CONTEXTUAL; the
 /// actual serializer is resolved from the `SerializersModule` at run time.
 fn build_contextual_serializer(ir: &mut IrFile, classifier: TypeName) -> ExprId {
+    let kclass = contextual_kclass(ir, classifier);
+    ir.new_external(
+        "kotlinx/serialization/ContextualSerializer",
+        "(Lkotlin/reflect/KClass;)V",
+        vec![kclass],
+    )
+}
+
+/// `new ContextualSerializer(<type>::class, fallback, typeArgumentsSerializers)` — the serializer
+/// kotlinc caches for a contextual PROPERTY, as opposed to a contextual collection element.
+fn build_contextual_property_serializer(
+    ir: &mut IrFile,
+    classifier: TypeName,
+    fallback: ExprId,
+    type_arguments: ExprId,
+) -> ExprId {
+    let kclass = contextual_kclass(ir, classifier);
+    ir.new_external(
+        "kotlinx/serialization/ContextualSerializer",
+        "(Lkotlin/reflect/KClass;Lkotlinx/serialization/KSerializer;[Lkotlinx/serialization/KSerializer;)V",
+        vec![kclass, fallback, type_arguments],
+    )
+}
+
+fn contextual_kclass(ir: &mut IrFile, classifier: TypeName) -> ExprId {
     let classlit = ir.add_expr(IrExpr::ClassConst {
         internal: Some(classifier),
     });
-    let kclass = ir.add_expr(IrExpr::Call {
+    ir.add_expr(IrExpr::Call {
         callee: Callee::Static {
             owner: type_name("kotlin/jvm/internal/Reflection"),
             name: "getOrCreateKotlinClass".to_string(),
@@ -804,12 +829,7 @@ fn build_contextual_serializer(ir: &mut IrFile, classifier: TypeName) -> ExprId 
         },
         dispatch_receiver: None,
         args: vec![classlit],
-    });
-    ir.new_external(
-        "kotlinx/serialization/ContextualSerializer",
-        "(Lkotlin/reflect/KClass;)V",
-        vec![kclass],
-    )
+    })
 }
 
 /// `new PolymorphicSerializer(<base>::class)` — the element serializer for a star-projection / erased

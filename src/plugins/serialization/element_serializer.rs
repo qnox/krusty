@@ -4,9 +4,10 @@ use super::constructed_standard_serializers::constructed_standard_serializer;
 use super::type_argument_serializers::named_serializer;
 use super::type_parameter_serializers::TypeParameterSerializers;
 use super::{
-    build_contextual_serializer, build_polymorphic_serializer, class_ty,
-    generated_serializer_accessor, is_nullable, kserializer_of, serializer_of_name,
-    type_is_contextual, wrap_nullable_serializer, KSERIALIZER_FQ,
+    build_contextual_property_serializer, build_contextual_serializer,
+    build_polymorphic_serializer, class_ty, generated_serializer_accessor, is_nullable,
+    kserializer_of, serializer_of_name, type_is_contextual, wrap_nullable_serializer,
+    KSERIALIZER_FQ,
 };
 use crate::ir::Spelled;
 use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
@@ -27,6 +28,13 @@ pub(super) enum ElementSerializerPlan {
     },
     Nullable(Box<ElementSerializerPlan>),
     Contextual(TypeName),
+    /// A contextual PROPERTY's serializer: `ContextualSerializer(T::class, <fallback>, [<type
+    /// argument serializers>])`, the fallback being `T`'s own serializer when it has one.
+    ContextualProperty {
+        classifier: TypeName,
+        fallback: Option<Box<ElementSerializerPlan>>,
+        arguments: Vec<ElementSerializerPlan>,
+    },
     Polymorphic(TypeName),
     /// A `@Serializable object`: `ObjectSerializer(<serial name>, <object>.INSTANCE, [])`.
     Object {
@@ -279,6 +287,81 @@ pub(super) fn element_serializer_plan_in(
     scope: TypeParameterSerializers<'_>,
     annotated: &Spelled,
 ) -> Option<ElementSerializerPlan> {
+    serializer_plan(ir, ctx, ty, scope, annotated, FileContextual::Applies)
+}
+
+/// Whether the file's `@UseContextualSerialization` decides the serializer of the type being
+/// planned. It does not for a contextual property's fallback, which is the type's OWN serializer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FileContextual {
+    Applies,
+    Ignored,
+}
+
+/// The child-cache slot of a contextual property of type `ty`: `@Contextual`, or a type the file's
+/// `@UseContextualSerialization` names. kotlinc caches it as
+/// `ContextualSerializer(T::class, <T's own serializer or null>, [<T's type argument serializers>])`,
+/// the fallback nullable when the property is.
+/// `Ok(None)` when the type mentions a class type parameter, which a static cache cannot hold.
+pub(super) fn contextual_property_plan(
+    ir: &IrFile,
+    ctx: &PluginContext,
+    ty: &Ty,
+    annotated: &Spelled,
+) -> Result<Option<ElementSerializerPlan>, UnderivableChildCacheElement> {
+    if ty.mentions_ty_param() {
+        return Ok(None);
+    }
+    let nn = ty.non_null();
+    let classifier = nn
+        .kotlin_class_internal()
+        .ok_or(UnderivableChildCacheElement)?;
+    let fallback = serializer_plan(
+        ir,
+        ctx,
+        &nn,
+        TypeParameterSerializers::NONE,
+        annotated,
+        FileContextual::Ignored,
+    )
+    .map(|own| {
+        // A nullable property's fallback is its type's serializer made nullable.
+        Box::new(if ty.is_nullable() {
+            ElementSerializerPlan::Nullable(Box::new(own))
+        } else {
+            own
+        })
+    });
+    let arguments = nn
+        .type_args()
+        .iter()
+        .enumerate()
+        .map(|(ordinal, argument)| {
+            type_argument_serializer_plan(
+                ir,
+                ctx,
+                argument,
+                TypeParameterSerializers::NONE,
+                annotated.arg(ordinal),
+            )
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or(UnderivableChildCacheElement)?;
+    Ok(Some(ElementSerializerPlan::ContextualProperty {
+        classifier,
+        fallback,
+        arguments,
+    }))
+}
+
+fn serializer_plan(
+    ir: &IrFile,
+    ctx: &PluginContext,
+    ty: &Ty,
+    scope: TypeParameterSerializers<'_>,
+    annotated: &Spelled,
+    file_contextual: FileContextual,
+) -> Option<ElementSerializerPlan> {
     let nn = ty.non_null();
     // A serializer the type itself is annotated with wins over everything the type's own
     // declaration would select, including a type parameter's supplied serializer.
@@ -320,7 +403,7 @@ pub(super) fn element_serializer_plan_in(
     // serializes through a `ContextualSerializer`, exactly as a property of that type would. The
     // property-level rule cannot see this one: the contextual type appears only as a collection's
     // element (`List<FlexibleMap>`).
-    if type_is_contextual(ctx, ir, fq_name) {
+    if file_contextual == FileContextual::Applies && type_is_contextual(ctx, ir, fq_name) {
         return Some(ElementSerializerPlan::Contextual(fq_name));
     }
     // A `@Serializable object` has no `$serializer` either: its serializer is an `ObjectSerializer`
@@ -696,6 +779,29 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
         }
         ElementSerializerPlan::Contextual(classifier) => {
             build_contextual_serializer(ir, classifier)
+        }
+        ElementSerializerPlan::ContextualProperty {
+            classifier,
+            fallback,
+            arguments,
+        } => {
+            let fallback = match fallback {
+                Some(fallback) => {
+                    let fallback = emit_element_serializer(ir, *fallback);
+                    narrow_to_kserializer(ir, fallback)
+                }
+                None => ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null)),
+            };
+            let elements: Vec<ExprId> = arguments
+                .into_iter()
+                .map(|argument| emit_element_serializer(ir, argument))
+                .collect();
+            let arguments = ir.add_expr(IrExpr::Vararg {
+                array_type: Ty::obj_args("kotlin/Array", &[class_ty(KSERIALIZER_FQ)]),
+                spreads: vec![false; elements.len()],
+                elements,
+            });
+            build_contextual_property_serializer(ir, classifier, fallback, arguments)
         }
         ElementSerializerPlan::Polymorphic(classifier) => {
             build_polymorphic_serializer(ir, classifier)

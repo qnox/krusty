@@ -14,8 +14,8 @@
 use super::{
     class_ty, declared_serializer_of,
     element_serializer::{
-        child_cache_element_plan, emit_cached_element_serializer, ElementSerializerPlan,
-        UnderivableChildCacheElement,
+        child_cache_element_plan, contextual_property_plan, emit_cached_element_serializer,
+        ElementSerializerPlan, UnderivableChildCacheElement,
     },
     kserializer_of, property_is_contextual, type_name, Callee, ClassId, ExprId, InlineKind,
     IrConst, IrExpr, IrFile, IrFunction, IrTypeOp, PluginContext, Ty, TypeName,
@@ -208,9 +208,10 @@ pub(super) fn add_child_serializer_cache(
     // Which properties need a cached serializer, decided ONCE, before anything is built.
     //
     // A property needs one when its serializer must be ALLOCATED rather than read as a singleton —
-    // a collection, an enum. A property that NAMES its serializer answers `false` whatever its
-    // type: an explicit `@Serializable(with = X::class)` or a contextual element is built from the
-    // DECLARATION, so there is nothing about the type to defer and the cache has no slot for it.
+    // a collection, an enum. A property that NAMES its serializer with `@Serializable(with =
+    // X::class)` answers `false` whatever its type: it is built from the DECLARATION, so there is
+    // nothing about the type to defer and the cache has no slot for it. A contextual property is
+    // cached as its constructed `ContextualSerializer`, as kotlinc does.
     //
     // Classifying one of those as cacheable asks the type for a serializer it cannot supply, which
     // now REFUSES the file rather than quietly dropping the cache. The classification has to be
@@ -220,19 +221,16 @@ pub(super) fn add_child_serializer_cache(
         foo_fields
             .iter()
             .map(|(name, ty)| {
-                if property_is_contextual(ctx, ir, class_id, name)
-                    || declared_serializer_of(ctx, ir, class_id, name).is_some()
-                {
+                if declared_serializer_of(ctx, ir, class_id, name).is_some() {
                     return Ok(None);
                 }
-                child_cache_element_plan(
-                    ir,
-                    ctx,
-                    ty,
-                    &super::type_argument_serializers::declared_type_spelling(
-                        ctx, ir, class_id, name,
-                    ),
-                )
+                let annotated = super::type_argument_serializers::declared_type_spelling(
+                    ctx, ir, class_id, name,
+                );
+                if property_is_contextual(ctx, ir, class_id, name) {
+                    return contextual_property_plan(ir, ctx, ty, &annotated);
+                }
+                child_cache_element_plan(ir, ctx, ty, &annotated)
             })
             .collect();
 

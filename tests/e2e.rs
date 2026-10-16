@@ -3032,6 +3032,7 @@ mod unboxing_coercion_e2e;
 
 mod data_class_enum_equality_e2e;
 mod serializer_metadata_class_id_e2e;
+mod serializer_property_with_over_contextual_e2e;
 #[path = "settled_instance_check_e2e.rs"]
 mod settled_instance_check_e2e;
 #[path = "unsigned_arrays_e2e.rs"]

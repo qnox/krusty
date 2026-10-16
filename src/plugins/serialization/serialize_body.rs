@@ -201,9 +201,21 @@ impl SerializeBody<'_> {
                 break;
             };
             let c = ir.add_expr(IrExpr::GetValue(encoder_slot));
-            if let Some(inst) =
-                contextual_serializer_for(ir, property_is_contextual(ctx, ir, class_id, pname), ty)
-            {
+            let contextual = property_is_contextual(ctx, ir, class_id, pname);
+            let contextual = if contextual {
+                super::child_serializer_cache::cached_strategy(
+                    ir,
+                    plan.as_ref(),
+                    Some(cache_local),
+                    i,
+                    elements.len(),
+                    "kotlinx/serialization/SerializationStrategy",
+                )
+                .or_else(|| contextual_serializer_for(ir, true, ty))
+            } else {
+                None
+            };
+            if let Some(inst) = contextual {
                 // Contextual element: encode[Nullable]SerializableElement(desc, i,
                 // ContextualSerializer(<type>::class), value.getX()).
                 let method = if is_nullable(ty) {

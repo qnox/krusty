@@ -111,12 +111,15 @@ impl ElementDecode<'_> {
         let dk = ir.add_expr(IrExpr::GetValue(self.descriptor_local));
         let idxc = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
         let cdk = ir.add_expr(IrExpr::GetValue(self.composite_local));
-        let decoded = if let Some(inst) = contextual_serializer_for(
-            ir,
-            property_is_contextual(ctx, ir, self.serialized_class, &self.fields[k].0),
-            &ty,
-        ) {
-            // Contextual element: `ContextualSerializer(<type>::class)`.
+        let contextual = property_is_contextual(ctx, ir, self.serialized_class, &self.fields[k].0);
+        let contextual = if contextual {
+            self.cached_slot(ir, k)
+                .or_else(|| contextual_serializer_for(ir, true, &ty))
+        } else {
+            None
+        };
+        let decoded = if let Some(inst) = contextual {
+            // Contextual element: its cached `ContextualSerializer`, else one built here.
             self.decode_serializable(ir, k, [dk, idxc, cdk], inst)
         } else if let Some(internal) =
             declared_serializer_of(ctx, ir, self.serialized_class, &self.fields[k].0)
