@@ -2112,6 +2112,8 @@ mod object_const_val_e2e;
 mod object_default_ctor_arg_e2e;
 #[path = "object_extends_class_e2e.rs"]
 mod object_extends_class_e2e;
+#[path = "object_field_signature_order_e2e.rs"]
+mod object_field_signature_order_e2e;
 #[path = "object_member_import_e2e.rs"]
 mod object_member_import_e2e;
 #[path = "object_member_overload_e2e.rs"]

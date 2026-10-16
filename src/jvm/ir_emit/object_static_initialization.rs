@@ -45,30 +45,10 @@ pub(super) fn emit(
     );
     delegated_property_array::declare(env, c.fq_name, cw);
 
-    // An interface companion interleaves const fields with instance fields in source order, and
-    // both intern at the field-table visit (after `<clinit>` and the accessors). A named object's
-    // backing fields stay on the eager path this block has always used.
+    // An interface companion interleaves const fields with instance fields in source order; a named
+    // object's backing fields were declared ahead of its static storage (`declare_fields`).
     if interface_companion {
         emit_interface_companion_member_fields(ir, env.run, c, signature_formatter, fq_name, cw);
-    } else {
-        for (field_index, field) in c.fields.iter().enumerate() {
-            let acc = declared_field_access(c, field_index, true);
-            let type_parameter = ir
-                .field_signatures(fq_name)
-                .and_then(|signatures| signatures.iter().find(|(name, _)| *name == field.name))
-                .map(|(_, parameter)| parameter.as_str())
-                .or(field.type_param.as_deref());
-            let field_sig = property_jvm_signatures(signature_formatter, &field.ty, type_parameter)
-                .field
-                .filter(|_| !field.is_property_delegate());
-            let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
-            cw.add_field_sig(
-                acc,
-                &physical_name,
-                &ir_type_desc(&field.ty),
-                field_sig.as_deref(),
-            );
-        }
     }
 
     let init_body = c.init_body;
@@ -204,6 +184,25 @@ pub(super) fn emit(
     }
 }
 
+/// Declare a named object's backing fields ahead of its static storage. Like an interface
+/// companion's, they intern at the field-table visit: after `<clinit>` and the accessors, so a
+/// field's generic `Signature` follows the initializer's constants.
+pub(super) fn declare_fields(
+    ir: &IrFile,
+    run: &EmitRun,
+    c: &IrClass,
+    signature_formatter: &JvmSignatureFormatter<'_>,
+    fq_name: &str,
+    cw: &mut ClassWriter,
+) {
+    if !static_storage(ir, c) || companion_of_interface(ir, c) {
+        return;
+    }
+    for field_index in 0..c.fields.len() {
+        add_late_member_field(ir, run, c, signature_formatter, fq_name, cw, field_index);
+    }
+}
+
 /// Instance backing fields and companion-owned `const val`s, in source order, after `$$INSTANCE`.
 ///
 /// A public or internal const also has a copy on the interface. The copy that stays here is the
@@ -250,44 +249,7 @@ fn emit_interface_companion_member_fields(
     for (_, _, member) in members {
         match member {
             Member::Instance(field_index) => {
-                let field = &c.fields[field_index];
-                let acc = declared_field_access(c, field_index, true);
-                let type_parameter = ir
-                    .field_signatures(fq_name)
-                    .and_then(|signatures| signatures.iter().find(|(name, _)| *name == field.name))
-                    .map(|(_, parameter)| parameter.as_str())
-                    .or(field.type_param.as_deref());
-                let field_sig =
-                    property_jvm_signatures(signature_formatter, &field.ty, type_parameter)
-                        .field
-                        .filter(|_| !field.is_property_delegate());
-                let physical_name = instance_field_jvm_name(ir, run, c, field_index);
-                let descriptor = ir_type_desc(&field.ty);
-                let nullability = field_visibility::publishes_field_nullability(c, field_index)
-                    .then(|| {
-                        nullability_annotation(field_nullability_kind(
-                            ir,
-                            fq_name,
-                            &field.name,
-                            field.ty,
-                        ))
-                    })
-                    .flatten();
-                cw.add_field_late_sig(
-                    acc,
-                    &physical_name,
-                    &descriptor,
-                    field_sig.as_deref(),
-                    None,
-                    nullability,
-                );
-                if let Some(annotations) = c
-                    .field_annotations
-                    .iter()
-                    .find(|annotations| annotations.field == field.name)
-                {
-                    cw.set_last_late_field_annotations(&annotations.annotations);
-                }
+                add_late_member_field(ir, run, c, signature_formatter, fq_name, cw, field_index);
             }
             Member::Const(static_index) => {
                 let property = &ir.statics[static_index as usize];
@@ -311,5 +273,48 @@ fn emit_interface_companion_member_fields(
                 cw.add_field_late(access, &property.name, &descriptor, value, nullability);
             }
         }
+    }
+}
+
+/// Declare an object's backing field for the field-table visit, with its generic `Signature`,
+/// nullability and declared annotations.
+fn add_late_member_field(
+    ir: &IrFile,
+    run: &EmitRun,
+    c: &IrClass,
+    signature_formatter: &JvmSignatureFormatter<'_>,
+    fq_name: &str,
+    cw: &mut ClassWriter,
+    field_index: usize,
+) {
+    let field = &c.fields[field_index];
+    let acc = declared_field_access(c, field_index, true);
+    let type_parameter = ir
+        .field_signatures(fq_name)
+        .and_then(|signatures| signatures.iter().find(|(name, _)| *name == field.name))
+        .map(|(_, parameter)| parameter.as_str())
+        .or(field.type_param.as_deref());
+    let field_sig = property_jvm_signatures(signature_formatter, &field.ty, type_parameter)
+        .field
+        .filter(|_| !field.is_property_delegate());
+    let physical_name = instance_field_jvm_name(ir, run, c, field_index);
+    let descriptor = ir_type_desc(&field.ty);
+    let nullability = field_visibility::publishes_field_nullability(c, field_index)
+        .then(|| nullability_annotation(field_nullability_kind(ir, fq_name, &field.name, field.ty)))
+        .flatten();
+    cw.add_field_late_sig(
+        acc,
+        &physical_name,
+        &descriptor,
+        field_sig.as_deref(),
+        None,
+        nullability,
+    );
+    if let Some(annotations) = c
+        .field_annotations
+        .iter()
+        .find(|annotations| annotations.field == field.name)
+    {
+        cw.set_last_late_field_annotations(&annotations.annotations);
     }
 }
