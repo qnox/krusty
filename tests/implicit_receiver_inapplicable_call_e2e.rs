@@ -37,3 +37,23 @@ fn an_inapplicable_implicit_receiver_member_reports_its_argument_like_kotlinc() 
         &[],
     );
 }
+
+/// A body-local classifier's member family exists only in the active body-checking overlay. The
+/// rejected call must therefore diagnose from the family selected at that receiver rung; querying
+/// the immutable module provider afterward would lose the declaration and report an unresolved
+/// name instead.
+#[test]
+fn a_rejected_body_local_member_uses_the_retained_candidate_like_kotlinc() {
+    common::assert_errors_match_kotlinc(
+        &[(
+            "Main.kt",
+            "fun enclosing() {\n\
+             \x20   class Local {\n\
+             \x20       fun take(xs: List<Int>) {}\n\
+             \x20       fun use(xs: List<Int>?) { take(xs) }\n\
+             \x20   }\n\
+             }\n",
+        )],
+        &[],
+    );
+}

@@ -767,43 +767,6 @@ impl Checker<'_> {
         }
     }
 
-    /// Report a bare call whose only same-named functions are members (or member extensions) of
-    /// an implicit receiver, none applicable: the nearest receiver that has any owns the
-    /// diagnostic, as it would own the call. `false` when no implicit receiver has one.
-    pub(super) fn report_inapplicable_implicit_receiver_call(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call_args: CallArgs<'_>,
-        name: &str,
-        receivers: &[ImplicitReceiver],
-        expected: Option<Ty>,
-    ) -> bool {
-        for receiver in receivers {
-            let receiver = self.apply_postponed_call_bindings(receiver.ty);
-            let candidates = self
-                .stable_receiver_callables(receiver, name)
-                .functions()
-                .to_vec();
-            if candidates.is_empty() {
-                continue;
-            }
-            let type_args = self.resolved_explicit_type_args(scope, call_args.call);
-            self.report_inapplicable_receiver_candidates(
-                scope,
-                call_args,
-                name,
-                CallConstraints {
-                    type_args: &type_args,
-                    receiver,
-                    expected,
-                },
-                &candidates,
-            );
-            return true;
-        }
-        false
-    }
-
     /// Report NONE_APPLICABLE over tied rejected candidates.
     pub(super) fn report_member_and_extensions_inapplicable(
         &mut self,
