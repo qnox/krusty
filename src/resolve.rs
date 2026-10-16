@@ -197,6 +197,7 @@ mod safe_call_flow;
 mod safe_index;
 mod sam_constructors;
 mod sam_conversion_recording;
+mod serialization_generated_members;
 mod source_constructor_type_oracle;
 mod source_fragment;
 mod source_generic_signatures;
@@ -323,6 +324,7 @@ use property_read_selection::{PropertyReadAmbiguity, PropertyReadMemberSelection
 use property_write_selection::PropertyWriteSelection;
 use qualifiers::*;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
+pub(crate) use serialization_generated_members::resolve as resolve_serialization_generated_member_statuses;
 use stable_path::StablePathRead;
 use streaming_signature_bridge::*;
 pub(crate) use streaming_signature_bridge::{

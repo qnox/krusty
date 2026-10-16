@@ -1,12 +1,16 @@
 //! Construction of methods owned by serialization-plugin generated classes.
 
-use super::{class_ty, kserializer_of, unit};
+#[cfg(test)]
+use super::kserializer_of;
+use super::{class_ty, unit};
 use crate::ir::{
     Callee, ExprId, IrExpr, IrFile, IrFunction, IrGeneratedDeclarationDebug,
     IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope, IrGeneratedFunctionPublication,
     IrGeneratedMemberPublication, IrProperty,
 };
-use crate::types::{Ty, TypeName, Visibility};
+use crate::types::{
+    ReturnValueStatus, SerializationGeneratedMemberStatuses, Ty, TypeName, Visibility,
+};
 
 const SERIALIZE_PARAMETER_NAMES: [&str; 2] = ["encoder", "value"];
 const DESERIALIZE_PARAMETER_NAMES: [&str; 1] = ["decoder"];
@@ -37,6 +41,29 @@ pub(super) fn publish_write_self(ir: &mut IrFile, owner: TypeName, function: u32
     ir.function_annotations
         .insert(function, super::annotations::write_self_annotations());
     ir.publish_generated_members(owner, write_self_publication(function, owner_line));
+}
+
+/// The return-value status each generated `$serializer` member inherits from the runtime's
+/// `GeneratedSerializer` declaration it overrides. The runtime decides it: a core that marks its
+/// serializer API must-use makes every generated override must-use, and an older core leaves them
+/// unspecified.
+impl SerializationGeneratedMemberStatuses {
+    /// Record the inherited statuses on the members [`add_serializer_members`] declared.
+    pub(super) fn record(self, ir: &mut IrFile, members: GeneratedSerializerMembers) {
+        for (function, status) in [
+            (members.serialize, self.serialize),
+            (members.deserialize, self.deserialize),
+            (members.child_serializers, self.child_serializers),
+            (
+                members.type_parameter_serializers,
+                self.type_parameter_serializers,
+            ),
+        ] {
+            if status != ReturnValueStatus::Unspecified {
+                ir.fn_return_value_statuses.insert(function, status);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,12 +212,7 @@ pub(super) fn descriptor_property(
 /// despite the same erasure. The stored star bound is a semantic read fact; metadata omits its
 /// nested type.
 fn serializer_array() -> Ty {
-    Ty::obj_args(
-        "kotlin/Array",
-        &[kserializer_of(Ty::star_projection(Ty::nullable(class_ty(
-            "kotlin/Any",
-        ))))],
-    )
+    super::generated_serializer_member_shapes(class_ty("kotlin/Any"))[2].result
 }
 
 /// Declare the complete member surface shared by generated serializer classes. Each member's body

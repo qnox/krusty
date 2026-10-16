@@ -91,7 +91,56 @@ pub const SERIALIZABLE_FQ: &str = "kotlinx/serialization/Serializable";
 pub const KSERIALIZER_FQ: &str = "kotlinx/serialization/KSerializer";
 /// `@kotlinx.serialization.Transient`: the property is not a serial element.
 const TRANSIENT_FQ: &str = "kotlinx/serialization/Transient";
-const GENERATED_SERIALIZER_FQ: &str = "kotlinx/serialization/internal/GeneratedSerializer";
+pub(crate) const GENERATED_SERIALIZER_FQ: &str =
+    "kotlinx/serialization/internal/GeneratedSerializer";
+
+/// Complete semantic input/result shape of one member a generated serializer overrides.
+pub(crate) struct GeneratedSerializerMemberShape {
+    pub(crate) name: &'static str,
+    pub(crate) parameters: Vec<Ty>,
+    pub(crate) result: Ty,
+}
+
+/// The four override slots whose inherited declaration status is copied to plugin-generated
+/// serializer members. This is the plugin ABI contract; Pass 1 matches each shape against the
+/// runtime's ordinary declaration model rather than selecting by arity in a backend.
+pub(crate) fn generated_serializer_member_shapes(
+    serialized: Ty,
+) -> [GeneratedSerializerMemberShape; 4] {
+    let serializer_array = || {
+        Ty::obj_args(
+            "kotlin/Array",
+            &[kserializer_of(Ty::star_projection(Ty::nullable(Ty::obj(
+                "kotlin/Any",
+            ))))],
+        )
+    };
+    [
+        GeneratedSerializerMemberShape {
+            name: "serialize",
+            parameters: vec![
+                Ty::obj("kotlinx/serialization/encoding/Encoder"),
+                serialized,
+            ],
+            result: unit(),
+        },
+        GeneratedSerializerMemberShape {
+            name: "deserialize",
+            parameters: vec![Ty::obj("kotlinx/serialization/encoding/Decoder")],
+            result: serialized,
+        },
+        GeneratedSerializerMemberShape {
+            name: "childSerializers",
+            parameters: Vec::new(),
+            result: serializer_array(),
+        },
+        GeneratedSerializerMemberShape {
+            name: "typeParametersSerializers",
+            parameters: Vec::new(),
+            result: serializer_array(),
+        },
+    ]
+}
 
 /// `StringFormat.encodeToString(SerializationStrategy, value): String` — the 2-arg member a reified
 /// `fmt.encodeToString(x)` lowers to. Owned here (not core) so a new serialization runtime is a
@@ -1415,7 +1464,12 @@ impl IrPlugin for SerializationPlugin {
             if class.is_sealed {
                 continue;
             }
-            serializer_class::declare(ir, class_id);
+            serializer_class::declare(
+                ir,
+                class_id,
+                ctx.generated_serializer_statuses()
+                    .expect("Pass 1 must publish the exact generated-serializer override statuses"),
+            );
         }
     }
 

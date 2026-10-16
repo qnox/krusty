@@ -1425,6 +1425,10 @@ pub struct ResolvedModuleIndex {
     /// This is the semantic handoff; lowering/backends must not recreate it from annotations or
     /// generated name conventions.
     generated_classifiers: HashMap<DeclarationId, Box<[crate::types::GeneratedClassifierFact]>>,
+    /// Return-value statuses of the exact runtime declarations overridden by serialization-plugin
+    /// generated members. Pass 1 resolves this closed contract from full semantic shapes.
+    serialization_generated_member_statuses:
+        Option<crate::types::SerializationGeneratedMemberStatuses>,
     /// Exact companion accessor contributed by the serialization frontend plugin for a source
     /// classifier. The callable was selected while the generated symbol table was authoritative;
     /// later consumers receive its owner and arity without recognizing a generated spelling.
@@ -2619,6 +2623,7 @@ impl ResolvedModuleIndex {
             && self.continuation_ordinals.is_empty()
             && self.local_class_name_provenance.is_empty()
             && self.generated_classifiers.is_empty()
+            && self.serialization_generated_member_statuses.is_none()
             && self.serialization_companion_accessors.is_empty()
             && self.no_arg_constructors.is_empty()
             && self.sam_with_receiver_annotations.is_empty()
