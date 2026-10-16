@@ -71,6 +71,7 @@ mod callable_reference_prefilter;
 mod callable_reference_selection;
 mod candidate_display;
 mod class_literal_array_of_nothing;
+mod class_literal_receiver;
 use candidate_display::{
     ambiguous_classifier_message, classifier_access_display_from_shape,
     inaccessible_classifier_message,
@@ -62084,8 +62085,17 @@ impl<'a> Checker<'a> {
                         .flatten()
                         .map(|(_, ty)| ty)
                 };
-                let unbound =
-                    unbound.map(|ty| self.validate_class_literal_type_arguments(e, recv, ty));
+                let unbound = unbound.map(|ty| {
+                    let ty = self.validate_class_literal_type_arguments(e, recv, ty);
+                    let Ty::Obj(internal, []) = ty else {
+                        return ty;
+                    };
+                    let classifier = self
+                        .fed_source()
+                        .classifier(internal)
+                        .expect("a resolved class-literal classifier must retain its declaration");
+                    class_literal_receiver::star_projected_class_literal_receiver(ty, &classifier)
+                });
                 if unbound == Some(Ty::Error) {
                     return self.set(e, Ty::Error);
                 }
