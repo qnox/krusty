@@ -162,7 +162,7 @@ pub(super) fn build_class_metadata_with_facts(
     Some(KotlinMetadata {
         k: 1,
         stamp: opts.metadata_stamp(),
-        xi: 48,
+        xi: super::metadata_policy::class_xi(ir, c),
         d1,
         d2,
     })

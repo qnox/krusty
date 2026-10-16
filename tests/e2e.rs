@@ -1569,6 +1569,8 @@ mod metadata_field_presence_e2e;
 mod metadata_field_signature_e2e;
 #[path = "metadata_function_flags_e2e.rs"]
 mod metadata_function_flags_e2e;
+#[path = "metadata_inline_object_abi_e2e.rs"]
+mod metadata_inline_object_abi_e2e;
 #[path = "metadata_inline_parameter_modifiers_e2e.rs"]
 mod metadata_inline_parameter_modifiers_e2e;
 #[path = "metadata_kept_params.rs"]
