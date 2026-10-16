@@ -10320,9 +10320,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Stamp(null)` in a nullable `Stamp?` element is written and read back as `null`. A serializer the
   underlying property names for itself comes first, as for any other property: `@Contextual`
   builds `ContextualSerializer(<type>::class, fallback, [])` in place, and `with = S::class` on the
-  property or its type codes through `S`, never directly. When the `@Serializable` annotation
-  shares the class header's line, a generated serializer's implicit return and `<clinit>` return
-  add no line entry of their own, since that line is already in effect.
+  property or its type codes through `S`, never directly. A type-parameter carrier follows its
+  resolved upper-bound nullability: unconstrained `T` and `T : Any?` use nullable value-coding,
+  while `T : Any` uses non-null value-coding. This is specific to the carrier representation; an
+  ordinary generic property still follows the nullability of its source occurrence. When the
+  `@Serializable` annotation shares the class header's line, a generated serializer's implicit
+  return and `<clinit>` return add no line entry of their own, since that line is already in effect.
   Tests: `tests/serializable_value_class_e2e.rs` (serializer classes byte-compared with kotlinc,
   plus runtime round trips, unsigned values included) and
   `tests/serialization_nullable_value_class_e2e.rs`.

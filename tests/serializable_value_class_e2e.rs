@@ -345,3 +345,76 @@ fn a_one_line_class_serializer_is_kotlincs() {
         "Point$$serializer",
     );
 }
+
+const GENERIC_CONTEXTUAL_MODEL: &str = "import kotlinx.serialization.Contextual\n\
+    import kotlinx.serialization.Serializable\n\
+    @Serializable\n\
+    @JvmInline\n\
+    value class Generic<T>(\n\
+    \x20   @Contextual val value: T,\n\
+    )\n\
+    @Serializable\n\
+    @JvmInline\n\
+    value class Strict<T : Any>(\n\
+    \x20   @Contextual val value: T,\n\
+    )\n\
+    @Serializable\n\
+    @JvmInline\n\
+    value class Loose<T : Any?>(\n\
+    \x20   @Contextual val value: T,\n\
+    )\n";
+
+const GENERIC_CONTEXTUAL_MAIN: &str = "import kotlinx.serialization.builtins.serializer\n\
+    import kotlinx.serialization.json.Json\n\
+    fun box(): String {\n\
+    \x20   val serializer = Generic.serializer(String.serializer())\n\
+    \x20   val text = Json.encodeToString(serializer, Generic(\"gh\"))\n\
+    \x20   val back = Json.decodeFromString(serializer, text)\n\
+    \x20   return text + \" \" + back.value\n\
+    }\n";
+
+#[test]
+fn a_generic_contextual_carrier_uses_its_type_parameter_serializer() {
+    assert_eq!(
+        both_compilers_box_files(
+            &[
+                ("Model.kt", GENERIC_CONTEXTUAL_MODEL),
+                ("Main.kt", GENERIC_CONTEXTUAL_MAIN),
+            ],
+            "generic_contextual_value_class_carrier"
+        ),
+        "\"gh\" gh"
+    );
+}
+
+#[test]
+fn a_generic_contextual_carrier_serializer_is_kotlincs() {
+    assert_class_matches_kotlinc_in(
+        "SerializableGenericContextualValueClass",
+        GENERIC_CONTEXTUAL_MODEL,
+        "Generic$$serializer",
+    );
+}
+
+/// A value-class carrier follows the type parameter's resolved bound: unconstrained `T` can carry
+/// null and uses nullable serializer calls, while `T : Any` keeps the non-null calls. The existing
+/// `Generic<T>` comparison above pins the first half; this pins the contrasting bound.
+#[test]
+fn a_non_null_bounded_generic_contextual_carrier_serializer_is_kotlincs() {
+    assert_class_matches_kotlinc_in(
+        "SerializableStrictGenericContextualValueClass",
+        GENERIC_CONTEXTUAL_MODEL,
+        "Strict$$serializer",
+    );
+}
+
+/// An explicit nullable upper bound takes the same carrier-coding branch as the implicit nullable
+/// bound above, while preserving the declaration's distinct generic signature.
+#[test]
+fn an_explicit_nullable_bounded_generic_contextual_carrier_serializer_is_kotlincs() {
+    assert_class_matches_kotlinc_in(
+        "SerializableLooseGenericContextualValueClass",
+        GENERIC_CONTEXTUAL_MODEL,
+        "Loose$$serializer",
+    );
+}

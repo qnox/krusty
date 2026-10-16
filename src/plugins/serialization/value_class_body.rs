@@ -40,6 +40,16 @@ enum Coding {
     Serializer { serializer: ExprId, nullable: bool },
 }
 
+/// Whether a property-selected serializer for a value class's underlying slot uses nullable calls.
+///
+/// Unlike an ordinary generic property, a value-class carrier is the representation itself. A bare
+/// contextual type parameter whose upper bound admits null therefore uses kotlinc's nullable
+/// value-coding path; an explicitly non-null bound does not. The default type-parameter serializer
+/// path remains non-null unless the type occurrence itself is nullable.
+fn carrier_is_nullable(ty: &Ty) -> bool {
+    ty.is_nullable() || (ty.is_ty_param() && ty.upper_bound_admits_null())
+}
+
 impl ValueClassBody<'_> {
     fn coding(&self, ir: &mut IrFile, ctx: &PluginContext) -> Coding {
         let (name, ty) = self.property;
@@ -48,8 +58,14 @@ impl ValueClassBody<'_> {
         // for every other serializable property: what it wrote only it can read back.
         let selected = if property_is_contextual(ctx, ir, self.serialized_class, name) {
             Some(
-                element_serializer::contextual_property_serializer(ir, ctx, ty, &annotated)
-                    .unwrap_or_else(|| element_serializer::unsupported_element_serializer(ir, *ty)),
+                element_serializer::contextual_property_serializer(
+                    ir,
+                    ctx,
+                    ty,
+                    self.type_parameter_serializers,
+                    &annotated,
+                )
+                .unwrap_or_else(|| element_serializer::unsupported_element_serializer(ir, *ty)),
             )
         } else {
             declared_serializer_of(ctx, ir, self.serialized_class, name).map(|serializer| {
@@ -66,10 +82,10 @@ impl ValueClassBody<'_> {
         if let Some(serializer) = selected {
             return Coding::Serializer {
                 serializer,
-                nullable: ty.is_nullable(),
+                nullable: carrier_is_nullable(ty),
             };
         }
-        if !ty.is_nullable() {
+        if !carrier_is_nullable(ty) {
             if let Some((enc_name, enc_desc, dec_name, dec_desc)) = inline_prim_methods(ty) {
                 return Coding::Direct {
                     encode: (enc_name, enc_desc),
@@ -286,5 +302,21 @@ impl ValueClassBody<'_> {
             value: None,
         });
         complete_generated_body(ir, self.function, body);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::carrier_is_nullable;
+    use crate::types::Ty;
+
+    #[test]
+    fn carrier_nullability_distinguishes_a_nullable_bound_from_a_nullable_occurrence() {
+        let nullable_bound = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let non_null_bound = Ty::ty_param("N", Ty::obj("kotlin/Any"));
+
+        assert!(carrier_is_nullable(&nullable_bound));
+        assert!(!carrier_is_nullable(&non_null_bound));
+        assert!(carrier_is_nullable(&Ty::nullable(non_null_bound)));
     }
 }
