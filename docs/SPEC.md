@@ -10257,13 +10257,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   arguments at any depth and the operand of `.nullable`. That is a `checkcast` wherever the
   operand's static type is a concrete serializer class, and nothing where it already is
   `KSerializer`.
-  Known gaps, all independent of which elements are derivable:
-  - kotlinc's generic `write$Self` takes the type-parameter serializers as parameters.
-  - kotlinc declares and initializes a generic class's `$childSerializers` before its
-    `$cachedDescriptor`, while krusty does it after.
+  `serialize` hands the elements to `write$Self` for a generic class too. kotlinc's generic
+  `write$Self` declares its own copy of each class type parameter, bounded by an explicit `Any?` in
+  `@Metadata` and absent from the synthetic method's `Signature`, and takes one
+  `KSerializer<T>` per type parameter after the descriptor, named `typeSerialK`. `serialize` passes
+  its `typeSerialK` fields, and `write$Self` builds the elements around its own parameters and reads
+  the backing fields directly. krusty wrote a generic class's elements inside `serialize`, through
+  each property's getter.
+  Known gap, independent of which elements are derivable: kotlinc declares and initializes a
+  generic class's `$childSerializers` before its `$cachedDescriptor`, while krusty does it after.
   Tests: `tests/serialization_type_parameter_elements_e2e.rs` (same-file and sibling-file runtime,
-  plus `childSerializers`/`deserialize`/`typeParametersSerializers` and child-cache factory bodies,
-  cross-checked against the reference compiler).
+  plus `childSerializers`/`deserialize`/`typeParametersSerializers`, `serialize`, `write$Self` and
+  child-cache factory bodies, cross-checked against the reference compiler).
 - **A generic `$serializer` has two constructors.** The private no-argument primary constructor
   builds the descriptor as one initializer spanning the class declaration: it closes on the
   declaration's last line and returns on its first. The public constructor, a declared

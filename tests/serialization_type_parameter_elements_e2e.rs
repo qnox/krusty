@@ -154,3 +154,41 @@ fn a_type_parameter_element_is_built_the_way_kotlinc_builds_it() {
         }
     }
 }
+
+/// kotlinc hands a generic class's type-parameter serializers to its `write$Self` as trailing
+/// parameters, and `serialize` passes its `typeSerialK` fields. krusty wrote the elements inside
+/// `serialize` instead, reading each property through its getter.
+#[test]
+fn a_generic_class_writes_itself_through_its_type_serializers() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = format!("import kotlinx.serialization.Serializable\n\n{ENTRY}\n{GENERIC}");
+    for (class, member) in [
+        (
+            "Bag$$serializer",
+            "void serialize(kotlinx.serialization.encoding.Encoder, Bag<T>)",
+        ),
+        ("Bag", "write$Self$"),
+        (
+            "Shelf$$serializer",
+            "void serialize(kotlinx.serialization.encoding.Encoder, Shelf<K, V>)",
+        ),
+        ("Shelf", "write$Self$"),
+    ] {
+        let Some(built) =
+            compare_with_kotlinc_plugin("TypeParameters", &src, class, &cp, "25", &extra)
+        else {
+            eprintln!("skipping: reference kotlinc or javap unavailable");
+            return;
+        };
+        let want = member_body(&built.reference, member);
+        assert!(
+            want.len() > 1,
+            "{class}.{member}: the reference declares it"
+        );
+        assert_eq!(member_body(&built.krusty, member), want, "{class}.{member}");
+    }
+}
