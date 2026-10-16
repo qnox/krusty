@@ -297,3 +297,140 @@ fun box(): String {
         "PrivateInlineAnonymousSupertype",
     );
 }
+
+const MATCHER: &str = r#"package lib
+
+import kotlin.reflect.typeOf
+
+inline fun <reified T> matcher(): (Any?) -> Boolean = object : (Any?) -> Boolean {
+    override fun invoke(value: Any?): Boolean = value is T
+}
+
+inline fun <reified T> isA(value: Any?): Boolean = value is T
+
+inline fun <reified T> forwarded(): (Any?) -> Boolean = object : (Any?) -> Boolean {
+    override fun invoke(value: Any?): Boolean = isA<T>(value)
+}
+
+inline fun <reified T> typed(): () -> String = object : () -> String {
+    override fun invoke(): String = typeOf<T>().toString()
+}
+"#;
+
+const MATCHER_USE: &str = r#"import kotlin.reflect.typeOf
+import lib.*
+
+fun box(): String {
+    if (!matcher<String>()("a") || matcher<String>()(1)) return "is"
+    if (!forwarded<String>()("a") || forwarded<String>()(1)) return "forwarded"
+    if (typed<String>()() != typeOf<String>().toString()) return "typeOf"
+    return "OK"
+}
+"#;
+
+#[test]
+fn an_object_in_a_reified_body_keeps_its_markers_for_another_module() {
+    // The consumer regenerates the dependency's own class; without its markers and the
+    // `needClassReification` guard the copy would still test, forward or describe `Object`.
+    let output = common::expect_box_run_against_ref("reified_object_markers", MATCHER, MATCHER_USE)
+        .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+    let classes = common::classes_against_kotlinc_module(&[("Lib.kt", MATCHER)]);
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        [
+            "lib/LibKt",
+            "lib/LibKt$forwarded$1",
+            "lib/LibKt$matcher$1",
+            "lib/LibKt$typed$1",
+        ]
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+const CATCH_OBJECT: &str = r#"// LANGUAGE: +AllowReifiedTypeInCatchClause
+package lib
+
+interface CatchProbe {
+    fun catches(block: () -> Unit): Boolean
+}
+
+inline fun <reified E : Throwable> catchProbe(): CatchProbe = object : CatchProbe {
+    override fun catches(block: () -> Unit): Boolean = try {
+        block()
+        false
+    } catch (ignored: E) {
+        true
+    }
+}
+"#;
+
+#[test]
+fn a_catch_marker_only_object_is_regenerated_for_another_module() {
+    let output = common::expect_box_run_against_ref(
+        "reified_catch_object_markers",
+        CATCH_OBJECT,
+        r#"// LANGUAGE: +AllowReifiedTypeInCatchClause
+import lib.*
+
+open class ParentFailure : Throwable()
+class ChildFailure : ParentFailure()
+
+fun box(): String {
+    val probe = catchProbe<ChildFailure>()
+    val child = probe.catches { throw ChildFailure() }
+    val parentEscaped = try {
+        probe.catches { throw ParentFailure() }
+        false
+    } catch (ignored: ParentFailure) {
+        true
+    }
+    return if (child && parentEscaped) "OK" else "FAIL"
+}
+"#,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+    let classes = common::classes_against_kotlinc_module(&[("Lib.kt", CATCH_OBJECT)]);
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        ["lib/CatchProbe", "lib/LibKt", "lib/LibKt$catchProbe$1"]
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+#[test]
+fn a_nested_inline_members_own_reified_catch_does_not_reify_its_object() {
+    // This is the upstream `nestedReifiedCatch.kt` corpus case verbatim. The repository regression
+    // asserts its exact `OK`; the JVM conformance matrix supplies the kotlinc differential oracle.
+    common::expect_box_ok_with_stdlib(
+        r#"// LANGUAGE: +AllowReifiedTypeInCatchClause
+
+inline fun <reified E : Throwable> f(): String {
+    try {
+        return object {
+            inline fun <reified E : Throwable> throwAndCatch(): String {
+                try {
+                    throw IllegalStateException("Fail 1")
+                    return "Fail 2"
+                } catch (e: E) {
+                    return "OK"
+                }
+            }
+
+            fun g(): String = throwAndCatch<IllegalStateException>()
+        }.g()
+    } catch (e: E) {
+        return "Fail 3"
+    }
+}
+
+fun box(): String {
+    return f<AssertionError>()
+}
+"#,
+        "NestedReifiedCatchInAnonymousObject",
+    );
+}

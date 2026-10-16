@@ -70,6 +70,70 @@ pub(in crate::jvm) fn realized_property_accessor(
     }
 }
 
+/// Start the identity source map kotlinc writes for a class whose nearest enclosing function is
+/// `inline` (`visitSMAP(…, intoInline = true)`): code inlining that function copies the class and
+/// maps its lines through it. A class one function further in carries none.
+pub(super) fn start_inline_body_source_map(
+    ir: &IrFile,
+    class: &crate::ir::IrClass,
+    writer: &mut crate::jvm::classfile::ClassWriter,
+) {
+    let in_inline_body = enclosing_functions(ir, class.enclosure)
+        .next()
+        .is_some_and(|(function, _)| ir.inline_fns.contains(&function));
+    if in_inline_body {
+        let lines = u16::try_from(ir.source_line_count)
+            .unwrap_or(u16::MAX)
+            .max(1);
+        writer.start_inline_origin_source_map(lines);
+    }
+}
+
+/// The functions whose bodies `enclosure` lies in, innermost first, each with the class it is a
+/// member of. A lambda, constructor, initializer or classifier passes through to the scope it is
+/// written in; a class member continues with its class's own enclosure. The walk ends at the file,
+/// at a top-level function, or at an accessor the file does not realize.
+pub(in crate::jvm) fn enclosing_functions(
+    ir: &IrFile,
+    mut enclosure: Option<crate::ir::IrEnclosure>,
+) -> impl Iterator<Item = (crate::ir::FunId, Option<TypeName>)> + '_ {
+    use crate::ir::IrEnclosure;
+    std::iter::from_fn(move || loop {
+        let function = match enclosure.take()? {
+            IrEnclosure::Function(function) => function,
+            IrEnclosure::PropertyAccessor { property, setter } => {
+                realized_property_accessor(ir, property, setter)?
+            }
+            IrEnclosure::Lambda(function) => {
+                enclosure = ir.lambda_enclosures.get(&function).copied();
+                continue;
+            }
+            IrEnclosure::Constructor { class, .. }
+            | IrEnclosure::ClassInitializer(class)
+            | IrEnclosure::Classifier(class) => {
+                enclosure = ir.classes[class as usize].enclosure;
+                continue;
+            }
+            IrEnclosure::File => return None,
+        };
+        let owner = ir.functions[function as usize]
+            .dispatch_receiver
+            .or_else(|| {
+                ir.classes
+                    .iter()
+                    .find(|class| class.methods.contains(&function))
+                    .map(|class| class.fq_name)
+            });
+        enclosure = owner.and_then(|owner| {
+            ir.classes
+                .iter()
+                .find(|class| class.fq_name == owner)
+                .and_then(|class| class.enclosure)
+        });
+        return Some((function, owner));
+    })
+}
+
 fn scope_enclosure(
     ir: &IrFile,
     override_results: &crate::jvm::override_results::OverrideResults,
