@@ -31,13 +31,19 @@ impl Checker<'_> {
         if self.unchecked_bounds_reference == Some(reference.span) {
             return;
         }
+        self.check_written_application_bounds(&reference.targs, resolved);
+    }
+
+    /// Check the written type `arguments` of a classifier application outside a type reference
+    /// (the left side of a callable reference), which resolved to `resolved`.
+    pub(super) fn check_written_application_bounds(&mut self, arguments: &[TypeRef], resolved: Ty) {
         let Ty::Obj(classifier, resolved) = resolved.non_null() else {
             return;
         };
         let Some(declaration) = self.fed_source().classifier(classifier) else {
             return;
         };
-        self.check_classifier_argument_bounds(classifier, &declaration, &reference.targs, resolved);
+        self.check_classifier_argument_bounds(classifier, &declaration, arguments, resolved);
     }
 
     /// [`Self::check_type_parameter_bound`] for a callable's type parameter, whose outermost
@@ -137,6 +143,44 @@ impl Checker<'_> {
         let spans = arguments.iter().map(type_argument_span).collect::<Vec<_>>();
         let owner = classifier_type_parameter_owner(&self.fed_source(), classifier, declaration);
         self.check_type_argument_bounds(&formals, &owner, resolved, &spans)
+    }
+
+    /// Report a constructor call whose explicit type arguments violate `classifier`'s bounds;
+    /// `display` renders the rejected constructor.
+    pub(super) fn report_explicit_constructor_type_argument_bounds(
+        &mut self,
+        call: crate::ast::ExprId,
+        classifier: TypeName,
+        has_value_arguments: bool,
+        explicit: &[Ty],
+        display: &str,
+    ) -> bool {
+        let Some(written) = self
+            .file
+            .call_type_args
+            .get(&call.0)
+            .map(|syntax| syntax.arguments.as_slice())
+            .filter(|written| written.len() == explicit.len())
+        else {
+            return false;
+        };
+        let Some(declaration) = self.fed_source().classifier(classifier) else {
+            return false;
+        };
+        if !self.check_classifier_argument_bounds(classifier, &declaration, written, explicit) {
+            return false;
+        }
+        if has_value_arguments {
+            self.report_bound_inapplicable_candidate(call, display);
+        }
+        true
+    }
+
+    fn report_bound_inapplicable_candidate(&mut self, call: crate::ast::ExprId, display: &str) {
+        self.diags.error(
+            self.call_callee_name_span(call),
+            format!("inapplicable candidate(s): {display}"),
+        );
     }
 
     /// Report each argument of `resolved` (parallel to `formals`, projections kept) that violates

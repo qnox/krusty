@@ -302,7 +302,9 @@ impl Checker<'_> {
         } else if arguments.is_empty() {
             Ty::obj_name(internal)
         } else {
-            self.classifier_type_with_arguments(scope, internal, &arguments)
+            let applied = self.classifier_type_with_arguments(scope, internal, &arguments);
+            self.check_written_application_bounds(&arguments, applied);
+            applied
         };
         if applied == Ty::Error {
             return Ty::Error;

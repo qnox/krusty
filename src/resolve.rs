@@ -42248,6 +42248,14 @@ impl<'a> Checker<'a> {
             ) {
                 return true;
             }
+            if self.report_rejected_explicit_type_argument_bounds(
+                call,
+                candidate,
+                !args.is_empty(),
+                &explicit_type_args,
+            ) {
+                return true;
+            }
             let mut generic_binding = None;
             let semantic_params = if let Some(signature) = candidate.generic_sig.as_ref() {
                 let mut bindings =
@@ -65444,6 +65452,21 @@ impl<'a> Checker<'a> {
                 .as_ref()
                 .filter(|signature| signature.params.len() == parameter_count)
             {
+                // Explicit type arguments are fixed before any argument is inferred: one outside
+                // its bound rejects the constructor whatever its arguments are (`Box<String>("")`).
+                if let Some(failure) = self.explicit_constructor_bound_violation(
+                    classifier.type_params(),
+                    signature,
+                    &explicit_type_arguments,
+                ) {
+                    type_argument_bound_failure.get_or_insert_with(|| {
+                        (
+                            failure,
+                            Self::generic_constructor_display(signature, &member),
+                        )
+                    });
+                    continue;
+                }
                 let expected_arguments = expected_classifier
                     .map(Ty::non_null)
                     .filter(|expected| expected.obj_internal() == Some(internal))
@@ -65797,7 +65820,12 @@ impl<'a> Checker<'a> {
                     |actual, bound| self.generic_bound_admits(actual, bound),
                 );
                 if let Some(failure) = violated_bound {
-                    type_argument_bound_failure.get_or_insert(failure);
+                    type_argument_bound_failure.get_or_insert_with(|| {
+                        (
+                            failure,
+                            Self::generic_constructor_display(signature, &member),
+                        )
+                    });
                     continue;
                 }
                 let result_arguments = classifier
@@ -65893,10 +65921,14 @@ impl<'a> Checker<'a> {
                                 return Err(failure);
                             }
                         }
-                        if let Some((expected, actual)) = type_argument_bound_failure {
+                        if let Some(((expected, actual), constructor)) = type_argument_bound_failure
+                        {
                             return Err(LibraryConstructorFailure::TypeArgumentMismatch {
                                 expected,
                                 actual,
+                                classifier: internal,
+                                explicit: explicit_type_arguments,
+                                constructor,
                             });
                         }
                         if let Some((failure, (params, call_sig))) =
