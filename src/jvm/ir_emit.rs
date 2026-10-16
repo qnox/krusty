@@ -3792,9 +3792,7 @@ fn emit_enum_class(
     ctor.invokespecial(super_init, 2, 0);
     // kotlinc maps the `super(name, ordinal)` call to where the declaration starts (annotations
     // included), then maps each property store to that property's own declaration line.
-    // `(pc, line)` of each constructor-property store, for the `LineNumberTable` below.
-    let mut store_lines: Vec<(u16, u32)> = Vec::new();
-    let mut restored_store_lines: Vec<u16> = Vec::new();
+    let mut store_lines = initializer_lines::ConstructorInitializerLines::default();
     let mut max_locals = 1 + ctor_words;
     // Store constructor-property parameters unless lowering already represented those stores in the
     // init body. The existence of a body property is not that contract: an init body can contain
@@ -3846,12 +3844,7 @@ fn emit_enum_class(
         e.emit_constructor_init_body(c, init_body, &mut ctor, &mut store_lines);
         e.render_initializer_boundaries = false;
         max_locals = max_locals.max(e.frame.max());
-        initializer_lines::record_restored_initializer_lines(
-            &ctor,
-            marks_before,
-            &mut store_lines,
-            &mut restored_store_lines,
-        );
+        store_lines.record_restored(&ctor, marks_before);
     }
     // The `return` maps to the primary constructor's start; a pending closing `init` line owns a
     // `nop` before that transition.
@@ -3892,18 +3885,12 @@ fn emit_enum_class(
             c.decl_start_line
         };
         if header != 0 {
-            let mut entries = vec![(0u16, start)];
-            if !store_lines.is_empty() {
-                // Each retained store maps to its property's line and the `return` to the
-                // constructor start. A missing line is not reconstructed in the backend.
-                entries.extend(store_lines.iter().copied());
-                entries.push((ctor_return_pc, primary_constructor_line(ir, c)));
-            }
-            // Collapse adjacent equal lines except where the emitter explicitly restored a line
-            // after an inlined initializer value.
-            entries.dedup_by(|(pc, line), (_, previous)| {
-                line == previous && !restored_store_lines.contains(pc)
-            });
+            // Each retained store maps to its property's line and the `return` to the constructor
+            // start. A missing line is not reconstructed in the backend.
+            let entries = store_lines.method_entries(
+                (0, start),
+                (ctor_return_pc, primary_constructor_line(ir, c)),
+            );
             cw.set_method_lines("<init>", &ctor_desc, &entries);
         }
     }

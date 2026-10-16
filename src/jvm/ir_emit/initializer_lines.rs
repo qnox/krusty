@@ -3,6 +3,48 @@
 
 use super::*;
 
+#[derive(Default)]
+pub(super) struct ConstructorInitializerLines {
+    entries: Vec<(u16, u32)>,
+    restored: Vec<u16>,
+}
+
+impl ConstructorInitializerLines {
+    pub(super) fn push(&mut self, entry: (u16, u32)) {
+        self.entries.push(entry);
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub(super) fn record_restored(&mut self, code: &CodeBuilder, marks_before: usize) {
+        record_restored_initializer_lines(
+            code,
+            marks_before,
+            &mut self.entries,
+            &mut self.restored,
+        );
+    }
+
+    /// Build the exact constructor table, retaining an adjacent equal line only when the emitter
+    /// identified that entry as an inlined line or its caller-line restoration.
+    pub(super) fn method_entries(
+        &self,
+        start: (u16, u32),
+        return_entry: (u16, u32),
+    ) -> Vec<(u16, u32)> {
+        let mut entries = vec![start];
+        if !self.entries.is_empty() {
+            entries.extend(self.entries.iter().copied());
+            entries.push(return_entry);
+        }
+        entries
+            .dedup_by(|(pc, line), (_, previous)| line == previous && !self.restored.contains(pc));
+        entries
+    }
+}
+
 impl Emitter<'_> {
     /// Whether this exact semantic initializer block is being emitted as class initialization.
     pub(super) fn renders_initializer_boundary(&self, block: u32) -> bool {
@@ -32,7 +74,7 @@ impl Emitter<'_> {
         class: &crate::ir::IrClass,
         init_body: crate::ir::ExprId,
         code: &mut CodeBuilder,
-        lines: &mut Vec<(u16, u32)>,
+        lines: &mut ConstructorInitializerLines,
     ) {
         let Some(stores) =
             crate::jvm::constructor_debug::initializer_property_stores(self.ir, class, init_body)
@@ -40,7 +82,7 @@ impl Emitter<'_> {
             // A block with `init` statements marks its own lines as it goes; keep them.
             let first = code.line_marks().len();
             self.emit(init_body, code);
-            lines.extend(
+            lines.entries.extend(
                 code.line_marks()[first..]
                     .iter()
                     .map(|&(pc, l)| (pc, u32::from(l))),
@@ -73,7 +115,7 @@ pub(super) fn record_initializer_lines(
 /// Keep the exact initializer marks whose producer identified them as an inlined line or the
 /// caller-line restoration after one. Constructor debug-table curation must not collapse those
 /// marks merely because the preceding entry names the same source line.
-pub(super) fn record_restored_initializer_lines(
+fn record_restored_initializer_lines(
     code: &CodeBuilder,
     marks_before: usize,
     lines: &mut Vec<(u16, u32)>,
