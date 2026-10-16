@@ -200,7 +200,7 @@ impl<'a> Checker<'a> {
 
     /// The checker's recorded capture decision for a lambda expression (set when the enclosing
     /// call is checked against an inline callee).
-    fn lambda_is_inline_spliced(&self, expression: ExprId) -> bool {
+    pub(super) fn lambda_is_inline_spliced(&self, expression: ExprId) -> bool {
         matches!(
             self.expr_lowers.get(&expression),
             Some(ExprLowering::Lambda(info)) if info.capture == LambdaCapture::InlineSplice

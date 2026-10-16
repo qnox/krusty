@@ -205,7 +205,7 @@ pub(crate) enum FlowExclusion {
 
 /// The facts one checked condition proves on one of its outcomes: positive narrowings and
 /// negative facts. A cast the stability gate declined where the condition was checked is no fact.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct ConditionFacts {
     pub(super) narrowings: Vec<(NarrowPath, Ty)>,
     pub(super) exclusions: Vec<(NarrowPath, FlowExclusion)>,
@@ -235,7 +235,7 @@ pub(super) struct FlowExecutionIdentity {
     pub(super) lambdas: Vec<ExprId>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct BooleanImplications {
     pub(super) when_true: ConditionFacts,
     pub(super) when_false: ConditionFacts,

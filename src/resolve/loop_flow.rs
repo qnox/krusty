@@ -426,7 +426,7 @@ impl Checker<'_> {
         let written = collect_loop_entry_writes(self.file, parts, &entry);
         for (name, binding) in entry {
             let definite = written.definite.contains(&binding.flow_identity);
-            if definite || written.compound.contains_key(&binding.flow_identity) {
+            if definite || written.compound.contains(&binding.flow_identity) {
                 scope.forget_paths_rooted_at(&PathRoot::Value(binding.flow_identity));
                 if definite {
                     self.forget_implied_facts(scope, binding.flow_identity);
