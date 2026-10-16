@@ -587,15 +587,50 @@ impl BodyLowering<'_> {
             }
             crate::fir::FirInlineIterationTraversal::Array
             | crate::fir::FirInlineIterationTraversal::Counted { .. } => {
-                let receiver_slot = self.allocate_temporary();
-                let receiver_declaration = self.ir.add_expr(IrExpr::Variable {
-                    index: receiver_slot,
-                    ty: receiver_ty?.get(),
-                    init: Some(iterable),
+                // The library body reads its receiver parameter on every access, so within a
+                // resolved frame the loop reads the frame's `$this$` local and declares its cursor
+                // before the array's length, in the body's own order. The legacy shape keeps the
+                // receiver in a temporary of its own and counts the length first.
+                let framed_receiver = match self.ir.expr(iterable) {
+                    IrExpr::GetValue(slot) if frame_source.is_some() => Some(*slot),
+                    _ => None,
+                };
+                let receiver_slot = match framed_receiver {
+                    Some(slot) => slot,
+                    None => {
+                        let receiver_slot = self.allocate_temporary();
+                        let receiver_declaration = self.ir.add_expr(IrExpr::Variable {
+                            index: receiver_slot,
+                            ty: receiver_ty?.get(),
+                            init: Some(iterable),
+                            named: false,
+                        });
+                        self.ir.call_operand_bindings.insert(receiver_declaration);
+                        statements.push(receiver_declaration);
+                        receiver_slot
+                    }
+                };
+                let cursor_slot = self.allocate_temporary();
+                let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                let cursor_declaration = self.ir.add_expr(IrExpr::Variable {
+                    index: cursor_slot,
+                    ty: Ty::Int,
+                    init: Some(zero),
                     named: false,
                 });
-                self.ir.call_operand_bindings.insert(receiver_declaration);
-                statements.push(receiver_declaration);
+                if framed_receiver.is_some() {
+                    statements.push(cursor_declaration);
+                    if let (Some(source), Some(call_line)) = (&frame_source, call_line) {
+                        // The cursor is the frame's first body statement, as an iterator's
+                        // declaration is: it marks the body's invocation line.
+                        let line = u32::from(source.invoke_line);
+                        self.ir.expr_lines.insert(cursor_declaration, line);
+                        self.ir.external_frame_lines.insert(
+                            cursor_declaration,
+                            external_frame_line(source, line, call_line),
+                        );
+                    }
+                }
                 let receiver = self.ir.add_expr(IrExpr::GetValue(receiver_slot));
                 let size = match traversal {
                     crate::fir::FirInlineIterationTraversal::Array => {
@@ -625,14 +660,9 @@ impl BodyLowering<'_> {
                 } else {
                     size
                 };
-                let cursor_slot = self.allocate_temporary();
-                let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                statements.push(self.ir.add_expr(IrExpr::Variable {
-                    index: cursor_slot,
-                    ty: Ty::Int,
-                    init: Some(zero),
-                    named: false,
-                }));
+                if framed_receiver.is_none() {
+                    statements.push(cursor_declaration);
+                }
                 let cursor = self.ir.add_expr(IrExpr::GetValue(cursor_slot));
                 let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                     op: crate::ir::IrBinOp::Lt,

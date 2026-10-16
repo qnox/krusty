@@ -285,7 +285,7 @@ impl BodyFirChecker<'_> {
 
     /// The `length` and `get` of `kotlin.CharSequence` (`char_sequence`) resolution selected for
     /// indexing a `CharSequence`. `None` keeps the loop iterating `IndexedValue`s.
-    fn char_sequence_indexing(
+    pub(super) fn char_sequence_indexing(
         &self,
         span: crate::diag::Span,
         char_sequence: Ty,

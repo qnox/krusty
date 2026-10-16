@@ -42,7 +42,15 @@ pub(crate) fn attach_dependency_function_realization(
         function,
         compiler_builtin_owner,
     );
-    function.callable.semantic_role = normalized_function_semantic_role(package, name, function);
+    let semantic_role = normalized_function_semantic_role(package, name, function);
+    function.callable.semantic_role = match semantic_role {
+        Some(crate::types::SemanticCallRole::KotlinCharSequenceIterator)
+            if !compiler_builtin_owner =>
+        {
+            None
+        }
+        role => role,
+    };
 }
 
 fn property_reference_receiver(receiver: Ty, mutable: bool) -> Option<(u8, &'static [Ty])> {
@@ -85,6 +93,21 @@ pub(crate) fn function_semantic_role(
 ) -> Option<crate::types::SemanticCallRole> {
     use crate::types::SemanticCallRole;
 
+    if facts.package.matches("kotlin/text")
+        && facts.name == "iterator"
+        && facts.kind == FnKind::Extension
+        && facts.receiver == Some(Ty::obj_name(crate::types::wk::char_sequence()))
+        && facts.params.is_empty()
+        && facts.ret == Ty::obj("kotlin/collections/CharIterator")
+        && facts.context_count == 0
+        && facts.type_parameter_count == 0
+        && facts.vararg.is_none()
+        && !facts.is_suspend
+        && facts.is_operator
+        && !facts.is_infix
+    {
+        return Some(SemanticCallRole::KotlinCharSequenceIterator);
+    }
     if facts.package != crate::types::wk::kotlin_package()
         || facts.kind != FnKind::Extension
         || facts.context_count != 0
@@ -1205,5 +1228,34 @@ mod tests {
             ..declaration
         };
         assert_eq!(function_semantic_role(&lookalike), None);
+    }
+
+    #[test]
+    fn char_sequence_iterator_role_requires_the_complete_stdlib_declaration() {
+        let declaration = BuiltinFunctionDeclaration {
+            package: crate::types::type_name("kotlin/text"),
+            name: "iterator",
+            kind: FnKind::Extension,
+            receiver: Some(Ty::obj_name(crate::types::wk::char_sequence())),
+            params: &[],
+            ret: Ty::obj("kotlin/collections/CharIterator"),
+            context_count: 0,
+            type_parameter_count: 0,
+            vararg: None,
+            is_suspend: false,
+            is_operator: true,
+            is_infix: false,
+        };
+        assert_eq!(
+            function_semantic_role(&declaration),
+            Some(crate::types::SemanticCallRole::KotlinCharSequenceIterator)
+        );
+        assert_eq!(
+            function_semantic_role(&BuiltinFunctionDeclaration {
+                package: crate::types::type_name("fixture"),
+                ..declaration
+            }),
+            None
+        );
     }
 }

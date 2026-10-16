@@ -32,18 +32,21 @@ impl BodyFirChecker<'_> {
                     BodyCheckFailureKind::UnsupportedStatement(StatementForm::ForEach),
                 )
             })?;
-        let element_ty = self.resolved_type(
-            self.file
-                .stmt_spans
-                .get(statement.0 as usize)
-                .copied()
-                .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?,
-            element_ty,
-        )?;
+        let span = self
+            .file
+            .stmt_spans
+            .get(statement.0 as usize)
+            .copied()
+            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+        let element_ty = self.resolved_type(span, element_ty)?;
         let variable = self.loop_variable(statement, name);
         // The iterable runs before the body, and a counted loop's header is known from it alone.
         let iterable_expression = self.expression(iterable)?;
-        let progression = if iteration_ty.array_elem().is_some() || iteration_ty == Ty::String {
+        let indexes_char_sequence = self.info.indexes_char_sequence(iterable);
+        let progression = if iteration_ty.array_elem().is_some()
+            || iteration_ty == Ty::String
+            || indexes_char_sequence
+        {
             None
         } else {
             self.progression_loop_header(variable, element_ty, iterable, iterable_expression)?
@@ -79,6 +82,21 @@ impl BodyFirChecker<'_> {
                 } else {
                     FirBuiltinIterableKind::Array
                 },
+                iterable: iterable_expression,
+            }
+        } else if indexes_char_sequence {
+            let indexing = self
+                .char_sequence_indexing(span, Ty::obj_name(crate::types::wk::char_sequence()))?
+                .ok_or_else(|| {
+                    self.failure(
+                        Some(span),
+                        BodyCheckFailureKind::UnsupportedStatement(StatementForm::ForEach),
+                    )
+                })?;
+            FirLoopHeader::Iterable {
+                variable,
+                variable_ty: element_ty,
+                kind: FirBuiltinIterableKind::CharSequence(Box::new(indexing)),
                 iterable: iterable_expression,
             }
         } else if let Some(header) = progression {

@@ -67,6 +67,15 @@ pub struct CharSequenceIndexing {
     pub get: Box<super::ResolvedCall>,
 }
 
+fn iterator_protocol_indexes_char_sequence(protocol: &IteratorProtocolTarget) -> bool {
+    matches!(
+        protocol.iterator.as_ref(),
+        super::ResolvedCall::Extension(call)
+            if call.callable.semantic_role
+                == Some(crate::types::SemanticCallRole::KotlinCharSequenceIterator)
+    )
+}
+
 impl IterationPlans {
     /// The selected `first`, `last` and `step` of progression class `class`.
     pub fn plan(&self, class: Ty) -> Option<&ProgressionPlan> {
@@ -100,6 +109,16 @@ impl super::TypeInfo {
 
     pub fn char_sequence_indexing(&self) -> Option<&CharSequenceIndexing> {
         self.iteration_plans.char_sequence()
+    }
+
+    /// Whether the iterable's selected iterator is the standard `CharSequence.iterator`
+    /// declaration. The role is attached by the provider after checking the declaration's full
+    /// signature; no receiver name or subtype test is repeated during checked FIR construction.
+    pub fn indexes_char_sequence(&self, iterable: ExprId) -> bool {
+        matches!(
+            self.iterator_protocols.get(&iterable),
+            Some(protocol) if iterator_protocol_indexes_char_sequence(protocol)
+        )
     }
 
     pub fn indexed_value_properties(&self) -> Option<IndexedValueProperties> {
@@ -400,6 +419,9 @@ impl Checker<'_> {
             Some((target.iter_ty, iterator.clone())),
             None,
         );
+        if iterator_protocol_indexes_char_sequence(&target) {
+            self.record_char_sequence_indexing(Ty::obj_name(wk::char_sequence()));
+        }
         target.enhancement = ProtocolEnhancement { iterator, element };
         let elem = target.elem_ty;
         self.iterator_protocols.insert(iterable, target);
