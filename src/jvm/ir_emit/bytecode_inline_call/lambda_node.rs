@@ -436,6 +436,7 @@ impl Emitter<'_> {
             value_class_return: None,
             captured: 0..0,
             capture_names: self.capture_names(lambda.impl_fn, lambda.captures.len()),
+            default_class: None,
         };
         let captures = lambda
             .captures
@@ -708,6 +709,7 @@ impl Emitter<'_> {
                 value_class_return: self.invoke_coercion(result_semantic, result).value_class(),
                 captured: 0..0,
                 capture_names: self.capture_names(impl_fn, captures.len()),
+                default_class: None,
             },
             captures: captures
                 .iter()

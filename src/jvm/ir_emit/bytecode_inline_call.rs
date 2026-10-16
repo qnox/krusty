@@ -27,6 +27,7 @@ use crate::jvm::method_node::{
     encode_instruction, is_terminal, stack_shapes, word_delta, Category, Insn, MethodNode, Node,
 };
 use crate::jvm::source_map::SourceMap;
+use default_bridge::CalleeNodes;
 pub(super) use lambda_route::{LambdaCallRoute, SpliceReason};
 pub(super) use regenerated_objects::{RegeneratedObjectNames, RegenerationSite};
 
@@ -290,7 +291,12 @@ impl Emitter<'_> {
         else {
             return InlineCallOutcome::NotApplicable;
         };
-        let defaults = match self.default_bridge_masks(call_expression, args, &physical) {
+        let defaults = match self.default_bridge_masks(
+            call_expression,
+            args,
+            leading_non_argument_operands,
+            &physical,
+        ) {
             Ok(defaults) => defaults,
             Err(reason) => {
                 self.run.set_inline_bail(reason);
@@ -351,10 +357,11 @@ impl Emitter<'_> {
             return self.inline_value_used_lambda_call(&inline_call, code);
         }
         let reason = match self.lambda_call_route(&inline_call, code) {
-            Ok(LambdaCallRoute::MethodInliner(callee)) => {
+            Ok(LambdaCallRoute::MethodInliner(callee, default_lambdas)) => {
                 return match self.inline_classpath_lambda_call(
                     &inline_call,
                     &callee,
+                    &default_lambdas,
                     LambdaPlacement::Invokes,
                     code,
                 ) {
@@ -388,12 +395,13 @@ impl Emitter<'_> {
         // anonymous object takes the literal as an ordinary value (one passed where the parameter
         // is not function-typed, as `map[key] = { … }`).
         match self.lambda_call_route(inline_call, code) {
-            Ok(LambdaCallRoute::MethodInliner(callee))
+            Ok(LambdaCallRoute::MethodInliner(callee, default_lambdas))
                 if crate::jvm::inliner::constructs_anonymous_object(&callee, &self.bodies) =>
             {
                 return match self.inline_classpath_lambda_call(
                     inline_call,
                     &callee,
+                    &default_lambdas,
                     LambdaPlacement::Objects,
                     code,
                 ) {
@@ -404,7 +412,7 @@ impl Emitter<'_> {
                     }
                 };
             }
-            Ok(LambdaCallRoute::MethodInliner(_)) => {
+            Ok(LambdaCallRoute::MethodInliner(..)) => {
                 crate::trace_compiler!("splice", "value-used lambda bridged: no object");
             }
             Ok(LambdaCallRoute::Splice(reason)) => {
@@ -582,7 +590,11 @@ impl Emitter<'_> {
         if code.is_dead() {
             return Some(());
         }
-        let (declared, callee) = match self.inline_callee_nodes(call) {
+        let CalleeNodes {
+            declared,
+            callee,
+            default_lambdas,
+        } = match self.inline_callee_nodes(call) {
             Ok(nodes) => nodes,
             Err(error) => {
                 crate::trace_compiler!("splice", "unified inliner cannot read the body: {error}");
@@ -602,8 +614,22 @@ impl Emitter<'_> {
             crate::trace_compiler!("splice", "unified inliner cannot bind the arguments");
             return None;
         };
+        let mut lambdas = Vec::new();
+        let mut lambda_bindings = HashMap::default();
+        match self.load_default_lambdas(call, &default_lambdas, &physical) {
+            Ok(loaded) => {
+                for (operand, lambda) in loaded {
+                    lambda_bindings.insert(operand, lambdas.len());
+                    lambdas.push(lambda);
+                }
+            }
+            Err(error) => {
+                crate::trace_compiler!("splice", "unified inliner declines: {error:?}");
+                return None;
+            }
+        }
         let parameters =
-            self.call_parameters(&supplies, &physical, args, &HashMap::default(), Vec::new());
+            self.call_parameters(&supplies, &physical, args, &lambda_bindings, Vec::new());
         let base = self.inline_splice_base(self.frame.size());
         // The body's lines are mapped once the arguments are evaluated, like kotlinc's, so that
         // the source map numbers them after any call inlined into an argument; this first pass only
@@ -611,7 +637,7 @@ impl Emitter<'_> {
         if let Err(error) = inliner::inline(
             &callee,
             &parameters,
-            &[],
+            &lambdas,
             target.inline_only,
             base,
             reified,
@@ -635,7 +661,7 @@ impl Emitter<'_> {
             supplies: &supplies,
         };
         let inlined = InlinedLambdas {
-            lambdas: &[],
+            lambdas: &lambdas,
             lines: SourceMap::default(),
         };
         self.emit_inlined_call(&inlined_call, &callee, &parameters, inlined, base, code)
@@ -655,6 +681,7 @@ impl Emitter<'_> {
         &mut self,
         call: &ClasspathInlineCall<'_, '_>,
         callee: &MethodNode,
+        default_lambdas: &[inliner::ExtractedDefaultLambda],
         placement: LambdaPlacement,
         code: &mut CodeBuilder,
     ) -> Result<(), &'static str> {
@@ -699,6 +726,17 @@ impl Emitter<'_> {
             let mut lambda = argument.lambda;
             lambda.captured = start..captured.len();
             lambda_bindings.insert(index, lambdas.len());
+            lambdas.push(lambda);
+        }
+        let loaded = self
+            .load_default_lambdas(call, default_lambdas, &physical)
+            .map_err(|error| {
+                crate::trace_compiler!("splice", "a default lambda is not inlined: {error:?}");
+                "a default lambda of a planned call cannot be inlined"
+            })?;
+        for (operand, mut lambda) in loaded {
+            lambda.captured = captured.len()..captured.len();
+            lambda_bindings.insert(operand, lambdas.len());
             lambdas.push(lambda);
         }
         // The lambdas' lines are lines of the caller's map as compiling them left it.
@@ -913,6 +951,7 @@ impl Emitter<'_> {
             visited: HashMap::default(),
             lambda_lines: &lambda_lines,
             lambda_visited: HashMap::default(),
+            default_lambda_visited: HashMap::default(),
         };
         let mut objects =
             lines
@@ -1580,6 +1619,8 @@ struct CallLines<'e, 'a, 'b, 'l> {
     lambda_lines: &'l SourceMap,
     /// One `SourceMapCopier` for those lambda lines: each old output line is imported once.
     lambda_visited: HashMap<u16, u16>,
+    /// One `SourceMapCopier` per default lambda class, over that class's own lines.
+    default_lambda_visited: HashMap<(String, u16), u16>,
 }
 
 impl inliner::SourceLines for CallLines<'_, '_, '_, '_> {
@@ -1618,6 +1659,19 @@ impl inliner::SourceLines for CallLines<'_, '_, '_, '_> {
             .source_map_for_inlining(self.claimable)?
             .map_copied_line(name, path, source, call_site)?;
         self.lambda_visited.insert(line, mapped);
+        Some(mapped)
+    }
+
+    fn default_lambda(&mut self, class: &str, invoke_desc: &str, line: u16) -> Option<u16> {
+        let key = (class.to_string(), line);
+        if let Some(&mapped) = self.default_lambda_visited.get(&key) {
+            return Some(mapped);
+        }
+        let body = self.emitter.bodies.body(class, "invoke", invoke_desc)?;
+        let mapped =
+            self.emitter
+                .map_inlined_line(&body, false, line, self.call_line, self.claimable)?;
+        self.default_lambda_visited.insert(key, mapped);
         Some(mapped)
     }
 }

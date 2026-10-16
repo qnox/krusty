@@ -9,8 +9,9 @@ use crate::jvm::inliner::UnsupportedShape;
 
 /// The lowering of one inline call with literal lambda arguments.
 pub(in crate::jvm::ir_emit) enum LambdaCallRoute {
-    /// kotlinc's `MethodInliner` over the callee's node.
-    MethodInliner(MethodNode),
+    /// kotlinc's `MethodInliner` over the callee's node, with the omitted parameters whose default
+    /// lambdas it inlines.
+    MethodInliner(MethodNode, Vec<inliner::ExtractedDefaultLambda>),
     /// The byte splice, for a shape the port does not own yet.
     Splice(SpliceReason),
 }
@@ -58,7 +59,11 @@ impl Emitter<'_> {
             leading_non_argument_operands,
             ..
         } = *call;
-        let (declared, callee) = self.inline_callee_nodes(call)?;
+        let CalleeNodes {
+            declared,
+            callee,
+            default_lambdas,
+        } = self.inline_callee_nodes(call)?;
         // Only the MethodNode inliner specializes reified type parameters, so a reified body in a
         // shape the port does not own yet fails cleanly instead of taking the splice.
         let reified_body = inliner::has_reified_markers(&callee);
@@ -136,6 +141,17 @@ impl Emitter<'_> {
                 lambda_bindings.insert(index, lambdas.len());
                 lambdas.push(lambda);
             }
+            let loaded = self
+                .load_default_lambdas(call, &default_lambdas, &physical)
+                .map_err(|error| {
+                    crate::trace_compiler!("splice", "a default lambda is not inlined: {error:?}");
+                    "a default lambda of the call cannot be inlined"
+                })?;
+            for (operand, mut lambda) in loaded {
+                lambda.captured = captured.len()..captured.len();
+                lambda_bindings.insert(operand, lambdas.len());
+                lambdas.push(lambda);
+            }
             let parameters =
                 self.call_parameters(&supplies, &physical, args, &lambda_bindings, captured);
             let probe = inliner::inline(
@@ -163,7 +179,7 @@ impl Emitter<'_> {
                 ));
             }
         }
-        Ok(LambdaCallRoute::MethodInliner(callee))
+        Ok(LambdaCallRoute::MethodInliner(callee, default_lambdas))
     }
 }
 

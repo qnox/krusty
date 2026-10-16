@@ -43,18 +43,24 @@ fn owner_is_inheritable(ir: &IrFile, owner: &str) -> bool {
 }
 
 /// Emit an instance method's mask-expanding `$default` synthetic.
-#[allow(clippy::too_many_arguments)]
+/// The function a `$default` stub is emitted for, and its parameters' default expressions.
+#[derive(Clone, Copy)]
+pub(super) struct DefaultStubSource<'a> {
+    pub ir: &'a IrFile,
+    pub fid: u32,
+    pub defaults: &'a [Option<u32>],
+}
+
 pub(super) fn emit_default_stub(
-    ir: &IrFile,
-    fid: u32,
+    source: DefaultStubSource<'_>,
     static_owner: Option<StaticOwner>,
     owner: &str,
     facade: &str,
     cw: &mut ClassWriter,
-    defaults: &[Option<u32>],
     env: &EmitEnv,
     is_interface: bool,
 ) {
+    let DefaultStubSource { ir, fid, defaults } = source;
     let function = &ir.functions[fid as usize];
     let method_name = function.name.clone();
     let real_params = jvm_function_params(ir, fid);
@@ -129,6 +135,7 @@ pub(super) fn emit_default_stub(
         receiver_offset,
         &param_slots,
         &mask_slots,
+        None,
     );
     code.aload(0);
     for (index, &(slot, ty)) in param_slots.iter().enumerate() {
@@ -398,6 +405,7 @@ pub(super) fn emit_default_param_overwrites(
     receiver_offset: usize,
     param_slots: &[(u16, Ty)],
     mask_slots: &[u16],
+    signature_line: Option<u32>,
 ) {
     let logical_param_count = param_slots
         .len()
@@ -406,6 +414,11 @@ pub(super) fn emit_default_param_overwrites(
     for (index, default) in defaults.iter().enumerate().take(logical_param_count) {
         if let Some(expression) = default {
             let (slot, ty) = param_slots[index + receiver_offset];
+            // An inline stub's mask tests stand on the signature line, which a preceding
+            // default's own line no longer is.
+            if let Some(line) = signature_line {
+                code.mark_line(line);
+            }
             code.iload(mask_slots[index / 32]);
             code.push_int(default_mask_bit(index), emitter.cw);
             code.iand();
@@ -415,6 +428,9 @@ pub(super) fn emit_default_param_overwrites(
                 emitter.ir,
                 *expression,
             ) {
+                // The marker is the default's first instruction, so it opens the default's line:
+                // an inliner reads it as the instruction just before the lambda's instance load.
+                emitter.mark_expression_start(*expression, code);
                 let marker = emitter.cw.methodref(
                     "kotlin/jvm/internal/Intrinsics",
                     "needClassReification",
@@ -466,17 +482,15 @@ fn publish_exported_private_access(emitter: &mut Emitter<'_>, fid: u32) {
 }
 
 /// Emit a facade-style static function `$default` synthetic.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_facade_default_stub(
-    ir: &IrFile,
-    fid: u32,
+    source: DefaultStubSource<'_>,
     static_owner: StaticOwner,
     facade: &str,
     cw: &mut ClassWriter,
-    defaults: &[Option<u32>],
     env: &EmitEnv,
     marker: Ty,
 ) {
+    let DefaultStubSource { ir, fid, defaults } = source;
     let function = &ir.functions[fid as usize];
     let method_name = function.name.clone();
     let real_params = jvm_function_params(ir, fid);
@@ -554,6 +568,14 @@ pub(super) fn emit_facade_default_stub(
             code.mark_line(line);
         }
     }
+    let signature_line = inline_default
+        .then(|| {
+            ir.fn_sig_lines
+                .get(&fid)
+                .or_else(|| ir.fn_decl_lines.get(&fid))
+        })
+        .flatten()
+        .copied();
     emit_default_param_overwrites(
         &mut emitter,
         &mut code,
@@ -561,6 +583,7 @@ pub(super) fn emit_facade_default_stub(
         receiver_prefix,
         &param_slots,
         &mask_slots,
+        signature_line,
     );
     let reified_body = function
         .body

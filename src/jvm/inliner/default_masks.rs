@@ -9,6 +9,10 @@
 //! store's test on. The mask words and the handler then stop being parameters of the body
 //! (kotlinc's `prepareNode` drops them from its descriptor); their slots are ordinary locals the
 //! body may reuse.
+//!
+//! An omitted inline lambda parameter's default is not stored either (`extractDefaultLambdasInfo`):
+//! the arm's `getstatic Lambda.INSTANCE` and its store are deleted, and the call inlines the
+//! lambda class's `invoke` wherever the body invokes the parameter ([`super::default_lambda`]).
 
 use std::collections::{HashSet, VecDeque};
 
@@ -28,6 +32,9 @@ const IAND: u8 = 0x7e;
 const IFEQ: u8 = 0x99;
 const IFNULL: u8 = 0xc6;
 const NEW: u8 = 0xbb;
+const CHECKCAST: u8 = 0xc0;
+const GETSTATIC: u8 = 0xb2;
+const INVOKESTATIC: u8 = 0xb8;
 const ACC_STATIC: u16 = 0x0008;
 
 /// The constant masks one call passes to a `$default` bridge, and where the bridge declares them:
@@ -40,6 +47,21 @@ pub(crate) struct DefaultMasks {
     /// realized call-site operand plan. Header parsing must not recover this association from the
     /// bridge's store types or positions.
     pub parameters: Vec<(usize, u16)>,
+    /// The slots of the omitted parameters that are inline lambda parameters (kotlinc's
+    /// `DefaultValueOfInlineParameter` offsets): their defaults are inlined, never stored.
+    pub inline_lambdas: Vec<u16>,
+}
+
+/// An omitted inline lambda parameter whose default is a lambda class's singleton
+/// (`ExtractedDefaultLambda`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExtractedDefaultLambda {
+    /// The parameter's declaration slot.
+    pub slot: u16,
+    /// The lambda class.
+    pub class: String,
+    /// The default arm marked the class for reification (`needClassReification`).
+    pub need_reification: bool,
 }
 
 impl DefaultMasks {
@@ -79,12 +101,36 @@ struct Condition {
 }
 
 /// Resolve `node`'s mask header for `masks` and drop the mask words and the handler from its
-/// descriptor. A test whose shape is not kotlinc's is an error, never left to run.
-pub(crate) fn expand(node: &mut MethodNode, masks: &DefaultMasks) -> Result<(), InlineError> {
+/// descriptor; the omitted inline lambda parameters whose defaults are extracted are returned. A
+/// test whose shape is not kotlinc's is an error, never left to run.
+pub(crate) fn expand(
+    node: &mut MethodNode,
+    masks: &DefaultMasks,
+) -> Result<Vec<ExtractedDefaultLambda>, InlineError> {
     validate_contract(node, masks)?;
     let conditions = header_conditions(node, masks)?;
     let label_positions = label_positions(node);
     let mut deleted = vec![false; node.nodes.len()];
+    let mut extracted = Vec::new();
+    for condition in &conditions {
+        let Some(slot) = condition
+            .parameter
+            .filter(|slot| condition.keeps_default && masks.inline_lambdas.contains(slot))
+        else {
+            continue;
+        };
+        let store = label_positions
+            .get(condition.target.index())
+            .and_then(Option::as_ref)
+            .and_then(|position| position.checked_sub(1))
+            .ok_or_else(|| malformed("a mask test jumps to a label the body never places"))?;
+        if let Some((lambda, first)) = singleton_default(node, slot, condition.jump, store) {
+            for entry in deleted.iter_mut().take(store + 1).skip(first) {
+                *entry = true;
+            }
+            extracted.push(lambda);
+        }
+    }
     for condition in &conditions {
         let end = if condition.keeps_default {
             condition.jump + 1
@@ -132,8 +178,70 @@ pub(crate) fn expand(node: &mut MethodNode, masks: &DefaultMasks) -> Result<(), 
         index += 1;
         keep
     });
+    node.local_variables.retain(|variable| {
+        !extracted
+            .iter()
+            .any(|lambda| lambda.slot == variable.slot && variable.slot < masks.start)
+    });
     reject_uninitialized_suffix_reads(node, masks)?;
-    drop_mask_parameters(node, masks)
+    drop_mask_parameters(node, masks)?;
+    Ok(extracted)
+}
+
+/// The default arm `[needClassReification] getstatic Lambda.INSTANCE [checkcast] astore slot`
+/// ending at `store`, and where its deleted instructions begin. A lambda class constructed with
+/// captured values is not extracted yet: its default stays the stored object.
+fn singleton_default(
+    node: &MethodNode,
+    slot: u16,
+    jump: usize,
+    store: usize,
+) -> Option<(ExtractedDefaultLambda, usize)> {
+    let mut instance = store.checked_sub(1)?;
+    if matches!(
+        node.nodes.get(instance),
+        Some(Node::Insn(Insn::Type { op: CHECKCAST, .. }))
+    ) {
+        instance = instance.checked_sub(1)?;
+    }
+    if instance <= jump {
+        return None;
+    }
+    let Some(Node::Insn(Insn::Field {
+        op: GETSTATIC,
+        owner,
+        name,
+        ..
+    })) = node.nodes.get(instance)
+    else {
+        return None;
+    };
+    if name != "INSTANCE" {
+        return None;
+    }
+    let marker = instance.checked_sub(1).filter(|&at| {
+        at > jump
+            && matches!(
+                node.nodes.get(at),
+                Some(Node::Insn(Insn::Method {
+                    op: INVOKESTATIC,
+                    owner,
+                    name,
+                    desc,
+                    ..
+                })) if owner == "kotlin/jvm/internal/Intrinsics"
+                    && name == "needClassReification"
+                    && desc == "()V"
+            )
+    });
+    Some((
+        ExtractedDefaultLambda {
+            slot,
+            class: owner.clone(),
+            need_reification: marker.is_some(),
+        },
+        marker.unwrap_or(instance),
+    ))
 }
 
 /// Validate the call-site contract against the bridge descriptor before inspecting its body. The
@@ -724,6 +832,7 @@ mod tests {
             start: 2,
             masks: vec![bits],
             parameters: vec![(0, 0), (1, 1)],
+            inline_lambdas: Vec::new(),
         }
     }
 

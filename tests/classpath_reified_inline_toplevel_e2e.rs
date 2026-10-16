@@ -73,12 +73,11 @@ fn top_level_reified_inline_call_splices_and_runs() {
     assert_eq!(out, "OK");
 }
 
+/// The omitted `block` is the library's singleton lambda class, whose `$default` arm calls
+/// `needClassReification`. The call inlines that lambda's body specialized for `String` instead of
+/// calling the bridge, which only throws.
 #[test]
-fn a_body_needing_class_reification_bails_instead_of_miscompiling() {
-    // krusty splices INSTRUCTIONS; it cannot regenerate a dependency's compiled inner classes, which
-    // is exactly what `needClassReification` demands. Reusing the erased-`T` copy — or falling back to
-    // a direct call, which throws — would both be miscompiles, so the backend REFUSES the call. This
-    // pins the refusal: the day class regeneration lands, this test is what says so.
+fn a_default_lambda_needing_class_reification_is_inlined_and_runs() {
     let Some(libout) = common::compile_lib("reified_needs_reification", NEEDS_CLASS_REIFICATION)
     else {
         return;
@@ -87,17 +86,18 @@ fn a_body_needing_class_reification_bails_instead_of_miscompiling() {
     let jdk = common::jdk_modules();
     let classpath = [libout, stdlib];
     let main = "import lib.configure\n\
-        fun box(): String = configure<String>()\n";
-    let diagnostics = common::front_end_diagnostics(main, &classpath, Some(jdk.as_path()));
-    // The front end accepts it — resolution is fine; the BACKEND is what must refuse.
-    assert!(
-        diagnostics.is_empty(),
-        "resolution should succeed, got {diagnostics:?}"
-    );
-    assert!(
-        common::compile_in_process(main, "Main", &classpath, Some(jdk.as_path())).is_none(),
-        "a needClassReification body must not be emitted as a call that throws at runtime"
-    );
+        fun box(): String {\n\
+        \x20 val configured = configure<String>()\n\
+        \x20 return if (configured == \"String/configured\") \"OK\" else configured\n\
+        }\n";
+    let Some(out) = common::compile_and_run_box(main, "Main", &classpath, Some(jdk.as_path()))
+    else {
+        panic!(
+            "compile/run returned None: {:?}",
+            common::front_end_diagnostics(main, &classpath, Some(jdk.as_path()))
+        );
+    };
+    assert_eq!(out, "OK");
 }
 
 /// Real kotlinc must be able to INLINE a krusty-built reified inline function: the emitted method
