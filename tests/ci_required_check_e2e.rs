@@ -272,6 +272,14 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
             "the maximum-version Native row must retain focused KLIB coverage ({needle}): {conformance}"
         );
     }
+    assert!(
+        conformance.contains(
+            "if: matrix.target == 'wasm' || (matrix.target == 'native' && matrix.version != needs.versions.outputs.max)"
+        ) && conformance.contains(
+            "klib_libraries::tests::implementation_coverage:: --nocapture"
+        ),
+        "every non-maximum Native/Wasm matrix row must run the exact implementation ratchet: {conformance}"
+    );
     let focused = conformance
         .find("- name: run focused KLIB semantics and Native oracle coverage")
         .expect("Native conformance retains focused KLIB coverage");

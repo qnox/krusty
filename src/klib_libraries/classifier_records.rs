@@ -5,7 +5,7 @@
 //! hierarchy walk over the direct supertypes the record lists.
 
 use super::builtin_realizations;
-use super::classifier_signatures::SignedClassifier;
+use super::classifier_signatures::{SignedClassifier, SignedConstructor};
 use super::external_identities::ExternalIdentities;
 use super::inventory::PackageInventory;
 use super::lookup::{published_function, published_property};
@@ -26,22 +26,7 @@ pub(super) fn classifier_record(
     let signed = inventory.classifier(identity)?;
     let mut shape = signed.shape.clone();
     for constructor in &signed.constructors {
-        let mut member = declared_constructor(
-            identity,
-            &shape,
-            &signed.type_parameters,
-            &constructor.declaration,
-            &constructor.parameters,
-        );
-        member.default_values = constructor.defaults.clone();
-        identities.assign_constructor(
-            &constructor.signature,
-            &constructor.parameters,
-            identity,
-            signed.internal_friend,
-            signed.module.as_deref(),
-            &mut member,
-        );
+        let member = published_constructor(identities, identity, signed, constructor);
         shape
             .named_parameter_lists
             .push(constructor_parameter_list(&member));
@@ -123,9 +108,35 @@ pub(super) fn classifier_record(
     Some(shape)
 }
 
+/// Normalize one signed constructor exactly as classifier publication does.
+pub(super) fn published_constructor(
+    identities: &ExternalIdentities,
+    identity: TypeName,
+    classifier: &SignedClassifier,
+    constructor: &SignedConstructor,
+) -> crate::libraries::LibraryMember {
+    let mut member = declared_constructor(
+        identity,
+        &classifier.shape,
+        &classifier.type_parameters,
+        &constructor.declaration,
+        &constructor.parameters,
+    );
+    member.default_values = constructor.defaults.clone();
+    identities.assign_constructor(
+        &constructor.signature,
+        &constructor.parameters,
+        identity,
+        classifier.internal_friend,
+        classifier.module.as_deref(),
+        &mut member,
+    );
+    member
+}
+
 /// The placement of a `companion { … }` block member of `classifier`: named through it, declared
 /// by it, and privately accessible within its body.
-fn block_member_placement(classifier: TypeName) -> CallablePlacement {
+pub(super) fn block_member_placement(classifier: TypeName) -> CallablePlacement {
     CallablePlacement::Associated {
         classifier,
         declaration_owner: SemanticCallableOwner::Classifier(classifier),
@@ -198,7 +209,7 @@ pub(super) fn associated_callables(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum EnumClassMember {
+pub(super) enum EnumClassMember {
     /// `values()` or `valueOf(value)`, named through the enum class.
     Function,
     /// The getter of the synthetic `entries` property.
@@ -207,7 +218,7 @@ enum EnumClassMember {
 
 /// The members an enum class declares implicitly, each with the identity of the declaration its
 /// library serialized: `values`, `valueOf`, and, for an enum compiled with `entries`, its getter.
-fn enum_class_members(
+pub(super) fn enum_class_members(
     identities: &ExternalIdentities,
     owner: TypeName,
     signed: &SignedClassifier,

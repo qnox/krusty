@@ -558,6 +558,14 @@ impl PackageInventory {
             .flat_map(|(package, functions)| functions.iter().map(move |f| (*package, f)))
     }
 
+    /// Every published top-level property with its package, in no particular order.
+    #[cfg(test)]
+    pub(super) fn all_properties(&self) -> impl Iterator<Item = (TypeName, &SignedProperty)> {
+        self.properties
+            .iter()
+            .flat_map(|(package, properties)| properties.iter().map(move |p| (*package, p)))
+    }
+
     /// Every published class with its identity, in no particular order.
     #[cfg(test)]
     pub(super) fn all_classifiers(&self) -> impl Iterator<Item = (TypeName, &SignedClassifier)> {
@@ -572,6 +580,16 @@ impl PackageInventory {
         &self,
     ) -> impl Iterator<Item = (TypeName, &CompanionExtension<SignedFunction>)> {
         self.companion_functions
+            .iter()
+            .flat_map(|(classifier, extensions)| extensions.iter().map(move |e| (*classifier, e)))
+    }
+
+    /// Every companion extension property with the classifier it is named through.
+    #[cfg(test)]
+    pub(super) fn all_companion_properties(
+        &self,
+    ) -> impl Iterator<Item = (TypeName, &CompanionExtension<SignedProperty>)> {
+        self.companion_properties
             .iter()
             .flat_map(|(classifier, extensions)| extensions.iter().map(move |e| (*classifier, e)))
     }
