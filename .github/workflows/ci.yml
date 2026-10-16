@@ -499,6 +499,7 @@ jobs:
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.native-recording-mode.outputs.write }}
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_REQUIRE_KLIB: "1"
+          KRUSTY_REQUIRE_KLIB_IMPLEMENTATION_TARGETS: native
           KRUSTY_REQUIRE_KOTLIN_NATIVE: "1"
           RUST_MIN_STACK: "134217728"
         run: |
@@ -556,6 +557,7 @@ jobs:
         env:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_REQUIRE_KLIB: "1"
+          KRUSTY_REQUIRE_KLIB_IMPLEMENTATION_TARGETS: ${{ matrix.target == 'native' && 'native' || 'wasm-js,wasm-wasi' }}
           KRUSTY_TEST_TIMEOUT_SECONDS: "600"
         run: |
           set -euo pipefail

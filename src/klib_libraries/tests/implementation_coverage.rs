@@ -97,11 +97,18 @@ fn list_path(target: &str) -> PathBuf {
         .join(format!("{}.txt", crate::kotlin_version::target()))
 }
 
+fn target_is_required(target: &str) -> bool {
+    match std::env::var("KRUSTY_REQUIRE_KLIB_IMPLEMENTATION_TARGETS") {
+        Ok(required) => required.split(',').any(|entry| entry == target),
+        Err(_) => std::env::var_os("KRUSTY_REQUIRE_KLIB").is_some(),
+    }
+}
+
 fn check_target(target: CompilationTarget, list: &str) {
     let Some(stdlib) = crate::toolchain::kotlin_stdlib_klib(target) else {
         assert!(
-            std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
-            "KRUSTY_REQUIRE_KLIB is set but no {target:?} stdlib KLIB is provisioned"
+            !target_is_required(list),
+            "{target:?} is required by KRUSTY_REQUIRE_KLIB_IMPLEMENTATION_TARGETS but its stdlib KLIB is not provisioned"
         );
         return;
     };
