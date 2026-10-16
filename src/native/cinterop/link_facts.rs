@@ -121,23 +121,39 @@ fn read(path: &Path, arch: Arch) -> Result<ImportLibrary, CinteropError> {
 
 /// The facts as the library carries them: per library, a `library <soname>` line, then one
 /// `function <name> [<version>]` or `data <name> [<version>]` line per export, in name order.
-pub(crate) fn encode(libraries: &[ImportLibrary]) -> Vec<u8> {
+/// Fields are separated by spaces, so a soname, export or version containing whitespace is
+/// refused rather than written as facts [`decode`] would misread.
+pub(crate) fn encode(libraries: &[ImportLibrary]) -> Result<Vec<u8>, CinteropError> {
+    let field = |text: &str, what: &str, soname: &str| {
+        if text.chars().any(char::is_whitespace) {
+            Err(CinteropError(format!(
+                "{soname}: the {what} {text:?} contains whitespace, which an interop library \
+                 cannot record"
+            )))
+        } else {
+            Ok(())
+        }
+    };
     let mut out = String::new();
     for library in libraries {
-        out.push_str(&format!("library {}\n", library.soname()));
+        let soname = library.soname();
+        field(soname, "soname", soname)?;
+        out.push_str(&format!("library {soname}\n"));
         for (name, export) in library.exports() {
+            field(name, "export", soname)?;
             let kind = match export.kind {
                 ExportKind::Function => "function",
                 ExportKind::Data => "data",
             };
             out.push_str(&format!("{kind} {name}"));
             if let Some(version) = &export.version {
+                field(version, "symbol version", soname)?;
                 out.push_str(&format!(" {version}"));
             }
             out.push('\n');
         }
     }
-    out.into_bytes()
+    Ok(out.into_bytes())
 }
 
 /// Read the facts [`encode`] wrote. `what` names the library that carries them, in errors. A line
@@ -252,7 +268,7 @@ mod tests {
                 &[("environ", ExportKind::Data, Some("GLIBC_2.2.5"))],
             ),
         ];
-        let text = encode(&libraries);
+        let text = encode(&libraries).expect("encodes");
         assert_eq!(
             String::from_utf8(text.clone()).expect("UTF-8"),
             "library libz.so.1\nfunction compressBound\nfunction deflate ZLIB_1.2.0\n\
@@ -260,6 +276,35 @@ mod tests {
         );
         assert_eq!(decode(&text, "zlib.klib").expect("decodes"), libraries);
         assert_eq!(decode(b"", "zlib.klib").expect("decodes"), Vec::new());
+    }
+
+    #[test]
+    fn facts_with_whitespace_are_refused_when_the_library_is_made() {
+        let export = |version: Option<&str>| Export {
+            kind: ExportKind::Function,
+            version: version.map(str::to_string),
+        };
+        let refused = |soname: &str, name: &str, version: Option<&str>| {
+            let library =
+                ImportLibrary::new(soname.to_string(), [(name.to_string(), export(version))])
+                    .expect("a valid library");
+            encode(&[library]).expect_err("refused").0
+        };
+        assert_eq!(
+            refused("libz so.1", "deflate", None),
+            "libz so.1: the soname \"libz so.1\" contains whitespace, which an interop library \
+             cannot record"
+        );
+        assert_eq!(
+            refused("libz.so.1", "de flate", None),
+            "libz.so.1: the export \"de flate\" contains whitespace, which an interop library \
+             cannot record"
+        );
+        assert_eq!(
+            refused("libz.so.1", "deflate", Some("ZLIB\t1")),
+            "libz.so.1: the symbol version \"ZLIB\\t1\" contains whitespace, which an interop \
+             library cannot record"
+        );
     }
 
     #[test]

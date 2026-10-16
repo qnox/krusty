@@ -29,6 +29,7 @@ use crate::metadata::semantic::KotlinPackage;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::TypeName;
 
+pub(crate) use archives::OpenedKlibLibraries;
 pub use archives::{KlibLibrariesOpenError, KlibLibraryInput, KlibStdlibSemantics};
 pub(crate) use declaration_bodies::KlibCalleeOrigin;
 pub use declaration_bodies::{KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError};

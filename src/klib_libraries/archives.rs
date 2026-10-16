@@ -102,6 +102,17 @@ struct LibraryRecord<'a> {
     native_interop_library: bool,
 }
 
+/// The exact opened KLIB records selected by one compilation input assembly.
+///
+/// Target-specific input assembly may derive backend facts from these same archives before
+/// [`into_libraries`](Self::into_libraries) publishes their declarations. It must not reopen the
+/// paths: every consumed channel is frozen by [`KlibArchive::open`], and the final publication
+/// guard proves that the selected paths still name that generation.
+pub(crate) struct OpenedKlibLibraries<'a> {
+    records: Vec<LibraryRecord<'a>>,
+    platform_module: Option<String>,
+}
+
 /// Why the selected libraries could not be published.
 #[derive(Debug)]
 pub enum KlibLibrariesOpenError {
@@ -126,7 +137,7 @@ pub enum KlibLibrariesOpenError {
     Bodies(KlibDeclarationBodiesError),
     /// A selected KLIB has no stable module identity for cross-archive joins.
     MissingUniqueName { library: PathBuf },
-    /// A selected KLIB's semantic channels changed after this open froze and decoded them.
+    /// A selected KLIB's consumed channels changed after this open froze and decoded them.
     ChangedDuringOpen { library: PathBuf },
 }
 
@@ -163,7 +174,7 @@ impl std::fmt::Display for KlibLibrariesOpenError {
             ),
             Self::ChangedDuringOpen { library } => write!(
                 formatter,
-                "KLIB {} changed while its declarations and bodies were being opened",
+                "KLIB {} changed while its declarations, bodies, and backend facts were being opened",
                 library.display()
             ),
         }
@@ -175,6 +186,27 @@ impl std::error::Error for KlibLibrariesOpenError {}
 impl KlibLibraries {
     /// Publish every package fragment of the typed KLIB inputs, zipped or unpacked.
     pub fn open(libraries: &[KlibLibraryInput]) -> Result<Self, KlibLibrariesOpenError> {
+        OpenedKlibLibraries::open(libraries)?.into_libraries()
+    }
+}
+
+impl<'a> OpenedKlibLibraries<'a> {
+    /// Open and select the typed inputs once, before any semantic or backend facts are published.
+    pub(crate) fn open(libraries: &'a [KlibLibraryInput]) -> Result<Self, KlibLibrariesOpenError> {
+        Self::open_snapshot(libraries, false)
+    }
+
+    /// Open Native inputs with their target import channels in the same immutable snapshot.
+    pub(crate) fn open_native(
+        libraries: &'a [KlibLibraryInput],
+    ) -> Result<Self, KlibLibrariesOpenError> {
+        Self::open_snapshot(libraries, true)
+    }
+
+    fn open_snapshot(
+        libraries: &'a [KlibLibraryInput],
+        native_imports: bool,
+    ) -> Result<Self, KlibLibrariesOpenError> {
         let mut platform_stdlib = None;
         for input in libraries {
             let KlibLibraryRole::PlatformStdlib(_) = input.role else {
@@ -191,7 +223,12 @@ impl KlibLibraries {
         let mut records = Vec::with_capacity(libraries.len());
         for input in libraries {
             let library = &input.path;
-            let archive = KlibArchive::open(library).map_err(KlibLibrariesOpenError::Archive)?;
+            let archive = if native_imports {
+                KlibArchive::open_with_native_imports(library)
+            } else {
+                KlibArchive::open(library)
+            }
+            .map_err(KlibLibrariesOpenError::Archive)?;
             let manifest = archive
                 .manifest()
                 .map_err(KlibLibrariesOpenError::Archive)?;
@@ -236,6 +273,25 @@ impl KlibLibraries {
                     || matches!(record.input.role, KlibLibraryRole::PlatformStdlib(_))
             })
             .collect::<Vec<_>>();
+        Ok(Self {
+            records,
+            platform_module,
+        })
+    }
+
+    /// The selected archive paths and their frozen contents, in compiler input order.
+    pub(crate) fn archives(&self) -> impl Iterator<Item = (&Path, &KlibArchive)> {
+        self.records
+            .iter()
+            .map(|record| (record.input.path.as_path(), &record.archive))
+    }
+
+    /// Decode and publish the common KLIB provider from these exact opened records.
+    pub(crate) fn into_libraries(self) -> Result<KlibLibraries, KlibLibrariesOpenError> {
+        let Self {
+            records,
+            platform_module,
+        } = self;
         let mut packages = Vec::new();
         for record in &records {
             packages.extend(package_fragments(
@@ -323,12 +379,12 @@ impl KlibLibraries {
         });
         // Decoders read the immutable bytes frozen by `KlibArchive::open`, so they cannot combine
         // channels from two generations. Before publishing those decoded facts, prove that the
-        // selected path still names that same semantic generation. A later module will make the
+        // selected path still names that same consumed generation. A later module will make the
         // same check independently and the session snapshot will join the two fingerprints.
         for record in &records {
             validate_current_generation(record)?;
         }
-        Ok(Self::over_with_bodies_and_snapshot(
+        Ok(KlibLibraries::over_with_bodies_and_snapshot(
             std::rc::Rc::new(inventory),
             std::rc::Rc::new(bodies),
             body_snapshot,
@@ -352,14 +408,16 @@ pub(super) fn opened_generation_is_current(
     library: &Path,
     opened: &KlibArchive,
 ) -> Result<bool, KlibLibrariesOpenError> {
-    let opened = opened
+    let current = opened
+        .reopen_selected(library)
+        .map_err(KlibLibrariesOpenError::Archive)?;
+    let opened_fingerprint = opened
         .content_fingerprint()
         .map_err(KlibLibrariesOpenError::Archive)?;
-    let current = KlibArchive::open(library)
-        .map_err(KlibLibrariesOpenError::Archive)?
+    let current_fingerprint = current
         .content_fingerprint()
         .map_err(KlibLibrariesOpenError::Archive)?;
-    Ok(opened == current)
+    Ok(opened_fingerprint == current_fingerprint)
 }
 
 /// Snapshot one active body provider. Inactive same-module records never reach this channel.

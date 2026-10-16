@@ -59,18 +59,21 @@ fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/native_cinterop/direct_call.klib")
 }
 
-fn libraries() -> Option<krusty::klib_libraries::KlibLibraries> {
+fn libraries(target: NativeTarget) -> Option<krusty::native::NativeKlibInputs> {
     let stdlib = krusty::toolchain::kotlin_stdlib_klib(
         krusty::compilation_target::CompilationTarget::Native,
     )?;
     Some(
-        krusty::klib_libraries::KlibLibraries::open(&[
-            krusty::klib_libraries::KlibLibraryInput::dependency(fixture()),
-            krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
-                stdlib,
-                krusty::klib_libraries::KlibStdlibSemantics::Native,
-            ),
-        ])
+        krusty::native::NativeKlibInputs::open(
+            &[
+                krusty::klib_libraries::KlibLibraryInput::dependency(fixture()),
+                krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
+                    stdlib,
+                    krusty::klib_libraries::KlibStdlibSemantics::Native,
+                ),
+            ],
+            target,
+        )
         .expect("open the cinterop fixture and Native stdlib KLIBs"),
     )
 }
@@ -129,7 +132,7 @@ fn a_real_interop_klib_publishes_and_calls_its_exact_direct_c_target() {
     else {
         return;
     };
-    let Some(libraries) = libraries() else {
+    let Some(inputs) = libraries(target) else {
         assert!(
             std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
             "required Native stdlib KLIB is unavailable"
@@ -137,6 +140,7 @@ fn a_real_interop_klib_publishes_and_calls_its_exact_direct_c_target() {
         return;
     };
 
+    let libraries = inputs.libraries();
     let symbols = libraries.symbols(
         SymbolNamespace::Package(type_name("fixture/directc")),
         "krusty_fixture_sum",
@@ -167,6 +171,11 @@ fn a_real_interop_klib_publishes_and_calls_its_exact_direct_c_target() {
             .expect("the provider authenticated the direct C target")
             .symbol(),
         "krusty_fixture_sum"
+    );
+    let (libraries, imports) = inputs.into_parts();
+    assert!(
+        imports.is_empty(),
+        "the hand-linked direct-call fixture names no C libraries"
     );
 
     let inputs = [SourceInput::kotlin(SOURCE).with_file_stem("directCall")];
@@ -227,7 +236,7 @@ fn an_authenticated_direct_c_pointer_declines_its_nullable_boxed_carrier_exactly
     else {
         return;
     };
-    let Some(libraries) = libraries() else {
+    let Some(inputs) = libraries(target) else {
         assert!(
             std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
             "required Native stdlib KLIB is unavailable"
@@ -235,6 +244,11 @@ fn an_authenticated_direct_c_pointer_declines_its_nullable_boxed_carrier_exactly
         return;
     };
 
+    let (libraries, imports) = inputs.into_parts();
+    assert!(
+        imports.is_empty(),
+        "the direct-call fixture names no C libraries"
+    );
     let inputs = [SourceInput::kotlin(POINTER_SOURCE).with_file_stem("directPointer")];
     let stems = ["directPointer".to_owned()];
     let mut diags = DiagSink::new();
@@ -352,14 +366,18 @@ fn a_program_against_a_krusty_built_interop_klib_links_and_calls_its_shared_libr
     std::fs::rename(scratch.0.join(SHARED_LIBRARY), loaded.join(SHARED_LIBRARY))
         .expect("move the shared library out of the link's reach");
 
-    let libraries = krusty::klib_libraries::KlibLibraries::open(&[
-        krusty::klib_libraries::KlibLibraryInput::dependency(klib.clone()),
-        krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
-            stdlib.clone(),
-            krusty::klib_libraries::KlibStdlibSemantics::Native,
-        ),
-    ])
-    .expect("open the krusty-built interop KLIB and the Native stdlib KLIB");
+    let native_inputs = krusty::native::NativeKlibInputs::open(
+        &[
+            krusty::klib_libraries::KlibLibraryInput::dependency(klib),
+            krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
+                stdlib,
+                krusty::klib_libraries::KlibStdlibSemantics::Native,
+            ),
+        ],
+        target,
+    )
+    .expect("assemble the interop KLIB and Native stdlib KLIB once");
+    let libraries = native_inputs.libraries();
     for (name, expected) in [
         ("krusty_shared_sum", "krusty_shared_sum"),
         ("krusty_shared_scale", "krusty_shared_scale"),
@@ -400,6 +418,8 @@ fn a_program_against_a_krusty_built_interop_klib_links_and_calls_its_shared_libr
         );
     }
 
+    let (libraries, imports) = native_inputs.into_parts();
+
     let inputs = [SourceInput::kotlin(SHARED_SOURCE).with_file_stem("sharedCall")];
     let stems = ["sharedCall".to_owned()];
     let mut diags = DiagSink::new();
@@ -421,8 +441,6 @@ fn a_program_against_a_krusty_built_interop_klib_links_and_calls_its_shared_libr
         .map(|(_, bytes)| bytes.as_slice())
         .collect::<Vec<_>>();
 
-    let imports = krusty::native::interop_link_libraries(&[klib, stdlib], target)
-        .expect("read the interop KLIB's link facts");
     assert_eq!(
         imports
             .iter()

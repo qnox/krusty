@@ -37,7 +37,7 @@ mod value_classes;
 #[cfg(test)]
 pub(crate) use codegen::COUNTED_LOOPS;
 pub use codegen::{CraneliftBackend, Entry, BOX_RESULT_FRAME};
-pub use interop_libraries::interop_link_libraries;
+pub use interop_libraries::{NativeKlibInputs, NativeKlibInputsOpenError};
 pub use linker::{
     can_link, link_program, link_program_with_libraries, runtime_symbols, Export, ExportKind,
     ImportLibrary, ProgramLinkError,
