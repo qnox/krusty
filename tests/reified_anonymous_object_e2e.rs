@@ -348,3 +348,55 @@ fn an_object_in_a_reified_body_keeps_its_markers_for_another_module() {
     let differences = classes.differences();
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
 }
+
+const CATCH_OBJECT: &str = r#"// LANGUAGE: +AllowReifiedTypeInCatchClause
+package lib
+
+interface CatchProbe {
+    fun catches(block: () -> Unit): Boolean
+}
+
+inline fun <reified E : Throwable> catchProbe(): CatchProbe = object : CatchProbe {
+    override fun catches(block: () -> Unit): Boolean = try {
+        block()
+        false
+    } catch (ignored: E) {
+        true
+    }
+}
+"#;
+
+#[test]
+fn a_catch_marker_only_object_is_regenerated_for_another_module() {
+    let output = common::expect_box_run_against_ref(
+        "reified_catch_object_markers",
+        CATCH_OBJECT,
+        r#"// LANGUAGE: +AllowReifiedTypeInCatchClause
+import lib.*
+
+open class ParentFailure : Throwable()
+class ChildFailure : ParentFailure()
+
+fun box(): String {
+    val probe = catchProbe<ChildFailure>()
+    val child = probe.catches { throw ChildFailure() }
+    val parentEscaped = try {
+        probe.catches { throw ParentFailure() }
+        false
+    } catch (ignored: ParentFailure) {
+        true
+    }
+    return if (child && parentEscaped) "OK" else "FAIL"
+}
+"#,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+    let classes = common::classes_against_kotlinc_module(&[("Lib.kt", CATCH_OBJECT)]);
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        ["lib/CatchProbe", "lib/LibKt", "lib/LibKt$catchProbe$1"]
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}

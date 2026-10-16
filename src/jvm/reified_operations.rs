@@ -239,12 +239,16 @@ fn outer_class(ir: &IrFile, class: ClassId) -> Option<ClassId> {
 fn record_reifying_classes(ir: &mut IrFile, classes: impl IntoIterator<Item = ClassId>) {
     for class in classes {
         let mut current = Some(class);
+        let mut seen = HashSet::default();
         while let Some(class) = current {
-            if !in_reified_body(ir, ir.classes[class as usize].enclosure)
-                || !ir.reified_anonymous_declarations.insert(class)
-            {
+            if !seen.insert(class) || !in_reified_body(ir, ir.classes[class as usize].enclosure) {
                 break;
             }
+            // Common inline lowering may already have recorded the directly constructed class.
+            // Keep walking: a marker in a nested class also makes every enclosing generated class
+            // part of the reified copy, and prior membership is not proof that those owners were
+            // recorded.
+            ir.reified_anonymous_declarations.insert(class);
             current = outer_class(ir, class);
         }
     }
@@ -274,7 +278,8 @@ fn marker_roots<'a>(ir: &IrFile, functions: impl IntoIterator<Item = &'a FunId>)
     roots
 }
 
-/// Record which catches are still a reified parameter of a declaration in `functions`.
+/// Record catches that still carry a declaration-owned reified parameter across the complete exact
+/// emitted-root domain: selected functions and every class-owned root in a reified enclosure.
 ///
 /// The plan is the declaration's source spelling, keyed by the `try` expression and parallel to
 /// its catches. Later passes may move a catch onto a fresh `try`, so emission rebuilds the plan
@@ -286,7 +291,13 @@ fn record_reified_catches(
 ) {
     ir.reified_catch_markers.clear();
     let mut visited = HashSet::default();
-    for root in marker_roots(ir, functions) {
+    let mut roots = marker_roots(ir, functions);
+    for class in &ir.classes {
+        if in_reified_body(ir, class.enclosure) {
+            roots.extend(class_marker_roots(ir, class));
+        }
+    }
+    for root in roots {
         let mut pending = vec![root];
         while let Some(expression) = pending.pop() {
             if !visited.insert(expression) {
@@ -322,7 +333,8 @@ fn realize_expression_dag(
     ir: &mut IrFile,
     root: ExprId,
     parameters: &HashMap<String, ReifiedParameter>,
-) {
+) -> bool {
+    let mut emits_marker = false;
     let mut pending = vec![root];
     let mut visited = HashSet::default();
     while let Some(expression) = pending.pop() {
@@ -330,6 +342,7 @@ fn realize_expression_dag(
             continue;
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        emits_marker |= expression_emits_reified_marker(ir, expression, parameters);
         let replacement = match ir.expr(expression).clone() {
             IrExpr::KClassLiteral {
                 classifier: Some(classifier),
@@ -372,52 +385,119 @@ fn realize_expression_dag(
             ir.exprs[expression as usize] = replacement;
         }
     }
+    emits_marker
 }
 
-/// Whether the code under `root` executes a reification marker once realized: a reified class
-/// token, type operation or catch, a `typeOf` naming a reified parameter, or a call forwarding one
-/// to another reified declaration.
-fn executes_reification(
+/// Whether this exact semantic type occurrence carries a declaration-owned reified parameter that
+/// a JVM marker can consume. Do not inspect a non-reified parameter's bound: `typeOf<S>()` describes
+/// `S` as a runtime type parameter even when one of its bounds mentions a different reified `T`.
+fn type_uses_reified_parameter(ty: Ty, parameters: &HashMap<String, ReifiedParameter>) -> bool {
+    match ty {
+        Ty::TyParam(identity, _) => parameters.contains_key(identity),
+        Ty::Obj(_, arguments) | Ty::Intersection(arguments) => arguments
+            .iter()
+            .copied()
+            .any(|argument| type_uses_reified_parameter(argument, parameters)),
+        Ty::Fun(signature) => {
+            signature
+                .params
+                .iter()
+                .copied()
+                .any(|parameter| type_uses_reified_parameter(parameter, parameters))
+                || type_uses_reified_parameter(signature.ret, parameters)
+        }
+        Ty::Nullable(inner)
+        | Ty::PlatformNullable(inner)
+        | Ty::InProjection(inner)
+        | Ty::OutProjection(inner)
+        | Ty::DefinitelyNotNull(inner) => type_uses_reified_parameter(*inner, parameters),
+        // A star's readable bound is semantic information, but `typeOf<C<*>>()` emits
+        // `KTypeProjection.star` and no operation for that bound.
+        Ty::StarProjection(_) | Ty::Unit | Ty::Null | Ty::Nothing | Ty::Error | Ty::Pending => {
+            false
+        }
+    }
+}
+
+/// All IR-owned sources that emit `Intrinsics.reifiedOperationMarker` in this backend. Ownership of
+/// a generated class is derived from this one plan, so adding a marker producer cannot silently
+/// leave construction without `needClassReification`.
+fn expression_emits_reified_marker(
     ir: &IrFile,
-    root: ExprId,
+    expression: ExprId,
     parameters: &HashMap<String, ReifiedParameter>,
 ) -> bool {
-    let reified = |ty: Ty| {
-        ty.mentions_marker(
-            &|ty| matches!(ty, Ty::TyParam(identity, _) if parameters.contains_key(identity)),
-        )
-    };
-    let mut pending = vec![root];
-    let mut visited = HashSet::default();
-    while let Some(expression) = pending.pop() {
-        if !visited.insert(expression) {
-            continue;
-        }
-        let executes = match ir.expr(expression) {
-            IrExpr::ReifiedClassMarker { .. } | IrExpr::ReifiedTypeOp { .. } => true,
-            IrExpr::Call {
-                callee:
-                    crate::ir::Callee::Intrinsic {
-                        operation: crate::ir::IrIntrinsic::TypeOf { ty },
-                        ..
-                    },
-                ..
-            } => reified(*ty),
-            _ => false,
-        } || ir
-            .reified_catch_markers
-            .get(&expression)
-            .is_some_and(|markers| markers.iter().any(Option::is_some))
-            || ir
-                .reified_call_subst
-                .get(&expression)
-                .is_some_and(|substitutions| substitutions.iter().any(|&(_, ty)| reified(ty)));
-        if executes {
-            return true;
-        }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    if ir
+        .reified_call_subst
+        .get(&expression)
+        .is_some_and(|substitutions| {
+            substitutions
+                .iter()
+                .any(|(_, ty)| type_uses_reified_parameter(*ty, parameters))
+        })
+    {
+        return true;
     }
-    false
+    match ir.expr(expression) {
+        IrExpr::ReifiedClassMarker { .. } | IrExpr::ReifiedTypeOp { .. } => true,
+        IrExpr::KClassLiteral {
+            classifier: Some(classifier),
+            value: None,
+            ..
+        }
+        | IrExpr::TypeOp {
+            type_operand: classifier,
+            ..
+        } => parameter(*classifier, parameters).is_some(),
+        IrExpr::Try { catches, .. } => catches
+            .iter()
+            .any(|catch| parameter(catch.ty, parameters).is_some()),
+        IrExpr::Call {
+            callee:
+                crate::ir::Callee::Intrinsic {
+                    operation:
+                        crate::ir::IrIntrinsic::TypeOf { ty: classifier }
+                        | crate::ir::IrIntrinsic::EnumValueOf { classifier }
+                        | crate::ir::IrIntrinsic::EnumEntries { classifier },
+                    ..
+                },
+            ..
+        } => type_uses_reified_parameter(*classifier, parameters),
+        _ => false,
+    }
+}
+
+/// Expression roots physically emitted as part of one class rather than one [`IrFunction`].
+/// Keeping this inventory beside the marker plan makes constructors and property/enum
+/// initialization participate in the same ownership decision as methods and accessors.
+fn class_marker_roots(ir: &IrFile, class: &crate::ir::IrClass) -> Vec<ExprId> {
+    let mut roots = class.init_body.into_iter().collect::<Vec<_>>();
+    roots.extend(ir.companion_clinit_body(class.fq_name));
+    roots.extend(class.super_arg_prelude.iter().copied());
+    roots.extend(class.super_args.iter().copied());
+    roots.extend(
+        class
+            .properties
+            .iter()
+            .filter_map(|property| property.initializer),
+    );
+    for constructor in &class.secondary_ctors {
+        roots.extend(constructor.body.iter().copied());
+        roots.extend(constructor.defaults.iter().copied().flatten());
+        roots.extend(constructor.delegate_prelude.iter().copied());
+        roots.extend(constructor.delegate_args.iter().copied());
+    }
+    for entry in &class.enum_entries {
+        roots.extend(entry.argument_prelude.iter().copied());
+        roots.extend(entry.args.iter().copied());
+    }
+    roots.extend(
+        ir.statics
+            .iter()
+            .filter(|property| property.owner == Some(class.fq_name))
+            .filter_map(|property| property.init),
+    );
+    roots
 }
 
 pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMethods) {
@@ -428,34 +508,11 @@ pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMe
     // An object declared in a reified body executes the marker too: inlining regenerates its class.
     let parameters = collect_reified_parameters(ir);
     let functions = reified_marker_functions(ir, lambdas);
-    let classes = (0..ir.classes.len() as ClassId)
-        .filter(|&class| in_reified_body(ir, ir.classes[class as usize].enclosure))
-        .collect::<Vec<_>>();
-    let initializers = classes
-        .iter()
-        .filter_map(|&class| Some((class, ir.classes[class as usize].init_body?)))
-        .collect::<Vec<_>>();
-    let roots = marker_roots(ir, &functions);
-    for root in roots
-        .into_iter()
-        .chain(initializers.iter().map(|&(_, initializer)| initializer))
-    {
-        realize_expression_dag(ir, root, &parameters);
-    }
-    record_reified_catches(ir, &parameters, &functions);
-    let executes = |roots: Vec<ExprId>| {
-        roots
-            .into_iter()
-            .any(|root| executes_reification(ir, root, &parameters))
-    };
-    let mut reifying = initializers
-        .iter()
-        .filter(|&&(_, initializer)| executes(vec![initializer]))
-        .map(|&(class, _)| class)
-        .collect::<Vec<_>>();
+    let mut reifying = Vec::new();
     for &function in &functions {
-        if !executes(marker_roots(ir, [&function])) {
-            continue;
+        let mut realized = false;
+        for root in marker_roots(ir, [&function]) {
+            realized |= realize_expression_dag(ir, root, &parameters);
         }
         let owner = super::ir_emit::enclosure::enclosing_functions(
             ir,
@@ -463,9 +520,25 @@ pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMe
         )
         .next()
         .and_then(|(_, owner)| owner);
-        reifying.extend(owner.and_then(|owner| ir.class_id_by_name(owner)));
+        if realized {
+            reifying.extend(owner.and_then(|owner| ir.class_id_by_name(owner)));
+        }
+    }
+    for class in 0..ir.classes.len() as ClassId {
+        let declaration = &ir.classes[class as usize];
+        if !in_reified_body(ir, declaration.enclosure) {
+            continue;
+        }
+        let roots = class_marker_roots(ir, declaration);
+        let emits_marker = roots.into_iter().fold(false, |emits_marker, root| {
+            realize_expression_dag(ir, root, &parameters) || emits_marker
+        });
+        if emits_marker {
+            reifying.push(class);
+        }
     }
     record_reifying_classes(ir, reifying);
+    record_reified_catches(ir, &parameters, &functions);
 }
 
 #[cfg(test)]
@@ -568,6 +641,140 @@ mod tests {
                     },
                 ),
             ])
+        );
+    }
+
+    #[test]
+    fn marker_plan_covers_type_of_catches_and_forwarded_calls() {
+        let identity = "T@owner";
+        let parameter_ty = Ty::ty_param(identity, Ty::obj("kotlin/Any"));
+        let parameters = HashMap::from_iter([(
+            identity.to_owned(),
+            ReifiedParameter {
+                source_name: "T".to_owned(),
+                erased: crate::types::type_name("java/lang/Object"),
+            },
+        )]);
+        let mut ir = IrFile::default();
+        let type_of = ir.add_expr(IrExpr::Call {
+            callee: crate::ir::Callee::Intrinsic {
+                operation: crate::ir::IrIntrinsic::TypeOf {
+                    ty: Ty::obj_args("kotlin/collections/List", &[parameter_ty]),
+                },
+                ret: Ty::obj("kotlin/reflect/KType"),
+            },
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let thrown = ir.add_expr(IrExpr::UnitInstance);
+        let handler = ir.add_expr(IrExpr::UnitInstance);
+        let catch = ir.add_expr(IrExpr::Try {
+            body: thrown,
+            catches: vec![IrCatch {
+                var: 1,
+                binding: None,
+                ty: parameter_ty,
+                body: handler,
+                line: None,
+            }],
+            finally: None,
+            result: Ty::Unit,
+        });
+        let forwarded = ir.add_expr(IrExpr::UnitInstance);
+        ir.reified_call_subst.insert(
+            forwarded,
+            vec![(
+                "R".to_owned(),
+                Ty::obj_args("kotlin/collections/List", &[parameter_ty]),
+            )],
+        );
+        let enum_entries = ir.add_expr(IrExpr::Call {
+            callee: crate::ir::Callee::Intrinsic {
+                operation: crate::ir::IrIntrinsic::EnumEntries {
+                    classifier: parameter_ty,
+                },
+                ret: Ty::obj("kotlin/enums/EnumEntries"),
+            },
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let star = ir.add_expr(IrExpr::Call {
+            callee: crate::ir::Callee::Intrinsic {
+                operation: crate::ir::IrIntrinsic::TypeOf {
+                    ty: Ty::obj_args(
+                        "kotlin/collections/List",
+                        &[Ty::star_projection(parameter_ty)],
+                    ),
+                },
+                ret: Ty::obj("kotlin/reflect/KType"),
+            },
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+
+        assert!(expression_emits_reified_marker(&ir, type_of, &parameters));
+        assert!(expression_emits_reified_marker(&ir, catch, &parameters));
+        assert!(expression_emits_reified_marker(&ir, forwarded, &parameters));
+        assert!(expression_emits_reified_marker(
+            &ir,
+            enum_entries,
+            &parameters
+        ));
+        assert!(!expression_emits_reified_marker(&ir, star, &parameters));
+    }
+
+    #[test]
+    fn a_pre_recorded_nested_class_still_records_its_reified_owner_chain() {
+        let identity = "T@owner";
+        let mut ir = IrFile::default();
+        let body = ir.add_expr(IrExpr::UnitInstance);
+        function(&mut ir, body, identity);
+        let mut outer = crate::ir::IrClass::synthetic(crate::types::type_name("Owner$1"));
+        outer.enclosure = Some(IrEnclosure::Function(0));
+        let mut inner = crate::ir::IrClass::synthetic(crate::types::type_name("Owner$1$Inner"));
+        inner.enclosure = Some(IrEnclosure::Classifier(0));
+        ir.classes.extend([outer, inner]);
+        ir.reified_anonymous_declarations.insert(1);
+
+        record_reifying_classes(&mut ir, [1]);
+
+        assert_eq!(
+            ir.reified_anonymous_declarations,
+            HashSet::from_iter([0, 1])
+        );
+    }
+
+    #[test]
+    fn a_class_initializer_catch_uses_the_same_reified_marker_plan() {
+        let identity = "E@owner";
+        let parameter_ty = Ty::ty_param(identity, Ty::obj("kotlin/Throwable"));
+        let mut ir = IrFile::default();
+        let thrown = ir.add_expr(IrExpr::UnitInstance);
+        let handler = ir.add_expr(IrExpr::UnitInstance);
+        let catch = ir.add_expr(IrExpr::Try {
+            body: thrown,
+            catches: vec![IrCatch {
+                var: 1,
+                binding: None,
+                ty: parameter_ty,
+                body: handler,
+                line: None,
+            }],
+            finally: None,
+            result: Ty::Unit,
+        });
+        function(&mut ir, thrown, identity);
+        let mut class = crate::ir::IrClass::synthetic(crate::types::type_name("Owner$1"));
+        class.enclosure = Some(IrEnclosure::Function(0));
+        class.init_body = Some(catch);
+        ir.classes.push(class);
+        let parameters = collect_reified_parameters(&ir);
+
+        record_reified_catches(&mut ir, &parameters, &HashSet::default());
+
+        assert_eq!(
+            ir.reified_catch_markers.get(&catch),
+            Some(&vec![Some("T".to_owned())])
         );
     }
 

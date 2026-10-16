@@ -5913,13 +5913,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   clause is checked as the reified parameter. Common IR stores only that semantic type. While the
   parameter is still unsubstituted, the JVM reified-operation pass records the declaration's
   source spelling on that `try` — the spelling the marker carries, not a name recovered from the
-  semantic identity. Emission catches the parameter's bound (`Throwable`) and writes
+  semantic identity. The same plan covers a function, initializer, or accessor owned by a class
+  declared in that reified body; an unrelated member that merely has an equal source spelling is
+  outside the recorded enclosure and cannot join the plan. Emission catches the parameter's bound
+  (`Throwable`) and writes
   `Intrinsics.reifiedOperationMarker(7, "E")` as the handler's first instructions, ahead of the
-  store of the exception. The plan is recorded only for the reified declaration and its lambda
-  implementations. Declaration-owned defaults are roots of that same domain, so their type
-  operations, class literals, and catches receive markers too. An ordinary object member that
-  mentions the same identity is not a marker. The bytecode inliner selects the handler
-  the way kotlinc does: the nearest preceding handler label, or the label before an optional
+  store of the exception. Declaration-owned defaults are roots of that same domain, so their type
+  operations, class literals, and catches receive markers too. The bytecode inliner selects the
+  handler the way kotlinc does: the nearest preceding handler label, or the label before an optional
   line-number label whose following line metadata names that exact label. It does not skip an
   executable instruction, a bare unrelated label, or mismatched line metadata. Every typed
   exception entry of that handler is retargeted when those entries name the same class, which is
@@ -5988,18 +5989,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a lambda node becomes a class value. Closure realization preserves implementation identities
   and their owned nested/helper methods across that boundary; an anonymous object's ordinary
   generic members are not in this lambda domain merely because they use the same semantic parameter.
-  Every function and class initializer declared at any depth in a reified declaration's body is in
-  the marker domain, as kotlinc regenerates such classes per call site
-  (`an_object_in_a_reified_body_keeps_its_markers_for_another_module`).
   The enum-bound anonymous delegate's call-site copy executes its cast without a reification marker
   (`erased_anonymous_delegate_member_is_not_a_reified_closure_method`).
-  Those members are still reified operations of the anonymous class. The declaration class keeps
-  the marker, and the inline method calls `needClassReification` before constructing it. That
-  guard covers every class in a reified body whose members or initializer execute a marker (a
-  reified class token, type operation or catch, a `typeOf` of a reified parameter, or a call that
-  forwards one), and each enclosing class in the same body; a class a same-module call copies is
-  recorded too. A same-module inline call copies the class and substitutes the call's
-  reified arguments, so the copy executes the specialized operation with no marker.   Source
+  Those members are still reified operations of the anonymous class. Before erasure, the JVM
+  reified-operation pass walks the exact recorded enclosure domain once and builds one marker plan
+  for every class body. It includes `is`/`as`, class literals, `typeOf`, reified catches, reified
+  enum reflection, already-normalized marker nodes, and checked reified-call substitutions. A
+  marker in a nested class records that class and each generated enclosing class that must be
+  regenerated with it, even when common inline lowering already recorded the directly constructed
+  class. The declaration class keeps the marker, and the inline method calls
+  `needClassReification` before constructing it. The emitter consumes that class ownership and the
+  per-operation plans; it does not search bodies again or recover an owner or parameter from a JVM
+  name. A same-module inline call copies the class and substitutes the call's reified arguments, so
+  the copy executes the specialized operation with no marker.   Source
   property overrides leave their accessor functions empty. Accessor functions are materialized
   after the copy, once property layouts exist; the same clone map then records those functions
   on the copy. The copy fills its overrides from the recorded layout through that map, and
