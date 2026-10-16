@@ -803,9 +803,7 @@ fn attach_synth_nullability(
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     // A reference type (descriptor `L…;`/`[…`) gets `@NotNull` unless it is `Ty::Nullable`, then
     // `@Nullable`; a primitive gets no annotation.
-    let ann = |name: &str, t: Ty| {
-        nullability_annotation(field_nullability_kind(ir, &c.fq_name(), name, t))
-    };
+    let ann = |t: Ty| nullability_annotation(field_nullability_kind(t));
     // Interfaces have accessors but no backing fields. The annotation targets the PHYSICAL field
     // (`result$1` when mangled away from a same-named hoisted companion static). The constructor
     // prefix's fields and other compiler-generated storage are not annotated.
@@ -816,7 +814,7 @@ fn attach_synth_nullability(
             if !field_visibility::publishes_field_nullability(c, index) {
                 continue;
             }
-            if let Some(a) = ann(&f.name, f.ty) {
+            if let Some(a) = ann(f.ty) {
                 cw.set_field_nullability(
                     &instance_field_jvm_name(ir, run, c, index),
                     &desc(jvm_value_ty(&f.ty)),
@@ -842,7 +840,7 @@ fn attach_synth_nullability(
             })
             .filter(|(_, s)| !s.is_lateinit)
         {
-            if let Some(a) = ann(&s.name, jvm_declared_ty(&s.ty)) {
+            if let Some(a) = ann(jvm_declared_ty(&s.ty)) {
                 cw.set_field_nullability(
                     ir.static_field_jvm_name(index as u32),
                     &desc(jvm_declared_ty(&s.ty)),
@@ -875,7 +873,7 @@ fn attach_synth_nullability(
         let Some(hoisted) = static_fields::hoisted_static_for(ir, c, property_index) else {
             continue;
         };
-        let Some(a) = ann(&property.name, hoisted.ty) else {
+        let Some(a) = ann(hoisted.ty) else {
             continue;
         };
         let (getter, setter) = accessor_jvm_names(c, &property.name);
@@ -910,7 +908,7 @@ fn attach_synth_nullability(
     }
     // Accessors: a reference getter annotates its return; a `var` reference setter its parameter.
     for f in &c.fields {
-        let Some(a) = ann(&f.name, f.ty) else {
+        let Some(a) = ann(f.ty) else {
             continue;
         };
         let (getter, setter) = accessor_jvm_names(c, &f.name);
@@ -936,8 +934,7 @@ fn attach_synth_nullability(
             let function = &ir.functions[fid as usize];
             // `copy`'s parameters mirror the primary-constructor properties, so each reference param
             // takes the SAME `@NotNull`/`@Nullable` annotation kotlinc puts on the constructor's.
-            let copy_params: Vec<Option<&str>> =
-                data_fields.iter().map(|f| ann(&f.name, f.ty)).collect();
+            let copy_params: Vec<Option<&str>> = data_fields.iter().map(|f| ann(f.ty)).collect();
             cw.set_method_nullability(
                 &function.name,
                 &ir_method_desc(&function.params, &function.ret),
@@ -964,7 +961,7 @@ fn attach_synth_nullability(
             );
         }
         for (i, f) in data_fields.iter().enumerate() {
-            if let Some(a) = ann(&f.name, f.ty) {
+            if let Some(a) = ann(f.ty) {
                 let fid = ir
                     .data_class_member(c.fq_name_id(), IrDataClassMemberRole::Component(i as u32))
                     .expect("a data-class component records its generated identity");
@@ -979,21 +976,6 @@ fn attach_synth_nullability(
                     &ir_method_desc(&function.params, &function.ret),
                     Some(a),
                     &[],
-                );
-            }
-        }
-    }
-    // A value class's `constructor-impl` returns the erased underlying; kotlinc annotates that return
-    // exactly like the property's (a non-null reference underlying → `@NotNull`).
-    if c.is_value {
-        if let Some(f0) = c.fields.first() {
-            if let Some(a) = ann(&f0.name, f0.ty) {
-                let u = desc(f0.ty);
-                cw.set_method_nullability(
-                    "constructor-impl",
-                    &format!("({u}){u}"),
-                    Some(a),
-                    &[Some(a)],
                 );
             }
         }
@@ -2639,7 +2621,7 @@ fn emit_class(
             // the local `type_parameter` above is the `Signature` attribute's spelling, a wider source
             // that must not become a second answer to the same question.
             let field_ann = field_visibility::publishes_field_nullability(c, field_index)
-                .then(|| nullability_annotation(field_nullability_kind(ir, &fq_name, name, *ty)))
+                .then(|| nullability_annotation(field_nullability_kind(*ty)))
                 .flatten();
             cw.add_field_late_sig(
                 acc,
@@ -3144,6 +3126,8 @@ fn emit_class(
         c.is_value && computed.is_some() && !is_coroutine_state_machine(c);
     if early_value_nullability {
         attach_synth_nullability(ir, c, env.run, &mut cw);
+        // `set_class_annotations` visits the deferred underlying field first, so a generic
+        // underlying's `Signature` (`TT;`) interns before `@JvmInline` too.
         cw.set_class_annotations(&super::value_classes::class_file_annotations(c));
     }
     // Debug tables + nullability annotations follow a successfully computed `@Metadata` shape.
@@ -3731,7 +3715,7 @@ fn emit_enum_class(
     for (field_index, (f, t)) in c.fields.iter().zip(&field_tys).enumerate() {
         let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
         let nullability = (!f.is_lateinit())
-            .then(|| nullability_annotation(field_nullability_kind(ir, &fq, &f.name, f.ty)))
+            .then(|| nullability_annotation(field_nullability_kind(f.ty)))
             .flatten();
         let signature =
             property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref())
@@ -3931,7 +3915,7 @@ fn emit_enum_class(
             cw.reserve_descriptor(&getter);
         }
         // The nullability comes from the declared type; `t` is its erased JVM form.
-        match field_nullability_kind(ir, &fq, &f.name, f.ty) {
+        match field_nullability_kind(f.ty) {
             1 => cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;"),
             2 => cw.reserve_descriptor("Lorg/jetbrains/annotations/Nullable;"),
             _ => {}

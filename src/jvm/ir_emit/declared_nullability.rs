@@ -1,13 +1,16 @@
 //! kotlinc's synthesized `@NotNull`/`@Nullable` on a declared function's result and parameters.
 //!
-//! A reference result or parameter is annotated with its declared nullability. A value-class
-//! member's static replacement leaves its carrier unannotated, and so does every position whose type
-//! is a bare type parameter with a nullable bound. The value-class interface entry, which stands in
+//! A reference result or parameter is annotated with its declared nullability, classified by
+//! `declared_type_nullability`. A value-class member's static replacement leaves its carrier
+//! unannotated, and so does every position whose type is a bare type parameter with a nullable bound.
+//! A value class's `constructor-impl` declares the class's own constructor parameters and returns the
+//! class type, so its result is always `@NotNull` whatever the carrier. The value-class interface entry, which stands in
 //! for that member on the box, carries the same annotations less the carrier. A suspend
 //! function's result is its CPS `Object`, always `@Nullable`.
 
 use super::body_has_reified_markers;
 use crate::ir::IrFile;
+use crate::jvm::declared_type_nullability::{declared_annotation, is_unannotated_type_parameter};
 use crate::types::Ty;
 
 /// The nullability annotation type descriptors of one function, in physical parameter order.
@@ -18,23 +21,13 @@ pub(super) struct DeclaredNullability {
 
 pub(super) fn declared_nullability(ir: &IrFile, fid: u32) -> DeclaredNullability {
     let f = &ir.functions[fid as usize];
-    let ann_of = |physical: Ty, semantic: Ty| -> Option<&'static str> {
-        let d = crate::jvm::names::type_descriptor(physical);
-        if !(d.starts_with('L') || d.starts_with('[')) {
-            return None;
-        }
-        Some(if matches!(semantic, Ty::Nullable(_)) {
-            "Lorg/jetbrains/annotations/Nullable;"
-        } else {
-            "Lorg/jetbrains/annotations/NotNull;"
-        })
-    };
-    // A bare type parameter with a nullable upper bound has no fixed nullability annotation. A
-    // non-null bound (`T : Any`) is different: kotlinc publishes `@NotNull` on that occurrence.
+    let ann_of = |physical: Ty, semantic: Ty| declared_annotation(semantic, physical);
+    // A bare type parameter whose upper-bound chain admits null has no fixed nullability
+    // annotation. A non-null bound (`T : Any`) or `T & Any` is different: kotlinc publishes
+    // `@NotNull` on that occurrence.
     let gsig = ir.signatures.get(&fid);
     let member_sem = ir.member_semantic_sigs.get(&fid);
-    let unannotated_type_parameter =
-        |ty: Ty| matches!(ty, Ty::TyParam(_, bound) if bound.is_nullable());
+    let unannotated_type_parameter = is_unannotated_type_parameter;
     let value_class_declaration = ir.vc_declared_sigs.get(&fid);
     // A synthesized value-class `constructor-impl` has already been rewritten to its carrier in
     // `f.params`, but its recorded representation signature still owns the source parameters. A
@@ -68,6 +61,7 @@ pub(super) fn declared_nullability(ir: &IrFile, fid: u32) -> DeclaredNullability
         }
         let semantic = value_class_declaration
             .map(|(_, _, result)| *result)
+            .or_else(|| value_class_constructor.and_then(|signature| signature.ret))
             .unwrap_or(f.ret);
         ann_of(f.ret, semantic)
     })
@@ -90,6 +84,10 @@ pub(super) fn declared_nullability(ir: &IrFile, fid: u32) -> DeclaredNullability
                     .is_some_and(unannotated_type_parameter)
                     || member_sem
                         .and_then(|(ps, _)| ps.get(index))
+                        .copied()
+                        .is_some_and(unannotated_type_parameter)
+                    || value_class_parameters
+                        .and_then(|parameters| parameters.get(index))
                         .copied()
                         .is_some_and(unannotated_type_parameter)
             });

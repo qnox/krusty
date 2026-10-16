@@ -1,6 +1,7 @@
 //! A declared property's synthesized accessors: its default getter and setter.
 
 use super::*;
+use crate::jvm::declared_type_nullability::declared_reference_nullability;
 
 /// The class whose property accessors are emitted, with what their bodies and signatures need.
 pub(super) struct AccessorOwner<'a> {
@@ -97,31 +98,6 @@ fn emitted_signature(
     (!occupied).then_some(signature)
 }
 
-/// The nullability annotation an accessor's header carries for the reference type `jt`. A field
-/// typed by a class type parameter answers from the field's own classification, the one the
-/// class-wide accessor pass attaches: `T?` is `@Nullable`, a non-null-bounded `T` is `@NotNull`,
-/// and an unbounded `T` is unannotated. Reserving it with the header puts it where kotlinc visits
-/// it, before the accessor's body.
-fn accessor_nullability(
-    ir: &IrFile,
-    fq_name: &str,
-    property: &crate::ir::IrProperty,
-    field: &crate::ir::IrField,
-    jt: Ty,
-) -> Option<&'static str> {
-    if !jt.is_reference() {
-        return None;
-    }
-    if field.type_param.is_some() {
-        return nullability_annotation(field_nullability_kind(ir, fq_name, &field.name, field.ty));
-    }
-    Some(if property.ty.is_nullable() {
-        "Lorg/jetbrains/annotations/Nullable;"
-    } else {
-        "Lorg/jetbrains/annotations/NotNull;"
-    })
-}
-
 /// Emit `property`'s synthesized accessor on `side`, unless the class declares that accessor itself.
 pub(super) fn emit(
     owner: &AccessorOwner<'_>,
@@ -184,7 +160,13 @@ pub(super) fn emit(
         // Visit the method header before constructing its code. This is especially observable for a
         // setter guard (`<set-?>`) and for a generic accessor Signature.
         let sig = &signatures.getter;
-        let getter_ann = accessor_nullability(ir, fq_name, property, field, getter_jt);
+        // The header interns the declared type's annotation, so a bare type-parameter property
+        // classifies by that occurrence exactly as its field does (`T : Cargo` and `T & Any` are
+        // `@NotNull`, `T?` is `@Nullable`, a nullable-bounded `T` is unannotated).
+        let getter_ann = getter_jt
+            .is_reference()
+            .then(|| nullability_annotation(declared_reference_nullability(property.ty)))
+            .flatten();
         let annotations = &property.accessor_annotations.getter;
         cw.reserve_method_pool_with_annotations(
             getter,
@@ -250,7 +232,10 @@ pub(super) fn emit(
         let setter_desc = &planned.descriptor;
         {
             let sig = &signatures.setter;
-            let setter_ann = accessor_nullability(ir, fq_name, property, field, accessor_jt);
+            let setter_ann = accessor_jt
+                .is_reference()
+                .then(|| nullability_annotation(declared_reference_nullability(property.ty)))
+                .flatten();
             let annotations = &property.accessor_annotations.setter;
             let parameter_annotations =
                 std::slice::from_ref(&property.accessor_annotations.setter_parameter);
@@ -286,7 +271,7 @@ pub(super) fn emit(
             let guarded = param_assertions
                 && accessor_jt.is_reference()
                 && !property.ty.is_nullable()
-                && is_nonnull_reference_field(ir, fq_name, &field.name, field.ty);
+                && is_nonnull_reference_field(field.ty);
             if guarded {
                 st.aload(1);
                 st.push_string("<set-?>", cw);

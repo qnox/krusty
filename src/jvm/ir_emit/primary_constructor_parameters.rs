@@ -4,6 +4,7 @@
 //! field but is annotated like a property-backed one.
 
 use super::*;
+use crate::jvm::declared_type_nullability::declared_reference_nullability;
 
 /// The backing field each physical constructor parameter stores into, `None` for a plain parameter.
 /// A synthesized class (no `ctor_args`) stores every parameter into its leading fields.
@@ -60,7 +61,7 @@ pub(super) fn primary_ctor_source_parameters<'a>(
     ir: &IrFile,
     c: &'a IrClass,
 ) -> Vec<SourceCtorParameter<'a>> {
-    let mut parameters = source_parameters(ir, c);
+    let mut parameters = source_parameters(c);
     if !annotates_parameter_nullability(ir, c) {
         for parameter in &mut parameters {
             parameter.nullability = 0;
@@ -69,15 +70,14 @@ pub(super) fn primary_ctor_source_parameters<'a>(
     parameters
 }
 
-fn source_parameters<'a>(ir: &IrFile, c: &'a IrClass) -> Vec<SourceCtorParameter<'a>> {
-    let fq_name = c.fq_name();
+fn source_parameters(c: &IrClass) -> Vec<SourceCtorParameter<'_>> {
     let prefix = c.constructor_prefix_count as usize;
     if c.ctor_args.is_empty() {
         return c.fields[..c.ctor_param_count as usize]
             .iter()
             .skip(prefix)
             .map(|field| SourceCtorParameter {
-                nullability: field_nullability_kind(ir, &fq_name, &field.name, field.ty),
+                nullability: field_nullability_kind(field.ty),
                 annotations: None,
             })
             .collect();
@@ -92,37 +92,21 @@ fn source_parameters<'a>(ir: &IrFile, c: &'a IrClass) -> Vec<SourceCtorParameter
             nullability: match field {
                 Some(field) => {
                     let field = &c.fields[field];
-                    field_nullability_kind(ir, &fq_name, &field.name, field.ty)
+                    field_nullability_kind(field.ty)
                 }
-                None => plain_parameter_nullability(ir, c, &fq_name, argument),
+                None => plain_parameter_nullability(argument),
             },
             annotations: c.ctor_param_annotations.get(index),
         })
         .collect()
 }
 
-fn plain_parameter_nullability(
-    ir: &IrFile,
-    c: &IrClass,
-    fq_name: &str,
-    argument: &crate::ir::IrCtorArg,
-) -> u8 {
+/// A plain parameter is classified by its declared type, like a property-backed one: the
+/// occurrence (`T`, `T?`, `T & Any`) answers, not the class's declared bound for `T`.
+fn plain_parameter_nullability(argument: &crate::ir::IrCtorArg) -> u8 {
     let descriptor = crate::jvm::names::type_descriptor(argument.ty);
     if !(descriptor.starts_with('L') || descriptor.starts_with('[')) {
         return 0;
     }
-    if matches!(argument.ty, Ty::PlatformNullable(_)) {
-        0
-    } else if argument.ty.is_nullable() {
-        // `p: T?` is nullable at the occurrence. The parameter's bound answers only a bare `T`.
-        2
-    } else if let Some(parameter) = argument.type_param {
-        let name = c
-            .type_params
-            .get(parameter as usize)
-            .expect("a constructor parameter's type parameter is declared by its class");
-        u8::from(!ir.class_type_param_admits_null(fq_name, name))
-    } else {
-        1
-    }
+    declared_reference_nullability(argument.declared_ty.unwrap_or(argument.ty))
 }
