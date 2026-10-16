@@ -297,3 +297,30 @@ fun box(): String {
         "PrivateInlineAnonymousSupertype",
     );
 }
+
+const MATCHER: &str = r#"package lib
+
+inline fun <reified T> matcher(): (Any?) -> Boolean = object : (Any?) -> Boolean {
+    override fun invoke(value: Any?): Boolean = value is T
+}
+"#;
+
+#[test]
+fn an_object_in_a_reified_body_keeps_its_markers_for_another_module() {
+    // The consumer regenerates the dependency's own class; without `reifiedOperationMarker` in the
+    // object's method the copy would still test `Object`.
+    let output = common::expect_box_run_against_ref(
+        "reified_object_markers",
+        MATCHER,
+        "import lib.*\n\nfun box(): String = if (matcher<String>()(\"a\") && !matcher<String>()(1)) \"OK\" else \"FAIL\"\n",
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+    let classes = common::classes_against_kotlinc_module(&[("Lib.kt", MATCHER)]);
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        ["lib/LibKt", "lib/LibKt$matcher$1"]
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}

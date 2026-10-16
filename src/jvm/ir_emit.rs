@@ -2429,14 +2429,14 @@ fn emit_class(
     let mut cw = new_classifier_writer(ir, c, &superclass, env, opts);
     // A LOCAL or ANONYMOUS class carries kotlinc's `EnclosingMethod` attribute: without it
     // reflection reads the class as top-level and `simpleName` reports the whole `owner$Local` name.
-    // Lowering records the exact semantic scope; the backend only realizes its physical owner and
-    // descriptor here.
+    // Lowering records the exact semantic scope; the backend realizes its owner and descriptor.
     if let Some((owner, method)) = class_enclosure(ir, env.override_results, c, facade) {
         match method {
             Some((name, descriptor)) => cw.set_enclosing_method(&owner, &name, &descriptor),
             None => cw.set_enclosing_class(&owner),
         }
     }
+    enclosure::start_inline_body_source_map(ir, c, &mut cw);
     let transformed = env.run.transformed_coroutine(&fq_name);
     let transformed_metadata = env
         .continuation_metadata

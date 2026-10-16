@@ -282,10 +282,10 @@ impl super::Emitter<'_> {
                     // run with `[new, dup]` on the stack. Evaluate all args into temps first (clean
                     // stack), then build. An ordinary branch keeps them, as kotlinc does.
                     let temps = self.spill_to_temps(&args, code);
-                    let ci = self.cw.class_ref(&owner);
                     crate::jvm::reified_anonymous::guard_reified_construction(
                         self.ir, self.cw, code, *internal,
                     );
+                    let ci = self.cw.class_ref(&owner);
                     code.new_obj(ci);
                     code.dup();
                     let mut supplied = temps.iter().zip(args.iter());
@@ -344,10 +344,10 @@ impl super::Emitter<'_> {
                     self.mark_call_start(e, code);
                     code.invokespecial(m, aw, 0);
                 } else {
-                    let ci = self.cw.class_ref(&owner);
                     crate::jvm::reified_anonymous::guard_reified_construction(
                         self.ir, self.cw, code, *internal,
                     );
+                    let ci = self.cw.class_ref(&owner);
                     code.new_obj(ci);
                     code.dup();
                     let mut supplied = args.iter().copied();

@@ -9,7 +9,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 use super::reified_arguments::ReifiedArgument;
-use crate::ir::{ExprId, FunId, IrExpr, IrFile, IrTypeOp, IrTypeParameter};
+use crate::ir::{ClassId, ExprId, FunId, IrEnclosure, IrExpr, IrFile, IrTypeOp, IrTypeParameter};
 use crate::types::{stored_value_ty, Ty, TypeName};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -182,30 +182,77 @@ fn collect_reified_parameters(ir: &IrFile) -> HashMap<String, ReifiedParameter> 
     parameters
 }
 
+fn owns_reified_parameter(ir: &IrFile, function: FunId) -> bool {
+    ir.signatures.get(&function).is_some_and(|signature| {
+        signature
+            .type_params
+            .iter()
+            .any(|parameter| parameter.reified)
+    })
+}
+
+fn in_reified_body(ir: &IrFile, enclosure: Option<IrEnclosure>) -> bool {
+    super::ir_emit::enclosure::enclosing_functions(ir, enclosure)
+        .any(|(function, _)| owns_reified_parameter(ir, function))
+}
+
 /// Declarations whose bodies may execute a reification marker: a signature that owns a reified
-/// parameter, and the exact lambda implementations `realize` already normalizes. An ordinary
-/// anonymous or local object member is absent even when its erased body mentions an enclosing
-/// reified identity.
+/// parameter, any function declared at any depth in such a body (an anonymous or local object's
+/// member, which code inlining the declaration regenerates with the call site's classes, as kotlinc
+/// does), and the exact lambda implementations `realize` already normalizes.
 fn reified_marker_functions(
     ir: &IrFile,
     lambdas: &super::lambda_classes::LambdaMethods,
 ) -> HashSet<FunId> {
     let mut functions = lambdas.functions().collect::<HashSet<_>>();
-    for (&function, signature) in &ir.signatures {
-        if signature
-            .type_params
-            .iter()
-            .any(|parameter| parameter.reified)
-        {
-            functions.insert(function);
+    functions.extend(
+        (0..ir.functions.len() as FunId)
+            .filter(|&function| in_reified_body(ir, Some(IrEnclosure::Function(function)))),
+    );
+    functions
+}
+
+/// The class a class is declared in, when it is declared in one's code.
+fn outer_class(ir: &IrFile, class: ClassId) -> Option<ClassId> {
+    let mut enclosure = ir.classes[class as usize].enclosure;
+    loop {
+        match enclosure? {
+            IrEnclosure::Lambda(function) => {
+                enclosure = ir.lambda_enclosures.get(&function).copied();
+            }
+            IrEnclosure::Constructor { class, .. }
+            | IrEnclosure::ClassInitializer(class)
+            | IrEnclosure::Classifier(class) => return Some(class),
+            scope => {
+                let (_, owner) =
+                    super::ir_emit::enclosure::enclosing_functions(ir, Some(scope)).next()?;
+                return ir.class_id_by_name(owner?);
+            }
         }
     }
-    functions
+}
+
+/// Record the classes declared in a reified body whose code executes a marker: constructing one
+/// calls `needClassReification`, which tells an inliner to regenerate the class. Like kotlinc's
+/// codegen merging a nested class's reified usages into its parent's, an enclosing class declared
+/// in the same body is recorded too.
+fn record_reifying_classes(ir: &mut IrFile, classes: impl IntoIterator<Item = ClassId>) {
+    for class in classes {
+        let mut current = Some(class);
+        while let Some(class) = current {
+            if !in_reified_body(ir, ir.classes[class as usize].enclosure)
+                || !ir.reified_anonymous_declarations.insert(class)
+            {
+                break;
+            }
+            current = outer_class(ir, class);
+        }
+    }
 }
 
 /// Body and declaration-owned default expressions of `functions`. A default is not a child of the
 /// body, so a catch written there is its own root.
-fn marker_roots(ir: &IrFile, functions: &HashSet<FunId>) -> Vec<ExprId> {
+fn marker_roots<'a>(ir: &IrFile, functions: impl IntoIterator<Item = &'a FunId>) -> Vec<ExprId> {
     let mut roots = Vec::new();
     for &function in functions {
         if let Some(body) = ir
@@ -275,7 +322,8 @@ fn realize_expression_dag(
     ir: &mut IrFile,
     root: ExprId,
     parameters: &HashMap<String, ReifiedParameter>,
-) {
+) -> bool {
+    let mut realized = false;
     let mut pending = vec![root];
     let mut visited = HashSet::default();
     while let Some(expression) = pending.pop() {
@@ -323,8 +371,10 @@ fn realize_expression_dag(
         };
         if let Some(replacement) = replacement {
             ir.exprs[expression as usize] = replacement;
+            realized = true;
         }
     }
+    realized
 }
 
 pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMethods) {
@@ -332,14 +382,37 @@ pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMe
     // closure can replace its Lambda node with a class value, but cannot change those identities.
     // Normalize the exact declaration/closure method domain from that checked map rather than
     // rediscovering implementations through expression nodes already consumed by representation.
-    // An ordinary object's member can use the same parameter through generic erasure; that is not
-    // a declaration or specialized lambda body and must not execute a reification marker.
+    // An object declared in a reified body executes the marker too: inlining regenerates its class.
     let parameters = collect_reified_parameters(ir);
     let functions = reified_marker_functions(ir, lambdas);
-    let roots = marker_roots(ir, &functions);
-    for root in roots {
-        realize_expression_dag(ir, root, &parameters);
+    let mut reifying = Vec::new();
+    for &function in &functions {
+        let mut realized = false;
+        for root in marker_roots(ir, [&function]) {
+            realized |= realize_expression_dag(ir, root, &parameters);
+        }
+        let owner = super::ir_emit::enclosure::enclosing_functions(
+            ir,
+            Some(IrEnclosure::Function(function)),
+        )
+        .next()
+        .and_then(|(_, owner)| owner);
+        if realized {
+            reifying.extend(owner.and_then(|owner| ir.class_id_by_name(owner)));
+        }
     }
+    for class in 0..ir.classes.len() as ClassId {
+        let declaration = &ir.classes[class as usize];
+        let Some(initializer) = declaration.init_body else {
+            continue;
+        };
+        if in_reified_body(ir, declaration.enclosure)
+            && realize_expression_dag(ir, initializer, &parameters)
+        {
+            reifying.push(class);
+        }
+    }
+    record_reifying_classes(ir, reifying);
     record_reified_catches(ir, &parameters, &functions);
 }
 
