@@ -713,6 +713,9 @@ pub(crate) fn lower_companion_properties(
                 });
             }
             ir.statics[static_index as usize].init = Some(initializer);
+            // The outer `<clinit>` now evaluates the initializer, so it owns the lambdas too.
+            let outer = ir.classes[candidate.outer as usize].fq_name;
+            move_initializer_lambdas(ir, candidate.companion, outer, initializer);
         }
 
         let class = &mut ir.classes[candidate.companion as usize];
@@ -936,10 +939,6 @@ fn schedule_class_companion_initializers(
     }
 }
 
-/// Move lambda implementation methods used by `body` from the companion onto `outer`.
-///
-/// Lowering attaches each lambda to the companion, the class whose constructor originally held
-/// the initializer. After the body moves, the `invokedynamic` is emitted by the outer class.
 /// Replace companion-`this` reads in `body` with a load of the outer `Companion` field.
 fn reload_companion_instance(
     ir: &mut IrFile,
@@ -1064,6 +1063,10 @@ fn private_declared_accessor(
         .then_some(function)
 }
 
+/// Move lambda implementation methods used by `body` from the companion onto `outer`.
+///
+/// Lowering attaches each lambda to the companion, the class whose constructor originally held
+/// the initializer. After the body moves, the `invokedynamic` is emitted by the outer class.
 fn move_initializer_lambdas(
     ir: &mut IrFile,
     companion: ClassId,
