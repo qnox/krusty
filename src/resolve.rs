@@ -210,6 +210,7 @@ mod source_fragment;
 mod source_generic_signatures;
 mod source_signature_display;
 mod source_type_resolution;
+mod standalone_qualifier_type_arguments;
 mod static_access_type_arguments;
 mod symbol_display;
 mod type_test_planning;
@@ -12915,8 +12916,14 @@ impl<'a> Checker<'a> {
 
     /// The value a resolved classifier identity denotes in expression position. `None` means it is
     /// only a qualifier; the enclosing member/call/class-literal operation consumes the classifier.
-    fn classifier_value_ty(&mut self, expression: ExprId, internal: TypeName) -> Option<Ty> {
+    fn classifier_value_ty(
+        &mut self,
+        expression: ExprId,
+        internal: TypeName,
+        through_alias: bool,
+    ) -> Option<Ty> {
         if internal == type_name("kotlin/Unit") {
+            self.check_standalone_qualifier_type_arguments(expression, internal, through_alias);
             self.expr_lowers.insert(
                 expression,
                 ExprLowering::SingletonValue(SingletonValue {
@@ -12926,6 +12933,7 @@ impl<'a> Checker<'a> {
             return Some(Ty::Unit);
         }
         let singleton = self.classifier_singleton_value(internal)?;
+        self.check_standalone_qualifier_type_arguments(expression, internal, through_alias);
         let ty = Ty::obj_name(singleton.classifier);
         self.expr_lowers
             .insert(expression, ExprLowering::SingletonValue(singleton));
@@ -12948,7 +12956,7 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         expected: Option<Ty>,
     ) -> ClassifierValueCall {
-        let Some(receiver_ty) = self.classifier_value_ty(receiver, classifier) else {
+        let Some(receiver_ty) = self.classifier_value_ty(receiver, classifier, false) else {
             return ClassifierValueCall::NoValue;
         };
         self.set(receiver, receiver_ty);
@@ -13234,7 +13242,7 @@ impl<'a> Checker<'a> {
         expected: Option<Ty>,
     ) -> Option<InvokeResolution> {
         let span = self.span(call);
-        let receiver = self.classifier_value_ty(callee, classifier)?;
+        let receiver = self.classifier_value_ty(callee, classifier, false)?;
         self.set(callee, receiver);
         let argument_types = self.invoke_operator_arg_tys(scope, call, receiver, args);
         Some(self.record_invoke(
@@ -13459,14 +13467,28 @@ impl<'a> Checker<'a> {
             let Some(classifier) = record.classifier_name else {
                 continue;
             };
-            if self.classifier_singleton_value(classifier).is_some()
-                && !explicit.contains(&classifier)
-            {
-                explicit.push(classifier);
+            let through_alias = matches!(
+                record.classifier_declaration,
+                Some(crate::libraries::ClassifierDeclaration::TypeAlias(_))
+            );
+            if self.classifier_singleton_value(classifier).is_some() {
+                if let Some((_, selected_through_alias)) = explicit
+                    .iter_mut()
+                    .find(|(selected, _)| *selected == classifier)
+                {
+                    // Preserve the existing value-namespace deduplication by semantic classifier.
+                    // Mixed ordinary/alias provenance cannot prove that the selected access was
+                    // written through an alias, so only unanimous alias candidates retain it.
+                    *selected_through_alias &= through_alias;
+                } else {
+                    explicit.push((classifier, through_alias));
+                }
             }
         }
         match explicit.as_slice() {
-            [classifier] => return self.classifier_value_ty(expression, *classifier),
+            [(classifier, through_alias)] => {
+                return self.classifier_value_ty(expression, *classifier, *through_alias);
+            }
             [_, _, ..] => {
                 self.diags.error(
                     self.span(expression),
@@ -13482,11 +13504,14 @@ impl<'a> Checker<'a> {
                 .classifier_levels()
                 .iter()
                 .map(|level| {
-                    crate::symbol_resolver::classifier_candidates_at_import_level(
+                    crate::symbol_resolver::scoped_classifier_candidates_at_import_level(
                         &source, name, level,
                     )
                     .into_iter()
-                    .filter(|classifier| self.classifier_singleton_value(*classifier).is_some())
+                    .filter(|candidate| {
+                        self.classifier_singleton_value(candidate.classifier)
+                            .is_some()
+                    })
                     .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>()
@@ -13498,7 +13523,13 @@ impl<'a> Checker<'a> {
         for candidates in levels {
             match candidates.as_slice() {
                 [] => continue,
-                [classifier] => return self.classifier_value_ty(expression, *classifier),
+                [candidate] => {
+                    return self.classifier_value_ty(
+                        expression,
+                        candidate.classifier,
+                        candidate.alias.is_some(),
+                    );
+                }
                 [_, _, ..] => {
                     self.diags.error(
                         self.span(expression),
@@ -21438,7 +21469,8 @@ impl<'a> Checker<'a> {
                         self.read_classifier_member(callee, owner, &declared_name)
                     });
                 if let Some(ct) = imported_classifier_value.or_else(|| {
-                    bare_classifier.and_then(|internal| self.classifier_value_ty(callee, internal))
+                    bare_classifier
+                        .and_then(|internal| self.classifier_value_ty(callee, internal, false))
                 }) {
                     crate::trace_compiler!(
                         "resolve",
@@ -31157,7 +31189,14 @@ fun use() {
 
     #[test]
     fn bool_operator_misuse() {
-        err_contains("fun f(a: Int): Boolean = a && a", "cannot be applied");
+        let (errors, _) = check("fun f(a: Int): Boolean = a && a");
+        assert_eq!(
+            errors,
+            [
+                "condition type mismatch: inferred type is 'Int' but 'Boolean' was expected.",
+                "condition type mismatch: inferred type is 'Int' but 'Boolean' was expected.",
+            ]
+        );
     }
 
     #[test]
@@ -36850,6 +36889,9 @@ impl<'a> Checker<'a> {
         match binary_result_with(&prohibited_identity, &equality_compatible, op, lt, rt) {
             Ok(result) => result,
             Err(BinaryRefusal::ErrorOperand) => Ty::Error,
+            // `&&`/`||` operands were checked as two condition sites by `expr_inner_binary`.
+            // Do not replace those exact diagnostics with one overload-style binary error.
+            Err(BinaryRefusal::Mismatch) if matches!(op, BinOp::And | BinOp::Or) => Ty::Error,
             Err(BinaryRefusal::Mismatch) => self.bin_err(op, lt, rt, span),
             Err(BinaryRefusal::ProhibitedIdentity) => {
                 self.diags.error(
@@ -58676,7 +58718,7 @@ impl<'a> Checker<'a> {
         let source = self.fed_source();
         match expected_nested_classifier(&source, expected, name) {
             InheritedNestedClassifier::Found(classifier) => {
-                let value = self.classifier_value_ty(expression, classifier)?;
+                let value = self.classifier_value_ty(expression, classifier, false)?;
                 self.receiver_is_assignable(value, expected)
                     .then_some(value)
             }
@@ -59367,10 +59409,12 @@ impl<'a> Checker<'a> {
                     self.set(e, ty)
                 } else if let Some(ty) = self.imported_classifier_value_ty(scope, e, &n) {
                     ty
-                } else if let Ok(ResolvedQualifier::Classifier(internal)) =
-                    self.qualifier(scope, QualifierInput::Root(&n))
+                } else if let (InheritedNestedClassifier::Found(internal), _, selected_alias) =
+                    self.select_classifier_binding(scope, &n)
                 {
-                    if let Some(ty) = self.classifier_value_ty(e, internal) {
+                    if let Some(ty) =
+                        self.classifier_value_ty(e, internal, selected_alias.is_some())
+                    {
                         return self.set(e, ty);
                     }
                     self.diags
@@ -59467,8 +59511,11 @@ impl<'a> Checker<'a> {
                     self.apply_condition_exclusions(scope, lhs, op == BinOp::And);
                     self.expr(scope, rhs)
                 };
-                // `check_binary` enforces both operands are `Boolean` (and reports the same
-                // "operator cannot be applied" error as the non-`&&` path otherwise).
+                // Logical operands are conditions, not overloadable binary-operator arguments.
+                // Diagnose each invalid condition at its own expression, matching the condition
+                // diagnostics used by `if`, `while`, and subjectless `when`.
+                self.expect_assignable(Ty::Boolean, lt, self.span(lhs), "logical condition");
+                self.expect_assignable(Ty::Boolean, rt, self.span(rhs), "logical condition");
                 let bt = self.check_binary(op, lt, rt, self.span(e));
                 return self.set(e, bt);
             }
@@ -60037,16 +60084,26 @@ impl<'a> Checker<'a> {
             // latter when both exist.
             let member_qualifier = receiver_qualifier.clone().and_then(|prefix| {
                 let source = self.fed_source();
-                walk_qualifier(&source, prefix, &[(Some(e), name.clone())])
+                walk_qualifier_with_declaration_identity(
+                    &source,
+                    prefix,
+                    &[(Some(e), name.clone())],
+                )
             });
-            if let Some(internal) = member_qualifier
-                .ok()
-                .and_then(ResolvedQualifier::classifier)
-            {
+            if let Ok((ResolvedQualifier::Classifier(internal), declaration)) = member_qualifier {
                 if self.reject_inaccessible_classifier_expression(e, internal) {
                     return self.set(e, Ty::Error);
                 }
-                if let Some(ty) = self.classifier_value_ty(e, internal) {
+                let Ok(selected_alias) =
+                    self.selected_provider_alias(internal, declaration.as_ref())
+                else {
+                    self.diags.error(
+                        self.member_name_span(e, &name),
+                        crate::diagnostic_wording::unresolved_reference_on(&name, None),
+                    );
+                    return self.set(e, Ty::Error);
+                };
+                if let Some(ty) = self.classifier_value_ty(e, internal, selected_alias.is_some()) {
                     return self.set(e, ty);
                 }
             }
