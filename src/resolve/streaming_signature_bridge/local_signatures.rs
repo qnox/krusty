@@ -381,6 +381,10 @@ fn publish_checked_local_signatures_selected(
             .declaration_header(candidate)
             .and_then(|header| header.owner)
             .or(anchor.owner)
+            // A root local/anonymous classifier is lexically owned by the body that declared it,
+            // even though it has no semantic classifier owner. Bounded Pass 2 must retain that
+            // edge so an actually deferred classifier selects and publishes its whole subtree.
+            .or_else(|| index.local_classifier_lexical_root(candidate))
     }
 
     fn stable_ancestor_or_same(
@@ -682,7 +686,7 @@ fn publish_checked_local_signatures_selected(
     let pass_one_finalized_headers = local_declarations
         .iter()
         .copied()
-        .filter(|declaration| index.declaration_spellings(*declaration).is_some())
+        .filter(|declaration| index.declaration_semantic_header_complete(*declaration))
         .collect::<crate::fx_hash::HashSet<_>>();
     if let Some(active) = active {
         failed.extend(
@@ -754,29 +758,17 @@ fn publish_checked_local_signatures_selected(
             continue;
         };
         let finalized_header = pass_one_finalized_headers.contains(&declaration);
-        if finalized_header && index.classifier_header(declaration).is_none() {
-            crate::trace_compiler!(
-                "signature",
-                "finalized local classifier is missing its stable header declaration={declaration:?}",
-            );
-            failed.push(declaration);
-            continue;
-        }
-        if finalized_header {
-            let stable_classifier = index
-                .classifier_header(declaration)
-                .map(|header| header.classifier);
-            if info
+        if finalized_header
+            && info
                 .checked_local_classifier_identities
                 .get(&declaration)
                 .copied()
-                != stable_classifier
-                || index.classifier_type_arguments(declaration).is_none()
-                || index.classifier_hierarchy(declaration).is_none()
-            {
-                failed.push(declaration);
-                continue;
-            }
+                != index
+                    .classifier_header(declaration)
+                    .map(|header| header.classifier)
+        {
+            failed.push(declaration);
+            continue;
         }
         let class = match active {
             Some(_) => class,
@@ -2306,10 +2298,12 @@ fn publish_checked_local_signatures_selected(
         for declaration in &failed {
             crate::trace_compiler!(
                 "signature",
-                "local signature publication failed declaration={declaration:?} anchor={:?} header={:?} signature={:?}",
+                "local signature publication failed declaration={declaration:?} anchor={:?} header={:?} signature={:?} callable={:?} declaration_callable={:?}",
                 index.declaration_anchor(*declaration),
                 index.declaration_header(*declaration),
                 index.signature(*declaration),
+                index.callable(crate::fir::CallableId::from_raw(declaration.raw())),
+                index.callable_for_declaration(*declaration),
             );
         }
         Err(failed)

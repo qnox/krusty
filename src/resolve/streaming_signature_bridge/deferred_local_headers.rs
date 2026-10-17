@@ -1,8 +1,8 @@
-//! Stable declarations whose entire semantic header is owned by active Pass 2 body checking.
+//! Stable declarations whose semantic header may require active Pass 2 body checking.
 //!
-//! Their absent spelling marker gives Pass 2 exclusive ownership, so Pass 1 must not ask a
-//! transitional provider for a seed that could select a same-spelled declaration outside the
-//! body-local scope.
+//! This is a candidate set, not a completion decision. Pass 1 still publishes a candidate whose
+//! source ABI is already representable; finalization records only candidates whose semantic types
+//! remain unresolved as deferred.
 
 use crate::fir::{DeclarationFlags, DeclarationId, HeaderDeclarationKind, SignatureGraph};
 use crate::fx_hash::HashSet;
@@ -60,6 +60,47 @@ pub(super) fn declarations(
         })
         .map(|stub| stub.id)
         .collect()
+}
+
+/// A local declaration's compact semantic header may be complete while projection of one source
+/// occurrence still needs the active lexical scope. That spelling is published by the checked
+/// inline/default/body fragment. Non-local spelling failures remain Pass-1 failures.
+pub(super) fn retain_non_local_spelling_failures(
+    headers: &crate::fir::StreamedHeaderModule,
+    failures: &mut Vec<DeclarationId>,
+) {
+    failures.retain(|declaration| {
+        !headers
+            .stubs
+            .iter()
+            .any(|stub| stub.id == *declaration && stub.flags.has(DeclarationFlags::LOCAL_CLASS))
+    });
+}
+
+/// Remove the legacy symbol table's physical capture prefix from a local constructor seed. The
+/// stable signature is a source ABI; checked FIR/backends own capture storage separately.
+pub(super) fn retain_source_constructor_parameters(
+    headers: &crate::fir::StreamedHeaderModule,
+    declaration: DeclarationId,
+    parameters: &mut Vec<crate::types::Ty>,
+) -> bool {
+    let Some(syntax) = headers.syntax.declaration(declaration) else {
+        return false;
+    };
+    let HeaderDeclarationKind::Constructor {
+        context_parameters,
+        parameters: source_parameters,
+    } = syntax.kind
+    else {
+        return false;
+    };
+    let source_count = headers.syntax.parameters(context_parameters).len()
+        + headers.syntax.parameters(source_parameters).len();
+    let Some(capture_count) = parameters.len().checked_sub(source_count) else {
+        return false;
+    };
+    parameters.drain(..capture_count);
+    true
 }
 
 /// Nominal classifier headers belong to Pass 1 even when their executable local signatures need

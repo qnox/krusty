@@ -66,8 +66,12 @@ fun make(): Any {
         .owned_declaration(classifier, crate::fir::DeclarationKind::Constructor, 0)
         .expect("stable primary constructor declaration");
     assert!(
-        index.signature(constructor).is_none(),
-        "the undemanded primary constructor belongs exclusively to Pass 2"
+        index
+            .signature(constructor)
+            .expect("the complete source constructor ABI publishes in Pass 1")
+            .parameters
+            .is_empty(),
+        "Pass 1 source signatures exclude the later checked-FIR physical capture prefix"
     );
 
     crate::resolve::publish_checked_local_signatures(

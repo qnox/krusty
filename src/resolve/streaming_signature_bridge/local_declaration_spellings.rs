@@ -169,6 +169,37 @@ pub(super) fn publish_checked_local_declaration_spellings(
             }
             continue;
         }
+        if index.declaration_header(declaration).is_some_and(|header| {
+            header
+                .flags
+                .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+        }) {
+            // Generated data/value methods and capture-storage properties have no parser
+            // declaration and therefore no written type occurrences to transfer. Their Pass-1
+            // semantic publication is complete; publish the explicit empty spelling record that
+            // downstream source-rendering consumers expect. Capture storage deliberately has no
+            // source property identity.
+            let complete = match anchor.kind {
+                DeclarationKind::Function => {
+                    index.signature(declaration).is_some()
+                        && index.callable_for_declaration(declaration).is_some()
+                }
+                DeclarationKind::Property => index.signature(declaration).is_some(),
+                DeclarationKind::Classifier
+                | DeclarationKind::EnumEntry
+                | DeclarationKind::TypeAlias
+                | DeclarationKind::Constructor
+                | DeclarationKind::Accessor
+                | DeclarationKind::Initializer
+                | DeclarationKind::Script => false,
+            };
+            if complete {
+                index.publish_declaration_spellings(declaration, DeclaredSpellings::default());
+            } else {
+                failed.push(declaration);
+            }
+            continue;
+        }
         let record = match anchor.kind {
             DeclarationKind::Classifier => active
                 .class(file, declaration)

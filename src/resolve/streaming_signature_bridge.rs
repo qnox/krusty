@@ -3821,7 +3821,8 @@ pub(crate) fn finalized_streamed_signature_index(
     };
     explicit_type_semantics.bind_local_alias_templates(&graph);
     let stable_members = stable_property_index::StableMemberIndex::build(table);
-    let undemanded_ordinary_locals = deferred_local_headers::declarations(headers, &graph);
+    let deferred_local_candidates = deferred_local_headers::declarations(headers, &graph);
+    let mut deferred_local_headers = HashSet::default();
     for stub in &headers.stubs {
         if suppressed_generated_callables.contains(&stub.id) {
             continue;
@@ -3864,10 +3865,7 @@ pub(crate) fn finalized_streamed_signature_index(
             .declarations
             .anchor(stub.id)
             .expect("a compact stub must retain its stable anchor");
-        let undemanded_ordinary_local = undemanded_ordinary_locals.contains(&stub.id);
-        if undemanded_ordinary_local {
-            continue;
-        }
+        let deferred_local_candidate = deferred_local_candidates.contains(&stub.id);
         let signature = if stub.kind == DeclarationKind::Function
             && stub
                 .flags
@@ -3947,6 +3945,10 @@ pub(crate) fn finalized_streamed_signature_index(
             }
         };
         let Some((mut parameters, mut result, mut receiver)) = signature else {
+            if deferred_local_candidate {
+                deferred_local_headers.insert(stub.id);
+                continue;
+            }
             crate::trace_compiler!(
                 "fir",
                 "signature finalization declined {:?}: no signature for kind {:?}",
@@ -3956,6 +3958,32 @@ pub(crate) fn finalized_streamed_signature_index(
             failed.push(stub.id);
             continue;
         };
+        if stub.kind == DeclarationKind::Constructor
+            && stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
+            && !deferred_local_headers::retain_source_constructor_parameters(
+                headers,
+                stub.id,
+                &mut parameters,
+            )
+        {
+            if deferred_local_candidate {
+                deferred_local_headers.insert(stub.id);
+                continue;
+            }
+            failed.push(stub.id);
+            continue;
+        }
+        if deferred_local_candidate
+            && parameters
+                .iter()
+                .copied()
+                .chain(std::iter::once(result))
+                .chain(receiver)
+                .any(|ty| crate::fir::ResolvedTy::new(ty).is_err())
+        {
+            deferred_local_headers.insert(stub.id);
+            continue;
+        }
         let constructor_property_vararg =
             vararg_constructor_property::is_vararg(headers, stub, anchor);
         let compact_declaration = headers.syntax.declaration(stub.id).map(|value| value.kind);
@@ -4852,6 +4880,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 && !resolved_classifier_parents.contains_key(&stub.id)
             {
                 index.publish_classifier_identity(stub.id, classifier.internal);
+                deferred_local_headers.insert(stub.id);
                 crate::trace_compiler!(
                     "fir",
                     "signature finalization deferred ordinary local classifier {:?} ({}) to Pass 2",
@@ -4963,8 +4992,7 @@ pub(crate) fn finalized_streamed_signature_index(
         }
     }
     for stub in &headers.stubs {
-        if undemanded_ordinary_locals.contains(&stub.id) && stub.kind != DeclarationKind::Classifier
-        {
+        if deferred_local_headers.contains(&stub.id) && stub.kind != DeclarationKind::Classifier {
             // The active body pass owns this entire declaration header, including its generic
             // contract. Classifier formals are the exception: their nominal header is already
             // complete above and body checking needs its applied layout before entering Pass 2.
@@ -5648,35 +5676,6 @@ pub(crate) fn finalized_streamed_signature_index(
                             )
                         }),
                 );
-                let anchor = headers
-                    .declarations
-                    .anchor(stub.id)
-                    .expect("a constructor stub must retain its stable anchor");
-                if anchor.sibling == 0 {
-                    let anonymous_captures = anchor
-                        .owner
-                        .and_then(|owner| classifier_types.get(&owner))
-                        .and_then(|owner| {
-                            table
-                                .anonymous_object_types
-                                .iter()
-                                .find_map(|(source, ty)| {
-                                    (*ty == *owner && source.0 == stub.source.raw())
-                                        .then_some(source)
-                                })
-                        })
-                        .and_then(|source| table.anonymous_object_captures.get(source));
-                    published_parameters.extend(anonymous_captures.into_iter().flatten().map(
-                        |capture| {
-                            (
-                                capture.name.as_str(),
-                                crate::fir::ResolvedValueParameterFlags::new(
-                                    false, false, true, false,
-                                ),
-                            )
-                        },
-                    ));
-                }
                 index.publish_callable_parameters(callable, published_parameters);
             }
             DeclarationKind::Property
@@ -6018,7 +6017,8 @@ pub(crate) fn finalized_streamed_signature_index(
     // Assemble the stable sidecars only after those operations and all header publication finish;
     // this phase performs no resolver call and no source-spelling lookup.
     let (declared_spellings, type_alias_spellings, mut spelling_failures) =
-        finalized_compact_declared_spellings(&semantics, &index, &undemanded_ordinary_locals);
+        finalized_compact_declared_spellings(&semantics, &index, &deferred_local_headers);
+    deferred_local_headers::retain_non_local_spelling_failures(headers, &mut spelling_failures);
     for (declaration, spelling) in type_alias_spellings {
         index.publish_type_alias_spelling(declaration, spelling);
     }

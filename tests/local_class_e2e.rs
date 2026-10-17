@@ -63,6 +63,59 @@ fn local_class_inheritance_with_modifiers() {
 }
 
 #[test]
+fn local_inferred_properties_and_no_arg_super_constructor_publish_before_body_checking() {
+    const SRC: &str = "fun box(): String {\n\
+    open class K {\n\
+        val o = \"O\"\n\
+    }\n\
+    class Bar : K() {\n\
+        val k = \"K\"\n\
+    }\n\
+    return K().o + Bar().k\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("complete local source ABIs publish before the enclosing body is checked"),
+        "OK"
+    );
+}
+
+#[test]
+fn transitively_inherited_inferred_local_member_is_visible_in_the_enclosing_body() {
+    const SRC: &str = "fun box(): String {\n\
+    val result = \"OK\"\n\
+    open class Local {\n\
+        fun result() = result\n\
+    }\n\
+    open class Middle : Local()\n\
+    class Derived : Middle()\n\
+    return Derived().result()\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("the active local-member union must include inherited checked members"),
+        "OK"
+    );
+}
+
+#[test]
+fn local_secondary_constructor_uses_a_listed_superclass_header() {
+    const SRC: &str = "open class Root(val value: String)\n\
+fun box(): String {\n\
+    val captured = \"OK\"\n\
+    open class Base : Root {\n\
+        constructor(): super(captured)\n\
+    }\n\
+    class Derived : Base {\n\
+        constructor(): super()\n\
+    }\n\
+    return Derived().value\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("a superclass listed without a header call keeps its finalized identity"),
+        "OK"
+    );
+}
+
+#[test]
 fn named_local_object_is_rejected() {
     // Kotlin permits local anonymous-object expressions, but a named singleton declaration cannot
     // be local. Keep this at the frontend boundary: synthesizing JVM INSTANCE storage for it would

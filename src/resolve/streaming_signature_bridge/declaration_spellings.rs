@@ -182,7 +182,7 @@ fn bound_spellings(
 pub(in crate::resolve) fn finalized_compact_declared_spellings(
     semantics: &super::ProductionSignatureSemantics<'_>,
     index: &crate::fir::ResolvedModuleIndex,
-    undemanded_ordinary_locals: &crate::fx_hash::HashSet<DeclarationId>,
+    deferred_headers: &crate::fx_hash::HashSet<DeclarationId>,
 ) -> (
     Vec<(DeclarationId, DeclaredSpellings)>,
     Vec<(DeclarationId, Spelled)>,
@@ -334,10 +334,8 @@ pub(in crate::resolve) fn finalized_compact_declared_spellings(
                                     .is_some_and(|anchor| anchor.sibling == 0)
                         })
                         .map(|constructor| constructor.id);
-                    let primary_parameters_deferred =
-                        primary_constructor.is_some_and(|constructor| {
-                            undemanded_ordinary_locals.contains(&constructor)
-                        });
+                    let primary_parameters_deferred = primary_constructor
+                        .is_some_and(|constructor| deferred_headers.contains(&constructor));
                     Some(DeclaredSpellings {
                         params: if primary_parameters_deferred {
                             Vec::new()
@@ -435,11 +433,10 @@ pub(in crate::resolve) fn finalized_compact_declared_spellings(
             }
         })();
         match record {
-            // Absence is the stable marker that this exact ordinary local header belongs to
-            // Pass 2. Even an empty successful LOCAL_CLASS record must therefore be retained: it
-            // distinguishes an already-bound demanded/inline/default-owned header from a deferred
-            // one whose active lexical checker still owns binding.
-            _ if undemanded_ordinary_locals.contains(&stub.id) => {}
+            // A header still owned by Pass 2 delegates its source projection to the same active
+            // lexical checker. Successful empty records for other local declarations remain
+            // explicit because downstream spelling consumers must distinguish them from absence.
+            _ if deferred_headers.contains(&stub.id) => {}
             Some(record)
                 if !record.is_none()
                     || stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS) =>

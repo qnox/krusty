@@ -564,30 +564,29 @@ impl<'a> Checker<'a> {
         else {
             return false;
         };
-        if header.interfaces.len() != class.supertypes.len()
-            || header.superclass.is_some() != class.base_class.is_some()
-            || class.base_class.is_some() != class.base_class_span.is_some()
-        {
+        if class.base_class.is_some() != class.base_class_span.is_some() {
             return false;
         }
         let spellings = self.finalized_declaration_spellings(Some(declaration));
-        for (index, (reference, resolved)) in class
-            .supertypes
-            .iter()
-            .zip(header.interfaces.iter())
-            .enumerate()
-        {
-            self.record_finalized_declaration_type(
-                reference,
-                resolved.get(),
-                spellings.supertype(index),
-            );
-        }
-        if let (Some(name), Some(span), Some(superclass)) = (
-            class.base_class.as_ref(),
-            class.base_class_span,
-            header.superclass,
-        ) {
+        if let (Some(name), Some(span)) = (class.base_class.as_ref(), class.base_class_span) {
+            if header.interfaces.len() != class.supertypes.len() {
+                return false;
+            }
+            for (index, (reference, resolved)) in class
+                .supertypes
+                .iter()
+                .zip(header.interfaces.iter())
+                .enumerate()
+            {
+                self.record_finalized_declaration_type(
+                    reference,
+                    resolved.get(),
+                    spellings.supertype(index),
+                );
+            }
+            let Some(superclass) = header.superclass else {
+                return false;
+            };
             // A superclass constructor call keeps its written type apart from the call; only the
             // arguments and the reference's span take part in the check.
             let reference = TypeRef {
@@ -605,6 +604,19 @@ impl<'a> Checker<'a> {
                 superclass.get(),
                 &spellings.superclass,
             );
+        } else {
+            let resolved = header.declared_supertypes().collect::<Vec<_>>();
+            if resolved.len() != class.supertypes.len() {
+                return false;
+            }
+            for (index, (reference, resolved)) in class.supertypes.iter().zip(resolved).enumerate()
+            {
+                self.record_finalized_declaration_type(
+                    reference,
+                    resolved.get(),
+                    spellings.supertype(index),
+                );
+            }
         }
         true
     }

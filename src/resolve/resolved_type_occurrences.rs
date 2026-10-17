@@ -169,13 +169,17 @@ impl Checker<'_> {
         source_names: &[String],
     ) -> Option<super::TParams> {
         let index = self.resolved_index?;
-        if index
-            .type_parameter(
-                declaration,
-                u32::try_from(source_names.len()).expect("too many type parameters"),
-            )
-            .is_some()
-        {
+        let source_count = u32::try_from(source_names.len()).expect("too many type parameters");
+        let has_wrong_parameter_count = index
+            .declaration_header(declaration)
+            .is_some_and(|header| header.kind == crate::fir::DeclarationKind::Classifier)
+            .then(|| index.classifier_own_type_parameter_count(declaration))
+            .flatten()
+            .map_or_else(
+                || index.type_parameter(declaration, source_count).is_some(),
+                |own| own != source_count,
+            );
+        if has_wrong_parameter_count {
             return None;
         }
         let mut parameters = enclosing.clone();
@@ -198,9 +202,8 @@ impl Checker<'_> {
         Some(parameters)
     }
 
-    /// Whether an active local declaration's compact header deliberately left both semantic
-    /// binding and spelling projection to Pass 2. Demanded/inline/default-owned locals publish an
-    /// explicit spelling record even when it is empty, so absence is unambiguous here.
+    /// Whether an active local declaration's semantic header still belongs to Pass 2. Spelling
+    /// sidecars have an independent lifecycle and cannot be used as a completion marker.
     pub(super) fn has_deferred_local_header(
         &self,
         declaration: Option<crate::fir::DeclarationId>,
@@ -210,7 +213,7 @@ impl Checker<'_> {
             .is_some_and(|(declaration, index)| {
                 index.declaration_header(declaration).is_some_and(|header| {
                     header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
-                }) && index.declaration_spellings(declaration).is_none()
+                }) && !index.declaration_semantic_header_complete(declaration)
             })
     }
 

@@ -252,6 +252,12 @@ pub(in crate::resolve) fn spelling_from_bound_facts(
 ) -> Option<Spelled> {
     let complete = std::cell::Cell::new(true);
     let mut resolved_spelling = |reference: &TypeRef| {
+        if reference.is_star_projection() {
+            // `*` is a language-defined projection, not a classifier occurrence. The type
+            // checker therefore records no name-binding fact for this syntax node; its empty
+            // spelling is nevertheless complete.
+            return ResolvedTypeSpelling::default();
+        }
         facts
             .get(&(reference as *const TypeRef as usize))
             .copied()
@@ -261,6 +267,11 @@ pub(in crate::resolve) fn spelling_from_bound_facts(
             })
     };
     let mut resolve_argument = |argument: &TypeRef| {
+        if argument.is_star_projection() {
+            // Alias parameters cannot declare bounds, so a written star has the same `Any?`
+            // readable upper bound used by alias semantic projection.
+            return Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")));
+        }
         facts
             .get(&(argument as *const TypeRef as usize))
             .and_then(|fact| fact.resolved)

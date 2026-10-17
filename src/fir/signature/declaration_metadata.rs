@@ -22,6 +22,36 @@ pub enum NoArgSuperConstructor {
 }
 
 impl ResolvedModuleIndex {
+    /// Whether every stable semantic record required by a declaration header is published.
+    /// Source-spelling sidecars are independent metadata and deliberately do not participate in
+    /// this lifecycle decision.
+    pub(crate) fn declaration_semantic_header_complete(&self, declaration: DeclarationId) -> bool {
+        let Some(anchor) = self.declaration_anchor(declaration) else {
+            return false;
+        };
+        match anchor.kind {
+            DeclarationKind::Classifier => {
+                self.classifier_header(declaration).is_some()
+                    && self.classifier_type_arguments(declaration).is_some()
+                    && self.classifier_hierarchy(declaration).is_some()
+            }
+            DeclarationKind::Function
+            | DeclarationKind::Constructor
+            | DeclarationKind::Accessor => {
+                self.signature(declaration).is_some()
+                    && self.callable_for_declaration(declaration).is_some()
+            }
+            DeclarationKind::Property => {
+                self.signature(declaration).is_some()
+                    && self.property_for_declaration(declaration).is_some()
+            }
+            DeclarationKind::EnumEntry
+            | DeclarationKind::TypeAlias
+            | DeclarationKind::Initializer
+            | DeclarationKind::Script => false,
+        }
+    }
+
     /// Complete the primary-constructor parameter role of an already-published classifier
     /// spelling record. Classifier parents, bounds, and context parameters can be demanded in
     /// Pass 1 while the primary constructor remains body-local Pass-2 work (for example, a vararg

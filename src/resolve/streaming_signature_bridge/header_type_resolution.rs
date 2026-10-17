@@ -283,12 +283,15 @@ impl ProductionSignatureSemantics<'_> {
                 abbreviation.arguments = abbreviation
                     .arguments
                     .iter()
-                    .map(|argument| crate::types::ty_subst_alias_expansion(*argument, &bindings))
+                    .map(|argument| crate::types::ty_subst_applied_arguments(*argument, &bindings))
                     .collect::<Vec<_>>()
                     .into_boxed_slice();
                 self.selected_types.record(origin, abbreviation);
             }
-            crate::types::ty_subst_alias_expansion(symbolic, &bindings)
+            // These are artificial structural placeholders, not declaration formals. Their
+            // `Nothing` seed only keeps the template symbolic while arguments are evaluated; the
+            // already-resolved written arguments must be applied exactly, including nullability.
+            crate::types::ty_subst_applied_arguments(symbolic, &bindings)
         };
         self.record_type_spelling_projection(Some(selected_site), resolved);
         crate::fir::ResolvedTy::new(resolved).map_err(|_| Self::failure())
