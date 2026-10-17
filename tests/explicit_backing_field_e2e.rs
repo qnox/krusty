@@ -286,3 +286,25 @@ fn untyped_field_initializer_inferred_from_the_property_type_runs() {
         "property-typed field initializer",
     );
 }
+
+/// The accessors of an explicit backing field return the property's type, not the field's narrower
+/// one: `getX()` returns `Object` and is `@Nullable`, has a line table, and its metadata signature
+/// names that descriptor.
+#[test]
+fn an_explicit_backing_field_getter_is_typed_by_its_property() {
+    let built = common::compare_with_kotlinc_plugin(
+        "ExplicitBackingFieldGetter",
+        "class Backed {\n    val x: Any?\n        field: String = \"x\"\n    val y: List<String>\n        field: MutableList<String> = mutableListOf()\n}\n",
+        "Backed",
+        &[common::stdlib_jar()],
+        "25",
+        &["-XXLanguage:+ExplicitBackingFields".to_string()],
+    )
+    .expect("reference kotlinc is provisioned");
+    assert!(
+        built.krusty_bytes == built.reference_bytes,
+        "Backed differs from kotlinc\n--- kotlinc ---\n{}\n--- krusty ---\n{}",
+        built.reference,
+        built.krusty
+    );
+}
