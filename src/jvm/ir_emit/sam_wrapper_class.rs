@@ -121,7 +121,16 @@ pub(super) fn emit_sam_wrapper_class(
 
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
 
-    finish_local_synthetic_class(cw, env)
+    if wrapper.public_inline {
+        // A non-private inline function's wrapper is part of that function's public ABI.
+        let xi =
+            super::metadata_policy::synthetic_class_xi(super::metadata_policy::SYNTHETIC_PUBLIC)
+                | super::metadata_policy::METADATA_PUBLIC_ABI_FLAG;
+        cw.set_kotlin_metadata(3, env.metadata_stamp, xi, &[], &[]);
+        env.run.finish_class(cw)
+    } else {
+        finish_local_synthetic_class(cw, env)
+    }
 }
 
 /// `FunctionAdapter` members a Kotlin fun-interface wrapper adds after its own method.
