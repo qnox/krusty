@@ -2319,6 +2319,8 @@ mod private_inline_property_access_e2e;
 mod private_member_extension_accessor_e2e;
 #[path = "private_set_e2e.rs"]
 mod private_set_e2e;
+#[path = "probe_argument_call_e2e.rs"]
+mod probe_argument_call_e2e;
 #[path = "projected_receiver_extension_e2e.rs"]
 mod projected_receiver_extension_e2e;
 #[path = "projected_smart_cast_e2e.rs"]

@@ -20500,26 +20500,24 @@ impl<'a> Checker<'a> {
                     {
                         return Ty::Error;
                     }
-                    let postponed_reference_mark =
-                        matches!(self.file.expr(a), Expr::CallableRef { .. })
-                            .then(|| {
-                                let shape = selected_lambda_shape?;
-                                let declared = *shape.argument_parameters.get(i)?;
-                                shape
-                                    .generic_formals
-                                    .iter()
-                                    .any(|formal| {
-                                        !known_generic_bindings.contains_key(formal)
-                                            && ty_mentions_param(
-                                                declared,
-                                                std::slice::from_ref(formal),
-                                            )
-                                    })
-                                    .then_some(self.diags.diags.len())
-                            })
-                            .flatten();
+                    // A callable reference whose parameter still mentions an open formal, or a
+                    // nested call typed before any candidate supplies its parameter, is a probe:
+                    // the selected candidate re-checks it, and only that verdict stands.
+                    let probe = match self.file.expr(a) {
+                        Expr::CallableRef { .. } => selected_lambda_shape
+                            .and_then(|shape| Some((shape, *shape.argument_parameters.get(i)?)))
+                            .is_some_and(|(shape, declared)| {
+                                shape.generic_formals.iter().any(|formal| {
+                                    !known_generic_bindings.contains_key(formal)
+                                        && ty_mentions_param(declared, std::slice::from_ref(formal))
+                                })
+                            }),
+                        Expr::Call { .. } => known_sig.is_none(),
+                        _ => false,
+                    };
+                    let probe_mark = probe.then_some(self.diags.diags.len());
                     let checked = self.expr(scope, a);
-                    if let Some(mark) = postponed_reference_mark {
+                    if let Some(mark) = probe_mark {
                         self.postponed_diagnostics
                             .capture_since(a, self.diags, mark);
                     }
