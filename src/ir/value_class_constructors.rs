@@ -58,7 +58,7 @@ impl IrFile {
     }
 
     /// [`Self::has_value_param_ctor`] for a class identity.
-    pub fn has_value_param_ctor_of(&self, owner: crate::types::TypeName) -> bool {
+    pub(crate) fn has_value_param_ctor_of(&self, owner: crate::types::TypeName) -> bool {
         self.value_class_constructor_facts
             .primary_owners
             .contains(&owner)
