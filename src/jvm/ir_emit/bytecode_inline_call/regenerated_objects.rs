@@ -241,12 +241,12 @@ impl AnonymousObjects for CallObjects<'_> {
             scratch = generators.clone();
             &mut scratch
         };
-        // A SAM wrapper, the one synthetic class kotlinc copies, is replayed under the calling
-        // class's name once and shared by that class's inline calls.
-        if original.access & ACC_SYNTHETIC != 0 {
-            let (new_class, first) = generators
-                .sam_wrapper(&self.owner, class)
-                .ok_or(unsupported("a SAM wrapper without its name segment"))?;
+        // A SAM wrapper is copied, not regenerated: kotlinc replays it under the calling class's
+        // name once and shares the copy among that class's inline calls.
+        let wrapper = (original.access & ACC_SYNTHETIC != 0)
+            .then(|| generators.sam_wrapper(&self.owner, class))
+            .flatten();
+        if let Some((new_class, first)) = wrapper {
             let bytes =
                 copy_sam_wrapper(&original, &new_class).map_err(InlineError::Regeneration)?;
             if self.commit && first {
