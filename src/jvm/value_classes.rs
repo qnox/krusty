@@ -3462,6 +3462,15 @@ pub(crate) fn lower_value_classes(
         + 1;
     let mut unique_ops = HashSet::default();
     ops.retain(|operation| unique_ops.insert(*operation));
+    // A suspend call recorded as handing over the carrier needs no `unbox-impl`: the erased CPS
+    // descriptor says `Object`, but the continuation carries the unboxed representation, null or
+    // not. Drop such an unbox before round trips are paired, so a consumer's box is kept.
+    ops.retain(|&(id, op)| match op {
+        BoxOp::Unbox(x) | BoxOp::UnboxNull(x) => {
+            !suspend_results::hands_over_carrier(ir, &under, id, x)
+        }
+        _ => true,
+    });
     substitution_coercions::drop_rebox_round_trips(&mut ops, ir);
     // Each `unbox-impl` realized over a suspend call whose CPS result is the value class's box, as
     // recorded for that exact call. A suspend function returning the same box hands that value
@@ -3490,19 +3499,6 @@ pub(crate) fn lower_value_classes(
             BoxOp::BoxNull(x) => {
                 box_wrap_nullable(ir, id, x, &under, fresh);
                 fresh += 1;
-            }
-            BoxOp::Unbox(x) | BoxOp::UnboxNull(x)
-                if matches!(
-                    ir.value_class_suspend_calls.get(&id).copied(),
-                    Some(crate::ir::IrValueClassSuspendResult::Carrier { carrier, .. })
-                        if carrier.non_null().canonical_semantic()
-                            == erase(&under[&x], &under).canonical_semantic()
-                ) =>
-            {
-                // The erased CPS method descriptor says `Object`, but the continuation carries the
-                // already-unboxed representation recorded for this exact call, null or not. A boundary
-                // collected from the pre-CPS descriptor must not insert a value-class `unbox-impl`
-                // around it.
             }
             BoxOp::Unbox(x) => {
                 if matches!(

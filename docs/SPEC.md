@@ -791,7 +791,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   body crosses the enclosing suspend function's return boundary directly: it does not flow back
   through the inline call's result adapter. Its returned box is therefore unboxed to the enclosing
   declaration's recorded carrier before the template is spliced; this must not depend on an
-  argument temporary (`tests/inline_lambda_resumed_value_class_e2e.rs`). Tests:
+  argument temporary (`tests/inline_lambda_resumed_value_class_e2e.rs`). A carrier handed over
+  by a call to a dependency's `suspend fun find(): Id?` (with `value class Id(val value: String)`)
+  is boxed again where it enters a generic parameter or receiver (`find() shouldBe Id("x")`), as
+  kotlinc does. No `unbox-impl` is recorded for such a call, so none can cancel the consumer's box
+  (`tests/suspend_value_class_carrier_rebox_e2e.rs`). Tests:
   `tests/suspend_value_class_results_e2e.rs`.
 - **An unintercepted suspension block reports its suspension to the debug probes.** After the value
   of a `suspendCoroutineUninterceptedOrReturn` block, kotlinc writes `dup; getCOROUTINE_SUSPENDED;
