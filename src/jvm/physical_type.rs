@@ -144,6 +144,35 @@ pub(crate) fn field_slot(descriptor: &str) -> FieldSlot {
     }
 }
 
+/// The operand held by one descriptor slot.
+///
+/// A class descriptor naming an unsigned type (`Lkotlin/ULong;`) is a one-word box even though
+/// [`class_descriptor_ty`] preserves its unsigned semantic classifier. Nullable unsigned spelling
+/// is the backend-local `Ty` representation of that box; the bare type remains its scalar carrier.
+pub(super) fn descriptor_operand_ty(descriptor: &str) -> Ty {
+    let slot = field_slot(descriptor);
+    if slot.reference && slot.ty.is_jvm_scalar() {
+        Ty::nullable(slot.ty)
+    } else {
+        slot.ty
+    }
+}
+
+/// Operand types named by a JVM method descriptor, preserving each slot's physical category.
+pub(super) fn method_operand_tys(descriptor: &str) -> Option<(Vec<Ty>, Ty)> {
+    let (parameters, result) = crate::jvm::names::parse_method_descriptor(descriptor)?;
+    Some((
+        parameters.into_iter().map(descriptor_operand_ty).collect(),
+        descriptor_operand_ty(result),
+    ))
+}
+
+/// Return operand named by a valid JVM method descriptor, without allocating its parameter list.
+pub(super) fn method_return_operand_ty(descriptor: &str) -> Option<Ty> {
+    let result = crate::jvm::names::parse_method_return_descriptor(descriptor)?;
+    Some(descriptor_operand_ty(result))
+}
+
 /// Operand type for a descriptor slot.
 ///
 /// An ordinary class or array descriptor already names its exact physical type and must not be
@@ -371,6 +400,33 @@ mod tests {
         assert!(!carrier.reference);
         assert_eq!(carrier.ty, Ty::Int);
         assert!(!super::operand_slot_ty("Ljava/lang/String;", None).is_nullable());
+    }
+
+    #[test]
+    fn method_operands_keep_an_unsigned_class_descriptor_boxed() {
+        let descriptor = "(Lkotlin/UInt;Lkotlin/ULong;)Lkotlin/ULong;";
+        let (parameters, result) =
+            super::method_operand_tys(descriptor).expect("valid method descriptor");
+
+        assert_eq!(parameters.len(), 2);
+        for (operand, expected) in [
+            (parameters[0], "Lkotlin/UInt;"),
+            (parameters[1], "Lkotlin/ULong;"),
+            (result, "Lkotlin/ULong;"),
+        ] {
+            assert!(operand.is_reference());
+            assert!(!operand.is_jvm_scalar());
+            let round_trip = crate::jvm::names::type_descriptor(operand);
+            assert_eq!(round_trip, expected);
+            assert_eq!(super::field_slot(&round_trip).words(), 1);
+        }
+        assert_eq!(
+            crate::jvm::names::method_descriptor(&parameters, result),
+            descriptor
+        );
+        assert_eq!(super::method_return_operand_ty(descriptor), Some(result));
+        assert_eq!(super::method_return_operand_ty("not-a-method"), None);
+        assert_eq!(super::method_return_operand_ty("(Lbroken)V"), None);
     }
 
     #[test]

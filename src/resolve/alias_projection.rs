@@ -268,6 +268,7 @@ impl Checker<'_> {
             };
         }
         if formals.is_empty() {
+            self.check_alias_application_bounds(&formals, expansion, arguments, &[], span);
             return AppliedAlias {
                 ty: expansion,
                 conflicts: Vec::new(),
@@ -296,6 +297,7 @@ impl Checker<'_> {
             .zip(args.iter().copied())
             .collect::<crate::symbol_resolver::GSigBinds>();
         let resolved = crate::types::ty_subst_alias_expansion(expansion, &bindings);
+        self.check_alias_application_bounds(&formals, expansion, arguments, &args, span);
         let conflicts = conflicting_use_site_spans(
             &formals,
             arguments,

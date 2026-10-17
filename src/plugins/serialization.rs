@@ -39,9 +39,7 @@ mod type_parameter_serializers;
 mod value_class_body;
 mod value_class_types;
 
-use crate::ir::{
-    Callee, ClassId, ExprId, IrConst, IrCtorArg, IrExpr, IrFile, IrFunction, IrTypeOp,
-};
+use crate::ir::{Callee, ClassId, ExprId, IrConst, IrExpr, IrFile, IrFunction, IrTypeOp};
 use crate::kt_string::KtString;
 use crate::libraries::InlineKind;
 use crate::names::property_getter_name;
@@ -1633,10 +1631,12 @@ impl IrPlugin for SerializationPlugin {
                             field_defaults: &properties.constant_defaults,
                             nested_serializers: &properties.nested_serializers,
                             type_parameter_serializers,
-                            write_self: ir.generated_function(
-                                ir.classes[foo_id as usize].fq_name_id(),
-                                crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf,
-                            ),
+                            write_self: ir
+                                .generated_function(
+                                    ir.classes[foo_id as usize].fq_name_id(),
+                                    crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf,
+                                )
+                                .expect("a plain serializable class declares its write$Self"),
                             write_self_name: self.write_self_name(),
                             cache: self
                                 .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),
@@ -1676,8 +1676,9 @@ impl IrPlugin for SerializationPlugin {
                         type_parameter_serializers.install_member_body(ir, fid);
                     }
                     crate::ir::IrGeneratedFunctionRole::SerializationTypeParameterSerializers => {}
-                    crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf => {
-                        unreachable!("the serializer member ledger contains no write$Self")
+                    crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf
+                    | crate::ir::IrGeneratedFunctionRole::SerializationTypeSerializerGetter(_) => {
+                        unreachable!("the serializer member ledger holds only its declared members")
                     }
                 }
             }

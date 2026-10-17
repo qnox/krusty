@@ -36,12 +36,55 @@ pub(crate) struct SuspendLambdaScopedNames {
     names: HashMap<crate::ir::FunId, (crate::ir::FunId, String)>,
 }
 
+/// Final JVM implementation ordinals for outermost lambdas moved into another physical class.
+/// The placement pass records the exact function identity after allocating its new ordinal; lifted
+/// naming then applies that ordinal to the matching source path and everything nested beneath it.
+#[derive(Default)]
+pub(super) struct PhysicalTopLambdaOrdinals {
+    ordinals: HashMap<crate::ir::FunId, u32>,
+}
+
+impl PhysicalTopLambdaOrdinals {
+    pub(super) fn record_moved(&mut self, ir: &IrFile, functions: &[crate::ir::FunId]) {
+        let roots = functions
+            .iter()
+            .filter_map(|&function| {
+                let (sequence, site) = ir.lifted_functions.get(&function)?;
+                if !site.lifted {
+                    return None;
+                }
+                let [step] = site.path.as_ref() else {
+                    return None;
+                };
+                if step.kind != crate::lifting_provenance::LiftingCallableKind::Lambda {
+                    return None;
+                }
+                let origin = ir.lambda_origins.get(&function)?;
+                Some((
+                    (sequence.clone(), step.position),
+                    origin.implementation_ordinal,
+                ))
+            })
+            .collect::<HashMap<_, _>>();
+        for &function in functions {
+            let Some(root) = lifting_root(ir, function) else {
+                continue;
+            };
+            let Some(&ordinal) = roots.get(&(root.sequence, root.position)) else {
+                continue;
+            };
+            self.ordinals.insert(function, ordinal);
+        }
+    }
+}
+
 /// Number every lifting sequence of the file and record kotlinc's lifted name of each function
 /// lowered from a lambda or local function. A callable inside a suspend lambda, which is not
 /// lifted, is named within that lambda's class and returned apart.
-pub(crate) fn number(
+pub(super) fn number(
     ir: &mut IrFile,
     helper_access: &super::local_delegate_accessors::HelperAccess,
+    physical_top_lambda_ordinals: &PhysicalTopLambdaOrdinals,
 ) -> SuspendLambdaScopedNames {
     // The suspend lambdas: lambdas that take no place among the lifted callables, by the function
     // each one is.
@@ -140,12 +183,18 @@ pub(crate) fn number(
                 0,
             ),
         };
-        let spelled = site.path[start..].iter().all(|step| {
+        let physical_top_ordinal = (start == 0)
+            .then(|| physical_top_lambda_ordinals.ordinals.get(&function))
+            .flatten();
+        let spelled = site.path[start..].iter().enumerate().all(|(index, step)| {
             let Some(segment) = segments.get(&(sequence, step.position)) else {
                 return false;
             };
             name.push('$');
-            name.push_str(segment);
+            match (index, physical_top_ordinal) {
+                (0, Some(ordinal)) => name.push_str(&format!("lambda${ordinal}")),
+                _ => name.push_str(segment),
+            }
             true
         });
         match (spelled, suspend_lambda) {

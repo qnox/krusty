@@ -6,13 +6,15 @@
 //! is coded with its own element serializer through `encode[Nullable]SerializableValue` and
 //! `decode[Nullable]SerializableValue`, as kotlinc does.
 
+use super::declared_serializer::build_field_serializer_instance;
 use super::deserialize_body::narrowed;
 use super::element_serializer;
 use super::type_argument_serializers::declared_type_spelling;
 use super::type_parameter_serializers::TypeParameterSerializers;
 use super::value_class_types::inline_prim_methods;
 use super::{
-    class_ty, complete_generated_body, synthesized_accessor, ty_descriptor, virtual_iface,
+    class_ty, complete_generated_body, declared_serializer_of, property_is_contextual,
+    synthesized_accessor, ty_descriptor, virtual_iface,
 };
 use crate::ir::{ClassId, ExprId, IrConst, IrExpr, IrFile};
 use crate::plugins::PluginContext;
@@ -38,10 +40,52 @@ enum Coding {
     Serializer { serializer: ExprId, nullable: bool },
 }
 
+/// Whether a property-selected serializer for a value class's underlying slot uses nullable calls.
+///
+/// Unlike an ordinary generic property, a value-class carrier is the representation itself. A bare
+/// contextual type parameter whose upper bound admits null therefore uses kotlinc's nullable
+/// value-coding path; an explicitly non-null bound does not. The default type-parameter serializer
+/// path remains non-null unless the type occurrence itself is nullable.
+fn carrier_is_nullable(ty: &Ty) -> bool {
+    ty.is_nullable() || (ty.is_ty_param() && ty.upper_bound_admits_null())
+}
+
 impl ValueClassBody<'_> {
     fn coding(&self, ir: &mut IrFile, ctx: &PluginContext) -> Coding {
         let (name, ty) = self.property;
-        if !ty.is_nullable() {
+        let annotated = declared_type_spelling(ctx, ir, self.serialized_class, name);
+        // A serializer the property names for itself takes precedence over its type's, as it does
+        // for every other serializable property: what it wrote only it can read back.
+        let selected = if property_is_contextual(ctx, ir, self.serialized_class, name) {
+            Some(
+                element_serializer::contextual_property_serializer(
+                    ir,
+                    ctx,
+                    ty,
+                    self.type_parameter_serializers,
+                    &annotated,
+                )
+                .unwrap_or_else(|| element_serializer::unsupported_element_serializer(ir, *ty)),
+            )
+        } else {
+            declared_serializer_of(ctx, ir, self.serialized_class, name).map(|serializer| {
+                build_field_serializer_instance(
+                    ir,
+                    ctx,
+                    serializer,
+                    *ty,
+                    self.type_parameter_serializers,
+                    &annotated,
+                )
+            })
+        };
+        if let Some(serializer) = selected {
+            return Coding::Serializer {
+                serializer,
+                nullable: carrier_is_nullable(ty),
+            };
+        }
+        if !carrier_is_nullable(ty) {
             if let Some((enc_name, enc_desc, dec_name, dec_desc)) = inline_prim_methods(ty) {
                 return Coding::Direct {
                     encode: (enc_name, enc_desc),
@@ -52,7 +96,6 @@ impl ValueClassBody<'_> {
         // The serializer of the NON-NULL type: nullability is the coding call's, not a
         // `.nullable` wrapper's.
         let element = ty.non_null();
-        let annotated = declared_type_spelling(ctx, ir, self.serialized_class, name);
         let serializer = element_serializer::element_serializer_expr_in(
             ir,
             ctx,
@@ -167,8 +210,10 @@ impl ValueClassBody<'_> {
             value: Some(guarded),
         });
         ir.logical_types.insert(call, Ty::Unit);
-        let header_line = ir.classes[self.serialized_class as usize].decl_line;
-        if header_line != 0 {
+        let class = &ir.classes[self.serialized_class as usize];
+        let (start_line, header_line) = (class.decl_start_line, class.decl_line);
+        // On a one-line declaration the implicit return is already on that line.
+        if header_line != 0 && header_line != start_line {
             ir.fn_close_lines.insert(self.function, header_line);
         }
         let body = ir.add_expr(IrExpr::Block {
@@ -257,5 +302,21 @@ impl ValueClassBody<'_> {
             value: None,
         });
         complete_generated_body(ir, self.function, body);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::carrier_is_nullable;
+    use crate::types::Ty;
+
+    #[test]
+    fn carrier_nullability_distinguishes_a_nullable_bound_from_a_nullable_occurrence() {
+        let nullable_bound = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let non_null_bound = Ty::ty_param("N", Ty::obj("kotlin/Any"));
+
+        assert!(carrier_is_nullable(&nullable_bound));
+        assert!(!carrier_is_nullable(&non_null_bound));
+        assert!(carrier_is_nullable(&Ty::nullable(non_null_bound)));
     }
 }

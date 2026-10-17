@@ -5,21 +5,60 @@ use crate::ir::{ClassId, IrExpr, IrFile};
 use crate::types::Ty;
 
 /// The serializers a generic `$serializer` is constructed with, one per type parameter of the
-/// class it serves. An element whose type is, or contains, one of those parameters reads it off the
-/// `$serializer` (`this.typeSerial<k>`), so only code running on that instance can use it.
+/// class it serves. An element whose type is, or contains, one of those parameters reads it from
+/// where the running code holds it: the `$serializer`'s own `this.typeSerial<k>`, or the
+/// serialized class's `write$Self`, which receives them as trailing parameters.
 #[derive(Clone, Copy)]
 pub(super) struct TypeParameterSerializers<'a> {
-    serializer_class: ClassId,
-    /// The semantic identity of each type parameter, in declaration order. Parameter `k`'s
-    /// serializer is field `1 + k`; field 0 is the descriptor.
+    storage: TypeParameterSerializerStorage,
+    /// The semantic identity of each type parameter, in declaration order.
     identities: &'a [&'static str],
+}
+
+/// Where code holds the type-parameter serializers it was given.
+#[derive(Clone, Copy)]
+enum TypeParameterSerializerStorage {
+    /// Parameter `k`'s serializer is field `1 + k` of this `$serializer`; field 0 is the
+    /// descriptor.
+    SerializerFields(ClassId),
+    /// Parameter `k`'s serializer is local `first + k` of a static helper.
+    Parameters { first: u32 },
+}
+
+/// One type parameter's serializer, as the running code reads it.
+#[derive(Clone, Copy)]
+pub(super) enum TypeParameterSerializer {
+    SerializerField {
+        serializer_class: ClassId,
+        field: u32,
+    },
+    Parameter(u32),
+}
+
+impl TypeParameterSerializer {
+    pub(super) fn read(self, ir: &mut IrFile) -> crate::ir::ExprId {
+        match self {
+            TypeParameterSerializer::SerializerField {
+                serializer_class,
+                field,
+            } => {
+                let this = ir.add_expr(IrExpr::GetValue(0));
+                ir.add_expr(IrExpr::GetField {
+                    receiver: this,
+                    class: serializer_class,
+                    index: field,
+                })
+            }
+            TypeParameterSerializer::Parameter(local) => ir.add_expr(IrExpr::GetValue(local)),
+        }
+    }
 }
 
 impl<'a> TypeParameterSerializers<'a> {
     /// No type parameter has a serializer: a non-generic class, or code that is not on the
     /// `$serializer` instance.
     pub(super) const NONE: TypeParameterSerializers<'static> = TypeParameterSerializers {
-        serializer_class: 0,
+        storage: TypeParameterSerializerStorage::Parameters { first: 0 },
         identities: &[],
     };
 
@@ -28,34 +67,57 @@ impl<'a> TypeParameterSerializers<'a> {
         identities: &'a [&'static str],
     ) -> TypeParameterSerializers<'a> {
         TypeParameterSerializers {
-            serializer_class,
+            storage: TypeParameterSerializerStorage::SerializerFields(serializer_class),
             identities,
         }
     }
 
-    /// The `$serializer` field holding the serializer for the type parameter `identity`.
-    pub(super) fn field(&self, identity: &str) -> Option<u32> {
-        self.identities
-            .iter()
-            .position(|candidate| *candidate == identity)
-            .map(|ordinal| 1 + ordinal as u32)
+    /// The same serializers as a static helper receives them: parameter `k`'s is local
+    /// `first + k`.
+    pub(super) fn as_parameters(&self, first: u32) -> TypeParameterSerializers<'a> {
+        TypeParameterSerializers {
+            storage: TypeParameterSerializerStorage::Parameters { first },
+            identities: self.identities,
+        }
     }
 
-    pub(super) fn serializer_class(&self) -> ClassId {
-        self.serializer_class
+    pub(super) fn len(&self) -> usize {
+        self.identities.len()
+    }
+
+    /// Where the serializer for the type parameter `identity` is held.
+    pub(super) fn serializer(&self, identity: &str) -> Option<TypeParameterSerializer> {
+        let ordinal = self
+            .identities
+            .iter()
+            .position(|candidate| *candidate == identity)? as u32;
+        Some(match self.storage {
+            TypeParameterSerializerStorage::SerializerFields(serializer_class) => {
+                TypeParameterSerializer::SerializerField {
+                    serializer_class,
+                    field: 1 + ordinal,
+                }
+            }
+            TypeParameterSerializerStorage::Parameters { first } => {
+                TypeParameterSerializer::Parameter(first + ordinal)
+            }
+        })
+    }
+
+    /// Every serializer, in type-parameter order.
+    pub(super) fn reads(&self, ir: &mut IrFile) -> Vec<crate::ir::ExprId> {
+        self.identities
+            .iter()
+            .map(|identity| {
+                self.serializer(identity)
+                    .expect("each identity has a serializer")
+                    .read(ir)
+            })
+            .collect()
     }
 
     pub(super) fn install_member_body(&self, ir: &mut IrFile, function: u32) {
-        let elements = (1..=self.identities.len() as u32)
-            .map(|field| {
-                let receiver = ir.add_expr(IrExpr::GetValue(0));
-                ir.add_expr(IrExpr::GetField {
-                    receiver,
-                    class: self.serializer_class,
-                    index: field,
-                })
-            })
-            .collect::<Vec<_>>();
+        let elements = self.reads(ir);
         let array = ir.add_expr(IrExpr::Vararg {
             array_type: Ty::obj_args("kotlin/Array", &[class_ty(KSERIALIZER_FQ)]),
             spreads: vec![false; elements.len()],

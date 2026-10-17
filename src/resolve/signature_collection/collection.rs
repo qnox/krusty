@@ -1282,6 +1282,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             .resolved_annotation(i as u32, annotation)
                             .is_some_and(|name| name == type_name("kotlin/jvm/JvmInline"))
                     });
+                    let copy_annotations = DataCopyAnnotations::of(&table, i as u32, c);
+                    let respects_ctor_visibility = file.data_copy_respects_ctor_visibility;
+                    copy_annotations.check(classifier_is_data, respects_ctor_visibility, diags);
                     let value_representation = c.value_modifier_span.map(|value_keyword| {
                         ValueClassDeclaration {
                             value_keyword,
@@ -2910,60 +2913,27 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 }],
                             );
                         }
-                        // Every `copy` parameter has a default (the receiver's property) — so `required`
-                        // is 0 and any subset may be passed, by name or position.
                         declared_callable_order.push("copy".to_string());
-                        methods.insert(
-                            "copy".into(),
-                            vec![Signature {
-                                params: data_properties.iter().map(|((_, ty), _)| **ty).collect(),
-                                ret: self_ty,
-                                generic_sig: Some(GenericSig {
-                                    formals: Vec::new(),
-                                    formal_bounds: Vec::new(),
-                                    receiver: None,
-                                    params: data_properties
-                                        .iter()
-                                        .map(|(_, (shape, _))| *shape)
-                                        .collect(),
-                                    ret: self_shape,
-                                    return_policy: GenericReturnPolicy::Exact,
-                                }),
-                                projected_return_hazard: false,
-                                flags: SigFlags::default(),
-                                annotations: Vec::new(),
-                                equality_bound: None,
-                                vararg_index: None,
-                                required: 0,
-                                param_defaults: vec![true; data_properties.len()],
-                                exact_params: vec![false; data_properties.len()],
-                                no_infer_params: vec![false; data_properties.len()],
-                                implicit_integer_coercion: vec![false; data_properties.len()],
-                                param_default_values: Vec::new(),
-                                param_names: data_properties
-                                    .iter()
-                                    .map(|((property, _), _)| property.name.clone())
-                                    .collect(),
-                                parameter_identities: Vec::new(),
-                                lambda_param_types: Vec::new(),
-                                lambda_recv: Vec::new(),
-                                inline_modifiers: Vec::new(),
-                                visibility: Visibility::Public,
-                                context_count: 0,
-                                source_decl: None,
-                                stable_declaration: compact_generated_member_declaration(
-                                    compact_headers,
-                                    compact_classifier.map(|stub| stub.id),
-                                    "copy",
-                                ),
-                                source_file: None,
-                                source_member: None,
-                                source_receiver: None,
-                                package: TypeName::ROOT,
-                                contract: None,
-                                plugin_expression: None,
-                            }],
-                        );
+                        let copy = DataCopyShape {
+                            properties: data_properties
+                                .iter()
+                                .map(|((property, ty), (shape, _))| {
+                                    (property.name.clone(), **ty, *shape)
+                                })
+                                .collect(),
+                            ret: self_ty,
+                            ret_shape: self_shape,
+                            visibility: copy_annotations.copy_visibility(
+                                respects_ctor_visibility,
+                                c.primary_ctor_visibility,
+                            ),
+                            stable_declaration: compact_generated_member_declaration(
+                                compact_headers,
+                                compact_classifier.map(|stub| stub.id),
+                                "copy",
+                            ),
+                        };
+                        methods.insert("copy".into(), vec![copy.signature()]);
                     }
                     if classifier_is_enum {
                         table.enums.insert(

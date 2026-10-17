@@ -220,7 +220,7 @@ use metadata_policy::{
 };
 use method_defaults::{
     body_has_reified_markers, emit_default_stub, emit_facade_default_stub,
-    static_default_stub_marker,
+    static_default_stub_marker, DefaultStubSource,
 };
 pub use must_inline_lambdas::mark_must_inline_lambdas;
 use must_inline_lambdas::splice_called_impls;
@@ -912,7 +912,7 @@ fn attach_synth_nullability(
         cw.set_method_param_annotations("<init>", &ctor_desc, &user);
     }
     // Accessors: a reference getter annotates its return; a `var` reference setter its parameter.
-    for f in &c.fields {
+    for f in c.fields.iter().filter(|f| !f.is_compiler_generated()) {
         let Some(a) = ann(f.ty) else {
             continue;
         };
@@ -1575,6 +1575,8 @@ fn emit_pass(
         // gets no bridge; a `suspend fun main` has a continuation parameter after lowering and so is
         // not parameterless here (its bridge needs the coroutine runner and is not emitted yet).
         if f.name == "main" && f.params.is_empty() && matches!(f.ret, Ty::Unit) {
+            // kotlinc visits the bridge's header before its body's call to `main()`.
+            cw.reserve_method_pool("main", "([Ljava/lang/String;)V", None, &[]);
             let mut bridge = CodeBuilder::new(1);
             let target = cw.methodref(facade, "main", "()V");
             bridge.invokestatic(target, 0, 0);
@@ -1603,12 +1605,14 @@ fn emit_pass(
             let defaults = ir.param_defaults(i as u32).unwrap();
             // A top-level function's `$default` marker is a plain `Object` (kotlinc's function ABI).
             emit_facade_default_stub(
-                ir,
-                i as u32,
+                DefaultStubSource {
+                    ir,
+                    fid: i as u32,
+                    defaults,
+                },
                 StaticOwner::Facade,
                 facade,
                 &mut cw,
-                defaults,
                 env,
                 Ty::obj("java/lang/Object"),
             );
@@ -2301,24 +2305,20 @@ fn emit_scheduled_member(
         if f.is_static {
             let marker = static_default_stub_marker(ir, fid);
             emit_facade_default_stub(
-                ir,
-                fid,
+                DefaultStubSource { ir, fid, defaults },
                 StaticOwner::Class(c.fq_name),
                 fq_name,
                 cw,
-                defaults,
                 env,
                 marker,
             );
         } else {
             emit_default_stub(
-                ir,
-                fid,
+                DefaultStubSource { ir, fid, defaults },
                 Some(StaticOwner::Class(c.fq_name)),
                 fq_name,
                 facade,
                 cw,
-                defaults,
                 env,
                 false,
             );
@@ -3214,11 +3214,7 @@ fn emit_class(
 }
 
 pub(crate) fn parse_physical_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
-    let (params, ret) = crate::jvm::names::parse_method_descriptor(desc)?;
-    Some((
-        params.into_iter().map(ty_from_field_descriptor).collect(),
-        ty_from_field_descriptor(ret),
-    ))
+    super::physical_type::method_operand_tys(desc)
 }
 
 /// The wrapper class internal name for a primitive (`Int` → `java/lang/Integer`), for casting an
@@ -3458,13 +3454,15 @@ fn emit_interface_class(
                 // sites go to the holder's copy instead.
                 if bodies_on_interface {
                     emit_default_stub(
-                        ir,
-                        default_fid,
+                        DefaultStubSource {
+                            ir,
+                            fid: default_fid,
+                            defaults,
+                        },
                         Some(StaticOwner::Class(c.fq_name)),
                         &fq_name,
                         facade,
                         &mut cw,
-                        defaults,
                         env,
                         true,
                     );
@@ -3488,13 +3486,15 @@ fn emit_interface_class(
                         default_impls::emit_default_stub_forward(ir, default_fid, &fq_name, di);
                     } else {
                         emit_default_stub(
-                            ir,
-                            default_fid,
+                            DefaultStubSource {
+                                ir,
+                                fid: default_fid,
+                                defaults,
+                            },
                             None,
                             &fq_name,
                             facade,
                             di,
-                            defaults,
                             env,
                             true,
                         );
@@ -3998,13 +3998,11 @@ fn emit_enum_class(
                 // inheritable (an entry body subclasses it), which is why kotlinc guards the stub.
                 if let Some(defaults) = ir.declared_param_defaults(fid) {
                     emit_default_stub(
-                        ir,
-                        fid,
+                        DefaultStubSource { ir, fid, defaults },
                         Some(StaticOwner::Class(c.fq_name)),
                         &fq,
                         facade,
                         cw,
-                        defaults,
                         env,
                         false,
                     );
@@ -6325,7 +6323,9 @@ impl<'a> Emitter<'a> {
                     .map(|(params, _)| {
                         params
                             .iter()
-                            .map(|p| slot_words(ty_from_field_descriptor(p)) as i32)
+                            .map(|parameter| {
+                                crate::jvm::physical_type::field_slot(parameter).words()
+                            })
                             .sum()
                     })
                     .unwrap_or_else(|| slot_words(target) as i32);
@@ -6365,7 +6365,7 @@ impl<'a> Emitter<'a> {
                     .expect("a planned property access bridge has a valid JVM descriptor");
                 let words = parameters
                     .iter()
-                    .map(|parameter| slot_words(ty_from_field_descriptor(parameter)) as i32)
+                    .map(|parameter| crate::jvm::physical_type::field_slot(parameter).words())
                     .sum();
                 let owner = owner.render();
                 let m = self.cw.methodref(&owner, &name, &descriptor);
@@ -6844,7 +6844,9 @@ impl<'a> Emitter<'a> {
             IrExpr::SingletonValue { classifier } => Ty::obj_name(*classifier),
             IrExpr::ExternalStaticInstance { ty, .. } => Ty::obj_name(*ty),
             // The static field's JVM type, from its descriptor.
-            IrExpr::ExternalStaticField { descriptor, .. } => ty_from_field_descriptor(descriptor),
+            IrExpr::ExternalStaticField { descriptor, .. } => {
+                super::physical_type::descriptor_operand_ty(descriptor)
+            }
             IrExpr::RefNew { elem, .. } => Ty::obj(ref_class(elem).0),
             IrExpr::RefGet { elem, .. } => ir_ty_to_jvm(elem),
             IrExpr::RefSet { .. } => Ty::Unit,
@@ -6928,8 +6930,8 @@ pub(super) fn descriptor_is_reference(descriptor: &str) -> bool {
 /// Byte/Short/Char target is narrowed from `int` last.
 /// Parse the return type of a JVM method descriptor (`(…)Lfoo/Bar;` → `Obj("foo/Bar")`) into a `Ty`.
 fn ty_from_descriptor_ret(desc: &str) -> Ty {
-    let ret = desc.rsplit(')').next().unwrap_or("V");
-    ty_from_field_descriptor(ret)
+    super::physical_type::method_return_operand_ty(desc)
+        .expect("emitted invocation has a valid JVM method descriptor")
 }
 
 fn descriptor_ret_words(desc: &str) -> i32 {
@@ -6940,16 +6942,6 @@ fn descriptor_ret_words(desc: &str) -> i32 {
     } else {
         slot_words(ty_from_descriptor_ret(desc)) as i32
     }
-}
-
-/// Parse a single JVM field/type descriptor into a `Ty`.
-///
-/// The physical-type boundary owns descriptor parsing. Consumers that still need a `Ty` project it
-/// from that slot instead of maintaining another primitive/object/array table here. In particular,
-/// this preserves the reference element category of `[Lkotlin/UInt;` rather than rebuilding it as
-/// the specialized primitive `UIntArray` (`[I`).
-pub(crate) fn ty_from_field_descriptor(d: &str) -> Ty {
-    super::physical_type::field_slot(d).ty
 }
 
 /// `(opcode, value-words)` for an array element load (`Xaload`).
@@ -7211,11 +7203,6 @@ mod invariant_tests {
 
     #[test]
     fn descriptor_ty_consumers_preserve_reference_array_elements() {
-        for descriptor in ["[Lfixture/Token;", "[Lkotlin/UInt;", "[[I"] {
-            let ty = ty_from_field_descriptor(descriptor);
-            assert_eq!(type_descriptor(ty), descriptor, "{descriptor}");
-        }
-
         let (params, result) =
             parse_physical_method_desc("([Lfixture/Token;[Lkotlin/UInt;)[Lkotlin/UInt;")
                 .expect("valid physical method descriptor");

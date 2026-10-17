@@ -251,10 +251,30 @@ fn valid_field_descriptor(desc: &str) -> bool {
             && !base[1..base.len() - 1].contains([';', '[']))
 }
 
-pub(crate) fn parse_method_descriptor(desc: &str) -> Option<(Vec<&str>, &str)> {
+fn method_descriptor_parts(desc: &str) -> Option<(&str, &str)> {
     let body = desc.strip_prefix('(')?;
     let close = body.find(')')?;
-    let mut rest = &body[..close];
+    let parameters = &body[..close];
+    let ret = &body[close + 1..];
+    (ret == "V" || valid_field_descriptor(ret)).then_some((parameters, ret))
+}
+
+/// The validated return descriptor of a JVM method descriptor without allocating its parameter
+/// list. Return-only emission paths use this instead of silently treating malformed input as void.
+pub(super) fn parse_method_return_descriptor(desc: &str) -> Option<&str> {
+    let (mut rest, ret) = method_descriptor_parts(desc)?;
+    while !rest.is_empty() {
+        let (param, tail) = split_field_descriptor(rest)?;
+        if !valid_field_descriptor(param) {
+            return None;
+        }
+        rest = tail;
+    }
+    Some(ret)
+}
+
+pub(crate) fn parse_method_descriptor(desc: &str) -> Option<(Vec<&str>, &str)> {
+    let (mut rest, ret) = method_descriptor_parts(desc)?;
     let mut params = Vec::new();
     while !rest.is_empty() {
         let (param, tail) = split_field_descriptor(rest)?;
@@ -264,8 +284,7 @@ pub(crate) fn parse_method_descriptor(desc: &str) -> Option<(Vec<&str>, &str)> {
         params.push(param);
         rest = tail;
     }
-    let ret = &body[close + 1..];
-    (ret == "V" || valid_field_descriptor(ret)).then_some((params, ret))
+    Some((params, ret))
 }
 
 pub(crate) fn reference_array_element(ty: Ty) -> Ty {

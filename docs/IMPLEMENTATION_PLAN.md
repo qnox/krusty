@@ -5295,6 +5295,8 @@ regress.
     `invoke`'s `Object` is coerced over the Kotlin types (`checkcast` + `unbox-impl`, `box-impl`),
     the pairs then removed by RedundantBoxing with the caller's value-class descriptors.
 - ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.
+  Mask expansion and singleton default lambdas (`DefaultLambda`, with reification) are ported;
+  a default lambda constructed with captured values and `finally` rewriting remain.
 - ☐ 6. Same-module inline functions compiled from IR to a node (`IrSourceCompilerForInline`) and
   inlined by the same port; the JVM stops using the IR expansion (other targets keep it).
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs

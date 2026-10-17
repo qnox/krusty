@@ -92,3 +92,43 @@ fun box(): String {
     );
     assert_eq!(out.as_deref(), Some("OK"));
 }
+
+/// A property declared as a generic value class instantiated with a concrete argument
+/// (`val boxed: Boxed<String>`) returns the carrier, which the generic underlying erases to
+/// `Object`. Reading it from the declaring file and from a sibling file must take that `Object`
+/// as the carrier; treating it as a box cast the bare `String` to `Boxed`.
+const DECLARED_PROPERTY_MODEL: &str = "\
+@JvmInline
+value class Boxed<T>(val value: T)
+
+class Plain(val boxed: Boxed<String>) {
+    val computed: Boxed<String> get() = boxed
+}
+
+class Gen<T>(val item: T)
+
+val top: Boxed<String> = Boxed(\"t\")
+
+fun sameFile(): String = Plain(Boxed(\"s\")).boxed.value
+";
+
+const DECLARED_PROPERTY_MAIN: &str = "\
+fun box(): String {
+    val plain = Plain(Boxed(\"p\"))
+    return sameFile() + plain.boxed.value + plain.computed.value + top.value +
+        Gen(Boxed(\"g\")).item.value
+}
+";
+
+#[test]
+fn a_concretely_typed_generic_value_class_property_is_read_as_its_carrier() {
+    let sources = [
+        ("Model.kt", DECLARED_PROPERTY_MODEL),
+        ("Main.kt", DECLARED_PROPERTY_MAIN),
+    ];
+    let jdk = common::jdk_modules();
+    let krusty = common::compile_and_run_box_files(&sources, &[common::stdlib_jar()], Some(&jdk));
+    let reference = common::kotlinc_box_files_result(&sources, "MainKt");
+    assert_eq!(reference, "spptg");
+    assert_eq!(krusty.as_deref(), Some("spptg"));
+}

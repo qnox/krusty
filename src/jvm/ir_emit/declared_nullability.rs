@@ -59,6 +59,7 @@ pub(super) fn declared_nullability(ir: &IrFile, fid: u32) -> DeclaredNullability
         if suspend {
             return ann_of(f.ret, Ty::nullable(f.ret));
         }
+        // `constructor-impl` returns the value class itself, never null whatever its carrier.
         let semantic = value_class_declaration
             .map(|(_, _, result)| *result)
             .or_else(|| value_class_constructor.and_then(|signature| signature.ret))

@@ -100,7 +100,7 @@ impl Checker<'_> {
         let warning =
             severity == Severity::Eager && !self.file.allow_eager_supertype_accessibility_checks;
         for supertype in &missing {
-            let supertype = Self::access_owner_display(*supertype);
+            let supertype = access_control::owner_display(*supertype);
             if warning {
                 if !self.suppresses_diagnostic("MISSING_DEPENDENCY_SUPERCLASS_WARNING") {
                     self.diags.warning(
@@ -193,7 +193,7 @@ impl Checker<'_> {
             names.reverse();
             return format!("<local>.{}", names.join("."));
         }
-        Self::access_owner_display(owner)
+        access_control::owner_display(owner)
     }
 
     /// kotlinc's declaration check of a type parameter: each upper bound's inherited missing
@@ -215,7 +215,7 @@ impl Checker<'_> {
             upper = *bound;
         }
         if let Some(classifier) = upper.non_null().kotlin_class_internal() {
-            let label = Self::access_owner_display(classifier);
+            let label = access_control::owner_display(classifier);
             self.report_missing_supertypes(parameter, classifier, &label, Severity::Error);
         }
     }
@@ -360,7 +360,7 @@ impl Checker<'_> {
         let mut reported_receiver = false;
         if let Some(receiver) = access.dispatch_receiver {
             checked.push(receiver);
-            let label = Self::access_owner_display(receiver);
+            let label = access_control::owner_display(receiver);
             reported_receiver =
                 self.report_missing_supertypes(access.span, receiver, &label, Severity::Error);
         }
@@ -377,7 +377,7 @@ impl Checker<'_> {
                 continue;
             }
             checked.push(classifier);
-            let label = Self::access_owner_display(classifier);
+            let label = access_control::owner_display(classifier);
             self.report_missing_supertypes(access.span, classifier, &label, severity);
         }
     }

@@ -113,6 +113,10 @@ impl DeclarationFlags {
     /// non-`const` `val` of this shape `only 'const val' can be used in constant expressions.` when
     /// a constant expression reads it; any other non-constant read is not a compile-time constant.
     pub const LITERAL_INITIALIZER: u64 = 1 << 44;
+    /// The synthesized `copy` member of a data class. Its final visibility is resolved from the
+    /// class's copy-visibility annotations during signature collection; other generated members
+    /// keep the visibility recorded in their inventory stub.
+    pub const DATA_CLASS_COPY: u64 = 1 << 45;
 
     pub const fn with(mut self, flag: u64, enabled: bool) -> Self {
         if enabled {

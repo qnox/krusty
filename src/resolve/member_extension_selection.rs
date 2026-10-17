@@ -325,6 +325,7 @@ pub(super) fn candidate(
         stable_declaration: shape.function.signature.stable_declaration,
         external_identity: shape.function.external_identity,
         external_default_provider: shape.function.external_default_provider,
+        diagnostic_candidate: shape.diagnostic_candidate.clone(),
         priority: shape.priority,
         dispatch_receiver: shape.dispatch_receiver,
         score: instantiated.score,

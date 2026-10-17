@@ -208,3 +208,230 @@ fn a_private_member_extension_of_an_unrelated_class_is_unresolved() {
     let diagnostics = common::compiler_diagnostics(&[("Bad.kt", source)], &[common::stdlib_jar()]);
     common::expect_identical_rejection(&diagnostics, "private member extension");
 }
+
+fn assert_exact_access_error(
+    diagnostics: &common::CompilerDiagnosticResult,
+    expected: common::CompilerError,
+) {
+    assert_eq!(
+        diagnostics.reference_code, 1,
+        "{}",
+        diagnostics.reference_stderr
+    );
+    assert_eq!(
+        diagnostics.krusty_code, 1,
+        "{}{}",
+        diagnostics.krusty_stdout, diagnostics.krusty_stderr
+    );
+    let reference = common::compiler_errors(&diagnostics.reference_stderr);
+    let krusty = common::compiler_errors(&diagnostics.krusty_stderr);
+    assert_eq!(reference, [expected]);
+    assert_eq!(krusty, reference);
+    assert_eq!(common::compiler_errors(&diagnostics.krusty_stdout), []);
+}
+
+/// An inaccessible member-extension function renders its resolved extension receiver separately
+/// from the named/defaulted value parameters. Both complete diagnostic ledgers are pinned: the
+/// receiver must not consume `x`'s source name or default marker.
+#[test]
+fn an_inaccessible_member_extension_function_matches_kotlinc_exactly() {
+    let source = r#"package demo
+
+class C {
+    private fun String.hidden(x: Int = 1): Int = x
+}
+
+fun use(c: C): Int = with(c) { "".hidden() }
+"#;
+    let diagnostics = common::compiler_diagnostics(&[("Main.kt", source)], &[common::stdlib_jar()]);
+    assert_exact_access_error(
+        &diagnostics,
+        common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 7,
+            column: 35,
+            message:
+                "cannot access 'fun String.hidden(x: Int = ...): Int': it is private in 'demo.C'."
+                    .to_string(),
+        },
+    );
+}
+
+/// A local classifier has no source-level owner name in an access diagnostic. The stable local
+/// declaration identity selects kotlinc's `file` container without reconstructing that fact from
+/// the generated classifier spelling.
+#[test]
+fn an_inaccessible_local_member_extension_reports_the_file_container() {
+    let source = r#"package demo
+
+fun use(): Int {
+    class Local {
+        private fun String.hidden(): Int = length
+    }
+    val local = Local()
+    return with(local) { "".hidden() }
+}
+"#;
+    let diagnostics = common::compiler_diagnostics(&[("Main.kt", source)], &[common::stdlib_jar()]);
+    assert_exact_access_error(
+        &diagnostics,
+        common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 8,
+            column: 29,
+            message: "cannot access 'fun String.hidden(): Int': it is private in file.".to_string(),
+        },
+    );
+}
+
+/// Context parameters are a declaration prefix, not ordinary value parameters. The selected
+/// member's semantic shape supplies both the context split and every resolved parameter type.
+#[test]
+fn an_inaccessible_context_member_extension_matches_kotlinc_exactly() {
+    let source = r#"package demo
+
+class C {
+    context(ctx: String)
+    private fun String.hidden(x: Int = 1): Int = ctx.length + x
+}
+
+context(ctx: String)
+fun use(c: C): Int = with(c) { "".hidden() }
+"#;
+    let diagnostics = common::compiler_diagnostics(&[("Main.kt", source)], &[common::stdlib_jar()]);
+    assert_exact_access_error(
+        &diagnostics,
+        common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 9,
+            column: 35,
+            message: "cannot access 'context(ctx: String) fun String.hidden(x: Int = ...): Int': it is private in 'demo.C'."
+                .to_string(),
+        },
+    );
+}
+
+/// A legacy context receiver has no source parameter name. Its recorded semantic role renders the
+/// declaration as `context(String)`, never as the provider placeholder `context(_: String)`.
+#[test]
+fn an_inaccessible_legacy_context_member_extension_matches_kotlinc_exactly() {
+    // Kotlin 2.4.20 removed the legacy `context(Type)` source form. Older supported targets still
+    // exercise this declaration shape in their matrix lanes.
+    if krusty::kotlin_version::target() >= krusty::kotlin_version::KotlinVersion::V2_4_20 {
+        return;
+    }
+    let source = r#"// LANGUAGE: +ContextReceivers
+package demo
+
+class C {
+    context(String)
+    private fun String.hidden(x: Int = 1): Int = x
+}
+
+context(String)
+fun use(c: C): Int = with(c) { "".hidden() }
+"#;
+    let arguments = common::language_directives::kotlinc_args(source);
+    let diagnostics = common::compiler_diagnostics_with_reference_args(
+        &[("Main.kt", source)],
+        &[common::stdlib_jar()],
+        &arguments,
+    );
+    assert_exact_access_error(
+        &diagnostics,
+        common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 10,
+            column: 35,
+            message: "cannot access 'context(String) fun String.hidden(x: Int = ...): Int': it is private in 'demo.C'."
+                .to_string(),
+        },
+    );
+}
+
+/// A dependency suspend member extension retains a physical trailing `Continuation`, but source
+/// diagnostics render only its resolved source slots and its suspend modifier.
+#[test]
+fn an_inaccessible_dependency_suspend_member_extension_matches_kotlinc_exactly() {
+    let Some(library) = common::kotlinc_lib_out(&[(
+        "Library.kt",
+        r#"package demo
+
+class C {
+    private suspend fun String.hidden(x: Int = 1): Int = x
+}
+"#,
+    )]) else {
+        return;
+    };
+    let source = r#"package client
+
+import demo.C
+
+suspend fun use(c: C): Int = with(c) { "".hidden() }
+"#;
+    let diagnostics =
+        common::compiler_diagnostics(&[("Use.kt", source)], &[library, common::stdlib_jar()]);
+    assert_exact_access_error(
+        &diagnostics,
+        common::CompilerError {
+            file: "Use.kt".to_string(),
+            line: 5,
+            column: 43,
+            message: "cannot access 'suspend fun String.hidden(x: Int = ...): Int': it is private in 'demo.C'."
+                .to_string(),
+        },
+    );
+}
+
+/// The selected declaration renderer retains generic formals, bounds, `reified`, and `vararg` from
+/// the same semantic candidate. Access reporting must not reconstruct this shape from a specialized
+/// argument vector or print the vararg's array representation.
+#[test]
+fn an_inaccessible_generic_vararg_member_extension_matches_kotlinc_exactly() {
+    let source = r#"package demo
+
+class C {
+    private inline fun <reified T : CharSequence> T.hidden(vararg values: T): T = values[0]
+}
+
+fun use(c: C): CharSequence = with(c) { "".hidden("x") }
+"#;
+    let diagnostics = common::compiler_diagnostics(&[("Main.kt", source)], &[common::stdlib_jar()]);
+    assert_exact_access_error(
+        &diagnostics,
+        common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 7,
+            column: 44,
+            message: "cannot access 'fun <reified T : CharSequence> T.hidden(vararg values: T): T': it is private in 'demo.C'."
+                .to_string(),
+        },
+    );
+}
+
+/// Ordinary selected members use the same declaration renderer as member extensions. Keep this
+/// separate so a receiver-slot repair cannot leave the direct member path's generic/vararg ledger
+/// untested.
+#[test]
+fn an_inaccessible_generic_vararg_member_matches_kotlinc_exactly() {
+    let source = r#"package demo
+
+class C {
+    private inline fun <reified T : CharSequence> hidden(vararg values: T): T = values[0]
+}
+
+fun use(c: C): CharSequence = c.hidden("x")
+"#;
+    let diagnostics = common::compiler_diagnostics(&[("Main.kt", source)], &[common::stdlib_jar()]);
+    assert_exact_access_error(
+        &diagnostics,
+        common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 7,
+            column: 33,
+            message: "cannot access 'fun <reified T : CharSequence> hidden(vararg values: T): T': it is private in 'demo.C'."
+                .to_string(),
+        },
+    );
+}

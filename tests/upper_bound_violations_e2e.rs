@@ -412,3 +412,175 @@ fn forbidding_feature_checks_type_operators_and_callable_bounds() {
         ],
     );
 }
+
+const CALLS: &str = "\
+class B<T : Number>
+fun <T : Number> g() {}
+fun <T : Number> f(x: T) {}
+fun <T : Number> f2(x: Int) {}
+fun <T : Number> f3(x: List<T>) {}
+fun <T : Number> f4(): T = TODO()
+fun <T : Comparable<T>> cmp() {}
+class Box<T : Number>(val t: T)
+fun use() {
+    g<String>()
+    f<String>(\"\")
+    f2<String>(1)
+    f3<String>(listOf(\"\"))
+    val z = f4<String>()
+    cmp<Any>()
+    B<String>()
+    Box<String>(\"\")
+    val r = B<String>::toString
+    val l = listOf<B<String>>()
+    val m = mapOf<String, B<String>>()
+}
+";
+
+/// A call's explicit type arguments are checked against its candidate's bounds; a call that also
+/// passes value arguments reports that candidate as inapplicable at the callee.
+#[test]
+fn call_type_arguments_and_callable_references_are_checked() {
+    let function = |position: &str, owner: &str, bound: &str, actual: &str| {
+        violation(position, &format!("T (of {owner})"), bound, actual)
+    };
+    let inapplicable =
+        |position: &str, display: &str| format!("{position}: inapplicable candidate(s): {display}");
+    assert_matches_kotlinc(
+        CALLS,
+        &[],
+        &[
+            function("10:7", "fun <T : Number> g", "Number", "String"),
+            inapplicable("11:5", "fun <T : Number> f(x: T): Unit"),
+            function("11:7", "fun <T : Number> f", "Number", "String"),
+            inapplicable("12:5", "fun <T : Number> f2(x: Int): Unit"),
+            function("12:8", "fun <T : Number> f2", "Number", "String"),
+            inapplicable("13:5", "fun <T : Number> f3(x: List<T>): Unit"),
+            function("13:8", "fun <T : Number> f3", "Number", "String"),
+            function("14:16", "fun <T : Number> f4", "Number", "String"),
+            function(
+                "15:9",
+                "fun <T : Comparable<T>> cmp",
+                "Comparable<Any>",
+                "Any",
+            ),
+            b_violation("16:7", "String"),
+            inapplicable("17:5", "constructor<T : Number>(t: T): Box<T>"),
+            function("17:9", "class Box<T : Number>", "Number", "String"),
+            b_violation("18:15", "String"),
+            b_violation("19:22", "String"),
+            b_violation("20:29", "String"),
+        ],
+    );
+}
+
+const CONSTRUCTOR_CALLS: &str = "\
+class Two<T : Number>(val t: T) { constructor(s: String, t: T) : this(t) }
+class Opt<T : Number>(val t: T? = null)
+fun use() {
+    Two<String>(\"\")
+    Two<String>(\"\", \"\")
+    Opt<String>()
+    Opt<String>(null)
+}
+";
+
+/// A constructor call's explicit type arguments reject the constructor its arguments select,
+/// before those arguments are inferred against it.
+#[test]
+fn constructor_type_arguments_reject_the_selected_constructor() {
+    let two =
+        |position: &str| violation(position, "T (of class Two<T : Number>)", "Number", "String");
+    let opt =
+        |position: &str| violation(position, "T (of class Opt<T : Number>)", "Number", "String");
+    assert_matches_kotlinc(
+        CONSTRUCTOR_CALLS,
+        &[],
+        &[
+            "4:5: inapplicable candidate(s): constructor<T : Number>(t: T): Two<T>".to_string(),
+            two("4:9"),
+            "5:5: inapplicable candidate(s): constructor<T : Number>(s: String, t: T): Two<T>"
+                .to_string(),
+            two("5:9"),
+            opt("6:9"),
+            "7:5: inapplicable candidate(s): constructor<T : Number>(t: T? = ...): Opt<T>"
+                .to_string(),
+            opt("7:9"),
+        ],
+    );
+}
+
+const ALIASES: &str = "\
+class B<T : Number>
+typealias BL<X> = List<B<X>>
+typealias BA<X> = B<X>
+typealias BS = B<String>
+typealias LBS = List<BS>
+typealias LB2<X> = List<B<String>>
+typealias M<X> = Map<X, B<X>>
+typealias W<X> = B<List<X>>
+typealias BB<X> = B<B<X>>
+typealias N<X> = List<List<B<X>>>
+val a1: BL<String>? = null
+val a2: List<BS>? = null
+val a3: LBS? = null
+val a4: BA<BA<String>>? = null
+val a5: LB2<Int>? = null
+val a6: M<String>? = null
+val a7: W<Int>? = null
+val a8: BB<String>? = null
+val a9: N<String>? = null
+val a10: N<Int>? = null
+val a11: BB<Int>? = null
+fun f(x: BL<String>): BA<String>? = null
+";
+
+/// A typealias is checked where it is declared (only its arguments that are neither type
+/// parameters nor carry arguments) and where it is applied: the expansion's own arguments in full,
+/// a nested application only through arguments that are exactly an alias parameter. A violation
+/// is reported at the use-site argument it came from, or else at the alias reference.
+#[test]
+fn typealias_declarations_and_applications_are_checked_through_their_expansion() {
+    assert_matches_kotlinc(
+        ALIASES,
+        &[],
+        &[
+            b_violation("4:18", "String"),
+            b_violation("5:22", "String"),
+            b_violation("6:27", "String"),
+            b_violation("11:12", "String"),
+            b_violation("12:14", "String"),
+            b_violation("14:12", "B<String>"),
+            b_violation("14:15", "String"),
+            b_violation("16:11", "String"),
+            b_violation("17:9", "List<Int>"),
+            b_violation("18:9", "B<String>"),
+            b_violation("18:12", "String"),
+            b_violation("19:11", "String"),
+            b_violation("21:10", "B<Int>"),
+            b_violation("22:13", "String"),
+            b_violation("22:26", "String"),
+        ],
+    );
+}
+
+const STABLE_NESTED_ALIASES: &str = "\
+class B<T : Number>
+class Host {
+    typealias Bad = B<String>
+}
+object Registry {
+    typealias AlsoBad = B<String>
+}
+";
+
+/// A nested alias retained on a stable class/object is checked from its Pass-1 declaration identity
+/// even when no source use applies it.
+#[test]
+fn stable_nested_typealias_declarations_are_checked() {
+    assert_matches_kotlinc(
+        STABLE_NESTED_ALIASES,
+        &["-XXLanguage:+NestedTypeAliases"],
+        &[b_violation("3:23", "String"), b_violation("6:27", "String")],
+    );
+}

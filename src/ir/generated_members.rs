@@ -131,6 +131,8 @@ pub(crate) enum IrGeneratedFunctionRole {
     SerializationTypeParameterSerializers,
     /// kotlinx.serialization's `write$Self` on a serialized class.
     SerializationWriteSelf,
+    /// A generic `$serializer`'s private `getTypeSerial<k>()` for type parameter `k`.
+    SerializationTypeSerializerGetter(u32),
 }
 
 /// A compiler-generated classifier's semantic role within its source owner.
@@ -183,6 +185,21 @@ impl IrFile {
         role: IrGeneratedFunctionRole,
     ) -> Option<FunId> {
         self.generated_functions.get(&(owner, role)).copied()
+    }
+
+    /// Whether `function` is a member kotlinc's IR plugin adds to `owner` after its declared
+    /// members and constructors.
+    pub(crate) fn follows_declared_constructors(&self, owner: TypeName, function: FunId) -> bool {
+        self.generated_functions
+            .iter()
+            .any(|(&(member_owner, role), &member)| {
+                member_owner == owner
+                    && member == function
+                    && matches!(
+                        role,
+                        IrGeneratedFunctionRole::SerializationTypeSerializerGetter(_)
+                    )
+            })
     }
 
     pub(crate) fn publish_generated_members(
@@ -238,6 +255,29 @@ impl IrFile {
                 .is_none(),
             "one producer owns a class's generated-member publication"
         );
+    }
+
+    /// Append a debug-only entry to `owner`'s publication: a member a later phase generates that
+    /// has no Kotlin `Function` record.
+    pub(crate) fn publish_generated_debug_function(
+        &mut self,
+        owner: TypeName,
+        member: IrGeneratedFunctionPublication,
+    ) {
+        assert!(
+            member.metadata.is_none(),
+            "an appended generated function publishes debug only"
+        );
+        assert!(
+            self.generated_function_publication(member.function)
+                .is_none(),
+            "a generated function has one owning publication"
+        );
+        self.generated_member_publications
+            .get_mut(&owner)
+            .expect("an appended generated function joins its owner's publication")
+            .functions
+            .push(member);
     }
 
     pub(crate) fn generated_member_publication(

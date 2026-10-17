@@ -1305,6 +1305,19 @@ fn generated_functions(
                 ret,
             );
             record.flags = generated_function_flags(ir, member.function, metadata.visibility);
+            if let Some(signature) = semantic_signature {
+                for parameter in &signature.type_params {
+                    record
+                        .type_params
+                        .push((parameter.name.clone(), parameter.reified));
+                    record
+                        .semantic_type_params
+                        .push(parameter.semantic_name.clone());
+                    record
+                        .type_param_bounds
+                        .push(parameter.bounds.iter().map(|(bound, _)| *bound).collect());
+                }
+            }
             // A compiler plugin's function has no source file.
             record.has_source = false;
             record.annotations =
