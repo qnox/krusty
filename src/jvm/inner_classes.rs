@@ -116,13 +116,14 @@ impl InnerClasses {
                 });
                 continue;
             }
-            // A SAM wrapper is anonymous, and scoped to the file that declares it.
-            if class.sam_wrapper.is_some() {
+            // A SAM wrapper is anonymous, and scoped to the file that declares it; a non-private
+            // inline function's wrapper is public, since its callers construct it.
+            if let Some(wrapper) = &class.sam_wrapper {
                 specs.push(InnerClassSpec {
                     inner: identity.render(),
                     outer: None,
                     name: None,
-                    access: 0x0010 | 0x0008,
+                    access: u16::from(wrapper.public_inline) | 0x0010 | 0x0008,
                 });
                 continue;
             }

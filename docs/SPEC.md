@@ -11923,10 +11923,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (T) -> Unit`) is `Function1` when passed to a suspend collector. A fun
   interface whose context parameters are published as ordinary named slots is still that
   interface. A conversion in
-  an inline function uses kotlinc's public `$sam$i$` class and constructor. The statement line
-  starts at the wrapped value rather than at `new`; bridge debug provenance comes from the first
-  exact conversion site. Tests: `tests/sam_wrapper_class_e2e.rs`
-  (`java_sam_class_mode_shares_one_wrapper`). Corpus:
+  a non-private inline function, or in a lambda written in one, uses kotlinc's public `$sam$i$`
+  class and constructor (a `public static final` `InnerClasses` row, and `xi` carrying the public
+  ABI flag and public visibility); a private inline function's conversion uses the ordinary
+  `$sam$` class. kotlinc writes no `invokedynamic` in an inline function, so a function value
+  converted to a Java interface there takes the same wrapper under every `-Xsam-conversions`
+  mode, and a same-file caller's inlined copy constructs the declaration's wrapper. The
+  construction has no position: the statement line starts at the wrapped value rather than at
+  `new`; bridge debug provenance comes from the first exact conversion site. Tests:
+  `tests/sam_wrapper_class_e2e.rs` (`java_sam_class_mode_shares_one_wrapper`,
+  `java_sam_in_an_inline_function_is_its_wrapper_class`). Corpus:
   `inlineClasses/funInterface/mangledSamWrappers`, `mangledSamWrappersGeneric`,
   `callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction`,
   `coroutines/suspendConversion/suspendConversionBetweenFunInterfaces`, and

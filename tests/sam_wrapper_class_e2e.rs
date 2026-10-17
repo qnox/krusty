@@ -419,3 +419,44 @@ fn suspend_callable_reference_passes_the_sam_continuation() {
         }\n";
     common::expect_box_same_as_kotlinc(src, "SuspendSamCallableReference");
 }
+
+const JAVA_SAM_INLINE_SRC: &str = "package inl\n\
+import java.util.function.Supplier\n\
+fun take(s: Supplier<String>): String = s.get()\n\
+inline fun published(noinline f: () -> String): String = take(f)\n\
+internal inline fun module(noinline f: () -> String): String = take(f)\n\
+private inline fun hidden(noinline f: () -> String): String = take(f)\n\
+inline fun scoped(noinline f: () -> String): String = run { take(f) }\n\
+fun callers(m: String): String = hidden { m } + published { m } + module { m }\n";
+
+/// kotlinc writes no `invokedynamic` in an `inline` function: a function value converted to a Java
+/// interface there is wrapped in the file's class, `$sam$i$` (public) for a non-private function
+/// and the ordinary `$sam$` for a private one. A same-file caller's inlined copy constructs the
+/// declaration's wrapper.
+#[test]
+fn java_sam_in_an_inline_function_is_its_wrapper_class() {
+    for class in [
+        "inl/JavaSamInlineKt",
+        "inl/JavaSamInlineKt$sam$i$java_util_function_Supplier$0",
+        "inl/JavaSamInlineKt$sam$java_util_function_Supplier$0",
+    ] {
+        assert_eq!(
+            common::byte_diff_against_kotlinc_cp(
+                "JavaSamInline",
+                JAVA_SAM_INLINE_SRC,
+                class,
+                &[common::stdlib_jar()]
+            )
+            .expect("reference kotlinc is provisioned"),
+            Ok(()),
+            "{class}"
+        );
+    }
+    let runtime_src = format!(
+        "{}fun box(): String = if (callers(\"k\") + scoped {{ \"!\" }} == \"kkk!\") \"OK\" else \"fail\"\n",
+        JAVA_SAM_INLINE_SRC
+            .strip_prefix("package inl\n")
+            .expect("runtime fixture package prefix")
+    );
+    common::expect_box_same_as_kotlinc(&runtime_src, "JavaSamInlineBehavior");
+}
