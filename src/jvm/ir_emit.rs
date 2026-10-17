@@ -1516,8 +1516,13 @@ fn emit_pass(
         .protected_member_access_bridges
         .borrow_mut()
         .clone_from(&member_access_bridges.protected);
-    *env.run.static_accessor_plan.borrow_mut() =
-        static_accessors::plan(ir, env, &contexts, &class_member_fids);
+    *env.run.static_accessor_plan.borrow_mut() = static_accessors::plan(
+        ir,
+        env,
+        &contexts,
+        &class_member_fids,
+        &member_access_bridges.private_calls,
+    );
     let mut cw = new_writer(facade, "java/lang/Object", opts);
     // The facade constructs the file's local classes, and a class that references one as a class
     // constant must list it in `InnerClasses` — reflection cross-checks the two sides and throws
@@ -3116,7 +3121,6 @@ fn emit_class(
     // `<clinit>` follows both.
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
-    access_bridges::emit_private_member_access_bridges(ir, c, &fq_name, &mut cw, env.run);
     accessor_emission_order::emit(ir, c, &fq_name, facade, env, &mut cw);
     if !static_storage(ir, c) {
         static_fields::emit_class_static_initializer(
@@ -3382,21 +3386,6 @@ fn emit_interface_class(
                 !f.is_static,
                 env,
             );
-            if env
-                .run
-                .private_member_access_bridges
-                .borrow()
-                .contains(&fid)
-            {
-                access_bridges::emit_private_member_access_bridge(
-                    ir,
-                    fid,
-                    &fq_name,
-                    &mut cw,
-                    true,
-                    static_accessors::class_declaration_line(c),
-                );
-            }
             if ir.function_reference_access_bridges.contains(&fid) {
                 access_bridges::emit_function_reference_access_bridge(
                     ir,
@@ -4160,7 +4149,7 @@ fn emit_enum_class(
     // before `<clinit>`, forwarders first.
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
-    constructor_accessors::emit_accessors(ir, c, &fq, &mut cw);
+    constructor_accessors::emit_sealed_accessors(ir, c, &fq, &mut cw);
     static_accessors::emit(
         ir,
         env.run,

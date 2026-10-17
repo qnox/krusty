@@ -427,7 +427,7 @@ fn interface_and_reference_bridges_of_an_annotated_owner_sit_on_its_annotation_l
         )
         .expect("reference kotlinc is provisioned")
     };
-    for class in ["J", "E2", "F", "L"] {
+    for class in ["I2", "J", "E2", "F", "L"] {
         let built = compare(class);
         assert!(
             built.krusty_bytes == built.reference_bytes,
@@ -436,20 +436,57 @@ fn interface_and_reference_bridges_of_an_annotated_owner_sit_on_its_annotation_l
             built.krusty
         );
     }
-    // kotlinc appends a private interface method's bridge after the `$jd` bridges, a member order
-    // this change leaves alone; each accessor's body and line table already match.
-    let interface = compare("I2");
-    for header in [
-        "public static int access$hid(I2);",
-        "public static kotlin.jvm.functions.Function0 access$g$jd(I2);",
-        "public static kotlin.jvm.functions.Function0 access$r$jd(I2);",
-    ] {
-        let accessor = common::method_block(&interface.reference, header);
-        assert!(!accessor.is_empty(), "kotlinc declares {header}");
-        assert_eq!(
-            common::method_block(&interface.krusty, header),
-            accessor,
-            "{header} matches kotlinc"
+}
+
+/// kotlinc creates a class's synthetic accessors in the order its lowering first meets their uses,
+/// whatever their kind: a private constructor's marker accessor, a private method's
+/// `access$<name>`, a private field's `access$get<X>$p` and a companion field's `$cp` accessor
+/// interleave by first use.
+#[test]
+fn synthetic_accessors_of_every_kind_follow_first_use() {
+    const SOURCE: &str = "class P private constructor(val x: Int) {\n\
+        \x20   private fun s() = 1\n\
+        \x20   inner class I { fun g() = s() }\n\
+        \x20   companion object { fun mk() = P(1) }\n\
+        }\n\
+        \n\
+        class Q private constructor(val x: Int) {\n\
+        \x20   companion object { fun mk() = Q(1) }\n\
+        \x20   private fun s() = 1\n\
+        \x20   inner class I { fun g() = s() }\n\
+        }\n\
+        \n\
+        class R {\n\
+        \x20   private fun a() = 1\n\
+        \x20   private val b = 2\n\
+        \x20   private fun c() = 3\n\
+        \x20   inner class I { fun g() = c() + b + a() }\n\
+        }\n\
+        \n\
+        class H(val t: Int) {\n\
+        \x20   companion object {\n\
+        \x20       val x = 1\n\
+        \x20       fun make() = H(1).secret()\n\
+        \x20   }\n\
+        \x20   private fun secret() = 4\n\
+        \x20   private val p = 5\n\
+        \x20   inner class I { fun g() = secret() + p }\n\
+        }\n";
+    for class in ["P", "Q", "R", "H"] {
+        let built = common::compare_with_kotlinc_plugin(
+            "AccessorFirstUseOrder",
+            SOURCE,
+            class,
+            &[common::stdlib_jar()],
+            "25",
+            &[],
+        )
+        .expect("reference kotlinc is provisioned");
+        assert!(
+            built.krusty_bytes == built.reference_bytes,
+            "{class} differs from kotlinc\n--- kotlinc ---\n{}\n--- krusty ---\n{}",
+            built.reference,
+            built.krusty
         );
     }
 }
