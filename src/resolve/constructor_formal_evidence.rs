@@ -1,0 +1,136 @@
+//! What a checked constructor call's inference established about each class type parameter.
+//!
+//! Constructor selection records, once per check, how each of the constructed classifier's own
+//! type parameters was fixed ([`ConstructorFormalEvidence`]): bound by a written type argument, an
+//! argument, the expected type or an enclosing call; completed as a self type; or not constrained at
+//! all. The `cannot infer type for type parameter` report reads that record. It never reconstructs
+//! the evidence from the selected (already specialized) parameters or from the result type.
+
+use super::*;
+use crate::symbol_resolver::ConstructorFormalEvidence;
+
+/// The evidence of one constructor call, in the classifier's own type-parameter order.
+pub(super) type CallEvidence = Vec<(String, ConstructorFormalEvidence)>;
+
+impl Checker<'_> {
+    /// Record the evidence of a source constructor call from its inferred declaration-order
+    /// `bindings`, where a type parameter nothing bound is still `Ty::Error`.
+    pub(super) fn record_source_constructor_evidence(
+        &mut self,
+        call: ExprId,
+        class: &ClassSig,
+        bindings: &[Ty],
+    ) {
+        let bound = class
+            .type_params
+            .iter()
+            .cloned()
+            .zip(bindings.iter().copied())
+            .collect::<crate::symbol_resolver::GSigBinds>();
+        let bounds = class
+            .type_param_bounds
+            .iter()
+            .map(|bound| {
+                (*bound != Ty::Error)
+                    .then_some(*bound)
+                    .into_iter()
+                    .collect()
+            })
+            .collect::<Vec<_>>();
+        self.record_constructor_evidence(
+            call,
+            class.internal_name(),
+            &class.type_params,
+            &bounds,
+            &bound,
+        );
+    }
+
+    /// Record the evidence of a dependency constructor call from the selected declaration's
+    /// inferred `bindings`. Only the classifier's own type parameters are the call's to infer; the
+    /// captured ones of an inner classifier come from its outer receiver.
+    pub(super) fn record_library_constructor_evidence(
+        &mut self,
+        call: ExprId,
+        owner: TypeName,
+        classifier: &crate::libraries::LibraryType,
+        bindings: &crate::symbol_resolver::GSigBinds,
+    ) {
+        let own = classifier.own_type_parameter_count;
+        let formals = classifier.type_params().get(..own).unwrap_or_default();
+        let bounds = classifier
+            .type_param_bounds()
+            .get(..own)
+            .unwrap_or_default();
+        self.record_constructor_evidence(call, owner, formals, bounds, bindings);
+    }
+
+    /// Record the evidence of a constructor call of `owner` whose own `formals` inferred `bindings`.
+    fn record_constructor_evidence(
+        &mut self,
+        call: ExprId,
+        owner: TypeName,
+        formals: &[String],
+        formal_bounds: &[Vec<Ty>],
+        bindings: &crate::symbol_resolver::GSigBinds,
+    ) {
+        let evidence = crate::symbol_resolver::constructor_formal_evidence(
+            owner,
+            formals,
+            formal_bounds,
+            bindings,
+        );
+        self.constructor_formal_evidence
+            .insert(call, formals.iter().cloned().zip(evidence).collect());
+    }
+
+    /// Report a completed constructor call whose class type parameter nothing constrained. kotlinc
+    /// reports `cannot infer type for type parameter` for `C(1)` with
+    /// `class C<T : Comparable<T>>(val n: Int)`. A self type is completed instead (see
+    /// [`ConstructorFormalEvidence::SelfType`]).
+    ///
+    /// Like the generic-call report, this runs only at a completion root (an untyped declaration
+    /// initializer or a statement), after any enclosing call has had the chance to complete it.
+    pub(super) fn report_uninferred_constructor_type_parameter(&mut self, call: ExprId) -> bool {
+        let Some(formal) = self
+            .constructor_formal_evidence
+            .get(&call)
+            .and_then(|evidence| {
+                evidence
+                    .iter()
+                    .find(|(_, evidence)| *evidence == ConstructorFormalEvidence::Unconstrained)
+                    .map(|(formal, _)| formal.clone())
+            })
+        else {
+            return false;
+        };
+        let message = format!(
+            "cannot infer type for type parameter '{}'. Specify it explicitly.",
+            crate::types::type_parameter_source_name(&formal)
+        );
+        self.diags.error(self.call_callee_name_span(call), message);
+        true
+    }
+}
+
+/// Complete a source constructor's declaration-order `bindings`: a `null`-only binding is
+/// `Nothing?`, and a type parameter nothing bound takes its declared bound (recorded as
+/// [`ConstructorFormalEvidence::Unconstrained`] unless it is a self type).
+pub(super) fn complete_source_constructor_bindings(
+    class: &ClassSig,
+    mut bindings: Vec<Ty>,
+) -> Vec<Ty> {
+    for (index, binding) in bindings.iter_mut().enumerate() {
+        if *binding == Ty::Null {
+            *binding = Ty::nullable(Ty::Nothing);
+        } else if *binding == Ty::Error {
+            *binding = class
+                .type_param_bounds
+                .get(index)
+                .copied()
+                .filter(|bound| *bound != Ty::Error)
+                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+        }
+    }
+    bindings
+}

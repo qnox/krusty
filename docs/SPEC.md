@@ -9559,8 +9559,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the same completion roots the generic-call report uses (an untyped declaration initializer or a
   statement), so an enclosing call such as `use(C(7))` still completes the result first. A self
   type (`T : KB<T>` in `KB`) is exempt: Kotlin completes it to its starred bound. A recursive bound
-  that also names another formal (`SELF : MB<T, SELF>`) is not, and `MB("v")` is reported. Owner:
-  `src/resolve/call_result_templates.rs`. Test: `tests/uninferred_constructor_type_parameter_e2e.rs`.
+  that also names another formal (`SELF : MB<T, SELF>`) is not, and `MB("v")` is reported. The
+  report reads what constructor inference recorded for each formal when it selected the
+  constructor, never the selected parameters: those are already specialized, so `Seq(s)` for
+  `class Seq<T : CharSequence>(val x: T)` with `s: CharSequence` would otherwise look unconstrained,
+  and a named or defaulted argument (`Named(x = s)`) would be matched to the wrong parameter. Owner:
+  `src/resolve/constructor_formal_evidence.rs`. Test:
+  `tests/uninferred_constructor_type_parameter_e2e.rs`.
 
 - **A self-bounded constructor variable with no other constraint completes to its starred bound.**
   `Builder("x")` for Java `class Builder<SELF extends Builder<SELF>>` has no argument or expected

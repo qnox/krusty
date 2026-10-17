@@ -11,7 +11,9 @@ const CLASSES: &str = "class C<T : Comparable<T>>(val n: Int)\n\
     class D<T>(val n: Int)\n\
     class P<A, B>(val a: A)\n\
     class KB<T : KB<T>>(val n: Int)\n\
-    open class MB<T, SELF : MB<T, SELF>>(val v: T)\n";
+    open class MB<T, SELF : MB<T, SELF>>(val v: T)\n\
+    class Seq<T : CharSequence>(val x: T)\n\
+    class Named<T : CharSequence>(val n: Int = 0, val x: T)\n";
 
 #[test]
 fn an_unconstrained_constructor_type_parameter_is_not_inferred() {
@@ -28,6 +30,9 @@ fn an_unconstrained_constructor_type_parameter_is_not_inferred() {
             val typed: C<Int> = C(5)\n\
             val written = D<String>(6)\n\
             use(C(7))\n\
+            val s: CharSequence = \"\"\n\
+            val seq = Seq(s)\n\
+            val named = Named(x = s)\n\
             return \"OK\"\n\
         }\n";
     let result = common::compiler_diagnostics(&[("Classes.kt", CLASSES), ("Main.kt", main)], &[]);
@@ -46,6 +51,9 @@ fn a_dependency_constructor_type_parameter_is_not_inferred_either() {
             val p = P(\"a\")\n\
             val kb = KB(2)\n\
             val typed: D<Int> = D(3)\n\
+            val s: CharSequence = \"\"\n\
+            val seq = Seq(s)\n\
+            val named = Named(x = s)\n\
             return \"OK\"\n\
         }\n";
     let result = common::compiler_diagnostics(&[("Main.kt", main)], &[classes]);
