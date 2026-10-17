@@ -22,12 +22,16 @@ struct ReifiedTypeArgument {
     argument: Ty,
     /// The callee's type-parameter identity, naming the parameter an intersection was inferred for.
     formal: String,
+    /// Complete inference fact retained at selected-call commitment. The ordinary argument stays a
+    /// denotable `Ty`; diagnostics must not rebuild this from FIR's additional-bound projection.
+    intersection: Option<super::intersection_inference::InferredIntersection>,
 }
 
 /// Where and how one type argument is checked.
 struct ReifiedArgument {
     span: Span,
-    explicit: bool,
+    /// Applied source spelling of an explicit argument, parallel to its expanded semantic type.
+    spelling: Option<crate::spelling::Spelled>,
 }
 
 /// One finding of the checker, in kotlinc's report order.
@@ -65,10 +69,18 @@ impl Checker<'_> {
             let written = explicit.and_then(|references| references.get(reified.ordinal));
             let site = ReifiedArgument {
                 span: written.map_or_else(|| self.call_callee_name_span(expression), |r| r.span),
-                explicit: written.is_some(),
+                spelling: written.map(|reference| self.reified_argument_spelling(reference)),
             };
             let mut problems = Vec::new();
-            self.reified_problems(scope, &site, reified.argument, false, false, &mut problems);
+            self.reified_problems(
+                scope,
+                site.spelling.as_ref(),
+                reified.argument,
+                reified.intersection.as_ref(),
+                false,
+                false,
+                &mut problems,
+            );
             findings.push((site.span, reified.formal, problems));
         }
         for (span, formal, problems) in findings {
@@ -94,106 +106,80 @@ impl Checker<'_> {
                 ordinal: 0,
                 argument: element,
                 formal: formal.to_string(),
+                intersection: None,
             }];
         }
         let Some(arguments) = self.resolved_call_type_args.get(&expression) else {
             return Vec::new();
         };
-        let Some(call) = self.resolved_calls.get(&expression) else {
-            return Vec::new();
-        };
-        self.reified_parameters(call, arguments.len())
+        self.selected_call_reified_type_parameters
+            .get(&expression)
+            .cloned()
+            .unwrap_or_default()
             .into_iter()
             .filter_map(|(ordinal, formal)| {
                 let argument = (*arguments.get(ordinal)?)?;
                 Some(ReifiedTypeArgument {
                     ordinal,
-                    argument: self.reified_argument_type(expression, ordinal, argument),
+                    argument,
                     formal,
+                    intersection: self
+                        .resolved_call_type_argument_intersections
+                        .get(&(expression, ordinal))
+                        .cloned(),
                 })
             })
             .collect()
     }
 
-    /// The reified type parameters of `call`'s callee, by ordinal among its own type parameters,
-    /// with their identities. A declaration of this module answers through its resolved
-    /// type-parameter headers; a dependency's callable carries the ordinals it was decoded with.
-    fn reified_parameters(&self, call: &ResolvedCall, arity: usize) -> Vec<(usize, String)> {
-        let declaration = match call {
-            ResolvedCall::Member(selected) => selected.member.stable_declaration,
-            ResolvedCall::Companion(member) => member.stable_declaration,
-            ResolvedCall::TopLevel(call) => call.stable_declaration,
-            ResolvedCall::Extension(call) => call.stable_declaration,
-            ResolvedCall::MemberExtension {
-                stable_declaration, ..
-            } => *stable_declaration,
-            // A local function cannot be `inline`, so none of its type parameters is reified.
-            ResolvedCall::LocalFunction(_) => return Vec::new(),
-        };
-        if let Some(declaration) = declaration {
-            let Some(index) = self.resolved_index else {
-                return Vec::new();
-            };
-            return (0..arity)
-                .filter_map(|ordinal| {
-                    let parameter =
-                        index.type_parameter(declaration, u32::try_from(ordinal).ok()?)?;
-                    if !index.type_parameter_header(parameter)?.flags.is_reified() {
-                        return None;
-                    }
-                    let formal = index.type_parameter_name(parameter)?;
-                    Some((ordinal, formal.to_string()))
-                })
-                .collect();
-        }
-        let (reified, formals): (&[u32], &[String]) = match call {
-            ResolvedCall::Member(selected) => (
-                &selected.member.call_sig.reified_type_parameter_ordinals,
-                generic_formals(selected.member.generic_sig.as_ref()),
-            ),
-            ResolvedCall::Companion(member) => (
-                &member.call_sig.reified_type_parameter_ordinals,
-                generic_formals(member.generic_sig.as_ref()),
-            ),
-            ResolvedCall::TopLevel(call) => (
-                &call.callable.reified_type_parameter_ordinals,
-                generic_formals(call.callable.generic_sig.as_deref()),
-            ),
-            ResolvedCall::Extension(call) => (
-                &call.callable.reified_type_parameter_ordinals,
-                generic_formals(call.callable.generic_sig.as_deref()),
-            ),
-            ResolvedCall::MemberExtension {
-                reified_type_parameter_ordinals,
-                type_parameters,
-                ..
-            } => (reified_type_parameter_ordinals, type_parameters),
-            ResolvedCall::LocalFunction(_) => return Vec::new(),
-        };
-        reified
+    /// Apply the bind-once alias template selected while this explicit type argument was resolved.
+    /// The resulting spelling tree follows the expanded semantic type, while each node remembers
+    /// whether `T & Any` was written at this call site rather than inherited from an alias RHS.
+    fn reified_argument_spelling(&self, reference: &TypeRef) -> crate::spelling::Spelled {
+        let argument_spellings = reference
+            .targs
             .iter()
-            .filter_map(|&ordinal| {
-                let ordinal = ordinal as usize;
-                Some((ordinal, formals.get(ordinal)?.clone()))
-            })
-            .collect()
-    }
-
-    /// The checked type argument at `ordinal`, as the complete intersection when inference
-    /// recorded further constituents beside it.
-    fn reified_argument_type(&self, expression: ExprId, ordinal: usize, argument: Ty) -> Ty {
-        let bounds = self
-            .resolved_call_type_argument_bounds
-            .get(&expression)
-            .and_then(|bounds| bounds.get(ordinal))
-            .filter(|bounds| !bounds.is_empty());
-        match bounds {
-            Some(bounds) => {
-                let mut parts = vec![argument];
-                parts.extend(bounds.iter().copied());
-                Ty::Intersection(crate::types::intern_tys(&parts))
-            }
-            None => argument,
+            .map(|argument| self.reified_argument_spelling(argument))
+            .collect::<Vec<_>>();
+        let selected = self
+            .selected_type_alias_applications
+            .get(&(reference.span.lo, reference.span.hi));
+        let args = selected.map_or_else(
+            || argument_spellings.clone(),
+            |selected| {
+                let use_site = reference
+                    .targs
+                    .iter()
+                    .zip(argument_spellings.iter().cloned())
+                    .map(|(argument, spelling)| {
+                        let semantic = self
+                            .resolved_type_tys
+                            .get(&(argument.span.lo, argument.span.hi))
+                            .copied()
+                            .unwrap_or(Ty::Error);
+                        (semantic, spelling)
+                    })
+                    .collect::<Vec<_>>();
+                super::type_spellings::expansion_arg_spellings(
+                    Some((
+                        &selected.expansion_spelling,
+                        &selected.formals,
+                        selected.expansion,
+                    )),
+                    &use_site,
+                )
+            },
+        );
+        crate::spelling::Spelled {
+            definitely_non_null: reference.definitely_non_null(),
+            use_site_definitely_non_null: reference.definitely_non_null(),
+            alias: None,
+            alias_args: Vec::new(),
+            args,
+            annotations: Vec::new(),
+            expansion_annotations: Vec::new(),
+            unsafe_variance: false,
+            parameter_name: None,
         }
     }
 
@@ -201,20 +187,42 @@ impl Checker<'_> {
     fn reified_problems(
         &self,
         scope: &CheckerScope<'_>,
-        site: &ReifiedArgument,
+        spelling: Option<&crate::spelling::Spelled>,
         argument: Ty,
+        intersection: Option<&super::intersection_inference::InferredIntersection>,
         in_array: bool,
         in_dnn_or_flexible: bool,
         problems: &mut Vec<ReifiedProblem>,
     ) {
+        let explicitly_dnn = spelling.is_some_and(|spelling| spelling.use_site_definitely_non_null);
+        let inferred_dnn = type_parameter_occurrence_is_definitely_non_null(scope, argument);
+        let through_indirect = in_dnn_or_flexible || explicitly_dnn || inferred_dnn;
+        if explicitly_dnn {
+            problems.push(ReifiedProblem::DefinitelyNonNullable);
+        }
+        if let Some(intersection) = intersection {
+            problems.push(ReifiedProblem::Intersection {
+                parts: intersection.parts.clone(),
+                in_dnn_or_flexible: through_indirect || intersection.through_flexible,
+            });
+            return;
+        }
         if let Some(elements) = array_type_arguments(argument) {
             // A projected element (`out T`, `in T`, `*`) is not materialized.
-            for &element in elements {
+            for (index, &element) in elements.iter().enumerate() {
                 if !matches!(
                     element,
                     Ty::InProjection(_) | Ty::OutProjection(_) | Ty::StarProjection(_)
                 ) {
-                    self.reified_problems(scope, site, element, true, false, problems);
+                    self.reified_problems(
+                        scope,
+                        spelling.map(|spelling| spelling.arg(index)),
+                        element,
+                        None,
+                        true,
+                        through_indirect,
+                        problems,
+                    );
                 }
             }
             return;
@@ -226,7 +234,7 @@ impl Checker<'_> {
                     problems.push(ReifiedProblem::TypeParameter {
                         name,
                         in_array,
-                        in_dnn_or_flexible,
+                        in_dnn_or_flexible: through_indirect,
                     });
                 }
             }
@@ -235,17 +243,12 @@ impl Checker<'_> {
                     problems.push(ReifiedProblem::TypeParameter {
                         name,
                         in_array,
-                        in_dnn_or_flexible,
+                        in_dnn_or_flexible: through_indirect,
                     });
                 }
             }
             Ty::DefinitelyNotNull(original) => {
-                // kotlinc infers some arguments to definitely-non-nullable types; only a written
-                // one is reported.
-                if site.explicit {
-                    problems.push(ReifiedProblem::DefinitelyNonNullable);
-                }
-                self.reified_problems(scope, site, *original, in_array, true, problems);
+                self.reified_problems(scope, None, *original, None, in_array, true, problems);
             }
             Ty::Nothing => problems.push(ReifiedProblem::ForbiddenSubstitution("Nothing")),
             Ty::Null | Ty::Nullable(&Ty::Nothing) if !features.nullable_nothing => {
@@ -253,10 +256,10 @@ impl Checker<'_> {
             }
             Ty::Intersection(parts) => problems.push(ReifiedProblem::Intersection {
                 parts: parts.to_vec(),
-                in_dnn_or_flexible,
+                in_dnn_or_flexible: through_indirect,
             }),
             Ty::PlatformNullable(lower) => {
-                self.reified_problems(scope, site, *lower, in_array, true, problems);
+                self.reified_problems(scope, spelling, *lower, None, in_array, true, problems);
             }
             _ => {}
         }
@@ -273,12 +276,10 @@ impl Checker<'_> {
                 let name = crate::types::type_parameter_source_name(name);
                 if in_dnn_or_flexible && !features.report_in_dnn_and_flexible {
                     let message = type_parameter_as_reified(name);
-                    let warning = deprecation_warning_message(
-                        &message,
-                        features
-                            .report_in_dnn_and_flexible_warning_suffix
-                            .as_deref(),
-                    );
+                    let warning = features
+                        .report_in_dnn_and_flexible_warning_format
+                        .as_ref()
+                        .map(|format| format.message(&message));
                     self.report_deprecation_error(
                         span,
                         false,
@@ -312,12 +313,10 @@ impl Checker<'_> {
             } => {
                 let message = intersection_as_reified(formal, &parts);
                 if in_dnn_or_flexible && !features.report_in_dnn_and_flexible {
-                    let warning = deprecation_warning_message(
-                        &message,
-                        features
-                            .report_in_dnn_and_flexible_warning_suffix
-                            .as_deref(),
-                    );
+                    let warning = features
+                        .report_in_dnn_and_flexible_warning_format
+                        .as_ref()
+                        .map(|format| format.message(&message));
                     self.report_deprecation_error(
                         span,
                         false,
@@ -326,10 +325,10 @@ impl Checker<'_> {
                         &message,
                     );
                 } else {
-                    let warning = deprecation_warning_message(
-                        &message,
-                        features.prohibit_intersection_warning_suffix.as_deref(),
-                    );
+                    let warning = features
+                        .prohibit_intersection_warning_format
+                        .as_ref()
+                        .map(|format| format.message(&message));
                     self.report_deprecation_error(
                         span,
                         features.prohibit_intersection,
@@ -343,16 +342,34 @@ impl Checker<'_> {
     }
 }
 
-/// Attach a parser-selected deprecation suffix to a message built from resolved types.
-fn deprecation_warning_message(message: &str, suffix: Option<&str>) -> Option<String> {
-    suffix.map(|suffix| {
-        let separator = if message.ends_with('.') || message.ends_with(char::is_whitespace) {
-            " "
-        } else {
-            ". "
-        };
-        format!("{message}{separator}{suffix}")
-    })
+/// Whether this semantic occurrence is the definitely-non-null form of a lexical type parameter.
+/// `Ty` compactly stores `T & Any` as `T` with a tightened occurrence bound, so compare it with the
+/// declaration-owned bound retained by the scope instead of guessing from either source spelling or
+/// the normalized occurrence alone.
+fn type_parameter_occurrence_is_definitely_non_null(
+    scope: &CheckerScope<'_>,
+    occurrence: Ty,
+) -> bool {
+    let occurrence = match occurrence {
+        Ty::TyParam(identity, bound) => Some((identity, *bound)),
+        Ty::Nullable(inner) => match *inner {
+            Ty::TyParam(identity, bound) => Some((identity, *bound)),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some((identity, occurrence_bound)) = occurrence else {
+        return false;
+    };
+    let Some((declared, _, _)) = scope.tparam_binding(identity) else {
+        return false;
+    };
+    let Ty::TyParam(declared_identity, declared_bound) = declared.non_null() else {
+        return false;
+    };
+    declared_identity == identity
+        && declared_bound.upper_bound_admits_null()
+        && !occurrence_bound.upper_bound_admits_null()
 }
 
 /// Whether the type parameter with identity `identity`, in scope here, is `reified`.
@@ -371,10 +388,6 @@ fn reified_type_parameter(scope: &CheckerScope<'_>, identity: &str) -> bool {
         }
     }
     false
-}
-
-fn generic_formals(signature: Option<&crate::libraries::GenericSig>) -> &[String] {
-    signature.map_or(&[], |signature| signature.formals.as_slice())
 }
 
 /// The type arguments of a fully expanded `kotlin.Array` type, nullable or not.

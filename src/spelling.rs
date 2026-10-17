@@ -29,6 +29,11 @@ pub struct Spelled {
     /// [`Ty`] already carries that fact in its occurrence bound; this sidecar preserves the exact
     /// Kotlin-metadata flag without making it part of structural type identity.
     pub definitely_non_null: bool,
+    /// This occurrence's definitely-non-null intersection was written at the current use site.
+    /// `definitely_non_null` also includes a typealias right-hand side inherited by expansion;
+    /// reified-call diagnostics distinguish that declaration-site fact from `T & Any` written in
+    /// the call's own type argument without reopening the [`TypeRef`](crate::ast::TypeRef).
+    pub use_site_definitely_non_null: bool,
     /// The `typealias` named AT this node, fully qualified.
     ///
     /// kotlinc records only the OUTERMOST alias of a chain: with `typealias Cargo = Payload` and
@@ -71,6 +76,7 @@ pub struct Spelled {
 /// The spelling of a node that names no alias and records no annotation.
 const EMPTY: Spelled = Spelled {
     definitely_non_null: false,
+    use_site_definitely_non_null: false,
     alias: None,
     alias_args: Vec::new(),
     args: Vec::new(),

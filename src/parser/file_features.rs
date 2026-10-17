@@ -71,11 +71,11 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         features.has("ReportTypeVarianceConflictsInDnnAndFlexible");
     file.reified_type_arguments = crate::ast::ReifiedTypeArgumentFeatures {
         report_in_dnn_and_flexible: features.has("ReportReificationProblemsInDnnAndFlexible"),
-        report_in_dnn_and_flexible_warning_suffix: features
-            .deprecation_warning_suffix("ReportReificationProblemsInDnnAndFlexible"),
+        report_in_dnn_and_flexible_warning_format: features
+            .deprecation_warning_format("ReportReificationProblemsInDnnAndFlexible"),
         prohibit_intersection: features.has("ProhibitIntersectionReifiedTypeParameter"),
-        prohibit_intersection_warning_suffix: features
-            .deprecation_warning_suffix("ProhibitIntersectionReifiedTypeParameter"),
+        prohibit_intersection_warning_format: features
+            .deprecation_warning_format("ProhibitIntersectionReifiedTypeParameter"),
         nullable_nothing: features.has("NullableNothingInReifiedPosition"),
     };
     file.recursive_type_of = features.has("JvmSupportRecursiveTypeOf");

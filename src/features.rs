@@ -277,14 +277,6 @@ impl LangFeatures {
             .map(LanguageFeature::deprecation_warning_format)
     }
 
-    /// The release-selected suffix for a deprecation whose base message is constructed after
-    /// parsing. `None` means the selected compiler predates the split warning diagnostic.
-    pub(crate) fn deprecation_warning_suffix(&self, feature: &str) -> Option<String> {
-        self.table()
-            .get(feature)
-            .map(|feature| feature.deprecation_warning_suffix())
-    }
-
     /// The explicitly set features and their states, by name.
     pub fn explicit_settings(&self) -> impl Iterator<Item = (&str, bool)> {
         self.specific

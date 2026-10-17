@@ -273,6 +273,11 @@ impl Checker<'_> {
             if !resolved.is_empty() && resolved.iter().all(Option::is_some) {
                 self.resolved_call_type_args.insert(expression, resolved);
             }
+            self.publish_selected_call_reified_type_parameters(
+                expression,
+                signature,
+                &selected.call_sig,
+            );
         }
         self.commit_selected_argument_slots(expression, slots, defaults)
     }

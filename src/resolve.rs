@@ -142,6 +142,7 @@ pub(crate) use import_diagnostics::check_module_import_paths;
 mod integer_constants;
 mod interface_delegate_calls;
 mod interface_delegation;
+mod intersection_inference;
 mod intersection_receiver_selection;
 mod invoke_selection;
 mod lambda_call_shapes;
@@ -11170,7 +11171,11 @@ fn instantiate_member_extension_with(
             signature
                 .formals
                 .iter()
-                .map(|formal| solved_member_extension_type_argument(&bindings, formal))
+                .map(|formal| {
+                    member_extension_selection::solved_member_extension_type_argument(
+                        &bindings, formal,
+                    )
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -11187,19 +11192,9 @@ fn instantiate_member_extension_with(
         score,
         argument_parameters,
         type_arguments,
+        bindings,
+        parameter_indices,
     })
-}
-
-/// A formal's call-site solution, or `None` when it is still the formal itself.
-fn solved_member_extension_type_argument(
-    bindings: &crate::symbol_resolver::GSigBinds,
-    formal: &str,
-) -> Option<Ty> {
-    let solution = bindings.get(formal).copied()?;
-    (solution != Ty::Error
-        && !solution.mentions_pending()
-        && !matches!(solution.non_null(), Ty::TyParam(identity, _) if identity == formal))
-    .then_some(solution)
 }
 
 impl<'a> Checker<'a> {
@@ -33056,6 +33051,8 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_call_type_args: HashMap::default(),
         resolved_call_type_argument_bounds: HashMap::default(),
         inferred_expression_intersections: HashMap::default(),
+        resolved_call_type_argument_intersections: HashMap::default(),
+        selected_call_reified_type_parameters: HashMap::default(),
         selected_value_smartcasts: HashMap::default(),
         selected_numeric_conversions: HashMap::default(),
         selected_function_value_conversions: HashMap::default(),
@@ -35202,6 +35199,14 @@ pub(crate) struct MemberExtensionFunctionCandidate {
     /// Solved method type arguments in formal order. `None` is an unsolved formal.
     type_arguments: Vec<Option<Ty>>,
     type_parameters: Box<[String]>,
+    /// Provider-normalized declaration signature and its selected call-site solution. They remain
+    /// attached to the candidate until commitment so every callable origin publishes identical
+    /// type-argument and intersection facts.
+    generic_sig: Option<crate::libraries::GenericSig>,
+    bindings: crate::symbol_resolver::GSigBinds,
+    intersection_bindings: HashMap<String, Vec<Ty>>,
+    /// Maps the source-visible parameter order back to the normalized declaration parameters.
+    parameter_indices: Vec<usize>,
 }
 
 #[derive(Clone)]
@@ -35241,6 +35246,10 @@ struct InstantiatedMemberExtension {
     /// Solved method type arguments in formal order. Published on the call when every formal
     /// has one, matching an ordinary extension call.
     type_arguments: Vec<Option<Ty>>,
+    /// Complete call-site solution retained until the selected candidate commits its arguments.
+    bindings: crate::symbol_resolver::GSigBinds,
+    /// Maps the source-visible parameter order back to the normalized declaration parameters.
+    parameter_indices: Vec<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -35716,7 +35725,15 @@ struct Checker<'a> {
     /// Non-denotable most-specific common classifier views of a selected generic call result.
     /// This stays inside the active checker and is copied onto an inferred immutable local's
     /// lexical intersection narrowing; checked FIR later carries only the selected concrete view.
-    inferred_expression_intersections: HashMap<ExprId, Vec<Ty>>,
+    inferred_expression_intersections:
+        HashMap<ExprId, intersection_inference::InferredIntersection>,
+    /// Complete inferred intersection facts by selected call and formal ordinal. This is resolver
+    /// output: the reified checker consumes it without rebuilding constraints from source syntax.
+    resolved_call_type_argument_intersections:
+        HashMap<(ExprId, usize), intersection_inference::InferredIntersection>,
+    /// Reified formals of the normalized selected candidate, by call. Candidate commitment writes
+    /// this once so the post-check does not branch on callable origin or provider storage.
+    selected_call_reified_type_parameters: HashMap<ExprId, Vec<(usize, String)>>,
     selected_value_smartcasts: HashMap<ExprId, Ty>,
     selected_numeric_conversions: HashMap<ExprId, Ty>,
     selected_function_value_conversions: HashMap<ExprId, (Ty, Ty)>,
@@ -36838,28 +36855,6 @@ impl<'a> Checker<'a> {
     /// its own assignability oracle.
     fn semantic_common_supertype(&self, a: Ty, b: Ty) -> Option<Ty> {
         semantic_common_supertype(&self.fed_source(), self, a, b)
-    }
-
-    fn inferred_expression_intersection(&self, expression: ExprId) -> Vec<Ty> {
-        if let Some(bounds) = self.inferred_expression_intersections.get(&expression) {
-            return bounds.clone();
-        }
-        let Expr::If {
-            then_branch,
-            else_branch: Some(else_branch),
-            ..
-        } = self.file.expr(expression)
-        else {
-            return Vec::new();
-        };
-        let Some(left) = self.expr_types.get(then_branch.0 as usize).copied() else {
-            return Vec::new();
-        };
-        let Some(right) = self.expr_types.get(else_branch.0 as usize).copied() else {
-            return Vec::new();
-        };
-        let views = self.minimal_common_classifier_views(left, right);
-        (views.len() > 1).then_some(views).unwrap_or_default()
     }
 
     /// Exact branch lower bounds for a conditional used as a generic-call argument. The ordinary
@@ -41904,7 +41899,7 @@ impl<'a> Checker<'a> {
         let SelectedCallable {
             info: mut selected,
             bindings: mut selected_bindings,
-            intersection_bindings,
+            mut intersection_bindings,
             ..
         } = selected;
         self.reject_non_public_api_from_public_inline(
@@ -42133,79 +42128,18 @@ impl<'a> Checker<'a> {
                 return Ty::Error;
             }
         }
-        if let Some(signature) = selected.generic_sig.as_ref() {
-            let resolved = signature
-                .formals
-                .iter()
-                .enumerate()
-                .map(|(index, formal)| {
-                    explicit_type_args
-                        .get(index)
-                        .copied()
-                        .filter(|argument| *argument != Ty::Error)
-                        .or_else(|| selected_bindings.get(formal).copied())
-                })
-                .collect::<Vec<_>>();
-            if resolved.iter().any(Option::is_some) {
-                self.resolved_call_type_args.insert(call, resolved);
-            } else {
-                // Expected-type rechecking may revisit the same parser call after an earlier
-                // contextual pass had solved it. This selection is the authoritative replacement;
-                // retaining the old solutions would make a now-symbolic result look finalized to
-                // an enclosing constraint round.
-                self.resolved_call_type_args.remove(&call);
-            }
-            let direct_result_formal = match signature.ret {
-                Ty::TyParam(formal, _) => Some((formal, 0_u8)),
-                Ty::Nullable(inner) => match *inner {
-                    Ty::TyParam(formal, _) => Some((formal, 1_u8)),
-                    _ => None,
-                },
-                Ty::PlatformNullable(inner) => match *inner {
-                    Ty::TyParam(formal, _) => Some((formal, 2_u8)),
-                    _ => None,
-                },
-                _ => None,
-            };
-            let result_intersection = direct_result_formal
-                .and_then(|(formal, nullability)| {
-                    intersection_bindings.get(formal).map(|bounds| {
-                        bounds
-                            .iter()
-                            .copied()
-                            .map(|bound| match nullability {
-                                1 => Ty::nullable(bound.non_null()),
-                                2 => Ty::platform_nullable(bound.non_null()),
-                                _ => bound,
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .filter(|bounds| bounds.len() > 1);
-            if let Some(bounds) = result_intersection {
-                self.inferred_expression_intersections.insert(call, bounds);
-            } else {
-                self.inferred_expression_intersections.remove(&call);
-            }
-            let additional_bounds = signature
-                .formals
-                .iter()
-                .map(|formal| {
-                    intersection_bindings
-                        .get(formal)
-                        .into_iter()
-                        .flatten()
-                        .copied()
-                        .filter(|bound| selected_bindings.get(formal).copied() != Some(*bound))
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
-            if additional_bounds.iter().any(|bounds| !bounds.is_empty()) {
-                self.resolved_call_type_argument_bounds
-                    .insert(call, additional_bounds);
-            } else {
-                self.resolved_call_type_argument_bounds.remove(&call);
-            }
+        if let Some(signature) = selected.generic_sig.clone() {
+            ret = self.commit_selected_call_intersections(
+                call,
+                &signature,
+                explicit_type_args,
+                &shape.parameter_indices,
+                &shape.call_sig,
+                &mut selected_bindings,
+                &mut intersection_bindings,
+                selected.ret,
+                ret,
+            );
         }
         if let Some(signatures) = sam_signatures {
             let expected_types = self.sam_argument_expected_types(
