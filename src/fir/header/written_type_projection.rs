@@ -179,7 +179,7 @@ impl HeaderSyntaxArena {
                                 .into_iter()
                                 .flatten()
                                 .filter(|arguments| arguments.segment < segment)
-                                .map(|arguments| arguments.count as usize)
+                                .map(|arguments| arguments.arguments.len())
                                 .sum::<usize>()
                         })
                         .unwrap_or(0);

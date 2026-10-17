@@ -632,8 +632,8 @@ pub trait SignatureSemantics: PostponedArgumentTransaction {
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     /// Resolve a graph-owned written type application. The semantic adapter first binds the
-    /// declaration-site target, then asks the graph evaluator for exactly the argument nodes that
-    /// belong to that target. Package-owned argument subtrees are deliberately not evaluated.
+    /// declaration-site target, evaluates package-owned argument subtrees only for diagnostics,
+    /// then asks the graph evaluator for exactly the semantic arguments that belong to the target.
     fn resolve_written_type_application(
         &self,
         expression: SigExprId,

@@ -424,3 +424,46 @@ fun use(): Int = inferred(Cell(\"OK\")).length
         &[],
     );
 }
+
+const INVALID_PACKAGE_ARGUMENTS: &str = "\
+package retained.parts
+
+class C<T>
+annotation class A
+
+val ordinary: retained<Missing>.parts.C<OtherMissing>? = null
+
+@retained<AnnotationMissing>.parts.A
+val annotated = 1
+";
+
+/// Package-owned argument values do not enter classifier application, but their source type
+/// occurrences still belong to ordinary resolution. Annotation names retain the same syntax even
+/// though they have no classifier `TypeRef::targs` of their own.
+#[test]
+fn package_argument_types_keep_their_exact_diagnostics() {
+    let unresolved = [
+        "InvalidPackageArguments.kt:6:24: unresolved reference 'Missing'.".to_string(),
+        "InvalidPackageArguments.kt:6:41: unresolved reference 'OtherMissing'.".to_string(),
+        "InvalidPackageArguments.kt:8:11: unresolved reference 'AnnotationMissing'.".to_string(),
+    ];
+    assert_matches_kotlinc(
+        &[("InvalidPackageArguments.kt", INVALID_PACKAGE_ARGUMENTS)],
+        &[],
+        &unresolved,
+        &[],
+    );
+
+    assert_matches_kotlinc(
+        &[("InvalidPackageArguments.kt", INVALID_PACKAGE_ARGUMENTS)],
+        &[FORBID],
+        &[
+            error("InvalidPackageArguments.kt:6:23"),
+            unresolved[0].clone(),
+            unresolved[1].clone(),
+            error("InvalidPackageArguments.kt:8:10"),
+            unresolved[2].clone(),
+        ],
+        &[],
+    );
+}

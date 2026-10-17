@@ -28,11 +28,15 @@ pub struct TypeRef {
 }
 
 /// One `<…>` list written on a segment of a qualified type or annotation reference.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// The arguments remain syntax owned by this exact occurrence even though package-owned results
+/// never participate in classifier application. Resolution must still visit them for diagnostics;
+/// annotation names have no ordinary `TypeRef::targs` path from which they could be recovered.
+#[derive(Clone, Debug)]
 pub struct QualifierSegmentArguments {
     pub segment: u32,
-    pub count: u32,
     pub span: Span,
+    pub arguments: Box<[TypeRef]>,
 }
 
 /// Bit-packed [`TypeRef`] flags.

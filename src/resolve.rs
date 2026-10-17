@@ -45831,7 +45831,7 @@ impl<'a> Checker<'a> {
             match selection {
                 InheritedNestedClassifier::Found(internal) => {
                     let without_package_arguments =
-                        self.check_selected_package_type_arguments(r, classifier_segment);
+                        self.check_selected_package_type_arguments(scope, r, classifier_segment);
                     let r = without_package_arguments.as_ref().unwrap_or(r);
                     if let Some(alias) = selected_alias {
                         crate::trace_compiler!(

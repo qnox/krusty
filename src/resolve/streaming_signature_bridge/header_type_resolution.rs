@@ -148,9 +148,9 @@ impl ProductionSignatureSemantics<'_> {
     }
 
     /// Resolve one graph-owned written application after selecting its declaration-site target.
-    /// Argument evaluation stays lazy so package-owned argument subtrees are never treated as
-    /// classifier arguments. Both explicit headers and the ordinary signature evaluator enter
-    /// through this operation.
+    /// Package-owned argument subtrees are evaluated for their own diagnostics in source order,
+    /// but their results never enter classifier application. Both explicit headers and the
+    /// ordinary signature evaluator enter through this operation.
     pub(super) fn evaluate_written_type_application(
         &self,
         graph: &crate::fir::SignatureGraph,
@@ -264,10 +264,48 @@ impl ProductionSignatureSemantics<'_> {
                 .map(|reference| reference.targs.len())
                 .unwrap_or(written.targs.len());
             let arguments = graph.operands(application.arguments);
-            let mut bindings = crate::symbol_resolver::GSigBinds::default();
-            for ((formal, argument), index) in formals
+            let argument_by_written_index = application
+                .written_argument_indices
                 .iter()
-                .zip(arguments)
+                .copied()
+                .zip(arguments.iter().copied())
+                .collect::<crate::fx_hash::HashMap<_, _>>();
+            let written_argument_order = if written.is_function_type_syntax() {
+                application.written_argument_indices.to_vec()
+            } else {
+                let mut order = super::super::package_qualifier_type_arguments::type_argument_indices_source_order(
+                    &written,
+                );
+                order.extend(
+                    application
+                        .written_argument_indices
+                        .iter()
+                        .copied()
+                        .filter(|index| *index >= written.targs.len() as u32),
+                );
+                order
+            };
+            let mut resolved_arguments = crate::fx_hash::HashMap::default();
+            let mut argument_failure = None;
+            for index in written_argument_order {
+                let Some(argument) = argument_by_written_index.get(&index).copied() else {
+                    continue;
+                };
+                match evaluate_argument(argument) {
+                    Ok(resolved) => {
+                        resolved_arguments.insert(index, resolved);
+                    }
+                    Err(diagnostic) => {
+                        argument_failure.get_or_insert(diagnostic);
+                    }
+                }
+            }
+            if let Some(diagnostic) = argument_failure {
+                return Err(diagnostic);
+            }
+            let mut bindings = crate::symbol_resolver::GSigBinds::default();
+            for (formal, index) in formals
+                .iter()
                 .zip(application.written_argument_indices.iter().copied())
             {
                 if !written.is_function_type_syntax()
@@ -276,7 +314,11 @@ impl ProductionSignatureSemantics<'_> {
                 {
                     continue;
                 }
-                let resolved = evaluate_argument(*argument)?.get();
+                let resolved = resolved_arguments
+                    .get(&index)
+                    .copied()
+                    .ok_or_else(Self::failure)?
+                    .get();
                 bindings.insert(formal.clone(), resolved);
             }
             if let Some(mut abbreviation) = self.selected_types.abbreviation(origin) {

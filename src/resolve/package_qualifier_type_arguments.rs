@@ -16,7 +16,7 @@ const MESSAGE: &str = "type arguments are not allowed for packages.";
 fn package_argument_lists(
     reference: &TypeRef,
     classifier_segment: u32,
-) -> (Vec<QualifierSegmentArguments>, u32) {
+) -> (Vec<&QualifierSegmentArguments>, u32) {
     if reference.qualifier_arguments.is_empty() {
         return (Vec::new(), 0);
     }
@@ -24,9 +24,23 @@ fn package_argument_lists(
         .qualifier_arguments
         .iter()
         .filter(|list| list.segment < classifier_segment)
-        .copied()
         .collect();
     (lists, classifier_segment)
+}
+
+/// Indices into `TypeRef::targs` in written source order. `targs` stores qualified classifier
+/// applications inside-out (`C, B, A` for `a<A>.b<B>.C<C>`), while diagnostics visit them
+/// left-to-right (`A, B, C`).
+pub(super) fn type_argument_indices_source_order(reference: &TypeRef) -> Vec<u32> {
+    let mut end = reference.targs.len();
+    let mut indices = Vec::new();
+    for list in &reference.qualifier_arguments {
+        let start = end.saturating_sub(list.arguments.len());
+        indices.extend((start..end).map(|index| index as u32));
+        end = start;
+    }
+    indices.extend((0..end).map(|index| index as u32));
+    indices
 }
 
 /// `reference` without the type arguments written on its package segments, when it wrote any.
@@ -41,15 +55,15 @@ pub(super) fn without_package_arguments(
     }
     // Earlier segments' arguments follow every later segment's in `targs`, so the package
     // segments' arguments are its tail.
-    let stripped = lists.iter().map(|list| list.count as usize).sum::<usize>();
+    let stripped = lists.iter().map(|list| list.arguments.len()).sum::<usize>();
     let mut reference = reference.clone();
     let kept = reference.targs.len().saturating_sub(stripped);
     reference.targs.truncate(kept);
     reference.qualifier_arguments = reference
         .qualifier_arguments
         .iter()
-        .filter(|list| !lists.contains(list))
-        .copied()
+        .filter(|list| list.segment >= classifier_segment)
+        .cloned()
         .collect::<Vec<_>>()
         .into_boxed_slice();
     Some(reference)
@@ -60,14 +74,54 @@ impl Checker<'_> {
     /// remove package-owned arguments before applying the selected classifier or alias.
     pub(super) fn check_selected_package_type_arguments(
         &mut self,
+        scope: &CheckerScope<'_>,
         reference: &TypeRef,
         classifier_segment: Option<u32>,
     ) -> Option<TypeRef> {
-        self.check_package_type_arguments(
-            reference,
-            classifier_segment
-                .expect("a selected classifier path must retain its written boundary"),
-        )
+        let classifier_segment = classifier_segment
+            .expect("a selected classifier path must retain its written boundary");
+        let (lists, packages) = package_argument_lists(reference, classifier_segment);
+        let diagnostics_start = self.diags.diags.len();
+        // A package owns no semantic arguments, but every written argument is still an ordinary
+        // source type occurrence. Resolve each exactly once on the selected lexical rung so its
+        // diagnostics are neither skipped nor allowed to affect classifier application.
+        for list in &lists {
+            for argument in &list.arguments {
+                self.type_ref_ty_reported(scope, argument);
+            }
+        }
+        let argument_failed = self.diags.diags[diagnostics_start..]
+            .iter()
+            .any(|diagnostic| diagnostic.severity == crate::diag::Severity::Error);
+        let has_forbidden_list = lists
+            .iter()
+            .any(|list| self.file.forbid_useless_type_arguments || list.segment + 1 == packages);
+        for list in lists {
+            let forbidden = self.file.forbid_useless_type_arguments || list.segment + 1 == packages;
+            // Like kotlinc's diagnostic collector, do not retain this deprecation warning beside
+            // an error produced by the same qualified type application.
+            if forbidden || (!argument_failed && !has_forbidden_list) {
+                self.report_package_type_arguments(list, packages);
+            }
+        }
+        without_package_arguments(reference, classifier_segment)
+    }
+
+    fn report_package_type_arguments(&mut self, list: &QualifierSegmentArguments, packages: u32) {
+        // The last package segment never accepted type arguments.
+        let forbidden = self.file.forbid_useless_type_arguments || list.segment + 1 == packages;
+        let warning = self
+            .file
+            .useless_type_arguments_warning_format
+            .as_ref()
+            .map(|format| format.message(MESSAGE));
+        self.report_deprecation_error(
+            list.span,
+            forbidden,
+            warning.as_deref(),
+            crate::diag::CompilerWarningName::TypeArgumentsNotAllowed,
+            MESSAGE,
+        );
     }
 
     /// Report the type arguments `reference` wrote on package segments, and return it without
@@ -78,21 +132,8 @@ impl Checker<'_> {
         classifier_segment: u32,
     ) -> Option<TypeRef> {
         let (lists, packages) = package_argument_lists(reference, classifier_segment);
-        for list in &lists {
-            // The last package segment never accepted type arguments.
-            let forbidden = self.file.forbid_useless_type_arguments || list.segment + 1 == packages;
-            let warning = self
-                .file
-                .useless_type_arguments_warning_format
-                .as_ref()
-                .map(|format| format.message(MESSAGE));
-            self.report_deprecation_error(
-                list.span,
-                forbidden,
-                warning.as_deref(),
-                crate::diag::CompilerWarningName::TypeArgumentsNotAllowed,
-                MESSAGE,
-            );
+        for list in lists {
+            self.report_package_type_arguments(list, packages);
         }
         without_package_arguments(reference, classifier_segment)
     }

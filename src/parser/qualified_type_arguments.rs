@@ -41,8 +41,8 @@ impl Parser<'_> {
         if !arguments.is_empty() {
             lists.push(QualifierSegmentArguments {
                 segment,
-                count: arguments.len() as u32,
                 span,
+                arguments: arguments.clone().into_boxed_slice(),
             });
         }
         arguments
