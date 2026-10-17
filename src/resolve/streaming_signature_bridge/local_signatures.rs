@@ -3,6 +3,9 @@
 use super::*;
 use crate::resolve::TypeInfo;
 
+#[cfg(test)]
+mod tests;
+
 /// Same-parse test adapter for capture storage discovered by the legacy retained-file fixture.
 /// Production ordinary bodies publish no capture declaration; their checked FIR carries field
 /// coordinates directly.
@@ -1485,21 +1488,6 @@ fn publish_checked_local_signatures_selected(
                         if parameter_failed {
                             failed.push(declaration);
                             continue;
-                        }
-                        let captures = info
-                            .anonymous_object_captures_by_class
-                            .get(&owner_decl)
-                            .or_else(|| info.local_class_captures_by_class.get(&owner_decl));
-                        for capture in captures.into_iter().flatten() {
-                            parameters.push(capture.stored_ty());
-                            source_parameters.push((
-                                capture.name.as_str(),
-                                false,
-                                false,
-                                true,
-                                false,
-                                crate::types::ContextParameterKind::None,
-                            ));
                         }
                     } else {
                         let Some(constructor) = owner
