@@ -14273,6 +14273,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type parameters: an enclosing class's `T` stays `T`, it is not read as its bound
   (`List<T (of class Generic<T>)>`, not `List<Any>`). Verified against kotlinc 2.4.20.
   (`tests/implicit_receiver_inapplicable_call_e2e.rs`.)
+- **Equally specific overloads prefer the call that uses no default argument.** A trailing lambda
+  can fill `block` of `fun app(block: () -> Unit)` directly or fill it after the defaulted `n` of
+  `fun app(n: Int = 0, block: () -> Unit)`. Both pass every argument to the same parameter type,
+  so they are equally specific, and `app { }` selects the overload without a defaulted argument,
+  also when an expression-bodied caller's result type depends on it (`fun a() = app { }`). The
+  signature pass selects each argument mapping on its own and applies this tie-break only when the
+  selections agree on every argument's parameter type; otherwise a postponed lambda's own shape
+  decides later. Verified against kotlinc 2.4.20. (`tests/default_argument_overload_tie_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 
