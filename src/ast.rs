@@ -754,6 +754,10 @@ pub struct FunDecl {
     /// may use them concretely (`is T`, `as T`, `T::class`) and codegen specializes them per call.
     pub reified_type_params: crate::fx_hash::HashSet<String>,
     pub span: Span,
+    /// [`Self::span`] widened to the member's modifiers and annotations, which is where kotlinc
+    /// starts a diagnostic about the declaration's inferred type. Only a class member records its
+    /// modifier prefix; any other function starts at its keyword, as [`Self::span`] does.
+    pub declaration_span: Span,
     /// Exact span of the declaration's NAME. Kotlin diagnostics about a declaration as a whole
     /// point here, not at its keyword.
     pub name_span: Span,
@@ -2031,6 +2035,9 @@ pub struct File {
     pub data_class_copy_visibility_change_warning: Option<String>,
     /// Exact per-compilation deprecation text for an inaccessible generated `copy()` usage warning.
     pub data_class_invisible_copy_usage_warning: Option<String>,
+    /// `+ReportTypeVarianceConflictsInDnnAndFlexible`: the class variance checker also walks a
+    /// definitely-non-null type and a flexible (platform) type. Without it those types are skipped.
+    pub report_type_variance_conflicts_in_dnn_and_flexible: bool,
     /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
     /// parameters whose declared upper bounds contain a cycle.
     pub recursive_type_of: bool,

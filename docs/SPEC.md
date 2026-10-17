@@ -13816,6 +13816,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `copy()` the constructor's visibility. Class records carry the `data` modifier, from the
     declaration or the metadata `IS_DATA` flag, so a dependency's `copy()` is checked the same way
     (`tests/data_class_copy_visibility_e2e.rs`).
+  - `ReportTypeVarianceConflictsInDnnAndFlexible`: not a deprecation. The class variance checker
+    (`FirClassVarianceChecker`, `src/resolve/variance_conflicts.rs`) reports a classifier formal
+    declared `in`/`out` that occurs in a position its variance forbids: "type parameter 'T' is
+    declared as 'out' but occurs in 'in' position in type '<declared type>'.", or "… in abbreviated
+    type '<expansion>'." for a direct argument of a type written through a typealias. It walks
+    every classifier (local, inner and anonymous ones too): own bounds and supertypes in `out`
+    position, and each non-private member's own bounds, context parameters, receiver and function
+    value parameters in `in` position and its result in `out` (`invariant` for a `var`); an
+    inferred result reports at the declaration's start, annotations included. An argument's
+    position combines the formal's variance with the use-site projection (a star or conflicting
+    projection is skipped); function types are `FunctionN<in P…, out R>`; `@UnsafeVariance`
+    suppresses. A conflict reports at the written type argument with the same index, else at the
+    nearest written reference (`M<O>` with `typealias M<X> = Map<String, X>` reports at `M<O>`). A
+    definitely-non-null (`T & Any`) or flexible type (a Java result, walked through its mutable
+    lower bound) is walked only with the feature on; off, nothing is reported there and there is no
+    warning. An inner or local classifier's owner wording lists the formals it captures, innermost
+    declaration first, as kotlinc renders them: `class E<out S, out Outer(T) : Number>`. Known
+    gap: kotlinc renders a typealias spelled inside another alias's right-hand side by its alias
+    name (`List<L<O>>`); krusty's expanded `Ty` renders the expansion. (`tests/variance_conflicts_e2e.rs`.)
 - **Pre-release output.** As kotlinc's `LanguageVersionSettings.isPreRelease`, a compilation is
   pre-release when its language version is not stable in the release or any explicitly set feature (an
   `@Enables` argument, `-progressive`, `-XXLanguage`, or a `// LANGUAGE:` directive) is enabled and

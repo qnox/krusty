@@ -214,6 +214,49 @@ impl Checker<'_> {
             })
     }
 
+    /// Bind the type-use annotations of an occurrence while its authoritative lexical scope is in
+    /// hand. Only the semantic fact consumed later is retained; no diagnostic post-check repeats
+    /// classifier selection from the annotation spelling.
+    pub(super) fn retain_resolved_type_use_annotations(
+        &mut self,
+        scope: &super::CheckerScope<'_>,
+        reference: &TypeRef,
+    ) {
+        let annotations = self
+            .file
+            .type_annotations
+            .get(&reference.span.lo)
+            .cloned()
+            .unwrap_or_default();
+        if annotations.iter().any(|annotation| {
+            self.annotation_identity_in_scope(scope, annotation)
+                == Some(crate::types::wk::unsafe_variance())
+        }) {
+            self.resolved_unsafe_variance_occurrences
+                .insert((reference.span.lo, reference.span.hi));
+        }
+    }
+
+    /// Restore the same fact from the checked spelling that Pass 1 finalized for a declaration.
+    pub(super) fn retain_finalized_type_use_annotations(
+        &mut self,
+        reference: &TypeRef,
+        spelled: &crate::spelling::Spelled,
+    ) {
+        if spelled.unsafe_variance
+            || spelled.annotations.iter().any(|annotation| {
+                matches!(
+                    annotation,
+                    crate::spelling::TypeUseAnnotation::Checked(annotation)
+                        if annotation.annotation == crate::types::wk::unsafe_variance()
+                )
+            })
+        {
+            self.resolved_unsafe_variance_occurrences
+                .insert((reference.span.lo, reference.span.hi));
+        }
+    }
+
     /// Publish the superclass occurrence from the classifier header Pass 1 already finalized.
     /// The detached parser copy is not resolved again: doing so would lose the declaration's
     /// lexical visibility policy, while editor navigation still needs the selected identity at
@@ -244,6 +287,7 @@ impl Checker<'_> {
             .insert((reference.span.lo, reference.span.hi), declaration);
         self.resolved_declaration_spellings
             .insert((reference.span.lo, reference.span.hi), spelled.clone());
+        self.retain_finalized_alias_applications(reference, spelled);
         self.check_finalized_type_reference_usage(reference, declaration);
         self.check_finalized_type_bounds(reference, declaration, spelled);
         self.check_finalized_package_type_arguments(reference, declaration, spelled);
@@ -265,6 +309,7 @@ impl Checker<'_> {
             .insert((reference.span.lo, reference.span.hi), semantic);
         self.resolved_declaration_spellings
             .insert((reference.span.lo, reference.span.hi), spelled.clone());
+        self.retain_finalized_alias_applications(reference, spelled);
         self.check_finalized_type_reference_usage(reference, semantic);
         self.check_finalized_type_bounds(reference, semantic, spelled);
         self.check_finalized_package_type_arguments(reference, semantic, spelled);

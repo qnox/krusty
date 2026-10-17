@@ -704,26 +704,36 @@ mod tests {
         parse(args.iter().map(|s| s.to_string()))
     }
 
-    /// `-progressive` turns on the selected release's progressive features, so it is refused while
-    /// one of them is a feature krusty does not model; every supported release has such a feature.
+    /// `-progressive` accepts releases whose progressive features are all modeled and names the
+    /// first unmodeled feature otherwise.
     #[test]
-    fn progressive_is_refused_while_it_turns_on_an_unmodeled_feature() {
-        for (release, feature) in [
-            ("2.4.0", "ReportTypeVarianceConflictsInDnnAndFlexible"),
-            ("2.4.10", "ReportTypeVarianceConflictsInDnnAndFlexible"),
-            ("2.4.20", "ReportDeprecationsOfClassifiersInImplicitInvokes"),
-        ] {
+    fn progressive_accepts_modeled_features_and_refuses_the_first_unmodeled_one() {
+        for release in ["2.4.0", "2.4.10"] {
             let o = parse_args(&[
                 &format!("-Xkotlin-reference-version={release}"),
                 "-progressive",
                 "f.kt",
             ]);
-            assert_eq!(
-                o.errors,
-                [format!("krusty does not implement the language feature '{feature}' selected by '-progressive'")],
+            assert_eq!(o.errors, Vec::<String>::new(), "kotlinc {release}");
+            assert!(
+                o.language_settings
+                    .features
+                    .has("ReportTypeVarianceConflictsInDnnAndFlexible"),
                 "kotlinc {release}"
             );
         }
+
+        let o = parse_args(&["-Xkotlin-reference-version=2.4.20", "-progressive", "f.kt"]);
+        assert_eq!(
+            o.errors,
+            ["krusty does not implement the language feature \
+              'ReportDeprecationsOfClassifiersInImplicitInvokes' selected by '-progressive'"
+                .to_string()]
+        );
+        assert!(o
+            .language_settings
+            .features
+            .has("ReportTypeVarianceConflictsInDnnAndFlexible"));
     }
 
     /// `-Xkotlin-reference-version` selects a supported release and refuses any other, rather than

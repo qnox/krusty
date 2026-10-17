@@ -160,6 +160,7 @@ const MODELED_FEATURES: &[&str] = &[
     "NameBasedDestructuring",
     "NestedTypeAliases",
     "PrioritizedEnumEntries",
+    "ReportTypeVarianceConflictsInDnnAndFlexible",
     "UnitConversionsOnArbitraryExpressions",
     "WhenGuards",
 ];

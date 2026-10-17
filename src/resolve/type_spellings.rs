@@ -213,6 +213,7 @@ pub(in crate::resolve) fn spelling_of_ref_with(
             inherited.chain(&rhs.annotations).cloned().collect()
         })
         .unwrap_or_default();
+    let unsafe_variance = template.is_some_and(|(rhs, _, _)| rhs.unsafe_variance);
     let expansion_args = expansion_arg_spellings(template, &alias_args);
     Spelled {
         classifier_segment,
@@ -231,6 +232,7 @@ pub(in crate::resolve) fn spelling_of_ref_with(
         args: expansion_args,
         annotations,
         expansion_annotations,
+        unsafe_variance,
         parameter_name: None,
     }
 }
@@ -332,6 +334,7 @@ fn substituted_parameter_spelling(occurrence: &Spelled, argument: Spelled) -> Sp
         &mut spelling.annotations
     };
     *expanded = inherited.chain(std::mem::take(expanded)).collect();
+    spelling.unsafe_variance |= occurrence.unsafe_variance;
     spelling.definitely_non_null |= occurrence.definitely_non_null;
     if occurrence.parameter_name.is_some() {
         spelling.parameter_name = occurrence.parameter_name.clone();
@@ -420,6 +423,7 @@ fn substitute_expansion_spelling(
         args,
         annotations: spelling.annotations.clone(),
         expansion_annotations: spelling.expansion_annotations.clone(),
+        unsafe_variance: spelling.unsafe_variance,
         parameter_name: spelling.parameter_name.clone(),
     }
 }

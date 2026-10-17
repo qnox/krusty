@@ -132,6 +132,17 @@ impl Checker<'_> {
         })
     }
 
+    /// Check every declared bound of one callable after its type-parameter scope is installed.
+    pub(super) fn check_callable_type_parameter_bounds(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        bounds: &[(String, TypeRef)],
+    ) {
+        for (_, bound) in bounds {
+            self.check_callable_type_parameter_bound(scope, bound);
+        }
+    }
+
     /// Run `resolve` with the outermost application of `reference` exempt from the bound check.
     pub(super) fn with_unchecked_outermost_bounds<R>(
         &mut self,
@@ -734,9 +745,7 @@ impl<'a> Checker<'a> {
                 }
             }
         } else if !deferred_local_header {
-            for (_, bound) in &function.type_param_bounds {
-                self.check_callable_type_parameter_bound(&method_scope, bound);
-            }
+            self.check_callable_type_parameter_bounds(&method_scope, &function.type_param_bounds);
         }
         if deferred_local_header {
             if let Some(receiver) = function.receiver.as_ref() {
@@ -846,9 +855,7 @@ impl<'a> Checker<'a> {
                 }
             }
         } else if !deferred_local_header {
-            for (_, bound) in &property.type_param_bounds {
-                self.check_callable_type_parameter_bound(&property_scope, bound);
-            }
+            self.check_callable_type_parameter_bounds(&property_scope, &property.type_param_bounds);
         }
         if deferred_local_header {
             if let Some(receiver) = property.receiver.as_ref() {

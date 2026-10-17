@@ -2489,6 +2489,10 @@ impl<'a> Parser<'a> {
         let annotations = self.take_pending_annotations();
         let annotation_args = self.take_pending_annotation_args();
         let start = self.tok().span;
+        let declaration_start = match self.member_declaration_prefix.take() {
+            Some((prefix_start, prefix_end)) if prefix_end == self.i => prefix_start,
+            _ => start.lo,
+        };
         let override_span = declaration_modifiers::span(self, modifiers, "override");
         let operator_span = declaration_modifiers::span(self, modifiers, "operator");
         // `tailrec` keeps its own span for the same reason `operator` does: the diagnostic that
@@ -2565,6 +2569,7 @@ impl<'a> Parser<'a> {
             non_null_type_params,
             reified_type_params,
             span: Span::new(start.lo, end.hi),
+            declaration_span: Span::new(declaration_start, end.hi),
             name_span,
             signature_span: Span::new(start.lo, signature_end),
             override_span,

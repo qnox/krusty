@@ -18,7 +18,7 @@ pub(super) fn emit(
     env: &EmitEnv<'_>,
     writer: &mut ClassWriter,
 ) {
-    constructor_accessors::emit_accessors(ir, class, fq_name, writer);
+    constructor_accessors::emit_sealed_accessors(ir, class, fq_name, writer);
     let marker_accessor = class.has_primary_ctor
         && marker_accessor_emitted_last(ir, class)
         && has_ctor_marker_accessor(ir, class);
@@ -30,7 +30,7 @@ pub(super) fn emit(
             &env.run.static_accessor_plan.borrow(),
             StaticOwner::Class(class.fq_name),
             facade,
-            class.decl_start_line.max(class.decl_line),
+            static_accessors::class_declaration_line(class),
             writer,
         );
     } else {
@@ -40,7 +40,7 @@ pub(super) fn emit(
             &env.run.static_accessor_plan.borrow(),
             StaticOwner::Class(class.fq_name),
             facade,
-            class.decl_start_line.max(class.decl_line),
+            static_accessors::class_declaration_line(class),
             writer,
         );
     }
@@ -79,7 +79,7 @@ pub(super) fn emit(
             &env.run.static_accessor_plan.borrow(),
             StaticOwner::Class(class.fq_name),
             facade,
-            class.decl_start_line.max(class.decl_line),
+            static_accessors::class_declaration_line(class),
             writer,
         );
     }

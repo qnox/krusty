@@ -1807,6 +1807,8 @@ mod value_class_suspend_override_e2e;
 mod value_class_suspend_resume_e2e;
 #[path = "value_class_try_value_e2e.rs"]
 mod value_class_try_value_e2e;
+#[path = "variance_conflicts_e2e.rs"]
+mod variance_conflicts_e2e;
 
 #[path = "diagnostic_wording_versions_e2e.rs"]
 mod diagnostic_wording_versions_e2e;
