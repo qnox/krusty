@@ -9505,6 +9505,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   use-site projection is reported on that keyword, for that application only:
   `conflicting projection in type alias expansion in intermediate type 'Box<CONFLICTING-PROJECTION String>?'`.
   Tests: `tests/typealias_projection_e2e.rs`. Corpus: `reflection/typeOf/typeAliasedType.kt`.
+- **A self-bounded constructor variable with no other constraint completes to its starred bound.**
+  `Builder("x")` for Java `class Builder<SELF extends Builder<SELF>>` has no argument or expected
+  type evidence for `SELF`. kotlinc completes it to the declared bound with the recursive occurrence
+  replaced by a star and the argument projected `out`, so the call types as `Builder<out Builder<*>>`
+  and a fluent `withPort(): SELF` reads `Builder<*>`. krusty completed `SELF` to the raw bound
+  `Builder<SELF>`, so the second fluent call returned the bare `SELF` and the third failed as an
+  unresolved member. A variable whose bound does not refer to itself still takes that bound. Owner:
+  `src/symbol_resolver/generic_inference/postponed_result.rs`. Test:
+  `tests/java_self_bounded_constructor_e2e.rs::a_self_bounded_constructor_result_keeps_a_fluent_chain_typed`.
 - **Omitted typealias arguments on a constructor call are inferred, not written.** `LinkedHashMap(a)`
   calls the stdlib's `typealias LinkedHashMap<K, V> = java.util.LinkedHashMap<K, V>` without type
   arguments, so the alias's `K`/`V` are type variables of the call, decided by the value arguments and

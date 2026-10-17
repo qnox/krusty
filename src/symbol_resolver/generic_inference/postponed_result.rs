@@ -30,6 +30,67 @@ pub(crate) fn unconstrained_result_bindings(signature: &GenericSig) -> GSigBinds
         .collect()
 }
 
+/// Complete every still-unbound variable whose declared upper bound refers to itself.
+///
+/// Kotlin approximates a self-bounded variable with no other constraint by its bound, with the
+/// recursive occurrence replaced by a star and the whole argument projected `out`: `Box("x")` for
+/// `class Box<SELF : Box<SELF>>` types as `Box<out Box<*>>`, so `withPort(): SELF` reads `Box<*>`
+/// and a fluent chain keeps its members. A variable without a self-reference keeps its existing
+/// completion.
+fn complete_self_bounded_formals(
+    formals: &[String],
+    formal_bounds: &[Vec<Ty>],
+    binds: &mut GSigBinds,
+) {
+    for (formal, bounds) in formals.iter().zip(formal_bounds) {
+        let Some(&bound) = bounds.first() else {
+            continue;
+        };
+        if binds.contains_key(formal)
+            || !crate::types::ty_mentions_param(bound, std::slice::from_ref(formal))
+        {
+            continue;
+        }
+        // The star carries the bound it reads as, exactly as a written `Box<*>` does.
+        let unbounded_star = GSigBinds::from_iter([(
+            formal.clone(),
+            Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))),
+        )]);
+        let star = GSigBinds::from_iter([(
+            formal.clone(),
+            Ty::star_projection(super::ty_subst_keep_unbound(bound, &unbounded_star)),
+        )]);
+        let completion = Ty::out_projection(super::ty_subst_keep_unbound(bound, &star));
+        binds.insert(formal.clone(), completion);
+    }
+}
+
+/// The classifier arguments of a constructor result once argument and expected-type inference are
+/// done. A bound variable keeps its binding, a self-bounded one completes as
+/// [`complete_self_bounded_formals`] describes, and any other takes its first declared bound.
+pub(crate) fn completed_constructor_result_arguments(
+    formals: &[String],
+    formal_bounds: &[Vec<Ty>],
+    bindings: &GSigBinds,
+) -> Vec<Ty> {
+    let mut completed = bindings.clone();
+    complete_self_bounded_formals(formals, formal_bounds, &mut completed);
+    formals
+        .iter()
+        .enumerate()
+        .map(|(index, formal)| {
+            completed.get(formal).copied().unwrap_or_else(|| {
+                formal_bounds
+                    .get(index)
+                    .and_then(|bounds| bounds.first())
+                    .copied()
+                    .filter(|bound| *bound != Ty::Error)
+                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
+            })
+        })
+        .collect()
+}
+
 /// Instantiate a nested result-only call from the concrete parts of an enclosing parameter.
 ///
 /// The parameter may still contain the outer call's inference variables. Those variables are not
@@ -313,6 +374,32 @@ mod tests {
                 actual == bound || bound == any
             }),
             Err(())
+        );
+    }
+
+    #[test]
+    fn a_self_bounded_constructor_variable_completes_to_its_starred_bound() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let recursive = Ty::obj_args("sample/Builder", &[Ty::ty_param("SELF", any)]);
+        let plain = Ty::obj("sample/Settings");
+        let formals = ["SELF".to_string(), "S".to_string()];
+
+        assert_eq!(
+            completed_constructor_result_arguments(
+                &formals,
+                &[vec![recursive], vec![plain]],
+                &GSigBinds::default(),
+            ),
+            vec![
+                Ty::out_projection(Ty::obj_args(
+                    "sample/Builder",
+                    &[Ty::star_projection(Ty::obj_args(
+                        "sample/Builder",
+                        &[Ty::star_projection(any)],
+                    ))],
+                )),
+                plain,
+            ]
         );
     }
 }
