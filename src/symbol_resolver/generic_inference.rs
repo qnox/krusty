@@ -1622,8 +1622,10 @@ pub(crate) fn apply_only_input_type_bindings(
             }
             let declared = ty_subst_keep_unbound(declared, bindings);
             let actual = argument.ty();
+            // An integer literal is an input of a nullable solution too: `assertEquals(2001,
+            // jobId)` with `jobId: Long?` solves `T := Long?`, and the literal becomes a `Long`.
             actual.mentions_error()
-                || argument.adapts_integer_literal_to(declared)
+                || argument.adapts_integer_literal_to(declared.non_null())
                 || argument.binds_unconstrained_result_to(source, declared)
                 || resolution_subtype(source, actual, declared)
         })
