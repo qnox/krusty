@@ -97,6 +97,7 @@ mod compound_assignments;
 mod condition_exclusions;
 mod conditional_branch;
 mod constant_evaluation;
+mod constructor_formal_evidence;
 mod context_capture;
 mod context_receiver_priority;
 mod context_sensitive_resolution;
@@ -16024,6 +16025,7 @@ impl<'a> Checker<'a> {
         self.resolved_calls.remove(&call);
         self.unbound_value_lambda_call_formals.remove(&call);
         self.resolved_constructors.remove(&call);
+        self.constructor_formal_evidence.remove(&call);
         self.record_call_site_lexical_formals(scope, call);
         if expected.is_some() {
             self.postponed_diagnostics.discard(call);
@@ -33083,6 +33085,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         for_range_iterator_protocols: HashMap::default(),
         iteration_plans: IterationPlans::default(),
         resolved_constructors: HashMap::default(),
+        constructor_formal_evidence: HashMap::default(),
         resolved_enum_entry_constructors: HashMap::default(),
         resolved_ctor_delegations: HashMap::default(),
         resolved_primary_ctor_delegations: HashMap::default(),
@@ -35764,6 +35767,8 @@ struct Checker<'a> {
     for_range_iterator_protocols: HashMap<StmtId, ForRangeIteratorTarget>,
     iteration_plans: IterationPlans,
     resolved_constructors: HashMap<ExprId, ResolvedConstructor>,
+    /// How each constructor call's inference fixed its classifier's own type parameters.
+    constructor_formal_evidence: HashMap<ExprId, constructor_formal_evidence::CallEvidence>,
     resolved_enum_entry_constructors: HashMap<(u32, u32), ResolvedConstructor>,
     resolved_ctor_delegations: HashMap<(DeclId, usize), ResolvedCtorDelegation>,
     resolved_primary_ctor_delegations: HashMap<DeclId, ResolvedCtorDelegation>,
@@ -37647,7 +37652,7 @@ impl<'a> Checker<'a> {
         call: ExprId,
     ) -> bool {
         let Some(signature) = self.unbound_call_result_signature(call).cloned() else {
-            return false;
+            return self.report_uninferred_constructor_type_parameter(call);
         };
         let actual = self.expr_types[call.0 as usize];
         let resolved = self.resolved_call_type_args.get(&call);
@@ -53629,6 +53634,7 @@ impl<'a> Checker<'a> {
             }
             bindings[type_parameter] = candidate;
         }
+        self.record_source_constructor_evidence(call, class, &bindings);
         for (type_parameter, binding) in bindings.iter_mut().enumerate() {
             if explicitly_bound[type_parameter] {
                 continue;
@@ -53809,19 +53815,7 @@ impl<'a> Checker<'a> {
                 None,
             );
         }
-        for (index, binding) in bindings.iter_mut().enumerate() {
-            if *binding == Ty::Null {
-                *binding = Ty::nullable(Ty::Nothing);
-            } else if *binding == Ty::Error {
-                *binding = class
-                    .type_param_bounds
-                    .get(index)
-                    .copied()
-                    .filter(|bound| *bound != Ty::Error)
-                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-            }
-        }
-        bindings
+        constructor_formal_evidence::complete_source_constructor_bindings(class, bindings)
     }
 
     /// Bind the declaration identities captured by an inner/local classifier to this construction
@@ -60530,7 +60524,7 @@ impl<'a> Checker<'a> {
                 this_narrow: Option<Ty>,
             }
             let mut arm_results = Vec::with_capacity(arms.len());
-            let mut has_else = false;
+            let has_else = arms.iter().any(|arm| arm.conditions.is_empty());
             // A `when` may have at most one `else` branch (kotlinc rejects a second one).
             if arms.iter().filter(|a| a.conditions.is_empty()).count() > 1 {
                 self.diags.error(
@@ -60555,9 +60549,6 @@ impl<'a> Checker<'a> {
             let mut fallthrough_declined: Vec<(String, Ty)> = Vec::new();
             let mut completing_flows = Vec::new();
             for arm in &arms {
-                if arm.conditions.is_empty() {
-                    has_else = true;
-                }
                 let incoming_fallthrough_casts = fallthrough_casts.clone();
                 let incoming_fallthrough_declined = fallthrough_declined.clone();
                 // Keep accumulated false-branch facts in the arm's child scope. Subject-form
@@ -60651,7 +60642,7 @@ impl<'a> Checker<'a> {
                             let guard_ty = c.expr(scope, guard);
                             c.expect_assignable(Ty::Boolean, guard_ty, c.span(guard), "when guard");
                         }
-                        c.expr_result(scope, arm.body, expected, value_required)
+                        c.joined_branch_result(scope, arm.body, expected, value_required, has_else)
                     })
                 };
                 if self.completed_normally(arm.body) {
@@ -65408,6 +65399,7 @@ impl<'a> Checker<'a> {
         let expected_classifier =
             Self::alias_constructor_result_constraint(applied_classifier, expected);
         let mut members = Vec::new();
+        let mut member_bindings = Vec::new();
         let mut candidates = Vec::new();
         let mut mapping_failures = Vec::new();
         let mut bound_failures = Vec::new();
@@ -65497,7 +65489,7 @@ impl<'a> Checker<'a> {
                 .into_iter()
                 .map(|slot| contextual.parameter_indices[slot])
                 .collect::<Vec<_>>();
-
+            let mut inferred = None;
             if let Some(signature) = member
                 .generic_sig
                 .as_ref()
@@ -65894,6 +65886,7 @@ impl<'a> Checker<'a> {
                         crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &bindings)
                     })
                     .collect();
+                inferred = Some(bindings);
             }
             member.call_sig = call_sig;
             candidates.push(CtorDelegationCandidate {
@@ -65927,6 +65920,7 @@ impl<'a> Checker<'a> {
                 },
             });
             members.push(member);
+            member_bindings.push(inferred);
         }
 
         let (candidate_index, selected) =
@@ -65993,6 +65987,9 @@ impl<'a> Checker<'a> {
         let Some(member) = members.get(candidate_index).cloned() else {
             return Ok(LibraryConstructorSelection::NoMatch);
         };
+        if let Some(Some(bindings)) = member_bindings.get(candidate_index) {
+            self.record_library_constructor_evidence(call, internal, classifier, bindings);
+        }
         let annotation = if classifier.is_annotation() {
             let Some(construction) = dependency_annotation_defaults::dependency_construction(
                 self.libraries,

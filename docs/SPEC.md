@@ -9594,6 +9594,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   use-site projection is reported on that keyword, for that application only:
   `conflicting projection in type alias expansion in intermediate type 'Box<CONFLICTING-PROJECTION String>?'`.
   Tests: `tests/typealias_projection_e2e.rs`. Corpus: `reflection/typeOf/typeAliasedType.kt`.
+- **A constructor type parameter that nothing constrains cannot be inferred.** `C(1)` for
+  `class C<T : Comparable<T>>(val n: Int)`, `D(2)` for `class D<T>(val n: Int)`, and the `B` of
+  `P(3)` for `class P<A, B>(val a: A)` have no argument, written type argument, expected type or
+  enclosing call that fixes the parameter. kotlinc reports `cannot infer type for type parameter`
+  at the callee, as it does for `val x = make()` with `fun <T> make(): List<T>`. krusty completed
+  the parameter to its declared bound and accepted the call. It now reports the same diagnostic at
+  the same completion roots the generic-call report uses (an untyped declaration initializer or a
+  statement), so an enclosing call such as `use(C(7))` still completes the result first. A self
+  type (`T : KB<T>` in `KB`) is exempt: Kotlin completes it to its starred bound. A recursive bound
+  that also names another formal (`SELF : MB<T, SELF>`) is not, and `MB("v")` is reported. The
+  report reads what constructor inference recorded for each formal when it selected the
+  constructor, never the selected parameters: those are already specialized, so `Seq(s)` for
+  `class Seq<T : CharSequence>(val x: T)` with `s: CharSequence` would otherwise look unconstrained,
+  and a named or defaulted argument (`Named(x = s)`) would be matched to the wrong parameter. A
+  branch of an `if` with an `else` or a `when` with an `else` arm withholds the report even as a
+  statement: kotlinc completes the conditional as one call, so a sibling branch can fix the
+  parameter (`else -> Buildee()` beside `build { setTypeVariable(TargetType()) }`, KT-60291). That
+  joint system is not modelled, so a branch nothing constrains in any arm is accepted there, where
+  kotlinc still reports it. A `when` without `else` is not joined and reports. An inner class has
+  no type parameter of its own, so `Outer(42).Inner(100)` reports nothing. Owner:
+  `src/resolve/constructor_formal_evidence.rs`. Test:
+  `tests/uninferred_constructor_type_parameter_e2e.rs`.
+
 - **A self-bounded constructor variable with no other constraint completes to its starred bound.**
   `Builder("x")` for Java `class Builder<SELF extends Builder<SELF>>` has no argument or expected
   type evidence for `SELF`. kotlinc completes it to the declared bound with the recursive occurrence
@@ -9602,8 +9625,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Builder<SELF>`, so the second fluent call returned the bare `SELF` and the third failed as an
   unresolved member. Only a bound that is the constructed classifier itself is such a self type: for
   `C<T : Comparable<T>>`, `C(1)` has no completion in kotlinc (`cannot infer type for type
-  parameter 'T'`), and krusty keeps its existing bound completion there. Nor is a bound that also
-  names another formal: for `MB<T, SELF : MB<T, SELF>>`, kotlinc reports `cannot infer type for
+  parameter 'T'`), and krusty reports the same error (see the entry above). Nor is a bound that
+  also names another formal: for `MB<T, SELF : MB<T, SELF>>`, kotlinc reports `cannot infer type for
   type parameter 'SELF'` for `MB("v")` even with `T` inferred. Owner:
   `src/symbol_resolver/generic_inference/postponed_result.rs`. Test:
   `tests/java_self_bounded_constructor_e2e.rs::a_self_bounded_constructor_result_keeps_a_fluent_chain_typed`.
