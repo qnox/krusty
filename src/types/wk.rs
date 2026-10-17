@@ -33,6 +33,7 @@ names! {
     continuation => "kotlin/coroutines/Continuation",
     function_root => "kotlin/Function",
     any => "kotlin/Any",
+    unsafe_variance => "kotlin/UnsafeVariance",
     kclass => "kotlin/reflect/KClass",
     comparable => "kotlin/Comparable",
     array => "kotlin/Array",
