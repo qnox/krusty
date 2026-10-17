@@ -280,6 +280,7 @@ mod type_join;
 mod type_parameter_owners;
 mod upper_bound_violations;
 mod value_class_parameters;
+mod variance_conflicts;
 mod when_exhaustiveness;
 mod when_flow;
 
@@ -10525,6 +10526,7 @@ struct LexicalTypeAlias {
     target: TypeName,
     formals: Vec<String>,
     expansion: Ty,
+    expansion_spelling: crate::spelling::Spelled,
 }
 
 /// A lexical binding: a value (local, parameter, narrowing shadow) or a callable overload set.
@@ -32985,6 +32987,8 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         command_line_opt_ins: std::cell::OnceCell::new(),
         resolved_type_bounds: HashMap::default(),
         resolved_declaration_types: HashMap::default(),
+        selected_type_alias_applications: HashMap::default(),
+        resolved_unsafe_variance_occurrences: HashSet::default(),
         resolved_declaration_type_parameters: HashMap::default(),
         lexical_type_parameter_bounds: Default::default(),
         class_literal_targets: HashMap::default(),
@@ -35525,6 +35529,13 @@ struct Checker<'a> {
     command_line_opt_ins: std::cell::OnceCell<Vec<TypeName>>,
     resolved_type_bounds: HashMap<(u32, u32), (Ty, bool)>,
     resolved_declaration_types: HashMap<(u32, u32), Ty>,
+    /// Alias templates retained when their source occurrences are first selected. Variance
+    /// diagnostics consume this bounded checker state and never reopen scope lookup by spelling.
+    selected_type_alias_applications:
+        HashMap<(u32, u32), alias_projection::SelectedAliasApplication>,
+    /// Type occurrences whose `@UnsafeVariance` annotation was bound to the well-known identity.
+    /// Variance checking consumes this fact and never selects an annotation again by spelling.
+    resolved_unsafe_variance_occurrences: HashSet<(u32, u32)>,
     resolved_declaration_type_parameters: HashMap<u32, Vec<String>>,
     /// All bounds of body-local type parameters, keyed by declaration-owned semantic identity.
     /// Local functions have no stable module header, but assignability still needs the same bound
@@ -45812,6 +45823,7 @@ impl<'a> Checker<'a> {
 
     /// Resolve a syntactic type without erasing source nullability.
     fn type_ref_ty(&mut self, scope: &CheckerScope<'_>, r: &TypeRef) -> Ty {
+        self.retain_resolved_type_use_annotations(scope, r);
         let (resolved, conflicts) = self.type_ref_ty_resolved(scope, r);
         // Nullability on the written use is part of the intermediate type kotlinc quotes. The
         // conflict spans belong to this application; nested alias arguments already reported theirs.
@@ -45826,6 +45838,7 @@ impl<'a> Checker<'a> {
             Some(scope.tparam_bound(&r.name))
         } else if scope.type_alias(&r.name).is_some() {
             self.scoped_source_alias_ty(scope, r).map(|applied| {
+                self.retain_selected_alias_application(r, &applied);
                 conflicts = applied.conflicts;
                 applied.ty
             })
@@ -45852,14 +45865,16 @@ impl<'a> Checker<'a> {
                         Some(if r.is_import() {
                             alias.expansion
                         } else {
-                            let applied = self.alias_application_ty(
+                            let applied = self.alias_application_ty_with_spelling(
                                 scope,
                                 alias.formals,
                                 alias.expansion,
+                                alias.expansion_spelling,
                                 &r.name,
                                 alias_projection::AliasArguments::of(r),
                                 r.span,
                             );
+                            self.retain_selected_alias_application(r, &applied);
                             conflicts = applied.conflicts;
                             applied.ty
                         })
@@ -45877,6 +45892,7 @@ impl<'a> Checker<'a> {
                     // Primitive/function aliases have no classifier facet, so no classifier was
                     // selected above. Resolve that sole alias binding through the normal type path.
                     self.scoped_source_alias_ty(scope, r).map(|applied| {
+                        self.retain_selected_alias_application(r, &applied);
                         conflicts = applied.conflicts;
                         applied.ty
                     })
@@ -45899,6 +45915,7 @@ impl<'a> Checker<'a> {
         } {
             Ty::from_name(&primitive_alias).unwrap_or(Ty::Error)
         } else if let Some(applied) = self.scoped_source_alias_ty(scope, r) {
+            self.retain_selected_alias_application(r, &applied);
             conflicts = applied.conflicts;
             applied.ty
         } else {
@@ -45951,6 +45968,10 @@ impl<'a> Checker<'a> {
             target,
             formals,
             expansion,
+            // Body-local aliases are not stable metadata declarations. Their ordinary source
+            // occurrence still supplies use-site provenance; a dedicated local template sidecar
+            // can fill this slot when local alias type-use annotations become supported.
+            expansion_spelling: Default::default(),
         };
         scope.rebind(
             &alias.name,
@@ -47354,9 +47375,7 @@ impl<'a> Checker<'a> {
             self.check_function_annotation_applications(scope, f, "top level function");
         self.check_infix_declaration(f, false);
         let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
-        for (_, bound) in &f.type_param_bounds {
-            self.check_callable_type_parameter_bound(scope, bound);
-        }
+        self.check_callable_type_parameter_bounds(scope, &f.type_param_bounds);
         self.check_duplicate_param_names(&f.params, f.context_count, f.span);
         // Duplicate type-parameter names (`fun <T, T> f()`) are illegal (conflicting declaration).
         {
@@ -47866,9 +47885,7 @@ impl<'a> Checker<'a> {
         });
         self.check_declaration_type_parameter_annotations(scope, p.span.lo);
         let owned_type_parameters = self.publish_property_type_parameter_owner(scope, p);
-        for (_, bound) in &p.type_param_bounds {
-            self.check_callable_type_parameter_bound(scope, bound);
-        }
+        self.check_callable_type_parameter_bounds(scope, &p.type_param_bounds);
         self.check_duplicate_param_names(&p.context_params, p.context_params.len(), p.span);
         let prev_extension_receiver = self.this_extension_receiver;
         // For an extension property (`val Recv.name: T get() = …`), `this` inside the
@@ -49260,7 +49277,7 @@ impl<'a> Checker<'a> {
             scope.declare_tparams(&cl.type_params, &class_tparams, |name| {
                 inherited_reified_type_parameters.contains(name)
             });
-            self.publish_class_type_parameter_owner(scope, cl);
+            self.publish_class_type_parameter_owner(scope, cl, current_owner);
             scope.declare_context_receivers(&class_context_receivers);
             let mut context_names = crate::fx_hash::HashSet::default();
             for receiver in &class_context_receivers {
@@ -50066,9 +50083,10 @@ impl<'a> Checker<'a> {
                             &property_scope,
                             bp.span.lo,
                         );
-                        for (_, bound) in &bp.type_param_bounds {
-                            self.check_callable_type_parameter_bound(&property_scope, bound);
-                        }
+                        self.check_callable_type_parameter_bounds(
+                            &property_scope,
+                            &bp.type_param_bounds,
+                        );
                         self.check_duplicate_param_names(
                             &bp.context_params,
                             bp.context_params.len(),
@@ -51106,6 +51124,7 @@ impl<'a> Checker<'a> {
                     let owned_type_parameters =
                         self.publish_property_type_parameter_owner(scope, bp);
                     self.check_declaration_type_parameter_annotations(scope, bp.span.lo);
+                    self.check_callable_type_parameter_bounds(scope, &bp.type_param_bounds);
                     self.check_duplicate_param_names(
                         &bp.context_params,
                         bp.context_params.len(),
@@ -51216,15 +51235,16 @@ impl<'a> Checker<'a> {
                     // reported); the inference error is emitted after the accessor checks only
                     // when they stayed silent.
                     let body_diag_mark = self.diags.diags.len();
+                    let checked_declared_property = bp
+                        .declared_ty()
+                        .map(|declared| self.check_declaration_type(scope, declared));
                     if let Some(init) = bp.init.filter(|_| check_ordinary_property_body) {
                         // A solved inferred signature is the initializer's output, never its
                         // contextual input. Feeding the Pass-1 result back here can bind an
                         // otherwise unbound generic call (`val x = Result.failure(...)`) and hide
                         // the required inference diagnostic. Only source-written property/storage
                         // types constrain the ordinary Pass-2 initializer.
-                        let declared = bp
-                            .declared_ty()
-                            .map(|declared| self.check_declaration_type(scope, declared))
+                        let declared = checked_declared_property
                             .filter(|ty| !ty.mentions_error() && !ty.mentions_pending())
                             .map(|property_ty| {
                                 if bp.explicit_backing_field.is_some() {
@@ -51295,9 +51315,7 @@ impl<'a> Checker<'a> {
                             current_owner.expect("a checked member property has an owning class"),
                         );
                         let this_ref = extension_receiver.unwrap_or(owner_ref);
-                        let expected_property = bp
-                            .declared_ty()
-                            .map(|declared| self.check_declaration_type(scope, declared))
+                        let expected_property = checked_declared_property
                             .filter(|ty| !ty.mentions_error() && !ty.mentions_pending());
                         let mut site =
                             DelegateConventionSite::of(bp, Some(owner_ref), extension_receiver);
@@ -51363,10 +51381,7 @@ impl<'a> Checker<'a> {
                         self.this_extension_receiver = Some(receiver_span);
                         self.symbolic_signature_inference = true;
                     }
-                    let prop_ty = bp
-                        .ty
-                        .as_ref()
-                        .map(|r| self.check_declaration_type(scope, r))
+                    let prop_ty = checked_declared_property
                         .or_else(|| declared_property.map(|(property_ty, _)| property_ty))
                         .filter(|ty| !ty.mentions_error() && !ty.mentions_pending())
                         .or(body_inferred_property_type)
@@ -51534,6 +51549,7 @@ impl<'a> Checker<'a> {
             for _ in 0..label_depth {
                 self.this_labels.pop();
             }
+            self.check_class_variance(scope, cl, d, current_owner);
         }
         // Enum entry constructor arguments (e.g. `RED(0xff0000)`) are type-checked in a
         // static classifier-receiver scope. There is no entry INSTANCE yet: `this` is the nearest
@@ -51795,9 +51811,7 @@ impl<'a> Checker<'a> {
         });
         let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
         let suppression_depth = self.check_function_annotation_applications(scope, f, "function");
-        for (_, bound) in &f.type_param_bounds {
-            self.check_callable_type_parameter_bound(scope, bound);
-        }
+        self.check_callable_type_parameter_bounds(scope, &f.type_param_bounds);
         let dispatch_this = scope.this_ty();
         let dispatch_extension_receiver = self.this_extension_receiver;
         let stable_declaration = stable_declaration.or_else(|| {

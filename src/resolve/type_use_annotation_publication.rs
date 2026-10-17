@@ -8,7 +8,7 @@
 //! `SOURCE`-retained one leaves the record.
 
 use super::*;
-use crate::spelling::{AnnotationOccurrence, CheckedTypeUseAnnotations};
+use crate::spelling::{AnnotationOccurrence, CheckedTypeUseAnnotation, CheckedTypeUseAnnotations};
 
 /// Fold every type-use annotation application of `files` and seal the spellings Pass 1 publishes.
 pub(crate) fn publish_checked_type_use_annotations(
@@ -76,7 +76,13 @@ pub(crate) fn publish_checked_type_use_annotations(
                 source: file_index,
                 span: annotation.span,
             };
-            checked.insert(occurrence, recorded);
+            checked.insert(
+                occurrence,
+                CheckedTypeUseAnnotation {
+                    metadata: recorded,
+                    unsafe_variance: applied.internal == crate::types::wk::unsafe_variance(),
+                },
+            );
         }
     }
     let mut annotation_spans = Vec::new();
@@ -136,7 +142,10 @@ fn collect_annotation_spans(
         let crate::spelling::TypeUseAnnotation::Bound(occurrence) = annotation else {
             continue;
         };
-        let Some(Some(application)) = checked.get(occurrence) else {
+        let Some(application) = checked
+            .get(occurrence)
+            .and_then(|checked| checked.metadata.as_ref())
+        else {
             continue;
         };
         out.push((

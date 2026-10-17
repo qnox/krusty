@@ -67,6 +67,8 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         "ErrorAboutDataClassCopyVisibilityChange",
         crate::resolve::data_class_copy_visibility::USAGE,
     );
+    file.report_type_variance_conflicts_in_dnn_and_flexible =
+        features.has("ReportTypeVarianceConflictsInDnnAndFlexible");
     file.recursive_type_of = features.has("JvmSupportRecursiveTypeOf");
     file.opted_in_markers = features.opted_in().map(str::to_string).collect();
 }
