@@ -208,6 +208,11 @@ impl MetaFn {
     pub fn is_companion_block_member(&self) -> bool {
         self.flags.has(MfnFlags::IS_COMPANION_BLOCK_MEMBER)
     }
+    /// Kotlin metadata's exact `Function.flags.MEMBER_KIND == SYNTHESIZED` declaration fact.
+    #[inline]
+    pub fn is_synthesized(&self) -> bool {
+        self.flags.has(MfnFlags::IS_SYNTHESIZED)
+    }
     #[inline]
     pub fn ret_nullable(&self) -> bool {
         self.flags.has(MfnFlags::RET_NULLABLE)

@@ -119,6 +119,7 @@ const MODELED_FEATURES: &[&str] = &[
     "EagerLambdaAnalysis",
     "EnableNameBasedDestructuringShortForm",
     "EnumEntries",
+    "ErrorAboutDataClassCopyVisibilityChange",
     "ExplicitBackingFields",
     "ExplicitContextArguments",
     "ForbidArrayOfNothingInLhsOfClassLiteral",
@@ -416,9 +417,7 @@ mod tests {
         assert!(LangFeatures::models(
             "AllowEagerSupertypeAccessibilityChecks"
         ));
-        assert!(!LangFeatures::models(
-            "ErrorAboutDataClassCopyVisibilityChange"
-        ));
+        assert!(!LangFeatures::models("JsStaticInInterface"));
     }
 
     #[test]

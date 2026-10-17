@@ -838,6 +838,7 @@ fn a_klib_declaration_signature_is_frozen_with_its_callable() {
         is_suspend: false,
         is_operator: false,
         is_infix: false,
+        is_synthesized: false,
         is_expect: false,
         is_external: false,
         is_static: false,

@@ -55,6 +55,16 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         "ForbidUselessTypeArgumentsIn25",
         "object access cannot have explicit type arguments.",
     );
+    file.error_about_data_class_copy_visibility_change =
+        features.has("ErrorAboutDataClassCopyVisibilityChange");
+    file.data_class_copy_visibility_change_warning = features.deprecation_warning_message(
+        "ErrorAboutDataClassCopyVisibilityChange",
+        crate::resolve::data_class_copy_visibility::DECLARATION,
+    );
+    file.data_class_invisible_copy_usage_warning = features.deprecation_warning_message(
+        "ErrorAboutDataClassCopyVisibilityChange",
+        crate::resolve::data_class_copy_visibility::USAGE,
+    );
     file.recursive_type_of = features.has("JvmSupportRecursiveTypeOf");
     file.opted_in_markers = features.opted_in().map(str::to_string).collect();
 }
@@ -87,6 +97,18 @@ mod tests {
 
         assert_eq!(old.value_class_recursion_via_type_parameters_warning, None);
         assert_eq!(old.inapplicable_operator_modifier_warning, None);
+        assert_eq!(
+            old.data_class_copy_visibility_change_warning.as_deref(),
+            Some(
+                "non-public primary constructor is exposed via the generated 'copy()' method of the 'data' class.\n\nThe generated 'copy()' will change its visibility in future releases.\n\nTo suppress the warning do one of the following:\n- Annotate the data class with the '@ConsistentCopyVisibility' annotation.\n- Use the '-Xconsistent-data-class-copy-visibility' compiler flag.\n- Annotate the data class with the '@ExposedCopyVisibility' annotation \n  (Discouraged, but can be used to keep binary compatibility).\n\nTo learn more, see the documentation of the '@ConsistentCopyVisibility' and '@ExposedCopyVisibility' annotations.\n\nThis will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914."
+            )
+        );
+        assert_eq!(
+            old.data_class_invisible_copy_usage_warning.as_deref(),
+            Some(
+                "this 'copy()' exposes the non-public primary constructor of a 'data class'. See the appropriate 'data class' documentation or contact the 'data class' author for migration guidance. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914."
+            )
+        );
         assert_eq!(
             old.type_arguments_not_allowed_warning.as_deref(),
             type_arguments_not_allowed_warning

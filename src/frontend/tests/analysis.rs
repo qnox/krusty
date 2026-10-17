@@ -174,6 +174,7 @@ impl ExistingLibrary {
             };
             std::sync::Arc::new(LibraryType {
                 is_kotlin: true,
+                is_data: false,
                 access: crate::libraries::ClassifierAccess::Public,
                 source_file: None,
                 stable_declaration: None,

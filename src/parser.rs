@@ -2015,6 +2015,7 @@ impl<'a> Parser<'a> {
         let declaration = ClassDecl {
             name_span,
             primary_ctor_visibility: Visibility::Public,
+            primary_ctor_visibility_span: None,
             name,
             visibility: visibility_of(modifiers),
             annotations,
@@ -2397,6 +2398,7 @@ impl<'a> Parser<'a> {
         let has_primary_ctor = has_primary_ctor || secondary_ctors.is_empty();
         ClassDecl {
             primary_ctor_visibility: Visibility::Public,
+            primary_ctor_visibility_span: None,
             name,
             name_span,
             visibility: Visibility::Public,
@@ -2929,11 +2931,23 @@ impl<'a> Parser<'a> {
         // The primary constructor starts at its first modifier, annotation, `constructor` keyword,
         // or `(`; a KDoc before it is not part of it.
         let mut ctor_open_offset = 0u32;
+        let mut primary_ctor_visibility_span = None;
         if self.primary_constructor_header_follows() {
             self.skip_newlines();
             ctor_open_offset = self.tok().span.lo;
             if self.at(TokenKind::At) || self.at_modifier() {
+                let prefix_start = self.i;
                 let ctor_mods = self.skip_decl_prefix();
+                primary_ctor_visibility_span = self.t[prefix_start..self.i]
+                    .iter()
+                    .find(|token| {
+                        token.kind == TokenKind::Ident
+                            && matches!(
+                                token.text(self.src),
+                                "private" | "protected" | "internal" | "public"
+                            )
+                    })
+                    .map(|token| token.span);
                 // The declared constructor visibility survives into `@Metadata` (and, for
                 // `protected`, the JVM `<init>` access flags).
                 primary_ctor_visibility = visibility_of(&ctor_mods);
@@ -3129,6 +3143,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             name_span,
             primary_ctor_visibility,
+            primary_ctor_visibility_span,
             name,
             visibility: Visibility::Public,
             annotations,
@@ -3502,6 +3517,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             name_span,
             primary_ctor_visibility: Visibility::Public,
+            primary_ctor_visibility_span: None,
             name,
             visibility: Visibility::Public,
             annotations,
@@ -3620,6 +3636,7 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         let synth = ClassDecl {
             primary_ctor_visibility: Visibility::Public,
+            primary_ctor_visibility_span: None,
             name: name.clone(),
             name_span: span,
             visibility: Visibility::Public,
@@ -3754,6 +3771,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             name_span,
             primary_ctor_visibility: Visibility::Public,
+            primary_ctor_visibility_span: None,
             name,
             visibility: Visibility::Public,
             annotations,
@@ -4208,8 +4226,16 @@ impl<'a> Parser<'a> {
         let mut trailing = None;
         if let Some(&last) = stmts.last() {
             if let Stmt::Expr(e) = self.file.stmt(last) {
-                trailing = Some(*e);
+                let e = *e;
+                trailing = Some(e);
                 stmts.pop();
+                // The statement's annotations (`@Suppress("NAME") call()`) annotate the value.
+                if let Some(mut annotations) = self.file.statement_annotations.remove(&last) {
+                    if let Some(own) = self.file.expression_annotations.remove(&e) {
+                        annotations.extend(own);
+                    }
+                    self.file.expression_annotations.insert(e, annotations);
+                }
             }
         }
         self.file

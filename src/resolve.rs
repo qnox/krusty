@@ -54,6 +54,7 @@ mod anonymous_receiver_labels;
 mod applied_hierarchy;
 mod checked_annotation_publication;
 mod checked_constant_publication;
+pub(crate) mod data_class_copy_visibility;
 pub(crate) mod operator_override_relations;
 pub(crate) use actualization_names::actualization_type_bindings;
 #[cfg(test)]
@@ -1081,26 +1082,26 @@ impl MemberExtFunSig {
     }
 }
 
-/// Bit-packed boolean modifiers for a [`ClassSig`]. The eight per-class flags below each cost a full
-/// byte as a separate `bool` field (plus struct padding); collapsed into one `u8` they save several
+/// Bit-packed boolean modifiers for a [`ClassSig`]. The per-class flags below each cost a full
+/// byte as a separate `bool` field (plus struct padding); collapsed into one `u16` they save several
 /// bytes per sig, and the compiler builds a few thousand. Built with the `with_*` chain from
-/// [`ClassFlags::default`]; read through the `ClassSig::is_*` / `has_*` accessors. All eight bits are
-/// in use — a ninth flag needs a wider field.
+/// [`ClassFlags::default`]; read through the `ClassSig::is_*` / `has_*` accessors.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ClassFlags(u8);
+pub struct ClassFlags(u16);
 
 impl ClassFlags {
-    const INTERFACE: u8 = 1 << 0;
-    const OBJECT: u8 = 1 << 1;
-    const ABSTRACT: u8 = 1 << 2;
-    const FUN_INTERFACE: u8 = 1 << 3;
-    const SEALED: u8 = 1 << 4;
-    const FINAL: u8 = 1 << 5;
-    const HAS_ABSTRACT_MEMBERS: u8 = 1 << 6;
-    const ANNOTATION: u8 = 1 << 7;
+    const INTERFACE: u16 = 1 << 0;
+    const OBJECT: u16 = 1 << 1;
+    const ABSTRACT: u16 = 1 << 2;
+    const FUN_INTERFACE: u16 = 1 << 3;
+    const SEALED: u16 = 1 << 4;
+    const FINAL: u16 = 1 << 5;
+    const HAS_ABSTRACT_MEMBERS: u16 = 1 << 6;
+    const ANNOTATION: u16 = 1 << 7;
+    const DATA: u16 = 1 << 8;
 
     #[inline]
-    const fn with(mut self, mask: u8, on: bool) -> Self {
+    const fn with(mut self, mask: u16, on: bool) -> Self {
         if on {
             self.0 |= mask;
         } else {
@@ -1109,7 +1110,7 @@ impl ClassFlags {
         self
     }
     #[inline]
-    const fn has(self, mask: u8) -> bool {
+    const fn has(self, mask: u16) -> bool {
         self.0 & mask != 0
     }
 
@@ -1145,6 +1146,10 @@ impl ClassFlags {
     pub const fn with_annotation(self, on: bool) -> Self {
         self.with(Self::ANNOTATION, on)
     }
+    #[inline]
+    pub const fn with_data(self, on: bool) -> Self {
+        self.with(Self::DATA, on)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1169,6 +1174,7 @@ fn source_class_flags(class: &ClassDecl) -> ClassFlags {
                 || class.body_props.iter().any(|property| property.is_abstract),
         )
         .with_annotation(class.is_annotation())
+        .with_data(class.is_data)
 }
 
 /// Classifier flags read from the compact Pass-1 declaration inventory.
@@ -1203,6 +1209,7 @@ fn streamed_source_class_flags(
         .with_final(flags.has(crate::fir::DeclarationFlags::FINAL))
         .with_has_abstract_members(has_abstract_members)
         .with_annotation(flags.has(crate::fir::DeclarationFlags::ANNOTATION_CLASS))
+        .with_data(flags.has(crate::fir::DeclarationFlags::DATA))
 }
 
 /// Capture the source-level callable inventory before functions and properties are normalized into
@@ -1797,6 +1804,11 @@ impl ClassSig {
     #[inline]
     pub fn is_annotation(&self) -> bool {
         self.flags.has(ClassFlags::ANNOTATION)
+    }
+    /// True for a Kotlin `data class`.
+    #[inline]
+    pub fn is_data(&self) -> bool {
+        self.flags.has(ClassFlags::DATA)
     }
     #[inline]
     pub fn set_is_abstract(&mut self, on: bool) {
@@ -24446,6 +24458,7 @@ val result = object { fun value(): String = captured }
     fn import_test_classifier(alias_target: Option<TypeName>) -> crate::libraries::LibraryType {
         crate::libraries::LibraryType {
             is_kotlin: true,
+            is_data: false,
             access: crate::libraries::ClassifierAccess::Public,
             source_file: None,
             stable_declaration: None,
@@ -27209,6 +27222,7 @@ fun box(): String {
                     };
                 return Some(std::sync::Arc::new(crate::libraries::LibraryType {
                     is_kotlin: true,
+                    is_data: false,
                     access: crate::libraries::ClassifierAccess::Public,
                     source_file: None,
                     stable_declaration: None,
@@ -27339,6 +27353,7 @@ fun box(): String {
                     .collect();
                 std::sync::Arc::new(crate::libraries::LibraryType {
                     is_kotlin: true,
+                    is_data: false,
                     access: crate::libraries::ClassifierAccess::Public,
                     source_file: None,
                     stable_declaration: None,
@@ -40612,6 +40627,7 @@ impl<'a> Checker<'a> {
         if member.is_member_extension() {
             return self.reject_member_extension_reference(expression, &member.name);
         }
+        self.check_data_class_copy_usage(self.member_name_span(expression, &member.name), &member);
         if !type_arguments.is_empty() {
             self.resolved_call_type_args
                 .insert(expression, type_arguments.into_iter().map(Some).collect());
@@ -40684,6 +40700,7 @@ impl<'a> Checker<'a> {
         if member.is_member_extension() {
             return Some(self.reject_member_extension_reference(expression, &member.name));
         }
+        self.check_data_class_copy_usage(self.member_name_span(expression, &member.name), &member);
         self.apply_checked_source_callable_result(receiver, &mut member);
         if member.ret == Ty::Nothing {
             return None;
@@ -48829,6 +48846,7 @@ impl<'a> Checker<'a> {
         if !body_local_class {
             self.check_bodyless_operator_declarations(scope, cl, d, current_owner);
         }
+        self.check_data_class_copy_visibility(scope, cl);
         for m in &cl.methods {
             if m.is_abstract() && !matches!(m.body, FunBody::None) {
                 self.diags.error(
@@ -63682,6 +63700,7 @@ impl<'a> Checker<'a> {
             self.diags.error(self.call_callee_name_span(call), message);
             return Some(Ty::Error);
         }
+        self.check_data_class_copy_usage(self.call_callee_name_span(call), &selected.member);
         self.reject_non_public_api_from_public_inline(
             call,
             Self::is_public_api_for_inline_access(

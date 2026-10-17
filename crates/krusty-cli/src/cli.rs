@@ -707,7 +707,11 @@ mod tests {
     /// one of them is a feature krusty does not model; every supported release has such a feature.
     #[test]
     fn progressive_is_refused_while_it_turns_on_an_unmodeled_feature() {
-        for release in ["2.4.0", "2.4.10", "2.4.20"] {
+        for (release, feature) in [
+            ("2.4.0", "ReportTypeVarianceConflictsInDnnAndFlexible"),
+            ("2.4.10", "ReportTypeVarianceConflictsInDnnAndFlexible"),
+            ("2.4.20", "ReportDeprecationsOfClassifiersInImplicitInvokes"),
+        ] {
             let o = parse_args(&[
                 &format!("-Xkotlin-reference-version={release}"),
                 "-progressive",
@@ -715,7 +719,7 @@ mod tests {
             ]);
             assert_eq!(
                 o.errors,
-                ["krusty does not implement the language feature 'ErrorAboutDataClassCopyVisibilityChange' selected by '-progressive'".to_string()],
+                [format!("krusty does not implement the language feature '{feature}' selected by '-progressive'")],
                 "kotlinc {release}"
             );
         }
