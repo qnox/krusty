@@ -48,7 +48,9 @@ use crate::jvm::{
     bytecode_passes::insn_list::EditableMethod,
 };
 
-pub(crate) use anonymous_object::{regenerate, CallSite, Regeneration, RegenerationError};
+pub(crate) use anonymous_object::{
+    copy_sam_wrapper, regenerate, CallSite, Regeneration, RegenerationError,
+};
 pub(crate) use callee_shape::{
     can_inline_arguments_in_place, constructs_anonymous_object, in_place_arguments_begin_at_entry,
     requires_empty_stack_on_entry, unsupported_shape, UnsupportedShape,

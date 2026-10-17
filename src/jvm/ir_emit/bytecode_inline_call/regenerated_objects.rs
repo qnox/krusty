@@ -10,9 +10,10 @@ use super::*;
 use crate::backend::BackendClassifierSource;
 use crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors;
 use crate::jvm::class_node::ClassNode;
+use crate::jvm::classfile::ACC_SYNTHETIC;
 use crate::jvm::inliner::{
-    regenerate, AnonymousObjects, CallSite, ClassNameGenerators, InlineError, ObjectLambda,
-    RegeneratedObject, Regeneration, RegenerationError,
+    copy_sam_wrapper, regenerate, AnonymousObjects, CallSite, ClassNameGenerators, InlineError,
+    ObjectLambda, RegeneratedObject, Regeneration, RegenerationError,
 };
 use crate::jvm::ir_emit::JvmSignatureFormatter;
 use crate::jvm::reified_arguments::ReifiedArguments;
@@ -240,6 +241,26 @@ impl AnonymousObjects for CallObjects<'_> {
             scratch = generators.clone();
             &mut scratch
         };
+        // A SAM wrapper, the one synthetic class kotlinc copies, is replayed under the calling
+        // class's name once and shared by that class's inline calls.
+        if original.access & ACC_SYNTHETIC != 0 {
+            let (new_class, first) = generators
+                .sam_wrapper(&self.owner, class)
+                .ok_or(unsupported("a SAM wrapper without its name segment"))?;
+            let bytes =
+                copy_sam_wrapper(&original, &new_class).map_err(InlineError::Regeneration)?;
+            if self.commit && first {
+                self.run
+                    .machine_classes
+                    .borrow_mut()
+                    .push((new_class.clone(), bytes));
+            }
+            return Ok(RegeneratedObject {
+                name: new_class,
+                constructor_desc: constructor_desc.to_string(),
+                reified_parameters_remain: false,
+            });
+        }
         let kotlin_name = (!site.special).then_some(site.function.as_str());
         let new_class = generators
             .for_function(&self.owner, kotlin_name)
