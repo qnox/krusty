@@ -823,13 +823,16 @@ pub(super) fn emit_class_static_initializer(
     byte_parity: bool,
     cw: &mut ClassWriter,
 ) {
-    let clinit_statics: Vec<(u32, &crate::ir::IrStatic, crate::ir::ExprId)> = ir
+    let mut clinit_statics: Vec<(u32, &crate::ir::IrStatic, crate::ir::ExprId)> = ir
         .statics
         .iter()
         .enumerate()
         .filter(|(_, s)| s.owner_matches(fq_name))
         .filter_map(|(index, s)| Some((index as u32, s, clinit_initializer(ir, s)?)))
         .collect();
+    // Generated statics (no source position) initialize after the declared ones, whatever order
+    // the passes created them in.
+    clinit_statics.sort_by_key(|&(_, s, _)| s.source_order == u32::MAX);
     if c.companion_class.is_some()
         || !clinit_statics.is_empty()
         || delegated_property_array::exists(env, c.fq_name)
@@ -886,6 +889,8 @@ pub(super) fn emit_class_static_initializer(
         // Every hoisted-property store gets an entry at its pc, mapping to the property's
         // declaration line in the COMPANION source. The `Companion` construction itself has no
         // entry.
+        // A generated static that ends the initializer returns on its declaration's last line.
+        let mut closing_line = None;
         for &(static_index, s, _) in &clinit_statics {
             let Some(init) = stored_clinit_initializer(ir, s) else {
                 continue;
@@ -902,13 +907,22 @@ pub(super) fn emit_class_static_initializer(
             } else {
                 s.line
             };
-            if line != 0 {
+            if line != 0 && clinit_lines.last().map(|&(_, last)| last) != Some(line) {
                 clinit_lines.push((pc, line));
             }
             e.emit_static_initializer_store(fq_name, static_index, init, &mut clinit);
+            closing_line = (s.source_order == u32::MAX)
+                .then_some(s.accessor_lines.declaration_end)
+                .filter(|&end| end != 0);
         }
         if let Some(body) = companion_initializer {
             e.emit_companion_clinit_body(c, fq_name, body, &mut clinit, &mut clinit_lines);
+            closing_line = None;
+        }
+        if let Some(end) =
+            closing_line.filter(|&end| clinit_lines.last().is_some_and(|&(_, last)| last != end))
+        {
+            clinit_lines.push((clinit.bytes.len() as u16, end));
         }
         clinit.ret_void();
         clinit.ensure_locals(e.frame.max());

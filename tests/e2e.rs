@@ -2233,6 +2233,8 @@ mod deprecation_classpath_e2e;
 mod deprecation_usage_e2e;
 #[path = "extension_receiver_specificity_e2e.rs"]
 mod extension_receiver_specificity_e2e;
+#[path = "generic_serializable_class_e2e.rs"]
+mod generic_serializable_class_e2e;
 #[path = "int_when_switch_e2e.rs"]
 mod int_when_switch_e2e;
 #[path = "library_function_reference_class_e2e.rs"]

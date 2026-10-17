@@ -31,6 +31,7 @@ pub(super) fn add_cached_descriptor(
     owner: TypeName,
     serial_name: KtString,
     elements: &[(KtString, bool)],
+    (line, end_line): (u32, u32),
 ) -> u32 {
     let descriptor_ty = class_ty("kotlinx/serialization/descriptors/SerialDescriptor");
     let implementation_ty =
@@ -90,8 +91,13 @@ pub(super) fn add_cached_descriptor(
         setter_jvm_name: None,
         erased_declared_ty: None,
         accessors: crate::ir::IrStaticAccessors::ABSENT,
-        line: 0,
-        accessor_lines: crate::ir::IrAccessorLines::default(),
+        // kotlinc builds the descriptor in the companion's initializer: the store opens on the
+        // companion's first line and the class initializer returns on its last.
+        line,
+        accessor_lines: crate::ir::IrAccessorLines {
+            declaration_end: end_line,
+            ..Default::default()
+        },
         source_order: u32::MAX,
         property_delegate: false,
     });

@@ -91,14 +91,15 @@ pub(super) fn child_cache_element_plan(
         return Ok(None);
     };
     // kotlinc caches every element whose serializer is a constructed instance rather than a
-    // singleton: a standard serializer's, an enum's, an object's `ObjectSerializer`, or an
-    // external companion's accessor.
+    // singleton: a standard serializer's, an enum's, an object's `ObjectSerializer`, a generic
+    // class's generated serializer, or an external companion's accessor.
     let cacheable = constructed_standard_serializer(classifier).is_some()
         || ir
             .classes
             .iter()
             .any(|class| class.fq_name_id() == classifier && class.is_enum)
         || super::cached_serializer::local_serializable_object(ir, ctx, classifier).is_some()
+        || super::cached_serializer::local_generic_serializable_class(ir, ctx, classifier)
         || constructs_custom_serializer(ir, classifier)
         || matches!(
             ctx.external_serializer(classifier),

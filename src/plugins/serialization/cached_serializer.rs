@@ -176,6 +176,26 @@ pub(super) fn local_serializable_object(
     .then_some(class_id)
 }
 
+/// A generic `@Serializable` class declared in this file with its generated serializer: an element
+/// typed by it constructs that serializer class from the type arguments' serializers
+/// (`new G$$serializer(IntSerializer.INSTANCE)`), where a non-generic class reads a singleton.
+pub(super) fn local_generic_serializable_class(
+    ir: &IrFile,
+    ctx: &crate::plugins::PluginContext,
+    classifier: TypeName,
+) -> bool {
+    ir.classes
+        .iter()
+        .position(|class| {
+            class.fq_name_id() == classifier && !class.is_object && !class.type_params.is_empty()
+        })
+        .is_some_and(|index| {
+            let class_id = index as ClassId;
+            ctx.has_annotation(class_id, type_name(super::SERIALIZABLE_FQ))
+                && super::custom_serializer_of(ctx, ir, class_id).is_none()
+        })
+}
+
 /// A `@Serializable object`: `serializer()` is a member of the object returning the cached
 /// `ObjectSerializer`, through a private `get$cachedSerializer()` that reads the delegate.
 pub(super) fn add_object_serializer(
