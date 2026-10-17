@@ -132,6 +132,7 @@ mod implicit_receiver_calls;
 mod implicit_rungs;
 mod inline_access;
 mod inner_constructor_calls;
+mod nested_producer_bindings;
 use inner_constructor_calls::BoundInnerConstruction;
 mod import_diagnostics;
 mod inspection_analysis;
@@ -20499,26 +20500,24 @@ impl<'a> Checker<'a> {
                     {
                         return Ty::Error;
                     }
-                    let postponed_reference_mark =
-                        matches!(self.file.expr(a), Expr::CallableRef { .. })
-                            .then(|| {
-                                let shape = selected_lambda_shape?;
-                                let declared = *shape.argument_parameters.get(i)?;
-                                shape
-                                    .generic_formals
-                                    .iter()
-                                    .any(|formal| {
-                                        !known_generic_bindings.contains_key(formal)
-                                            && ty_mentions_param(
-                                                declared,
-                                                std::slice::from_ref(formal),
-                                            )
-                                    })
-                                    .then_some(self.diags.diags.len())
-                            })
-                            .flatten();
+                    // A callable reference whose parameter still mentions an open formal, or a
+                    // nested call typed before any candidate supplies its parameter, is a probe:
+                    // the selected candidate re-checks it, and only that verdict stands.
+                    let probe = match self.file.expr(a) {
+                        Expr::CallableRef { .. } => selected_lambda_shape
+                            .and_then(|shape| Some((shape, *shape.argument_parameters.get(i)?)))
+                            .is_some_and(|(shape, declared)| {
+                                shape.generic_formals.iter().any(|formal| {
+                                    !known_generic_bindings.contains_key(formal)
+                                        && ty_mentions_param(declared, std::slice::from_ref(formal))
+                                })
+                            }),
+                        Expr::Call { .. } => known_sig.is_none(),
+                        _ => false,
+                    };
+                    let probe_mark = probe.then_some(self.diags.diags.len());
                     let checked = self.expr(scope, a);
-                    if let Some(mark) = postponed_reference_mark {
+                    if let Some(mark) = probe_mark {
                         self.postponed_diagnostics
                             .capture_since(a, self.diags, mark);
                     }
@@ -39154,6 +39153,20 @@ impl<'a> Checker<'a> {
                 let Some(&declared_parameter) = signature.params.get(parameter) else {
                     continue;
                 };
+                let declared_parameter = if candidate.call_sig.vararg_index == Some(parameter)
+                    && !self.file.is_spread_arg(args[argument])
+                {
+                    declared_parameter
+                        .array_read_elem()
+                        .unwrap_or(declared_parameter)
+                } else {
+                    declared_parameter
+                };
+                let open_formal = nested_producer_bindings::open_variable(
+                    &signature,
+                    type_args,
+                    declared_parameter,
+                );
                 let substituted =
                     crate::symbol_resolver::ty_subst_keep_unbound(declared_parameter, &bindings);
                 let nested_expected = match substituted {
@@ -39197,44 +39210,32 @@ impl<'a> Checker<'a> {
                         None if nested_expected.mentions_ty_param() => {
                             crate::symbol_resolver::unconstrained_result_bindings(&generic_sig)
                         }
+                        // An outer variable typed only by another argument's lower bound is not
+                        // fixed yet: the nested result becomes a second lower bound, and the
+                        // variable their common supertype.
+                        None if open_formal.is_some() => {
+                            let upper = open_formal.and_then(|formal| {
+                                expected_result_bindings.as_ref()?.get(formal).copied()
+                            });
+                            match nested_producer_bindings::open_variable_bindings(
+                                &source,
+                                &generic_sig,
+                                nested_expected,
+                                upper,
+                                |actual, bound| self.receiver_is_assignable(actual, bound),
+                            ) {
+                                Some(bindings) => bindings,
+                                None => continue,
+                            }
+                        }
                         None => continue,
                     }
                 };
-                // A symbolic outer expectation may bind the nested producer's formal directly to
-                // an outer call variable. That relation is valid only when the OUTER variable's
-                // own upper bound satisfies the nested declaration's bound. For
-                // `<Y : Any> produce(): Box<Y>` passed to `<X> consume(Box<X>)`, `Y = X` is not a
-                // solution while `X` still has its default `Any?` bound; the producer contributes
-                // its denotable `Any` bound and thereby constrains `X` to non-null. Enforce that
-                // declaration bound before projecting the nested result into the outer call.
-                for (index, formal) in generic_sig.formals.iter().enumerate() {
-                    let Some(actual) = nested_bindings.get(formal).copied() else {
-                        continue;
-                    };
-                    let Some(actual_bound) = actual.non_null().ty_param_bound() else {
-                        continue;
-                    };
-                    let Some(required) = generic_sig
-                        .formal_bounds
-                        .get(index)
-                        .and_then(|bounds| bounds.first())
-                        .copied()
-                        .filter(|bound| {
-                            !generic_sig.formals.iter().any(|nested| {
-                                crate::types::ty_mentions_param(
-                                    *bound,
-                                    std::slice::from_ref(nested),
-                                )
-                            })
-                        })
-                    else {
-                        continue;
-                    };
-                    if actual.is_nullable() || !self.receiver_is_assignable(actual_bound, required)
-                    {
-                        nested_bindings.insert(formal.clone(), required);
-                    }
-                }
+                nested_producer_bindings::enforce_declared_bounds(
+                    &generic_sig,
+                    &mut nested_bindings,
+                    |actual, bound| self.receiver_is_assignable(actual, bound),
+                );
                 crate::trace_compiler!(
                     "resolve",
                     "postponed argument call={call:?} parameter={parameter} nested_bindings={nested_bindings:?}",
@@ -39260,6 +39261,16 @@ impl<'a> Checker<'a> {
                 // solution here; its readable upper is a bound, not a concrete outer binding.
                 for formal in nested_constraints.upper_only {
                     inferred_nested.entry(formal).or_insert(Ty::Nothing);
+                }
+                // The producer's result is a lower bound for a bare outer variable.
+                if open_formal.is_some() {
+                    nested_producer_bindings::join_lower_bounds(
+                        &source,
+                        &signature,
+                        &receiver_bindings,
+                        &mut bindings,
+                        &mut inferred_nested,
+                    );
                 }
                 crate::trace_compiler!(
                     "resolve",

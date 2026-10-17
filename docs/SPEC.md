@@ -105,6 +105,9 @@ Phase 6 adds a minimal Java *source* front end for mixed compilation.
 
 Integer literals participate in overload applicability using the candidate parameter types. An
 exact `Int` parameter wins over adaptation to `Long`; non-literal `Int` values are not adapted.
+A literal is an input occurrence of a nullable `@OnlyInputTypes` solution as well:
+`ids.contains(2001)` with `ids: Iterable<Long?>` solves `T := Long?` and passes a `Long`
+(`tests/only_input_integer_literal_e2e.rs`).
 Public static fields are valid class-qualified property reads, including in inferred property
 initializers.
 
@@ -2313,7 +2316,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   typed `invoke`, and before the erased bridge, local functions first, then lambdas with each nested
   lambda before its enclosing one. A lambda an inline call splices is no closure and stays in the
   body. The names apply only to a lambda realized as its class; one that keeps the lifted-function
-  path keeps the names it had (`tests/suspend_lambda_nested_declarations_e2e.rs`).
+  path keeps the names it had (`tests/suspend_lambda_nested_declarations_e2e.rs`). Calls to a
+  local function of a class member's suspend lambda were lowered as static calls on the member's
+  class; they follow the function into the lambda class, so the member's class gets no
+  `access$invokeSuspend$twice` bridge to a method it does not have
+  (`tests/suspend_lambda_local_function_e2e.rs`).
 - **Internal instance members are public and named `name$<module>`.** An `internal` method or
   property accessor is `ACC_PUBLIC` in bytecode, with `$` and the compilation's module name
   appended. The module is sanitized by keeping letters, digits, and `_` and turning every other
@@ -3105,6 +3112,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the parameter at that slot (and it mentions no open formal), that parameter is the argument's
   expectation and the call is re-evaluated under it before selection. Test:
   `streaming_signature_tests::a_member_call_hands_its_parameter_to_a_nested_generic_call_in_pass_one`.
+- **A nested call probed before the outer call selects is not a verdict.** With no single
+  declared signature to read ahead (a member on an implicit receiver, or an overloaded top-level
+  function), `instance(mapOf("m" to emptyList()))` types its argument with no expectation. That
+  probe cannot infer `mapOf`'s `K`/`V`, and reported `argument type mismatch: actual type is
+  'Pair<String, V>', but 'Pair<K, V>' was expected.` although the selected candidate then re-checks
+  the argument under `Map<String, List<Cfg>>` and it is fine; kotlinc accepts the call. Such a probe's
+  diagnostics are now held under the argument and dropped when the selected candidate re-checks it
+  with its parameter, as callable-reference probes already were; a probe that is never re-checked
+  keeps its diagnostics. Tests: `probe_argument_call_e2e::a_nested_generic_argument_takes_the_selected_parameter`,
+  `probe_argument_call_e2e::the_selected_parameter_still_reports_a_real_mismatch`.
 - **A postponed lambda body is checked under the expected return type.** Signature inference
   materializes `{ HashMap() }` / `{ mutableMapOf() }` / `{ if (c) ArrayList() else ArrayList() }`
   only after the surrounding call has a function type for that argument (`() -> T` on
@@ -3298,6 +3315,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `MutableList<Frame<*>>` argument. Tests: `tests/classpath_star_projection_bound_e2e.rs` (run
   against krusty- and kotlinc-built dependencies; classes byte-identical to kotlinc's) and
   `a_star_projection_contains_every_argument_whatever_bound_it_carries` in `src/assignable.rs`.
+- **A platform-typed implicit receiver exposes its members.** In
+  `KeyPairGenerator.getInstance("RSA").apply { initialize(1024) }` the `apply` receiver is the
+  flexible `KeyPairGenerator!`. A bare `initialize` selects the member exactly as
+  `this.initialize` does; the flexible type is usable as its non-null bound for member calls through
+  an implicit receiver, as it is on an explicit one. Test:
+  `tests/platform_implicit_receiver_member_e2e.rs`.
+
 - **A lexical local or parameter beats an implicit receiver's member of the same name, even a
   receiver introduced inside its scope.** `val headers = authHeaders(); client.get(url) {
   headers.forEach { (k, v) -> header(k, v) } }` reads the local map, not
@@ -3380,7 +3404,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (six more in a main set). The extractor now (1) rebinds every name asserted `x!!` in a statement
   — outside lambdas — to its non-null value for the rest of the block, including the trailing
   expression; (2) takes an argument spelled `x != null` as a contract candidate whose proof is a
-  `returns() implies actual` effect (`ContractNarrowed { condition: true }`); (3) narrows the
+  `returns() implies actual` effect (`ContractNarrowed { condition: true }`), and so is every
+  `x != null` conjunct of an `&&` condition (`require(a != null && b != null && …)` narrows
+  both; `tests/contract_conjunct_null_checks_e2e.rs`); (3) narrows the
   safe-call receiver of `x?.p == literal` / `x?.p != null` on the true edge of an `if`. The body
   check gained the `x?.p == literal` form too (it had `!= null` only), through the same
   `null_check_narrowings` proof. The `x!!` and `assertTrue` shapes are byte-identical to kotlinc;
@@ -9701,6 +9727,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   argument would fix the outer result to `Any`. Test:
   `tests/nested_concrete_argument_inference_e2e.rs`.
 
+- **A nested producer is one more lower bound for an outer variable that another argument
+  already bound.** `fun <T> same(actual: T, expected: T): T` called as
+  `same(list, emptyList())` with `list: MutableList<String>` gives `T` the lower bound
+  `MutableList<String>` from the first argument. `emptyList<E>(): List<E>` cannot equal that type,
+  so the producer is solved against the `List` supertype of the existing bound (`E = String`), and
+  `T` becomes the common supertype of both lower bounds, `List<String>`, matching kotlinc. The
+  same applies to `T?` parameters and extension receivers (`values shouldBe emptyList()`). An
+  explicit type argument fixes the variable instead, and then the producer is checked against it.
+  When the expected result also bounds the variable from above, the producer is solved under that
+  bound first: `listOf(real, Unimpl("x"))` expected as `List<Provider<Builder>>`, with
+  `real: Provider<Builder>` and `class Unimpl<T> : Provider<T>`, solves `Unimpl<Builder>`, and the
+  element type joins to `Provider<Builder>`. A `vararg` parameter relates each producer to its
+  element type, not to the array.
+  Only lower-bound evidence joins: a binding the extension receiver supplied through
+  `Sink<in T>` is an upper bound, so `sink.take(producer())` with `sink: Sink<Collection<Any>>`
+  and expected `List<Any>` keeps `T = List<Any>` rather than widening it to `Collection<Any>`.
+  Because `T` is the join, `val joined = same(list, emptyList())` has type `List<String>`, and
+  assigning `joined` to a `MutableList<String>` is an initializer type mismatch. Test:
+  `tests/nested_producer_lower_bound_inference_e2e.rs`.
+
 - **A Java constructor infers the class's type parameters, and an invariant expected result
   fixes them.** A JVM constructor `Signature` names only type parameters the constructor itself
   declares (`(TV;)V` has none) and returns `void`. The constructed classifier's type parameters
@@ -15053,6 +15099,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/type_parameter_nullability_annotations_e2e.rs`. Corpus:
   `inlineClasses/hiddenConstructor/delegatingSuperConstructorCallInSecondaryConstructorGeneric.kt`
   (annotations; its private constructor's line table is a separate gap).
+
+  A property TYPED by a value class is annotated by that declared type, not by the carrier its
+  backing field stores. `val b: N` over `value class N(val s: String?)` stores a `String?` and
+  `val a: Boxed<String>` stores the `Object` that `T` erases to, yet the field, the getter, a
+  `var`'s setter, and a data class's `copy` parameter and `componentN` are all `@NotNull`, as in
+  kotlinc. The field's descriptor still decides whether the position is a reference at all
+  (`val i: I` over `Int` stores an `int` and has no annotation). The parameter guards and the
+  constructor line table keep classifying the stored type: `N` admits null, so kotlinc emits no
+  `checkNotNullParameter` for it, a top-level `var`'s setter included. The same holds for a
+  top-level property's facade field, a named object's and an enum's fields, and a companion
+  property hoisted onto its outer class. An explicit backing field (`val x: Any? field: String`)
+  declares its own type, so its field keeps that type's annotation. Tests:
+  `tests/nullable_value_class_nullability_e2e.rs`.
 
 - **A `try` and a `return` own their own `LineNumberTable` entries.** Four rules, each measured
   against the reference compiler and each previously absent, so a debugger stepping through a
