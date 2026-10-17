@@ -21,6 +21,23 @@ pub(super) fn nullable_generic_actual(actual: Ty) -> Ty {
     }
 }
 
+/// Read one whole value argument against a parameter that is exactly a flexible type variable.
+///
+/// Kotlin reduces `Foo? <: T!` to `Foo? <: T`, so a nullable argument fixes `T` to that nullable
+/// type instead of contributing the definitely-non-null lower face used by an ordinary flexible
+/// shape. Nested flexible variables remain part of their enclosing structural constraint and do
+/// not enter this root-only rule.
+pub(super) fn flexible_variable_argument(shape: Ty, actual: Ty) -> Option<(Ty, Ty)> {
+    let Ty::PlatformNullable(&variable @ Ty::TyParam(..)) = shape else {
+        return None;
+    };
+    match actual {
+        Ty::Null => Some((variable, Ty::nullable(Ty::Nothing))),
+        Ty::Nullable(_) => Some((variable, actual)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,5 +89,22 @@ mod tests {
             nullable_generic_actual(Ty::nullable(Ty::Nothing)),
             Ty::Nothing
         );
+    }
+
+    #[test]
+    fn a_nullable_argument_fixes_a_root_flexible_variable_as_nullable() {
+        let variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
+        let shape = Ty::platform_nullable(variable);
+        let nullable = Ty::nullable(Ty::String);
+
+        assert_eq!(
+            flexible_variable_argument(shape, nullable),
+            Some((variable, nullable))
+        );
+        assert_eq!(
+            flexible_variable_argument(shape, Ty::Null),
+            Some((variable, Ty::nullable(Ty::Nothing)))
+        );
+        assert_eq!(flexible_variable_argument(shape, Ty::String), None);
     }
 }

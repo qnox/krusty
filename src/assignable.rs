@@ -264,6 +264,14 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
         return matches!(sup, Ty::Nullable(_)) || sup == Ty::Null;
     }
     if let Ty::Nullable(inner) = sup {
+        // `X? <: Y?` compares the non-null face of `X` against the nullable target. Stripping the
+        // target's mark as well would reject a symbolic `X : Any?` from `Any?`, even though the
+        // complete nullable occurrence is valid. This is the relation used when a nullable value
+        // fixes a flexible Java variable (`Foo? <: T!`) and that solution is checked against T's
+        // nullable upper bound.
+        if let Ty::Nullable(sub_inner) = sub {
+            return assignable_inner(cx, oracle, *sub_inner, sup);
+        }
         // A symbolic source has the nullability of its upper bound. Follow that bound before
         // stripping the target's `?`: `<T : Any?>` is a subtype of `Any?` (and therefore fits a
         // star projection), but is not a subtype of non-null `Any`. Preserve the direct `T <: T?`
@@ -711,6 +719,7 @@ mod tests {
         let parameter = Ty::ty_param("T", Ty::nullable(s("kotlin/Any")));
         assert!(ok(parameter, Ty::nullable(parameter)));
         assert!(ok(parameter, Ty::nullable(s("kotlin/Any"))));
+        assert!(ok(Ty::nullable(parameter), Ty::nullable(s("kotlin/Any"))));
         assert!(!ok(parameter, s("kotlin/Any")));
         assert!(!ok(Ty::nullable(parameter), parameter));
     }

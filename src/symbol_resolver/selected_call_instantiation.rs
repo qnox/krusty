@@ -178,7 +178,16 @@ impl<'a> SymbolResolver<'a> {
         );
         let params = value_params
             .iter()
-            .map(|parameter| ty_subst_keep_unbound(*parameter, &bindings))
+            .map(|parameter| {
+                instantiate_slot(
+                    &self.src,
+                    Some(&semantic),
+                    *parameter,
+                    &bindings,
+                    TypePosition::In,
+                    UnboundSpecialization::Preserve,
+                )
+            })
             .collect::<Vec<_>>();
         let applied_receiver = match receiver.non_null() {
             Ty::Obj(owner, arguments) => self
@@ -222,7 +231,14 @@ impl<'a> SymbolResolver<'a> {
             let inferred = if expected_result.is_some() {
                 specialize_final_signature_output_type(&self.src, semantic.ret, &bindings)
             } else {
-                ty_subst_keep_unbound(semantic.ret, &bindings)
+                instantiate_slot(
+                    &self.src,
+                    Some(&semantic),
+                    semantic.ret,
+                    &bindings,
+                    TypePosition::Out,
+                    UnboundSpecialization::Preserve,
+                )
             };
             merge_specialized_return(provider, inferred)
         };

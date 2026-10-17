@@ -3,7 +3,7 @@
 use super::*;
 
 mod nullable_actual;
-use nullable_actual::nullable_generic_actual;
+use nullable_actual::{flexible_variable_argument, nullable_generic_actual};
 mod bound_relations;
 mod call_constraints;
 mod call_site_variables;
@@ -565,6 +565,7 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
 }
 
 pub(crate) fn unify_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {
+    let (sig, actual) = flexible_variable_argument(sig, actual).unwrap_or((sig, actual));
     unify_ty_impl(None, sig, actual, binds);
 }
 
@@ -582,6 +583,7 @@ pub(crate) fn unify_ty_from_symbols(
     } else {
         sig
     };
+    let (sig, actual) = flexible_variable_argument(sig, actual).unwrap_or((sig, actual));
     unify_ty_impl(Some(source), sig, actual, binds);
 }
 
@@ -1353,7 +1355,7 @@ pub(crate) fn merge_inferred_lower_bounds_from_symbols(
 }
 
 pub(crate) fn unify_inferred_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {
-    unify_inferred_ty_impl(None, sig, actual, binds);
+    unify_inferred_root(None, sig, actual, binds);
 }
 
 pub(crate) fn unify_inferred_ty_with_source(
@@ -1362,7 +1364,20 @@ pub(crate) fn unify_inferred_ty_with_source(
     actual: Ty,
     binds: &mut GSigBinds,
 ) {
-    unify_inferred_ty_impl(Some(source), sig, actual, binds);
+    unify_inferred_root(Some(source), sig, actual, binds);
+}
+
+/// Unify one complete receiver or value-parameter position. A root flexible variable has a
+/// distinct nullable-argument rule; recursive structural positions keep ordinary flexible
+/// constraint collection.
+fn unify_inferred_root(
+    source: Option<&dyn SymbolSource>,
+    sig: Ty,
+    actual: Ty,
+    binds: &mut GSigBinds,
+) {
+    let (sig, actual) = flexible_variable_argument(sig, actual).unwrap_or((sig, actual));
+    unify_inferred_ty_impl(source, sig, actual, binds);
 }
 
 pub(crate) fn infer_generic_bindings(
@@ -1506,7 +1521,16 @@ pub(crate) fn specialize_typed_call_signature(
     let parameters = signature
         .params
         .iter()
-        .map(|parameter| ty_subst_keep_unbound(*parameter, &bindings))
+        .map(|parameter| {
+            super::instantiate_slot(
+                source,
+                Some(signature),
+                *parameter,
+                &bindings,
+                super::TypePosition::In,
+                super::UnboundSpecialization::Preserve,
+            )
+        })
         .collect::<Vec<_>>();
     if !parameters
         .iter()
@@ -1515,7 +1539,17 @@ pub(crate) fn specialize_typed_call_signature(
     {
         return None;
     }
-    Some((parameters, ty_subst_keep_unbound(signature.ret, &bindings)))
+    Some((
+        parameters,
+        super::instantiate_slot(
+            source,
+            Some(signature),
+            signature.ret,
+            &bindings,
+            super::TypePosition::Out,
+            super::UnboundSpecialization::Preserve,
+        ),
+    ))
 }
 
 /// Enforce Kotlin's `@OnlyInputTypes` inference policy for selected declaration formals.

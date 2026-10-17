@@ -2715,6 +2715,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `org.jetbrains.annotations` and `org.checkerframework.checker.nullness.qual`; kotlinc's other
   nullability annotation families are not read yet. Tests: `tests/java_type_use_nullability_e2e.rs`
   (classfile and Java-source APIs, the complete diagnostics against kotlinc).
+- **A Java type-variable occurrence is flexible, and a declaration inferred from it publishes the
+  flexible type.** FIR's Java type mapping gives `List<T>` the argument `T!`, so the classfile
+  provider normalizes every Java type-variable occurrence to `T!` (its bound flexible too).
+  Selected-slot instantiation follows kotlinc's flexible bounds: `T!` with `X` is `X!`, and with a
+  nullable `X?` it is the rigid `X?` (both bounds nullable). `Collections.singletonList(x)` with
+  `x: X` is therefore `(Mutable)List<X!>!`, and inferred declarations publish that flexible type in
+  `@Metadata`: the lower bound `MutableList<X!>`, the nullable read-only upper bound `List<X!>?`,
+  and the capability `kotlin.jvm.PlatformType`, interned in kotlinc's order (lower, upper,
+  capability). A flexible result fixes no nullability, so the method carries neither `@NotNull` nor
+  `@Nullable`. The checker records both faces against the stable declaration identity; metadata
+  handoff consumes that declaration-owned contract without reopening the source expression.
+  Tests: `tests/java_platform_type_publication_e2e.rs` (byte-identical vs kotlinc),
+  `metadata::type_encoder::tests::platform_type_encodes_a_nullable_flexible_upper_bound`.
+- **A nullable argument fixes a flexible Java type variable to its nullable type.** kotlinc reduces
+  `Foo? <: T!` to `Foo? <: T` (`simplifyLowerConstraint`), so `fun <E> a(x: E?): List<E> =
+  Collections.singletonList(x)` infers `T := E?` and the result `(Mutable)List<E?>!` no longer fits
+  `List<E>`. A `null` argument constrains `T` with `Nothing?`. `E? <: Any?` holds for a type
+  parameter `E`; nullable sides are compared without stripping the target to non-null `Any`.
+  Krusty applies the inference rule at a parameter's root only: a flexible variable nested in a
+  Java array argument still keeps the surrounding structural inference used by kotlinc.
+  Tests: `tests/java_flexible_variable_inference_e2e.rs` (exact diagnostics, a box run, and
+  byte-identical publication).
+- **A declaration inferred from an enhanced Java value publishes its argument marks.** kotlinc's
+  metadata records `EnhancedNullability` as the type annotation
+  `@kotlin.jvm.internal.EnhancedNullability` on each marked position of a declaration's inferred
+  type. The checker records the selected value's normalized marks against the stable declaration
+  identity, and metadata handoff applies them to the declaration spelling. An inferred property's
+  initializer is also guarded like an inferred local's. A declared result type has no inferred
+  marks. Test:
+  `java_platform_type_publication_e2e::inferred_enhanced_java_results_publish_enhanced_nullability_like_kotlinc`.
 - **A PLATFORM value narrowed to a declared non-null type is guarded where it enters.** A Java value
   arrives as `T!` (`Ty::PlatformNullable`), usable as both `T` and `T?`. Where the source commits it to
   a declared non-null type, kotlinc emits `dup` + `ldc "<expression>"` +
