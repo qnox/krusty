@@ -141,6 +141,62 @@ pub(super) fn declared_member(source: &dyn SymbolSource, member: &LibraryMember)
     .render(source)
 }
 
+/// A selected constructor as its classifier declares it. Selection specializes `params` and
+/// `ret`; the declaration-owned generic signature retains the source type parameters and result.
+pub(super) fn declared_constructor(source: &dyn SymbolSource, member: &LibraryMember) -> String {
+    let signature = member
+        .generic_sig
+        .clone()
+        .unwrap_or_else(|| crate::libraries::GenericSig {
+            formals: Vec::new(),
+            formal_bounds: Vec::new(),
+            receiver: None,
+            params: member.params.clone(),
+            ret: member.ret,
+            return_policy: crate::libraries::GenericReturnPolicy::Exact,
+        });
+    let type_parameters = type_parameters_display(
+        source,
+        signature.formals.iter().enumerate().map(|(index, formal)| {
+            (
+                formal.as_str(),
+                signature
+                    .formal_bounds
+                    .get(index)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+                false,
+            )
+        }),
+    );
+    let type_parameters = type_parameters.trim_end();
+    let parameters = signature
+        .params
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| {
+            let name = member
+                .call_sig
+                .param_names
+                .get(index)
+                .filter(|name| !name.is_empty())
+                .cloned()
+                .unwrap_or_else(|| format!("p{index}"));
+            let default = if member.call_sig.param_defaults.get(index) == Some(&true) {
+                " = ..."
+            } else {
+                ""
+            };
+            format!("{name}: {}{default}", readable_type(source, *ty))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "constructor{type_parameters}({parameters}): {}",
+        readable_type(source, signature.ret)
+    )
+}
+
 struct FunctionDeclarationShape<'a> {
     name: &'a str,
     suspend: bool,

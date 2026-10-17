@@ -107,8 +107,11 @@ pub(in crate::resolve) fn function_callable_message(
     )
 }
 
-pub(in crate::resolve) fn constructor_message(owner: TypeName, member: &LibraryMember) -> String {
-    let params = parameter_display(&member.call_sig, &member.params, 0);
+pub(in crate::resolve) fn constructor_message(
+    source: &dyn SymbolSource,
+    owner: TypeName,
+    member: &LibraryMember,
+) -> String {
     let visibility = match member.visibility {
         crate::types::Visibility::Private => "private",
         crate::types::Visibility::Protected => "protected",
@@ -116,14 +119,9 @@ pub(in crate::resolve) fn constructor_message(owner: TypeName, member: &LibraryM
         crate::types::Visibility::PackagePrivate => "package-private",
         crate::types::Visibility::Public => "public",
     };
-    let declaration = owner
-        .render()
-        .rsplit('/')
-        .next()
-        .unwrap_or_else(|| owner.nested_segment_ref())
-        .replace('$', ".");
     format!(
-        "cannot access 'constructor({params}): {declaration}': it is {visibility} in '{}'.",
+        "cannot access '{}': it is {visibility} in '{}'.",
+        super::super::declaration_rendering::declared_constructor(source, member),
         owner_display(owner),
     )
 }

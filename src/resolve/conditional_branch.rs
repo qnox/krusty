@@ -267,9 +267,12 @@ impl Checker<'_> {
         if self.postponed_argument_depth != 0 {
             return;
         }
+        let discarded = self.discarded_exprs.contains(&branch);
         let branch = branch_value_expression(self.file, branch);
         let Some(signature) = self.unbound_call_result_signature(branch).cloned() else {
-            self.report_uninferred_constructor_type_parameter(branch);
+            if discarded {
+                self.report_uninferred_constructor_type_parameter(branch);
+            }
             return;
         };
         let actual = self.expr_types[branch.0 as usize];

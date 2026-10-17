@@ -60726,7 +60726,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            self.join_conditional_constructor_evidence(
+            self.join_constructor_branches(
                 scope,
                 arm_results.iter().map(|record| (record.body, record.ty)),
             );
@@ -66002,13 +66002,8 @@ impl<'a> Checker<'a> {
         } else {
             None
         };
-        if !self.callable_accessible(member.visibility, internal, member.external_identity)
-            && !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
-        {
-            self.diags.error(
-                self.call_callee_name_span(call),
-                access_control::constructor_message(internal, &member),
-            );
+        let bindings = &member_bindings[candidate_index];
+        if self.reject_ctor_access(call, internal, classifier, &member, bindings.as_ref()) {
             return Ok(LibraryConstructorSelection::Rejected);
         }
         let mut slots = vec![None; member.params.len()];

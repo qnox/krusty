@@ -60,13 +60,37 @@ impl Checker<'_> {
         classifier: &crate::libraries::LibraryType,
         bindings: &crate::symbol_resolver::GSigBinds,
     ) {
+        let evidence = self.library_constructor_evidence(owner, classifier, bindings);
+        self.constructor_formal_evidence.insert(call, evidence);
+    }
+
+    /// Diagnose a selected dependency constructor that cannot be committed because access control
+    /// rejects it. Its inference result is still source-observable, but an access-rejected library
+    /// call must never be published in [`Checker::constructor_formal_evidence`].
+    pub(super) fn report_rejected_library_constructor_evidence(
+        &mut self,
+        call: ExprId,
+        owner: TypeName,
+        classifier: &crate::libraries::LibraryType,
+        bindings: &crate::symbol_resolver::GSigBinds,
+    ) -> bool {
+        let evidence = self.library_constructor_evidence(owner, classifier, bindings);
+        self.report_constructor_evidence(call, evidence)
+    }
+
+    fn library_constructor_evidence(
+        &self,
+        owner: TypeName,
+        classifier: &crate::libraries::LibraryType,
+        bindings: &crate::symbol_resolver::GSigBinds,
+    ) -> CallEvidence {
         let own = classifier.own_type_parameter_count;
         let formals = classifier.type_params().get(..own).unwrap_or_default();
         let bounds = classifier
             .type_param_bounds()
             .get(..own)
             .unwrap_or_default();
-        self.record_constructor_evidence(call, owner, formals, bounds, bindings);
+        Self::constructor_evidence(owner, formals, bounds, bindings)
     }
 
     /// Record the evidence of a constructor call of `owner` whose own `formals` inferred `bindings`.
@@ -78,26 +102,33 @@ impl Checker<'_> {
         formal_bounds: &[Vec<Ty>],
         bindings: &crate::symbol_resolver::GSigBinds,
     ) {
+        let evidence = Self::constructor_evidence(owner, formals, formal_bounds, bindings);
+        self.constructor_formal_evidence.insert(call, evidence);
+    }
+
+    fn constructor_evidence(
+        owner: TypeName,
+        formals: &[String],
+        formal_bounds: &[Vec<Ty>],
+        bindings: &crate::symbol_resolver::GSigBinds,
+    ) -> CallEvidence {
         let evidence = crate::symbol_resolver::constructor_formal_evidence(
             owner,
             formals,
             formal_bounds,
             bindings,
         );
-        self.constructor_formal_evidence.insert(
-            call,
-            CallEvidence {
-                owner,
-                formals: formals.iter().cloned().zip(evidence).collect(),
-            },
-        );
+        CallEvidence {
+            owner,
+            formals: formals.iter().cloned().zip(evidence).collect(),
+        }
     }
 
     /// Check one branch of an `if` with an `else` or a `when` with an `else` arm. kotlinc completes
     /// such a conditional as one synthetic call even in statement position, so a sibling branch can
     /// fix a constructor type parameter this branch leaves open (`when (s) { "a" -> build {
     /// set(T()) }; else -> Buildee() }`). Retain that open evidence until every branch has been
-    /// checked; [`Self::join_conditional_constructor_evidence`] consumes only a sibling's proven
+    /// checked; [`Self::join_constructor_branches`] consumes only a sibling's proven
     /// application and the normal completion-root report handles anything still open.
     pub(super) fn joined_branch_result(
         &mut self,
@@ -130,7 +161,7 @@ impl Checker<'_> {
     /// constructor can contribute an argument only when its record says that ordinal was actually
     /// fixed. A non-constructor branch contributes its selected semantic result application. This
     /// is deliberately a provenance join, not another lookup or overload-selection path.
-    pub(super) fn join_conditional_constructor_evidence(
+    pub(super) fn join_constructor_branches(
         &mut self,
         scope: &CheckerScope<'_>,
         branches: impl IntoIterator<Item = (ExprId, Ty)>,
@@ -204,20 +235,20 @@ impl Checker<'_> {
     /// Like the generic-call report, this runs only at a completion root (an untyped declaration
     /// initializer or a statement), after any enclosing call has had the chance to complete it.
     pub(super) fn report_uninferred_constructor_type_parameter(&mut self, call: ExprId) -> bool {
-        let Some(formal) = self
-            .constructor_formal_evidence
-            .get(&call)
-            .and_then(|evidence| {
-                evidence
-                    .formals
-                    .iter()
-                    .find(|(_, evidence)| *evidence == ConstructorFormalEvidence::Unconstrained)
-                    .map(|(formal, _)| formal.clone())
-            })
+        let Some(evidence) = self.constructor_formal_evidence.remove(&call) else {
+            return false;
+        };
+        self.report_constructor_evidence(call, evidence)
+    }
+
+    fn report_constructor_evidence(&mut self, call: ExprId, evidence: CallEvidence) -> bool {
+        let Some((formal, _)) = evidence
+            .formals
+            .into_iter()
+            .find(|(_, evidence)| *evidence == ConstructorFormalEvidence::Unconstrained)
         else {
             return false;
         };
-        self.constructor_formal_evidence.remove(&call);
         let message = format!(
             "cannot infer type for type parameter '{}'. Specify it explicitly.",
             crate::types::type_parameter_source_name(&formal)
