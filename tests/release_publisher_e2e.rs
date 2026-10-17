@@ -284,7 +284,7 @@ fn steps(job: &str) -> Vec<&str> {
 }
 
 #[test]
-fn updates_supersede_their_ref_but_every_master_run_reaches_the_release_lock() {
+fn updates_supersede_their_ref_without_cancelling_master_validation() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workflow = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
 
