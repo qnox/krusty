@@ -4784,15 +4784,14 @@ pub(crate) fn finalized_streamed_signature_index(
         index.publish_property_parameter_identities(property, std::iter::empty(), None);
     }
     // Publish classifier headers after the full declaration inventory so source order is irrelevant.
-    'classifier_publication: for stub in &headers.stubs {
+    'classifier_publication: for stub in
+        deferred_local_headers::pass_one_classifiers(headers, &undemanded_ordinary_locals)
+    {
         macro_rules! skip_classifier {
             ($declaration:expr) => {{
                 failed.push($declaration);
                 continue 'classifier_publication;
             }};
-        }
-        if stub.kind != DeclarationKind::Classifier {
-            continue;
         }
         let Some(classifier) = classifier_types
             .get(&stub.id)

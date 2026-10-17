@@ -7,6 +7,9 @@
 use crate::fir::{DeclarationFlags, DeclarationId, HeaderDeclarationKind, SignatureGraph};
 use crate::fx_hash::HashSet;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) fn declarations(
     headers: &crate::fir::StreamedHeaderModule,
     graph: &SignatureGraph,
@@ -57,4 +60,16 @@ pub(super) fn declarations(
         })
         .map(|stub| stub.id)
         .collect()
+}
+
+/// Classifiers whose complete nominal header belongs to Pass 1. An undemanded body-local
+/// classifier keeps only its stable inventory identity until Pass 2 atomically publishes the
+/// header, formals, and applied type-argument layout.
+pub(super) fn pass_one_classifiers<'a>(
+    headers: &'a crate::fir::StreamedHeaderModule,
+    declarations: &'a HashSet<DeclarationId>,
+) -> impl Iterator<Item = &'a crate::fir::DeclarationStub> + 'a {
+    headers.stubs.iter().filter(|stub| {
+        stub.kind == crate::fir::DeclarationKind::Classifier && !declarations.contains(&stub.id)
+    })
 }

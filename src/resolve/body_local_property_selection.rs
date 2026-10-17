@@ -16,6 +16,48 @@ impl CheckedLocalProperty {
 }
 
 impl Checker<'_> {
+    /// Add the checked constructor-property view required while a body-local classifier has no
+    /// provider header of its own. An active declaration may enter this overlay only when the
+    /// exact stable property role is explicitly deferred; a finalized missing provider fact is a
+    /// publication failure. Legacy checking retains its pre-stable-inventory path.
+    pub(super) fn append_authoritative_constructor_property_overlay(
+        &self,
+        scope: &CheckerScope<'_>,
+        properties: &mut Vec<ScopedProperty>,
+        owner: TypeName,
+        property: &PropParam,
+        source_member: crate::libraries::SourceMember,
+        stable_declaration: Option<crate::fir::DeclarationId>,
+        stable_fact: Option<(crate::fir::DeclarationId, bool)>,
+        checked: Ty,
+    ) -> bool {
+        let authorized = self.active_declarations.is_none()
+            || stable_fact.is_some_and(|(declaration, finalized)| {
+                !finalized && Some(declaration) == stable_declaration
+            });
+        if !authorized {
+            return false;
+        }
+        properties.push(ScopedProperty {
+            name: property.name.clone(),
+            ty: checked,
+            owner_storage_ty: None,
+            is_var: property.is_var,
+            owner,
+            dispatch_receiver_identity: self
+                .implicit_receivers(scope)
+                .into_iter()
+                .find(|receiver| receiver.ty.obj_internal() == Some(owner))
+                .map(|receiver| receiver.identity),
+            class_storage: None,
+            enum_entry_property: None,
+            source_visible: true,
+            source_member: Some(source_member),
+            stable_declaration,
+        });
+        true
+    }
+
     fn record_checked_local_property_shape(
         &mut self,
         owner: TypeName,

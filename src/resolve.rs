@@ -48515,25 +48515,18 @@ impl<'a> Checker<'a> {
                             if scoped.owner_storage_ty == Some(Ty::Error) {
                                 scoped.owner_storage_ty = Some(checked);
                             }
-                        } else if self.active_declarations.is_none() {
-                            props.push(ScopedProperty {
-                                name: property.name.clone(),
-                                ty: checked,
-                                owner_storage_ty: None,
-                                is_var: property.is_var,
-                                owner,
-                                dispatch_receiver_identity: self
-                                    .implicit_receivers(scope)
-                                    .into_iter()
-                                    .find(|receiver| receiver.ty.obj_internal() == Some(owner))
-                                    .map(|receiver| receiver.identity),
-                                class_storage: None,
-                                enum_entry_property: None,
-                                source_visible: true,
-                                source_member: Some(source_member),
-                                stable_declaration,
-                            });
-                        } else {
+                        } else if !self.append_authoritative_constructor_property_overlay(
+                            scope,
+                            &mut props,
+                            owner,
+                            property,
+                            source_member,
+                            stable_declaration,
+                            constructor_property_facts[property_index]
+                                .as_ref()
+                                .map(|(declaration, finalized, _, _)| (*declaration, *finalized)),
+                            checked,
+                        ) {
                             self.failed_local_declaration_bindings.insert(
                                 stable_declaration
                                     .expect("an active constructor property has a stable role"),
