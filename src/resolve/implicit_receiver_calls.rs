@@ -56,8 +56,14 @@ impl Checker<'_> {
         let CallArgs { call, args, .. } = call_args;
         let rt = self.apply_postponed_call_bindings(receiver.ty);
         let type_args = self.resolved_explicit_type_args(scope, call);
-        let (rung, rejected_candidates, mut member_mapping_failure) = if rt == Ty::String
-            || matches!(rt, Ty::Obj(..) | Ty::TyParam(..))
+        // A platform type `T!` is usable as `T` for member calls, as on an explicit receiver.
+        let member_receiver = match rt {
+            Ty::PlatformNullable(inner) => *inner,
+            _ => rt,
+        };
+        let (rung, rejected_candidates, mut member_mapping_failure) = if member_receiver
+            == Ty::String
+            || matches!(member_receiver, Ty::Obj(..) | Ty::TyParam(..))
         {
             match self
                 .record_member_call_with_slots(scope, call, rt, name, args, tower_rung, expected)

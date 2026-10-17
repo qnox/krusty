@@ -48,6 +48,34 @@ pub(super) enum CompactTryWrite {
     },
 }
 
+/// The `x != null` checks a `true` outcome of `condition` proves: the check itself, or each
+/// conjunct of an `&&` chain. A `true` result marks each as a Boolean-condition proof.
+pub(super) fn null_checks_of_true(file: &File, condition: ExprId) -> Vec<(ExprId, &str, bool)> {
+    match file.expr(condition) {
+        Expr::Binary {
+            op: BinOp::And,
+            lhs,
+            rhs,
+            ..
+        } => {
+            let mut checks = null_checks_of_true(file, *lhs);
+            checks.extend(null_checks_of_true(file, *rhs));
+            checks
+        }
+        Expr::Binary {
+            op: BinOp::Ne | BinOp::RefNe,
+            lhs,
+            rhs,
+            ..
+        } => match (file.expr(*lhs), file.expr(*rhs)) {
+            (Expr::Name(name), Expr::NullLit) => vec![(*lhs, name.as_str(), true)],
+            (Expr::NullLit, Expr::Name(name)) => vec![(*rhs, name.as_str(), true)],
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
 pub(super) enum CompactCompletion {
     Never,
     Always,

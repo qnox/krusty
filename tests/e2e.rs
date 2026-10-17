@@ -585,6 +585,8 @@ mod contextual_lambda_expected_return_e2e;
 mod continuation_spill_order_e2e;
 #[path = "contract_calls_in_place_e2e.rs"]
 mod contract_calls_in_place_e2e;
+#[path = "contract_conjunct_null_checks_e2e.rs"]
+mod contract_conjunct_null_checks_e2e;
 #[path = "contract_declarations_e2e.rs"]
 mod contract_declarations_e2e;
 #[path = "contract_erasure_e2e.rs"]
@@ -1691,6 +1693,8 @@ mod suspend_argument_operands_e2e;
 mod suspend_coroutine_inline_e2e;
 #[path = "suspend_function_boxing_e2e.rs"]
 mod suspend_function_boxing_e2e;
+#[path = "suspend_lambda_local_function_e2e.rs"]
+mod suspend_lambda_local_function_e2e;
 #[path = "suspend_lambda_private_property_e2e.rs"]
 mod suspend_lambda_private_property_e2e;
 #[path = "suspend_lambda_shared_capture_e2e.rs"]
@@ -2150,6 +2154,8 @@ mod object_value_inference_e2e;
 mod omitted_default_generic_overload_e2e;
 #[path = "one_armed_when_fallthrough_e2e.rs"]
 mod one_armed_when_fallthrough_e2e;
+#[path = "platform_implicit_receiver_member_e2e.rs"]
+mod platform_implicit_receiver_member_e2e;
 #[path = "private_constructor_accessors_e2e.rs"]
 mod private_constructor_accessors_e2e;
 #[path = "private_inline_property_ref_e2e.rs"]
@@ -2317,6 +2323,8 @@ mod private_inline_property_access_e2e;
 mod private_member_extension_accessor_e2e;
 #[path = "private_set_e2e.rs"]
 mod private_set_e2e;
+#[path = "probe_argument_call_e2e.rs"]
+mod probe_argument_call_e2e;
 #[path = "projected_receiver_extension_e2e.rs"]
 mod projected_receiver_extension_e2e;
 #[path = "projected_smart_cast_e2e.rs"]
