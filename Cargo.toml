@@ -21,7 +21,7 @@ resolver = "2"
 # per-process random keys retain HashDoS resistance without paying SipHash's cost on every lookup.
 ahash = "0.8.12"
 # Read `.class` entries from `.jar` classpath entries (Java/Kotlin library support).
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # Inflate zlib-compressed JDK jimage resources (JetBrains Runtime / `jlink --compress` images).
 flate2 = "1"
 # Exact KLIB provider snapshots retain a collision-resistant digest of the selected archive
