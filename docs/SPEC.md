@@ -1426,8 +1426,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   value is the call's result, not a `FunctionN.invoke` result, so it is not boxed as a lambda tail
   is. kotlinc boxes it into the generic `R` slot and unboxes it at the call, and its optimizer
   removes the pair; krusty boxed it and then read the box as the carrier, returning `Id` from a
-  method declared to return `String` and casting it to `String` behind `?.let`. Test:
-  `inline_lambda_value_class_result_e2e`.
+  method declared to return `String` and casting it to `String` behind `?.let`. Only a plan whose
+  value is the invocation result itself is exempt: a collection expansion (`map { Id(it) }`) appends
+  the value to an erased element slot, and `also`/`apply` return a parameter, so those keep the
+  boxed lambda value. Test: `inline_lambda_value_class_result_e2e`.
 - **A value class over an `Object` carrier read out of a type-parameter slot is the BOX.**
   `Iterator<Slot>.next()`, `List<Slot>.get` and a `for` over `Iterable<Slot>` for
   `value class Slot(val raw: Any?)` return a bare `T`, so the slot holds `Slot`'s box and the read

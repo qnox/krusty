@@ -3,6 +3,8 @@
 //! keep the representation the call's type gives it. krusty boxed it as if it crossed a
 //! `FunctionN.invoke`, so `fun f(s: String): Id = s.let { Id(it) }` returned the box from a method
 //! declared to return the carrier, and `map[k]?.let { Id(it) }` cast that box to `String`.
+//! A collection expansion (`map`) or a plan that returns a parameter (`also`) is not the lambda's
+//! own result, so its value-class element is still boxed where it lands.
 
 use super::common;
 
@@ -17,6 +19,9 @@ fun viaLet(s: String): Id = s.let { Id(it) }
 fun viaSafeLet(s: String?): Id? = s?.let { Id(it) }
 fun viaRun(s: String): Id = s.run { Id(this) }
 fun viaWith(s: String): Id = with(s) { Id(this) }
+fun mapped(xs: List<String>): List<Id> = xs.map { Id(it) }
+fun cached(m: MutableMap<String, Id>, k: String): Id = m.getOrPut(k) { Id(k + "!") }
+fun alsoId(s: String): Id = Id(s).also { it.value.length }
 fun stored(s: String?): Id? {
     val id = s?.let { Id(it) }
     return id
@@ -30,6 +35,10 @@ fun box(): String {
     if (viaRun("r").value != "r") return "run"
     if (viaWith("w").value != "w") return "with"
     if (stored("v") != Id("v")) return "stored"
+    if (mapped(listOf("x", "y")) != listOf(Id("x"), Id("y"))) return "map"
+    val cache = mutableMapOf<String, Id>()
+    if (cached(cache, "k") != Id("k!") || cache["k"] != Id("k!")) return "getOrPut"
+    if (alsoId("a") != Id("a")) return "also"
     return "OK"
 }
 "#;

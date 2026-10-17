@@ -3754,20 +3754,17 @@ pub(crate) fn lower_value_classes(
         {
             // A lambda SAM-converted to a method that DECLARES this very value class as its return is
             // exempt from ALL of the tail boxing below — see the note on the loop. Its inline body
-            // shares the same tail node, so it must be exempt from `box_vc_tail` too.
-            if sam_declares_vc_return(ir, &orig_rets, *impl_fn, &callable_under) {
+            // shares the same tail node, so it must be exempt from `box_vc_tail` too, as is a body
+            // spliced as an inline call's own value (`let`): the call's type gives its representation.
+            if sam_declares_vc_return(ir, &orig_rets, *impl_fn, &callable_under)
+                || ir.inline_call_value_lambdas.contains(impl_fn)
+            {
                 continue;
             }
-            // A common-IR expansion of an external inline call takes a source lambda's body as
-            // its own value and drops the implementation's body: that value is the call's result,
-            // not an `invoke` result, so it keeps the representation the call's type gives it.
-            let Some(body) = ir.functions.get(*impl_fn as usize).and_then(|f| f.body) else {
-                continue;
-            };
-            lambda_impls.push((*impl_fn, body));
-            if let Some(b) = inline_body {
-                inline_bodies.push(*b);
+            if let Some(body) = ir.functions.get(*impl_fn as usize).and_then(|f| f.body) {
+                lambda_impls.push((*impl_fn, body));
             }
+            inline_bodies.extend(*inline_body);
         }
     }
     for (impl_fn, body) in lambda_impls {
@@ -3776,10 +3773,9 @@ pub(crate) fn lower_value_classes(
         // class `X`, box the tail to `X` uniformly — for EVERY value class (a classpath `kotlin/Result` is a
         // value class like any other) and EVERY tail form (`this`, a library call, a constructor) — unless
         // it is already a boxed `X`. The impl method's JVM return becomes the box type `X`.
-        // A lambda whose SAM method DECLARES this value class as its return was skipped when the list
-        // was collected: that return erases to the underlying (kotlinc's
-        // `onResult-d1pmJ48()Ljava/lang/Object;` hands back the carrier), so the already-erased return
-        // is the right one and the tail needs no boxing at all.
+        // A lambda whose SAM method DECLARES this value class as its return was skipped above: that
+        // return erases to the underlying (kotlinc's `onResult-d1pmJ48()Ljava/lang/Object;` hands back
+        // the carrier), so the already-erased return is right and the tail needs no boxing at all.
         if let Some(x) = orig_rets[impl_fn as usize]
             .non_null()
             .obj_internal()

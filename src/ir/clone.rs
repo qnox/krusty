@@ -656,6 +656,7 @@ fn copy_function_implementation_facts(
     copy_set!(bridge_methods);
     copy_set!(deprecated_methods);
     copy_set!(inline_only_fns);
+    copy_set!(inline_call_value_lambdas);
     copy_set!(unlooped_tailrec);
     if let Some(owner) = ir.class_static_local_functions.get(&source).copied() {
         ir.class_static_local_functions.insert(target, owner);
