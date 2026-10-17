@@ -1423,6 +1423,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a custom value class through a bare-`T` box boundary; `Ok`/`Err`-style factories over a two-parameter
   value class with an `Any?` carrier), `generic_hof_vc_binding_e2e::nullable_generic_return_keeps_null`,
   and the `cross_file_*_value_class_return_*` cases in `tests/reference_adaptation_e2e.rs`.
+- **A library inline call's expanded lambda yields the value class as the call's type gives it.**
+  `s.let { Id(it) }`, `s.run { Id(this) }` and `with(s) { Id(this) }` are expanded in place: the
+  lambda's body becomes the call's value, and the lambda's implementation loses its body. That
+  value is the call's result, not a `FunctionN.invoke` result, so it is not boxed as a lambda tail
+  is. kotlinc boxes it into the generic `R` slot and unboxes it at the call, and its optimizer
+  removes the pair; krusty boxed it and then read the box as the carrier, returning `Id` from a
+  method declared to return `String` and casting it to `String` behind `?.let`. A spliced lambda
+  body therefore keeps its own representation everywhere, and only the consumer of its value adapts
+  it. A body spliced into a library's inline bytecode (`map { Id(it) }`) is coerced to the replaced
+  `invoke`'s `Object` after the lambda's locals end, which is where kotlinc places the `box-impl`.
+  Test: `inline_lambda_value_class_result_e2e`.
 - **A value class over an `Object` carrier read out of a type-parameter slot is the BOX.**
   `Iterator<Slot>.next()`, `List<Slot>.get` and a `for` over `Iterable<Slot>` for
   `value class Slot(val raw: Any?)` return a bare `T`, so the slot holds `Slot`'s box and the read
@@ -2172,10 +2183,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `FirDataClassConsistentDataCopyAnnotationChecker`, krusty reports both annotations on one data
   class as incompatible (an error on each entry), either annotation on a non-data classifier as the
   wrong target, and `@ConsistentCopyVisibility` under the flag as redundant (a warning). The
-  `ErrorAboutDataClassCopyVisibilityChange` deprecation warnings are not modeled here. An ordinary
-  selected-member access diagnostic renders the callable and its recorded parameter roles; a legacy
+  `ErrorAboutDataClassCopyVisibilityChange` changes the declaration and inaccessible-use migration
+  diagnostics from warnings to errors; both remain absent once copy respects constructor visibility.
+  An ordinary selected-member access diagnostic renders the callable and its recorded parameter roles; a legacy
   context receiver therefore remains `context(String)`, rather than acquiring a fabricated name.
-  Tests: `tests/consistent_copy_visibility_e2e.rs` (normalized `copy`/`copy$default` javap sections
+  Tests: `tests/consistent_copy_visibility_e2e.rs`, `tests/data_class_copy_visibility_e2e.rs`
+  (normalized `copy`/`copy$default` javap sections
   differential vs kotlinc with and without the flag and per annotation, a protected ctor,
   byte-level toggling isolation, internal-ctor pin, and annotation/call-site diagnostics) plus the
   flag-modeling tests in `crates/krusty-cli/src/cli.rs` and `src/features.rs`, and the
@@ -2277,6 +2290,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `builder_inferred_class_lambda_metadata_matches_kotlinc`,
   `shadowed_type_parameter_class_lambda_metadata_matches_kotlinc`), box
   `inference/pcla/issues/kt47744.kt`.
+- **A `-Xlambdas=class` lambda's body is its class's `invoke`.** kotlinc moves the lambda into its
+  class: the class extends `kotlin/jvm/internal/Lambda`, its constructor stores each capture in a
+  final synthetic `$name` field and then calls `Lambda(arity)`, and the typed `invoke` holds the
+  body (no static `$lambda$N` implementation method). krusty realizes every Kotlin function lambda
+  this way through the same IR pass that builds the classes `LambdaMetafactory` cannot. A capture
+  typed by an enclosing type parameter is signed `TT;` on its field and constructor, and the typed
+  `invoke` names the type parameter. The class supertype `Signature` writes nested
+  declaration-site variance (`Function1<Pair<+Integer;+Integer;>;…>`). A receiver lambda's guard
+  names `$this$<label>`. A lambda written in another lambda is enclosed by the outer class's
+  `invoke`. A default argument lambda of a non-inline function is enclosed by its `$default`
+  stub, and an inline function's default lambda carries its function record in `@Metadata`.
+  Dead code dropped while emitting (the tail after `return` in an anonymous function) no longer
+  leaves its constants in the pool. Not yet identical: lambdas the serialization plugin synthesizes
+  (kotlinc names them `Owner$1` / `Owner$$childSerializers$1`), a receiver type spelled through a
+  typealias (`kotlin.text.StringBuilder` or `Appendable`, recorded as the abbreviation in
+  `@Metadata`), and a postfix `++` on a captured `var`. Test: `tests/class_lambda_e2e.rs`
+  (`class_lambda_shapes_are_identical_to_kotlinc`).
 - **Lifted method names (kotlinc's `LocalDeclarationsLowering`).** A lambda or local function is
   lifted into a method named after the declarations around it, joined by `$`: the outermost
   declaration (a function's or property's name; `_init_` for constructors, `init` blocks, parameter
@@ -3130,6 +3160,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   rejected. A result-only producer argument now also offers the ordinary solution as its witness
   when it can be completed to it. Test:
   `only_input_type_producer_e2e::a_result_only_producer_witnesses_the_only_input_type`.
+- **Only a candidate that can take a postponed lambda shapes it in the signature pass.** An
+  inferred declaration type (`fun run() = lib.launch { ... }`, `val engine = Engine { ... }`) is
+  computed before bodies, so a postponed lambda takes its parameter shape from the call's
+  candidates. A package-qualified call kept an overload that needs one more argument
+  (`launch(timeoutMillis: Long, body)`), so the family stayed ambiguous; the unqualified path
+  already dropped structurally inapplicable overloads. A constructor whose parameter cannot take a
+  lambda (`Engine(config: Config)`) claimed `Engine { ... }` ahead of the companion `invoke` the
+  call selects. Both declined and reported `module signatures were not finalized`. The qualified
+  path now applies the same structural filter, and a constructor is skipped when a postponed
+  argument maps to a parameter that admits no function value (not a function type, SAM interface,
+  type variable, or supertype of function types). A lambda literal declares only value parameters,
+  so `{ name -> ... }` fits `Scope.(String) -> Unit` by its one value parameter; comparing it with
+  the receiver-inclusive arity made the companion `invoke` inapplicable too. Test:
+  `signature_postponed_candidates_e2e::postponed_lambdas_are_shaped_by_the_candidates_that_take_them`.
 - **A postponed lambda body is checked under the expected return type.** Signature inference
   materializes `{ HashMap() }` / `{ mutableMapOf() }` / `{ if (c) ArrayList() else ArrayList() }`
   only after the surrounding call has a function type for that argument (`() -> T` on
@@ -9550,6 +9594,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   use-site projection is reported on that keyword, for that application only:
   `conflicting projection in type alias expansion in intermediate type 'Box<CONFLICTING-PROJECTION String>?'`.
   Tests: `tests/typealias_projection_e2e.rs`. Corpus: `reflection/typeOf/typeAliasedType.kt`.
+- **A self-bounded constructor variable with no other constraint completes to its starred bound.**
+  `Builder("x")` for Java `class Builder<SELF extends Builder<SELF>>` has no argument or expected
+  type evidence for `SELF`. kotlinc completes it to the declared bound with the recursive occurrence
+  replaced by a star and the argument projected `out`, so the call types as `Builder<out Builder<*>>`
+  and a fluent `withPort(): SELF` reads `Builder<*>`. krusty completed `SELF` to the raw bound
+  `Builder<SELF>`, so the second fluent call returned the bare `SELF` and the third failed as an
+  unresolved member. Only a bound that is the constructed classifier itself is such a self type: for
+  `C<T : Comparable<T>>`, `C(1)` has no completion in kotlinc (`cannot infer type for type
+  parameter 'T'`), and krusty keeps its existing bound completion there. Nor is a bound that also
+  names another formal: for `MB<T, SELF : MB<T, SELF>>`, kotlinc reports `cannot infer type for
+  type parameter 'SELF'` for `MB("v")` even with `T` inferred. Owner:
+  `src/symbol_resolver/generic_inference/postponed_result.rs`. Test:
+  `tests/java_self_bounded_constructor_e2e.rs::a_self_bounded_constructor_result_keeps_a_fluent_chain_typed`.
 - **Omitted typealias arguments on a constructor call are inferred, not written.** `LinkedHashMap(a)`
   calls the stdlib's `typealias LinkedHashMap<K, V> = java.util.LinkedHashMap<K, V>` without type
   arguments, so the alias's `K`/`V` are type variables of the call, decided by the value arguments and
@@ -10369,6 +10426,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/serialization_type_parameter_elements_e2e.rs` (same-file and sibling-file runtime,
   plus `childSerializers`/`deserialize`/`typeParametersSerializers`, `serialize`, `write$Self` and
   child-cache factory bodies, cross-checked against the reference compiler).
+- **A concrete generic element is cached; a generic class's descriptor and accessor follow
+  kotlinc.** `val g: G<Int>` over a same-file generic `@Serializable class G<T>` is serialized by
+  `new G.$serializer(IntSerializer.INSTANCE)`, a constructed serializer, so the holder caches it in
+  `$childSerializers` like a collection's. The generic class's `$cachedDescriptor` is `@JvmField`
+  ahead of `@NotNull`, and `<clinit>` builds it after the companion's own properties, opening on the
+  companion's first line and returning on its last (a generated companion takes the class's span).
+  The companion's `serializer(typeSerial0, …)` declares unbounded type parameters whatever the
+  class's bounds; its metadata records no upper bound. Tests:
+  `tests/generic_serializable_class_e2e.rs`.
 - **A generic `$serializer` has two constructors.** The private no-argument primary constructor
   builds the descriptor as one initializer spanning the class declaration: it closes on the
   declaration's last line and returns on its first. The public constructor, a declared
@@ -13714,6 +13780,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
       alias-to-object qualifier written with arguments as `Unit` and then fails in its JVM backend,
       so the off-mode alias warnings are pinned against krusty's front end alone.
       (`tests/object_qualifier_type_arguments_e2e.rs`.)
+    - Class literals (`FirClassLiteralChecker`): `T<Int>::class` on a reified type parameter
+      reports "type arguments are not allowed for type parameters." on the list. A typealias written
+      with type arguments on a class literal's left-hand side is useless when its expansion has no
+      type arguments or is a reference array (`Str<Int>::class`, `Arr<Int>::class`). A count the
+      alias's formals do not take reports kotlinc's arity message, `one type argument expected for
+      'typealias Yes2<T> = String'.`, on the list; a fitting count reports "only classes are
+      allowed on the left-hand side of a class literal." on the literal. A useless form is a
+      deprecation warning until the feature, and any other alias (`Lst<Int>::class` for
+      `typealias Lst<T> = List<T>`) is always the error. An exact-arity useless application still
+      applies its written arguments to the expansion: `Arr<Int>::class` denotes
+      `KClass<Array<Int>>`, while the checker independently reports those arguments as useless. A
+      wrong-arity application has no substitution and retains the projected expansion only while
+      the checker owns its exact diagnostic. A reified parameter keeps `KClass<T>`. Signature
+      solving follows the same rule for an implicitly typed property
+      (`TrFlags::CLASS_LITERAL_LHS`).
+      (`tests/class_literal_type_arguments_e2e.rs`.)
+  - `ErrorAboutDataClassCopyVisibilityChange`: a `data class` whose primary constructor is not
+    public is reported at the constructor's visibility modifier unless it is annotated
+    `@ConsistentCopyVisibility` or `@ExposedCopyVisibility`, and a call or callable reference to its
+    generated `copy()` is reported at the callee name where the constructor is not visible, whatever
+    the annotations. Neither is reported once `DataClassCopyRespectsConstructorVisibility` gives
+    `copy()` the constructor's visibility. Class records carry the `data` modifier, from the
+    declaration or the metadata `IS_DATA` flag, so a dependency's `copy()` is checked the same way
+    (`tests/data_class_copy_visibility_e2e.rs`).
 - **Pre-release output.** As kotlinc's `LanguageVersionSettings.isPreRelease`, a compilation is
   pre-release when its language version is not stable in the release or any explicitly set feature (an
   `@Enables` argument, `-progressive`, `-XXLanguage`, or a `// LANGUAGE:` directive) is enabled and

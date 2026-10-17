@@ -61,6 +61,17 @@ pub(super) fn emit(
             writer,
         );
     }
+    // kotlinc adds a value-class constructor's marker accessor after every declared member: the
+    // primary's, then each secondary's in declaration order.
+    if !class.is_sealed && !class.is_enum {
+        for (ordinal, constructor) in class.secondary_ctors.iter().enumerate() {
+            if constructor.vc_params {
+                constructor_accessors::emit_secondary_marker_accessor(
+                    ir, class, ordinal, fq_name, writer,
+                );
+            }
+        }
+    }
     if companion_marker {
         static_accessors::emit_after_companion_marker(
             ir,

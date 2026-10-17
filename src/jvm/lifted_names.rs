@@ -18,7 +18,8 @@
 //! becomes before kotlinc lifts anything out of it. What it declares is lifted into that class and
 //! named after `invokeSuspend`, counted afresh: `invokeSuspend$lambda$0`, `invokeSuspend$local`,
 //! `invokeSuspend$lambda$0$0`. Those names hold only once the lambda is realized as its class, so
-//! they are kept apart ([`SuspendLambdaScopedNames`]) until [`realize`] knows that.
+//! they are kept apart ([`LambdaClassScopedNames`]) until [`realize`] knows that. An ordinary
+//! `-Xlambdas=class` lambda likewise owns declarations under `invoke`.
 //!
 //! kotlinc renames a function whose signature mentions a value class before it lifts anything out
 //! of it, so its JVM name is the outermost segment: `lamP_txdesME$lambda$0` in `lamP-txdesME`,
@@ -29,10 +30,10 @@ use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{IrEnclosure, IrFile, IrLiftingRoot, IrLiftingSequence};
 
-/// The lifted names of the callables a suspend lambda declares, each with that lambda's function:
-/// the names its class gives them, which apply only when the lambda is realized as that class.
+/// Lifted names of declarations a realized lambda class owns, each with that lambda's function.
+/// The names apply only when the declaration actually moved into that exact class.
 #[derive(Default)]
-pub(crate) struct SuspendLambdaScopedNames {
+pub(crate) struct LambdaClassScopedNames {
     names: HashMap<crate::ir::FunId, (crate::ir::FunId, String)>,
 }
 
@@ -85,18 +86,33 @@ pub(super) fn number(
     ir: &mut IrFile,
     helper_access: &super::local_delegate_accessors::HelperAccess,
     physical_top_lambda_ordinals: &PhysicalTopLambdaOrdinals,
-) -> SuspendLambdaScopedNames {
-    // The suspend lambdas: lambdas that take no place among the lifted callables, by the function
-    // each one is.
-    let class_scopes = ir
+) -> LambdaClassScopedNames {
+    // Lambda scopes that take no place among the lifted callables, by stable sequence position.
+    // Suspend lambda scopes are already recorded in lifting provenance; ordinary class-mode
+    // lambdas retain their consumed scope on the realized class.
+    let mut class_scopes = ir
         .lifted_functions
         .iter()
         .filter_map(|(&function, (sequence, site))| {
             let step = site.path.last()?;
             (step.kind == crate::lifting_provenance::LiftingCallableKind::Lambda && !site.lifted)
-                .then_some(((sequence, step.position), function))
+                .then_some((
+                    (sequence.clone(), step.position),
+                    (function, "invokeSuspend".to_string()),
+                ))
         })
         .collect::<HashMap<_, _>>();
+    class_scopes.extend(ir.classes.iter().filter_map(|class| {
+        let lambda = class.lambda.as_ref()?;
+        let scope = lambda.lifting_scope.as_ref()?;
+        Some((
+            (scope.sequence.clone(), scope.position),
+            (
+                lambda.invoke,
+                segment_spelling(&ir.functions[lambda.invoke as usize].name),
+            ),
+        ))
+    }));
     let inline_delegate_sites = ir
         .lifted_functions
         .iter()
@@ -139,7 +155,7 @@ pub(super) fn number(
                     // A suspend lambda's class numbers its callables as a declaration does.
                     let scope = entry
                         .scope
-                        .filter(|&scope| !class_scopes.contains_key(&(sequence, scope)));
+                        .filter(|&scope| !class_scopes.contains_key(&(sequence.clone(), scope)));
                     unnamed_segment(scope, inline_delegate, next)
                 }
                 crate::lifting_provenance::LiftingCallableKind::LocalFunction => {
@@ -158,21 +174,21 @@ pub(super) fn number(
         }
     }
     let mut names = HashMap::default();
-    let mut scoped = SuspendLambdaScopedNames::default();
+    let mut scoped = LambdaClassScopedNames::default();
     for (&function, (sequence, site)) in &ir.lifted_functions {
         let enclosing = site.path.split_last().map(|(_, enclosing)| enclosing);
-        let suspend_lambda = enclosing.and_then(|enclosing| {
+        let lambda_class = enclosing.and_then(|enclosing| {
             enclosing
                 .iter()
                 .enumerate()
                 .rev()
                 .find_map(|(index, step)| {
-                    let lambda = class_scopes.get(&(sequence, step.position))?;
-                    Some((index, *lambda))
+                    let (lambda, method) = class_scopes.get(&(sequence.clone(), step.position))?;
+                    Some((index, *lambda, method.as_str()))
                 })
         });
-        let (mut name, start) = match (suspend_lambda, helper_access.lambda_path_start(function)) {
-            (Some((index, _)), _) => ("invokeSuspend".to_owned(), index + 1),
+        let (mut name, start) = match (lambda_class, helper_access.lambda_path_start(function)) {
+            (Some((index, _, method)), _) => (method.to_owned(), index + 1),
             (None, Some(start)) => ("invoke".to_owned(), start),
             (None, None) => (
                 site.path
@@ -197,9 +213,9 @@ pub(super) fn number(
             }
             true
         });
-        match (spelled, suspend_lambda) {
+        match (spelled, lambda_class) {
             (false, _) => {}
-            (true, Some((_, lambda))) => {
+            (true, Some((_, lambda, _))) => {
                 scoped.names.insert(function, (lambda, name));
             }
             (true, None) => {
@@ -219,16 +235,20 @@ pub(super) fn number(
 pub(crate) fn realize(
     ir: &mut IrFile,
     override_results: &crate::jvm::override_results::OverrideResults,
-    scoped: &SuspendLambdaScopedNames,
+    scoped: &LambdaClassScopedNames,
     machines: &crate::jvm::suspend::EmitTimeMachines,
 ) {
     let mut renames = ir.lifted_names.clone();
     for (&function, (lambda, name)) in &scoped.names {
         let in_lambda_class = ir.classes.iter().any(|class| {
             class.methods.contains(&function)
-                && machines
-                    .suspend_lambda(class.fq_name_id())
-                    .is_some_and(|realized| realized.invoke_suspend == *lambda)
+                && (class
+                    .lambda
+                    .as_ref()
+                    .is_some_and(|realized| realized.invoke == *lambda)
+                    || machines
+                        .suspend_lambda(class.fq_name_id())
+                        .is_some_and(|realized| realized.invoke_suspend == *lambda))
         });
         if in_lambda_class {
             ir.lifted_names.insert(function, name.clone());
@@ -328,6 +348,15 @@ pub(super) fn lifting_root(ir: &IrFile, function: crate::ir::FunId) -> Option<Ir
     Some(IrLiftingRoot {
         sequence: sequence.clone(),
         position: site.path.first()?.position,
+    })
+}
+
+/// The exact innermost lambda step a realized class owns.
+pub(super) fn lifting_scope(ir: &IrFile, function: crate::ir::FunId) -> Option<IrLiftingRoot> {
+    let (sequence, site) = ir.lifted_functions.get(&function)?;
+    Some(IrLiftingRoot {
+        sequence: sequence.clone(),
+        position: site.path.last()?.position,
     })
 }
 

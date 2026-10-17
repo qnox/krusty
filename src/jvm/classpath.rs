@@ -4331,14 +4331,14 @@ fn build_jar_packages_jar(jar: &Path, jp: &mut JarPackages) -> bool {
     let mut module_indices = Vec::new();
     let mut complete = true;
     for i in 0..archive.len() {
-        let Some(name) = archive.name_for_index(i) else {
+        let Some(Ok(name)) = archive.name_for_index(i) else {
             complete = false;
             continue;
         };
         if name.starts_with("META-INF/") && name.ends_with(".kotlin_module") {
             module_indices.push(i);
         } else {
-            record_pkg_entry_name(name, jp);
+            record_pkg_entry_name(&name, jp);
         }
     }
     for i in module_indices {
@@ -4348,7 +4348,10 @@ fn build_jar_packages_jar(jar: &Path, jp: &mut JarPackages) -> bool {
         };
         let mut buf = Vec::new();
         if e.read_to_end(&mut buf).is_ok() {
-            let name = e.name().to_string();
+            let Ok(name) = e.name() else {
+                complete = false;
+                continue;
+            };
             module_optional_annotations::record_kotlin_module(&name, &buf, jp);
         } else {
             complete = false;

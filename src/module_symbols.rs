@@ -428,6 +428,7 @@ impl<'a> ModuleSymbols<'a> {
         let mut shape = LibraryType {
             // A current-module classifier is by definition a Kotlin declaration.
             is_kotlin: true,
+            is_data: c.is_data(),
             access: c.visibility.into(),
             source_file: Some(c.source_file),
             stable_declaration: c.stable_declaration,

@@ -40,7 +40,8 @@ fn jar_entries(jar: &Path) -> Vec<String> {
                 .by_index(index)
                 .expect("jar entry")
                 .name()
-                .to_string()
+                .expect("jar entry name")
+                .into_owned()
         })
         .collect()
 }
@@ -218,7 +219,7 @@ fn the_projects_progressive_flag_is_refused() {
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "krusty: error: krusty does not implement the language feature 'ErrorAboutDataClassCopyVisibilityChange' selected by '-progressive'\n"
+        "krusty: error: krusty does not implement the language feature 'ReportDeprecationsOfClassifiersInImplicitInvokes' selected by '-progressive'\n"
     );
     assert!(!jar.exists(), "a refused argument must not write the jar");
 }
@@ -319,7 +320,7 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
     assert_eq!(
         lines,
         [
-            r#"{"exitCode":1,"output":"krusty: unsupported by krusty: krusty does not implement the language feature 'ErrorAboutDataClassCopyVisibilityChange' selected by '-progressive'","requestId":1}"#,
+            r#"{"exitCode":1,"output":"krusty: unsupported by krusty: krusty does not implement the language feature 'ReportDeprecationsOfClassifiersInImplicitInvokes' selected by '-progressive'","requestId":1}"#,
             r#"{"exitCode":0,"output":"","requestId":2}"#,
             r#"{"exitCode":1,"output":"krusty: krusty has no Java front end, so this target cannot be built by it: --java-count 4","requestId":3}"#,
             r#"{"exitCode":0,"output":"","requestId":4}"#,

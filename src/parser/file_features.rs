@@ -47,6 +47,8 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds =
         features.has("ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds");
     file.forbid_useless_type_arguments = features.has("ForbidUselessTypeArgumentsIn25");
+    file.useless_type_arguments_warning_format =
+        features.deprecation_warning_format("ForbidUselessTypeArgumentsIn25");
     file.type_arguments_not_allowed_warning = features.deprecation_warning_message(
         "ForbidUselessTypeArgumentsIn25",
         "type arguments are not allowed when static member is accessed.",
@@ -54,6 +56,16 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.explicit_type_arguments_in_property_access_warning = features.deprecation_warning_message(
         "ForbidUselessTypeArgumentsIn25",
         "object access cannot have explicit type arguments.",
+    );
+    file.error_about_data_class_copy_visibility_change =
+        features.has("ErrorAboutDataClassCopyVisibilityChange");
+    file.data_class_copy_visibility_change_warning = features.deprecation_warning_message(
+        "ErrorAboutDataClassCopyVisibilityChange",
+        crate::resolve::data_class_copy_visibility::DECLARATION,
+    );
+    file.data_class_invisible_copy_usage_warning = features.deprecation_warning_message(
+        "ErrorAboutDataClassCopyVisibilityChange",
+        crate::resolve::data_class_copy_visibility::USAGE,
     );
     file.recursive_type_of = features.has("JvmSupportRecursiveTypeOf");
     file.opted_in_markers = features.opted_in().map(str::to_string).collect();
@@ -84,9 +96,33 @@ mod tests {
             "object access cannot have explicit type arguments. This will become an error in \
              language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-390.",
         );
+        let dynamic_warning = |file: &File| {
+            file.useless_type_arguments_warning_format
+                .as_ref()
+                .map(|format| {
+                    format.message("one type argument expected for 'typealias Box<T> = String'.")
+                })
+        };
+        let expected_dynamic_warning = Some(
+            "one type argument expected for 'typealias Box<T> = String'. This will become an \
+             error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-390."
+                .to_string(),
+        );
 
         assert_eq!(old.value_class_recursion_via_type_parameters_warning, None);
         assert_eq!(old.inapplicable_operator_modifier_warning, None);
+        assert_eq!(
+            old.data_class_copy_visibility_change_warning.as_deref(),
+            Some(
+                "non-public primary constructor is exposed via the generated 'copy()' method of the 'data' class.\n\nThe generated 'copy()' will change its visibility in future releases.\n\nTo suppress the warning do one of the following:\n- Annotate the data class with the '@ConsistentCopyVisibility' annotation.\n- Use the '-Xconsistent-data-class-copy-visibility' compiler flag.\n- Annotate the data class with the '@ExposedCopyVisibility' annotation \n  (Discouraged, but can be used to keep binary compatibility).\n\nTo learn more, see the documentation of the '@ConsistentCopyVisibility' and '@ExposedCopyVisibility' annotations.\n\nThis will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914."
+            )
+        );
+        assert_eq!(
+            old.data_class_invisible_copy_usage_warning.as_deref(),
+            Some(
+                "this 'copy()' exposes the non-public primary constructor of a 'data class'. See the appropriate 'data class' documentation or contact the 'data class' author for migration guidance. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914."
+            )
+        );
         assert_eq!(
             old.type_arguments_not_allowed_warning.as_deref(),
             type_arguments_not_allowed_warning
@@ -96,10 +132,12 @@ mod tests {
                 .as_deref(),
             property_access_warning
         );
+        assert_eq!(dynamic_warning(&old), expected_dynamic_warning);
         assert_eq!(
             patch.type_arguments_not_allowed_warning.as_deref(),
             type_arguments_not_allowed_warning
         );
+        assert_eq!(dynamic_warning(&patch), expected_dynamic_warning);
         assert_eq!(
             current.value_class_recursion_via_type_parameters_warning,
             Some(
@@ -127,5 +165,6 @@ mod tests {
                 .as_deref(),
             property_access_warning
         );
+        assert_eq!(dynamic_warning(&current), expected_dynamic_warning);
     }
 }

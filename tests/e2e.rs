@@ -278,6 +278,8 @@ mod class_literal_e2e;
 mod class_literal_equality_e2e;
 #[path = "class_literal_star_projection_e2e.rs"]
 mod class_literal_star_projection_e2e;
+#[path = "class_literal_type_arguments_e2e.rs"]
+mod class_literal_type_arguments_e2e;
 #[path = "class_member_order_e2e.rs"]
 mod class_member_order_e2e;
 #[path = "class_metadata_roundtrip.rs"]
@@ -629,6 +631,8 @@ mod ctor_lambda_return_binds_type_param_e2e;
 mod ctor_numeric_widening_e2e;
 #[path = "custom_floating_range_membership_e2e.rs"]
 mod custom_floating_range_membership_e2e;
+#[path = "data_class_copy_visibility_e2e.rs"]
+mod data_class_copy_visibility_e2e;
 #[path = "data_class_metadata_wiring_e2e.rs"]
 mod data_class_metadata_wiring_e2e;
 #[path = "data_class_nullable_value_class_e2e.rs"]
@@ -1205,6 +1209,8 @@ mod inline_lambda_suspend_member_e2e;
 mod inline_lambda_unintercepted_probe_e2e;
 #[path = "inline_lambda_value_argument_e2e.rs"]
 mod inline_lambda_value_argument_e2e;
+#[path = "inline_lambda_value_class_result_e2e.rs"]
+mod inline_lambda_value_class_result_e2e;
 #[path = "inline_lambda_value_return_e2e.rs"]
 mod inline_lambda_value_return_e2e;
 #[path = "inline_object_regeneration_e2e.rs"]
@@ -1338,6 +1344,8 @@ mod java_instance_e2e;
 #[path = "java_interface_mutable_collection_face_e2e.rs"]
 mod java_interface_mutable_collection_face_e2e;
 mod java_member_modules;
+#[path = "java_self_bounded_constructor_e2e.rs"]
+mod java_self_bounded_constructor_e2e;
 #[path = "local_function_reference_inference_e2e.rs"]
 mod local_function_reference_inference_e2e;
 java_member_modules::declare!();
@@ -1679,6 +1687,8 @@ mod same_module_inline_frame_markers_e2e;
 mod serialization_explicit_companion_e2e;
 #[path = "setter_return_line_e2e.rs"]
 mod setter_return_line_e2e;
+#[path = "signature_postponed_candidates_e2e.rs"]
+mod signature_postponed_candidates_e2e;
 #[path = "source_map_annotation_parts_e2e.rs"]
 mod source_map_annotation_parts_e2e;
 #[path = "special_collection_bridge_e2e.rs"]
@@ -2233,6 +2243,8 @@ mod deprecation_classpath_e2e;
 mod deprecation_usage_e2e;
 #[path = "extension_receiver_specificity_e2e.rs"]
 mod extension_receiver_specificity_e2e;
+#[path = "generic_serializable_class_e2e.rs"]
+mod generic_serializable_class_e2e;
 #[path = "int_when_switch_e2e.rs"]
 mod int_when_switch_e2e;
 #[path = "library_function_reference_class_e2e.rs"]

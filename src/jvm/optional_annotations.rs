@@ -177,6 +177,7 @@ fn annotation_type(declaration: &semantic::KotlinClass) -> LibraryType {
     LibraryType {
         access: declaration.visibility.into(),
         is_kotlin: true,
+        is_data: false,
         source_file: None,
         stable_declaration: None,
         is_nested: declaration.is_nested,

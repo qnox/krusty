@@ -443,10 +443,10 @@ fn every_stdlib_method_round_trips() {
     let mut methods = 0usize;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).expect("entry");
-        if !entry.name().ends_with(".class") || entry.name().starts_with("META-INF/") {
+        let class_name = entry.name().expect("entry name").into_owned();
+        if !class_name.ends_with(".class") || class_name.starts_with("META-INF/") {
             continue;
         }
-        let class_name = entry.name().to_string();
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut bytes).expect("read class");
         let class = classreader::parse_class(&bytes).expect("parse class");

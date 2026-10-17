@@ -1,6 +1,7 @@
 //! Completion of a postponed producer whose result has no proper call-site constraint.
 
 use super::{GSigBinds, GenericSig, Ty};
+use crate::types::TypeName;
 
 /// Complete the declaration-owned variables of an unconstrained producer.
 ///
@@ -26,6 +27,87 @@ pub(crate) fn unconstrained_result_bindings(signature: &GenericSig) -> GSigBinds
                 })
                 .unwrap_or(Ty::Nothing);
             (formal.clone(), completion)
+        })
+        .collect()
+}
+
+/// Complete every still-unbound variable whose declared upper bound is the constructed classifier
+/// applied to that variable itself.
+///
+/// Kotlin approximates such a self type with no other constraint by its bound, with the recursive
+/// occurrence replaced by a star and the whole argument projected `out`: `Box("x")` for
+/// `class Box<SELF : Box<SELF>>` types as `Box<out Box<*>>`, so `withPort(): SELF` reads `Box<*>`
+/// and a fluent chain keeps its members. A recursive bound on another classifier
+/// (`C<T : Comparable<T>>`) is not a self type; kotlinc cannot infer it and it keeps its existing
+/// completion.
+fn complete_self_bounded_formals(
+    owner: TypeName,
+    formals: &[String],
+    formal_bounds: &[Vec<Ty>],
+    binds: &mut GSigBinds,
+) {
+    for (formal, bounds) in formals.iter().zip(formal_bounds) {
+        let Some(bound) = self_type_bound(owner, formal, formals, bounds) else {
+            continue;
+        };
+        if binds.contains_key(formal) {
+            continue;
+        }
+        // The star carries the bound it reads as, exactly as a written `Box<*>` does.
+        let unbounded_star = GSigBinds::from_iter([(
+            formal.clone(),
+            Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))),
+        )]);
+        let star = GSigBinds::from_iter([(
+            formal.clone(),
+            Ty::star_projection(super::ty_subst_keep_unbound(bound, &unbounded_star)),
+        )]);
+        let completion = Ty::out_projection(super::ty_subst_keep_unbound(bound, &star));
+        binds.insert(formal.clone(), completion);
+    }
+}
+
+/// The declared bound of `formal` when it is a self type of `owner` (`SELF : Box<SELF>` in `Box`).
+///
+/// The bound names no other formal of `owner`: for `MB<T, SELF : MB<T, SELF>>` kotlinc does not
+/// complete `SELF`, even with `T` inferred (`MB("v")` reports `cannot infer type for type
+/// parameter 'SELF'`), so that `SELF` keeps its existing completion.
+fn self_type_bound(owner: TypeName, formal: &str, formals: &[String], bounds: &[Ty]) -> Option<Ty> {
+    let &bound = bounds.first()?;
+    let others = formals
+        .iter()
+        .filter(|other| *other != formal)
+        .cloned()
+        .collect::<Vec<_>>();
+    (bound.non_null().obj_internal() == Some(owner)
+        && crate::types::ty_mentions_param(bound, &[formal.to_string()])
+        && !crate::types::ty_mentions_param(bound, &others))
+    .then_some(bound)
+}
+
+/// The classifier arguments of a constructor result once argument and expected-type inference are
+/// done. A bound variable keeps its binding, a self type of `owner` completes as
+/// [`complete_self_bounded_formals`] describes, and any other takes its first declared bound.
+pub(crate) fn completed_constructor_result_arguments(
+    owner: TypeName,
+    formals: &[String],
+    formal_bounds: &[Vec<Ty>],
+    bindings: &GSigBinds,
+) -> Vec<Ty> {
+    let mut completed = bindings.clone();
+    complete_self_bounded_formals(owner, formals, formal_bounds, &mut completed);
+    formals
+        .iter()
+        .enumerate()
+        .map(|(index, formal)| {
+            completed.get(formal).copied().unwrap_or_else(|| {
+                formal_bounds
+                    .get(index)
+                    .and_then(|bounds| bounds.first())
+                    .copied()
+                    .filter(|bound| *bound != Ty::Error)
+                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
+            })
         })
         .collect()
 }
@@ -313,6 +395,61 @@ mod tests {
                 actual == bound || bound == any
             }),
             Err(())
+        );
+    }
+
+    #[test]
+    fn a_self_bounded_constructor_variable_completes_to_its_starred_bound() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let recursive = Ty::obj_args("sample/Builder", &[Ty::ty_param("SELF", any)]);
+        let comparable = Ty::obj_args(
+            "kotlin/Comparable",
+            &[Ty::ty_param("C", Ty::obj("kotlin/Any"))],
+        );
+        let plain = Ty::obj("sample/Settings");
+        let formals = ["SELF".to_string(), "C".to_string(), "S".to_string()];
+
+        assert_eq!(
+            completed_constructor_result_arguments(
+                crate::types::type_name("sample/Builder"),
+                &formals,
+                &[vec![recursive], vec![comparable], vec![plain]],
+                &GSigBinds::default(),
+            ),
+            vec![
+                Ty::out_projection(Ty::obj_args(
+                    "sample/Builder",
+                    &[Ty::star_projection(Ty::obj_args(
+                        "sample/Builder",
+                        &[Ty::star_projection(any)],
+                    ))],
+                )),
+                comparable,
+                plain,
+            ]
+        );
+    }
+
+    /// A recursive bound that also names another formal is not completed, even with that formal
+    /// inferred: kotlinc reports `cannot infer type for type parameter 'SELF'` for `MB("v")`.
+    #[test]
+    fn a_self_bound_naming_another_formal_is_not_completed() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let recursive = Ty::obj_args(
+            "sample/MB",
+            &[Ty::ty_param("T", any), Ty::ty_param("SELF", any)],
+        );
+        let formals = ["T".to_string(), "SELF".to_string()];
+        let inferred = GSigBinds::from_iter([("T".to_string(), Ty::obj("kotlin/String"))]);
+
+        assert_eq!(
+            completed_constructor_result_arguments(
+                crate::types::type_name("sample/MB"),
+                &formals,
+                &[vec![any], vec![recursive]],
+                &inferred,
+            ),
+            vec![Ty::obj("kotlin/String"), recursive]
         );
     }
 }

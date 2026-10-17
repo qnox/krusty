@@ -1,8 +1,7 @@
 //! A local function declared in a suspend lambda of a class member is lifted into the lambda's
 //! class as `invokeSuspend$<name>`, as kotlinc does. Its calls were lowered as static calls on the
-//! member's class before the lambda became a class, and kept that owner: the member's class got an
-//! `access$invokeSuspend$<name>` bridge to a method it does not have, and the call failed with
-//! `NoSuchMethodError`.
+//! member's class before the lambda became a class, and must follow the selected function identity
+//! to its final physical owner.
 
 use super::common;
 

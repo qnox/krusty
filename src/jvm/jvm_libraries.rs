@@ -1580,6 +1580,13 @@ impl JvmLibraries {
                         annotations: &member.annotations,
                     },
                 );
+                if ci.meta.is_data
+                    && declaration.is_some_and(|declaration| {
+                        declaration.is_synthesized() && declaration.kotlin_name == "copy"
+                    })
+                {
+                    member.semantic_role = Some(crate::types::SemanticCallRole::DataClassCopy);
+                }
                 if let Some(declaration) = declaration {
                     let facts = crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
                         owner: internal_name,
@@ -2388,6 +2395,7 @@ impl JvmLibraries {
             );
             Some(LibraryType {
                 is_kotlin: has_kotlin_metadata,
+                is_data: ci.meta.is_data,
                 access: if let Some(visibility) = ci.meta.class_visibility {
                     visibility.into()
                 } else {

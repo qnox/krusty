@@ -47,6 +47,10 @@ pub struct ResolvedSignature {
 pub struct ResolvedTypeAbbreviation {
     pub alias: crate::types::TypeName,
     pub arguments: Box<[Ty]>,
+    /// Expanded-type argument indices from the inferred result root to the node abbreviated by
+    /// `alias`. Constructor aliases abbreviate the root and therefore carry an empty path; a
+    /// class literal through `Alias<T>` abbreviates the represented `KClass` argument at `[0]`.
+    pub argument_path: Box<[u32]>,
 }
 
 impl ResolvedSignature {

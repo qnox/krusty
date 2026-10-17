@@ -166,27 +166,33 @@ fn a_noinline_argument_of_an_inline_call_is_its_own_class() {
     common::expect_box_same_as_kotlinc(SRC, "NoinlineLambdaClass");
 }
 
-/// A lambda the metafactory cannot adapt whose body declares a local function would need that
-/// function moved into its class, which is not realized yet. The backend reports it rather than
-/// emitting an `invokedynamic` that cannot link.
+/// A lambda the metafactory cannot adapt owns the local function declared in its body. Both move
+/// into the lambda class, so the class is byte-identical to kotlinc's and the call links at run
+/// time rather than being left behind on the facade.
 #[test]
-fn a_lambda_class_nesting_a_local_function_is_reported_not_left_to_indy() {
-    let src = "@JvmInline value class Tag(val name: String)\n\
+fn a_lambda_class_nesting_a_local_function_owns_and_runs_it() {
+    const SRC: &str = "@JvmInline value class Tag(val name: String)\n\
         fun label(f: (Tag) -> String, t: Tag): String = f(t)\n\
-        fun box(): String = label({ fun twice(s: String) = s + s; twice(it.name) }, Tag(\"O\"))\n";
-    let diagnostics = common::compile_in_process_diagnostics(
-        src,
+        fun box(): String = label({\n\
+            fun twice(s: String) = s + \"K\"\n\
+            twice(it.name)\n\
+        }, Tag(\"O\"))\n";
+    let built = common::compare_with_kotlinc_plugin(
         "NestedLambdaClass",
+        SRC,
+        "NestedLambdaClassKt$box$1",
         &[common::stdlib_jar()],
-        Some(&common::jdk_modules()),
+        "25",
+        &[],
+    )
+    .expect("reference kotlinc is provisioned");
+    assert!(
+        built.krusty_bytes == built.reference_bytes,
+        "NestedLambdaClassKt$box$1 differs from kotlinc's:\n{}\n---\n{}",
+        built.krusty,
+        built.reference
     );
-    assert_eq!(
-        diagnostics,
-        [
-            "internal error: lambda box$lambda$0 needs the class kotlinc writes when \
-          LambdaMetafactory cannot adapt its signature, and its shape is not realized as one yet"
-        ]
-    );
+    common::expect_box_same_as_kotlinc(SRC, "NestedLambdaClass");
 }
 
 /// A generic value class over `T` whose bound admits `null` has a nullable underlying type, which
