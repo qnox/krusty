@@ -37,6 +37,7 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         "ForbidValueClassRecursionViaTypeParameters",
         "value class cannot be recursive.",
     );
+    file.deprecation_migrations = crate::features::DeprecationMigrations::from_features(features);
     file.forbid_operator_equals_in_enum_entries_and_anonymous_objects =
         features.has("ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects");
     file.inapplicable_operator_modifier_warning = features.deprecation_warning_message(

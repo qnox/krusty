@@ -141,7 +141,7 @@ mod nested_producer_bindings;
 use inner_constructor_calls::BoundInnerConstruction;
 mod import_diagnostics;
 mod inspection_analysis;
-pub(crate) use import_diagnostics::check_module_import_paths;
+pub(crate) use import_diagnostics::{check_import_deprecations, check_module_import_paths};
 mod integer_constants;
 mod interface_delegate_calls;
 mod interface_delegation;
@@ -272,6 +272,7 @@ use signature_parameter_identity::{
 };
 pub(in crate::resolve) use type_spellings::{spelling_of_ref, spelling_of_ref_with};
 mod singleton_receivers;
+pub use singleton_receivers::SingletonValue;
 mod source_constructors;
 mod source_package;
 mod stable_path;
@@ -12870,6 +12871,7 @@ impl<'a> Checker<'a> {
                 expression,
                 ExprLowering::SingletonValue(SingletonValue {
                     classifier: internal,
+                    companion_owner: None,
                 }),
             );
             return Some(Ty::Unit);
@@ -13232,6 +13234,7 @@ impl<'a> Checker<'a> {
                     expression,
                     ExprLowering::SingletonValue(SingletonValue {
                         classifier: companion,
+                        companion_owner: None,
                     }),
                 );
                 return Some(Ty::obj_name(companion));
@@ -35073,13 +35076,6 @@ pub struct ImplicitReceiverSelection {
     pub singleton: Option<SingletonValue>,
 }
 
-/// Singleton instance selected by semantic resolution. Its classifier is the complete language-level
-/// identity; the target backend chooses how to materialize the value.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SingletonValue {
-    pub classifier: TypeName,
-}
-
 /// Runtime identity of a value selected for an implicit context parameter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResolvedContextArgument {
@@ -40336,6 +40332,7 @@ impl<'a> Checker<'a> {
             expression,
             ExprLowering::SingletonValue(SingletonValue {
                 classifier: companion,
+                companion_owner: None,
             }),
         );
         self.set(expression, ty);
@@ -56285,6 +56282,7 @@ impl<'a> Checker<'a> {
                                     e,
                                     ExprLowering::SingletonValue(SingletonValue {
                                         classifier: instance.companion,
+                                        companion_owner: None,
                                     }),
                                 );
                             }

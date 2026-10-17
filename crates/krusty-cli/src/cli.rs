@@ -727,7 +727,8 @@ mod tests {
         assert_eq!(
             o.errors,
             ["krusty does not implement the language feature \
-              'ReportDeprecationsOfClassifiersInImplicitInvokes' selected by '-progressive'"
+              'ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier' selected by \
+              '-progressive'"
                 .to_string()]
         );
         assert!(o

@@ -19,14 +19,15 @@
 
 use super::symbol_display::source_declaration_display;
 use super::*;
+use crate::features::{DeprecationMigration, DeprecationMigrations};
 use crate::fir::DeclarationKind;
 use crate::types::{DeprecatedDeclaration, Deprecation, DeprecationLevel};
 use std::sync::Arc;
 
 /// One deprecated declaration a reference uses, with the rendering its diagnostic names.
-struct DeprecatedUse {
-    symbol: String,
-    deprecation: Deprecation,
+pub(super) struct DeprecatedUse {
+    pub(super) symbol: String,
+    pub(super) deprecation: Deprecation,
 }
 
 /// Which accessor of a property a reference uses.
@@ -46,6 +47,19 @@ impl Checker<'_> {
             let used = self.classifier_deprecated_use(classifier);
             self.report_deprecated_use(self.span(qualifier), used);
         }
+        if matches!(
+            self.file.expr(expression),
+            Expr::Name(_) | Expr::Member { .. }
+        ) {
+            if let Some(target) = self.file.compound_assignment_read_spans.get(&expression.0) {
+                let used = self.read_deprecated_use(expression);
+                let migration = self
+                    .implicit_companion_read(expression)
+                    .then_some(DeprecationMigration::CompanionInDelegation);
+                self.report_deprecated_use_as(*target, used, migration);
+                return;
+            }
+        }
         let (span, used) = match self.file.expr(expression) {
             Expr::Call { callee, .. } => {
                 let span = self.deprecation_callee_span(*callee);
@@ -56,6 +70,7 @@ impl Checker<'_> {
                         .get(&expression)
                         .and_then(|call| self.call_deprecated_use(call)),
                 };
+                self.check_implicit_invoke_receiver_deprecation(expression);
                 (span, used)
             }
             Expr::SafeCall { name, args, .. } => {
@@ -381,31 +396,131 @@ impl Checker<'_> {
     }
 
     fn report_deprecated_use(&mut self, span: Span, used: Option<DeprecatedUse>) {
-        let Some(DeprecatedUse {
-            symbol,
-            deprecation,
-        }) = used
-        else {
+        self.report_deprecated_use_as(span, used, None);
+    }
+
+    fn report_deprecated_use_as(
+        &mut self,
+        span: Span,
+        used: Option<DeprecatedUse>,
+        migration: Option<DeprecationMigration>,
+    ) {
+        emit_deprecated_use(
+            self.diags,
+            &self.file.deprecation_migrations,
+            &self.active_lexical_policies,
+            span,
+            used,
+            migration,
+        );
+    }
+
+    /// Report the selected object receiver of an implicit `invoke`. A companion selected through
+    /// its class value is excluded by retained selection provenance, not an owner/name query.
+    fn check_implicit_invoke_receiver_deprecation(&mut self, call: ExprId) {
+        let Some(ExprLowering::Invoke { receiver, .. }) = self.expr_lowers.get(&call) else {
             return;
         };
-        let message = format!(
-            "'{symbol}' is deprecated.{}",
-            optional_sentence(deprecation.message.as_deref())
+        let receiver = *receiver;
+        if !matches!(
+            self.file.expr(receiver),
+            Expr::Name(_) | Expr::Member { .. }
+        ) {
+            return;
+        }
+        let Some(ExprLowering::SingletonValue(singleton)) = self.expr_lowers.get(&receiver) else {
+            return;
+        };
+        if singleton.companion_owner.is_some() {
+            return;
+        }
+        let used = self.classifier_deprecated_use(singleton.classifier);
+        let span = match self.file.expr(receiver) {
+            Expr::Member { name, .. } => self.member_name_span(receiver, name),
+            _ => self.span(receiver),
+        };
+        self.report_deprecated_use_as(
+            span,
+            used,
+            Some(DeprecationMigration::ClassifierInImplicitInvoke),
         );
-        match deprecation.level {
-            DeprecationLevel::Warning => {
-                if !self.suppresses_diagnostic("DEPRECATION") {
-                    self.diags.warning_named(
-                        span,
-                        crate::diag::CompilerWarningName::Deprecation,
-                        message,
-                    );
-                }
+    }
+
+    fn implicit_companion_read(&self, expression: ExprId) -> bool {
+        matches!(
+            self.expr_lowers.get(&expression),
+            Some(ExprLowering::SingletonValue(SingletonValue {
+                companion_owner: Some(_),
+                ..
+            }))
+        )
+    }
+}
+
+/// Resolve a classifier's published deprecation from its already-selected identity.
+pub(super) fn classifier_deprecated_use_by_identity(
+    index: &crate::fir::ResolvedModuleIndex,
+    libraries: &dyn SemanticPlatform,
+    file_index: u32,
+    classifier: TypeName,
+) -> Option<DeprecatedUse> {
+    if let Some(declaration) = index.classifier_declaration(classifier) {
+        if index.binds_expectation(crate::fir::SourceFileId::from_raw(file_index), declaration) {
+            return None;
+        }
+        let deprecation = index
+            .declaration_applied_annotations(declaration)
+            .iter()
+            .find_map(crate::types::ResolvedAnnotation::deprecation)?;
+        return Some(DeprecatedUse {
+            symbol: source_declaration_display(index, declaration)?,
+            deprecation,
+        });
+    }
+    dependency_deprecated_use(libraries.classifier(classifier)?.deprecation.as_ref())
+}
+
+/// Emit an already-bound declaration use under finalized lexical and migration policies.
+pub(super) fn emit_deprecated_use(
+    diags: &mut DiagSink,
+    migrations: &DeprecationMigrations,
+    policies: &[LexicalPolicy],
+    span: Span,
+    used: Option<DeprecatedUse>,
+    migration: Option<DeprecationMigration>,
+) {
+    let Some(DeprecatedUse {
+        symbol,
+        deprecation,
+    }) = used
+    else {
+        return;
+    };
+    let message = deprecated_use_message(&symbol, &deprecation);
+    let suppresses = |diagnostic: &str| {
+        policies.iter().rev().any(|policy| {
+                matches!(policy, LexicalPolicy::Suppress(suppressed) if suppressed == diagnostic)
+            })
+    };
+    match deprecation.level {
+        DeprecationLevel::Warning => {
+            if !suppresses("DEPRECATION") {
+                diags.warning_named(span, crate::diag::CompilerWarningName::Deprecation, message);
             }
-            DeprecationLevel::Error | DeprecationLevel::Hidden => {
-                if !self.suppresses_diagnostic("DEPRECATION_ERROR") {
-                    self.diags.error(span, message);
-                }
+        }
+        DeprecationLevel::Error | DeprecationLevel::Hidden => {
+            let warning = migration.and_then(|migration| {
+                let policy = migrations.policy(migration);
+                (!policy.completed)
+                    .then(|| policy.warning_format.as_ref())
+                    .flatten()
+            });
+            if let Some(format) = warning {
+                // This warning stands in for the future error and is not suppressible as a
+                // regular `DEPRECATION`/`DEPRECATION_ERROR` report in kotlinc.
+                diags.warning(span, format.message(&message));
+            } else if !suppresses("DEPRECATION_ERROR") {
+                diags.error(span, message);
             }
         }
     }
@@ -434,6 +549,13 @@ fn call_declaration(call: &ResolvedCall) -> Option<crate::fir::DeclarationId> {
         } => *stable_declaration,
         ResolvedCall::LocalFunction(_) => None,
     }
+}
+
+fn deprecated_use_message(symbol: &str, deprecation: &Deprecation) -> String {
+    format!(
+        "'{symbol}' is deprecated.{}",
+        optional_sentence(deprecation.message.as_deref())
+    )
 }
 
 /// kotlinc's `OPTIONAL_SENTENCE`: nothing for a blank message, otherwise a space, the trimmed

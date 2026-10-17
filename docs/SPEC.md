@@ -14071,7 +14071,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `companion object Companion : I`, `class G<in T, out R : Any> : Any`. The checked annotations of
   top-level functions and properties, body properties, accessors and constructors are folded and
   published on their stable declarations in Pass 1, like those of classifiers and methods. Not yet
-  modeled: imports, `@get:`/`@set:` use-site targets, constructor-property parameters, type aliases,
+  modeled: `@get:`/`@set:` use-site targets, constructor-property parameters, type aliases,
   enum entries, operator conventions, `this(...)` delegation, annotation uses, the deprecation of
   an `expect` header itself, and the `actual` of a primary constructor in its rendering.
   Test: `tests/deprecation_usage_e2e.rs`.
@@ -14095,6 +14095,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   top-level `const` properties; Java platform-type and substituted renderings; companion-block
   properties; and `hiddenSince` removing the candidate.
   Test: `tests/deprecation_classpath_e2e.rs`.
+- **Deprecated classifiers on imports and migrating use positions.** Import validation retains the
+  selected classifier identities for each valid occurrence in a resolver-owned inventory. After
+  checked declaration and file annotations are published, the deprecation checker consumes those
+  identities without resolving the written path again. An import does not report the declaration
+  it imports: it reports that declaration's classifier container, then each enclosing classifier
+  innermost first. Enclosing classifiers use
+  `ReportDeprecationsOfOuterImportedClasses`. The checker also reports a deprecated object called
+  through implicit `invoke` (`ReportDeprecationsOfClassifiersInImplicitInvokes`) and a deprecated
+  companion selected through its class as an augmented-assignment target
+  (`ReportDeprecatedCompanionInDelegation`). Both decisions consume the resolver's selected
+  singleton identity and provenance. While one of these migrations remains disabled, an `ERROR`
+  deprecation warns with the selected reference release's future-error suffix and is not hidden by
+  `@Suppress`; enabling the feature restores the declaration's error level.
+  Test: `tests/deprecation_migration_e2e.rs`.
 - **An abstract member's metadata and nullability match a concrete one's, without the field.** An
   abstract property has no backing field, so kotlinc writes no field entry in its
   `JvmPropertySignature` and interns none of the field's strings: `interface Holder { val count:
