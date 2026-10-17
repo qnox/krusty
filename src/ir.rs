@@ -1527,6 +1527,10 @@ pub struct IrSpecializedFunction {
     /// Specialized implementation lexically containing this one. Nested copies retain containment
     /// rather than being flattened into another top-level expansion ordinal.
     pub parent: Option<FunId>,
+    /// This copy consumed a supplied inline-lambda capture into its implementation. Even when the
+    /// supplied lambda had no captures and the resulting closure has no fields, each expansion
+    /// still creates that closure value rather than sharing the declaration's singleton.
+    pub consumed_inline_capture: bool,
 }
 
 /// A call-site copy of an anonymous class whose members use a reified type parameter.

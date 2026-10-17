@@ -1170,11 +1170,17 @@ pub fn exact_class_difference(class: &str, reference: &[u8], ours: &[u8]) -> Str
             info.signature.clone(),
         )
     };
+    let inner_classes = |bytes: &[u8]| {
+        krusty::jvm::classreader::parse_class(bytes)
+            .expect("a readable class file")
+            .inner_classes
+    };
     let reference_disassembly = disassemble(class, reference);
     let ours_disassembly = disassemble(class, ours);
     format!(
         "{class} differs (kotlinc {} bytes, krusty {} bytes; {first_raw_difference})\n\
          headers:\n  kotlinc: {:?}\n  krusty:  {:?}\n\
+         InnerClasses:\n  kotlinc: {:#?}\n  krusty:  {:#?}\n\
          member tables:\n  kotlinc: {:#?}\n  krusty:  {:#?}\n\
          members/code/debug:\n--- kotlinc ---\n{}\n--- krusty ---\n{}\n\
          metadata:\n  kotlinc: {:#?}\n  krusty:  {:#?}",
@@ -1182,6 +1188,8 @@ pub fn exact_class_difference(class: &str, reference: &[u8], ours: &[u8]) -> Str
         ours.len(),
         header(reference),
         header(ours),
+        inner_classes(reference),
+        inner_classes(ours),
         member_table(reference),
         member_table(ours),
         member_blocks(&reference_disassembly).join("\n"),

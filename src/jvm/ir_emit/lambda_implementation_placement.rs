@@ -230,6 +230,7 @@ mod tests {
                 inline_callee: crate::fir::CallableId::from_raw(0),
                 inline_callee_source_name: "inlineCall".to_string(),
                 parent: None,
+                consumed_inline_capture: false,
             },
         );
 
@@ -296,6 +297,7 @@ mod tests {
                 inline_callee: crate::fir::CallableId::from_raw(0),
                 inline_callee_source_name: "inlineCall".to_string(),
                 parent: None,
+                consumed_inline_capture: false,
             },
         );
         let direct = ir.add_expr(IrExpr::Call {
@@ -394,6 +396,7 @@ mod tests {
                 inline_callee: crate::fir::CallableId::from_raw(0),
                 inline_callee_source_name: "inlineCall".to_string(),
                 parent: None,
+                consumed_inline_capture: false,
             },
         );
 

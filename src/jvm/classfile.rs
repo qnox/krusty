@@ -526,8 +526,7 @@ pub struct ClassWriter {
     source_map: crate::jvm::source_map::SourceMap,
     /// The methods the coroutine transformer rewrites when the class is written, and its results.
     coroutines: coroutine_transform::Coroutines,
-    /// Owner, method name, and descriptor for the `EnclosingMethod` attribute.
-    enclosing_method: Option<(String, String, String)>,
+    enclosing_method: enclosing_method::EnclosingMethodState,
     pub internal_name: String,
 }
 
@@ -582,7 +581,7 @@ impl ClassWriter {
             source_file: None,
             source_map: crate::jvm::source_map::SourceMap::default(),
             coroutines: coroutine_transform::Coroutines::default(),
-            enclosing_method: None,
+            enclosing_method: enclosing_method::EnclosingMethodState::default(),
             internal_name: internal_name.to_string(),
         }
     }
@@ -615,23 +614,6 @@ impl ClassWriter {
             self.source_map = crate::jvm::source_map::SourceMap::new(&source_file, &path, lines);
         }
         Some(&mut self.source_map)
-    }
-
-    /// Start the identity source map kotlinc writes for a class generated inside an `inline`
-    /// function (`visitSMAP(…, intoInline = true)`). The map is kept even when the class inlines
-    /// nothing else. A map an earlier splice already started is left as it is.
-    pub fn start_inline_origin_source_map(&mut self, lines: u16) {
-        if self.source_map.is_unstarted() {
-            let Some(source_file) = self.source_file.clone() else {
-                return;
-            };
-            let path = self.internal_name.clone();
-            self.source_map = crate::jvm::source_map::SourceMap::for_regenerated_class(
-                &source_file,
-                &path,
-                lines,
-            );
-        }
     }
 
     /// The class's own source file, for a synthesized class that belongs to it.
@@ -1886,7 +1868,12 @@ impl ClassWriter {
             u4(&mut out, bytes.len() as u32);
             out.extend_from_slice(bytes);
         }
-        pool_layout::relayout(out, &relaid, self.unnamed_entries())
+        pool_layout::relayout(
+            out,
+            &relaid,
+            self.unnamed_entries(),
+            self.enclosing_method.retained_header_entries(),
+        )
     }
 }
 

@@ -1301,6 +1301,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
             ir,
             facts.metadata.override_results,
             facade,
+            opts.lambda_modes,
         ),
     };
     emit_all_with_class_meta(ir, facade, &env, facts.metadata.facade, opts, &|_| None)
@@ -5398,9 +5399,6 @@ struct Emitter<'a> {
     /// The exact selector currently emitted by a safe-call guard. Its copied inline frame may
     /// need to adapt a value before the selector joins the null arm.
     active_safe_call_selector: Option<u32>,
-    /// An erased copied result whose enclosing safe-call selector owns adaptation, but whose
-    /// trailing spliced lambda must perform it before closing its locals and inline frame.
-    pending_pre_close_copied_result: Option<block_scope::PendingPreCloseCopiedResult>,
     /// A chain's receiver temporaries declared after its first guard already jumped to the shared
     /// null exit, by that exit: none of them is assigned on every path into it.
     safe_call_exit_temporaries: HashMap<Label, Vec<u32>>,
@@ -5432,6 +5430,7 @@ struct Emitter<'a> {
     suspend_lambda_parameter_reads: HashSet<crate::ir::ExprId>,
     /// Function-value invocations whose consumer takes `invoke`'s erased `Object` as it is.
     erased_invocations: HashSet<crate::ir::ExprId>,
+    inline_coercions: block_scope::InlineCoercionState,
     /// The next state's ordinal. A state belongs to an emission SITE, not to an expression: an
     /// inline function that invokes its lambda twice splices the same body twice, and each copy
     /// suspends on its own locals. Both passes emit the same sequence, so both number it alike.
@@ -5572,7 +5571,6 @@ impl<'a> Emitter<'a> {
             safe_call_null_exits: HashMap::default(),
             stack_resident_value: None,
             active_safe_call_selector: None,
-            pending_pre_close_copied_result: None,
             safe_call_exit_temporaries: HashMap::default(),
             var_types: collect_body_var_types(ir, roots.iter().copied()),
             value_stores: non_null_operands::ValueStores::collect(ir, &roots),
@@ -5585,6 +5583,7 @@ impl<'a> Emitter<'a> {
             transformed_suspensions: Default::default(),
             suspend_lambda_parameter_reads: HashSet::default(),
             erased_invocations: HashSet::default(),
+            inline_coercions: block_scope::InlineCoercionState::default(),
             machine_next_ordinal: 0,
             machine_entered: false,
             machine_resumes: Vec::new(),
