@@ -909,15 +909,28 @@ impl Checker<'_> {
         self.report_callable_ambiguity(call, name, candidates);
         if let Expr::Call { args, .. } = self.file.expr(call) {
             let args = args.clone();
+            // A lambda with neither parameters nor an implicit `it` is still checked, without a
+            // receiver: kotlinc reports `{ length }` as `unresolved reference 'length'`.
+            for &argument in &args {
+                let Expr::Lambda { params, body } = self.file.expr(argument).clone() else {
+                    continue;
+                };
+                if params.is_empty() && !self.untyped_lambda_binds_implicit_it(scope, body) {
+                    self.omit_unshaped_any_receiver_type += 1;
+                    self.expr_inner_lambda(scope, argument, None, params, body, Some(name));
+                    self.omit_unshaped_any_receiver_type -= 1;
+                }
+            }
             self.report_unshaped_lambda_diagnostics(scope, &args);
         }
         self.set(call, Ty::Error)
     }
 
     /// Whether `left` and `right` give a lambda argument of `args` that declares no parameter
-    /// types incomparable inputs: the same receiver and parameter count, and at some parameter two
-    /// concrete types neither of which is a subtype of the other (`(Int) -> Unit` against
-    /// `(String) -> Unit`). Neither candidate is then more specific for that lambda.
+    /// types incomparable inputs: two concrete receivers, or two parameters at the same position of
+    /// equally long lists, neither of which is a subtype of the other (`(Int) -> Unit` against
+    /// `(String) -> Unit`, `Int.() -> Unit` against `String.() -> Unit`). Neither candidate is then
+    /// more specific for that lambda.
     fn untyped_lambda_inputs_differ(
         &self,
         args: &[ExprId],
@@ -942,6 +955,14 @@ impl Checker<'_> {
         let subtype = |sub: Ty, sup: Ty| {
             crate::assignable::is_subtype(&crate::assignable::TyCtx::new(), self, sub, sup)
         };
+        let incomparable = |left: Ty, right: Ty| {
+            !left.mentions_ty_param()
+                && !right.mentions_ty_param()
+                && left != Ty::Error
+                && right != Ty::Error
+                && !subtype(left, right)
+                && !subtype(right, left)
+        };
         args.iter().enumerate().any(|(index, &argument)| {
             let Expr::Lambda { .. } = self.file.expr(argument) else {
                 return false;
@@ -956,20 +977,16 @@ impl Checker<'_> {
             else {
                 return false;
             };
-            !declares_types
-                && receiver(left, index) == receiver(right, index)
-                && left_parameters.len() == right_parameters.len()
+            let receivers_differ = matches!(
+                (receiver(left, index), receiver(right, index)),
+                (Some(left), Some(right)) if incomparable(left, right)
+            );
+            let parameters_differ = left_parameters.len() == right_parameters.len()
                 && left_parameters
                     .iter()
                     .zip(&right_parameters)
-                    .any(|(&left, &right)| {
-                        !left.mentions_ty_param()
-                            && !right.mentions_ty_param()
-                            && left != Ty::Error
-                            && right != Ty::Error
-                            && !subtype(left, right)
-                            && !subtype(right, left)
-                    })
+                    .any(|(&left, &right)| incomparable(left, right));
+            !declares_types && (receivers_differ || parameters_differ)
         })
     }
 

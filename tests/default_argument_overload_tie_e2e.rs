@@ -45,6 +45,21 @@ fn an_undecided_family_keeps_the_call_ambiguous() {
     );
 }
 
+/// Incomparable lambda receivers tie the same way: `String.() -> Unit` and `Int.() -> Unit` leave
+/// `{ length }` unshaped, so kotlinc reports the ambiguity and then the unresolved `length`.
+#[test]
+fn incomparable_lambda_receivers_keep_the_call_ambiguous() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "fun pick(block: String.() -> Unit) = \"string\"\n\
+             fun pick(n: Int = 0, block: Int.() -> Unit) = \"int\"\n\
+             fun test() = pick { length }\n",
+        )],
+        &[],
+    );
+}
+
 /// A lambda whose explicit parameter type rules the other families out selects its own.
 #[test]
 fn an_explicit_parameter_type_selects_its_family() {

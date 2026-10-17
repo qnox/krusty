@@ -14286,10 +14286,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Unit)`, `pick { it + 1 }` is an overload resolution ambiguity, not the `Int` overload, while
   `pick { x: String -> x.length }` selects the `String` one. The body check follows the same
   rule: a lambda that declares no parameter types is shaped by the call's candidate, so when two
-  applicable top-level candidates expect incomparable inputs for it (neither parameter type is a
-  subtype of the other), kotlinc cannot analyze it before choosing. The call reports the overload
+  applicable top-level candidates expect incomparable inputs for it (neither parameter or
+  receiver type is a subtype of the other), kotlinc cannot analyze it before choosing. The call reports the overload
   resolution ambiguity over those candidates and the lambda's `it` is unresolved, rather than the
-  lambda being typed by the first candidate. Verified against kotlinc 2.4.20.
+  lambda being typed by the first candidate. A lambda with neither parameters nor `it` is checked
+  without a receiver: `pick { length }` over `String.() -> Unit` and `Int.() -> Unit` also reports
+  `unresolved reference 'length'`. Verified against kotlinc 2.4.20.
   (`tests/default_argument_overload_tie_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
