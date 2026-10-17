@@ -6,10 +6,11 @@
 //! The ordinary selector takes one parameter-ordered argument list, so candidates that map the
 //! same source arguments onto different parameters (a trailing lambda filling `block` directly, or
 //! filling it after a defaulted `n`) cannot be selected as one family. Each distinct argument
-//! mapping is selected on its own by that selector. When more than one mapping yields a
-//! candidate and all of them pass every argument to the same parameter type, they are equally
-//! specific and Kotlin prefers the candidate whose call uses no default argument. Any other tie
-//! stays undecided: a postponed argument's own shape may still rule a candidate out.
+//! mapping is selected on its own by that selector. When every mapping yields a candidate and all
+//! of them pass every argument to the same parameter type, they are equally specific and Kotlin
+//! prefers the candidate whose call uses no default argument. Any other outcome stays undecided: a
+//! family whose own selection is undecided may hold the call's candidate, and a postponed
+//! argument's own shape may still rule a candidate out.
 
 use super::*;
 
@@ -109,12 +110,12 @@ impl ProductionSignatureSemantics<'_> {
             return Self::select_mapping_family(resolver, spelling, family, type_arguments)
                 .or_else(|| Self::unique_visible_candidate(resolver, family, type_arguments));
         }
+        // A family the ordinary selector leaves undecided may still hold the call's candidate, so
+        // the shape is only known once every family has selected one.
         let mut selections = families
             .iter()
-            .filter_map(|family| {
-                Self::select_mapping_family(resolver, spelling, family, type_arguments)
-            })
-            .collect::<Vec<_>>();
+            .map(|family| Self::select_mapping_family(resolver, spelling, family, type_arguments))
+            .collect::<Option<Vec<_>>>()?;
         let first = selections.first()?.argument_parameters(arguments.len());
         if selections
             .iter()
