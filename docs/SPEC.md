@@ -6223,6 +6223,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `private_set_e2e::a_default_private_setter_has_no_method_like_kotlinc`,
   `private_set_e2e::an_override_and_a_hoisted_companion_private_default_setter_write_storage`,
   `private_set_e2e::declared_private_setters_remain_methods`.
+  Each default accessor is mangled by its own visibility: an `internal set` on a public property is
+  `setW$<module>` beside an unmangled `getW`. A `companion { … }` block property follows the same rules on its
+  class's static accessors: a `private set` has no `setP` and no metadata setter signature, an
+  `internal set` is `setW$<module>`, and an internal block property's default accessors are
+  `getV$<module>`/`setV$<module>` (unlike a file facade's). A sibling file's reads, writes and calls
+  of an internal block member and same-/sibling-file property-reference carriers name the mangled
+  spelling too; `@PublishedApi` keeps the unmangled public-ABI spelling. Tests:
+  `private_set_e2e::companion_block_private_and_internal_setters_match_kotlinc`,
+  `private_set_e2e::companion_block_internal_accessors_link_from_another_file`.
   The node carries the property's DECLARED type: substituting it to the type the site sees stays in the
   IR as before, because a pass that rewrites the read away still needs that bridging. And nothing ever
   narrows to a value class — it has no runtime type of its own, its values ARE the erased underlying — in

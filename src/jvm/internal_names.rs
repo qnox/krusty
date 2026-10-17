@@ -11,7 +11,10 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 use crate::fir::ResolvedFunctionOverrideTarget;
-use crate::ir::{Callee, FunId, IrExpr, IrFile, IrLocalPropertyLayout, IrVirtualTarget};
+use crate::ir::{
+    Callee, FunId, IrExpr, IrFile, IrLocalPropertyLayout, IrModuleMemberAccess, IrStaticPlacement,
+    IrVirtualTarget,
+};
 use crate::types::{TypeName, Visibility};
 
 /// Characters kotlinc keeps in a module suffix. `$` and every other non-identifier character
@@ -32,7 +35,12 @@ pub(crate) fn sanitize_module_name(module_name: &str) -> String {
 
 /// Append `$<module>` to every internal member that is not a facade or constructor, and to the
 /// bridges that publish that member's JVM name.
-pub(crate) fn mangle_internal_members(ir: &mut IrFile, module_name: &str, facade: &str) {
+pub(crate) fn mangle_internal_members(
+    ir: &mut IrFile,
+    module_name: &str,
+    facade: &str,
+    property_references: &crate::jvm::property_references::PropertyReferenceRealizations,
+) {
     let suffix = format!("${}", sanitize_module_name(module_name));
     let facade_name = crate::types::type_name(facade);
     let targets = (0..ir.functions.len())
@@ -61,6 +69,9 @@ pub(crate) fn mangle_internal_members(ir: &mut IrFile, module_name: &str, facade
     // A plain `internal var v` has no accessor function. The emitter synthesizes `getV`/`setV`
     // from the property, so the suffix has to land on that JVM name too.
     let synthesized = synthesized_internal_accessors(ir, facade_name);
+    // A `companion { … }` block property is static storage of its class rather than a class
+    // property, and its default accessors are named from that storage.
+    let companion_accessors = mangle_companion_block_default_accessors(ir, &suffix);
     // A sibling file may declare none of these members and still call them. Its calls spell the
     // Kotlin name until this rewrite, so an empty rename set is not a reason to leave them.
     let rewrites_sibling_calls = ir
@@ -70,7 +81,11 @@ pub(crate) fn mangle_internal_members(ir: &mut IrFile, module_name: &str, facade
         || ir.referenced_module_properties.values().any(|property| {
             module_getter_is_mangled(property) || module_setter_is_mangled(property)
         });
-    if old_names.is_empty() && synthesized.is_empty() && !rewrites_sibling_calls {
+    if old_names.is_empty()
+        && synthesized.is_empty()
+        && companion_accessors.is_empty()
+        && !rewrites_sibling_calls
+    {
         return;
     }
     // A value-class bridge calls the member by the spelling it had before this suffix
@@ -78,7 +93,14 @@ pub(crate) fn mangle_internal_members(ir: &mut IrFile, module_name: &str, facade
     // to move with it. A property reference is the same kind of stored spelling (`getX`).
     retarget_renamed_bridges(ir, &old_names);
     retarget_property_bridges(ir, &old_names, &synthesized, &suffix);
-    rewrite_property_references(ir, &old_names, &synthesized, &suffix);
+    rewrite_property_references(
+        ir,
+        &old_names,
+        &synthesized,
+        &companion_accessors,
+        property_references,
+        &suffix,
+    );
     suffix_override_bridges(ir, &old_names, &synthesized, &suffix);
     apply_synthesized_accessors(ir, &synthesized, &suffix);
     rewrite_call_names(ir, &old_names, &synthesized, &suffix);
@@ -187,6 +209,8 @@ fn rewrite_property_references(
     ir: &mut IrFile,
     old_names: &HashMap<FunId, String>,
     synthesized: &[SynthesizedAccessor],
+    companion_accessors: &[CompanionBlockAccessorNames],
+    realizations: &crate::jvm::property_references::PropertyReferenceRealizations,
     suffix: &str,
 ) {
     let mut getters = HashMap::<(TypeName, String), String>::default();
@@ -230,19 +254,43 @@ fn rewrite_property_references(
             setters.insert((owner, setter.clone()), format!("{setter}{suffix}"));
         }
     }
+    // Block-property references are realized before the JVM naming pass too. Their stored
+    // accessor spellings follow the exact old/new names selected above, including a value-class
+    // setter's existing mangling before the module suffix.
+    for accessor in companion_accessors {
+        if let Some((old, new)) = &accessor.getter {
+            getters.insert((accessor.owner, old.clone()), new.clone());
+        }
+        if let Some((old, new)) = &accessor.setter {
+            setters.insert((accessor.owner, old.clone()), new.clone());
+        }
+    }
     for class in &mut ir.classes {
+        let class_name = class.fq_name;
         let Some(reference) = class.prop_ref.as_mut() else {
             continue;
         };
         let Some(owner) = reference.call_owner_internal.or(reference.owner_internal) else {
             continue;
         };
-        if let Some(name) = getters.get(&(owner, reference.getter_name.clone())) {
-            reference.getter_name.clone_from(name);
+        let getter_was_rewritten =
+            if let Some(name) = getters.get(&(owner, reference.getter_name.clone())) {
+                reference.getter_name.clone_from(name);
+                true
+            } else {
+                false
+            };
+        let realization = realizations.get(class_name);
+        if !getter_was_rewritten
+            && realization.is_some_and(|realization| realization.module_suffix_getter)
+        {
+            reference.getter_name = append_module_suffix(&reference.getter_name, suffix);
         }
         if let Some(setter) = reference.setter_name.clone() {
-            if let Some(name) = setters.get(&(owner, setter)) {
+            if let Some(name) = setters.get(&(owner, setter.clone())) {
                 reference.setter_name = Some(name.clone());
+            } else if realization.is_some_and(|realization| realization.module_suffix_setter) {
+                reference.setter_name = Some(append_module_suffix(&setter, suffix));
             }
         }
     }
@@ -370,6 +418,68 @@ fn synthesized_internal_accessors(ir: &IrFile, facade: TypeName) -> Vec<Synthesi
         });
     }
     accessors
+}
+
+struct CompanionBlockAccessorNames {
+    owner: TypeName,
+    getter: Option<(String, String)>,
+    setter: Option<(String, String)>,
+}
+
+/// Suffix the compiler-default accessors of `companion { … }` block properties. Each accessor is
+/// mangled by its own visibility, as a class member's is: a public block `var` with an
+/// `internal set` keeps `getW` and publishes `setW$<module>`. A declared accessor is a function of
+/// the class and is renamed with the other internal members.
+fn mangle_companion_block_default_accessors(
+    ir: &mut IrFile,
+    suffix: &str,
+) -> Vec<CompanionBlockAccessorNames> {
+    use crate::ir::IrStaticAccessor;
+    let renames = ir
+        .companion_blocks
+        .properties()
+        .filter(|property| !property.visibility.is_private())
+        .filter_map(|property| {
+            let class = ir
+                .classes
+                .iter()
+                .find(|class| class.fq_name == property.class)?;
+            if property_publishes_api(class, property.source_order) {
+                return None;
+            }
+            let storage = property.storage?;
+            let accessors = ir.statics[storage as usize].accessors;
+            let getter = accessors.getter == IrStaticAccessor::Default
+                && !property.is_const
+                && property.visibility == Visibility::Internal;
+            let setter = accessors.setter == IrStaticAccessor::Default
+                && property.is_var
+                && property.setter_visibility == Visibility::Internal;
+            (getter || setter).then_some((property.class, storage, getter, setter))
+        })
+        .collect::<Vec<_>>();
+    let mut names = Vec::with_capacity(renames.len());
+    for (owner, storage, getter, setter) in renames {
+        let storage = &mut ir.statics[storage as usize];
+        let getter = getter.then(|| {
+            let old = storage.default_getter_jvm_name();
+            let new = format!("{old}{suffix}");
+            storage.getter_jvm_name = Some(new.clone());
+            (old, new)
+        });
+        let setter = setter.then(|| {
+            let old = storage.default_setter_jvm_name();
+            let new = format!("{old}{suffix}");
+            storage.setter_jvm_name = Some(new.clone());
+            (old, new)
+        });
+        names.push(CompanionBlockAccessorNames {
+            owner,
+            getter,
+            setter,
+        });
+    }
+    names
 }
 
 fn apply_synthesized_accessors(ir: &mut IrFile, accessors: &[SynthesizedAccessor], suffix: &str) {
@@ -695,16 +805,25 @@ fn rewrite_call_names(
         module_setters: &module_setters,
         suffix,
     };
-    for expression in &mut ir.exprs {
-        let IrExpr::Call { callee, .. } = expression else {
+    for (expression, node) in ir.exprs.iter_mut().enumerate() {
+        let IrExpr::Call { callee, .. } = node else {
             continue;
         };
-        rewrite_callee(callee, &rename);
+        let access = ir
+            .module_member_accesses
+            .get(&(expression as crate::ir::ExprId));
+        rewrite_callee(callee, access, &rename);
     }
 }
 
+/// Whether a module declaration is a member of a class rather than of a file facade: a class
+/// member, or a `companion { … }` block member, which is a static of its declaring class.
+fn is_class_member(owner: Option<TypeName>, placement: IrStaticPlacement) -> bool {
+    owner.is_some() || matches!(placement, IrStaticPlacement::CompanionBlock { .. })
+}
+
 pub(super) fn module_callable_is_mangled(callable: &crate::ir::IrModuleCallable) -> bool {
-    callable.owner.is_some()
+    is_class_member(callable.owner, callable.placement)
         && callable.visibility == Visibility::Internal
         && !callable
             .annotations
@@ -713,7 +832,7 @@ pub(super) fn module_callable_is_mangled(callable: &crate::ir::IrModuleCallable)
 }
 
 pub(super) fn module_getter_is_mangled(property: &crate::ir::IrModuleProperty) -> bool {
-    property.owner.is_some()
+    is_class_member(property.owner, property.placement)
         && property.visibility == Visibility::Internal
         && !property
             .annotations
@@ -722,7 +841,7 @@ pub(super) fn module_getter_is_mangled(property: &crate::ir::IrModuleProperty) -
 }
 
 pub(super) fn module_setter_is_mangled(property: &crate::ir::IrModuleProperty) -> bool {
-    property.owner.is_some()
+    is_class_member(property.owner, property.placement)
         && property.mutable
         && property.setter_visibility == Visibility::Internal
         && !property
@@ -773,7 +892,13 @@ struct CallRename<'a> {
     suffix: &'a str,
 }
 
-fn rewrite_callee(callee: &mut Callee, rename: &CallRename<'_>) {
+/// Rename `callee` to its declaration's mangled JVM name. `access` is the module member a sibling
+/// file's call was realized from, when it was.
+fn rewrite_callee(
+    callee: &mut Callee,
+    access: Option<&IrModuleMemberAccess>,
+    rename: &CallRename<'_>,
+) {
     match callee {
         Callee::Virtual {
             owner,
@@ -882,6 +1007,17 @@ fn rewrite_callee(callee: &mut Callee, rename: &CallRename<'_>) {
                 if let Some(renamed) = rename.by_callable.get(&target) {
                     *name = keep_default_stub(name, renamed.clone());
                 } else if rename.module_functions.contains(&target) {
+                    *name = append_module_suffix(name, rename.suffix);
+                }
+            } else if let Some(IrModuleMemberAccess::Property { target, write, .. }) = access {
+                // A sibling file's `companion { … }` block property accessor: each side is
+                // mangled by its own visibility.
+                let accessors = if *write {
+                    rename.module_setters
+                } else {
+                    rename.module_getters
+                };
+                if accessors.contains(target) {
                     *name = append_module_suffix(name, rename.suffix);
                 }
             }

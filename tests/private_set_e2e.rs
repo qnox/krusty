@@ -126,3 +126,94 @@ class Controlled {\n\
         assert_eq!(setter.access & 0x0007, 0x0002, "{name} visibility");
     }
 }
+
+/// A `companion { … }` block property is a static of its class, with the same accessor rules as a
+/// member: a `private set` produces no `setP` (and no setter signature in the class's
+/// `@Metadata`), and each default accessor is mangled by its own visibility — an `internal set` on
+/// a public property is `setW$<module>` beside `getW`, an internal property's are `getV$<module>`
+/// and `setV$<module>` — which the class's metadata records and the facade's calls name.
+#[test]
+fn companion_block_private_and_internal_setters_match_kotlinc() {
+    let src = "package store\n\
+               \n\
+               class C {\n\
+               \x20   companion {\n\
+               \x20       var w: String = \"\"; internal set\n\
+               \x20       var p: String = \"\"; private set\n\
+               \x20       internal var u: String = \"\"; private set\n\
+               \x20       internal var v: String = \"\"\n\
+               \x20       @PublishedApi internal var published: String = \"\"\n\
+               \x20       fun touch() { w = \"O\"; p = \"y\"; u = \"x\" }\n\
+               \x20   }\n\
+               }\n\
+               \n\
+               fun box(): String {\n\
+               \x20   C.touch()\n\
+               \x20   C.w = \"O\"\n\
+               \x20   C.v = \"K\"\n\
+               \x20   C.published = \"!\"\n\
+               \x20   return C.w + C.v + C.p + C.u + C.published\n\
+               }\n";
+    let settings = krusty::language_settings::LanguageSettings::new(
+        krusty::language_version::LanguageVersion::V2_4,
+        None,
+        &[krusty::features::FeatureSetting {
+            feature: "CompanionBlocksAndExtensions".to_string(),
+            enabled: true,
+        }],
+    )
+    .expect("Kotlin 2.4 with companion blocks");
+    for class in ["store/C", "store/CompanionBlockSettersKt"] {
+        let comparison = common::compare_with_kotlinc_plugin_language_settings(
+            "CompanionBlockSetters",
+            src,
+            class,
+            &[common::stdlib_jar()],
+            "1.8",
+            &settings,
+        )
+        .expect("reference kotlinc is provisioned");
+        assert!(
+            comparison.krusty_bytes == comparison.reference_bytes,
+            "{class} differs from kotlinc's:\n{}\n---\n{}",
+            comparison.krusty,
+            comparison.reference
+        );
+    }
+}
+
+/// A sibling file reaches a `companion { … }` block member through the declaring class, by the
+/// member's mangled JVM name: an `internal set`, an internal property's accessors and an internal
+/// function and same-/sibling-file property-reference carriers all carry the module suffix there
+/// too. A `@PublishedApi` property retains its public-ABI spelling.
+#[test]
+fn companion_block_internal_accessors_link_from_another_file() {
+    const DECLARING: &str = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+        package store\n\
+        class A {\n\
+        \x20   companion {\n\
+        \x20       var w: String = \"\"; internal set\n\
+        \x20       internal var v: String = \"\"\n\
+        \x20       @PublishedApi internal var published: String = \"\"\n\
+        \x20       internal fun f(): String = \"!\"\n\
+        \x20   }\n\
+        }\n\
+        internal fun sameFileReference(): String {\n\
+        \x20   val ref = A::v\n\
+        \x20   ref.set(\"K\")\n\
+        \x20   return ref.get()\n\
+        }\n";
+    const USING: &str = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+        package store\n\
+        fun box(): String {\n\
+        \x20   val ref = A::w\n\
+        \x20   ref.set(\"O\")\n\
+        \x20   A.published = \"P\"\n\
+        \x20   val r = ref.get() + sameFileReference() + A.f() + A.published\n\
+        \x20   return if (r == \"OK!P\") \"OK\" else r\n\
+        }\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("A.kt", DECLARING), ("Main.kt", USING)],
+        "CompanionBlockInternalAccessors",
+    );
+}

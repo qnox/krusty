@@ -71,8 +71,12 @@ pub struct IrStatic {
     /// accessors; cross-class reads inside the file go through a synthesized `access$get<X>$p` bridge
     /// (kotlinc's shape).
     pub visibility: crate::types::Visibility,
+    /// The default getter's JVM name when it is not the ordinary `get<X>` spelling: an internal
+    /// `companion { … }` block property's is `get<X>$<module>`. `None` ⇒ the ordinary name.
+    pub getter_jvm_name: Option<String>,
     /// The setter's JVM name when it is not the ordinary `set<X>` spelling — a value-class-typed
-    /// property mangles it, because a value-class PARAMETER always does. `None` ⇒ the ordinary name.
+    /// property mangles it, because a value-class PARAMETER always does, and an internal
+    /// `companion { … }` block setter takes the module suffix. `None` ⇒ the ordinary name.
     pub setter_jvm_name: Option<String>,
     /// The type this static was DECLARED with, when the JVM pass erased its storage to a value
     /// class's carrier (a file facade's property, which kotlinc erases the same way). `None` ⇒ the
@@ -101,6 +105,20 @@ pub struct IrStatic {
 }
 
 impl IrStatic {
+    /// The JVM name of the compiler-default getter.
+    pub fn default_getter_jvm_name(&self) -> String {
+        self.getter_jvm_name
+            .clone()
+            .unwrap_or_else(|| crate::names::property_getter_name(&self.name))
+    }
+
+    /// The JVM name of the compiler-default setter.
+    pub fn default_setter_jvm_name(&self) -> String {
+        self.setter_jvm_name
+            .clone()
+            .unwrap_or_else(|| crate::names::property_setter_name(&self.name))
+    }
+
     pub fn is_facade_owned(&self) -> bool {
         self.owner.is_none()
     }

@@ -481,6 +481,8 @@ fn classifier_property(
             package_owner: true,
             getter_function: None,
             setter_function: None,
+            module_suffix_getter: false,
+            module_suffix_setter: false,
             physical_getter_ret: None,
             physical_setter_value: None,
             getter_constant: None,
@@ -674,6 +676,8 @@ fn external_property(
             // A dependency declares no function of this module.
             getter_function: None,
             setter_function: None,
+            module_suffix_getter: false,
+            module_suffix_setter: false,
             physical_getter_ret: Some(callable.physical_ret),
             physical_setter_value,
             getter_constant,
@@ -1000,6 +1004,9 @@ fn module_property(
             package_owner: property.placement == crate::ir::IrStaticPlacement::Package,
             getter_function: declared.getter,
             setter_function: reference_mutable.then_some(declared.setter).flatten(),
+            module_suffix_getter: super::internal_names::module_getter_is_mangled(property),
+            module_suffix_setter: reference_mutable
+                && super::internal_names::module_setter_is_mangled(property),
             // The accessor's physical return is the property's own type: this module writes no
             // descriptor of its own for one, and the synthesized ones above are built from it.
             physical_getter_ret: getter_descriptor.is_some().then_some(property.ty),

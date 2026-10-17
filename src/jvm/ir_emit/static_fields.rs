@@ -287,15 +287,11 @@ pub(in crate::jvm) fn declared_default_static_accessor_signature(
     let storage = &ir.statics[static_index as usize];
     let descriptor = type_descriptor(jvm_declared_ty(&storage.ty));
     let (name, descriptor) = match side {
-        PropertyAccessorSide::Getter => (
-            property_getter_name(&storage.name),
-            format!("(){descriptor}"),
-        ),
+        PropertyAccessorSide::Getter => {
+            (storage.default_getter_jvm_name(), format!("(){descriptor}"))
+        }
         PropertyAccessorSide::Setter => (
-            storage
-                .setter_jvm_name
-                .clone()
-                .unwrap_or_else(|| property_setter_name(&storage.name)),
+            storage.default_setter_jvm_name(),
             format!("({descriptor})V"),
         ),
     };
@@ -1106,7 +1102,7 @@ impl Emitter<'_> {
             if !emitted_by_owner && companion_blocks::getter_owned(self.ir, i) {
                 let m = self.cw.methodref(
                     &owner_name,
-                    &property_getter_name(&name),
+                    &self.ir.statics[i as usize].default_getter_jvm_name(),
                     &format!("(){}", type_descriptor(jt)),
                 );
                 code.invokestatic(m, 0, slot_words(jt) as i32);
@@ -1286,10 +1282,7 @@ impl Emitter<'_> {
             let owner_name = owner.render();
             let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(owner));
             if !emitted_by_owner && companion_blocks::setter_owned(self.ir, index) {
-                let setter = self.ir.statics[index as usize]
-                    .setter_jvm_name
-                    .clone()
-                    .unwrap_or_else(|| property_setter_name(&name));
+                let setter = self.ir.statics[index as usize].default_setter_jvm_name();
                 let m =
                     self.cw
                         .methodref(&owner_name, &setter, &format!("({})V", type_descriptor(jt)));
