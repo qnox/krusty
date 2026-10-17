@@ -47375,9 +47375,7 @@ impl<'a> Checker<'a> {
             self.check_function_annotation_applications(scope, f, "top level function");
         self.check_infix_declaration(f, false);
         let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
-        for (_, bound) in &f.type_param_bounds {
-            self.check_callable_type_parameter_bound(scope, bound);
-        }
+        self.check_callable_type_parameter_bounds(scope, &f.type_param_bounds);
         self.check_duplicate_param_names(&f.params, f.context_count, f.span);
         // Duplicate type-parameter names (`fun <T, T> f()`) are illegal (conflicting declaration).
         {
@@ -47887,9 +47885,7 @@ impl<'a> Checker<'a> {
         });
         self.check_declaration_type_parameter_annotations(scope, p.span.lo);
         let owned_type_parameters = self.publish_property_type_parameter_owner(scope, p);
-        for (_, bound) in &p.type_param_bounds {
-            self.check_callable_type_parameter_bound(scope, bound);
-        }
+        self.check_callable_type_parameter_bounds(scope, &p.type_param_bounds);
         self.check_duplicate_param_names(&p.context_params, p.context_params.len(), p.span);
         let prev_extension_receiver = self.this_extension_receiver;
         // For an extension property (`val Recv.name: T get() = …`), `this` inside the
@@ -50087,9 +50083,10 @@ impl<'a> Checker<'a> {
                             &property_scope,
                             bp.span.lo,
                         );
-                        for (_, bound) in &bp.type_param_bounds {
-                            self.check_callable_type_parameter_bound(&property_scope, bound);
-                        }
+                        self.check_callable_type_parameter_bounds(
+                            &property_scope,
+                            &bp.type_param_bounds,
+                        );
                         self.check_duplicate_param_names(
                             &bp.context_params,
                             bp.context_params.len(),
@@ -51127,6 +51124,7 @@ impl<'a> Checker<'a> {
                     let owned_type_parameters =
                         self.publish_property_type_parameter_owner(scope, bp);
                     self.check_declaration_type_parameter_annotations(scope, bp.span.lo);
+                    self.check_callable_type_parameter_bounds(scope, &bp.type_param_bounds);
                     self.check_duplicate_param_names(
                         &bp.context_params,
                         bp.context_params.len(),
@@ -51817,9 +51815,7 @@ impl<'a> Checker<'a> {
         });
         let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
         let suppression_depth = self.check_function_annotation_applications(scope, f, "function");
-        for (_, bound) in &f.type_param_bounds {
-            self.check_callable_type_parameter_bound(scope, bound);
-        }
+        self.check_callable_type_parameter_bounds(scope, &f.type_param_bounds);
         let dispatch_this = scope.this_ty();
         let dispatch_extension_receiver = self.this_extension_receiver;
         let stable_declaration = stable_declaration.or_else(|| {

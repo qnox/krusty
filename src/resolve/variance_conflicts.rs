@@ -203,7 +203,7 @@ impl Checker<'_> {
             return;
         }
         if let Some(owner) = owner {
-            self.publish_enclosing_type_parameter_owners(owner);
+            self.publish_enclosing_type_parameter_owners(d, owner);
         }
         let variances = self.lexical_formal_variances(owner);
         if variances
@@ -219,7 +219,7 @@ impl Checker<'_> {
         };
         let mut occurrences = Vec::new();
         for (_, bound) in cl.type_param_bounds() {
-            occurrences.push(self.bound_occurrence(scope, bound, Position::Out));
+            occurrences.push(self.bound_occurrence(bound, Position::Out));
         }
         let base = cl.base_class.as_deref().map(|base| {
             base_class_type_ref(
@@ -229,7 +229,7 @@ impl Checker<'_> {
             )
         });
         for supertype in base.iter().chain(&cl.supertypes) {
-            occurrences.push(self.supertype_occurrence(scope, supertype, Position::Out));
+            occurrences.push(self.supertype_occurrence(supertype, Position::Out));
         }
         for property in cl.props.iter().filter(|property| property.is_property) {
             if property.visibility == Visibility::Private {
@@ -240,12 +240,7 @@ impl Checker<'_> {
             } else {
                 Position::Out
             };
-            occurrences.push(self.parameter_occurrence(
-                scope,
-                &property.ty,
-                property.is_vararg,
-                position,
-            ));
+            occurrences.push(self.parameter_occurrence(&property.ty, property.is_vararg, position));
         }
         self.report_variance_conflicts(&walk, occurrences);
         for (index, method) in cl.methods.iter().enumerate() {
@@ -255,7 +250,7 @@ impl Checker<'_> {
         }
         for (index, property) in cl.body_props.iter().enumerate() {
             if property.visibility != Visibility::Private {
-                self.check_property_variance(&walk, d, index, property);
+                self.check_property_variance(&walk, d, cl.props.len(), index, property);
             }
         }
     }
@@ -309,23 +304,20 @@ impl Checker<'_> {
         let owned = self.publish_function_type_parameter_owner(scope, method);
         let mut occurrences = Vec::new();
         for (_, bound) in &method.type_param_bounds {
-            occurrences.push(self.bound_occurrence(scope, bound, Position::In));
+            occurrences.push(self.bound_occurrence(bound, Position::In));
         }
         for parameter in &method.params {
             occurrences.push(self.parameter_occurrence(
-                scope,
                 &parameter.ty,
                 parameter.is_vararg,
                 Position::In,
             ));
         }
         if let Some(receiver) = &method.receiver {
-            occurrences.push(self.declared_occurrence(scope, receiver, Position::In));
+            occurrences.push(self.declared_occurrence(receiver, Position::In));
         }
         match &method.ret {
-            Some(result) => {
-                occurrences.push(self.declared_occurrence(scope, result, Position::Out))
-            }
+            Some(result) => occurrences.push(self.declared_occurrence(result, Position::Out)),
             None if matches!(method.body, FunBody::Expr(_)) => {
                 let declaration = self.member_declaration(d, owner, index);
                 let source_member = crate::libraries::SourceMember::Class {
@@ -358,6 +350,7 @@ impl Checker<'_> {
         &mut self,
         walk: &Walk<'_, '_>,
         d: DeclId,
+        primary_parameter_count: usize,
         index: usize,
         property: &PropDecl,
     ) {
@@ -380,10 +373,10 @@ impl Checker<'_> {
         let owned = self.publish_property_type_parameter_owner(scope, property);
         let mut occurrences = Vec::new();
         for (_, bound) in &property.type_param_bounds {
-            occurrences.push(self.bound_occurrence(scope, bound, Position::In));
+            occurrences.push(self.bound_occurrence(bound, Position::In));
         }
         for parameter in &property.context_params {
-            occurrences.push(self.declared_occurrence(scope, &parameter.ty, Position::In));
+            occurrences.push(self.declared_occurrence(&parameter.ty, Position::In));
         }
         let position = if property.is_var {
             Position::Invariant
@@ -391,7 +384,7 @@ impl Checker<'_> {
             Position::Out
         };
         match &property.ty {
-            Some(declared) => occurrences.push(self.declared_occurrence(scope, declared, position)),
+            Some(declared) => occurrences.push(self.declared_occurrence(declared, position)),
             None => {
                 let declaration = self.active_declarations.and_then(|active| {
                     active.class_body_property_declaration(
@@ -399,18 +392,13 @@ impl Checker<'_> {
                         u32::try_from(index).expect("too many class properties"),
                     )
                 });
-                let ty = self
-                    .property_decl_types
-                    .get(&(property.span.lo, property.span.hi))
-                    .copied()
-                    .or_else(|| {
-                        let source_member = crate::libraries::SourceMember::ClassProperty {
-                            file: self.file_index,
-                            owner: d.0,
-                            property: u32::try_from(index).expect("too many class properties"),
-                        };
-                        self.declared_member_result(declaration, source_member)
-                    });
+                let source_member = crate::libraries::SourceMember::ClassProperty {
+                    file: self.file_index,
+                    owner: d.0,
+                    property: u32::try_from(primary_parameter_count + index)
+                        .expect("too many class properties"),
+                };
+                let ty = self.declared_member_result(declaration, source_member);
                 if let Some(ty) = ty {
                     occurrences.push(Occurrence {
                         reference: None,
@@ -423,7 +411,7 @@ impl Checker<'_> {
             }
         }
         if let Some(receiver) = &property.receiver {
-            occurrences.push(self.declared_occurrence(scope, receiver, Position::In));
+            occurrences.push(self.declared_occurrence(receiver, Position::In));
         }
         let walk = Walk {
             scope,
@@ -448,12 +436,10 @@ impl Checker<'_> {
     }
 
     fn declared_occurrence<'r>(
-        &mut self,
-        scope: &CheckerScope<'_>,
+        &self,
         reference: &'r TypeRef,
         position: Position,
     ) -> Occurrence<'r> {
-        self.retain_resolved_type_use_annotation_tree(scope, reference);
         Occurrence {
             reference: Some(reference),
             ty: self
@@ -471,13 +457,7 @@ impl Checker<'_> {
         }
     }
 
-    fn bound_occurrence<'r>(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        reference: &'r TypeRef,
-        position: Position,
-    ) -> Occurrence<'r> {
-        self.retain_resolved_type_use_annotation_tree(scope, reference);
+    fn bound_occurrence<'r>(&self, reference: &'r TypeRef, position: Position) -> Occurrence<'r> {
         Occurrence {
             reference: Some(reference),
             ty: self
@@ -491,12 +471,10 @@ impl Checker<'_> {
     }
 
     fn supertype_occurrence<'r>(
-        &mut self,
-        scope: &CheckerScope<'_>,
+        &self,
         reference: &'r TypeRef,
         position: Position,
     ) -> Occurrence<'r> {
-        self.retain_resolved_type_use_annotation_tree(scope, reference);
         Occurrence {
             reference: Some(reference),
             ty: self
@@ -513,13 +491,11 @@ impl Checker<'_> {
     /// A value parameter's type: a `vararg` parameter declares `Array<out E>` over its written
     /// element type `E` (a primitive element declares its primitive array, which has no formal).
     fn parameter_occurrence<'r>(
-        &mut self,
-        scope: &CheckerScope<'_>,
+        &self,
         reference: &'r TypeRef,
         vararg: bool,
         position: Position,
     ) -> Occurrence<'r> {
-        self.retain_resolved_type_use_annotation_tree(scope, reference);
         let element = self
             .resolved_declaration_types
             .get(&(reference.span.lo, reference.span.hi))
@@ -537,7 +513,7 @@ impl Checker<'_> {
         {
             return Occurrence {
                 vararg: false,
-                ..self.declared_occurrence(scope, reference, position)
+                ..self.declared_occurrence(reference, position)
             };
         }
         Occurrence {
@@ -865,17 +841,18 @@ fn expansion_level<'a>(
 /// directly or inherited from an alias used in that template. The metadata publication boundary
 /// has already resolved these applications to qualified identities.
 fn spelling_has_unsafe_variance(spelling: &crate::spelling::Spelled) -> bool {
-    spelling
-        .annotations
-        .iter()
-        .chain(&spelling.expansion_annotations)
-        .any(|annotation| {
-            matches!(
-                annotation,
-                crate::spelling::TypeUseAnnotation::Checked(annotation)
-                    if annotation.annotation == crate::types::wk::unsafe_variance()
-            )
-        })
+    spelling.unsafe_variance
+        || spelling
+            .annotations
+            .iter()
+            .chain(&spelling.expansion_annotations)
+            .any(|annotation| {
+                matches!(
+                    annotation,
+                    crate::spelling::TypeUseAnnotation::Checked(annotation)
+                        if annotation.annotation == crate::types::wk::unsafe_variance()
+                )
+            })
 }
 
 /// A right-hand-side level without its nullability and use-site projection, which are not levels

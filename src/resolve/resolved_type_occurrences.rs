@@ -30,44 +30,21 @@ impl Checker<'_> {
         }
     }
 
-    /// Bind the annotations on a complete source type occurrence in the declaration's lexical
-    /// scope. Finalized signatures can supply the semantic type without recursively resolving its
-    /// source tree, but variance checking still needs the already-bound `@UnsafeVariance` fact on
-    /// any nested occurrence. This is the same identity lookup used by ordinary type resolution;
-    /// it does not infer the annotation from its spelling.
-    pub(super) fn retain_resolved_type_use_annotation_tree(
-        &mut self,
-        scope: &super::CheckerScope<'_>,
-        reference: &TypeRef,
-    ) {
-        self.retain_resolved_type_use_annotations(scope, reference);
-        let children = if super::function_type_ref_shape(reference).is_some() {
-            reference
-                .fun_params
-                .iter()
-                .chain(reference.arg.as_deref())
-                .collect::<Vec<_>>()
-        } else {
-            reference.targs.iter().collect::<Vec<_>>()
-        };
-        for child in children {
-            self.retain_resolved_type_use_annotation_tree(scope, child);
-        }
-    }
-
     /// Restore the same fact from the checked spelling that Pass 1 finalized for a declaration.
     pub(super) fn retain_finalized_type_use_annotations(
         &mut self,
         reference: &TypeRef,
         spelled: &crate::spelling::Spelled,
     ) {
-        if spelled.annotations.iter().any(|annotation| {
-            matches!(
-                annotation,
-                crate::spelling::TypeUseAnnotation::Checked(annotation)
-                    if annotation.annotation == crate::types::wk::unsafe_variance()
-            )
-        }) {
+        if spelled.unsafe_variance
+            || spelled.annotations.iter().any(|annotation| {
+                matches!(
+                    annotation,
+                    crate::spelling::TypeUseAnnotation::Checked(annotation)
+                        if annotation.annotation == crate::types::wk::unsafe_variance()
+                )
+            })
+        {
             self.resolved_unsafe_variance_occurrences
                 .insert((reference.span.lo, reference.span.hi));
         }

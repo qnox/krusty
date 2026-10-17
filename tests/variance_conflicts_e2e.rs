@@ -254,6 +254,51 @@ fn property_type_parameter_owner_survives_the_variance_walk() {
     );
 }
 
+/// An inferred public property is checked at the property's declaration site, using its finalized
+/// semantic type. Constructor properties precede body properties in the stable member inventory.
+#[test]
+fn inferred_property_uses_its_stable_member_identity_and_declaration_span() {
+    let source = "class A<in T>(val prefix: Int) {\n    val inferred = emptyList<T>()\n}";
+    assert_matches_kotlinc(
+        source,
+        &[],
+        &[conflict(
+            "2:5",
+            "T",
+            "in",
+            "out",
+            "List<T (of class A<in T>)>",
+        )],
+    );
+}
+
+/// An alias template's resolved `@UnsafeVariance` applies to each occurrence of its formal. An
+/// unannotated template that uses one formal twice reports both semantic occurrences: the first at
+/// the alias application and the second at the written argument, in kotlinc's order.
+#[test]
+fn alias_template_annotations_and_duplicate_formals_match_kotlinc() {
+    let source = "\
+package aliasvariance
+
+typealias Safe<X> = MutableMap<@UnsafeVariance X, @UnsafeVariance X>
+typealias Duplicated<X> = MutableMap<X, X>
+
+class A<out T> {
+    fun safe(value: Safe<T>) {}
+    fun duplicated(value: Duplicated<T>) {}
+}
+";
+    let ty = "MutableMap<T (of class A<out T>), T (of class A<out T>)>";
+    assert_matches_kotlinc(
+        source,
+        &[],
+        &[
+            expanded("8:27", "T", "out", "invariant", ty),
+            expanded("8:38", "T", "out", "invariant", ty),
+        ],
+    );
+}
+
 const NESTED: &str = "\
 package s
 interface Inv<T>

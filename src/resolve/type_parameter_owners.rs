@@ -6,7 +6,7 @@
 //! function is checked; a formal leaking out through an unsolved call keeps its bare name.
 
 use super::{Checker, CheckerScope};
-use crate::ast::{ClassDecl, ClassKind, FunDecl, PropDecl, TypeRef};
+use crate::ast::{ClassDecl, ClassKind, DeclId, FunDecl, PropDecl, TypeRef};
 use crate::fx_hash::HashMap;
 use crate::libraries::LibraryType;
 use crate::symbol_source::SymbolSource;
@@ -106,6 +106,40 @@ pub(super) fn classifier_type_parameter_owner(
 }
 
 impl Checker<'_> {
+    /// Classifiers contributed by stable enclosing `inner` ownership edges, nearest first.
+    ///
+    /// A retained inner classifier can be checked as a bounded root, without its source owner on
+    /// the live lexical-context stack. The stable declaration graph is authoritative for that
+    /// missing ancestry; generated classifier-name segments are never interpreted as owners.
+    fn active_inner_owner_classifiers(&self, parser: DeclId) -> Vec<TypeName> {
+        let Some((active, index)) = self.active_declarations.zip(self.resolved_index) else {
+            return Vec::new();
+        };
+        let Some(mut current) = active.canonical_classifier_declaration(parser, index) else {
+            return Vec::new();
+        };
+        let mut owners = Vec::new();
+        loop {
+            let Some(header) = index.declaration_header(current) else {
+                break;
+            };
+            if !header.flags.has(crate::fir::DeclarationFlags::INNER) {
+                break;
+            }
+            let Some(owner) = header.owner else {
+                break;
+            };
+            let Some(classifier) = index.classifier_identity(owner) else {
+                break;
+            };
+            if !owners.contains(&classifier) {
+                owners.push(classifier);
+            }
+            current = owner;
+        }
+        owners
+    }
+
     /// Record the owner wording of a function's formals, bound in `scope`, returning their
     /// identities for [`Self::retire_type_parameter_owners`] when the function's check ends.
     pub(super) fn publish_function_type_parameter_owner(
@@ -210,16 +244,30 @@ impl Checker<'_> {
         );
     }
 
-    /// Record the owner wording of the formals declared by the classifiers enclosing `owner`, from
-    /// their classifier records, where no check of that classifier published it: an inner
-    /// classifier can be checked in a unit of its own, and its members still name the formals it
-    /// captures by their declaring classifier (`O (of class A<out O>)`).
-    pub(super) fn publish_enclosing_type_parameter_owners(&mut self, owner: TypeName) {
+    /// Record the owner wording of formals declared by the classifiers enclosing parser
+    /// declaration `d`, from their provider-normalized classifier records. The live lexical stack
+    /// supplies ordinary source ancestry; stable declaration-owner edges supply an inner
+    /// classifier checked as a retained root. Generated classifier-name segments are not ancestry.
+    pub(super) fn publish_enclosing_type_parameter_owners(
+        &mut self,
+        d: crate::ast::DeclId,
+        owner: TypeName,
+    ) {
         let source = self.fed_source();
-        let mut enclosing = owner.nested_owner();
+        let enclosing = self
+            .lexical_class_context
+            .iter()
+            .copied()
+            .filter(|classifier| *classifier != owner)
+            .chain(self.active_inner_owner_classifiers(d))
+            .fold(Vec::new(), |mut classifiers, classifier| {
+                if !classifiers.contains(&classifier) {
+                    classifiers.push(classifier);
+                }
+                classifiers
+            });
         let mut published = Vec::new();
-        while let Some(classifier) = enclosing {
-            enclosing = classifier.nested_owner();
+        for classifier in enclosing {
             let Some(record) = source.classifier(classifier) else {
                 continue;
             };
