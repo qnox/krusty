@@ -214,6 +214,10 @@ and repeated labels are numbered `$context-String$1` where earlier releases wrot
 `$context-String#1`. A `Unit` suspend function whose body is a tail call still forwards its
 continuation, but 2.4.20 returns the callee's result only when it is `COROUTINE_SUSPENDED` and
 `Unit.INSTANCE` otherwise, where earlier releases return the callee's result unchanged.
+kotlinc 2.4.21 is a patch release whose fixes are in the Wasm and JS backends, reflection and
+scripting. Its argument, language-feature and language-version tables equal 2.4.20's, so every rule
+keyed "since 2.4.20" applies to it unchanged; it is still its own manifest entry with its own
+vendored tables and outcome lists.
 krusty reproduces ONE release per process, the *target*: `-Xkotlin-reference-version=<v>` selects
 it, else `KRUSTY_LANGUAGE_VERSION` (the variable the harness and `just test-all` export, already
 part of the build-cache key), else the newest manifest entry (`src/kotlin_version.rs`). The
