@@ -10,7 +10,7 @@ use super::*;
 use crate::backend::BackendClassifierSource;
 use crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors;
 use crate::jvm::class_node::ClassNode;
-use crate::jvm::classfile::ACC_SYNTHETIC;
+use crate::jvm::inline::RegeneratedClass;
 use crate::jvm::inliner::{
     copy_sam_wrapper, regenerate, AnonymousObjects, CallSite, ClassNameGenerators, InlineError,
     ObjectLambda, RegeneratedObject, Regeneration, RegenerationError,
@@ -18,6 +18,26 @@ use crate::jvm::inliner::{
 use crate::jvm::ir_emit::JvmSignatureFormatter;
 use crate::jvm::reified_arguments::ReifiedArguments;
 use crate::jvm::source_map::SourceMap;
+
+/// The ABI name of a SAM wrapper copied into `owner`, when `class` is declared to have that role.
+/// The class's declaration selects the operation; its spelling is consumed only to format the
+/// copied JVM class name.
+fn sam_wrapper_copy_name(
+    bodies: &dyn MethodBodies,
+    generators: &mut ClassNameGenerators,
+    owner: &str,
+    class: &str,
+) -> Result<Option<(String, bool)>, RegenerationError> {
+    if bodies.regenerated_class(class) != Some(RegeneratedClass::SamWrapper) {
+        return Ok(None);
+    }
+    generators
+        .sam_wrapper(owner, class)
+        .map(Some)
+        .ok_or(RegenerationError::Unsupported(
+            "a SAM wrapper without its ABI name segment",
+        ))
+}
 
 /// The method whose inline calls regenerate objects: its JVM identity, the name of the Kotlin
 /// function it realizes, which names the copies, and the classifiers its type arguments' signatures
@@ -243,9 +263,8 @@ impl AnonymousObjects for CallObjects<'_> {
         };
         // A SAM wrapper is copied, not regenerated: kotlinc replays it under the calling class's
         // name once and shares the copy among that class's inline calls.
-        let wrapper = (original.access & ACC_SYNTHETIC != 0)
-            .then(|| generators.sam_wrapper(&self.owner, class))
-            .flatten();
+        let wrapper = sam_wrapper_copy_name(self.bodies, generators, &self.owner, class)
+            .map_err(InlineError::Regeneration)?;
         if let Some((new_class, first)) = wrapper {
             let bytes =
                 copy_sam_wrapper(&original, &new_class).map_err(InlineError::Regeneration)?;
@@ -326,5 +345,60 @@ impl AnonymousObjects for CallObjects<'_> {
         }
         let descriptor = constructor.desc.clone();
         self.regenerate(class, &descriptor, &[], prior_classes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jvm::classreader::MethodCode;
+
+    struct DeclaredRole(Option<RegeneratedClass>);
+
+    impl MethodBodies for DeclaredRole {
+        fn body(&self, _owner: &str, _name: &str, _descriptor: &str) -> Option<MethodCode> {
+            None
+        }
+
+        fn regenerated_class(&self, _internal: &str) -> Option<RegeneratedClass> {
+            self.0
+        }
+    }
+
+    #[test]
+    fn sam_copy_dispatch_uses_the_declared_role_before_formatting_its_abi_name() {
+        let mut generators = ClassNameGenerators::default();
+        assert_eq!(
+            sam_wrapper_copy_name(
+                &DeclaredRole(Some(RegeneratedClass::AnonymousObject)),
+                &mut generators,
+                "CallerKt",
+                "LibraryKt$sam$LooksLikeAWrapper",
+            ),
+            Ok(None),
+        );
+        assert_eq!(
+            sam_wrapper_copy_name(
+                &DeclaredRole(Some(RegeneratedClass::SamWrapper)),
+                &mut generators,
+                "CallerKt",
+                "LibraryKt$sam$i$java_util_function_Supplier$0",
+            ),
+            Ok(Some((
+                "CallerKt$inlined$sam$i$java_util_function_Supplier$0".to_string(),
+                true,
+            ))),
+        );
+        assert_eq!(
+            sam_wrapper_copy_name(
+                &DeclaredRole(Some(RegeneratedClass::SamWrapper)),
+                &mut generators,
+                "CallerKt",
+                "LibraryKt$missingSegment",
+            ),
+            Err(RegenerationError::Unsupported(
+                "a SAM wrapper without its ABI name segment",
+            )),
+        );
     }
 }
