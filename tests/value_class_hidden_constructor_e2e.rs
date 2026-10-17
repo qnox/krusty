@@ -106,3 +106,31 @@ fn an_inner_class_reads_its_outer_value_class_as_the_carrier() {
 fn hidden_constructors_run() {
     common::expect_box_same_as_kotlinc(SRC, "HiddenConstructor");
 }
+
+/// Every marker accessor follows the class's members, the primary's first and then each
+/// secondary's in declaration order, not beside its own constructor.
+#[test]
+fn marker_accessors_follow_the_members_in_constructor_order() {
+    let built = common::compare_with_kotlinc_plugin(
+        "ValueClassMarkerAccessorOrder",
+        "@JvmInline value class N(val v: Int)\n\
+         class P(val a: N) {\n\
+         \x20   constructor(b: N, c: String) : this(b)\n\
+         \x20   fun f() = 1\n\
+         \x20   constructor(b: N, c: Long) : this(b)\n\
+         \x20   fun g() = 2\n\
+         \x20   companion object { fun h() = P(N(1)) }\n\
+         }\n",
+        "P",
+        &[common::stdlib_jar()],
+        "25",
+        &[],
+    )
+    .expect("reference kotlinc is provisioned");
+    assert!(
+        built.krusty_bytes == built.reference_bytes,
+        "P differs from kotlinc\n--- kotlinc ---\n{}\n--- krusty ---\n{}",
+        built.reference,
+        built.krusty
+    );
+}
