@@ -1507,8 +1507,13 @@ fn emit_pass(
         .protected_member_access_bridges
         .borrow_mut()
         .clone_from(&member_access_bridges.protected);
-    *env.run.static_accessor_plan.borrow_mut() =
-        static_accessors::plan(ir, env, &contexts, &class_member_fids);
+    *env.run.static_accessor_plan.borrow_mut() = static_accessors::plan(
+        ir,
+        env,
+        &contexts,
+        &class_member_fids,
+        &member_access_bridges.private_calls,
+    );
     let mut cw = new_writer(facade, "java/lang/Object", opts);
     // The facade constructs the file's local classes, and a class that references one as a class
     // constant must list it in `InnerClasses` — reflection cross-checks the two sides and throws
@@ -2180,7 +2185,7 @@ fn emit_scheduled_member(
                 fq_name,
                 cw,
                 false,
-                c.decl_line,
+                static_accessors::class_declaration_line(c),
             );
         }
         bridge_emission::emit_value_class_interface_entries(
@@ -3001,7 +3006,6 @@ fn emit_class(
     // `<clinit>` follows both.
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
-    access_bridges::emit_private_member_access_bridges(ir, c, &fq_name, &mut cw, env.run);
     accessor_emission_order::emit(ir, c, &fq_name, facade, env, &mut cw);
     if !static_storage(ir, c) {
         static_fields::emit_class_static_initializer(
@@ -3267,21 +3271,6 @@ fn emit_interface_class(
                 !f.is_static,
                 env,
             );
-            if env
-                .run
-                .private_member_access_bridges
-                .borrow()
-                .contains(&fid)
-            {
-                access_bridges::emit_private_member_access_bridge(
-                    ir,
-                    fid,
-                    &fq_name,
-                    &mut cw,
-                    true,
-                    c.decl_line,
-                );
-            }
             if ir.function_reference_access_bridges.contains(&fid) {
                 access_bridges::emit_function_reference_access_bridge(
                     ir,
@@ -3289,7 +3278,7 @@ fn emit_interface_class(
                     &fq_name,
                     &mut cw,
                     true,
-                    c.decl_line,
+                    static_accessors::class_declaration_line(c),
                 );
             }
             // A PRIVATE default stays a plain private instance method: kotlinc gives it no bridge,
@@ -3419,7 +3408,7 @@ fn emit_interface_class(
         &env.run.static_accessor_plan.borrow(),
         StaticOwner::Class(c.fq_name),
         facade,
-        c.decl_start_line.max(c.decl_line),
+        static_accessors::class_declaration_line(c),
         &mut cw,
     );
     for &fid in &jd_bridge_fids {
@@ -3435,7 +3424,7 @@ fn emit_interface_class(
         access_bridges::emit_jd_access_bridge(
             &mut cw,
             c.fq_name,
-            c.decl_line,
+            static_accessors::class_declaration_line(c),
             access_bridges::JdAccessBridgeMember {
                 name: &f.name,
                 param_tys: &physical_params,
@@ -3892,7 +3881,7 @@ fn emit_enum_class(
                         &fq,
                         cw,
                         false,
-                        c.decl_line,
+                        static_accessors::class_declaration_line(c),
                     );
                 }
                 // A defaulted member needs its `<name>$default` synthetic here too. The enum writer is a
@@ -4045,14 +4034,14 @@ fn emit_enum_class(
     // before `<clinit>`, forwarders first.
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
-    constructor_accessors::emit_accessors(ir, c, &fq, &mut cw);
+    constructor_accessors::emit_sealed_accessors(ir, c, &fq, &mut cw);
     static_accessors::emit(
         ir,
         env.run,
         &env.run.static_accessor_plan.borrow(),
         StaticOwner::Class(c.fq_name),
         facade,
-        c.decl_start_line.max(c.decl_line),
+        static_accessors::class_declaration_line(c),
         &mut cw,
     );
     // `<clinit>` is RESERVED and BUILT here, after the plugin-generated members: kotlinc interns
