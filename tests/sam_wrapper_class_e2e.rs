@@ -460,3 +460,32 @@ fn java_sam_in_an_inline_function_is_its_wrapper_class() {
     );
     common::expect_box_same_as_kotlinc(&runtime_src, "JavaSamInlineBehavior");
 }
+
+/// An inlined copy belongs to the declaration whose implementation it specializes, not to the
+/// inline caller that happens to contain the copy. A private relay must therefore keep constructing
+/// `published`'s public-ABI `$sam$i$` wrapper rather than replacing it with the private `$sam$` form.
+#[test]
+fn an_inline_copy_keeps_its_declarations_sam_wrapper_abi() {
+    let source = "package provenance\n\
+                  import java.util.function.Supplier\n\
+                  fun take(s: Supplier<String>): String = s.get()\n\
+                  inline fun published(noinline f: () -> String): String = take(f)\n\
+                  private inline fun relay(noinline f: () -> String): String = published(f)\n\
+                  fun call(value: String): String = relay { value }\n";
+    for class in [
+        "provenance/SamWrapperProvenanceKt",
+        "provenance/SamWrapperProvenanceKt$sam$i$java_util_function_Supplier$0",
+    ] {
+        assert_eq!(
+            common::byte_diff_against_kotlinc_cp(
+                "SamWrapperProvenance",
+                source,
+                class,
+                &[common::stdlib_jar()]
+            )
+            .expect("reference kotlinc is provisioned"),
+            Ok(()),
+            "{class}"
+        );
+    }
+}

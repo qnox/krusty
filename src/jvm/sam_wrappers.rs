@@ -195,23 +195,33 @@ fn conversion_scopes(ir: &IrFile, owners: &HashMap<ExprId, FunId>) -> HashMap<Ex
                 impl_fn,
                 sam: Some(_),
                 ..
-            } => Some((
-                ExprId::try_from(node).expect("IR expression index exceeds ExprId"),
-                super::lambda_classes::specialization_source(ir, *impl_fn),
-            )),
+            } => {
+                let source = super::lambda_classes::specialization_source(ir, *impl_fn);
+                Some((
+                    ExprId::try_from(node).expect("IR expression index exceeds ExprId"),
+                    *impl_fn,
+                    source,
+                ))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
     let declared = conversions
         .iter()
-        .filter_map(|&(node, implementation)| {
+        .filter_map(|&(node, implementation, source)| {
+            // An inlined copy carries its caller's expression owner but not its ABI. Only the
+            // declaration implementation establishes whether this stable source is published or
+            // private; every specialization below queries that decision by `source`.
+            if implementation != source {
+                return None;
+            }
             let function = *owners.get(&node)?;
-            Some((implementation, inline_scope(ir, &lambda_classes, function)?))
+            Some((source, inline_scope(ir, &lambda_classes, function)?))
         })
         .collect::<HashMap<_, _>>();
     conversions
         .into_iter()
-        .filter_map(|(node, implementation)| Some((node, *declared.get(&implementation)?)))
+        .filter_map(|(node, _, source)| Some((node, *declared.get(&source)?)))
         .collect()
 }
 
