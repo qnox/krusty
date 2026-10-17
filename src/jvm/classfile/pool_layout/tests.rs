@@ -210,7 +210,7 @@ fn an_orphaned_descriptor_keeps_name_and_type_component_order() {
         leading: Vec::new(),
         interned: after + 1..after + 1,
     }];
-    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped)
+    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped, &[])
         .expect("the class reads")
         .expect("the orphan moves to EnclosingMethod");
     let entries = pool(&laid_out);
@@ -308,7 +308,7 @@ fn a_rewritten_method_s_entries_are_placed_in_asm_order() {
         leading: Vec::new(),
         interned: after_g + 1..after_g + 1,
     }];
-    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped)
+    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped, &[])
         .expect("the class reads")
         .expect("the pool changes");
     let mut expected = emitted.to_vec();
@@ -352,7 +352,7 @@ fn transformation_class_entries_lead_the_rewritten_body() {
         leading,
         interned: after + 1..after + 1,
     }];
-    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped)
+    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped, &[])
         .expect("the class reads")
         .expect("the transformer's field moves ahead of the body");
     let entries = pool(&laid_out);
@@ -420,7 +420,7 @@ fn a_class_with_an_attribute_the_reader_does_not_know_is_not_read() {
         Some(Unread::UnknownAttribute("Cxde".to_string()))
     );
     // The unreferenced integer stays: nothing in the class was renumbered.
-    assert_eq!(relayout(class.clone(), &[], Unnamed::Dropped), class);
+    assert_eq!(relayout(class.clone(), &[], Unnamed::Dropped, &[]), class);
 }
 
 #[test]
@@ -432,7 +432,7 @@ fn an_entry_nothing_names_is_dropped() {
     });
     let class = writer.finish();
     let padded = with_integers(&class, 2);
-    assert_eq!(relayout(padded, &[], Unnamed::Dropped), class);
+    assert_eq!(relayout(padded, &[], Unnamed::Dropped, &[]), class);
 }
 
 /// A copied class keeps what its visits interned, named or not.
@@ -445,7 +445,35 @@ fn a_copied_class_keeps_an_entry_nothing_names() {
     });
     let class = writer.finish();
     let padded = with_integers(&class, 2);
-    assert_eq!(relayout(padded.clone(), &[], Unnamed::Kept), padded);
+    assert_eq!(relayout(padded.clone(), &[], Unnamed::Kept, &[]), padded);
+}
+
+#[test]
+fn a_replaced_copied_enclosure_keeps_only_its_visited_entries() {
+    let mut writer = ClassWriter::new("T", "java/lang/Object");
+    writer.retain_replaced_enclosing_method("declaration/Owner", "outer", "()V");
+    writer.seed_utf8("unrelated seed");
+    add_static(&mut writer, "f", "()I", |code, writer| {
+        code.push_int(1, writer);
+        code.ireturn();
+    });
+    assert_eq!(
+        pool(&writer.finish()),
+        [
+            "T",
+            "Class T",
+            "java/lang/Object",
+            "Class java/lang/Object",
+            "declaration/Owner",
+            "Class declaration/Owner",
+            "outer",
+            "()V",
+            "tag 12",
+            "f",
+            "()I",
+            "Code",
+        ]
+    );
 }
 
 #[test]
@@ -476,10 +504,11 @@ fn a_rewritten_call_site_follows_its_bootstrap_arguments_and_method() {
         leading: Vec::new(),
         interned: after_g + 1..after_g + 1,
     }];
-    let laid_out = match relaid_class(&class, &relaid, Unnamed::Dropped).expect("the class reads") {
-        Some(laid_out) => laid_out,
-        None => class,
-    };
+    let laid_out =
+        match relaid_class(&class, &relaid, Unnamed::Dropped, &[]).expect("the class reads") {
+            Some(laid_out) => laid_out,
+            None => class,
+        };
     let entries = pool(&laid_out);
     let position = |tag: &str| {
         entries

@@ -68,6 +68,7 @@ mod default_impls;
 mod delegated_property_array;
 mod field_nullability;
 use field_nullability::{
+    declared_field_annotation, declared_property_annotation, declared_static_annotation,
     field_nullability_kind, is_nonnull_reference_field, nullability_annotation,
 };
 mod discarding;
@@ -819,7 +820,7 @@ fn attach_synth_nullability(
             if !field_visibility::publishes_field_nullability(c, index) {
                 continue;
             }
-            if let Some(a) = ann(f.ty) {
+            if let Some(a) = declared_field_annotation(c, index) {
                 cw.set_field_nullability(
                     &instance_field_jvm_name(ir, run, c, index),
                     &desc(jvm_value_ty(&f.ty)),
@@ -845,7 +846,7 @@ fn attach_synth_nullability(
             })
             .filter(|(_, s)| !s.is_lateinit)
         {
-            if let Some(a) = ann(jvm_declared_ty(&s.ty)) {
+            if let Some(a) = declared_static_annotation(s) {
                 cw.set_field_nullability(
                     ir.static_field_jvm_name(index as u32),
                     &desc(jvm_declared_ty(&s.ty)),
@@ -912,8 +913,13 @@ fn attach_synth_nullability(
         cw.set_method_param_annotations("<init>", &ctor_desc, &user);
     }
     // Accessors: a reference getter annotates its return; a `var` reference setter its parameter.
-    for f in c.fields.iter().filter(|f| !f.is_compiler_generated()) {
-        let Some(a) = ann(f.ty) else {
+    for (index, f) in c
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| !f.is_compiler_generated())
+    {
+        let Some(a) = declared_property_annotation(c, index) else {
             continue;
         };
         let (getter, setter) = accessor_jvm_names(c, &f.name);
@@ -939,7 +945,9 @@ fn attach_synth_nullability(
             let function = &ir.functions[fid as usize];
             // `copy`'s parameters mirror the primary-constructor properties, so each reference param
             // takes the SAME `@NotNull`/`@Nullable` annotation kotlinc puts on the constructor's.
-            let copy_params: Vec<Option<&str>> = data_fields.iter().map(|f| ann(f.ty)).collect();
+            let copy_params: Vec<Option<&str>> = (0..data_fields.len())
+                .map(|index| declared_property_annotation(c, index))
+                .collect();
             cw.set_method_nullability(
                 &function.name,
                 &ir_method_desc(&function.params, &function.ret),
@@ -965,8 +973,8 @@ fn attach_synth_nullability(
                 &[Some("Lorg/jetbrains/annotations/Nullable;")],
             );
         }
-        for (i, f) in data_fields.iter().enumerate() {
-            if let Some(a) = ann(f.ty) {
+        for i in 0..data_fields.len() {
+            if let Some(a) = declared_property_annotation(c, i) {
                 let fid = ir
                     .data_class_member(c.fq_name_id(), IrDataClassMemberRole::Component(i as u32))
                     .expect("a data-class component records its generated identity");
@@ -1293,6 +1301,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
             ir,
             facts.metadata.override_results,
             facade,
+            opts.lambda_modes,
         ),
     };
     emit_all_with_class_meta(ir, facade, &env, facts.metadata.facade, opts, &|_| None)
@@ -2626,7 +2635,7 @@ fn emit_class(
             // the local `type_parameter` above is the `Signature` attribute's spelling, a wider source
             // that must not become a second answer to the same question.
             let field_ann = field_visibility::publishes_field_nullability(c, field_index)
-                .then(|| nullability_annotation(field_nullability_kind(*ty)))
+                .then(|| declared_field_annotation(c, field_index))
                 .flatten();
             cw.add_field_late_sig(
                 acc,
@@ -3720,7 +3729,7 @@ fn emit_enum_class(
     for (field_index, (f, t)) in c.fields.iter().zip(&field_tys).enumerate() {
         let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
         let nullability = (!f.is_lateinit())
-            .then(|| nullability_annotation(field_nullability_kind(f.ty)))
+            .then(|| declared_field_annotation(c, field_index))
             .flatten();
         let signature =
             property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref())
@@ -5390,9 +5399,6 @@ struct Emitter<'a> {
     /// The exact selector currently emitted by a safe-call guard. Its copied inline frame may
     /// need to adapt a value before the selector joins the null arm.
     active_safe_call_selector: Option<u32>,
-    /// An erased copied result whose enclosing safe-call selector owns adaptation, but whose
-    /// trailing spliced lambda must perform it before closing its locals and inline frame.
-    pending_pre_close_copied_result: Option<block_scope::PendingPreCloseCopiedResult>,
     /// A chain's receiver temporaries declared after its first guard already jumped to the shared
     /// null exit, by that exit: none of them is assigned on every path into it.
     safe_call_exit_temporaries: HashMap<Label, Vec<u32>>,
@@ -5424,6 +5430,7 @@ struct Emitter<'a> {
     suspend_lambda_parameter_reads: HashSet<crate::ir::ExprId>,
     /// Function-value invocations whose consumer takes `invoke`'s erased `Object` as it is.
     erased_invocations: HashSet<crate::ir::ExprId>,
+    inline_coercions: block_scope::InlineCoercionState,
     /// The next state's ordinal. A state belongs to an emission SITE, not to an expression: an
     /// inline function that invokes its lambda twice splices the same body twice, and each copy
     /// suspends on its own locals. Both passes emit the same sequence, so both number it alike.
@@ -5564,7 +5571,6 @@ impl<'a> Emitter<'a> {
             safe_call_null_exits: HashMap::default(),
             stack_resident_value: None,
             active_safe_call_selector: None,
-            pending_pre_close_copied_result: None,
             safe_call_exit_temporaries: HashMap::default(),
             var_types: collect_body_var_types(ir, roots.iter().copied()),
             value_stores: non_null_operands::ValueStores::collect(ir, &roots),
@@ -5577,6 +5583,7 @@ impl<'a> Emitter<'a> {
             transformed_suspensions: Default::default(),
             suspend_lambda_parameter_reads: HashSet::default(),
             erased_invocations: HashSet::default(),
+            inline_coercions: block_scope::InlineCoercionState::default(),
             machine_next_ordinal: 0,
             machine_entered: false,
             machine_resumes: Vec::new(),

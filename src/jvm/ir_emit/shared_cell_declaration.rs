@@ -228,6 +228,14 @@ impl Emitter<'_> {
                 .iter()
                 .position(|open| open.depth >= self.block_depth)
                 .unwrap_or(self.open_locals.len())
+        } else if let Some(frame) = inline_frame.filter(|_| !inline_operand) {
+            // The copied declaration's own locals are visited before the parameters that bind its
+            // call-site operands. Those operands opened before the marker, so keep them at the end
+            // of this frame without sorting unrelated or nested-frame locals.
+            self.open_locals
+                .iter()
+                .position(|open| open.inline_operand && open.inline_frame == Some(frame))
+                .unwrap_or(self.open_locals.len())
         } else {
             self.open_locals.len()
         };

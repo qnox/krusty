@@ -1058,6 +1058,10 @@ fn remap_class(class: &mut super::IrClass, names: &HashMap<TypeName, TypeName>) 
         for receiver in &mut lambda.captured_receivers {
             captured_receiver(receiver, names);
         }
+        lambda
+            .shared_capture_holders
+            .iter_mut()
+            .for_each(|(_, holder)| name(holder, names));
         lambda.function_type = ty(lambda.function_type, names);
         tys(&mut lambda.bridge.param_tys, names);
         lambda.bridge.ret_ty = ty(lambda.bridge.ret_ty, names);

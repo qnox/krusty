@@ -46,18 +46,38 @@ pub(super) fn emit_lambda_class(
             None => cw.set_enclosing_class(&owner),
         }
     }
-    if inline_default.is_some() {
-        let lines = u16::try_from(ir.source_line_count)
-            .unwrap_or(u16::MAX)
-            .max(1);
-        cw.start_inline_origin_source_map(lines);
+    let mut replaced_declaration_enclosure = None;
+    let mut regenerated_inline_class = false;
+    if lambda.inline_origin {
+        match regenerated_inline_origin(ir, env.override_results, lambda.invoke, facade) {
+            Some(origin) => {
+                regenerated_inline_class = true;
+                // AnonymousObjectTransformer visits the declaration class before replacing its
+                // call-site enclosure. Those now-unused constants remain at the front of the
+                // regenerated class's pool.
+                replaced_declaration_enclosure = origin.declaration_enclosure;
+                cw.set_source_file(Some(origin.source_file));
+                cw.start_inline_origin_source_map_at(origin.lines, &origin.path);
+            }
+            None => {
+                let lines = u16::try_from(ir.source_line_count)
+                    .unwrap_or(u16::MAX)
+                    .max(1);
+                cw.start_inline_origin_source_map(lines);
+            }
+        }
     }
     env.inner_classes.register(&mut cw);
     cw.add_interface(&jvm_function_interface(arity));
+    if let Some((owner, Some((name, descriptor)))) = replaced_declaration_enclosure {
+        cw.retain_replaced_enclosing_method(&owner, &name, &descriptor);
+    }
     delegated_property_array::declare(env, c.fq_name, &mut cw);
 
-    // Each captured value's field, typed by the value's declared type: a shared cell is a generic
-    // `Ref$ObjectRef<T>`, whose `Signature` the field and the constructor carry.
+    // Each captured value's field, typed by the value's declared type. A declaration lambda's
+    // shared cell is a generic `Ref$ObjectRef<T>` whose field and constructor carry a `Signature`;
+    // a call-site-regenerated anonymous object deliberately omits those signatures.
+    let regenerated = ir.specialized_functions.contains_key(&lambda.invoke);
     let captures = c
         .fields
         .iter()
@@ -65,10 +85,27 @@ pub(super) fn emit_lambda_class(
         .map(|(index, field)| Capture {
             names: crate::jvm::capture_names::lambda_class_capture(ir, lambda, index)
                 .expect("every field of a lambda class stores one of its captures"),
+            constructor_local: !lambda.captures.get(index).is_some_and(|capture| {
+                matches!(
+                    capture,
+                    crate::ir::IrLambdaCapture::Value { inlined: true, .. }
+                )
+            }),
             ty: jvm_value_ty(&field.ty),
             descriptor: ir_type_desc(&field.ty),
-            signature: parameterized_sig(&formatter, &field.ty),
-            parameter_signature: parameterized_sig_at(&formatter, &field.ty, Wildcards::Declared),
+            // A call-site-regenerated anonymous object carries the declaration-erased descriptor
+            // but publishes no capture-field or constructor generic signature. Its exact
+            // specialization identity was recorded before its emitted name existed.
+            signature: if regenerated {
+                None
+            } else {
+                parameterized_sig(&formatter, &field.ty)
+            },
+            parameter_signature: if regenerated {
+                None
+            } else {
+                parameterized_sig_at(&formatter, &field.ty, Wildcards::Declared)
+            },
         })
         .collect::<Vec<_>>();
     let constructor = format!(
@@ -115,17 +152,21 @@ pub(super) fn emit_lambda_class(
     let object = cw.methodref(OBJECT, "<init>", "()V");
     code.invokespecial(object, 0, 0);
     code.ret_void();
-    let parameters = captures
-        .iter()
-        .map(|capture| {
-            (
-                capture.names.parameter.as_str(),
-                capture.descriptor.as_str(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let locals =
-        function_reference_invoke::reference_constructor_locals(&mut cw, &class, &parameters);
+    // Anonymous-object regeneration drops only a transferred capture's declaration-local row.
+    // Its physical parameter still advances the slot used by every following capture.
+    let mut locals = vec![("this".to_string(), format!("L{class};"), 0u16)];
+    let mut parameter_slot = 1u16;
+    for capture in &captures {
+        if capture.constructor_local {
+            locals.push((
+                capture.names.parameter.clone(),
+                capture.descriptor.clone(),
+                parameter_slot,
+            ));
+        }
+        parameter_slot += slot_words(capture.ty);
+    }
+    cw.reserve_method_lvt(&locals);
     if lambda.public_inline {
         finish_code_sig::<0x0001>(
             &mut cw,
@@ -198,11 +239,24 @@ pub(super) fn emit_lambda_class(
         lambda.invoke,
         arity,
     );
-    if captures.is_empty() || delegated_property_array::exists(env, c.fq_name) {
-        emit_initialization(ir, c, &class, facade, env, &mut cw, captures.is_empty());
+    // A transferred inline capture preserves per-expansion closure identity even when transfer
+    // leaves no fields. Other capture-free specializations retain kotlinc's singleton shape.
+    let fresh_instance = ir
+        .specialized_functions
+        .get(&lambda.invoke)
+        .is_some_and(|specialization| specialization.consumed_inline_capture);
+    let singleton = captures.is_empty() && !fresh_instance;
+    if singleton || delegated_property_array::exists(env, c.fq_name) {
+        emit_initialization(ir, c, &class, facade, env, &mut cw, singleton);
     }
-    if captures.is_empty() {
+    if singleton {
         add_singleton_instance_field(&mut cw, &class);
+    }
+    if regenerated_inline_class {
+        // AnonymousObjectTransformer visits the copied class's InnerClasses rows before it writes
+        // the retained metadata and replaces EnclosingMethod. Seed only the rows this class keeps;
+        // the final writer's later visits then deduplicate them in the same order.
+        cw.seed_inner_class_names();
     }
     if lambda.public_inline {
         let mut xi =
@@ -217,6 +271,56 @@ pub(super) fn emit_lambda_class(
     } else {
         finish_local_synthetic_class(cw, env)
     }
+}
+
+struct RegeneratedInlineOrigin {
+    source_file: String,
+    path: String,
+    lines: u16,
+    declaration_enclosure: Option<(String, Option<(String, String)>)>,
+}
+
+/// The declaration source and original enclosure a call-site-specialized lambda class was
+/// regenerated from.
+fn regenerated_inline_origin(
+    ir: &IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
+    mut function: crate::ir::FunId,
+    facade: &str,
+) -> Option<RegeneratedInlineOrigin> {
+    let template = crate::jvm::lambda_classes::specialization_template(ir, function)?;
+    let declaration_facade = ir
+        .foreign_template_facade(template)
+        .map_or(facade, |facade| {
+            crate::jvm::names::classfile_internal_name_of(facade)
+        });
+    let declaration_enclosure = super::enclosure::scope_enclosure(
+        ir,
+        override_results,
+        crate::ir::IrEnclosure::Function(template),
+        declaration_facade,
+    );
+    function = crate::jvm::lambda_classes::specialization_source(ir, function);
+    let source = if ir.foreign_inline_templates.contains(&template) {
+        ir.foreign_template_source(template)?.source
+    } else {
+        ir.source_debug.current()?
+    };
+    let debug = ir.source_debug.file(source)?;
+    let source_file = debug
+        .name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&debug.name)
+        .to_string();
+    let path = ir.lambda_class_names.get(&function)?.render();
+    let lines = u16::try_from(debug.line_count).unwrap_or(u16::MAX).max(1);
+    Some(RegeneratedInlineOrigin {
+        source_file,
+        path,
+        lines,
+        declaration_enclosure,
+    })
 }
 
 fn emit_initialization(
@@ -283,6 +387,8 @@ fn emit_initialization(
 /// A captured value's field, as the constructor and `invoke` spell it.
 struct Capture {
     names: crate::jvm::capture_names::CaptureNames,
+    /// Whether the regenerated constructor retains this parameter's debug-local row.
+    constructor_local: bool,
     ty: Ty,
     descriptor: String,
     signature: Option<String>,

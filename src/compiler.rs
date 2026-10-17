@@ -140,6 +140,10 @@ fn emit_analyzed_into<B: Backend>(
             return Vec::new();
         }
     };
+    let source_line_counts = reparse_sources
+        .iter()
+        .map(crate::frontend::ReparseSource::source_line_count)
+        .collect::<Vec<_>>();
     let mut outputs = Vec::new();
     for (raw_source, source) in reparse_sources.iter().enumerate() {
         // Java declaration headers participated in Pass 1 through the platform provider. Java
@@ -165,7 +169,8 @@ fn emit_analyzed_into<B: Backend>(
             .map(|package| package.render().replace('/', "."));
         let mut ir = crate::ir::IrFile::with_package(package);
         ir.recursive_type_of = source.recursive_type_of();
-        ir.source_debug = crate::ir::SourceDebug::from_map(&source_map, source_id);
+        ir.source_debug =
+            crate::ir::SourceDebug::from_map(&source_map, source_id, &source_line_counts);
         let mut sink = match crate::fir_lower::CommonIrBodySink::new(&index, source_id, &mut ir) {
             Ok(sink) => sink,
             Err(error) => {

@@ -24,7 +24,7 @@ pub(super) fn class_capture(
     capture: &IrConstructorCapture,
 ) -> CaptureNames {
     let Some(receiver) = &capture.receiver else {
-        return CaptureNames::value(&capture.source_name);
+        return CaptureNames::value(&capture.source_name, false);
     };
     let container = class
         .enclosure
@@ -76,7 +76,10 @@ pub(super) fn lambda_class_capture(
     field: usize,
 ) -> Option<CaptureNames> {
     Some(match lambda.captures.get(field)? {
-        IrLambdaCapture::Value(name) => CaptureNames::value(name),
+        IrLambdaCapture::Value {
+            source_name,
+            inlined,
+        } => CaptureNames::value(source_name, *inlined),
         &IrLambdaCapture::Receiver(ordinal) => {
             let container = lambda
                 .lifting_root
@@ -101,6 +104,7 @@ pub(super) fn suspend_lambda_capture(
                 .source_name
                 .as_deref()
                 .expect("a suspend lambda's captured value keeps its source name"),
+            capture.provenance == crate::ir::IrParameterProvenance::InlinedCapture,
         ),
         IrParameterRole::CapturedReceiver { ordinal } => {
             let container = parameters
@@ -126,8 +130,9 @@ pub(super) struct CaptureNames {
 
 impl CaptureNames {
     /// A captured value: `$` before its source name, for both.
-    fn value(source_name: &str) -> Self {
-        let name = format!("${source_name}");
+    fn value(source_name: &str, inlined: bool) -> Self {
+        let suffix = if inlined { "$inlined" } else { "" };
+        let name = format!("${source_name}{suffix}");
         Self {
             parameter: name.clone(),
             field: name,
