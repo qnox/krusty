@@ -572,12 +572,19 @@ pub(super) fn complete(
                 .collect::<Vec<_>>();
             let descriptor_name = annotations::class_serial_name(ir, class_id);
             let descriptor_owner = ir.classes[class_id as usize].fq_name_id();
-            Some(add_cached_descriptor(
+            let cached = add_cached_descriptor(
                 ir,
                 descriptor_owner,
                 descriptor_name,
                 &descriptor_elements,
-            ))
+            );
+            ir.classes[class_id as usize]
+                .field_annotations
+                .push(crate::ir::FieldAnnotations {
+                    field: "$cachedDescriptor".to_string(),
+                    annotations: annotations::jvm_field_annotations(),
+                });
+            Some(cached)
         } else {
             None
         };
