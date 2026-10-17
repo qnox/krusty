@@ -15,7 +15,33 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub(super) type ClassMetadataLoadError = (TypeName, ReadError);
+/// Why an entry's declarations could not be indexed or loaded.
+#[derive(Debug)]
+pub(super) enum ClassMetadataLoadError {
+    /// A class whose bytes or Kotlin metadata do not parse.
+    Class(TypeName, ReadError),
+    /// An archive entry whose name does not decode, so it cannot be classified.
+    EntryName {
+        archive: PathBuf,
+        error: zip::result::ZipError,
+    },
+}
+
+/// The name of archive entry `entry_id`. A name that does not decode fails the entry's build: the
+/// entry cannot be classified, so skipping it would publish an index without its declarations.
+fn archive_entry_name<'a>(
+    archive: &'a zip::ZipArchive<File>,
+    jar: &Path,
+    entry_id: usize,
+) -> Result<Option<std::borrow::Cow<'a, str>>, ClassMetadataLoadError> {
+    archive
+        .name_for_index(entry_id)
+        .transpose()
+        .map_err(|error| ClassMetadataLoadError::EntryName {
+            archive: jar.to_path_buf(),
+            error,
+        })
+}
 
 fn parse_metadata_class(
     bytes: &[u8],
@@ -23,7 +49,9 @@ fn parse_metadata_class(
 ) -> Result<Option<ClassInfo>, ClassMetadataLoadError> {
     match parse_class(bytes) {
         Ok(class) => Ok(Some(class)),
-        Err(error @ ReadError::BadKotlinMetadata(_)) => Err((type_name(internal), error)),
+        Err(error @ ReadError::BadKotlinMetadata(_)) => {
+            Err(ClassMetadataLoadError::Class(type_name(internal), error))
+        }
         Err(_) => Ok(None),
     }
 }
@@ -177,7 +205,7 @@ fn collect_jar(
         return Ok(());
     };
     for entry_id in 0..archive.len() {
-        let name = archive.name_for_index(entry_id).and_then(Result::ok);
+        let name = archive_entry_name(&archive, jar, entry_id)?;
         let internal = name
             .as_deref()
             .and_then(class_internal_from_entry)
@@ -400,7 +428,7 @@ fn scan_types_jar(
         return Ok(());
     };
     for entry_id in 0..archive.len() {
-        let name = archive.name_for_index(entry_id).and_then(Result::ok);
+        let name = archive_entry_name(&archive, jar, entry_id)?;
         let internal = name
             .as_deref()
             .and_then(class_internal_from_entry)
@@ -433,7 +461,7 @@ fn scan_types_jar_package(
         return Ok(());
     };
     for entry_id in 0..archive.len() {
-        let name = archive.name_for_index(entry_id).and_then(Result::ok);
+        let name = archive_entry_name(&archive, jar, entry_id)?;
         let internal = name
             .as_deref()
             .and_then(class_internal_from_entry)

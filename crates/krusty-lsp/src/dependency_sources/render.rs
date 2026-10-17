@@ -565,9 +565,9 @@ fn attached_source_in(
     }
     let entries: Vec<String> = archive
         .file_names()
-        .filter_map(Result::ok)
-        .map(|name| name.into_owned())
-        .collect();
+        .map(|name| name.map(|name| name.into_owned()))
+        .collect::<Result<_, _>>()
+        .ok()?;
     let candidates = source_entry_candidates(&entries, package, &names);
 
     let mut fallback = None;

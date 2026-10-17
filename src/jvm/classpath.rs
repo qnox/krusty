@@ -1495,7 +1495,7 @@ pub struct Classpath {
     local_cache: RefCell<crate::lru::LruCache<TypeName, Option<std::sync::Arc<ClassInfo>>>>,
     /// First authoritative class parse failure observed by lazy lookup. Lookup stops at that entry;
     /// post-resolution platform validation turns it into one terminal frontend diagnostic.
-    class_load_error: RefCell<Option<(TypeName, ReadError)>>,
+    class_load_error: RefCell<Option<ClassMetadataLoadError>>,
     entry_caches: Vec<ClassCache>,
     /// Per-entry global body/class-bodies/builtins cache slots, resolved once at construction
     /// (parallel to `entries`); `None` for directory entries, which are per-test/module-local and
@@ -1591,22 +1591,31 @@ pub struct Classpath {
 
 impl Classpath {
     fn record_class_load_error(&self, internal: TypeName, error: ReadError) {
-        let mut first = self.class_load_error.borrow_mut();
-        if first.is_none() {
-            *first = Some((internal, error));
-        }
+        self.record_metadata_load_error(ClassMetadataLoadError::Class(internal, error));
     }
 
     fn record_metadata_load_error(&self, failure: ClassMetadataLoadError) {
-        self.record_class_load_error(failure.0, failure.1);
+        let mut first = self.class_load_error.borrow_mut();
+        if first.is_none() {
+            *first = Some(failure);
+        }
     }
 
     pub(super) fn validate_lazy_class_loads(
         &self,
     ) -> Result<(), crate::libraries::PlatformInitializationError> {
         let failure = self.class_load_error.borrow();
-        let Some((internal, error)) = failure.as_ref() else {
-            return Ok(());
+        let (internal, error) = match failure.as_ref() {
+            None => return Ok(()),
+            Some(ClassMetadataLoadError::Class(internal, error)) => (internal, error),
+            Some(ClassMetadataLoadError::EntryName { archive, error }) => {
+                return Err(crate::libraries::PlatformInitializationError {
+                    message: format!(
+                        "cannot read classpath entry {}: undecodable entry name: {error}",
+                        archive.display()
+                    ),
+                });
+            }
         };
         let detail = match error {
             ReadError::BadKotlinMetadata(error) => {

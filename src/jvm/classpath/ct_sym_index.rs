@@ -55,12 +55,12 @@ fn build_ct_sym_index(path: &Path, release: u8) -> Option<CtSymIndex> {
     let archive = zip::ZipArchive::new(file).ok()?;
     let mut index = CtSymIndex::default();
     for ordinal in 0..archive.len() {
+        // A name that does not decode cannot be classified, so no index is built rather than one
+        // missing that class.
+        let name = archive.name_for_index(ordinal)?.ok()?;
         // A central-directory name with no module segment is not a class (`L/`,
         // `L/system-modules`). Skip it. Returning from the loop on that name discarded every
         // class already recorded, so the selected JDK release view was empty.
-        let Some(Ok(name)) = archive.name_for_index(ordinal) else {
-            continue;
-        };
         let mut segments = name.splitn(3, '/');
         let (Some(releases), Some(_module), Some(resource)) =
             (segments.next(), segments.next(), segments.next())
