@@ -399,11 +399,10 @@ impl EmitRun {
     }
 }
 
-/// One synthetic lambda class to write under [`LambdaMode::Class`].
+/// One emitter-owned SAM class to write under [`LambdaMode::Class`].
 ///
-/// The lambda body stays where the indy strategy put it — a private static on the enclosing class —
-/// and the synthesized `invoke` delegates to it. kotlinc instead moves the body into `invoke` and
-/// emits no static, so the CLASS SET matches but the enclosing class keeps one extra private method.
+/// Kotlin function lambdas are realized in IR, with their body owned by the realized class. This
+/// plan remains only for SAM conversions whose implementation stays a static method on its owner.
 #[derive(Clone, Debug)]
 struct LambdaClassPlan {
     /// Internal name of the class to write (`LKt$box$plain$1`).
@@ -419,11 +418,6 @@ struct LambdaClassPlan {
     impl_desc: String,
     /// Captured values, in implementation-parameter order; empty ⇒ a singleton `INSTANCE`.
     captures: Vec<Ty>,
-    /// Source-level arity, passed to `kotlin.jvm.internal.Lambda`'s constructor.
-    arity: u32,
-    /// Only a Kotlin function type extends `kotlin/jvm/internal/Lambda`; a user SAM conversion
-    /// extends `java/lang/Object` (kotlinc emits no `FunctionBase` for a non-`FunctionN` target).
-    kotlin_function: bool,
     /// A fun-interface conversion of a callable reference implements Kotlin's FunctionAdapter
     /// equality contract by delegating to its single captured function value.
     function_adapter: bool,
@@ -431,9 +425,6 @@ struct LambdaClassPlan {
     /// constant, not a `Methodref` (`IncompatibleClassChangeError` otherwise).
     owner_is_interface: bool,
     identity: lambda_class_names::LambdaClassIdentity,
-    /// The generic signature and `@Metadata` kotlin-reflect reads for `toString()`. Absent for a
-    /// user SAM conversion and for a synthesized adapter that is not a source lambda.
-    reflection: Option<class_lambda_reflection::ClassLambdaReflection>,
 }
 
 impl EmitRun {
@@ -1697,31 +1688,13 @@ fn emit_pass(
     Some(out)
 }
 
-/// Write one synthetic lambda class for [`LambdaMode::Class`].
+/// Write one synthetic class for a SAM conversion that cannot use `invokedynamic`.
 ///
-/// Shape, as kotlinc emits it: `final class Outer$fn$N extends kotlin/jvm/internal/Lambda implements
-/// FunctionN`, whose constructor passes the source arity to `Lambda.<init>(I)V`. A non-capturing
-/// lambda additionally gets a `static final INSTANCE` initialized in `<clinit>`; a capturing one
-/// stores each captured value in a field and reads it back in `invoke`.
-///
-/// A source lambda declares kotlinc's typed `invoke` when its implementation has that physical
-/// shape, plus the erased `FunctionN.invoke` bridge used for dispatch. Arguments are adapted to the
-/// implementation's physical types and the result is adapted back to the declared function type,
-/// exactly as the metafactory's adapter would have done under `indy`.
+/// Kotlin function lambdas selected for class mode have already become IR classes. Keeping this
+/// path SAM-only makes a missed realization an emission error instead of a second implementation.
 fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Vec<u8>) {
-    let super_name = if plan.kotlin_function {
-        "kotlin/jvm/internal/Lambda"
-    } else {
-        "java/lang/Object"
-    };
-    let signature = plan
-        .reflection
-        .as_ref()
-        .map(|reflection| reflection.signature.as_str());
-    let mut cw = new_writer_generic(&plan.internal, signature, super_name, opts);
-    if let Some(signature) = signature {
-        cw.set_signature(signature);
-    }
+    const OBJECT: &str = "java/lang/Object";
+    let mut cw = new_writer_generic(&plan.internal, None, OBJECT, opts);
     cw.set_access(0x0030); // ACC_FINAL | ACC_SUPER
     cw.add_interface(&plan.iface);
     if plan.function_adapter {
@@ -1745,14 +1718,8 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         slot += slot_words(*ty);
     }
     ctor.aload(0);
-    if plan.kotlin_function {
-        ctor.push_int(plan.arity as i32, &mut cw);
-        let sup = cw.methodref(super_name, "<init>", "(I)V");
-        ctor.invokespecial(sup, 1, 0);
-    } else {
-        let sup = cw.methodref(super_name, "<init>", "()V");
-        ctor.invokespecial(sup, 0, 0);
-    }
+    let sup = cw.methodref(OBJECT, "<init>", "()V");
+    ctor.invokespecial(sup, 0, 0);
     for (index, ty) in plan.captures.iter().enumerate() {
         ctor.aload(0);
         load_slot(&mut ctor, capture_slots[index], *ty);
@@ -1778,25 +1745,6 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         .get(plan.captures.len()..)
         .unwrap_or(&[])
         .to_vec();
-    // A Kotlin lambda's class declares kotlinc's typed `invoke` over the lambda's own parameters,
-    // which its metadata names; the erased `FunctionN.invoke` is a bridge to it. A typed `invoke`
-    // that erases to the interface slot (`invoke(Object)Object` over an unbounded `T`) is that
-    // slot itself, with no bridge.
-    let typed_invoke = plan
-        .reflection
-        .as_ref()
-        .and_then(|reflection| reflection.typed_invoke.as_ref())
-        .filter(|typed| typed.descriptor != plan.sam_desc);
-    if let Some(typed) = typed_invoke {
-        class_mode_lambda_members::emit_typed_lambda_invoke(
-            &mut cw,
-            plan,
-            &field_descs,
-            &own_params,
-            impl_ret,
-            typed,
-        );
-    }
     let mut invoke_locals: u16 = 1;
     let mut arg_slots = Vec::new();
     for param in &sam_params {
@@ -1804,15 +1752,7 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         invoke_locals += if *param == "J" || *param == "D" { 2 } else { 1 };
     }
     let mut invoke = CodeBuilder::new(invoke_locals);
-    if typed_invoke.is_some() {
-        invoke.aload(0);
-    }
-    for (index, ty) in plan
-        .captures
-        .iter()
-        .enumerate()
-        .filter(|_| typed_invoke.is_none())
-    {
+    for (index, ty) in plan.captures.iter().enumerate() {
         invoke.aload(0);
         let field = cw.fieldref(
             &plan.internal,
@@ -1821,18 +1761,22 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         );
         invoke.getfield(field, slot_words(*ty) as i32);
     }
-    let high_arity = plan.kotlin_function && is_high_arity_function(plan.arity as u8);
-    if high_arity {
-        // FunctionN's single erased parameter is `Object[]`; unpack each semantic argument in order
-        // and adapt it to the existing implementation method's physical slot.
-        for (index, want) in own_params.iter().copied().enumerate() {
-            invoke.aload(arg_slots[0]);
-            invoke.push_int(index as i32, &mut cw);
-            invoke.array_load(0x32, 1); // aaload
+    for (index, physical) in sam_params.iter().enumerate() {
+        let want = own_params.get(index).copied().unwrap_or(Ty::Unit);
+        if *physical == "J" {
+            invoke.lload(arg_slots[index]);
+        } else if *physical == "D" {
+            invoke.dload(arg_slots[index]);
+        } else if *physical == "F" {
+            invoke.fload(arg_slots[index]);
+        } else if descriptor_is_reference(physical) {
+            invoke.aload(arg_slots[index]);
             let wanted = type_descriptor(want);
             if !matches!(want, Ty::Unit) && !descriptor_is_reference(&wanted) {
-                unbox_prim_from(&mut cw, &mut invoke, Ty::obj("java/lang/Object"), want);
-            } else if wanted != "Ljava/lang/Object;" {
+                // The erased slot carries a wrapper wherever the body wants a scalar.
+                unbox_prim_from_descriptor(&mut cw, &mut invoke, physical, want);
+            } else if wanted != *physical {
+                // The implementation may have a more specific reference type than the SAM slot.
                 let internal = wanted
                     .strip_prefix('L')
                     .and_then(|rest| rest.strip_suffix(';'))
@@ -1841,54 +1785,9 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
                 let target = cw.class_ref(&internal);
                 invoke.checkcast(target);
             }
-        }
-    } else {
-        for (index, physical) in sam_params.iter().enumerate() {
-            let want = own_params.get(index).copied().unwrap_or(Ty::Unit);
-            if *physical == "J" {
-                invoke.lload(arg_slots[index]);
-            } else if *physical == "D" {
-                invoke.dload(arg_slots[index]);
-            } else if *physical == "F" {
-                invoke.fload(arg_slots[index]);
-            } else if descriptor_is_reference(physical) {
-                invoke.aload(arg_slots[index]);
-                let wanted = type_descriptor(want);
-                if !matches!(want, Ty::Unit) && !descriptor_is_reference(&wanted) {
-                    // The erased slot carries a wrapper wherever the body wants a scalar.
-                    unbox_prim_from_descriptor(&mut cw, &mut invoke, physical, want);
-                } else if wanted != *physical {
-                    // `Function1.invoke` declares `Object`; the body declares the real type. Under
-                    // `indy` the metafactory's adapter inserted this cast — nothing else does here,
-                    // and without it the class fails verification on a specific reference parameter.
-                    let internal = wanted
-                        .strip_prefix('L')
-                        .and_then(|rest| rest.strip_suffix(';'))
-                        .map(str::to_owned)
-                        .unwrap_or(wanted);
-                    let target = cw.class_ref(&internal);
-                    invoke.checkcast(target);
-                }
-            } else {
-                invoke.iload(arg_slots[index]);
-            }
-        }
-    }
-    if let Some(typed) = typed_invoke {
-        let typed_desc = typed.descriptor.as_str();
-        let own_words: i32 = own_params.iter().map(|t| slot_words(*t) as i32).sum();
-        let typed = cw.methodref(&plan.internal, "invoke", typed_desc);
-        if typed_desc.ends_with(")V") {
-            invoke.invokevirtual(typed, own_words, 0);
-            let unit = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
-            invoke.getstatic(unit, 1);
         } else {
-            invoke.invokevirtual(typed, own_words, 1);
+            invoke.iload(arg_slots[index]);
         }
-        invoke.areturn();
-        // ACC_PUBLIC | ACC_BRIDGE | ACC_SYNTHETIC: the erased slot of the typed `invoke`.
-        cw.add_method(0x1041, &plan.sam_method, &plan.sam_desc, &invoke);
-        return class_mode_lambda_members::finish_lambda_class(cw, plan, &field_descs, opts);
     }
     let impl_words: i32 = impl_params.iter().map(|t| slot_words(*t) as i32).sum();
     let impl_ref = if plan.owner_is_interface {
@@ -1912,23 +1811,9 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
     } else {
         return_primitive(&mut invoke, impl_ret);
     }
-    // A typed `invoke` that erases to the interface slot is the slot itself, and keeps its generic
-    // `Signature` (`(TT;)TT;`).
-    let slot_signature = plan
-        .reflection
-        .as_ref()
-        .and_then(|reflection| reflection.typed_invoke.as_ref())
-        .filter(|typed| typed.descriptor == plan.sam_desc)
-        .and_then(|typed| typed.signature.as_deref());
     // ACC_PUBLIC | ACC_FINAL: the interface slot, implemented once.
-    cw.add_method_sig(
-        0x0011,
-        &plan.sam_method,
-        &plan.sam_desc,
-        &invoke,
-        slot_signature,
-    );
-    class_mode_lambda_members::finish_lambda_class(cw, plan, &field_descs, opts)
+    cw.add_method(0x0011, &plan.sam_method, &plan.sam_desc, &invoke);
+    class_mode_lambda_members::finish_lambda_class(cw, plan, &field_descs)
 }
 
 /// Take the lambda classes recorded while emitting the class just finished, and write them.

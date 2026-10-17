@@ -29,17 +29,11 @@ pub(super) fn emit_lambda_class(
     // source lambda; a class the runtime factory forces extends `Object` and carries none.
     let reflection = match &lambda.kotlin_lambda {
         Some(origin) => {
-            let function = &ir.functions[lambda.invoke as usize];
-            let invoke = class_lambda_reflection::ClassLambdaInvoke {
-                own: &function.params,
-                result: function.ret,
-            };
             match class_lambda_reflection::reflect_source(
                 ir,
                 lambda.function_type,
                 lambda.invoke,
                 origin,
-                invoke,
                 &formatter,
             ) {
                 Ok(reflection) => Some(reflection),

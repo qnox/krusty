@@ -11,7 +11,9 @@
 //! member's lambda captures its static's carrier (`$arg0`) rather than the instance (`this$0`). A lambda that captures nothing
 //! is a singleton read from its `INSTANCE` field.
 //!
-//! The conflicts taken so far: a value class whose declared underlying type is neither nullable
+//! High-arity lambdas also take this path because `FunctionN.invoke(Object[])` needs the packed
+//! bridge the realized class writes. The adaptation conflicts taken so far: a value class whose
+//! declared underlying type is neither nullable
 //! nor primitive, as a parameter or the result (the factory cannot box such a value, and it knows
 //! nothing of the mangled name its specialized method takes); and, before language level 2.4, a
 //! `Nothing`/`Nothing?` parameter or inferred result, which maps to `Void` and has no adaptee at all.
@@ -49,9 +51,7 @@ pub(super) fn specialization_template(ir: &IrFile, function: FunId) -> Option<Fu
         .copied()
 }
 
-use crate::ir::{
-    Callee, ClassId, ExprId, FunId, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole,
-};
+use crate::ir::{ClassId, ExprId, FunId, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole};
 use crate::types::{Ty, TypeName};
 
 /// Exact implementation identities retained across closure-class realization. Reification may
@@ -281,7 +281,6 @@ fn site_in_roots(
     };
     let lambda = &ir.exprs[node as usize];
     let IrExpr::Lambda {
-        arity,
         captures,
         sam: None,
         ..
@@ -297,14 +296,13 @@ fn site_in_roots(
         None => crate::jvm::local_class_names::callable_reference_name(ir, node)?,
     };
     let function_type = ir.logical_types.get(&node).copied()?;
-    let fits = usize::from(*arity) <= crate::jvm::names::MAX_NUMBERED_FUNCTION_ARITY;
     let mut template_copies = inline_template_copies(ir, fid, every_emitted_root);
     if shared {
         template_copies.extend(nodes.into_iter().filter(|&other| other != node));
         template_copies.sort_unstable();
         template_copies.dedup();
     }
-    (fits && !inline_call_argument(ir, node)).then(|| Site {
+    (!inline_call_argument(ir, node)).then(|| Site {
         node,
         template_copies,
         class,
@@ -555,7 +553,8 @@ struct Capture {
     shared_holder: Option<TypeName>,
 }
 
-/// Realize every lambda whose function type `LambdaMetafactory` cannot adapt as a class of its own.
+/// Realize every lambda whose function type needs a class, including `FunctionN`'s packed bridge
+/// and shapes `LambdaMetafactory` cannot adapt.
 /// A lambda of a shape this step does not realize is recorded instead, so emitting it as an
 /// `invokedynamic`, which cannot link, is an error rather than a silent fallback. A lambda an inline
 /// call's splice consumes is recorded too: the splice emits no value for it.
@@ -621,11 +620,13 @@ pub(super) fn realize(
         let Ty::Fun(signature) = function_type.non_null() else {
             continue;
         };
+        let high_arity = crate::jvm::names::uses_function_n(signature.params.len());
         if signature.suspend
             || (delegate_source.is_none()
                 && inline_default.is_none()
                 && !inline_scoped
                 && !class_lambdas
+                && !high_arity
                 && (!adapt_factory
                     || (!runtime_reified
                         && !inline_anonymous
@@ -726,7 +727,8 @@ pub(super) fn realize(
             }
             continue;
         }
-        let kotlin_lambda = if class_lambdas {
+        let source_class_lambda = class_lambdas || high_arity;
+        let kotlin_lambda = if source_class_lambda {
             ir.lambda_origins.get(&fid).cloned()
         } else {
             None
@@ -736,11 +738,11 @@ pub(super) fn realize(
             fid,
             every_emitted_root,
             inline_scope.map(|scope| scope.node),
-            runtime_reified || inline_default.is_some() || inline_scoped || class_lambdas,
+            runtime_reified || inline_default.is_some() || inline_scoped || source_class_lambda,
             class_name,
         ) {
             Ok((site, body, captures)) => {
-                if class_lambdas {
+                if source_class_lambda {
                     kotlin_lambda_sites.push((site.class, site.node));
                 }
                 realize_class(
@@ -1161,7 +1163,7 @@ fn adopt_lifted_declarations(ir: &mut IrFile, fid: FunId, class: ClassId) {
     let Some(scope) = site.path.last().map(|step| step.position) else {
         return;
     };
-    let mut declared = ir
+    let declared = ir
         .lifted_functions
         .iter()
         .filter(|(&function, (other, candidate))| {
@@ -1169,44 +1171,7 @@ fn adopt_lifted_declarations(ir: &mut IrFile, fid: FunId, class: ClassId) {
         })
         .map(|(&function, _)| function)
         .collect::<Vec<_>>();
-    declared.sort_unstable();
-    let owner = ir.classes[class as usize].fq_name;
-    for &function in &declared {
-        for other in &mut ir.classes {
-            other.methods.retain(|&method| method != function);
-        }
-        ir.class_method_owners.remove(&function);
-        ir.classes[class as usize].methods.push(function);
-        ir.note_class_method(class, function);
-        ir.class_static_local_functions.insert(function, owner);
-    }
-    if declared.is_empty() {
-        return;
-    }
-    for expression in &mut ir.exprs {
-        if let IrExpr::Call {
-            callee:
-                Callee::ClassStatic {
-                    owner: called,
-                    function,
-                }
-                | Callee::ClassStaticWithDefaults {
-                    owner: called,
-                    function,
-                    ..
-                }
-                | Callee::ClassStaticDefault {
-                    owner: called,
-                    function,
-                },
-            ..
-        } = expression
-        {
-            if declared.binary_search(function).is_ok() {
-                *called = owner;
-            }
-        }
-    }
+    super::lifted_declaration_ownership::move_lifted_declarations_to_class(ir, class, &declared);
 }
 
 fn replace_value(ir: &mut IrFile, site: &Site, fresh_instance: bool) {

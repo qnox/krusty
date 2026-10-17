@@ -2,13 +2,12 @@
 
 use super::*;
 
-/// The members after `invoke`: a fun-interface adapter's delegate and equality, the singleton
-/// `INSTANCE`, and the class's `@Metadata`.
+/// The members after the SAM slot: a fun-interface adapter's delegate and equality, and the
+/// singleton `INSTANCE`.
 pub(super) fn finish_lambda_class(
     mut cw: ClassWriter,
     plan: &LambdaClassPlan,
     field_descs: &[String],
-    opts: &EmitOptions,
 ) -> (String, Vec<u8>) {
     if plan.function_adapter {
         assert_eq!(
@@ -84,77 +83,5 @@ pub(super) fn finish_lambda_class(
         clinit.ret_void();
         cw.add_method(0x0008, "<clinit>", "()V", &clinit); // ACC_STATIC
     }
-    if let Some(reflection) = &plan.reflection {
-        cw.set_kotlin_metadata(
-            3,
-            opts.metadata_stamp(),
-            synthetic_class_xi(SYNTHETIC_LOCAL),
-            &reflection.d1,
-            &reflection.d2,
-        );
-    }
     (plan.internal.clone(), cw.finish())
-}
-
-/// kotlinc's typed `invoke(own parameters…)`: the captures read from the class's fields and the
-/// arguments passed to the lambda's implementation method, whose scalar result is boxed.
-pub(super) fn emit_typed_lambda_invoke(
-    cw: &mut ClassWriter,
-    plan: &LambdaClassPlan,
-    field_descs: &[String],
-    own_params: &[Ty],
-    impl_ret: Ty,
-    typed: &class_lambda_reflection::TypedInvoke,
-) {
-    let typed_desc = typed.descriptor.as_str();
-    let own_words: u16 = own_params.iter().map(|ty| slot_words(*ty)).sum();
-    let mut code = CodeBuilder::new(1 + own_words);
-    for (index, ty) in plan.captures.iter().enumerate() {
-        code.aload(0);
-        let field = cw.fieldref(
-            &plan.internal,
-            &format!("$captured${index}"),
-            &field_descs[index],
-        );
-        code.getfield(field, slot_words(*ty) as i32);
-    }
-    let mut slot = 1u16;
-    for ty in own_params {
-        load_slot(&mut code, slot, *ty);
-        slot += slot_words(*ty);
-    }
-    let impl_words: i32 = plan
-        .captures
-        .iter()
-        .chain(own_params)
-        .map(|ty| slot_words(*ty) as i32)
-        .sum();
-    let impl_ref = if plan.owner_is_interface {
-        cw.interface_methodref(&plan.impl_owner, &plan.impl_name, &plan.impl_desc)
-    } else {
-        cw.methodref(&plan.impl_owner, &plan.impl_name, &plan.impl_desc)
-    };
-    code.invokestatic(impl_ref, impl_words, slot_words(impl_ret) as i32);
-    if typed_desc.ends_with(")V") {
-        // The implementation of a `Unit` lambda may return the `Unit` value itself.
-        match slot_words(impl_ret) {
-            1 => code.pop(),
-            2 => code.pop2(),
-            _ => {}
-        }
-        code.ret_void();
-    } else {
-        if !descriptor_is_reference(&type_descriptor(impl_ret)) {
-            box_prim_free(cw, &mut code, impl_ret);
-        }
-        code.areturn();
-    }
-    // ACC_PUBLIC | ACC_FINAL
-    cw.add_method_sig(
-        0x0011,
-        "invoke",
-        typed_desc,
-        &code,
-        typed.signature.as_deref(),
-    );
 }

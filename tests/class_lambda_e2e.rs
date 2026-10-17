@@ -790,3 +790,33 @@ fun box(): String = if (local(5) == 12) "OK" else "fail"
 "#,
     );
 }
+
+/// `FunctionN`'s packed `Object[]` bridge is a supported class representation, so arity 23 must
+/// take the same IR-owned class path as the numbered function interfaces.
+#[test]
+fn high_arity_class_lambda_bytes_match_kotlinc() {
+    assert_class_mode_identical_to_kotlinc(
+        r#"
+fun high(seed: Int): Any = {
+    p00: Int, p01: Int, p02: Int, p03: Int, p04: Int, p05: Int,
+    p06: Int, p07: Int, p08: Int, p09: Int, p10: Int, p11: Int,
+    p12: Int, p13: Int, p14: Int, p15: Int, p16: Int, p17: Int,
+    p18: Int, p19: Int, p20: Int, p21: Int, p22: Int ->
+    seed + p00 + p01 + p02 + p03 + p04 + p05 + p06 + p07 + p08 + p09 + p10 +
+        p11 + p12 + p13 + p14 + p15 + p16 + p17 + p18 + p19 + p20 + p21 + p22
+}
+"#,
+    );
+}
+
+/// A lambda copied into a `$default` body keeps one declaration-owned class and its exact
+/// enclosure instead of reaching the emitter's legacy class shim.
+#[test]
+fn default_argument_class_lambda_bytes_match_kotlinc() {
+    assert_class_mode_identical_to_kotlinc(
+        r#"
+fun use(seed: Int, f: () -> Int = { seed + 1 }): Int = f()
+fun box(): String = if (use(4) == 5) "OK" else "fail"
+"#,
+    );
+}

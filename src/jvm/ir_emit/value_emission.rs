@@ -10,15 +10,15 @@ use crate::types::Ty;
 
 use super::{
     access_bridges, array_jvm_element, bottom_values, boxed_descriptor, bytecode_inline_call,
-    captured_storage, class_ctor_jvm_tys, class_lambda_reflection, constant_emission,
-    constructor_accessors, declared_jvm_interface, default_mask_bit, default_mask_count,
-    emit_box_impl, emit_constructor_default_arguments, instance_field_jvm_name, ir_ty_to_jvm,
-    jvm_declared_ty, jvm_function_interface, jvm_function_invoke_descriptor, jvm_function_params,
-    jvm_tys, jvm_value_ty, lambda_class, lambda_class_names, load, method_defaults,
+    captured_storage, class_ctor_jvm_tys, constant_emission, constructor_accessors,
+    declared_jvm_interface, default_mask_bit, default_mask_count, emit_box_impl,
+    emit_constructor_default_arguments, instance_field_jvm_name, ir_ty_to_jvm, jvm_declared_ty,
+    jvm_function_interface, jvm_function_invoke_descriptor, jvm_function_params, jvm_tys,
+    jvm_value_ty, lambda_class, lambda_class_names, load, method_defaults,
     native_unsigned_impl_target, parse_descriptor_params, physical_call_result_words,
-    prim_newarray_atype, push_zero, signature_formatter::JvmSignatureFormatter,
-    singleton_instance_load, slot_words, try_emission, ty_from_descriptor_ret, vararg,
-    JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation, LMF_METAFACTORY_DESC,
+    prim_newarray_atype, push_zero, singleton_instance_load, slot_words, try_emission,
+    ty_from_descriptor_ret, vararg, JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation,
+    LMF_METAFACTORY_DESC,
 };
 
 impl super::Emitter<'_> {
@@ -1618,9 +1618,12 @@ impl super::Emitter<'_> {
                 }) {
                     lambda_mode = LambdaMode::Class;
                 }
-                if self.ir.jvm_unrealized_lambda_classes.contains(impl_fn) {
-                    // The class is discarded; a placeholder keeps its frames computable. This is
-                    // an error in both modes: class mode must never fall back to the legacy shim.
+                if self.ir.jvm_unrealized_lambda_classes.contains(impl_fn)
+                    || (lambda_mode == LambdaMode::Class && sam.is_none())
+                {
+                    // The class is discarded; a placeholder keeps its frames computable. Every
+                    // Kotlin function lambda selected for class mode must already have been
+                    // realized in IR. This emitter-owned class path is only the SAM shim.
                     self.run
                         .set_emit_error(lambda_class::unrealized(self.ir, *impl_fn));
                     return code.aconst_null();
@@ -1708,6 +1711,9 @@ impl super::Emitter<'_> {
                     .map(|c| c.fq_name())
                     .unwrap_or_else(|| self.facade.clone());
                 if lambda_mode == LambdaMode::Class {
+                    let target = sam
+                        .as_ref()
+                        .expect("non-SAM class lambdas are rejected before legacy SAM emission");
                     let (internal, identity) = lambda_class_names::emitted_class_name(
                         self.ir,
                         *impl_fn,
@@ -1716,30 +1722,6 @@ impl super::Emitter<'_> {
                         &self.facade,
                         self.lambda_modes,
                     );
-                    let reflection = if sam.is_none() {
-                        let formatter = JvmSignatureFormatter::with_symbols(
-                            self.ir,
-                            self.classifiers,
-                            self.run,
-                        );
-                        let invoke = class_lambda_reflection::ClassLambdaInvoke {
-                            own: lam_tys,
-                            result: impl_ret,
-                        };
-                        match class_lambda_reflection::reflect(
-                            self.ir, e, *impl_fn, invoke, &formatter,
-                        ) {
-                            Ok(reflection) => reflection,
-                            Err(error) => {
-                                // The class is discarded; a placeholder keeps the frames
-                                // computable.
-                                self.run.set_emit_error(error);
-                                return code.aconst_null();
-                            }
-                        }
-                    } else {
-                        None
-                    };
                     self.run.lambda_classes.borrow_mut().push(LambdaClassPlan {
                         internal: internal.clone(),
                         iface: iface.clone(),
@@ -1749,14 +1731,11 @@ impl super::Emitter<'_> {
                         impl_name: impl_name.clone(),
                         impl_desc: impl_desc.clone(),
                         captures: cap_tys.to_vec(),
-                        arity: *arity as u32,
-                        kotlin_function: sam.is_none(),
                         function_adapter,
                         identity,
                         owner_is_interface: impl_owner_is_interface,
-                        reflection,
                     });
-                    let nullable = sam.as_ref().is_some_and(|target| target.nullable);
+                    let nullable = target.nullable;
                     if nullable {
                         self.emit_capturing_lambda_class(
                             code, &internal, captures, cap_tys, nullable,
