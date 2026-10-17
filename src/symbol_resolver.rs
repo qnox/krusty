@@ -24,7 +24,8 @@ mod classifier_scope;
 
 pub(crate) use classifier_scope::{
     classifier_candidates_at_import_level, classifier_precedence_levels,
-    explicit_classifier_candidates, ClassifierImportLevel, ScopedClassifier,
+    explicit_classifier_candidates, scoped_classifier_candidates_at_import_level,
+    ClassifierImportLevel, ScopedClassifier,
 };
 mod declaration_specificity;
 mod extension_specialization;
@@ -3747,6 +3748,7 @@ impl ResolvedMember {
         member.default_realization = callable.default_realization;
         member.nonvirtual_realization = callable.nonvirtual_realization;
         member.plugin_expression = callable.plugin_expression;
+        member.deprecation = callable.deprecation;
         Self {
             receiver,
             ret: member.ret,

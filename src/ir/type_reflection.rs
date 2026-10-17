@@ -133,6 +133,13 @@ impl IrFile {
             .map(|(function, source)| (*function, *source))
     }
 
+    pub(crate) fn foreign_template_source(&self, function: u32) -> Option<IrModuleSource> {
+        self.type_reflection
+            .foreign_template_sources
+            .get(&function)
+            .copied()
+    }
+
     pub(crate) fn record_foreign_template_facades(
         &mut self,
         facades: impl IntoIterator<Item = (u32, TypeName)>,

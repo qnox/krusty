@@ -1780,6 +1780,10 @@ pub struct File {
     /// `<…>` span in one retained value prevents compaction from remapping semantic input while
     /// leaving diagnostic syntax under an obsolete `ExprId`. Absent means no explicit arguments.
     pub call_type_args: crate::fx_hash::HashMap<u32, CallTypeArguments>,
+    /// Qualifier expressions whose explicit type-argument list ends the postfix expression
+    /// (`val u = Unit<Any>`). The selected classifier identity, not this syntax marker, decides
+    /// whether the access is a deprecated or invalid singleton value access.
+    pub standalone_type_argument_qualifiers: crate::fx_hash::HashSet<u32>,
     pub anonymous_object_classes: crate::fx_hash::HashMap<ExprId, DeclId>,
     /// Anonymous class declaration → exact lexically enclosing source function.
     pub anonymous_object_enclosing_functions:
@@ -2029,6 +2033,8 @@ pub struct File {
     pub forbid_useless_type_arguments: bool,
     /// Exact per-compilation warning text for the useless-type-argument transition.
     pub type_arguments_not_allowed_warning: Option<String>,
+    /// Exact warning text when the same transition applies to a standalone singleton value.
+    pub explicit_type_arguments_in_property_access_warning: Option<String>,
     /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
     /// parameters whose declared upper bounds contain a cycle.
     pub recursive_type_of: bool,
@@ -2086,6 +2092,7 @@ impl File {
         self.trailing_call_close_paren_ends = Default::default();
         self.infix_calls = Default::default();
         self.call_type_args = Default::default();
+        self.standalone_type_argument_qualifiers = Default::default();
         self.anonymous_object_classes = Default::default();
         self.anonymous_object_enclosing_functions = Default::default();
         self.local_class_name_provenance = Default::default();

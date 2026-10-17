@@ -121,7 +121,11 @@ impl IrFile {
             self.mark_inline_copy(target);
         }
         if let Some(provenance) = self.inline_copy_provenance(source).map(<[_]>::to_vec) {
-            self.inline_expansions.provenance.insert(target, provenance);
+            self.inline_expansions
+                .provenance
+                .entry(target)
+                .or_default()
+                .extend(provenance);
         }
         if self.is_unread_inline_operand(source) {
             self.mark_unread_inline_operand(target);

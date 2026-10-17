@@ -4852,130 +4852,6 @@ impl<'a> Parser<'a> {
             "<error>".to_string()
         }
     }
-
-    /// Lookahead: is the `<` at the current position the start of a type-argument list that is
-    /// followed by a call-like token (`(`, `{`, `.`)? Used to distinguish `a<B>(c)` (generic call)
-    /// from `a < b > c` (two comparisons). Returns true without advancing `self.i`.
-    fn lookahead_is_type_args_call(&self) -> bool {
-        let mut j = self.i + 1; // skip the opening `<`
-        let mut depth = 1i32;
-        loop {
-            let k = self.t.get(j).map(|t| t.kind);
-            match k {
-                Some(TokenKind::Lt) => {
-                    depth += 1;
-                    j += 1;
-                }
-                Some(TokenKind::Gt) => {
-                    depth -= 1;
-                    j += 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                // `>=` closes the last `<` if depth == 1 (e.g. `Foo<Bar>=` — not valid type args).
-                // Treat as "not type args" to stay safe.
-                Some(TokenKind::GtEq) => return false,
-                // A type-use annotation may carry an arbitrary constant-expression argument list.
-                // Skip that balanced list as one unit so operators or `>` inside it cannot be
-                // mistaken for the surrounding generic delimiters. The real type parser consumes
-                // and records the annotation after this lookahead commits the interpretation.
-                Some(TokenKind::At) => {
-                    let Some(after_annotation) = self.lookahead_after_type_annotation(j) else {
-                        return false;
-                    };
-                    j = after_annotation;
-                }
-                // Tokens valid inside type argument lists — including a function-type argument
-                // (`Foo<(A) -> B>`): its parens and arrow.
-                Some(TokenKind::Ident)
-                | Some(TokenKind::Dot)
-                | Some(TokenKind::Comma)
-                | Some(TokenKind::Star)
-                | Some(TokenKind::Question)
-                | Some(TokenKind::Colon)
-                | Some(TokenKind::Amp)
-                | Some(TokenKind::LParen)
-                | Some(TokenKind::RParen)
-                | Some(TokenKind::Newline)
-                // `in` is the variance keyword in an argument projection (`Foo<in T>`); `out` is an
-                // ordinary ident and already covered above.
-                | Some(TokenKind::KwIn)
-                | Some(TokenKind::Arrow) => {
-                    j += 1;
-                }
-                _ => return false,
-            }
-        }
-        // After `>`, must be followed by `(`, `{`, `.`, or `::` to be a generic call / a callable
-        // reference on a generic type (`A<String>::foo` — the type arguments erase, so it references
-        // `A::foo`). Anything else means the `<` was a less-than operator.
-        matches!(
-            self.t.get(j).map(|t| t.kind),
-            Some(TokenKind::LParen)
-                | Some(TokenKind::LBrace)
-                | Some(TokenKind::Dot)
-                | Some(TokenKind::ColonColon)
-        )
-    }
-
-    /// Token index immediately after one type-use annotation starting at `@`, for generic-call
-    /// lookahead. This recognizes the same qualified annotation name and optional argument group as
-    /// [`Self::parse_type_atom`], without interpreting the arguments themselves.
-    fn lookahead_after_type_annotation(&self, at: usize) -> Option<usize> {
-        debug_assert_eq!(self.t.get(at)?.kind, TokenKind::At);
-        let mut j = at + 1;
-        if self.t.get(j)?.kind != TokenKind::Ident {
-            return None;
-        }
-        j += 1;
-        while self
-            .t
-            .get(j)
-            .is_some_and(|token| token.kind == TokenKind::Dot)
-            && self
-                .t
-                .get(j + 1)
-                .is_some_and(|token| token.kind == TokenKind::Ident)
-        {
-            j += 2;
-        }
-
-        // `@Composable () -> Unit` annotates a function type; its parentheses are the type, not
-        // annotation arguments. Mirror the real parser's disambiguation exactly.
-        if self
-            .t
-            .get(j)
-            .is_some_and(|token| token.kind == TokenKind::LParen)
-            && !self.paren_group_precedes_arrow(j)
-        {
-            let mut paren_depth = 0u32;
-            loop {
-                match self.t.get(j)?.kind {
-                    TokenKind::LParen => paren_depth += 1,
-                    TokenKind::RParen => {
-                        paren_depth = paren_depth.checked_sub(1)?;
-                        j += 1;
-                        if paren_depth == 0 {
-                            break;
-                        }
-                        continue;
-                    }
-                    TokenKind::Eof => return None,
-                    _ => {}
-                }
-                j += 1;
-            }
-        }
-        while self
-            .t
-            .get(j)
-            .is_some_and(|token| token.kind == TokenKind::Newline)
-        {
-            j += 1;
-        }
-        Some(j)
-    }
 }
 
 // ---- precedence ----
@@ -6614,8 +6490,10 @@ typealias Box<@Marker T> = List<T>
     #[test]
     fn precedence_comparison_and_logic() {
         // a < b && c == d  =>  (&& (< a b) (== c d))
-        assert_eq!(tree("fun f(a: Int, b: Int, c: Int, d: Int): Boolean = a < b && c == d"),
-            "(fun f (param a Int) (param b Int) (param c Int) (param d Int) :Boolean (&& (< a b) (== c d)))\n");
+        assert_eq!(
+            tree("fun f(a: Int, b: Int, c: Int, d: Int): Boolean = a < b && c == d"),
+            "(fun f (param a Int) (param b Int) (param c Int) (param d Int) :Boolean (&& (< a b) (== c d)))\n"
+        );
     }
 
     #[test]

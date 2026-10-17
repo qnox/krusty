@@ -379,6 +379,9 @@ pub(super) fn decode_properties(
             annotation_method,
             deprecated_hidden: false,
             hidden_since: None,
+            deprecation: None,
+            getter_deprecation: None,
+            setter_deprecation: None,
             visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
             return_value_status: modern_flags.map_or_else(Default::default, |flags| {
                 crate::types::ReturnValueStatus::from_metadata(

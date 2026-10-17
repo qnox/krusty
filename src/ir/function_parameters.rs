@@ -121,6 +121,10 @@ pub enum IrGeneratedParameterRole {
 pub enum IrParameterProvenance {
     SourceDeclared,
     CompilerGenerated,
+    /// A caller lambda's capture transferred into a declaration closure specialized at an inline
+    /// call site. The semantic identity stays the captured declaration's; a target may distinguish
+    /// the regenerated storage from a capture the declaration closure owned itself.
+    InlinedCapture,
 }
 
 /// Stable identity of one physical function parameter.

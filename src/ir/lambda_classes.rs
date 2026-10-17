@@ -21,6 +21,10 @@ pub struct IrLambdaClass {
     /// from [`Self::public_inline`]: a private inline default still needs a public JVM class for
     /// cross-package module calls, but does not receive Kotlin's public-ABI metadata flag.
     pub public_inline_abi: bool,
+    /// The class originates in an `inline` function, so kotlinc gives both its declaration class
+    /// and any call-site-regenerated specialization the declaration's identity source map
+    /// (`visitSMAP(…, intoInline = true)`).
+    pub inline_origin: bool,
     /// The closure's semantic function type mentions a reified parameter of the inline declaration
     /// that exposes it. The JVM marks both singleton initialization and the default expression that
     /// loads it so an inliner regenerates the type-specialized class.
@@ -45,6 +49,11 @@ pub struct IrLambdaClass {
     pub raw_supertype: bool,
     /// What each field captures, in field order.
     pub captures: Vec<IrLambdaCapture>,
+    /// Field ordinal and exact JVM holder identity of each captured mutable cell. Lambda
+    /// realization records both before it consumes the shared-capture parameter ordinals; later
+    /// classfile preparation distinguishes declaration-owned fields from transferred inline
+    /// captures without reconstructing either fact from names or erased descriptors.
+    pub shared_capture_holders: Vec<(u32, TypeName)>,
     /// The origins of the implicit receivers the lambda captured, which
     /// [`IrLambdaCapture::Receiver`] indexes; the lambda's own record, which `invoke` no longer has.
     pub captured_receivers: Vec<IrCapturedReceiver>,
@@ -59,8 +68,12 @@ pub struct IrLambdaClass {
 /// One captured value a lambda class stores in a field.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IrLambdaCapture {
-    /// A captured local value, by its source name.
-    Value(Box<str>),
+    /// A captured local value, by its source name, and whether an inline specialization
+    /// transferred it from a supplied lambda into the regenerated declaration closure.
+    Value {
+        source_name: Box<str>,
+        inlined: bool,
+    },
     /// A captured implicit receiver, by its position among [`IrLambdaClass::captured_receivers`].
     Receiver(u32),
 }

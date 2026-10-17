@@ -156,7 +156,7 @@ pub(in crate::jvm) fn enclosing_functions(
     })
 }
 
-fn scope_enclosure(
+pub(in crate::jvm) fn scope_enclosure(
     ir: &IrFile,
     override_results: &crate::jvm::override_results::OverrideResults,
     enclosure: crate::ir::IrEnclosure,

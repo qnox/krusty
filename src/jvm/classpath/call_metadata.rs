@@ -64,6 +64,8 @@ pub struct MetadataCallFacts {
     /// `@DeprecatedSinceKotlin(hiddenSince)` on this exact declaration. At or above this API level
     /// the callable is absent from candidate construction.
     pub hidden_since: Option<LanguageVersion>,
+    /// The deprecation the selected declaration states.
+    pub deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
     /// Per DESCRIPTOR parameter position, the VALUE CLASS `@Metadata` declares there when the JVM
     /// descriptor carries its erased underlying (`timeout: kotlin.time.Duration` ↔ `J`).
     ///
@@ -105,6 +107,7 @@ impl MetadataCallFacts {
             deprecated_hidden: false,
             since_kotlin: None,
             hidden_since: None,
+            deprecation: None,
             value_class_params: Vec::new(),
             value_class_ret: None,
         }
@@ -163,6 +166,9 @@ pub(super) fn for_callable(
         deprecated_hidden: callable.deprecated_hidden(),
         since_kotlin: callable.since_kotlin(),
         hidden_since: callable.hidden_since(),
+        deprecation: callable
+            .deprecation()
+            .map(|deprecation| Box::new(deprecation.clone())),
         value_class_params: value_class_param_types(
             callable,
             desc_params,

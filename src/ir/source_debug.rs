@@ -11,6 +11,8 @@ use crate::fir::SourceFileId;
 #[derive(Clone, Debug)]
 pub(crate) struct SourceFileDebug {
     pub(crate) name: Arc<str>,
+    /// One past the last physical newline, matching the highest source line FIR records.
+    pub(crate) line_count: u32,
 }
 
 /// The module's source files, addressable by [`SourceFileId`].
@@ -21,7 +23,16 @@ pub(crate) struct SourceDebug {
 }
 
 impl SourceDebug {
-    pub(crate) fn from_map(map: &crate::fir::SourceMap, current: SourceFileId) -> Self {
+    pub(crate) fn from_map(
+        map: &crate::fir::SourceMap,
+        current: SourceFileId,
+        line_counts: &[u32],
+    ) -> Self {
+        assert_eq!(
+            line_counts.len(),
+            map.len(),
+            "source debug line counts must remain parallel with source identities"
+        );
         let files = (0..map.len())
             .map(|raw| {
                 let id = SourceFileId::from_raw(raw as u32);
@@ -30,6 +41,7 @@ impl SourceDebug {
                     .expect("source ids are allocated densely from zero");
                 SourceFileDebug {
                     name: Arc::clone(&file.path),
+                    line_count: line_counts[raw],
                 }
             })
             .collect();
@@ -45,5 +57,9 @@ impl SourceDebug {
 
     pub(crate) fn is_current(&self, source: SourceFileId) -> bool {
         self.current == Some(source)
+    }
+
+    pub(crate) fn current(&self) -> Option<SourceFileId> {
+        self.current
     }
 }

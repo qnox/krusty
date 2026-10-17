@@ -21,6 +21,10 @@ pub(super) struct InnerClasses {
     /// Specialized lambdas regenerated at a call site. kotlinc's inliner copies the
     /// `new` into the caller without giving that caller an `InnerClasses` row.
     call_sites: Rc<HashSet<String>>,
+    /// Runtime capture holders reached only through the copied inline construction, by caller.
+    copied_inline_holders: Rc<HashMap<String, HashSet<String>>>,
+    /// Runtime capture holders independently introduced by each physical caller's own source.
+    independent_capture_holders: Rc<HashMap<String, HashSet<String>>>,
     /// The table orders the file's writers share.
     orders: Rc<TableOrders>,
 }
@@ -30,6 +34,7 @@ impl InnerClasses {
         ir: &IrFile,
         override_results: &crate::jvm::override_results::OverrideResults,
         facade: &str,
+        lambda_modes: crate::jvm::ir_emit::LambdaModes,
     ) -> Self {
         let declared: HashMap<TypeName, &IrClass> = ir
             .classes
@@ -222,6 +227,13 @@ impl InnerClasses {
             paths: Rc::new(paths),
             declaring: Rc::new(declaring),
             call_sites: Rc::new(call_site_regenerated_lambdas(ir)),
+            copied_inline_holders: Rc::new(copied_inline_capture_holders(ir, facade, lambda_modes)),
+            independent_capture_holders: Rc::new(independent_capture_holders(
+                ir,
+                override_results,
+                facade,
+                lambda_modes,
+            )),
             orders: Rc::default(),
         }
     }
@@ -231,8 +243,146 @@ impl InnerClasses {
         writer.set_declaration_paths(self.paths.clone());
         writer.set_declaring_classes(self.declaring.clone());
         writer.set_call_site_classes(self.call_sites.clone());
+        writer.set_copied_inline_capture_holders(
+            self.copied_inline_holders.clone(),
+            self.independent_capture_holders.clone(),
+        );
         writer.set_table_orders(self.orders.clone());
     }
+}
+
+/// Capture-holder rows whose only introduction into a caller is the body of an inline declaration.
+///
+/// The stable specialization function identifies the regenerated closure, its realized lambda
+/// record retains the exact declaration-owned holder identities, and the recorded caller scope
+/// selects the one class writer that received the copied construction. No emitted name participates
+/// in selection; names are rendered only after those identities have selected the classfile payload.
+fn copied_inline_capture_holders(
+    ir: &IrFile,
+    facade: &str,
+    lambda_modes: crate::jvm::ir_emit::LambdaModes,
+) -> HashMap<String, HashSet<String>> {
+    let mut omitted = HashMap::<String, HashSet<String>>::default();
+    for class in &ir.classes {
+        let Some(lambda) = &class.lambda else {
+            continue;
+        };
+        let Some(specialization) = ir.specialized_functions.get(&lambda.invoke) else {
+            continue;
+        };
+        let caller = crate::jvm::ir_emit::lambda_class_names::specialization_owner(
+            ir,
+            specialization,
+            facade,
+            lambda_modes,
+        )
+        .expect("a realized specialized closure's caller has a physical JVM owner");
+        for &(_, holder) in &lambda.shared_capture_holders {
+            omitted
+                .entry(caller.clone())
+                .or_default()
+                .insert(holder.render());
+        }
+        for &(ordinal, holder) in &lambda.shared_capture_holders {
+            if lambda
+                .captures
+                .get(ordinal as usize)
+                .is_some_and(|capture| {
+                    matches!(
+                        capture,
+                        crate::ir::IrLambdaCapture::Value { inlined: true, .. }
+                    )
+                })
+            {
+                omitted
+                    .entry(class.fq_name())
+                    .or_default()
+                    .insert(holder.render());
+            }
+        }
+    }
+    omitted
+}
+
+/// Holder classes introduced by a physical caller's own source rather than copied inline code.
+/// A mixed-origin class must retain the row: kotlinc's ordinary source lowering visits it even
+/// though the inline instruction copy does not.
+fn independent_capture_holders(
+    ir: &IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
+    facade: &str,
+    lambda_modes: crate::jvm::ir_emit::LambdaModes,
+) -> HashMap<String, HashSet<String>> {
+    let mut introduced = HashMap::<String, HashSet<String>>::default();
+    for class in &ir.classes {
+        let Some(lambda) = &class.lambda else {
+            continue;
+        };
+        if !ir.specialized_functions.contains_key(&lambda.invoke) {
+            continue;
+        }
+        for &(ordinal, holder) in &lambda.shared_capture_holders {
+            if lambda
+                .captures
+                .get(ordinal as usize)
+                .is_some_and(|capture| {
+                    matches!(
+                        capture,
+                        crate::ir::IrLambdaCapture::Value { inlined: false, .. }
+                    )
+                })
+            {
+                introduced
+                    .entry(class.fq_name())
+                    .or_default()
+                    .insert(holder.render());
+            }
+        }
+    }
+    for (raw, function) in ir.functions.iter().enumerate() {
+        let Some(body) = function.body else {
+            continue;
+        };
+        let function = u32::try_from(raw).expect("function identity fits u32");
+        if ir.foreign_inline_templates.contains(&function) {
+            continue;
+        }
+        let owner = match crate::jvm::ir_emit::lambda_class_names::class_realized_function_location(
+            ir,
+            function,
+            facade,
+            lambda_modes,
+        ) {
+            Some((owner, _)) => owner,
+            None => {
+                let Some((owner, _)) = crate::jvm::ir_emit::enclosure::scope_enclosure(
+                    ir,
+                    override_results,
+                    crate::ir::IrEnclosure::Function(function),
+                    facade,
+                ) else {
+                    continue;
+                };
+                owner
+            }
+        };
+        for expression in crate::ir::value_namespace_expressions(ir, body) {
+            let crate::ir::IrExpr::RefNew { elem, .. } = ir.expr(expression) else {
+                continue;
+            };
+            if ir.inline_copy_provenance(expression).is_some() {
+                continue;
+            }
+            let holder = crate::jvm::shared_captures::holder_ty(elem)
+                .obj_internal()
+                .expect("a shared-capture holder has an object identity");
+            introduced
+                .entry(owner.clone())
+                .or_default()
+                .insert(holder.render());
+        }
+    }
+    introduced
 }
 
 /// Whether `scope` is code another source file declares: an inline function retained here only as
@@ -328,29 +478,29 @@ fn published_inline_lambda(ir: &IrFile, class: &IrClass) -> bool {
 fn call_site_regenerated_lambdas(ir: &IrFile) -> HashSet<String> {
     call_site_suspend_lambdas(ir)
         .into_iter()
-        .chain(call_site_reified_function_classes(ir))
+        .chain(call_site_specialized_function_classes(ir))
         .collect()
 }
 
-/// Specialized non-suspend reified function classes. A copy nested in another such class stays
+/// Specialized non-suspend function classes. A copy nested in another such class stays
 /// listed by its enclosing class.
-fn call_site_reified_function_classes(ir: &IrFile) -> HashSet<String> {
+fn call_site_specialized_function_classes(ir: &IrFile) -> HashSet<String> {
     ir.classes
         .iter()
         .filter(|class| {
             class.lambda.is_some()
                 && !is_suspend_lambda_class(class)
-                && class.methods.iter().any(|method| {
-                    ir.specialized_functions.contains_key(method)
-                        && ir.runtime_reified_lambda_implementations.contains(method)
-                })
-                && !enclosed_by_specialized_reified_lambda(ir, class)
+                && class
+                    .methods
+                    .iter()
+                    .any(|method| ir.specialized_functions.contains_key(method))
+                && !enclosed_by_specialized_lambda(ir, class)
         })
         .map(|class| class.fq_name())
         .collect()
 }
 
-fn enclosed_by_specialized_reified_lambda(ir: &IrFile, class: &IrClass) -> bool {
+fn enclosed_by_specialized_lambda(ir: &IrFile, class: &IrClass) -> bool {
     let function = match class.enclosure {
         Some(
             crate::ir::IrEnclosure::Function(function) | crate::ir::IrEnclosure::Lambda(function),
@@ -358,9 +508,6 @@ fn enclosed_by_specialized_reified_lambda(ir: &IrFile, class: &IrClass) -> bool 
         _ => return false,
     };
     ir.specialized_functions.contains_key(&function)
-        && ir
-            .runtime_reified_lambda_implementations
-            .contains(&function)
         && ir.class_method_owners.get(&function).is_some_and(|owners| {
             owners.iter().any(|&owner| {
                 ir.classes
@@ -489,7 +636,173 @@ pub(super) fn class_access(ir: &IrFile, class: &IrClass) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IrClass, IrEnclosure, IrLocalClassNameProvenance, IrModuleSource};
+    use crate::ir::{
+        IrClass, IrEnclosure, IrFunction, IrLambdaClass, IrLambdaForm, IrLambdaOrigin,
+        IrLocalClassNameProvenance, IrModuleSource,
+    };
+    use crate::jvm::ir_emit::{LambdaMode, LambdaModes};
+    use crate::types::Ty;
+
+    fn function(name: &str) -> IrFunction {
+        IrFunction {
+            name: name.to_string(),
+            params: Vec::new(),
+            ret: Ty::Unit,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        }
+    }
+
+    fn realized_specialized_lambda(ir: &mut IrFile, caller: Option<IrEnclosure>) -> u32 {
+        let implementation = ir.add_fun(function("specialized"));
+        ir.specialized_functions.insert(
+            implementation,
+            crate::ir::IrSpecializedFunction {
+                source: implementation,
+                caller_declaration: crate::fir::DeclarationId::from_raw(0),
+                caller,
+                caller_is_default: caller.is_none(),
+                caller_source_name: String::new(),
+                inline_callee: crate::fir::CallableId::from_raw(0),
+                inline_callee_source_name: "update".to_string(),
+                parent: None,
+                consumed_inline_capture: false,
+            },
+        );
+        let mut closure = IrClass::synthetic(type_name("sample/Specialized"));
+        closure.methods.push(implementation);
+        closure.lambda = Some(IrLambdaClass {
+            public_inline: false,
+            public_inline_abi: false,
+            inline_origin: false,
+            requires_reification: false,
+            extension_receiver_label: None,
+            inline_default_owner: None,
+            invoke: implementation,
+            function_type: Ty::fun(Vec::new(), Ty::Unit),
+            raw_supertype: false,
+            captures: vec![crate::ir::IrLambdaCapture::Value {
+                source_name: "cell".into(),
+                inlined: true,
+            }],
+            shared_capture_holders: vec![(0, type_name("kotlin/jvm/internal/Ref$ObjectRef"))],
+            captured_receivers: Vec::new(),
+            lifting_root: None,
+            bridge: crate::ir::IrInvokeBridge::logical(Vec::new(), Ty::Unit),
+        });
+        ir.add_class(closure);
+        implementation
+    }
+
+    #[test]
+    fn copied_holder_uses_facade_for_a_root_default_specialization() {
+        let mut ir = IrFile::default();
+        realized_specialized_lambda(&mut ir, None);
+
+        assert_eq!(
+            copied_inline_capture_holders(&ir, "sample/FacadeKt", LambdaModes::default(),),
+            HashMap::from_iter([
+                (
+                    "sample/FacadeKt".to_string(),
+                    HashSet::from_iter(["kotlin/jvm/internal/Ref$ObjectRef".to_string()]),
+                ),
+                (
+                    "sample/Specialized".to_string(),
+                    HashSet::from_iter(["kotlin/jvm/internal/Ref$ObjectRef".to_string()]),
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn copied_holder_uses_the_class_realized_caller_lambda() {
+        let mut ir = IrFile::default();
+        let caller = ir.add_fun(function("caller"));
+        ir.lambda_origins.insert(
+            caller,
+            IrLambdaOrigin {
+                identity: 7,
+                lexical_owner: None,
+                enclosing_name: "box".to_string(),
+                binding_name: None,
+                ordinal: 0,
+                implementation_name: "box".to_string(),
+                implementation_ordinal: 0,
+                receiver_parameter: None,
+                label: None,
+                form: IrLambdaForm::Literal,
+                explicit_suspend: false,
+                class_provenance: None,
+            },
+        );
+        ir.add_expr(crate::ir::IrExpr::Lambda {
+            impl_fn: caller,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: None,
+        });
+        let own_holder = ir.add_expr(crate::ir::IrExpr::RefNew {
+            elem: Ty::String,
+            init: None,
+        });
+        ir.functions[caller as usize].body = Some(own_holder);
+        realized_specialized_lambda(&mut ir, Some(IrEnclosure::Lambda(caller)));
+        let modes = LambdaModes {
+            lambdas: LambdaMode::Class,
+            sam_conversions: LambdaMode::Indy,
+        };
+        let copied = HashMap::from_iter([
+            (
+                "sample/FacadeKt$box$1".to_string(),
+                HashSet::from_iter(["kotlin/jvm/internal/Ref$ObjectRef".to_string()]),
+            ),
+            (
+                "sample/Specialized".to_string(),
+                HashSet::from_iter(["kotlin/jvm/internal/Ref$ObjectRef".to_string()]),
+            ),
+        ]);
+        let independent = HashMap::from_iter([(
+            "sample/FacadeKt$box$1".to_string(),
+            HashSet::from_iter(["kotlin/jvm/internal/Ref$ObjectRef".to_string()]),
+        )]);
+
+        assert_eq!(
+            copied_inline_capture_holders(&ir, "sample/FacadeKt", modes),
+            copied
+        );
+        assert_eq!(
+            independent_capture_holders(
+                &ir,
+                &crate::jvm::override_results::OverrideResults::default(),
+                "sample/FacadeKt",
+                modes,
+            ),
+            independent
+        );
+    }
+
+    #[test]
+    fn foreign_inline_template_holder_is_not_owned_by_the_consumer_file() {
+        let mut ir = IrFile::default();
+        let template = ir.add_fun(function("foreignTemplate"));
+        let holder = ir.add_expr(crate::ir::IrExpr::RefNew {
+            elem: Ty::String,
+            init: None,
+        });
+        ir.functions[template as usize].body = Some(holder);
+        ir.foreign_inline_templates.insert(template);
+
+        assert!(independent_capture_holders(
+            &ir,
+            &crate::jvm::override_results::OverrideResults::default(),
+            "sample/ConsumerKt",
+            LambdaModes::default(),
+        )
+        .is_empty());
+    }
 
     #[test]
     fn prepares_identity_based_candidates_once_in_kotlinc_order() {
@@ -521,6 +834,7 @@ mod tests {
             &ir,
             &crate::jvm::override_results::OverrideResults::default(),
             "sample/FacadeKt",
+            crate::jvm::ir_emit::LambdaModes::default(),
         );
         assert_eq!(
             prepared.specs,
@@ -585,6 +899,7 @@ mod tests {
                 &ir,
                 &crate::jvm::override_results::OverrideResults::default(),
                 "sample/FacadeKt",
+                crate::jvm::ir_emit::LambdaModes::default(),
             )
             .specs,
             [
@@ -617,6 +932,7 @@ mod tests {
             &ir,
             &crate::jvm::override_results::OverrideResults::default(),
             "sample/FacadeKt",
+            crate::jvm::ir_emit::LambdaModes::default(),
         );
     }
 }

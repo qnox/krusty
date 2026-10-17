@@ -3122,6 +3122,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   with its parameter, as callable-reference probes already were; a probe that is never re-checked
   keeps its diagnostics. Tests: `probe_argument_call_e2e::a_nested_generic_argument_takes_the_selected_parameter`,
   `probe_argument_call_e2e::the_selected_parameter_still_reports_a_real_mismatch`.
+- **A result-only producer witnesses an `@OnlyInputTypes` variable with its completed type.**
+  `assertEquals(emptyList(), calls)` with `calls: MutableList<String>` solves `T = List<String>`.
+  Kotlin admits that solution because `emptyList()` is completed to `List<String>`; its type once
+  the call is solved is an input type. The witness search only saw the producer's provisional
+  `List<E>`, so no occurrence admitted both arguments and every `assertEquals` overload was
+  rejected. A result-only producer argument now also offers the ordinary solution as its witness
+  when it can be completed to it. Test:
+  `only_input_type_producer_e2e::a_result_only_producer_witnesses_the_only_input_type`.
 - **Only a candidate that can take a postponed lambda shapes it in the signature pass.** An
   inferred declaration type (`fun run() = lib.launch { ... }`, `val engine = Engine { ... }`) is
   computed before bodies, so a postponed lambda takes its parameter shape from the call's
@@ -4371,6 +4379,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `for` is always a statement) before a loop's update, and before the bottom condition of a
   `do…while` whose condition has no source line of its own; a written `do…while` condition marks its
   own. `tests/loop_control_lines_e2e.rs` (full-byte against kotlinc).
+- **An implicit null check after an inlined call marks its line.** A platform value an inlined
+  call produces (`Collections.synchronizedList(…).apply { … }` returned as `List<String>`) is
+  checked with `dup; ldc; checkNotNullExpressionValue`. The inlined call restored the caller's line
+  and left it forgotten, and kotlinc marks the line again at the start of that check, so the check
+  has its own entry for the line already in effect (`line 4: 27`, then `line 4: 28` at the `dup`).
+  The JVM emitter re-marks the line in effect before a named check while the line is forgotten.
+  `tests/platform_null_check_line_e2e.rs` (full-byte against kotlinc).
 - **The line after a call kotlinc inlines.** After an inlined call, kotlinc's
   `markLineNumberAfterInlineIfNeeded` re-emits the line in effect when the call sits inside a
   condition and otherwise forgets it, so the next expression's mark is written even on the same
@@ -6237,6 +6252,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `private_set_e2e::a_default_private_setter_has_no_method_like_kotlinc`,
   `private_set_e2e::an_override_and_a_hoisted_companion_private_default_setter_write_storage`,
   `private_set_e2e::declared_private_setters_remain_methods`.
+  Each default accessor is mangled by its own visibility: an `internal set` on a public property is
+  `setW$<module>` beside an unmangled `getW`. A `companion { … }` block property follows the same rules on its
+  class's static accessors: a `private set` has no `setP` and no metadata setter signature, an
+  `internal set` is `setW$<module>`, and an internal block property's default accessors are
+  `getV$<module>`/`setV$<module>` (unlike a file facade's). A sibling file's reads, writes and calls
+  of an internal block member and same-/sibling-file property-reference carriers name the mangled
+  spelling too; `@PublishedApi` keeps the unmangled public-ABI spelling. Tests:
+  `private_set_e2e::companion_block_private_and_internal_setters_match_kotlinc`,
+  `private_set_e2e::companion_block_internal_accessors_link_from_another_file`.
   The node carries the property's DECLARED type: substituting it to the type the site sees stays in the
   IR as before, because a pass that rewrites the read away still needs that bridging. And nothing ever
   narrows to a value class — it has no runtime type of its own, its values ARE the erased underlying — in
@@ -11664,6 +11688,35 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   never an `invokedynamic` that cannot link. Tests: `tests/value_class_lambda_class_e2e.rs` (each class byte for byte
   against kotlinc; the whole source at run time; the exact error for the unrealized shape) and
   `tests/inline_value_class_lambda_e2e.rs`.
+- **A lambda written in an `inline` function is the same class.** kotlinc never compiles a lambda in
+  an inline function's body to an `invokedynamic`: `inline fun plain() = take { "plain$it" }` writes
+  `final class InlineScopeKt$plain$1 implements Function1` over `Object`, whatever the lambda's
+  signature, and no `plain$lambda$0`. The rule follows the lexical scope outward, through an
+  enclosing lambda (`nested$1$1`, whose `EnclosingMethod` is `nested$1.invoke`) and through an
+  anonymous object's or local class's method (`inObject$1$area$1`), to an inline function, member or
+  `private inline` alike. A lambda written in an inline call's lambda argument is the caller's and
+  keeps indy. The class and its constructor are public, since a caller in another package
+  constructs it, and its metadata carries the public-ABI flag unless the inline function is
+  private; one written directly in the inline function's body (not a nested one) also carries the
+  identity `SourceDebugExtension` source map of a class generated for inlining. A caller that inlines
+  the function, in the same file or another, constructs that declaring class
+  (`new InlineScopeKt$capturing$1(prefix)`, `InlineScopeKt$plain$1.INSTANCE`) rather than a class of
+  its own. The exception is a declaration lambda that captures a substituted inline parameter:
+  `crossinline transform` used from `runBlock { transform(value) }` makes a call-site
+  `<caller>$$inlined$<callee>$1` copy. Its body is spliced into that copy's implementation and its
+  function-value capture parameter is removed, so the caller has neither a function-value
+  constructor argument nor a `$lambda$N` helper. When the substituted lambda captures caller
+  values, those exact capture identities and constructor operands transfer to the call-site copy
+  before its body is spliced; the copied body is remapped to the new capture slots instead of
+  reinterpreting caller slots in the declaration namespace. The whole transfer is planned before
+  any implementation is consumed, so a later invalid edge cannot leave an earlier orphan
+  specialization. Not yet covered: a lambda
+  in an inline property accessor (`inline val p get() = take { … }`), and the anonymous object's own
+  public-ABI flag and source map. Tests: `tests/inline_function_lambda_class_e2e.rs` (each class byte
+  for byte against kotlinc, the facades of both files included, and the whole source at run time),
+  `tests/inline_lambda_captured_literal_e2e.rs`,
+  `tests/inline_lambda_placed_capture_suspension_e2e.rs`, and
+  `tests/inline_erased_capture_e2e.rs`.
 - **A lambda with a `Nothing`/`Nothing?` type the factory cannot adapt is the same class, with a raw
   supertype.** kotlinc's `computeParameterTypeAdaptationConstraint` also returns CONFLICT when the
   adaptee type `isNothing() || isNullableNothing()`: a parameter typed `Nothing`/`Nothing?` by the
@@ -13659,6 +13712,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
       `PropertyInfo::companion_associated` and `FunctionInfo::associated_classifier`) never accepted
       the arguments and is always the error. An object or companion member reached through the
       singleton value is not a static access. (`tests/static_access_type_arguments_e2e.rs`.)
+    - Object access (`FirStandaloneQualifierChecker`): an object qualifier written with type
+      arguments and used as a value (`val u = Unit<Any>`, `val p by MyUnitT<Any>`) reports "object
+      access cannot have explicit type arguments." on its list. The parser keeps a `<…>` list that
+      ends a postfix expression (before a newline, `)`, `]`, `}`, `,`, `==`, `!=`, or the end of
+      file) as type arguments on the qualifier and marks it in
+      `File::standalone_type_argument_qualifiers`. kotlinc accepted the `Unit` object itself and a
+      typealias whose expansion is an object without a companion, so those are deprecation
+      warnings; a declared or nested object, and a classifier with a companion object, written
+      directly or through a typealias, were always the error. kotlinc 2.4.20 types an
+      alias-to-object qualifier written with arguments as `Unit` and then fails in its JVM backend,
+      so the off-mode alias warnings are pinned against krusty's front end alone.
+      (`tests/object_qualifier_type_arguments_e2e.rs`.)
 - **Pre-release output.** As kotlinc's `LanguageVersionSettings.isPreRelease`, a compilation is
   pre-release when its language version is not stable in the release or any explicitly set feature (an
   `@Enables` argument, `-progressive`, `-XXLanguage`, or a `// LANGUAGE:` directive) is enabled and
@@ -13895,11 +13960,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `companion object Companion : I`, `class G<in T, out R : Any> : Any`. The checked annotations of
   top-level functions and properties, body properties, accessors and constructors are folded and
   published on their stable declarations in Pass 1, like those of classifiers and methods. Not yet
-  modeled: dependency (Kotlin metadata and Java) deprecation, `@DeprecatedSinceKotlin`, imports,
-  `@get:`/`@set:` use-site targets, constructor-property parameters, type aliases, enum entries,
-  operator conventions, `this(...)` delegation, annotation uses, the deprecation of an
-  `expect` header itself, and the `actual` of a primary constructor in its rendering.
+  modeled: imports, `@get:`/`@set:` use-site targets, constructor-property parameters, type aliases,
+  enum entries, operator conventions, `this(...)` delegation, annotation uses, the deprecation of
+  an `expect` header itself, and the `actual` of a primary constructor in its rendering.
   Test: `tests/deprecation_usage_e2e.rs`.
+- **Deprecated dependency declarations.** The same report applies to a classpath declaration.
+  A Kotlin one states `@kotlin.Deprecated` on the realizing method, field or class, or on the
+  property's `$annotations` method and accessors; the class reader keeps the application typed and
+  the metadata reader stamps it on the declaration by exact name and descriptor. A Java method,
+  field, constructor or class states it with the `Deprecated` attribute (or
+  `@java.lang.Deprecated`) and always warns `Deprecated in Java.`. An explicit
+  `@java.lang.Deprecated` on a metadata-bearing Kotlin declaration remains semantic but reports no
+  Java-origin sentence; a typed `@kotlin.Deprecated` on the same declaration takes precedence.
+  `@kotlin.DeprecatedSinceKotlin` replaces the written
+  level: `HIDDEN` once the API version reaches `hiddenSince`, otherwise `ERROR` from `errorSince`,
+  `WARNING` from `warningSince`, and no report before it (`"a".toUpperCase()` is an error at API
+  2.1 and later, a warning at 2.0). The provider publishes the level in effect together with the
+  symbol rendered from the declaration (`static fun old(): Unit`, `field field: Int`,
+  `constructor(): JOld.Nested`, `class JDep : Any`), so the checker reads one fact for every
+  origin; a member property renders without its dispatch receiver. A static call through a
+  deprecated class reports at the qualifier too. Not yet modeled: members decoded from
+  `.kotlin_builtins` (`Char.toInt()`), whose annotations keep no arguments; Java static field reads;
+  top-level `const` properties; Java platform-type and substituted renderings; companion-block
+  properties; and `hiddenSince` removing the candidate.
+  Test: `tests/deprecation_classpath_e2e.rs`.
 - **An abstract member's metadata and nullability match a concrete one's, without the field.** An
   abstract property has no backing field, so kotlinc writes no field entry in its
   `JvmPropertySignature` and interns none of the field's strings: `interface Holder { val count:

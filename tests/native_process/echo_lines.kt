@@ -1,5 +1,6 @@
 // Prints each line standard input yields as its UTF-16 code units in decimal, a run of one unit
 // written `unit*count`, then what is read at the end of input.
+@Suppress("DEPRECATION")
 fun main() {
     while (true) {
         val line = readLine() ?: break

@@ -1165,6 +1165,8 @@ mod inline_erased_capture_e2e;
 mod inline_erased_parameter_e2e;
 #[path = "inline_finally_marker_e2e.rs"]
 mod inline_finally_marker_e2e;
+#[path = "inline_function_lambda_class_e2e.rs"]
+mod inline_function_lambda_class_e2e;
 #[path = "inline_lambda_as_value_e2e.rs"]
 mod inline_lambda_as_value_e2e;
 #[path = "inline_lambda_caller_loop_jump_e2e.rs"]
@@ -1639,8 +1641,12 @@ mod nothing_type_argument_signature_e2e;
 mod nullable_double_type_param_equality_e2e;
 #[path = "nullable_uint_property_e2e.rs"]
 mod nullable_uint_property_e2e;
+#[path = "object_qualifier_type_arguments_e2e.rs"]
+mod object_qualifier_type_arguments_e2e;
 #[path = "only_input_integer_literal_e2e.rs"]
 mod only_input_integer_literal_e2e;
+#[path = "only_input_type_producer_e2e.rs"]
+mod only_input_type_producer_e2e;
 #[path = "open_end_range_membership_e2e.rs"]
 mod open_end_range_membership_e2e;
 #[path = "optional_expectation_annotation_e2e.rs"]
@@ -2156,6 +2162,8 @@ mod omitted_default_generic_overload_e2e;
 mod one_armed_when_fallthrough_e2e;
 #[path = "platform_implicit_receiver_member_e2e.rs"]
 mod platform_implicit_receiver_member_e2e;
+#[path = "platform_null_check_line_e2e.rs"]
+mod platform_null_check_line_e2e;
 #[path = "private_constructor_accessors_e2e.rs"]
 mod private_constructor_accessors_e2e;
 #[path = "private_inline_property_ref_e2e.rs"]
@@ -2221,6 +2229,8 @@ mod child_serializer_lazy_factory_e2e;
 mod class_static_signature_e2e;
 #[path = "declaration_debug_lines_e2e.rs"]
 mod declaration_debug_lines_e2e;
+#[path = "deprecation_classpath_e2e.rs"]
+mod deprecation_classpath_e2e;
 #[path = "deprecation_usage_e2e.rs"]
 mod deprecation_usage_e2e;
 #[path = "extension_receiver_specificity_e2e.rs"]

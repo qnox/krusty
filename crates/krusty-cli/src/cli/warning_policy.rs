@@ -24,6 +24,10 @@ impl WarningName {
         if let Some(name) = krusty::diag::CompilerWarningName::parse(name) {
             let available = match name {
                 krusty::diag::CompilerWarningName::Deprecation => true,
+                krusty::diag::CompilerWarningName::ExplicitTypeArgumentsInPropertyAccess => {
+                    FeatureTable::for_version(release)
+                        .is_some_and(|table| table.get("ForbidUselessTypeArgumentsIn25").is_some())
+                }
                 krusty::diag::CompilerWarningName::InapplicableOperatorModifier => {
                     FeatureTable::for_version(release).is_some_and(|table| {
                         table
