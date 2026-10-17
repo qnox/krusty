@@ -1618,13 +1618,14 @@ impl super::Emitter<'_> {
                 }) {
                     lambda_mode = LambdaMode::Class;
                 }
+                if self.ir.jvm_unrealized_lambda_classes.contains(impl_fn) {
+                    // The class is discarded; a placeholder keeps its frames computable. This is
+                    // an error in both modes: class mode must never fall back to the legacy shim.
+                    self.run
+                        .set_emit_error(lambda_class::unrealized(self.ir, *impl_fn));
+                    return code.aconst_null();
+                }
                 if lambda_mode == LambdaMode::Indy {
-                    if self.ir.jvm_unrealized_lambda_classes.contains(impl_fn) {
-                        // The class is discarded; a placeholder keeps its frames computable.
-                        self.run
-                            .set_emit_error(lambda_class::unrealized(self.ir, *impl_fn));
-                        return code.aconst_null();
-                    }
                     self.run.used_indy_lambdas.borrow_mut().insert(*impl_fn);
                 }
                 let f = &self.ir.functions[*impl_fn as usize];

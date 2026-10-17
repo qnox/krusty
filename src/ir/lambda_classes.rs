@@ -64,6 +64,10 @@ pub struct IrLambdaClass {
     /// that declaration differently (a value-class member as a static) names a captured receiver
     /// after that realization.
     pub(crate) lifting_root: Option<IrLiftingRoot>,
+    /// The exact lambda step whose declaration scope this class realizes. Lifted local
+    /// declarations use it to move with `invoke` and take their names from that scope; unlike
+    /// [`Self::lifting_root`], this is the innermost lambda rather than the outermost lifting step.
+    pub(crate) lifting_scope: Option<IrLiftingRoot>,
     /// What the erased `FunctionN.invoke` bridge adapts, once `invoke` has its physical signature.
     pub bridge: IrInvokeBridge,
     /// The class is a `-Xlambdas=class` Kotlin lambda: it extends `kotlin.jvm.internal.Lambda`

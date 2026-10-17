@@ -36,6 +36,10 @@ fun useFloat(h: FloatHandler): Float = h.handle(1.5f)
 fun useLambda(f: (Int) -> Int): Int = f(3)
 fun useString(f: (String) -> Int): Int = f("hey")
 fun useTwo(a: (Int) -> Int, b: (Int) -> Int): Int = a(1) + b(2)
+fun useLocal(seed: Int): Int = useLambda { value ->
+    fun add(delta: Int): Int = value + seed + delta
+    add(4)
+}
 
 interface Defaulted { fun go(): Int = useLambda { it * 4 } }
 class Impl : Defaulted
@@ -83,10 +87,11 @@ fun box(): String {
     val viaClassInit = named.h() + named.q + named.member()
     val collide = Collide()
     val viaCollidingNames = collide.x() * 10 + collide.q
+    val viaLocal = useLocal(5)
     val ok = plain == 6 && closing == 13 && sam == 6 && text == 3 &&
         real == 3.0f && pair == 33 && viaDefault == 12 && viaBothConstructors == 14 &&
-        viaClassInit == 57 && viaCollidingNames == 12
-    return if (ok) "OK" else "fail: $plain $closing $sam $text $real $pair $viaDefault $viaBothConstructors $viaClassInit $viaCollidingNames"
+        viaClassInit == 57 && viaCollidingNames == 12 && viaLocal == 12
+    return if (ok) "OK" else "fail: $plain $closing $sam $text $real $pair $viaDefault $viaBothConstructors $viaClassInit $viaCollidingNames $viaLocal"
 }
 "#;
 
@@ -768,4 +773,20 @@ fun labeled() = go lbl@{ return@lbl 7 }
 #[test]
 fn class_lambda_shapes_are_identical_to_kotlinc() {
     assert_class_mode_identical_to_kotlinc(CLASS_LAMBDA_SHAPES);
+}
+
+/// A local function declared and called by the lambda belongs to the lambda class beside
+/// `invoke`; retaining it on the facade is both a byte mismatch and a private-owner access bug.
+#[test]
+fn class_lambda_owns_local_function_bytes_like_kotlinc() {
+    assert_class_mode_identical_to_kotlinc(
+        r#"
+fun use(f: (Int) -> Int): Int = f(3)
+fun local(seed: Int): Int = use { value ->
+    fun add(delta: Int): Int = value + seed + delta
+    add(4)
+}
+fun box(): String = if (local(5) == 12) "OK" else "fail"
+"#,
+    );
 }

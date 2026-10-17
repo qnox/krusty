@@ -49,7 +49,9 @@ pub(super) fn specialization_template(ir: &IrFile, function: FunId) -> Option<Fu
         .copied()
 }
 
-use crate::ir::{ClassId, ExprId, FunId, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole};
+use crate::ir::{
+    Callee, ClassId, ExprId, FunId, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole,
+};
 use crate::types::{Ty, TypeName};
 
 /// Exact implementation identities retained across closure-class realization. Reification may
@@ -455,9 +457,10 @@ pub(super) fn emitted_roots(ir: &IrFile, every_emitted_root: bool) -> Vec<ExprId
     roots
 }
 
-/// Whether the body declares a lambda or local function of its own. Its lifted function would have
-/// to move into the lambda's class with it, which this step does not do.
-fn nests_lifted_functions(ir: &IrFile, body: ExprId, allow_nested_lambdas: bool) -> bool {
+/// Whether the body declares a lambda whose independently emitted implementation cannot move with
+/// this class. Lifted local declarations are adopted by [`realize_class`] through their stable
+/// lifting identities.
+fn nests_unrealized_lambda(ir: &IrFile, body: ExprId, allow_nested_lambdas: bool) -> bool {
     crate::ir::value_namespace_expressions(ir, body)
         .iter()
         .any(|&expression| match &ir.exprs[expression as usize] {
@@ -467,13 +470,6 @@ fn nests_lifted_functions(ir: &IrFile, body: ExprId, allow_nested_lambdas: bool)
             IrExpr::Lambda { impl_fn, .. } => {
                 !allow_nested_lambdas && !ir.specialized_functions.contains_key(impl_fn)
             }
-            IrExpr::Call {
-                callee:
-                    crate::ir::Callee::Local(function)
-                    | crate::ir::Callee::LocalDefault(function)
-                    | crate::ir::Callee::LocalWithDefaults { function, .. },
-                ..
-            } => ir.lifted_functions.contains_key(function),
             _ => false,
         })
 }
@@ -687,7 +683,7 @@ pub(super) fn realize(
             }
             let body = ir.functions[fid as usize].body.ok_or(())?;
             let captures = captures(ir, fid, body, &sites[0]).ok_or(())?;
-            if nests_lifted_functions(ir, body, runtime_reified) {
+            if nests_unrealized_lambda(ir, body, runtime_reified) {
                 return Err(());
             }
             realize_class(
@@ -766,9 +762,7 @@ pub(super) fn realize(
                     "value_classes",
                     "lambda fid={fid} needs a class but is left unrealized: {shape}"
                 );
-                if !class_lambdas {
-                    ir.jvm_unrealized_lambda_classes.insert(fid);
-                }
+                ir.jvm_unrealized_lambda_classes.insert(fid);
             }
         }
     }
@@ -846,8 +840,8 @@ fn class_shape(
     let site = site_in_roots(ir, fid, every_emitted_root, inline_declaration, class_name)
         .ok_or("no single named value outside an inline call")?;
     let body = ir.functions[fid as usize].body.ok_or("no body")?;
-    if nests_lifted_functions(ir, body, allow_nested_lambdas) {
-        return Err("its body declares a lambda or local function");
+    if nests_unrealized_lambda(ir, body, allow_nested_lambdas) {
+        return Err("its body declares an unrealized lambda");
     }
     let captures = captures(ir, fid, body, &site).ok_or("a capture has no field identity")?;
     Ok((site, body, captures))
@@ -1046,6 +1040,7 @@ fn realize_class(
     let kotlin_lambda = role.kotlin_lambda.is_some();
     super::shared_captures::realize_lambda_capture_parameters(ir, fid, captures.len());
     let class = declare_class(ir, fid, site, signature, captures, role);
+    adopt_lifted_declarations(ir, fid, class);
     // `invoke` takes `this` and the lambda's own parameters; each captured value is read from its
     // field.
     let expressions = crate::ir::value_namespace_expressions(ir, body);
@@ -1144,6 +1139,74 @@ fn realize_class(
         ir.fn_decl_lines.insert(fid, line);
     }
     replace_value(ir, site, fresh_instance);
+}
+
+/// Move every lifted declaration whose nearest enclosing lambda is `fid` into `fid`'s class.
+///
+/// The relation is selected from the stable lifting sequence and path, never from a generated
+/// method or class spelling. Calls already carry the selected `FunId`; only a class-static call's
+/// physical owner changes after its target moves.
+fn adopt_lifted_declarations(ir: &mut IrFile, fid: FunId, class: ClassId) {
+    let lifted_in_scope = |candidate: &crate::fir::FirLiftingSite, scope| {
+        candidate.lifted
+            && candidate.path[..candidate.path.len().saturating_sub(1)]
+                .iter()
+                .rev()
+                .find(|step| step.kind == crate::lifting_provenance::LiftingCallableKind::Lambda)
+                .is_some_and(|step| step.position == scope)
+    };
+    let Some((sequence, site)) = ir.lifted_functions.get(&fid) else {
+        return;
+    };
+    let Some(scope) = site.path.last().map(|step| step.position) else {
+        return;
+    };
+    let mut declared = ir
+        .lifted_functions
+        .iter()
+        .filter(|(&function, (other, candidate))| {
+            function != fid && other == sequence && lifted_in_scope(candidate, scope)
+        })
+        .map(|(&function, _)| function)
+        .collect::<Vec<_>>();
+    declared.sort_unstable();
+    let owner = ir.classes[class as usize].fq_name;
+    for &function in &declared {
+        for other in &mut ir.classes {
+            other.methods.retain(|&method| method != function);
+        }
+        ir.class_method_owners.remove(&function);
+        ir.classes[class as usize].methods.push(function);
+        ir.note_class_method(class, function);
+        ir.class_static_local_functions.insert(function, owner);
+    }
+    if declared.is_empty() {
+        return;
+    }
+    for expression in &mut ir.exprs {
+        if let IrExpr::Call {
+            callee:
+                Callee::ClassStatic {
+                    owner: called,
+                    function,
+                }
+                | Callee::ClassStaticWithDefaults {
+                    owner: called,
+                    function,
+                    ..
+                }
+                | Callee::ClassStaticDefault {
+                    owner: called,
+                    function,
+                },
+            ..
+        } = expression
+        {
+            if declared.binary_search(function).is_ok() {
+                *called = owner;
+            }
+        }
+    }
 }
 
 fn replace_value(ir: &mut IrFile, site: &Site, fresh_instance: bool) {
@@ -1313,6 +1376,7 @@ fn declare_class(
             .captured_receivers
             .clone(),
         lifting_root: super::lifted_names::lifting_root(ir, fid),
+        lifting_scope: super::lifted_names::lifting_scope(ir, fid),
         bridge: crate::ir::IrInvokeBridge::logical(signature.params.clone(), signature.ret),
         kotlin_lambda,
     });
@@ -1483,6 +1547,7 @@ mod method_domain_tests {
             shared_capture_holders: vec![],
             captured_receivers: vec![],
             lifting_root: None,
+            lifting_scope: None,
             bridge: crate::ir::IrInvokeBridge::logical(vec![], Ty::Unit),
             kotlin_lambda: None,
         });

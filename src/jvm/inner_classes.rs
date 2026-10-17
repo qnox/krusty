@@ -691,6 +691,7 @@ mod tests {
             shared_capture_holders: vec![(0, type_name("kotlin/jvm/internal/Ref$ObjectRef"))],
             captured_receivers: Vec::new(),
             lifting_root: None,
+            lifting_scope: None,
             bridge: crate::ir::IrInvokeBridge::logical(Vec::new(), Ty::Unit),
             kotlin_lambda: None,
         });
