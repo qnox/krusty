@@ -582,9 +582,7 @@ impl Checker<'_> {
                 continue;
             }
             let Some(superclass) = self
-                .resolved_body_local_supertypes
-                .get(&nested_owner)
-                .and_then(|supertypes| supertypes.first())
+                .applied_declared_supertype(nested_owner)
                 .and_then(|supertype| supertype.kotlin_class_internal())
             else {
                 continue;
