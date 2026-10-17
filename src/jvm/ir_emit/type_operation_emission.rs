@@ -48,40 +48,50 @@ impl Emitter<'_> {
                 value.map(|expression| (expression, self.ir.expr(expression))),
             );
         }
+        if op == IrTypeOp::ImplicitCoercion && self.inline_coercions.is_deferred(expression) {
+            let physical = if self.emit_erased_suspension_result(arg, jvm_ty, code) {
+                Ty::obj("java/lang/Object")
+            } else {
+                self.emit_implicit_coercion_operand(arg, type_operand, code)
+                    .0
+            };
+            self.inline_coercions
+                .record_deferred_result(expression, physical);
+            return;
+        }
+        let inline_stack_block = (op == IrTypeOp::ImplicitCoercion)
+            .then(|| self.inline_stack_coercion_block(arg, code.stack_height()))
+            .flatten();
+        let enclosing = self.inline_coercions.replace_pending(inline_stack_block);
+        self.emit_type_operation_now(expression, op, arg, type_operand, jvm_ty, &internal, code);
+        if inline_stack_block.is_some()
+            && !self.finish_pending_inline_stack_coercion(code)
+            && !code.is_dead()
+        {
+            self.run.set_emit_error(
+                "an inline-result coercion did not reach its spliced lambda block".to_string(),
+            );
+        }
+        self.inline_coercions.restore_pending(enclosing);
+    }
+
+    fn emit_type_operation_now(
+        &mut self,
+        expression: ExprId,
+        op: IrTypeOp,
+        arg: ExprId,
+        type_operand: Ty,
+        jvm_ty: Ty,
+        internal: &str,
+        code: &mut CodeBuilder,
+    ) {
         if op == IrTypeOp::ImplicitCoercion && self.emit_erased_suspension_result(arg, jvm_ty, code)
         {
             return;
         }
-        let reference_target = !ir_ty_to_jvm(&stored_value_ty(type_operand)).is_jvm_scalar();
         let (physical_arg, semantic_arg) = match op {
-            // A reference target materializes an erased result at its own type, so the result's
-            // narrowing to the substituted type is not written first.
-            IrTypeOp::ImplicitCoercion
-                if reference_target && self.erased_reference_result(arg).is_some() =>
-            {
-                let source = self.emit_consumed_operand(arg, code);
-                (source, source)
-            }
-            // A reference target reads an erased result narrowed to a scalar as the callee returned
-            // it: kotlinc coerces the `Object` slot straight to the consumer and never unboxes it.
-            IrTypeOp::ImplicitCoercion if reference_target => {
-                match self.erased_scalar_result(arg) {
-                    Some((call, slot)) => {
-                        self.emit_value(call, code);
-                        (slot, slot)
-                    }
-                    None => match self.emit_boxed_call_reference(arg, code) {
-                        Some(wrapper) => (wrapper, wrapper),
-                        None => {
-                            let arg = self.unboxed_reference_source(arg, type_operand);
-                            self.emit_type_op_operand(arg, code)
-                        }
-                    },
-                }
-            }
             IrTypeOp::ImplicitCoercion => {
-                let arg = self.unboxed_reference_source(arg, type_operand);
-                self.emit_type_op_operand(arg, code)
+                self.emit_implicit_coercion_operand(arg, type_operand, code)
             }
             IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => {
                 let arg = self.instance_check_operand(arg);
@@ -98,7 +108,7 @@ impl Emitter<'_> {
                         semantic_scalar_adapter(semantic_arg, physical_arg),
                     );
                 }
-                self.emit_nullable_instance_check(&internal, type_operand, code);
+                self.emit_nullable_instance_check(internal, type_operand, code);
                 if op == IrTypeOp::NotInstanceOf {
                     self.emit_negated_instance_result(code);
                 }
@@ -111,7 +121,7 @@ impl Emitter<'_> {
                         semantic_scalar_adapter(semantic_arg, physical_arg),
                     );
                 }
-                self.emit_instance_check(&internal, type_operand, code);
+                self.emit_instance_check(internal, type_operand, code);
             }
             IrTypeOp::NotInstanceOf => {
                 if physical_arg.is_jvm_scalar() {
@@ -121,7 +131,7 @@ impl Emitter<'_> {
                         semantic_scalar_adapter(semantic_arg, physical_arg),
                     );
                 }
-                self.emit_instance_check(&internal, type_operand, code);
+                self.emit_instance_check(internal, type_operand, code);
                 self.emit_negated_instance_result(code);
             }
             IrTypeOp::Cast => {
@@ -139,7 +149,7 @@ impl Emitter<'_> {
                 // Only a written `as` asks `TypeIntrinsics`; a compiler-inserted narrowing (an
                 // `as?` after its `is`) is kotlinc's implicit cast, a plain `checkcast`.
                 if let Some(intrinsic) = self.written_cast_intrinsic(expression, type_operand) {
-                    self.emit_intrinsic_cast(&internal, intrinsic, code);
+                    self.emit_intrinsic_cast(internal, intrinsic, code);
                     return;
                 }
                 let redundant = if physical_arg.is_jvm_scalar() {
@@ -153,7 +163,7 @@ impl Emitter<'_> {
                     crate::jvm::names::instanceof_internal_name(physical_arg) == internal
                 };
                 if !redundant {
-                    let class = self.cw.class_ref(&internal);
+                    let class = self.cw.class_ref(internal);
                     code.checkcast(class);
                 }
             }
@@ -163,7 +173,7 @@ impl Emitter<'_> {
                     arg,
                     type_operand,
                     jvm_ty,
-                    &internal,
+                    internal,
                     physical_arg,
                     semantic_arg,
                     code,
@@ -432,6 +442,43 @@ impl Emitter<'_> {
         self.rendered_cast_target(ty)
     }
 
+    /// Emit an implicit coercion's producer exactly as ordinary type-operation emission does, but
+    /// leave its consumer-side adaptation pending. Copied inline-result boundaries use the
+    /// returned physical type to finish that adaptation after their debug locals have closed.
+    fn emit_implicit_coercion_operand(
+        &mut self,
+        arg: ExprId,
+        type_operand: Ty,
+        code: &mut CodeBuilder,
+    ) -> (Ty, Ty) {
+        let reference_target = !ir_ty_to_jvm(&stored_value_ty(type_operand)).is_jvm_scalar();
+        if reference_target && self.erased_reference_result(arg).is_some() {
+            // A reference target materializes an erased result at its own type, so the result's
+            // narrowing to the substituted type is not written first.
+            let source = self.emit_consumed_operand(arg, code);
+            return (source, source);
+        }
+        if reference_target {
+            // A reference target reads an erased result narrowed to a scalar as the callee returned
+            // it: kotlinc coerces the `Object` slot straight to the consumer and never unboxes it.
+            return match self.erased_scalar_result(arg) {
+                Some((call, slot)) => {
+                    self.emit_value(call, code);
+                    (slot, slot)
+                }
+                None => match self.emit_boxed_call_reference(arg, code) {
+                    Some(wrapper) => (wrapper, wrapper),
+                    None => {
+                        let arg = self.unboxed_reference_source(arg, type_operand);
+                        self.emit_type_op_operand(arg, code)
+                    }
+                },
+            };
+        }
+        let arg = self.unboxed_reference_source(arg, type_operand);
+        self.emit_type_op_operand(arg, code)
+    }
+
     fn emit_implicit_coercion(
         &mut self,
         arg: ExprId,
@@ -506,6 +553,19 @@ impl Emitter<'_> {
                 code,
             );
         }
+    }
+
+    /// Finish a consumer-side inline-result coercion after the copied declaration's locals close.
+    /// The producer is already on the operand stack, so this performs only the representation
+    /// adaptation that ordinary type-operation emission would apply after evaluating `arg`.
+    pub(super) fn emit_deferred_inline_coercion(
+        &mut self,
+        arg: ExprId,
+        type_operand: Ty,
+        physical_arg: Ty,
+        code: &mut CodeBuilder,
+    ) {
+        self.emit_implicit_coercion(arg, type_operand, physical_arg, code);
     }
 
     /// The reference an unboxing coercion reads. kotlinc coerces a value from the type it was

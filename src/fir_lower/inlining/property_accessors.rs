@@ -14,8 +14,7 @@ use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
 
 use super::super::{FirFileLoweringFailure, InlineAccessorFailure as InlineFail};
 use super::{
-    mark_subtree, produce_sole_tail_return, rebase_values, specialize_inline_copy, value_indices,
-    InlineReturn,
+    mark_subtree, produce_sole_tail_return, rebase_values, specialize_inline_copy, InlineReturn,
 };
 
 /// Splice `inline` property accessors at the uses the checker recorded.
@@ -201,7 +200,11 @@ fn expand_inline_accessor(
     let highest_local = cloned
         .values()
         .filter(|copy| !protected.contains(*copy))
-        .filter_map(|copy| value_indices(ir.expr(*copy)).into_iter().max())
+        .filter_map(|copy| {
+            super::lambda_splice_contract::value_indices(ir.expr(*copy))
+                .into_iter()
+                .max()
+        })
         .filter(|index| *index >= parameter_count)
         .max();
     let local_count = highest_local
@@ -564,7 +567,7 @@ fn fresh_value_base(ir: &crate::ir::IrFile) -> u32 {
         }
     }
     for expression in &ir.exprs {
-        for index in value_indices(expression) {
+        for index in super::lambda_splice_contract::value_indices(expression) {
             see(&mut max_index, index);
         }
     }

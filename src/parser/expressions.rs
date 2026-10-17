@@ -18,6 +18,167 @@ impl Parser<'_> {
             .insert(key, CallTypeArguments { arguments, span });
     }
 
+    /// Lookahead: is the `<` at the current position the start of a type-argument list that is
+    /// followed by a call-like token (`(`, `{`, `.`)? Used to distinguish `a<B>(c)` (generic call)
+    /// from `a < b > c` (two comparisons). Returns true without advancing `self.i`.
+    fn lookahead_is_type_args_call(&self) -> bool {
+        // After `>`, must be followed by `(`, `{`, `.`, or `::` to be a generic call / a callable
+        // reference on a generic type (`A<String>::foo` — the type arguments erase, so it references
+        // `A::foo`). Anything else means the `<` was a less-than operator.
+        self.lookahead_type_argument_list_end().is_some_and(|j| {
+            matches!(
+                self.t.get(j).map(|t| t.kind),
+                Some(TokenKind::LParen)
+                    | Some(TokenKind::LBrace)
+                    | Some(TokenKind::Dot)
+                    | Some(TokenKind::ColonColon)
+            )
+        })
+    }
+
+    /// Whether the `<` at the cursor opens type arguments on a postfix operand: a generic call, or a
+    /// qualifier that ends its expression (`val u = Unit<Any>`), where `>` is followed by a token no
+    /// comparison operand can start with.
+    fn lookahead_is_postfix_type_arguments(&self) -> bool {
+        self.lookahead_type_argument_list_end().is_some_and(|j| {
+            let continuation = self.t.get(j).map(|token| token.kind);
+            matches!(
+                continuation,
+                None | Some(TokenKind::LParen)
+                    | Some(TokenKind::LBrace)
+                    | Some(TokenKind::Dot)
+                    | Some(TokenKind::ColonColon)
+                    | Some(TokenKind::Newline)
+                    | Some(TokenKind::RParen)
+                    | Some(TokenKind::RBrace)
+                    | Some(TokenKind::RBracket)
+                    | Some(TokenKind::Comma)
+                    | Some(TokenKind::Eof)
+                    | Some(TokenKind::EqEq)
+                    | Some(TokenKind::NotEq)
+                    | Some(TokenKind::RefEq)
+                    | Some(TokenKind::RefNe)
+                    | Some(TokenKind::AndAnd)
+                    | Some(TokenKind::OrOr)
+            ) || continuation == Some(TokenKind::Question)
+                && self
+                    .t
+                    .get(j + 1)
+                    .is_some_and(|token| token.kind == TokenKind::Colon)
+        })
+    }
+
+    /// Token index just after the balanced `>` closing the `<` at the cursor, when everything
+    /// between them can be a type argument list.
+    fn lookahead_type_argument_list_end(&self) -> Option<usize> {
+        let mut j = self.i + 1; // skip the opening `<`
+        let mut depth = 1i32;
+        loop {
+            let k = self.t.get(j).map(|t| t.kind);
+            match k {
+                Some(TokenKind::Lt) => {
+                    depth += 1;
+                    j += 1;
+                }
+                Some(TokenKind::Gt) => {
+                    depth -= 1;
+                    j += 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                // `>=` closes the last `<` if depth == 1 (e.g. `Foo<Bar>=` — not valid type args).
+                // Treat as "not type args" to stay safe.
+                Some(TokenKind::GtEq) => return None,
+                // A type-use annotation may carry an arbitrary constant-expression argument list.
+                // Skip that balanced list as one unit so operators or `>` inside it cannot be
+                // mistaken for the surrounding generic delimiters. The real type parser consumes
+                // and records the annotation after this lookahead commits the interpretation.
+                Some(TokenKind::At) => {
+                    j = self.lookahead_after_type_annotation(j)?;
+                }
+                // Tokens valid inside type argument lists — including a function-type argument
+                // (`Foo<(A) -> B>`): its parens and arrow.
+                Some(TokenKind::Ident)
+                | Some(TokenKind::Dot)
+                | Some(TokenKind::Comma)
+                | Some(TokenKind::Star)
+                | Some(TokenKind::Question)
+                | Some(TokenKind::Colon)
+                | Some(TokenKind::Amp)
+                | Some(TokenKind::LParen)
+                | Some(TokenKind::RParen)
+                | Some(TokenKind::Newline)
+                // `in` is the variance keyword in an argument projection (`Foo<in T>`); `out` is an
+                // ordinary ident and already covered above.
+                | Some(TokenKind::KwIn)
+                | Some(TokenKind::Arrow) => {
+                    j += 1;
+                }
+                _ => return None,
+            }
+        }
+        Some(j)
+    }
+
+    /// Token index immediately after one type-use annotation starting at `@`, for generic-call
+    /// lookahead. This recognizes the same qualified annotation name and optional argument group as
+    /// [`Self::parse_type_atom`], without interpreting the arguments themselves.
+    fn lookahead_after_type_annotation(&self, at: usize) -> Option<usize> {
+        debug_assert_eq!(self.t.get(at)?.kind, TokenKind::At);
+        let mut j = at + 1;
+        if self.t.get(j)?.kind != TokenKind::Ident {
+            return None;
+        }
+        j += 1;
+        while self
+            .t
+            .get(j)
+            .is_some_and(|token| token.kind == TokenKind::Dot)
+            && self
+                .t
+                .get(j + 1)
+                .is_some_and(|token| token.kind == TokenKind::Ident)
+        {
+            j += 2;
+        }
+
+        // `@Composable () -> Unit` annotates a function type; its parentheses are the type, not
+        // annotation arguments. Mirror the real parser's disambiguation exactly.
+        if self
+            .t
+            .get(j)
+            .is_some_and(|token| token.kind == TokenKind::LParen)
+            && !self.paren_group_precedes_arrow(j)
+        {
+            let mut paren_depth = 0u32;
+            loop {
+                match self.t.get(j)?.kind {
+                    TokenKind::LParen => paren_depth += 1,
+                    TokenKind::RParen => {
+                        paren_depth = paren_depth.checked_sub(1)?;
+                        j += 1;
+                        if paren_depth == 0 {
+                            break;
+                        }
+                        continue;
+                    }
+                    TokenKind::Eof => return None,
+                    _ => {}
+                }
+                j += 1;
+            }
+        }
+        while self
+            .t
+            .get(j)
+            .is_some_and(|token| token.kind == TokenKind::Newline)
+        {
+            j += 1;
+        }
+        Some(j)
+    }
+
     // ---- expressions (Pratt) ----
     pub(super) fn parse_expr(&mut self) -> ExprId {
         self.parse_bp(0)
@@ -982,12 +1143,18 @@ impl Parser<'_> {
                 // `expr<TypeArgs>(args)` — generic call with explicit type arguments.
                 // Disambiguate from `a < b > c` (two comparisons) by checking whether a balanced
                 // `>` is immediately followed by `(`, `{`, or `.` (call-like context).
-                TokenKind::Lt if self.lookahead_is_type_args_call() => {
+                TokenKind::Lt if self.lookahead_is_postfix_type_arguments() => {
                     // Capture the explicit type arguments for the call that follows.
                     pending_targs = Some(self.parse_type_argument_list());
                 }
                 _ => break,
             }
+        }
+        // `Unit<Any>` used as a value: the arguments stay on the qualifier, for the checker to
+        // reject.
+        if pending_targs.is_some() {
+            self.attach_call_type_args(lhs.0, pending_targs.take());
+            self.file.standalone_type_argument_qualifiers.insert(lhs.0);
         }
         lhs
     }
@@ -1706,7 +1873,7 @@ impl Parser<'_> {
                 Some(TokenKind::Ident)
                     if depth == 0 && matches!(self.t[j].text(self.src), "by" | "where") =>
                 {
-                    return false
+                    return false;
                 }
                 _ => {}
             }
@@ -1771,7 +1938,7 @@ impl Parser<'_> {
                 // never a lambda parameter name, so a `->` reached inside its supertype/body belongs to a
                 // function-type supertype — the brace is a BLOCK, not a lambda.
                 Some(TokenKind::Ident) if depth == 0 && self.t[j].text(self.src) == "object" => {
-                    return false
+                    return false;
                 }
                 Some(TokenKind::Arrow) if depth == 0 => return true,
                 Some(TokenKind::RBrace) if depth == 0 => return false,

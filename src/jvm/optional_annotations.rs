@@ -177,6 +177,7 @@ fn annotation_type(declaration: &semantic::KotlinClass) -> LibraryType {
     LibraryType {
         access: declaration.visibility.into(),
         is_kotlin: true,
+        is_data: false,
         source_file: None,
         stable_declaration: None,
         is_nested: declaration.is_nested,
@@ -218,6 +219,7 @@ fn annotation_type(declaration: &semantic::KotlinClass) -> LibraryType {
         annotation_targets: Some(crate::libraries::declared_targets(declaration)),
         mapped_collection: None,
         annotation_element_defaults: Vec::new(),
+        deprecation: None,
     }
 }
 

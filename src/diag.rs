@@ -27,7 +27,10 @@ pub enum Severity {
 /// while an identity says when two reports describe the same semantic occurrence.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum CompilerWarningName {
+    DataClassCopyVisibilityWillBeChanged,
+    DataClassInvisibleCopyUsage,
     Deprecation,
+    ExplicitTypeArgumentsInPropertyAccess,
     InapplicableOperatorModifier,
     TypeArgumentsNotAllowed,
     ValueClassCannotBeRecursiveViaTypeParameters,
@@ -36,7 +39,14 @@ pub enum CompilerWarningName {
 impl CompilerWarningName {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::DataClassCopyVisibilityWillBeChanged => {
+                "DATA_CLASS_COPY_VISIBILITY_WILL_BE_CHANGED_WARNING"
+            }
+            Self::DataClassInvisibleCopyUsage => "DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING",
             Self::Deprecation => "DEPRECATION",
+            Self::ExplicitTypeArgumentsInPropertyAccess => {
+                "EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING"
+            }
             Self::InapplicableOperatorModifier => "INAPPLICABLE_OPERATOR_MODIFIER_WARNING",
             Self::TypeArgumentsNotAllowed => "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING",
             Self::ValueClassCannotBeRecursiveViaTypeParameters => {
@@ -47,7 +57,14 @@ impl CompilerWarningName {
 
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
+            "DATA_CLASS_COPY_VISIBILITY_WILL_BE_CHANGED_WARNING" => {
+                Self::DataClassCopyVisibilityWillBeChanged
+            }
+            "DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING" => Self::DataClassInvisibleCopyUsage,
             "DEPRECATION" => Self::Deprecation,
+            "EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING" => {
+                Self::ExplicitTypeArgumentsInPropertyAccess
+            }
             "INAPPLICABLE_OPERATOR_MODIFIER_WARNING" => Self::InapplicableOperatorModifier,
             "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING" => Self::TypeArgumentsNotAllowed,
             "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING" => {
@@ -65,7 +82,10 @@ mod warning_name_tests {
     #[test]
     fn every_compiler_warning_name_round_trips_through_its_wire_spelling() {
         let names = [
+            CompilerWarningName::DataClassCopyVisibilityWillBeChanged,
+            CompilerWarningName::DataClassInvisibleCopyUsage,
             CompilerWarningName::Deprecation,
+            CompilerWarningName::ExplicitTypeArgumentsInPropertyAccess,
             CompilerWarningName::InapplicableOperatorModifier,
             CompilerWarningName::TypeArgumentsNotAllowed,
             CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,

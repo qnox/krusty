@@ -8,6 +8,7 @@
 //! block member.
 
 use super::*;
+use crate::ir::IrStaticAccessor;
 use crate::jvm::names::type_descriptor;
 use crate::metadata::class_builder::{JvmFieldSignature, JvmPropertySignature};
 
@@ -51,15 +52,19 @@ pub(super) fn property_signature(
         .map(|storage| &ir.statics[storage as usize]);
     let default_getter = || {
         (
-            property_getter_name(&property.name),
+            storage.map_or_else(
+                || property_getter_name(&property.name),
+                |storage| storage.default_getter_jvm_name(),
+            ),
             format!("(){}", type_descriptor(property.ty)),
         )
     };
     let default_setter = || {
         (
-            storage
-                .and_then(|storage| storage.setter_jvm_name.clone())
-                .unwrap_or_else(|| property_setter_name(&property.name)),
+            storage.map_or_else(
+                || property_setter_name(&property.name),
+                |storage| storage.default_setter_jvm_name(),
+            ),
             format!("({})V", type_descriptor(property.ty)),
         )
     };
@@ -71,11 +76,14 @@ pub(super) fn property_signature(
                     .map_or_else(|| Some(default_getter()), accessor_sig)
             })
             .flatten(),
+        // A bodiless `private set` leaves the default setter private, so it is never generated
+        // (its storage records the setter `Absent`) and has no signature.
         setter: (property.is_var && !property.visibility.is_private())
-            .then(|| {
-                property
-                    .setter
-                    .map_or_else(|| Some(default_setter()), accessor_sig)
+            .then(|| match property.setter {
+                Some(setter) => accessor_sig(setter),
+                None => storage
+                    .is_some_and(|storage| storage.accessors.setter == IrStaticAccessor::Default)
+                    .then(default_setter),
             })
             .flatten(),
         field: storage.map(|storage| JvmFieldSignature {

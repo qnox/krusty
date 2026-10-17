@@ -42,6 +42,12 @@ pub(super) fn classifier_record(
     let mut functions: Vec<(String, FunctionInfo)> = Vec::new();
     for function in &signed.functions {
         let mut published = published_function(identities, function, member, enclosing);
+        if shape.is_data
+            && function.declaration.is_synthesized
+            && function.declaration.name == "copy"
+        {
+            published.callable.semantic_role = Some(crate::types::SemanticCallRole::DataClassCopy);
+        }
         builtin_realizations::realize_member(identity, &mut published);
         shape.members.push(member_record(&published));
         functions.push((function.declaration.name.clone(), published));

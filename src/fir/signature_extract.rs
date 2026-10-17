@@ -1283,35 +1283,27 @@ impl SignatureConstraintExtractor {
             return;
         }
         for (index, argument) in args.iter().enumerate() {
-            // The value itself (`requireNotNull(x)`), or the condition `x != null`
-            // (`assertTrue(x != null)`), whose callee may promise `returns() implies actual`.
-            let (reference, name, condition) = match file.expr(*argument) {
-                Expr::Name(name) => (*argument, name, false),
-                Expr::Binary {
-                    op: BinOp::Ne | BinOp::RefNe,
-                    lhs,
-                    rhs,
-                    ..
-                } => match (file.expr(*lhs), file.expr(*rhs)) {
-                    (Expr::Name(name), Expr::NullLit) => (*lhs, name, true),
-                    (Expr::NullLit, Expr::Name(name)) => (*rhs, name, true),
-                    _ => continue,
-                },
-                _ => continue,
+            // The value itself (`requireNotNull(x)`), or each `x != null` the condition holds
+            // (`assertTrue(x != null && …)`), whose callee may promise `returns() implies actual`.
+            let proofs = match file.expr(*argument) {
+                Expr::Name(name) => vec![(*argument, name.as_str(), false)],
+                _ => condition_facts::null_checks_of_true(file, *argument),
             };
-            let Some(binding) = self.binding_for_reference(reference, name) else {
-                continue;
-            };
-            let Some(value) = self.compact_value_for_binding(&binding) else {
-                continue;
-            };
-            let narrowed = self.graph.add_expr(SigExpr::ContractNarrowed {
-                value,
-                call: effect,
-                argument: u32::try_from(index).expect("too many call arguments"),
-                condition,
-            });
-            self.lexical_values[binding.scope].insert(binding.name, narrowed);
+            for (reference, name, condition) in proofs {
+                let Some(binding) = self.binding_for_reference(reference, name) else {
+                    continue;
+                };
+                let Some(value) = self.compact_value_for_binding(&binding) else {
+                    continue;
+                };
+                let narrowed = self.graph.add_expr(SigExpr::ContractNarrowed {
+                    value,
+                    call: effect,
+                    argument: u32::try_from(index).expect("too many call arguments"),
+                    condition,
+                });
+                self.lexical_values[binding.scope].insert(binding.name, narrowed);
+            }
         }
     }
 

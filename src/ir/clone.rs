@@ -679,8 +679,10 @@ fn copy_function_implementation_facts(
         .map(|((_, ordinal), ty)| (*ordinal, *ty))
         .collect::<Vec<_>>();
     for (ordinal, ty) in captures {
-        ir.shared_capture_parameters
-            .insert((target, ordinal), ty_subst_keep_unbound(ty, bindings));
+        // A mutable capture keeps the declaration's erased holder ABI across an inline
+        // specialization. Its reads and writes specialize, but the one source cell cannot change
+        // from `Ref$ObjectRef<T>` to a primitive holder in a call-site copy.
+        ir.shared_capture_parameters.insert((target, ordinal), ty);
     }
     // Left on the source. These name the declaration, not one specialized implementation of it:
     // `checked_callable_functions`, `top_level_function_fids`, `public_inline_functions`,
@@ -817,6 +819,7 @@ mod tests {
             source,
             crate::ir::type_reflection::LambdaClassProvenance::SourceFunction,
         );
+        ir.shared_capture_parameters.insert((source, 0), parameter);
         let class = ir.add_class(blank_class("Holder"));
         ir.classes[class as usize].methods.push(source);
         ir.note_class_method(class, source);
@@ -838,6 +841,7 @@ mod tests {
                 inline_callee: crate::fir::CallableId::from_raw(11),
                 inline_callee_source_name: "defineFunc".to_string(),
                 parent: None,
+                consumed_inline_capture: false,
             },
         );
         let second = clone_function_implementation(
@@ -854,6 +858,7 @@ mod tests {
                 inline_callee: crate::fir::CallableId::from_raw(11),
                 inline_callee_source_name: "defineFunc".to_string(),
                 parent: None,
+                consumed_inline_capture: false,
             },
         );
 
@@ -861,6 +866,7 @@ mod tests {
         assert_ne!(second, first);
         assert_eq!(ir.functions[source as usize].params, vec![parameter]);
         assert_eq!(ir.functions[first as usize].params, vec![specialized]);
+        assert_eq!(ir.shared_capture_parameters[&(first, 0)], parameter);
         assert_eq!(ir.method_visibility(first), Visibility::Private);
         assert_eq!(ir.fn_decl_lines.get(&first), Some(&4));
         assert!(ir.inline_fns.contains(&source));

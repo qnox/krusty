@@ -899,7 +899,7 @@ mod tests {
             assert_eq!(
                 refusal,
                 Refusal::Unsupported(
-                    "krusty does not implement the language feature 'ErrorAboutDataClassCopyVisibilityChange' selected by '-progressive'".to_string()
+                    "krusty does not implement the language feature 'ReportDeprecationsOfClassifiersInImplicitInvokes' selected by '-progressive'".to_string()
                 )
             );
         }

@@ -420,7 +420,12 @@ fn run_backend_passes_after_plugins(
     );
     // After lifted names are fixed. The module suffix must not leak into `$lambda$N`: kotlinc
     // names those from the value-class spelling and only then appends `$<module>` to the member.
-    crate::jvm::internal_names::mangle_internal_members(ir, module_name, facade);
+    crate::jvm::internal_names::mangle_internal_members(
+        ir,
+        module_name,
+        facade,
+        &facts.property_reference_realizations,
+    );
     // A delegated property's reflected signature names its declaration's physical getter. Its
     // exact FunId was retained when the reference was built; consume that identity only after
     // value-class and internal-member naming have fixed the accessor's final JVM ABI.
@@ -436,10 +441,10 @@ fn run_backend_passes_after_plugins(
         lambda_modes,
         &mut facts.emit_time_machines,
     );
-    // A specialized reified lambda is already a function class. Its `$$inlined$` name depends on
-    // the caller's lifted spelling, which exists only now.
+    // A call-site-specialized lambda is already a function class. Its `$$inlined$` name depends
+    // on the caller's lifted spelling, which exists only now.
     let closure_names =
-        crate::jvm::lambda_classes::rename_specialized_reified_classes(ir, facade, lambda_modes);
+        crate::jvm::lambda_classes::rename_specialized_lambda_classes(ir, facade, lambda_modes);
     crate::jvm::reified_anonymous::rename(ir, facade, lambda_modes);
     facts
         .property_reference_realizations
@@ -1878,6 +1883,7 @@ mod tests {
             is_lateinit: false,
             owner: None,
             visibility: crate::types::Visibility::Public,
+            getter_jvm_name: None,
             setter_jvm_name: None,
             erased_declared_ty: None,
             accessors: crate::ir::IrStaticAccessors::ABSENT,

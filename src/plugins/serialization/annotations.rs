@@ -26,6 +26,20 @@ pub(super) fn write_self_annotations() -> DeclarationAnnotations {
     }])
 }
 
+/// `@JvmField` on a private plugin cache (`$childSerializers`, a generic class's
+/// `$cachedDescriptor`): kotlinc marks the field as the storage itself, not a property behind
+/// accessors. It is written ahead of the field's nullability annotation.
+pub(super) fn jvm_field_annotations() -> DeclarationAnnotations {
+    DeclarationAnnotations::new(vec![RetainedAnnotation {
+        retention: AnnotationRetention::Binary,
+        annotation: AppliedAnnotation {
+            internal: type_name("kotlin/jvm/JvmField"),
+            values: Vec::new(),
+        },
+        facts: Default::default(),
+    }])
+}
+
 pub(super) fn custom_serializer_of(
     ctx: &PluginContext,
     ir: &IrFile,

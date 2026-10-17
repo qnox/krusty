@@ -159,6 +159,7 @@ fn remap_reachable_implementations(
                 inline_callee: expansion.site.inline_callee,
                 inline_callee_source_name: expansion.site.inline_callee_source_name.to_string(),
                 parent: detached.parent,
+                consumed_inline_capture: false,
             },
         );
         if detached.parent.is_none() && detached.class_site {
@@ -1442,6 +1443,7 @@ fn remap_class(
 }
 
 struct InlineLambdaArgument {
+    expression: ExprId,
     parameter: usize,
     field: u32,
     impl_fn: u32,
@@ -1476,6 +1478,7 @@ fn inline_lambda_arguments(
             continue;
         };
         found.push(InlineLambdaArgument {
+            expression: actual,
             parameter: index,
             field,
             impl_fn,
@@ -1484,6 +1487,49 @@ fn inline_lambda_arguments(
         });
     }
     found
+}
+
+/// Exact substituted capture edges owned by an anonymous-object copy.
+///
+/// A declaration lambda can itself capture a substituted inline argument. If that argument owns
+/// caller captures, the anonymous-object specialization deliberately retains the declaration
+/// lambda as a constructor value instead of consuming either closure. If the argument is
+/// capture-free, specialization consumes it in the copied anonymous methods and removes its
+/// constructor field. The ordinary escaping-lambda transfer must not independently process either
+/// exact edge before anonymous specialization applies the appropriate operation.
+pub(super) fn owned_substituted_lambda_capture_edges(
+    ir: &crate::ir::IrFile,
+    constructions: impl IntoIterator<Item = ExprId>,
+    substituted_inline_lambdas: &HashSet<ExprId>,
+) -> HashSet<(ExprId, ExprId)> {
+    let mut retained = HashSet::default();
+    for construction in constructions {
+        let IrExpr::New { internal, .. } = ir.expr(construction) else {
+            continue;
+        };
+        let Some(class) = ir.class_id_by_name(*internal) else {
+            continue;
+        };
+        if !ir.classes[class as usize].is_anonymous_object {
+            continue;
+        }
+        for lambda in inline_lambda_arguments(ir, class, construction) {
+            if lambda.capture_count == 0 {
+                continue;
+            }
+            let IrExpr::Lambda { captures, .. } = ir.expr(lambda.expression) else {
+                unreachable!("an inline-lambda constructor argument remains a lambda")
+            };
+            retained.extend(
+                captures
+                    .iter()
+                    .copied()
+                    .filter(|capture| substituted_inline_lambdas.contains(capture))
+                    .map(|capture| (lambda.expression, capture)),
+            );
+        }
+    }
+    retained
 }
 
 fn inline_lambda(ir: &crate::ir::IrFile, expression: ExprId) -> Option<(u32, ExprId, usize)> {
@@ -1566,7 +1612,7 @@ fn body_uses_values(ir: &crate::ir::IrFile, root: ExprId) -> bool {
         if !seen.insert(expression) {
             continue;
         }
-        if !super::value_indices(ir.expr(expression)).is_empty() {
+        if !super::lambda_splice_contract::value_indices(ir.expr(expression)).is_empty() {
             return true;
         }
         if let IrExpr::Lambda { captures, .. } = ir.expr(expression) {
@@ -1914,3 +1960,7 @@ fn node_uses_binding(expression: &IrExpr, bindings: &HashMap<String, Ty>) -> boo
         _ => false,
     }
 }
+
+#[cfg(test)]
+#[path = "escaping_anonymous/tests.rs"]
+mod tests;

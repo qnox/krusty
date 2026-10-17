@@ -117,6 +117,7 @@ mod tests {
     ) -> std::sync::Arc<LibraryType> {
         std::sync::Arc::new(LibraryType {
             is_kotlin: true,
+            is_data: false,
             access: crate::libraries::ClassifierAccess::Public,
             source_file: None,
             stable_declaration: None,
@@ -153,6 +154,7 @@ mod tests {
             annotation_targets: None,
             mapped_collection: None,
             annotation_element_defaults: Vec::new(),
+            deprecation: None,
         })
     }
 
