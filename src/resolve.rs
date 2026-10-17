@@ -74,6 +74,7 @@ mod callable_reference_selection;
 mod candidate_display;
 mod class_literal_array_of_nothing;
 mod class_literal_receiver;
+mod class_literal_type_arguments;
 use candidate_display::{
     ambiguous_classifier_message, classifier_access_display_from_shape,
     inaccessible_classifier_message,
@@ -37628,11 +37629,7 @@ impl<'a> Checker<'a> {
         if supplied == expected {
             return false;
         }
-        let wording = match expected {
-            0 => "no type arguments expected".to_string(),
-            1 => "one type argument expected".to_string(),
-            count => format!("{count} type arguments expected"),
-        };
+        let wording = candidate_display::type_argument_count_wording(expected);
         let callee = self.call_callee_name_span(call);
         self.diags.error(
             Span::new(callee.hi, callee.hi.saturating_add(1)),
@@ -59867,7 +59864,7 @@ impl<'a> Checker<'a> {
                 self.callable_ref_lhs_classifier_type(scope, receiver, expression)
                     .ok()
                     .flatten()
-                    .map(|(_, ty)| ty)
+                    .map(|(_, ty, _)| ty)
             })
         } else {
             None
@@ -61450,7 +61447,7 @@ impl<'a> Checker<'a> {
         receiver: ExprId,
         name: &str,
     ) -> UnboundRefSelection {
-        let Ok(Some((internal, receiver_ty))) =
+        let Ok(Some((internal, receiver_ty, _))) =
             self.callable_ref_lhs_classifier_type(scope, receiver, expression)
         else {
             return UnboundRefSelection::NotClassifier;
@@ -61962,45 +61959,7 @@ impl<'a> Checker<'a> {
                 let Some(recv) = receiver else {
                     return unsupported(self);
                 };
-                // A bare name that resolves to a reference TYPE is an UNBOUND literal (`String::class`).
-                // Otherwise it's a BOUND literal on a value (`x::class`, `this::class`): type-check the
-                // receiver — a non-reference receiver (a primitive `Int::class`, an unresolved name) is
-                // skipped, not mis-read.
-                // The checker-visible representation of a reified `T::class`: the SEMANTIC type
-                // parameter, distinct from the lowering marker below. `KClass<T>` must carry the
-                // enclosing function's own `T` so a delegated generic member call infers its formal
-                // from the argument (`fun <T : Any> services(type: KClass<T>): List<T>` called as
-                // `services(T::class)` from a reified extension returns the EXTENSION's `List<T>`,
-                // not the member's unbound formal). The `Obj(T)` name marker must not leak into
-                // inference: it reads as a plain classifier named "T" and poisons every binding it
-                // reaches.
-                let unbound = if let Expr::Name(n) = self.file.expr(recv).clone() {
-                    // `T::class` on a REIFIED type parameter is an unbound literal: the lowerer
-                    // substitutes its declaration-owned identity to the call-site type
-                    // (`reified_subst`) when it expands the inline body. Only a REIFIED `T` is
-                    // accepted — kotlinc rejects a class literal on a non-reified type parameter.
-                    self.class_literal_unbound_ty(scope, recv, &n)
-                        .or_else(|| scope.reified_tparam(&n))
-                } else {
-                    // A QUALIFIED type name (`pkg.Cls::class`, `java.util.ArrayList::class`,
-                    // `Outer.Nested::class`) is an unbound literal exactly like the simple name an
-                    // import would bind — the receiver is a classifier, not a value to evaluate.
-                    self.callable_ref_lhs_classifier_type(scope, recv, e)
-                        .ok()
-                        .flatten()
-                        .map(|(_, ty)| ty)
-                };
-                let unbound = unbound.map(|ty| {
-                    let ty = self.validate_class_literal_type_arguments(e, recv, ty);
-                    let Ty::Obj(internal, []) = ty else {
-                        return ty;
-                    };
-                    let classifier = self
-                        .fed_source()
-                        .classifier(internal)
-                        .expect("a resolved class-literal classifier must retain its declaration");
-                    class_literal_receiver::star_projected_class_literal_receiver(ty, &classifier)
-                });
+                let unbound = self.class_literal_unbound_receiver(scope, e, recv);
                 if unbound == Some(Ty::Error) {
                     return self.set(e, Ty::Error);
                 }

@@ -47,6 +47,8 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds =
         features.has("ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds");
     file.forbid_useless_type_arguments = features.has("ForbidUselessTypeArgumentsIn25");
+    file.useless_type_arguments_warning_format =
+        features.deprecation_warning_format("ForbidUselessTypeArgumentsIn25");
     file.type_arguments_not_allowed_warning = features.deprecation_warning_message(
         "ForbidUselessTypeArgumentsIn25",
         "type arguments are not allowed when static member is accessed.",
@@ -94,6 +96,18 @@ mod tests {
             "object access cannot have explicit type arguments. This will become an error in \
              language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-390.",
         );
+        let dynamic_warning = |file: &File| {
+            file.useless_type_arguments_warning_format
+                .as_ref()
+                .map(|format| {
+                    format.message("one type argument expected for 'typealias Box<T> = String'.")
+                })
+        };
+        let expected_dynamic_warning = Some(
+            "one type argument expected for 'typealias Box<T> = String'. This will become an \
+             error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-390."
+                .to_string(),
+        );
 
         assert_eq!(old.value_class_recursion_via_type_parameters_warning, None);
         assert_eq!(old.inapplicable_operator_modifier_warning, None);
@@ -118,10 +132,12 @@ mod tests {
                 .as_deref(),
             property_access_warning
         );
+        assert_eq!(dynamic_warning(&old), expected_dynamic_warning);
         assert_eq!(
             patch.type_arguments_not_allowed_warning.as_deref(),
             type_arguments_not_allowed_warning
         );
+        assert_eq!(dynamic_warning(&patch), expected_dynamic_warning);
         assert_eq!(
             current.value_class_recursion_via_type_parameters_warning,
             Some(
@@ -149,5 +165,6 @@ mod tests {
                 .as_deref(),
             property_access_warning
         );
+        assert_eq!(dynamic_warning(&current), expected_dynamic_warning);
     }
 }

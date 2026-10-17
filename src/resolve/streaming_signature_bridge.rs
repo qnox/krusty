@@ -37,6 +37,7 @@ mod receiver_member_level;
 mod rejected_member_call;
 mod scope_resolver;
 mod selected_call_facts;
+mod selected_type_facts;
 mod semantics;
 mod source_contracts;
 mod stable_function_index;
@@ -89,6 +90,8 @@ struct ProductionSignatureSemantics<'a> {
     /// What each selected top-level call recorded, by call origin: its contract and the typealias
     /// it constructed through.
     selected_calls: selected_call_facts::SelectedCallFacts,
+    /// Typealias provenance recorded by the compact type-resolution operation that selected it.
+    selected_types: selected_type_facts::SelectedTypeFacts,
     /// Same-module source contracts bound before solving starts, by stable declaration, so a
     /// call of a source function with `returns() implies (x != null)` proves as much in a
     /// Pass-1 block as a library one. Publication into the index still happens at finalization.
@@ -3795,6 +3798,7 @@ pub(crate) fn finalized_streamed_signature_index(
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
+        selected_types: selected_type_facts::SelectedTypeFacts::default(),
         source_contracts: RefCell::new(HashMap::default()),
         file_import_scopes: file_import_scopes::FileImportScopes::default(),
         classifier_stubs_by_source: RefCell::new(None),
@@ -4461,6 +4465,7 @@ pub(crate) fn finalized_streamed_signature_index(
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
+        selected_types: selected_type_facts::SelectedTypeFacts::default(),
         source_contracts: RefCell::new(HashMap::default()),
         file_import_scopes: file_import_scopes::FileImportScopes::default(),
         classifier_stubs_by_source: RefCell::new(None),

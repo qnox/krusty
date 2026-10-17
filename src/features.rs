@@ -23,6 +23,30 @@ pub struct FeatureSetting {
     pub enabled: bool,
 }
 
+/// The release-owned suffix of a diagnostic that becomes an error with a language feature.
+///
+/// The feature table selects this policy while configuring a source file. A checker can then
+/// attach it to a diagnostic whose leading message contains declaration-specific text without
+/// retaining or consulting the feature table during body checking.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeprecationWarningFormat {
+    suffix: String,
+}
+
+impl DeprecationWarningFormat {
+    /// Format kotlinc's complete deprecation warning around the occurrence-specific `message`.
+    pub(crate) fn message(&self, message: &str) -> String {
+        let mut warning = message.to_string();
+        if warning.ends_with('.') {
+            warning.push(' ');
+        } else if !warning.ends_with(char::is_whitespace) {
+            warning.push_str(". ");
+        }
+        warning.push_str(&self.suffix);
+        warning
+    }
+}
+
 /// The set of enabled language features (by their kotlinc `LanguageFeature` name, e.g.
 /// `NameBasedDestructuring`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -234,9 +258,19 @@ impl LangFeatures {
         feature: &str,
         message: &str,
     ) -> Option<String> {
+        self.deprecation_warning_format(feature)
+            .map(|format| format.message(message))
+    }
+
+    /// The release-owned formatting policy for a deprecation diagnostic whose leading message is
+    /// only known when the checker has selected the declaration involved.
+    pub(crate) fn deprecation_warning_format(
+        &self,
+        feature: &str,
+    ) -> Option<DeprecationWarningFormat> {
         self.table()
             .get(feature)
-            .map(|feature| feature.deprecation_warning_message(message))
+            .map(LanguageFeature::deprecation_warning_format)
     }
 
     /// The explicitly set features and their states, by name.

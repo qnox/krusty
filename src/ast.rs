@@ -2034,6 +2034,9 @@ pub struct File {
     /// `+ForbidUselessTypeArgumentsIn25`: type arguments that select nothing (on a qualifier reaching
     /// a static member, …) are errors rather than deprecation warnings.
     pub forbid_useless_type_arguments: bool,
+    /// Release-owned warning formatting for class-literal diagnostics whose declaration-specific
+    /// leading message is known only after classifier selection.
+    pub useless_type_arguments_warning_format: Option<crate::features::DeprecationWarningFormat>,
     /// Exact per-compilation warning text for the useless-type-argument transition.
     pub type_arguments_not_allowed_warning: Option<String>,
     /// Exact warning text when the same transition applies to a standalone singleton value.
