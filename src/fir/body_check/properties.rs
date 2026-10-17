@@ -1793,8 +1793,10 @@ impl BodyFirChecker<'_> {
                 origin,
                 kind: FirStatementKind::Expression(write),
             }));
-            // The discarded value is still the block's result, read and dropped: the temporary is
-            // read twice before the backend's peephole drops that read, so it is not folded away.
+            // The discarded value is still the block's result, read and dropped after the block
+            // closes: the temporary is read twice before the backend's peephole drops that read,
+            // so it is not folded away. Recording the postfix update keeps that close between
+            // the read and its discard.
             let update = self.body.add_expr(FirExpr {
                 origin,
                 ty: receiver_ty,
@@ -1803,6 +1805,7 @@ impl BodyFirChecker<'_> {
                     result: Some(old_value),
                 },
             });
+            self.body.record_postfix_update(update);
             let discarded = self.body.add_statement(FirStatement {
                 origin,
                 kind: FirStatementKind::Expression(update),
