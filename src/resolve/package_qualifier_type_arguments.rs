@@ -4,43 +4,38 @@
 //! A package has no type parameters, so the arguments select nothing: "type arguments are not
 //! allowed for packages." on the segment's `<…>` list. kotlinc always rejected a list on the last
 //! package segment; one on an earlier segment keeps a deprecation warning until
-//! `ForbidUselessTypeArgumentsIn25`. Which segments are packages follows from the classifier the
-//! complete name resolved to: the segments before its outermost enclosing classifier.
+//! `ForbidUselessTypeArgumentsIn25`. Resolution records the exact written segment where its
+//! left-to-right namespace walk first selected a classifier; later checks consume that boundary
+//! without inspecting source spelling or the selected classifier's expanded nesting.
 
 use super::*;
 
 const MESSAGE: &str = "type arguments are not allowed for packages.";
 
-/// The lists `reference` wrote on package segments, given the classifier it resolved to, with the
-/// number of segments that are packages.
+/// The lists `reference` wrote before its already-selected classifier segment.
 fn package_argument_lists(
     reference: &TypeRef,
-    classifier: TypeName,
+    classifier_segment: u32,
 ) -> (Vec<QualifierSegmentArguments>, u32) {
     if reference.qualifier_arguments.is_empty() {
         return (Vec::new(), 0);
     }
-    let written = reference.name.split('.').count() as u32;
-    let classifier_segments =
-        std::iter::successors(Some(classifier), |classifier| classifier.nested_owner()).count()
-            as u32;
-    let packages = written.saturating_sub(classifier_segments);
     let lists = reference
         .qualifier_arguments
         .iter()
-        .filter(|list| list.segment < packages)
+        .filter(|list| list.segment < classifier_segment)
         .copied()
         .collect();
-    (lists, packages)
+    (lists, classifier_segment)
 }
 
 /// `reference` without the type arguments written on its package segments, when it wrote any.
 /// The classifier's own and captured arguments are unchanged.
 pub(super) fn without_package_arguments(
     reference: &TypeRef,
-    classifier: TypeName,
+    classifier_segment: u32,
 ) -> Option<TypeRef> {
-    let (lists, _) = package_argument_lists(reference, classifier);
+    let (lists, _) = package_argument_lists(reference, classifier_segment);
     if lists.is_empty() {
         return None;
     }
@@ -57,26 +52,45 @@ pub(super) fn without_package_arguments(
 }
 
 impl Checker<'_> {
+    /// Validate that a successful classifier selection retained its path boundary, then report and
+    /// remove package-owned arguments before applying the selected classifier or alias.
+    pub(super) fn check_selected_package_type_arguments(
+        &mut self,
+        reference: &TypeRef,
+        classifier_segment: Option<u32>,
+    ) -> Option<TypeRef> {
+        self.check_package_type_arguments(
+            reference,
+            classifier_segment
+                .expect("a selected classifier path must retain its written boundary"),
+        )
+    }
+
     /// Report the type arguments `reference` wrote on package segments, and return it without
     /// them when it wrote any.
     pub(super) fn check_package_type_arguments(
         &mut self,
         reference: &TypeRef,
-        classifier: TypeName,
+        classifier_segment: u32,
     ) -> Option<TypeRef> {
-        let (lists, packages) = package_argument_lists(reference, classifier);
+        let (lists, packages) = package_argument_lists(reference, classifier_segment);
         for list in &lists {
             // The last package segment never accepted type arguments.
             let forbidden = self.file.forbid_useless_type_arguments || list.segment + 1 == packages;
+            let warning = self
+                .file
+                .useless_type_arguments_warning_format
+                .as_ref()
+                .map(|format| format.message(MESSAGE));
             self.report_deprecation_error(
                 list.span,
-                "ForbidUselessTypeArgumentsIn25",
                 forbidden,
-                "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING",
+                warning.as_deref(),
+                crate::diag::CompilerWarningName::TypeArgumentsNotAllowed,
                 MESSAGE,
             );
         }
-        without_package_arguments(reference, classifier)
+        without_package_arguments(reference, classifier_segment)
     }
 
     /// Report the package-segment type arguments of a declaration type Pass 1 finalized as
@@ -85,16 +99,33 @@ impl Checker<'_> {
         &mut self,
         reference: &TypeRef,
         resolved: Ty,
+        spelling: &crate::spelling::Spelled,
     ) {
         let resolved = resolved.non_null();
-        if let Some(classifier) = resolved.kotlin_class_internal() {
-            self.check_package_type_arguments(reference, classifier);
+        let without_package_arguments = spelling
+            .classifier_segment
+            .and_then(|segment| self.check_package_type_arguments(reference, segment));
+        let reference = without_package_arguments.as_ref().unwrap_or(reference);
+        if spelling.alias.is_some() {
+            for (argument, (resolved, spelling)) in reference.targs.iter().zip(&spelling.alias_args)
+            {
+                if !argument.is_star_projection() {
+                    self.check_finalized_package_type_arguments(argument, *resolved, spelling);
+                }
+            }
+            return;
         }
-        for (argument, resolved) in reference.targs.iter().zip(resolved.type_args()) {
+        for ((argument, resolved), spelling) in reference
+            .targs
+            .iter()
+            .zip(resolved.type_args())
+            .zip(&spelling.args)
+        {
             if !argument.is_star_projection() {
                 self.check_finalized_package_type_arguments(
                     argument,
                     resolved.projection_read_ty(),
+                    spelling,
                 );
             }
         }

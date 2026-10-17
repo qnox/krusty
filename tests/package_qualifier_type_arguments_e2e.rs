@@ -170,3 +170,257 @@ fn forbidden_last_package_segment_type_arguments_are_errors() {
         &[],
     );
 }
+
+/// `Flat` is one selected classifier segment even though its expansion has two. The package
+/// boundary belongs to the alias binding, not to `Outer.Nested`'s expanded identity.
+#[test]
+fn an_alias_expansion_does_not_move_the_written_package_boundary() {
+    assert_matches_kotlinc(
+        &[(
+            "AliasBoundary.kt",
+            "\
+package aliasboundary.parts
+
+class Outer { class Nested }
+typealias Flat = Outer.Nested
+
+fun take(value: aliasboundary<Any>.parts.Flat?) {}
+",
+        )],
+        &[],
+        &[],
+        &[warning("AliasBoundary.kt:6:30")],
+    );
+}
+
+#[test]
+fn the_last_package_segment_is_kept_for_aliases_and_escaped_names() {
+    assert_matches_kotlinc(
+        &[
+            (
+                "AliasBoundary.kt",
+                "\
+package aliasboundary.parts
+
+class Outer { class Nested }
+typealias Flat = Outer.Nested
+
+fun take(value: aliasboundary.parts<Any>.Flat?) {}
+",
+            ),
+            (
+                "Escaped.kt",
+                "\
+package escaped.`when`
+
+class Cls
+
+fun take(value: escaped.`when`<Any>.Cls?) {}
+",
+            ),
+        ],
+        &[],
+        &[error("AliasBoundary.kt:6:36"), error("Escaped.kt:5:31")],
+        &[],
+    );
+}
+
+#[test]
+fn type_alias_targets_use_the_same_package_boundary_check() {
+    assert_matches_kotlinc(
+        &[(
+            "TypeAliasTarget.kt",
+            "\
+package part1.part2.part3
+
+class Cls
+typealias Alias = part1<Int>.part2.part3.Cls
+",
+        )],
+        &[],
+        &[],
+        &[warning("TypeAliasTarget.kt:4:24")],
+    );
+}
+
+#[test]
+fn contextual_local_constructor_parameters_keep_their_own_header_sites() {
+    assert_matches_kotlinc(
+        &[(
+            "ContextualConstructor.kt",
+            "\
+package contextual.parts
+
+class Marker
+class Value
+fun build() {
+    context(contextual.parts.Marker)
+    class Local(value: contextual<Any>.parts.Value)
+}
+",
+        )],
+        &["-XXLanguage:+ContextReceivers"],
+        &[],
+        &[warning("ContextualConstructor.kt:7:34")],
+    );
+}
+
+#[test]
+fn shape_changing_local_alias_projects_nested_source_facts_once() {
+    assert_matches_kotlinc(
+        &[(
+            "LocalAlias.kt",
+            "\
+package localalias.parts
+
+class Leaf
+fun build() {
+    typealias Pair<T> = Map<T, T>
+    class Local(val value: Pair<localalias<Any>.parts.Leaf>)
+}
+",
+        )],
+        &["-XXLanguage:+LocalTypeAliases"],
+        &[],
+        &[warning("LocalAlias.kt:6:43")],
+    );
+}
+
+#[test]
+fn alias_expansion_keeps_its_declaration_site_target_under_use_site_shadowing() {
+    assert_matches_kotlinc(
+        &[(
+            "AliasShadowing.kt",
+            "\
+package aliasshadow.parts
+
+class Target<T>(val declarationSite: Int)
+typealias Alias<T> = Target<T>
+class Leaf
+fun build() {
+    class Target<T>
+    class Local(val value: Alias<aliasshadow<Any>.parts.Leaf>) {
+        fun read(): Int = value.declarationSite
+    }
+}
+",
+        )],
+        &[],
+        &[],
+        &[warning("AliasShadowing.kt:8:45")],
+    );
+}
+
+#[test]
+fn local_alias_target_is_bound_before_a_later_use_site_shadow() {
+    assert_matches_kotlinc(
+        &[(
+            "LocalAliasShadowing.kt",
+            "\
+package localshadow.parts
+
+class Target<T>(val declarationSite: Int)
+class Leaf
+fun build() {
+    typealias Alias<T> = Target<T>
+    class Target<T>
+    class Local(val value: Alias<localshadow<Any>.parts.Leaf>) {
+        fun read(): Int = value.declarationSite
+    }
+}
+",
+        )],
+        &["-XXLanguage:+LocalTypeAliases"],
+        &[],
+        &[warning("LocalAliasShadowing.kt:8:45")],
+    );
+}
+
+#[test]
+fn chained_local_aliases_reuse_the_first_alias_semantic_template() {
+    assert_matches_kotlinc(
+        &[(
+            "LocalAliasChain.kt",
+            "\
+package localchain.parts
+
+class Target<T>(val declarationSite: Int)
+class Leaf
+fun build() {
+    typealias A<T> = Target<T>
+    typealias B<T> = A<T>
+    class Target<T>
+    class Local(val value: B<localchain<Any>.parts.Leaf>) {
+        fun read(): Int = value.declarationSite
+    }
+}
+",
+        )],
+        &["-XXLanguage:+LocalTypeAliases"],
+        &[],
+        &[warning("LocalAliasChain.kt:9:40")],
+    );
+}
+
+#[test]
+fn non_generic_local_alias_chain_b_equals_a_keeps_a_bound_target() {
+    assert_matches_kotlinc(
+        &[(
+            "LocalAliasSimpleChain.kt",
+            "\
+class Target(val declarationSite: Int)
+fun build() {
+    typealias A = Target
+    typealias B = A
+    class Target
+    class Local(val value: B) {
+        fun read(): Int = value.declarationSite
+    }
+}
+",
+        )],
+        &["-XXLanguage:+LocalTypeAliases"],
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn inferred_result_evaluates_a_generic_cast_type_structurally() {
+    assert_matches_kotlinc(
+        &[(
+            "InferredGenericCast.kt",
+            "\
+class Cell<T>(val value: T)
+
+fun inferred(input: Cell<String>?) = (input as Cell<String>).value
+fun use(): Int = inferred(Cell(\"OK\")).length
+",
+        )],
+        &[],
+        &[],
+        &[],
+    );
+}
+
+#[test]
+fn inferred_result_uses_a_bound_local_alias_inside_the_body() {
+    assert_matches_kotlinc(
+        &[(
+            "InferredLocalAlias.kt",
+            "\
+class Cell<T>(val value: T)
+
+fun inferred(input: Cell<String>?) = run {
+    typealias Alias<T> = Cell<T>
+    (input as Alias<String>).value
+}
+
+fun use(): Int = inferred(Cell(\"OK\")).length
+",
+        )],
+        &["-XXLanguage:+LocalTypeAliases"],
+        &[],
+        &[],
+    );
+}

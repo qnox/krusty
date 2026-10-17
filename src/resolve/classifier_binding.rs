@@ -101,6 +101,7 @@ type ClassifierBinding = (
     InheritedNestedClassifier,
     Option<ClassifierMiss>,
     Option<SelectedTypeAlias>,
+    Option<u32>,
 );
 
 enum CompleteImportedSelection {
@@ -130,7 +131,8 @@ impl Checker<'_> {
 
     /// Select the classifier root from the scope tower, then commit every remaining segment through
     /// the shared qualifier loop. The third result is the alias binding from the same winning root
-    /// rung. There is no import/module/classpath retry after this returns.
+    /// rung. The fourth result is the zero-based written segment that first bound as a classifier.
+    /// There is no import/module/classpath retry after this returns.
     pub(super) fn select_classifier_binding(
         &self,
         scope: &CheckerScope<'_>,
@@ -165,6 +167,7 @@ impl Checker<'_> {
             return (
                 InheritedNestedClassifier::NotFound,
                 Some(ClassifierMiss::Unresolved(name.to_string())),
+                None,
                 None,
             );
         };
@@ -224,6 +227,7 @@ impl Checker<'_> {
                     InheritedNestedClassifier::Ambiguous,
                     Some(ClassifierMiss::Unresolved(root_name.clone())),
                     None,
+                    None,
                 ));
             }
             InheritedNestedClassifier::NotFound => {}
@@ -252,6 +256,7 @@ impl Checker<'_> {
                 return (
                     InheritedNestedClassifier::NotFound,
                     Some(ClassifierMiss::Unresolved(root_name.clone())),
+                    None,
                     None,
                 );
             }
@@ -287,6 +292,7 @@ impl Checker<'_> {
                                     .collect(),
                             )),
                             None,
+                            None,
                         );
                     }
                 }
@@ -316,6 +322,7 @@ impl Checker<'_> {
                     return (
                         InheritedNestedClassifier::Ambiguous,
                         Some(ClassifierMiss::Ambiguous(unaliased_candidates(candidates))),
+                        None,
                         None,
                     );
                 }
@@ -351,6 +358,7 @@ impl Checker<'_> {
                         InheritedNestedClassifier::Ambiguous,
                         Some(ClassifierMiss::Ambiguous(unaliased_candidates(candidates))),
                         None,
+                        None,
                     ));
                 }
                 CandidateSelectionWithTies::None => {}
@@ -370,6 +378,7 @@ impl Checker<'_> {
                 return nearest_miss.take().unwrap_or((
                     InheritedNestedClassifier::Ambiguous,
                     Some(ClassifierMiss::Unresolved(root_name.clone())),
+                    None,
                     None,
                 ));
             }
@@ -394,6 +403,7 @@ impl Checker<'_> {
             InheritedNestedClassifier::NotFound,
             Some(ClassifierMiss::Unresolved(root_name.clone())),
             None,
+            None,
         )
     }
 
@@ -406,14 +416,18 @@ impl Checker<'_> {
         segments: &[(Option<ExprId>, String)],
         mut selected_alias: Option<SelectedTypeAlias>,
     ) -> ClassifierBinding {
-        match walk_qualifier_namespace_facets_with_declaration_identity(
+        match walk_qualifier_namespace_facets_with_binding_identity(
             source,
             root.classifier(),
             None,
             root_name,
             &segments[1..],
         ) {
-            Ok((ResolvedQualifier::Classifier(internal), declaration_identity)) => {
+            Ok((
+                ResolvedQualifier::Classifier(internal),
+                declaration_identity,
+                classifier_segment,
+            )) => {
                 let internal = self.libraries.canonical_source_type_name(internal);
                 if let Some(declaration) = declaration_identity {
                     let Ok(alias) = selected_alias_from_declaration(internal, Some(&declaration))
@@ -429,13 +443,15 @@ impl Checker<'_> {
                     InheritedNestedClassifier::Found(internal),
                     None,
                     selected_alias,
+                    classifier_segment,
                 )
             }
-            Ok((ResolvedQualifier::Value | ResolvedQualifier::Package(_), _)) => (
+            Ok((ResolvedQualifier::Value | ResolvedQualifier::Package(_), _, _)) => (
                 InheritedNestedClassifier::NotFound,
                 segments
                     .last()
                     .map(|(_, segment)| ClassifierMiss::Unresolved(segment.clone())),
+                None,
                 None,
             ),
             Err(QualifierError::UnresolvedSegment { name, .. })
@@ -443,10 +459,12 @@ impl Checker<'_> {
                 InheritedNestedClassifier::NotFound,
                 Some(ClassifierMiss::Unresolved(name)),
                 None,
+                None,
             ),
             Err(QualifierError::NotANameChain { .. }) => (
                 InheritedNestedClassifier::NotFound,
                 Some(ClassifierMiss::Unresolved(root_name.to_string())),
+                None,
                 None,
             ),
         }
@@ -490,7 +508,7 @@ impl Checker<'_> {
                 .collect::<Vec<_>>();
             debug_assert!(!roots.is_empty());
 
-            let mut completed: Vec<(TypeName, Option<SelectedTypeAlias>)> = Vec::new();
+            let mut completed: Vec<(TypeName, Option<SelectedTypeAlias>, Option<u32>)> = Vec::new();
             for (root, declaration) in roots {
                 let alias = selected_alias_from_declaration(root, declaration.as_ref());
                 let binding = self.commit_classifier_suffix(
@@ -510,35 +528,40 @@ impl Checker<'_> {
                     ));
                 };
                 let selected_alias = binding.2;
-                if let Some((_, previous_alias)) = completed
+                let classifier_segment = binding.3;
+                if let Some((_, previous_alias, previous_segment)) = completed
                     .iter()
-                    .find(|(previous, _)| *previous == classifier)
+                    .find(|(previous, _, _)| *previous == classifier)
                 {
-                    if !same_selected_alias(previous_alias.as_ref(), selected_alias.as_ref()) {
+                    if !same_selected_alias(previous_alias.as_ref(), selected_alias.as_ref())
+                        || *previous_segment != classifier_segment
+                    {
                         return CompleteImportedSelection::Selected(Self::invalid_alias_selection(
                             root_name,
                         ));
                     }
                     continue;
                 }
-                completed.push((classifier, selected_alias));
+                completed.push((classifier, selected_alias, classifier_segment));
             }
 
             match completed.len() {
                 0 => {}
                 1 => {
-                    let (classifier, alias) = completed.pop().expect("one completed type path");
+                    let (classifier, alias, classifier_segment) =
+                        completed.pop().expect("one completed type path");
                     return CompleteImportedSelection::Selected((
                         InheritedNestedClassifier::Found(classifier),
                         None,
                         alias,
+                        classifier_segment,
                     ));
                 }
                 _ => {
                     return CompleteImportedSelection::Ambiguous(
                         completed
                             .into_iter()
-                            .map(|(classifier, _)| classifier)
+                            .map(|(classifier, _, _)| classifier)
                             .collect(),
                     );
                 }
@@ -604,10 +627,12 @@ impl Checker<'_> {
         InheritedNestedClassifier,
         Option<ClassifierMiss>,
         Option<SelectedTypeAlias>,
+        Option<u32>,
     ) {
         (
             InheritedNestedClassifier::Ambiguous,
             Some(ClassifierMiss::Unresolved(name.to_string())),
+            None,
             None,
         )
     }

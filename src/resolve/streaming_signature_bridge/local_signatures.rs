@@ -520,12 +520,15 @@ fn publish_checked_local_signatures_selected(
                         return false;
                     }
                     let source_name = &class.type_params[ordinal];
-                    let mut bounds = class
+                    let bounds = class
                         .type_param_bounds
                         .iter()
                         .filter(|(formal, _)| formal == source_name)
-                        .filter_map(|(_, reference)| info.resolved_type_bound(reference))
-                        .collect::<Vec<_>>();
+                        .map(|(_, reference)| info.resolved_type_bound(reference))
+                        .collect::<Option<Vec<_>>>();
+                    let Some(mut bounds) = bounds else {
+                        return false;
+                    };
                     if bounds.is_empty() {
                         bounds.push((*bound, is_interface(index, *bound)));
                     }
@@ -668,7 +671,28 @@ fn publish_checked_local_signatures_selected(
                 .map(|header| (declaration, index.declaration_anchor(declaration), header)))
             .collect::<Vec<_>>(),
     );
-    let mut failed = Vec::new();
+    let mut failed = info
+        .failed_local_declaration_bindings
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    let pass_one_finalized_headers = local_declarations
+        .iter()
+        .copied()
+        .filter(|declaration| index.declaration_spellings(*declaration).is_some())
+        .collect::<crate::fx_hash::HashSet<_>>();
+    if let Some(active) = active {
+        failed.extend(
+            super::local_declaration_spellings::publish_checked_local_declaration_spellings(
+                file,
+                active,
+                info,
+                index,
+                &local_declarations,
+                &pass_one_finalized_headers,
+            ),
+        );
+    }
     let mut deferred_interface_delegations = Vec::new();
 
     let local_classifiers = local_declarations
@@ -701,13 +725,7 @@ fn publish_checked_local_signatures_selected(
             })
         });
         let parser_class = match active {
-            Some(active) => active.class(file, declaration).or_else(|| {
-                let transient = class?.source_decl?;
-                match file.decl(transient) {
-                    Decl::Class(class) => Some((transient, class)),
-                    Decl::Fun(_) | Decl::Property(_) => None,
-                }
-            }),
+            Some(active) => active.class(file, declaration),
             None => {
                 let Some(range) = index.declaration_range(declaration) else {
                     failed.push(declaration);
@@ -732,14 +750,42 @@ fn publish_checked_local_signatures_selected(
             failed.push(declaration);
             continue;
         };
-        let class = class.or_else(|| {
-            table.and_then(|table| {
-                table.classes.values().find(|candidate| {
-                    candidate.source_file == source.raw()
-                        && candidate.source_decl == Some(transient)
+        let finalized_header = pass_one_finalized_headers.contains(&declaration);
+        if finalized_header && index.classifier_header(declaration).is_none() {
+            crate::trace_compiler!(
+                "signature",
+                "finalized local classifier is missing its stable header declaration={declaration:?}",
+            );
+            failed.push(declaration);
+            continue;
+        }
+        if finalized_header {
+            let stable_classifier = index
+                .classifier_header(declaration)
+                .map(|header| header.classifier);
+            if info
+                .checked_local_classifier_identities
+                .get(&declaration)
+                .copied()
+                != stable_classifier
+                || index.classifier_type_arguments(declaration).is_none()
+                || index.classifier_hierarchy(declaration).is_none()
+            {
+                failed.push(declaration);
+                continue;
+            }
+        }
+        let class = match active {
+            Some(_) => class,
+            None => class.or_else(|| {
+                table.and_then(|table| {
+                    table.classes.values().find(|candidate| {
+                        candidate.source_file == source.raw()
+                            && candidate.source_decl == Some(transient)
+                    })
                 })
-            })
-        });
+            }),
+        };
         let Some(class) = class else {
             // Production Pass 2 has destroyed the parser-backed signature graph. A body-local
             // classifier's already-published primary-constructor result carries its stable semantic
@@ -749,17 +795,7 @@ fn publish_checked_local_signatures_selected(
             let classifier = info
                 .checked_local_classifier_identities
                 .get(&declaration)
-                .copied()
-                .or_else(|| {
-                    (0..index.declaration_count()).find_map(|raw| {
-                        let child = DeclarationId::from_raw(raw as u32);
-                        let child_anchor = index.declaration_anchor(child)?;
-                        (child_anchor.owner == Some(declaration)
-                            && child_anchor.kind == DeclarationKind::Constructor)
-                            .then(|| index.signature(child)?.result.get().kotlin_class_internal())
-                            .flatten()
-                    })
-                });
+                .copied();
             let Some(classifier) = classifier else {
                 crate::trace_compiler!(
                     "signature",
@@ -768,17 +804,16 @@ fn publish_checked_local_signatures_selected(
                 failed.push(declaration);
                 continue;
             };
-            let checked_supertypes = info
-                .checked_local_supertypes
-                .get(&declaration)
-                .map(|supertypes| supertypes.to_vec())
-                .unwrap_or_else(|| {
-                    class_decl
-                        .supertypes
-                        .iter()
-                        .filter_map(|supertype| info.resolved_type(supertype))
-                        .collect()
-                });
+            let checked_supertypes = match info.checked_local_supertypes.get(&declaration) {
+                Some(supertypes) => supertypes.to_vec(),
+                None => {
+                    if class_decl.base_class.is_some() || !class_decl.supertypes.is_empty() {
+                        failed.push(declaration);
+                        continue;
+                    }
+                    Vec::new()
+                }
+            };
             let (superclass, interfaces) = {
                 let is_interface = |ty: Ty| {
                     let Some(owner) = ty.non_null().kotlin_class_internal() else {
@@ -838,17 +873,21 @@ fn publish_checked_local_signatures_selected(
                     interface_delegations,
                 ));
             }
-            if !publish_checked_classifier_type_arguments(
-                info,
-                index,
-                platform,
-                declaration,
-                class_decl,
-            ) {
+            if !finalized_header
+                && !publish_checked_classifier_type_arguments(
+                    info,
+                    index,
+                    platform,
+                    declaration,
+                    class_decl,
+                )
+            {
                 failed.push(declaration);
                 continue;
             }
-            if !publish_checked_classifier_hierarchy(index, platform, source, declaration) {
+            if !finalized_header
+                && !publish_checked_classifier_hierarchy(index, platform, source, declaration)
+            {
                 failed.push(declaration);
             }
             continue;
@@ -973,7 +1012,7 @@ fn publish_checked_local_signatures_selected(
         let type_arguments = (0..type_argument_count)
             .map(|ordinal| index.type_parameter(declaration, ordinal as u32))
             .collect::<Option<Vec<_>>>();
-        if index.classifier_type_arguments(declaration).is_none() {
+        if !finalized_header && index.classifier_type_arguments(declaration).is_none() {
             if let Some(type_arguments) = type_arguments {
                 index.publish_classifier_type_arguments(
                     declaration,
@@ -990,7 +1029,9 @@ fn publish_checked_local_signatures_selected(
         // above is not enough: lowering the retained default refuses a classifier that has no
         // applied hierarchy, and an anonymous object extending a local class in that default
         // dispatches through this edge.
-        if !publish_checked_classifier_hierarchy(index, platform, source, declaration) {
+        if !finalized_header
+            && !publish_checked_classifier_hierarchy(index, platform, source, declaration)
+        {
             failed.push(declaration);
         }
     }
@@ -1038,6 +1079,17 @@ fn publish_checked_local_signatures_selected(
             | DeclarationKind::Initializer
             | DeclarationKind::Script => false,
         };
+        if active.is_some() && pass_one_finalized_headers.contains(&declaration) {
+            if !already_complete {
+                crate::trace_compiler!(
+                    "signature",
+                    "finalized local declaration is missing stable signature/shape declaration={declaration:?} kind={:?}",
+                    anchor.kind,
+                );
+                failed.push(declaration);
+            }
+            continue;
+        }
         if already_complete {
             continue;
         }
@@ -1077,28 +1129,22 @@ fn publish_checked_local_signatures_selected(
                         .params
                         .iter()
                         .map(|parameter| {
-                            info.resolved_declaration_type(&parameter.ty)
-                                .or_else(|| info.resolved_type(&parameter.ty))
-                                .map(|ty| {
-                                    crate::types::semantic_value_parameter_ty(
-                                        ty,
-                                        parameter.is_vararg,
-                                    )
-                                })
+                            info.resolved_declaration_type(&parameter.ty).map(|ty| {
+                                crate::types::semantic_value_parameter_ty(ty, parameter.is_vararg)
+                            })
                         })
                         .collect::<Option<Vec<_>>>();
-                    let result = method
-                        .ret
-                        .as_ref()
-                        .and_then(|result| {
-                            info.resolved_declaration_type(result)
-                                .or_else(|| info.resolved_type(result))
-                        })
-                        .or_else(|| info.checked_declaration_results.get(&declaration).copied())
-                        .or_else(|| {
-                            super::super::fun_body_expr(&method.body)
-                                .and_then(|body| info.expr_types.get(body.0 as usize).copied())
-                        });
+                    let result = match method.ret.as_ref() {
+                        Some(result) => info.resolved_declaration_type(result),
+                        None => info
+                            .checked_declaration_results
+                            .get(&declaration)
+                            .copied()
+                            .or_else(|| {
+                                super::super::fun_body_expr(&method.body)
+                                    .and_then(|body| info.expr_types.get(body.0 as usize).copied())
+                            }),
+                    };
                     let (Some(parameters), Some(result)) = (parameters, result) else {
                         failed.push(declaration);
                         continue;
@@ -1127,7 +1173,12 @@ fn publish_checked_local_signatures_selected(
                             .type_param_bounds
                             .iter()
                             .filter(|(formal, _)| formal == source_name)
-                            .filter_map(|(_, bound)| info.resolved_type_bound(bound));
+                            .map(|(_, bound)| info.resolved_type_bound(bound))
+                            .collect::<Option<Vec<_>>>();
+                        let Some(bounds) = bounds else {
+                            type_parameters_failed = true;
+                            break;
+                        };
                         if index
                             .publish_type_parameter(
                                 declaration,
@@ -1156,15 +1207,14 @@ fn publish_checked_local_signatures_selected(
                         failed.push(declaration);
                         continue;
                     }
-                    let receiver = method
-                        .receiver
-                        .as_ref()
-                        .and_then(|receiver| {
-                            info.resolved_declaration_type(receiver)
-                                .or_else(|| info.resolved_type(receiver))
-                        })
-                        .map(ResolvedTy::new)
-                        .transpose();
+                    let receiver = match method.receiver.as_ref() {
+                        Some(receiver) => info
+                            .resolved_declaration_type(receiver)
+                            .ok_or(crate::fir::UnpublishableType::Error)
+                            .and_then(ResolvedTy::new)
+                            .map(Some),
+                        None => Ok(None),
+                    };
                     let Ok(receiver) = receiver else {
                         failed.push(declaration);
                         continue;
@@ -1203,12 +1253,9 @@ fn publish_checked_local_signatures_selected(
                     if let Some(parameter) =
                         active.and_then(|active| active.constructor_parameter(file, declaration))
                     {
-                        let ty = info
-                            .resolved_declaration_type(&parameter.ty)
-                            .or_else(|| info.resolved_type(&parameter.ty))
-                            .map(|ty| {
-                                crate::types::semantic_value_parameter_ty(ty, parameter.is_vararg)
-                            });
+                        let ty = info.resolved_declaration_type(&parameter.ty).map(|ty| {
+                            crate::types::semantic_value_parameter_ty(ty, parameter.is_vararg)
+                        });
                         let Some(ty) =
                             ty.filter(|ty| !ty.mentions_error() && !ty.mentions_pending())
                         else {
@@ -1242,48 +1289,59 @@ fn publish_checked_local_signatures_selected(
                         failed.push(declaration);
                         continue;
                     };
-                    let ty = property
-                        .declared_ty()
-                        .and_then(|declared| {
-                            info.resolved_declaration_type(declared)
-                                .or_else(|| info.resolved_type(declared))
-                        })
-                        .or_else(|| {
-                            info.property_decl_types
-                                .get(&(property.span.lo, property.span.hi))
-                                .copied()
-                        })
-                        .or_else(|| {
-                            property
-                                .init
-                                .and_then(|init| info.expr_types.get(init.0 as usize).copied())
-                        })
-                        .or_else(|| {
-                            property
-                                .getter
-                                .as_ref()
-                                .and_then(super::super::fun_body_expr)
-                                .and_then(|body| info.expr_types.get(body.0 as usize).copied())
-                        });
+                    let ty = match property.declared_ty() {
+                        Some(declared) => info.resolved_declaration_type(declared),
+                        None => info
+                            .property_decl_types
+                            .get(&(property.span.lo, property.span.hi))
+                            .copied()
+                            .or_else(|| {
+                                property
+                                    .init
+                                    .and_then(|init| info.expr_types.get(init.0 as usize).copied())
+                            })
+                            .or_else(|| {
+                                property
+                                    .getter
+                                    .as_ref()
+                                    .and_then(super::super::fun_body_expr)
+                                    .and_then(|body| info.expr_types.get(body.0 as usize).copied())
+                            }),
+                    };
                     let Some(ty) = ty.filter(|ty| !ty.mentions_error() && !ty.mentions_pending())
                     else {
                         failed.push(declaration);
                         continue;
                     };
-                    if !signature_published && index.publish_signature(declaration, [], ty).is_err()
+                    let context_parameters = property
+                        .context_params
+                        .iter()
+                        .map(|parameter| {
+                            info.resolved_declaration_type(&parameter.ty).map(|ty| {
+                                crate::types::semantic_value_parameter_ty(ty, parameter.is_vararg)
+                            })
+                        })
+                        .collect::<Option<Vec<_>>>();
+                    let Some(context_parameters) = context_parameters else {
+                        failed.push(declaration);
+                        continue;
+                    };
+                    if !signature_published
+                        && index
+                            .publish_signature(declaration, context_parameters, ty)
+                            .is_err()
                     {
                         failed.push(declaration);
                         continue;
                     }
-                    let receiver = property
-                        .receiver
-                        .as_ref()
-                        .and_then(|receiver| {
-                            info.resolved_declaration_type(receiver)
-                                .or_else(|| info.resolved_type(receiver))
-                        })
-                        .map(ResolvedTy::new)
-                        .transpose();
+                    let receiver = match property.receiver.as_ref() {
+                        Some(receiver) => info
+                            .resolved_declaration_type(receiver)
+                            .ok_or(crate::fir::UnpublishableType::Error)
+                            .and_then(ResolvedTy::new)
+                            .map(Some),
+                        None => Ok(None),
+                    };
                     let Ok(receiver) = receiver else {
                         failed.push(declaration);
                         continue;
@@ -1384,10 +1442,7 @@ fn publish_checked_local_signatures_selected(
                     let mut source_parameters = Vec::new();
                     let mut parameter_failed = false;
                     for parameter in &owner.context_params {
-                        let Some(ty) = info
-                            .resolved_declaration_type(&parameter.ty)
-                            .or_else(|| info.resolved_type(&parameter.ty))
-                        else {
+                        let Some(ty) = info.resolved_declaration_type(&parameter.ty) else {
                             parameter_failed = true;
                             break;
                         };
@@ -1410,10 +1465,7 @@ fn publish_checked_local_signatures_selected(
                     }
                     if anchor.sibling == 0 {
                         for parameter in &owner.props {
-                            let Some(ty) = info
-                                .resolved_declaration_type(&parameter.ty)
-                                .or_else(|| info.resolved_type(&parameter.ty))
-                            else {
+                            let Some(ty) = info.resolved_declaration_type(&parameter.ty) else {
                                 parameter_failed = true;
                                 break;
                             };
@@ -1458,10 +1510,7 @@ fn publish_checked_local_signatures_selected(
                             continue;
                         };
                         for parameter in &constructor.params {
-                            let Some(ty) = info
-                                .resolved_declaration_type(&parameter.ty)
-                                .or_else(|| info.resolved_type(&parameter.ty))
-                            else {
+                            let Some(ty) = info.resolved_declaration_type(&parameter.ty) else {
                                 parameter_failed = true;
                                 break;
                             };
@@ -1780,10 +1829,7 @@ fn publish_checked_local_signatures_selected(
                 let mut source_context_parameters = Vec::with_capacity(owner.context_params.len());
                 let mut context_parameter_failed = false;
                 for parameter in &owner.context_params {
-                    let Some(ty) = info
-                        .resolved_declaration_type(&parameter.ty)
-                        .or_else(|| info.resolved_type(&parameter.ty))
-                    else {
+                    let Some(ty) = info.resolved_declaration_type(&parameter.ty) else {
                         context_parameter_failed = true;
                         break;
                     };

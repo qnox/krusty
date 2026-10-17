@@ -4482,9 +4482,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         publish_legacy_top_level_conflict_recovery_keys(&mut table, files);
     }
 
-    if let Some(headers) = compact_headers {
-        collect_compact_declared_spellings(&mut table, headers, &file_class_names);
-    }
     collect_stable_visibility_suppressions(&mut table, compact_headers);
 
     table.class_names = class_names;

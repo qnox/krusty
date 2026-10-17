@@ -105,97 +105,13 @@ impl ProductionSignatureSemantics<'_> {
             .ok_or_else(Self::failure)
     }
 
-    /// Fold a dotted qualifier into the receiver type its last segment is read against.
-    ///
-    /// The first segment is an ordinary value/classifier lookup (an object denotes itself, a class
-    /// with a companion denotes the companion, an enum denotes itself); every later segment is an
-    /// ordinary member read. This is the same walk the checker performs for a qualified expression —
-    /// the graph contributes no lookup rules of its own.
-    /// The classifier a DOTTED spelling names, walking nested children from an in-scope root:
-    /// `Container.Nested` is `Container$Nested`. Every intermediate segment must itself exist as a
-    /// classifier, so a value-qualified spelling falls through to receiver folding untouched.
-    /// A type reference resolved WITHOUT a body checker: a type parameter of the owning declaration
-    /// chain, or a classifier reachable through this file's import scope, with its type arguments
-    /// resolved the same way. Returns `None` for the forms that still need the checker so the caller
-    /// can fall back rather than publish a wrong type.
-    pub(super) fn signature_type_ref(
-        &self,
-        scope: crate::fir::SignatureScope,
-        lexical: &super::super::CheckerScope<'_>,
-        reference: &TypeRef,
-    ) -> Option<Ty> {
-        self.signature_type_ref_at(scope, lexical, reference, true)
-    }
-
-    /// Locate the first declaration type component whose compact lookup fails. The packed header
-    /// owns every component span, so Pass 1 can diagnose `Outer<Missing>` at `Missing` without
-    /// retaining source text or blaming the otherwise valid outer classifier.
-    pub(super) fn unresolved_signature_type_ref<'a>(
-        &self,
-        scope: crate::fir::SignatureScope,
-        lexical: &super::super::CheckerScope<'_>,
-        reference: &'a TypeRef,
-        include_scope_owner_body: bool,
-    ) -> &'a TypeRef {
-        let nested = reference
-            .fun_params
-            .iter()
-            .chain(reference.arg.iter().map(|argument| &**argument))
-            .chain(reference.targs.iter());
-        for component in nested {
-            if self
-                .signature_type_ref_at(scope, lexical, component, include_scope_owner_body)
-                .is_none()
-            {
-                return self.unresolved_signature_type_ref(
-                    scope,
-                    lexical,
-                    component,
-                    include_scope_owner_body,
-                );
-            }
-        }
-        reference
-    }
-
-    /// Resolve a classifier header type in the lexical scope immediately outside the classifier
-    /// body. The classifier's own type parameters remain in `lexical`, but nested declarations from
-    /// its body are not visible in its supertype list (`class C : Base { interface Base }`).
-    pub(super) fn classifier_header_type_ref(
-        &self,
-        scope: crate::fir::SignatureScope,
-        lexical: &super::super::CheckerScope<'_>,
-        reference: &TypeRef,
-    ) -> Option<Ty> {
-        self.signature_type_ref_at(scope, lexical, reference, false)
-    }
-
-    pub(super) fn signature_type_ref_at(
+    pub(super) fn signature_type_ref_at_impl(
         &self,
         scope: crate::fir::SignatureScope,
         lexical: &super::super::CheckerScope<'_>,
         reference: &TypeRef,
         include_scope_owner_body: bool,
-    ) -> Option<Ty> {
-        self.signature_type_ref_at_with_origin(
-            scope,
-            lexical,
-            reference,
-            include_scope_owner_body,
-            None,
-        )
-    }
-
-    /// Resolve a compact type and, for the root occurrence only, retain the selected alias under
-    /// its stable graph origin. Recursive component resolution deliberately receives no origin:
-    /// an alias nested in an argument is not the alias of the root type expression.
-    pub(super) fn signature_type_ref_at_with_origin(
-        &self,
-        scope: crate::fir::SignatureScope,
-        lexical: &super::super::CheckerScope<'_>,
-        reference: &TypeRef,
-        include_scope_owner_body: bool,
-        selected_origin: Option<crate::fir::OriginId>,
+        selected_site: Option<SelectedTypeSite>,
     ) -> Option<Ty> {
         if reference.name.is_empty() {
             return None;
@@ -215,10 +131,26 @@ impl ProductionSignatureSemantics<'_> {
         // inventory erases receiver, context, and suspend shape. Resolve the components in the
         // same lexical scope before considering aliases or classifiers.
         if super::super::function_type_ref_shape(reference).is_some() {
+            for component in reference
+                .fun_params
+                .iter()
+                .chain(reference.arg.iter().map(Box::as_ref))
+                .filter(|component| component.is_star_projection())
+            {
+                self.record_type_spelling_projection(
+                    self.selected_type_child(selected_site, reference, component),
+                    Ty::nullable(Ty::obj("kotlin/Any")),
+                );
+            }
             let mut unresolved = false;
             let function = super::super::typeref_leaf(reference, &mut |component| match self
-                .signature_type_ref_at(scope, lexical, component, include_scope_owner_body)
-            {
+                .signature_type_ref_at_with_site(
+                    scope,
+                    lexical,
+                    component,
+                    include_scope_owner_body,
+                    self.selected_type_child(selected_site, reference, component),
+                ) {
                 Some(ty) => ty,
                 None => {
                     unresolved = true;
@@ -250,59 +182,74 @@ impl ProductionSignatureSemantics<'_> {
                 .and_then(|receiver| self.headers.syntax.ty(receiver))
                 .is_some_and(|receiver| receiver.span == reference.span);
         if associated_receiver && reference.targs.is_empty() {
-            if let Some((_, _, expansion)) =
+            if let Some((identity, _, expansion)) =
                 self.signature_source_alias_expansion(scope, &reference.name)
             {
                 if let Some(classifier) = expansion.non_null().obj_internal() {
+                    self.record_type_spelling_binding(
+                        selected_site,
+                        super::super::type_spellings::ResolvedTypeSpelling {
+                            classifier_segment: None,
+                            alias: Some(identity),
+                            resolved: None,
+                        },
+                    );
                     return Some(Ty::obj_name(classifier));
                 }
             }
         }
         let lexical_classifier =
             self.lexically_nested_classifier_at(scope, &reference.name, include_scope_owner_body);
-        let (qualified_classifier, _) =
-            self.qualified_type_scoped_classifier_binding(scope, &reference.name);
-        // An alias is a declaration in the classifier namespace, but a body-local classifier is a
-        // nearer rung. Do not use an imported alias as a template for that unrelated declaration.
-        if lexical_classifier.is_none() {
-            if let Some(ty) = qualified_classifier.as_ref().and_then(|selected| {
-                self.signature_source_alias(
+        let (qualified_binding, _) = self.qualified_type_scoped_classifier_binding(
+            scope,
+            &reference.name,
+            include_scope_owner_body,
+        );
+        // Classifier before leaf, matching `Checker::type_ref_ty`: a declared classifier outranks a
+        // builtin spelling of the same name. The binding carries the alias declaration and written
+        // package/classifier boundary selected by this same scope-tower operation.
+        let binding = lexical_classifier
+            .map(crate::symbol_resolver::CompletedClassifierPath::ordinary_root)
+            .or(qualified_binding)
+            .or_else(|| {
+                self.classifier_header_scope_owner(scope.owner)
+                    .and_then(|owner| {
+                        self.classifier_header_inherited_classifier(scope, owner, &reference.name)
+                    })
+                    .map(crate::symbol_resolver::CompletedClassifierPath::ordinary_root)
+            });
+        if let Some(binding) = binding {
+            self.record_type_spelling_binding(
+                selected_site,
+                super::super::type_spellings::ResolvedTypeSpelling {
+                    classifier_segment: (!reference.qualifier_arguments.is_empty())
+                        .then_some(binding.classifier_segment),
+                    alias: binding.selected.alias.as_ref().map(|alias| alias.identity),
+                    resolved: None,
+                },
+            );
+            let without_package_arguments =
+                super::super::package_qualifier_type_arguments::without_package_arguments(
+                    reference,
+                    binding.classifier_segment,
+                );
+            let reference = without_package_arguments.as_ref().unwrap_or(reference);
+            if let Some(alias) = binding.selected.alias {
+                let ty = self.apply_signature_source_alias(
                     scope,
                     lexical,
                     reference,
                     include_scope_owner_body,
-                    selected.alias.clone()?,
-                    selected_origin,
-                )
-            }) {
+                    alias,
+                    selected_site,
+                )?;
                 return Some(if reference.nullable() && ty != Ty::Error {
                     Ty::nullable(ty)
                 } else {
                     ty
                 });
             }
-        }
-        // Classifier before leaf, matching `Checker::type_ref_ty`: a declared classifier outranks a
-        // builtin spelling of the same name.
-        if let Some(internal) = lexical_classifier
-            .or_else(|| {
-                qualified_classifier
-                    .as_ref()
-                    .map(|selected| selected.classifier)
-            })
-            .or_else(|| {
-                self.classifier_header_scope_owner(scope.owner)
-                    .and_then(|owner| {
-                        self.classifier_header_inherited_classifier(scope, owner, &reference.name)
-                    })
-            })
-        {
-            // The checker reports arguments written on package segments; they select nothing.
-            let without_package_arguments =
-                super::super::package_qualifier_type_arguments::without_package_arguments(
-                    reference, internal,
-                );
-            let reference = without_package_arguments.as_ref().unwrap_or(reference);
+            let internal = binding.selected.classifier;
             let access = self
                 .with_resolver(scope, |resolver| {
                     resolver.inaccessible_classifier_access(internal)
@@ -390,11 +337,12 @@ impl ProductionSignatureSemantics<'_> {
                 parsed.push(if argument.is_star_projection() {
                     None
                 } else {
-                    let resolved = self.signature_type_ref_at(
+                    let resolved = self.signature_type_ref_at_with_site(
                         scope,
                         lexical,
                         argument,
                         include_scope_owner_body,
+                        self.selected_type_child(selected_site, reference, argument),
                     )?;
                     Some(super::super::projected_typeref_argument(
                         argument,
@@ -408,7 +356,7 @@ impl ProductionSignatureSemantics<'_> {
                 &parsed,
             );
             for (index, (syntax, resolved)) in reference.targs.iter().zip(parsed).enumerate() {
-                arguments.push(match resolved {
+                let argument = match resolved {
                     Some(resolved) => resolved,
                     None => {
                         let upper_bound = declaration
@@ -422,7 +370,14 @@ impl ProductionSignatureSemantics<'_> {
                             .unwrap_or(default_star_bound);
                         super::super::projected_typeref_argument(syntax, Ty::Error, upper_bound)
                     }
-                });
+                };
+                if syntax.is_star_projection() {
+                    self.record_type_spelling_projection(
+                        self.selected_type_child(selected_site, reference, syntax),
+                        argument,
+                    );
+                }
+                arguments.push(argument);
             }
             // An unqualified inner/local type supplies only its own arguments, while a qualified
             // spelling (`Outer<A>.Inner<B>`) is flattened by the parser as own arguments followed
@@ -478,8 +433,13 @@ impl ProductionSignatureSemantics<'_> {
         // reference instead of silently publishing `Ty::Error`.
         let mut unresolved = false;
         let leaf = super::super::typeref_leaf(reference, &mut |component| match self
-            .signature_type_ref_at(scope, lexical, component, include_scope_owner_body)
-        {
+            .signature_type_ref_at_with_site(
+                scope,
+                lexical,
+                component,
+                include_scope_owner_body,
+                self.selected_type_child(selected_site, reference, component),
+            ) {
             Some(ty) => ty,
             None => {
                 unresolved = true;
@@ -494,17 +454,17 @@ impl ProductionSignatureSemantics<'_> {
         })
     }
 
-    /// A source `typealias` reachable from this file, expanded with the exact use-site arguments.
-    /// This operation precedes target-classifier lookup because the alias declaration—not its
-    /// expansion—owns arity and projection semantics.
-    fn signature_source_alias(
+    /// Apply the source `typealias` carried by the already-selected classifier binding. The alias
+    /// declaration—not its expansion—owns arity and projection semantics; no spelling lookup is
+    /// repeated here.
+    fn apply_signature_source_alias(
         &self,
         scope: crate::fir::SignatureScope,
         lexical: &super::super::CheckerScope<'_>,
         reference: &TypeRef,
         include_scope_owner_body: bool,
         alias: crate::libraries::AliasExpansion,
-        selected_origin: Option<crate::fir::OriginId>,
+        selected_site: Option<SelectedTypeSite>,
     ) -> Option<Ty> {
         let identity = alias.identity;
         let formals = alias.formals;
@@ -573,16 +533,29 @@ impl ProductionSignatureSemantics<'_> {
                 let resolved = if argument.is_star_projection() {
                     Ty::Error
                 } else {
-                    self.signature_type_ref_at(scope, lexical, argument, include_scope_owner_body)?
+                    self.signature_type_ref_at_with_site(
+                        scope,
+                        lexical,
+                        argument,
+                        include_scope_owner_body,
+                        self.selected_type_child(selected_site, reference, argument),
+                    )?
                 };
-                Some(super::super::projected_typeref_argument(
+                let projected = super::super::projected_typeref_argument(
                     argument,
                     resolved,
                     fallback_star_bound,
-                ))
+                );
+                if argument.is_star_projection() {
+                    self.record_type_spelling_projection(
+                        self.selected_type_child(selected_site, reference, argument),
+                        projected,
+                    );
+                }
+                Some(projected)
             })
             .collect::<Option<Vec<_>>>()?;
-        if let Some(origin) = selected_origin {
+        if let Some(origin) = selected_site.and_then(|site| site.abbreviation_origin) {
             self.selected_types.record(
                 origin,
                 crate::fir::ResolvedTypeAbbreviation {
@@ -631,7 +604,9 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         spelling: &str,
     ) -> Option<crate::types::TypeName> {
-        self.qualified_type_classifier_binding(scope, spelling).0
+        self.qualified_type_classifier_binding(scope, spelling)
+            .0
+            .map(|binding| binding.selected.classifier)
     }
 
     /// Resolve a classifier spelling and retain the segment where the committed namespace walk
@@ -791,8 +766,9 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         spelling: &str,
+        include_scope_owner_body: bool,
     ) -> (
-        Option<crate::symbol_resolver::ScopedClassifier>,
+        Option<crate::symbol_resolver::CompletedClassifierPath>,
         Option<crate::symbol_resolver::ClassifierMiss>,
     ) {
         let segments = spelling.split('.').collect::<Vec<_>>();
@@ -833,7 +809,7 @@ impl ProductionSignatureSemantics<'_> {
                 .anchor(scope.owner)
                 .is_some_and(|anchor| anchor.kind == crate::fir::DeclarationKind::Classifier);
         let declaration_nested = (!header_scope)
-            .then(|| self.lexically_nested_classifier_at(scope, first, true))
+            .then(|| self.lexically_nested_classifier_at(scope, first, include_scope_owner_body))
             .flatten();
         self.with_resolver(scope, |resolver| {
             let mut failure = None;
@@ -846,17 +822,11 @@ impl ProductionSignatureSemantics<'_> {
                 if selected.is_none() && failure.is_none() {
                     failure = failed_segment;
                 }
-                selected
+                selected.map(crate::symbol_resolver::CompletedClassifierPath::ordinary_root)
             };
             if let Some(candidate) = declaration_nested {
                 if let Some(selected) = advance(candidate) {
-                    return Some((
-                        Some(crate::symbol_resolver::ScopedClassifier {
-                            classifier: selected,
-                            alias: None,
-                        }),
-                        None,
-                    ));
+                    return Some((Some(selected), None));
                 }
             }
             for &owner in &lexical_owners {
@@ -865,13 +835,7 @@ impl ProductionSignatureSemantics<'_> {
                     .unwrap_or_else(|| crate::types::type_name_nested_child(owner, first));
                 if resolver.classifier(candidate).is_some() {
                     if let Some(selected) = advance(candidate) {
-                        return Some((
-                            Some(crate::symbol_resolver::ScopedClassifier {
-                                classifier: selected,
-                                alias: None,
-                            }),
-                            None,
-                        ));
+                        return Some((Some(selected), None));
                     }
                 }
             }
@@ -899,10 +863,11 @@ impl ProductionSignatureSemantics<'_> {
                 match inherited() {
                     crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
                         return Some((
-                            Some(crate::symbol_resolver::ScopedClassifier {
-                                classifier,
-                                alias: None,
-                            }),
+                            Some(
+                                crate::symbol_resolver::CompletedClassifierPath::ordinary_root(
+                                    classifier,
+                                ),
+                            ),
                             None,
                         ));
                     }
@@ -927,7 +892,10 @@ impl ProductionSignatureSemantics<'_> {
                     return Some((
                         None,
                         Some(crate::symbol_resolver::ClassifierMiss::Ambiguous(
-                            candidates,
+                            candidates
+                                .into_iter()
+                                .map(|candidate| candidate.selected)
+                                .collect(),
                         )),
                     ));
                 }
@@ -941,10 +909,11 @@ impl ProductionSignatureSemantics<'_> {
                 match inherited() {
                     crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
                         return Some((
-                            Some(crate::symbol_resolver::ScopedClassifier {
-                                classifier,
-                                alias: None,
-                            }),
+                            Some(
+                                crate::symbol_resolver::CompletedClassifierPath::ordinary_root(
+                                    classifier,
+                                ),
+                            ),
                             None,
                         ));
                     }
@@ -982,11 +951,10 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         spelling: &str,
     ) -> (
-        Option<crate::types::TypeName>,
+        Option<crate::symbol_resolver::CompletedClassifierPath>,
         Option<crate::symbol_resolver::ClassifierMiss>,
     ) {
-        let (selected, failure) = self.qualified_type_scoped_classifier_binding(scope, spelling);
-        (selected.map(|selected| selected.classifier), failure)
+        self.qualified_type_scoped_classifier_binding(scope, spelling, true)
     }
 
     pub(super) fn qualified_classifier_or_source_alias(

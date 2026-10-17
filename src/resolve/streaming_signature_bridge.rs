@@ -12,6 +12,7 @@ use crate::types::{Ty, TypeName};
 
 use super::{ClassSig, Signature, SymbolTable};
 
+mod bound_local_alias_templates;
 mod callable_references;
 mod classifier_associated;
 mod classifier_identities;
@@ -20,14 +21,18 @@ mod convention_results;
 mod declaration_aliases;
 mod declaration_conflicts;
 mod declaration_spellings;
+mod declaration_type_sites;
+mod deferred_local_headers;
 mod delegates;
 mod demanded_source_call;
 mod diagnostics;
 mod file_import_scopes;
 mod generated_member_header;
 mod header_projection;
+mod header_type_resolution;
 mod implicit_context_candidates;
 mod integer_constants;
+mod local_declaration_spellings;
 mod local_signatures;
 mod lookups;
 mod operator_conventions;
@@ -43,17 +48,20 @@ mod source_contracts;
 mod stable_function_index;
 mod stable_property_index;
 mod top_level_call;
+mod type_alias_publication;
 mod type_parameter_publication;
+mod type_resolution;
 mod value_parameter_publication;
 mod value_selection;
 mod vararg_constructor_property;
 
+use bound_local_alias_templates::BoundLocalAliasTemplates;
 use implicit_context_candidates::SignatureImplicitReceiver;
 use value_selection::{SelectedEnumEntry, SelectedValue};
 
 pub(super) use declaration_aliases::publish_compact_nested_aliases;
 pub(crate) use declaration_conflicts::finalize_streamed_top_level_conflicts;
-pub(super) use declaration_spellings::collect_compact_declared_spellings;
+use declaration_spellings::finalized_compact_declared_spellings;
 pub(super) use header_projection::*;
 
 #[cfg(test)]
@@ -68,6 +76,7 @@ pub(crate) use local_signatures::{
 };
 pub(crate) use source_contracts::{extract_source_contract_candidates, SourceContractCandidate};
 use top_level_call::SelectedTopLevelCall;
+use type_resolution::SelectedTypeSite;
 
 struct ProductionSignatureSemantics<'a> {
     headers: &'a crate::fir::StreamedHeaderModule,
@@ -92,6 +101,7 @@ struct ProductionSignatureSemantics<'a> {
     selected_calls: selected_call_facts::SelectedCallFacts,
     /// Typealias provenance recorded by the compact type-resolution operation that selected it.
     selected_types: selected_type_facts::SelectedTypeFacts,
+    bound_local_alias_templates: BoundLocalAliasTemplates,
     /// Same-module source contracts bound before solving starts, by stable declaration, so a
     /// call of a source function with `returns() implies (x != null)` proves as much in a
     /// Pass-1 block as a library one. Publication into the index still happens at finalization.
@@ -3697,7 +3707,8 @@ pub(crate) fn finalized_streamed_signature_index(
     // A body inferred below may pass a value of a type variable with several bounds; the module
     // provider answers those bounds from this index.
     table.index_callable_type_parameter_bounds();
-    let (graph, extraction_failures) = extracted.into_parts();
+    let (mut graph, extraction_failures) = extracted.into_parts();
+    declaration_type_sites::bind_graph_declaration_types(&mut graph, headers);
     let mut required = Vec::new();
     let mut explicit = Vec::new();
     let mut inferred_parameters = HashMap::default();
@@ -3782,6 +3793,8 @@ pub(crate) fn finalized_streamed_signature_index(
         }
     }
     let empty_extension_receivers = HashMap::default();
+    let selected_types = selected_type_facts::SelectedTypeFacts::default();
+    let bound_local_alias_templates = BoundLocalAliasTemplates::for_graph(&graph);
     let explicit_type_semantics = ProductionSignatureSemantics {
         headers,
         table,
@@ -3798,14 +3811,17 @@ pub(crate) fn finalized_streamed_signature_index(
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
-        selected_types: selected_type_facts::SelectedTypeFacts::default(),
+        selected_types: selected_types.clone(),
+        bound_local_alias_templates: bound_local_alias_templates.clone(),
         source_contracts: RefCell::new(HashMap::default()),
         file_import_scopes: file_import_scopes::FileImportScopes::default(),
         classifier_stubs_by_source: RefCell::new(None),
         extension_receivers_by_declaration: RefCell::new(None),
         property_type_parameters_by_declaration: RefCell::new(None),
     };
+    explicit_type_semantics.bind_local_alias_templates(&graph);
     let stable_members = stable_property_index::StableMemberIndex::build(table);
+    let undemanded_ordinary_locals = deferred_local_headers::declarations(headers, &graph);
     for stub in &headers.stubs {
         if suppressed_generated_callables.contains(&stub.id) {
             continue;
@@ -3848,33 +3864,10 @@ pub(crate) fn finalized_streamed_signature_index(
             .declarations
             .anchor(stub.id)
             .expect("a compact stub must retain its stable anchor");
-        let owns_signature_default =
-            headers
-                .syntax
-                .declaration(stub.id)
-                .is_some_and(|declaration| {
-                    let parameters = match declaration.kind {
-                        crate::fir::HeaderDeclarationKind::Callable { parameters, .. }
-                        | crate::fir::HeaderDeclarationKind::Constructor { parameters, .. } => {
-                            Some(parameters)
-                        }
-                        crate::fir::HeaderDeclarationKind::Classifier { .. }
-                        | crate::fir::HeaderDeclarationKind::Property { .. }
-                        | crate::fir::HeaderDeclarationKind::TypeAlias { .. } => None,
-                    };
-                    parameters.is_some_and(|parameters| {
-                        headers
-                            .syntax
-                            .parameters(parameters)
-                            .iter()
-                            .any(|parameter| parameter.flags.has_default())
-                    })
-                });
-        let undemanded_ordinary_local = stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
-            && !stub.flags.has(crate::fir::DeclarationFlags::INLINE)
-            && !owns_signature_default
-            && graph.constraint(stub.id).is_none()
-            && graph.explicit_signature_types(stub.id).is_none();
+        let undemanded_ordinary_local = undemanded_ordinary_locals.contains(&stub.id);
+        if undemanded_ordinary_local {
+            continue;
+        }
         let signature = if stub.kind == DeclarationKind::Function
             && stub
                 .flags
@@ -3963,25 +3956,11 @@ pub(crate) fn finalized_streamed_signature_index(
             failed.push(stub.id);
             continue;
         };
-        if undemanded_ordinary_local
-            && parameters
-                .iter()
-                .copied()
-                .chain(std::iter::once(result))
-                .chain(receiver)
-                .any(|ty| crate::fir::ResolvedTy::new(ty).is_err())
-        {
-            // The transitional symbol table cannot resolve a body-local type outside its lexical
-            // rung. Preserve the stable declaration header and let Pass 2 either publish the
-            // checked signature or report the source diagnostic; do not turn it into a silent
-            // module-finalization failure.
-            continue;
-        }
         let constructor_property_vararg =
             vararg_constructor_property::is_vararg(headers, stub, anchor);
         let compact_declaration = headers.syntax.declaration(stub.id).map(|value| value.kind);
         let has_compact_declaration = compact_declaration.is_some();
-        let (parameter_types, result_type, receiver_type, backing_field_type) =
+        let (parameter_types, result_type, getter_result_type, receiver_type, backing_field_type) =
             match compact_declaration {
                 Some(crate::fir::HeaderDeclarationKind::Callable {
                     receiver,
@@ -4000,6 +3979,7 @@ pub(crate) fn finalized_streamed_signature_index(
                         crate::fir::HeaderResultType::ImplicitUnit
                         | crate::fir::HeaderResultType::Inferred => None,
                     },
+                    None,
                     receiver,
                     None,
                 ),
@@ -4018,6 +3998,7 @@ pub(crate) fn finalized_streamed_signature_index(
                         .map(|parameter| (parameter.ty, false))
                         .collect::<Vec<_>>(),
                     declared_type.or(getter_type),
+                    declared_type.and(getter_type),
                     receiver,
                     backing_field_type,
                 ),
@@ -4038,12 +4019,22 @@ pub(crate) fn finalized_streamed_signature_index(
                             .iter()
                             .map(|parameter| (parameter.ty, parameter.flags.is_vararg())),
                     );
-                    (all_parameters, None, None, None)
+                    (all_parameters, None, None, None, None)
                 }
                 Some(crate::fir::HeaderDeclarationKind::Classifier { .. })
                 | Some(crate::fir::HeaderDeclarationKind::TypeAlias { .. })
-                | None => (Vec::new(), None, None, None),
+                | None => (Vec::new(), None, None, None, None),
             };
+        let (explicit_parameter_offset, explicit_parameter_count) = match compact_declaration {
+            Some(crate::fir::HeaderDeclarationKind::Constructor {
+                context_parameters,
+                parameters,
+            }) => (
+                headers.syntax.parameters(context_parameters).len(),
+                headers.syntax.parameters(parameters).len(),
+            ),
+            _ => (0, parameter_types.len()),
+        };
         let scope = crate::fir::SignatureScope {
             owner: stub.id,
             source: stub.source,
@@ -4087,6 +4078,31 @@ pub(crate) fn finalized_streamed_signature_index(
                             resolved,
                             constructor_property_vararg,
                         )
+                    }
+                    Err(_) => header_resolution_failed = true,
+                }
+            }
+            if let Some(syntax) = getter_result_type {
+                match explicit_type_semantics.resolve_explicit_header_type(scope, syntax) {
+                    Ok(resolved) => {
+                        let resolved = super::semantic_value_parameter_ty(
+                            resolved,
+                            constructor_property_vararg,
+                        );
+                        if resolved != result {
+                            let span = headers
+                                .syntax
+                                .transient_type_ref(syntax, &headers.lookup_names)
+                                .map_or(stub.range, |reference| reference.span);
+                            diags.error(
+                                span,
+                                format!(
+                                    "getter return type '{}' must be equal to the property type '{}'",
+                                    resolved.source_name(),
+                                    result.source_name(),
+                                ),
+                            );
+                        }
                     }
                     Err(_) => header_resolution_failed = true,
                 }
@@ -4178,17 +4194,23 @@ pub(crate) fn finalized_streamed_signature_index(
         );
         if let Some(compact) = compact_explicit_types {
             let compact_parameters = graph.operands(compact.parameters);
-            if compact_parameters.len() > parameters.len() {
+            if compact_parameters.len() != explicit_parameter_count
+                || explicit_parameter_offset + compact_parameters.len() > parameters.len()
+            {
                 crate::trace_compiler!(
                     "fir",
-                    "signature finalization declined {:?}: compact explicit parameters exceed the semantic shape",
+                    "signature finalization declined {:?}: compact explicit parameters do not align with the semantic shape",
                     stub.id,
                 );
                 failed.push(stub.id);
                 continue;
             }
             let mut replacement_failed = false;
-            for (parameter, expression) in parameters.iter_mut().zip(compact_parameters) {
+            for (parameter, expression) in parameters
+                .iter_mut()
+                .skip(explicit_parameter_offset)
+                .zip(compact_parameters)
+            {
                 let Some(resolved) =
                     explicit_type_semantics.resolve_compact_graph_type(&graph, *expression)
                 else {
@@ -4209,6 +4231,36 @@ pub(crate) fn finalized_streamed_signature_index(
                     continue;
                 };
                 result = super::semantic_value_parameter_ty(resolved, constructor_property_vararg);
+            }
+            if let Some(expression) = compact.getter_result {
+                let Some(resolved) =
+                    explicit_type_semantics.resolve_compact_graph_type(&graph, expression)
+                else {
+                    failed.push(stub.id);
+                    continue;
+                };
+                let resolved =
+                    super::semantic_value_parameter_ty(resolved, constructor_property_vararg);
+                if resolved != result {
+                    let span = match compact_declaration {
+                        Some(crate::fir::HeaderDeclarationKind::Property {
+                            getter_type: Some(getter),
+                            ..
+                        }) => headers
+                            .syntax
+                            .transient_type_ref(getter, &headers.lookup_names)
+                            .map_or(stub.range, |reference| reference.span),
+                        _ => stub.range,
+                    };
+                    diags.error(
+                        span,
+                        format!(
+                            "getter return type '{}' must be equal to the property type '{}'",
+                            resolved.source_name(),
+                            result.source_name(),
+                        ),
+                    );
+                }
             }
             if let Some(expression) = compact.receiver {
                 let Some(resolved) =
@@ -4465,7 +4517,8 @@ pub(crate) fn finalized_streamed_signature_index(
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
-        selected_types: selected_type_facts::SelectedTypeFacts::default(),
+        selected_types,
+        bound_local_alias_templates,
         source_contracts: RefCell::new(HashMap::default()),
         file_import_scopes: file_import_scopes::FileImportScopes::default(),
         classifier_stubs_by_source: RefCell::new(None),
@@ -4913,6 +4966,12 @@ pub(crate) fn finalized_streamed_signature_index(
         }
     }
     for stub in &headers.stubs {
+        if undemanded_ordinary_locals.contains(&stub.id) {
+            // The active body pass owns this entire declaration header, including its generic
+            // contract. Publishing only its type-parameter bounds here would split one written
+            // header across phases and make a later lexical alias bind twice.
+            continue;
+        }
         let Some(declaration) = headers.syntax.declaration(stub.id) else {
             continue;
         };
@@ -4961,9 +5020,10 @@ pub(crate) fn finalized_streamed_signature_index(
             .map(|bound| {
                 Some((
                     headers.lookup_names.get(bound.parameter)?.to_owned(),
+                    bound.ty,
                     headers
                         .syntax
-                        .transient_type_ref(bound.ty, &headers.lookup_names)?,
+                        .transient_written_type_ref(bound.ty, &headers.lookup_names)?,
                 ))
             })
             .collect::<Option<Vec<_>>>();
@@ -5004,7 +5064,7 @@ pub(crate) fn finalized_streamed_signature_index(
             );
             let declared_bound_count = declared_bounds
                 .iter()
-                .filter(|(owner, _)| owner == source_name)
+                .filter(|(owner, _, _)| owner == source_name)
                 .count();
             // `TParams` also carries the constraints inherited through a bare parameter edge
             // (`T : U` sees `U`'s bounds) for member lookup, after the written ones. The declaration
@@ -5098,93 +5158,18 @@ pub(crate) fn finalized_streamed_signature_index(
             }
         }
     }
-    // A typealias has no executable body, but its resolved expansion is part of the stable
-    // declaration header. Publish it before compact syntax and the legacy semantic table are
-    // released so common lowering and dependency metadata never have to reopen source text.
     for stub in headers
         .stubs
         .iter()
         .filter(|stub| stub.kind == DeclarationKind::TypeAlias)
     {
-        let Some(name) = stub
-            .lookup_name
-            .and_then(|name| headers.lookup_names.get(name))
-        else {
-            stop_with_failure!(stub.id);
-        };
-        let anchor = headers
-            .declarations
-            .anchor(stub.id)
-            .expect("a compact type-alias stub must retain its stable owner");
-        let owner = match anchor.owner {
-            Some(owner) => {
-                let Some(owner_header) = index.declaration_header(owner) else {
-                    stop_with_failure!(stub.id);
-                };
-                // A local classifier's alias is lexical-only and cannot be published to another
-                // module. Its Pass-2 uses resolve through the local scope and need no class metadata.
-                if owner_header
-                    .flags
-                    .has(crate::fir::DeclarationFlags::LOCAL_CLASS)
-                {
-                    continue;
-                }
-                let Some(classifier) = index.classifier_header(owner) else {
-                    stop_with_failure!(stub.id);
-                };
-                let mut nested = Vec::new();
-                let mut current = classifier.classifier;
-                while let Some(parent) = current.nested_owner() {
-                    nested.push(current.nested_segment_ref());
-                    current = parent;
-                }
-                nested.push(current.segment_ref());
-                nested.reverse();
-                let mut semantic_owner = classifier.classifier.namespace();
-                for segment in nested {
-                    semantic_owner = crate::types::type_name_child(semantic_owner, segment);
-                }
-                semantic_owner
-            }
-            None => {
-                let Some(file_scope) = headers.scopes.file(stub.source) else {
-                    stop_with_failure!(stub.id);
-                };
-                let mut package = crate::types::TypeName::ROOT;
-                for segment in headers.scopes.path(file_scope.package) {
-                    let Some(segment) = headers.lookup_names.get(*segment) else {
-                        stop_with_failure!(stub.id);
-                    };
-                    package = crate::types::type_name_child(package, segment);
-                }
-                package
-            }
-        };
-        let identity = crate::types::type_name_child(owner, name);
-        let Some((_, expansion)) = table.source_alias_expansions.get(&identity) else {
-            crate::trace_compiler!(
-                "fir",
-                "signature finalization declined {:?}: resolved type-alias expansion is missing",
-                stub.id,
-            );
-            stop_with_failure!(stub.id);
-        };
-        let Some(&target) = table.source_alias_fqns.get(&identity) else {
-            crate::trace_compiler!(
-                "fir",
-                "signature finalization declined {:?}: resolved type-alias target is missing",
-                stub.id,
-            );
-            stop_with_failure!(stub.id);
-        };
-        let expansion_spelling = table
-            .alias_expansion_spellings
-            .get(&identity)
-            .map(|(spelling, _, _)| spelling.clone())
-            .unwrap_or_default();
-        if index
-            .publish_type_alias_header(stub.id, identity, target, *expansion, expansion_spelling)
-            .is_err()
+        if type_alias_publication::publish_type_alias(
+            headers,
+            &explicit_type_semantics,
+            &mut index,
+            stub,
+        )
+        .is_err()
         {
             stop_with_failure!(stub.id);
         }
@@ -6031,6 +6016,18 @@ pub(crate) fn finalized_streamed_signature_index(
             index.publish_annotation_policy(classifier, retention);
         }
     }
+    // Every spelling fact below was selected by explicit compact resolution or by the solver.
+    // Assemble the stable sidecars only after those operations and all header publication finish;
+    // this phase performs no resolver call and no source-spelling lookup.
+    let (declared_spellings, type_alias_spellings, mut spelling_failures) =
+        finalized_compact_declared_spellings(&semantics, &index, &undemanded_ordinary_locals);
+    for (declaration, spelling) in type_alias_spellings {
+        index.publish_type_alias_spelling(declaration, spelling);
+    }
+    drop(evaluator);
+    drop(semantics);
+    table.stable_declared_spellings.extend(declared_spellings);
+    failed.append(&mut spelling_failures);
     failed.sort_by_key(|declaration| declaration.raw());
     failed.dedup();
     StreamedSignatureIndex {

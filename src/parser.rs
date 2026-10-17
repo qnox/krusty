@@ -31,6 +31,7 @@ mod lexical_type_parameters;
 mod line_breaks;
 mod nesting;
 mod properties;
+mod qualified_type_arguments;
 mod return_labels;
 mod superclass_references;
 mod type_annotations;
@@ -1608,35 +1609,6 @@ impl<'a> Parser<'a> {
             }
         }
         (qname, annotation_span)
-    }
-
-    /// An annotation's qualified classifier name, with the `<…>` lists written on its segments
-    /// before the last one (`@part1<Int>.part2.Anno`). A list on the last segment (`@Foo<Bar>`) is
-    /// parsed and dropped.
-    fn parse_annotation_name(&mut self) -> (String, Vec<QualifierSegmentArguments>) {
-        let mut segments = Vec::new();
-        let mut lists = Vec::new();
-        if self.at(TokenKind::Ident) {
-            segments.push(self.text().to_string());
-            self.bump();
-            loop {
-                let segment = segments.len() as u32 - 1;
-                self.parse_segment_type_arguments(segment, &mut lists);
-                if !self.at(TokenKind::Dot) {
-                    break;
-                }
-                self.bump();
-                if self.at(TokenKind::Ident) {
-                    segments.push(self.text().to_string());
-                    self.bump();
-                }
-            }
-        } else {
-            self.parse_type_args();
-        }
-        let last = segments.len().saturating_sub(1) as u32;
-        lists.retain(|list: &QualifierSegmentArguments| list.segment != last);
-        (segments.join("."), lists)
     }
 
     /// Parse an annotation argument list `( (name =)? value ,* )` through the real grammar. Values
@@ -4010,6 +3982,7 @@ impl<'a> Parser<'a> {
             }
         } else if self.at(TokenKind::Ident) {
             let mut name = self.text().to_string();
+            let mut segment = 0;
             self.bump();
             // A qualified type name — a nested class `Outer.Inner` (registered as `Outer.Inner`) or a
             // package-qualified type (`kotlin.reflect.KClass`). Consume the dotted path.
@@ -4023,10 +3996,10 @@ impl<'a> Parser<'a> {
                 name.push('.');
                 name.push_str(self.text());
                 self.bump();
+                segment += 1;
             }
             // Every classifier uses the same type-argument structure. Projection semantics belong to
             // resolution; the parser retains exactly what was written.
-            let mut segment = name.matches('.').count() as u32;
             let mut qualifier_arguments = Vec::new();
             let mut targs = self.parse_segment_type_arguments(segment, &mut qualifier_arguments);
             let arg = None;
@@ -4102,92 +4075,6 @@ impl<'a> Parser<'a> {
             return (false, true, Some(span));
         }
         (false, false, None)
-    }
-
-    /// The type arguments written after segment `segment` of a qualified name, recording their
-    /// list in `lists`.
-    fn parse_segment_type_arguments(
-        &mut self,
-        segment: u32,
-        lists: &mut Vec<QualifierSegmentArguments>,
-    ) -> Vec<TypeRef> {
-        if !self.at(TokenKind::Lt) {
-            return Vec::new();
-        }
-        let (arguments, span) = self.parse_type_argument_list();
-        if !arguments.is_empty() {
-            lists.push(QualifierSegmentArguments {
-                segment,
-                count: arguments.len() as u32,
-                span,
-            });
-        }
-        arguments
-    }
-
-    /// Parse a generic type-argument list `< (variance? type | *),+ >` via the real grammar
-    /// (recursing through `parse_type`, so nested generics like `Map<K, List<V>>` parse correctly).
-    /// The arguments are returned for completeness but JVM-erased, so callers may discard them.
-    fn parse_type_args(&mut self) -> Vec<TypeRef> {
-        self.parse_type_argument_list().0
-    }
-
-    /// [`Self::parse_type_args`], also returning the span of the written `<…>` list.
-    fn parse_type_argument_list(&mut self) -> (Vec<TypeRef>, Span) {
-        let open = self.tok().span;
-        let args = self.parse_type_argument_list_contents();
-        let close = self.t[self.i.saturating_sub(1)].span;
-        (args, Span::new(open.lo, close.hi.max(open.hi)))
-    }
-
-    fn parse_type_argument_list_contents(&mut self) -> Vec<TypeRef> {
-        let mut args = Vec::new();
-        if !self.eat(TokenKind::Lt) {
-            return args;
-        }
-        self.skip_newlines();
-        while !self.at(TokenKind::Gt) && !self.at(TokenKind::Eof) {
-            let (in_projection, out_projection, projection_span) = self.skip_variance();
-            self.skip_plain_newlines();
-            if self.at(TokenKind::Star) {
-                // Star projection `<*>` — erased to `Any?`.
-                let span = self.tok().span;
-                self.bump();
-                args.push(TypeRef {
-                    name: "Any".to_string(),
-                    flags: TrFlags::default()
-                        .with_nullable(true)
-                        .with_definitely_non_null(false)
-                        // `Any?` is the correct semantic bound, while this marker retains the one
-                        // source distinction needed by erased runtime checks. Without it,
-                        // `Function1<*, *>` and `Function1<Any?, Any?>` become indistinguishable:
-                        // Kotlin permits the former in `is` and rejects the latter as erased.
-                        .with_star_projection(true),
-                    arg: None,
-                    targs: Vec::new(),
-                    span,
-                    fun_params: Vec::new(),
-                    fun_context_count: 0,
-                    qualifier_arguments: Vec::new(),
-                });
-            } else {
-                let mut argument = self.parse_type();
-                argument.set_projection(in_projection, out_projection);
-                if let Some(projection_span) = projection_span {
-                    self.file
-                        .type_projection_spans
-                        .insert(argument.span, projection_span);
-                }
-                args.push(argument);
-            }
-            self.skip_newlines();
-            if !self.eat(TokenKind::Comma) {
-                break;
-            }
-            self.skip_newlines();
-        }
-        self.expect(TokenKind::Gt, "'>'");
-        args
     }
 
     fn parse_receiver_and_declaration_name(

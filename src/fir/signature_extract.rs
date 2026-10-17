@@ -10,6 +10,7 @@ mod integer_literals;
 mod qualified_calls;
 mod safe_index;
 mod try_flow;
+mod type_templates;
 
 use crate::ast::{BinOp, Expr, ExprId, File, Stmt, TrFlags, TypeRef, UnOp};
 use crate::fx_hash::{HashMap, HashSet};
@@ -71,8 +72,8 @@ pub struct SignatureConstraintExtractor {
 
 #[derive(Clone)]
 struct CompactLocalTypeAlias {
-    formals: Vec<String>,
-    target: TypeRef,
+    arity: usize,
+    template: super::LocalTypeAliasTemplateId,
 }
 
 #[derive(Clone, Copy)]
@@ -945,8 +946,14 @@ impl SignatureConstraintExtractor {
                     .iter()
                     .map(|parameter| self.compact_type(&parameter.ty, scope, origin))
                     .collect::<Vec<_>>();
-                self.graph
-                    .add_explicit_signature_types(constructor, parameters, None, None, None);
+                self.graph.add_explicit_signature_types(
+                    constructor,
+                    parameters,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
             }
         }
         for parameter in class.props.iter().filter(|parameter| parameter.is_property) {
@@ -961,7 +968,7 @@ impl SignatureConstraintExtractor {
             let scope = declaration_scope(self, stub.id);
             let result = self.compact_type(&parameter.ty, scope, origin);
             self.graph
-                .add_explicit_signature_types(stub.id, [], Some(result), None, None);
+                .add_explicit_signature_types(stub.id, [], Some(result), None, None, None);
         }
         for constructor in &class.secondary_ctors {
             let Some(stub) = self
@@ -986,7 +993,7 @@ impl SignatureConstraintExtractor {
                 .map(|parameter| self.compact_type(&parameter.ty, scope, origin))
                 .collect::<Vec<_>>();
             self.graph
-                .add_explicit_signature_types(stub.id, parameters, None, None, None);
+                .add_explicit_signature_types(stub.id, parameters, None, None, None, None);
         }
         for method in &class.methods {
             let Some(declaration) = self.source_functions.get(&method.span).copied() else {
@@ -1013,6 +1020,7 @@ impl SignatureConstraintExtractor {
                 declaration,
                 parameters,
                 result,
+                None,
                 receiver,
                 None,
             );
@@ -1032,9 +1040,16 @@ impl SignatureConstraintExtractor {
                 .iter()
                 .map(|parameter| self.compact_type(&parameter.ty, scope, origin))
                 .collect::<Vec<_>>();
-            let result = property
-                .declared_ty()
+            let declared_result = property
+                .ty
+                .as_ref()
                 .map(|result| self.compact_type(result, scope, origin));
+            let getter_result = property
+                .getter_ty
+                .as_ref()
+                .map(|result| self.compact_type(result, scope, origin));
+            let result = declared_result.or(getter_result);
+            let independent_getter_result = declared_result.and(getter_result);
             let receiver = property
                 .receiver
                 .as_ref()
@@ -1044,72 +1059,15 @@ impl SignatureConstraintExtractor {
                 .as_ref()
                 .and_then(|field| field.ty.as_ref())
                 .map(|storage| self.compact_type(storage, scope, origin));
-            self.graph
-                .add_explicit_signature_types(stub.id, parameters, result, receiver, storage);
+            self.graph.add_explicit_signature_types(
+                stub.id,
+                parameters,
+                result,
+                independent_getter_result,
+                receiver,
+                storage,
+            );
         }
-    }
-
-    fn compact_type(
-        &mut self,
-        ty: &crate::ast::TypeRef,
-        scope: SignatureScopeId,
-        origin: &mut impl FnMut(crate::diag::Span) -> OriginId,
-    ) -> SigExprId {
-        let visible = self
-            .lexical_types
-            .iter()
-            .flat_map(HashMap::iter)
-            .map(|(name, binding)| (name.clone(), binding.clone()))
-            .collect::<HashMap<_, _>>();
-        let expanded = (!visible.is_empty()).then(|| {
-            let declarations = visible
-                .iter()
-                .filter_map(|(name, binding)| match binding {
-                    CompactLexicalType::Alias(alias) => Some((
-                        name.to_string(),
-                        alias.formals.clone(),
-                        alias.target.clone(),
-                    )),
-                    CompactLexicalType::Classifier(_) => None,
-                })
-                .collect::<Vec<_>>();
-            crate::parser::expanded_type_alias_target(
-                &declarations,
-                ty,
-                &mut crate::fx_hash::HashMap::default(),
-            )
-        });
-        let expanded = expanded.as_ref().unwrap_or(ty);
-        if expanded.arg.is_none()
-            && expanded.targs.is_empty()
-            && expanded.fun_params.is_empty()
-            && !expanded.in_projection()
-            && !expanded.out_projection()
-            && !expanded.is_star_projection()
-        {
-            if let Some(CompactLexicalType::Classifier(declaration)) =
-                visible.get(expanded.name.as_str())
-            {
-                let mut result = self.graph.add_expr(SigExpr::ClassifierType {
-                    declaration: *declaration,
-                    scope,
-                });
-                if expanded.nullable() {
-                    result = self.graph.add_expr(SigExpr::Nullable(result));
-                }
-                if expanded.definitely_non_null() {
-                    result = self.graph.add_expr(SigExpr::NonNullable(result));
-                }
-                return result;
-            }
-        }
-        let syntax = self.graph.add_type_syntax(expanded);
-        let origin = origin(ty.span);
-        self.graph.add_expr(SigExpr::Type {
-            syntax,
-            scope,
-            origin,
-        })
     }
 
     fn class_literal_type_ref(
@@ -2386,14 +2344,22 @@ impl SignatureConstraintExtractor {
                             }
                         }
                         Stmt::LocalTypeAlias(alias) => {
+                            let root = self.compact_local_type_template(
+                                &alias.target,
+                                scope,
+                                &alias.type_params,
+                            );
+                            let template = self
+                                .graph
+                                .add_local_type_alias_template(root, alias.type_params.len());
                             self.lexical_types
                                 .last_mut()
                                 .expect("block type scope must exist")
                                 .insert(
                                     alias.name.clone().into_boxed_str(),
                                     CompactLexicalType::Alias(CompactLocalTypeAlias {
-                                        formals: alias.type_params.clone(),
-                                        target: alias.target.clone(),
+                                        arity: alias.type_params.len(),
+                                        template,
                                     }),
                                 );
                         }

@@ -39,7 +39,7 @@ mod member_specialization;
 mod overload_selection;
 mod property_candidates;
 mod qualified_classifiers;
-pub(crate) use qualified_classifiers::ClassifierMiss;
+pub(crate) use qualified_classifiers::{ClassifierMiss, CompletedClassifierPath};
 mod receiver_mro;
 mod resolved_symbol;
 mod sam;

@@ -11,8 +11,9 @@
 //! make `Obj(Payload, alias = Cargo) != Obj(Payload, alias = None)` and silently split every type
 //! comparison, interner bucket, and hash lookup on a distinction that is pure surface syntax.
 //! kotlinc keeps abbreviation off type equality for the same reason. Alias spelling is metadata
-//! input only; checked annotations on the mirrored occurrences are also semantic plugin input.
-//! The expanded `Ty` remains the single source of type identity and structure.
+//! input, checked annotations on the mirrored occurrences are semantic plugin input, and the
+//! selected written classifier boundary is a finalized frontend-diagnostic fact. The expanded
+//! `Ty` remains the single source of type identity and structure.
 //!
 //! Field numbers here were read off kotlinc 2.4.10 output, not recalled — see
 //! `docs/METADATA_NOTES.md`.
@@ -21,10 +22,14 @@ use crate::types::{ResolvedAnnotation, Ty, TypeName};
 
 /// The source spelling of one declared type, mirroring the expanded `Ty` tree node for node.
 ///
-/// The default (`alias: None`, both argument lists empty) means "no alias was spelled at or below
-/// this node", which is the overwhelmingly common case and allocates nothing.
+/// The default means "no source-side fact was retained at or below this node", which is the
+/// overwhelmingly common case and allocates nothing.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Spelled {
+    /// Zero-based written segment where resolution first selected a classifier for this source
+    /// occurrence. This frontend-only binding fact lets Pass 2 diagnose type arguments on package
+    /// segments without reopening lookup or inspecting the expanded classifier identity.
+    pub classifier_segment: Option<u32>,
     /// This occurrence was written as a definitely-non-null intersection (`T & Any`). The semantic
     /// [`Ty`] already carries that fact in its occurrence bound; this sidecar preserves the exact
     /// Kotlin-metadata flag without making it part of structural type identity.
@@ -66,6 +71,7 @@ pub struct Spelled {
 
 /// The spelling of a node that names no alias and records no annotation.
 const EMPTY: Spelled = Spelled {
+    classifier_segment: None,
     definitely_non_null: false,
     alias: None,
     alias_args: Vec::new(),
@@ -80,10 +86,11 @@ impl Spelled {
     /// encode sites whose types cannot carry an alias (synthesized members, builtin classifiers).
     pub const NONE: &'static Spelled = &EMPTY;
 
-    /// Whether this node and everything below it is free of alias spellings — the fast path that
-    /// lets the encoder skip the parallel walk entirely.
+    /// Whether this node and everything below it carries no source-side fact. The fast path lets
+    /// metadata encoding and finalized frontend checks skip the parallel walk entirely.
     pub fn is_none(&self) -> bool {
-        !self.definitely_non_null
+        self.classifier_segment.is_none()
+            && !self.definitely_non_null
             && self.alias.is_none()
             && self.annotations.is_empty()
             && self.expansion_annotations.is_empty()
@@ -232,11 +239,17 @@ impl DeclaredSpellings {
         checked: &CheckedTypeUseAnnotations,
         unchecked: &mut Vec<AnnotationOccurrence>,
     ) {
-        for spelling in [&mut self.ret, &mut self.receiver, &mut self.superclass]
-            .into_iter()
-            .chain(&mut self.params)
-            .chain(&mut self.supertypes)
-            .chain(self.type_param_bounds.iter_mut().flatten())
+        for spelling in [
+            &mut self.ret,
+            &mut self.getter_ret,
+            &mut self.receiver,
+            &mut self.superclass,
+        ]
+        .into_iter()
+        .chain(&mut self.params)
+        .chain(&mut self.classifier_context_params)
+        .chain(&mut self.supertypes)
+        .chain(self.type_param_bounds.iter_mut().flatten())
         {
             spelling.seal(checked, unchecked);
         }
@@ -287,8 +300,8 @@ pub(crate) struct SourceSpellings<'a> {
     pub annotations: &'a RecordedTypeAnnotations,
 }
 
-/// Source spellings of ONE declaration's declared types, addressed the way the metadata builders
-/// address them.
+/// Source-side facts for ONE declaration's declared types, addressed structurally by semantic role
+/// the same way finalized frontend checks and metadata builders address them.
 ///
 /// Every field defaults to "nothing spelled an alias", and a declaration whose whole record would
 /// be empty is not recorded at all — so the overwhelming majority of declarations, in the
@@ -297,9 +310,17 @@ pub(crate) struct SourceSpellings<'a> {
 pub struct DeclaredSpellings {
     /// The declared return type (a property's type, for a property).
     pub ret: Spelled,
+    /// A property's explicitly written getter result. It is semantically equal to [`Self::ret`]
+    /// when both occur, but each source occurrence can select a different alias spelling.
+    pub getter_ret: Spelled,
     /// Parallel to the declaration's LOGICAL value parameters — an extension receiver is recorded
     /// in [`Self::receiver`], not as a leading parameter, matching how `@Metadata` separates them.
     pub params: Vec<Spelled>,
+    /// Classifier-owned context parameters, kept separate from primary-constructor parameters.
+    /// Callable/property context parameters remain in [`Self::params`], where their stable
+    /// signatures place them. A class context parameter is an instance-header role and must not
+    /// shift the primary-constructor metadata parameter alignment.
+    pub classifier_context_params: Vec<Spelled>,
     /// The extension receiver's spelling (`val Cargo.ext: Cargo` abbreviates both).
     pub receiver: Spelled,
     /// Per declared type parameter, that parameter's declared upper bounds (`<T : Cargo>`).
@@ -318,20 +339,23 @@ impl DeclaredSpellings {
     /// The empty record, for the many builder paths whose declaration spelled no alias.
     pub const NONE: &'static DeclaredSpellings = &DeclaredSpellings {
         ret: EMPTY,
+        getter_ret: EMPTY,
         params: Vec::new(),
+        classifier_context_params: Vec::new(),
         receiver: EMPTY,
         superclass: EMPTY,
         type_param_bounds: Vec::new(),
         supertypes: Vec::new(),
     };
 
-    /// Whether this declaration spelled no `typealias` and recorded no type-use annotation anywhere
-    /// — the signal not to record it.
+    /// Whether this declaration retained no source-side fact — the signal not to record it.
     pub fn is_none(&self) -> bool {
         self.ret.is_none()
+            && self.getter_ret.is_none()
             && self.receiver.is_none()
             && self.superclass.is_none()
             && self.params.iter().all(Spelled::is_none)
+            && self.classifier_context_params.iter().all(Spelled::is_none)
             && self.supertypes.iter().all(Spelled::is_none)
             && self
                 .type_param_bounds
@@ -341,6 +365,12 @@ impl DeclaredSpellings {
 
     pub fn param(&self, index: usize) -> &Spelled {
         self.params.get(index).unwrap_or(Spelled::NONE)
+    }
+
+    pub fn classifier_context_param(&self, index: usize) -> &Spelled {
+        self.classifier_context_params
+            .get(index)
+            .unwrap_or(Spelled::NONE)
     }
 
     pub fn supertype(&self, index: usize) -> &Spelled {
@@ -371,10 +401,16 @@ impl DeclaredSpellings {
 
     pub(crate) fn storage_payload_bytes(&self) -> usize {
         self.ret.storage_payload_bytes()
+            + self.getter_ret.storage_payload_bytes()
             + self.receiver.storage_payload_bytes()
             + self.superclass.storage_payload_bytes()
             + self
                 .params
+                .iter()
+                .map(Spelled::storage_payload_bytes)
+                .sum::<usize>()
+            + self
+                .classifier_context_params
                 .iter()
                 .map(Spelled::storage_payload_bytes)
                 .sum::<usize>()

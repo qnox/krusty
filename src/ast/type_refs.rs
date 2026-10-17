@@ -5,7 +5,33 @@
 //! transformations with no resolution in them, which is why they sit beside the node rather than in
 //! the AST facade.
 
-use super::{AnnotationRef, TypeRef};
+use super::AnnotationRef;
+use crate::diag::Span;
+
+#[derive(Clone, Debug)]
+pub struct TypeRef {
+    pub name: String,
+    /// Nullability, function-type shape, and use-site projection flags.
+    pub flags: TrFlags,
+    /// Function result or the abbreviated classifier argument retained by parser syntax.
+    pub arg: Option<Box<TypeRef>>,
+    /// Classifier arguments in semantic application order.
+    pub targs: Vec<TypeRef>,
+    pub span: Span,
+    /// Written function parameters; `arg` owns the result.
+    pub fun_params: Vec<TypeRef>,
+    pub fun_context_count: u32,
+    /// Type-argument lists written before the last qualified-name segment.
+    pub qualifier_arguments: Vec<QualifierSegmentArguments>,
+}
+
+/// One `<…>` list written on a segment of a qualified type or annotation reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QualifierSegmentArguments {
+    pub segment: u32,
+    pub count: u32,
+    pub span: Span,
+}
 
 /// Bit-packed [`TypeRef`] flags.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

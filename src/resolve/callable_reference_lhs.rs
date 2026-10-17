@@ -54,6 +54,7 @@ impl Checker<'_> {
             span: self.file.expr_spans[expression.0 as usize],
             fun_params: Vec::new(),
             fun_context_count: 0,
+            qualifier_arguments: Vec::new(),
         };
         let ty = self.type_ref_ty(scope, &reference);
         if ty == Ty::Error {
@@ -119,7 +120,7 @@ impl Checker<'_> {
             Expr::CallableRef { name, .. } if name == "class"
         );
 
-        let (root_selection, _, root_alias) = self.select_classifier_binding(scope, root_name);
+        let (root_selection, _, root_alias, _) = self.select_classifier_binding(scope, root_name);
         let mut prefix = match root_selection {
             InheritedNestedClassifier::Found(classifier) => {
                 ResolvedQualifier::Classifier(classifier)

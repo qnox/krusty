@@ -231,6 +231,22 @@ impl ResolvedModuleIndex {
             .map(AsRef::as_ref)
     }
 
+    /// Complete semantic substitution domain of a finalized type alias, in declaration order.
+    /// Its expansion has already been alpha-renamed to these identities, so source spellings are
+    /// not interchangeable here. Missing identity metadata invalidates the whole stable header.
+    pub(crate) fn type_alias_substitution_formals(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<Vec<String>> {
+        (0..)
+            .map_while(|ordinal| self.type_parameter(declaration, ordinal))
+            .map(|parameter| {
+                self.type_parameter_semantic_name(parameter)
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
     pub(crate) fn type_parameter_by_semantic_name(
         &self,
         semantic_name: &str,

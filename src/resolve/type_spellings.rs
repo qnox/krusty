@@ -6,6 +6,17 @@ use super::{type_argument_of_ref, ClassNames, HashMap, TParams, Ty, TypeName, Ty
 use crate::diag::DiagSink;
 use crate::spelling::Spelled;
 
+/// Stable identity facts selected for one source type occurrence before its spelling sidecar is
+/// assembled. The classifier boundary and alias identity come from one left-to-right binding; the
+/// spelling walk must not rediscover either fact from the written or expanded name.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::resolve) struct ResolvedTypeSpelling {
+    pub(in crate::resolve) classifier_segment: Option<u32>,
+    pub(in crate::resolve) alias: Option<TypeName>,
+    /// Semantic type produced by the same authoritative resolution of this structural occurrence.
+    pub(in crate::resolve) resolved: Option<Ty>,
+}
+
 /// The SOURCE SPELLING of a declared type, walked in parallel with [`ty_of_ref_with`] over the same
 /// `TypeRef` — the sidecar `@Metadata` needs to write `Type.abbreviated_type` (see
 /// [`crate::spelling::Spelled`]).
@@ -23,36 +34,58 @@ pub(crate) fn spelling_of_ref(
     spellings: crate::spelling::SourceSpellings<'_>,
 ) -> Spelled {
     let mut sink = DiagSink::new();
+    let mut resolved_spelling = |reference: &TypeRef| {
+        let spelled = spellings.aliases.get(&reference.span).unwrap_or(reference);
+        ResolvedTypeSpelling {
+            classifier_segment: None,
+            alias: (!reference.is_import())
+                .then(|| classes.alias_identity(&spelled.name))
+                .flatten(),
+            resolved: None,
+        }
+    };
+    let mut alias_expansion = |identity| classes.alias_expansion_by_identity(identity).cloned();
     spelling_of_ref_with(
         r,
-        classes,
         tparams,
         expansions,
+        &mut alias_expansion,
         spellings,
         &mut |argument| type_argument_of_ref(argument, classes, tparams, &mut sink),
+        &mut resolved_spelling,
     )
 }
 
 /// [`spelling_of_ref`] with declaration-scoped semantic argument resolution supplied by the
 /// caller. Compact Pass-1 headers use this form so alias arguments are bound by the same lexical
 /// resolver as the declaration signature instead of being looked up again in a file-global map.
-pub(crate) fn spelling_of_ref_with(
+pub(in crate::resolve) fn spelling_of_ref_with(
     r: &TypeRef,
-    classes: &ClassNames,
     tparams: &TParams,
     expansions: &HashMap<TypeName, (Spelled, Vec<String>, Ty)>,
+    alias_expansion: &mut dyn FnMut(TypeName) -> Option<crate::libraries::AliasExpansion>,
     spellings: crate::spelling::SourceSpellings<'_>,
     resolve_argument: &mut dyn FnMut(&TypeRef) -> Ty,
+    resolved_spelling_of: &mut dyn FnMut(&TypeRef) -> ResolvedTypeSpelling,
 ) -> Spelled {
     // A source use stays written until name resolution selects its alias. A spelling parked in
     // `File::alias_spellings` comes only from a later declaration-template rewrite and preserves
     // that template's original abbreviation. An import path names a declaration rather than using
     // the type, and gets no abbreviation.
-    let spelled = spellings.aliases.get(&r.span).unwrap_or(r);
+    let resolved_spelling = resolved_spelling_of(r);
+    let classifier_segment = resolved_spelling.classifier_segment;
+    let source_spelling = spellings.aliases.get(&r.span).unwrap_or(r);
+    let without_package_arguments = classifier_segment.and_then(|segment| {
+        super::package_qualifier_type_arguments::without_package_arguments(source_spelling, segment)
+    });
+    let spelled = without_package_arguments
+        .as_ref()
+        .unwrap_or(source_spelling);
     let annotations = spellings.annotations.at(r.span.lo).to_vec();
     // A type parameter shadows any same-named alias, and is never itself one.
     if tparams.contains(&spelled.name) {
         return Spelled {
+            classifier_segment,
             definitely_non_null: spelled.definitely_non_null(),
             annotations,
             ..Spelled::default()
@@ -79,11 +112,12 @@ pub(crate) fn spelling_of_ref_with(
                     .map(Into::into),
                 ..spelling_of_ref_with(
                     parameter,
-                    classes,
                     tparams,
                     expansions,
+                    alias_expansion,
                     spellings,
                     resolve_argument,
+                    resolved_spelling_of,
                 )
             })
             .collect();
@@ -95,17 +129,19 @@ pub(crate) fn spelling_of_ref_with(
                     .map(|ret| {
                         spelling_of_ref_with(
                             ret,
-                            classes,
                             tparams,
                             expansions,
+                            alias_expansion,
                             spellings,
                             resolve_argument,
+                            resolved_spelling_of,
                         )
                     })
                     .unwrap_or_default(),
             );
         }
         return Spelled {
+            classifier_segment,
             definitely_non_null: spelled.definitely_non_null(),
             alias: None,
             alias_args: Vec::new(),
@@ -115,7 +151,7 @@ pub(crate) fn spelling_of_ref_with(
         };
     }
     let alias = (!r.is_import())
-        .then(|| classes.alias_identity(&spelled.name))
+        .then_some(resolved_spelling.alias)
         .flatten();
     // Argument spellings come from the SPELLED node: at an aliased reference these are the
     // as-written arguments, whose arity may differ from the expansion's.
@@ -125,16 +161,18 @@ pub(crate) fn spelling_of_ref_with(
         .map(|argument| {
             spelling_of_ref_with(
                 argument,
-                classes,
                 tparams,
                 expansions,
+                alias_expansion,
                 spellings,
                 resolve_argument,
+                resolved_spelling_of,
             )
         })
         .collect();
     let Some(alias) = alias else {
         return Spelled {
+            classifier_segment,
             definitely_non_null: spelled.definitely_non_null(),
             alias: None,
             alias_args: Vec::new(),
@@ -155,11 +193,12 @@ pub(crate) fn spelling_of_ref_with(
         .zip(argument_spellings)
         .map(|(argument, spelling)| (resolve_argument(argument), spelling))
         .collect();
+    let dependency_alias = alias_expansion(alias);
     let template = expansions
         .get(&alias)
         .map(|(rhs, formals, expansion)| (rhs, formals.as_slice(), *expansion))
         .or_else(|| {
-            classes.alias_expansion(&spelled.name).map(|classpath| {
+            dependency_alias.as_ref().map(|classpath| {
                 (
                     &classpath.expansion_spelling,
                     classpath.formals.as_slice(),
@@ -176,6 +215,7 @@ pub(crate) fn spelling_of_ref_with(
         .unwrap_or_default();
     let expansion_args = expansion_arg_spellings(template, &alias_args);
     Spelled {
+        classifier_segment,
         definitely_non_null: spelled.definitely_non_null(),
         alias: Some(alias),
         alias_args,
@@ -193,6 +233,51 @@ pub(crate) fn spelling_of_ref_with(
         expansion_annotations,
         parameter_name: None,
     }
+}
+
+/// Project one declaration type from facts captured by its authoritative checker traversal.
+///
+/// The fact map is deliberately scoped to that traversal and keyed by active syntax-node address:
+/// parser-expanded alias templates can reuse declaration-site spans at several use sites. This
+/// operation performs no lookup. An absent fact rejects publication instead of reconstructing a
+/// binding from the source spelling.
+pub(in crate::resolve) fn spelling_from_bound_facts(
+    r: &TypeRef,
+    tparams: &TParams,
+    facts: &HashMap<usize, ResolvedTypeSpelling>,
+    expansions: &mut dyn FnMut(TypeName) -> Option<crate::libraries::AliasExpansion>,
+    spellings: crate::spelling::SourceSpellings<'_>,
+) -> Option<Spelled> {
+    let complete = std::cell::Cell::new(true);
+    let mut resolved_spelling = |reference: &TypeRef| {
+        facts
+            .get(&(reference as *const TypeRef as usize))
+            .copied()
+            .unwrap_or_else(|| {
+                complete.set(false);
+                ResolvedTypeSpelling::default()
+            })
+    };
+    let mut resolve_argument = |argument: &TypeRef| {
+        facts
+            .get(&(argument as *const TypeRef as usize))
+            .and_then(|fact| fact.resolved)
+            .unwrap_or_else(|| {
+                complete.set(false);
+                Ty::Error
+            })
+    };
+    let local_expansions = HashMap::default();
+    let spelling = spelling_of_ref_with(
+        r,
+        tparams,
+        &local_expansions,
+        expansions,
+        spellings,
+        &mut resolve_argument,
+        &mut resolved_spelling,
+    );
+    complete.get().then_some(spelling)
 }
 
 /// Place a use site's argument spellings into an alias expansion's PARAMETER positions, keeping the
@@ -328,6 +413,7 @@ fn substitute_expansion_spelling(
         })
         .collect();
     Spelled {
+        classifier_segment: None,
         definitely_non_null: spelling.definitely_non_null,
         alias: spelling.alias,
         alias_args,

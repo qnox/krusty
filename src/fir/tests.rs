@@ -2208,6 +2208,39 @@ impl SignatureSemantics for TestSignatureSemantics {
             .map_err(|_| DiagnosticId::from_raw(2_004))
     }
 
+    fn resolve_written_type_application(
+        &self,
+        expression: SigExprId,
+        graph: &SignatureGraph,
+        evaluate_argument: &mut dyn FnMut(SigExprId) -> Result<ResolvedTy, DiagnosticId>,
+    ) -> Result<ResolvedTy, DiagnosticId> {
+        self.operations.borrow_mut().push("type-application".into());
+        let application = graph
+            .written_type_application(expression)
+            .ok_or_else(|| DiagnosticId::from_raw(2_004))?;
+        for argument in graph.operands(application.arguments) {
+            evaluate_argument(*argument)?;
+        }
+        let SigExpr::Type {
+            syntax,
+            scope,
+            origin,
+        } = graph
+            .expr(expression)
+            .ok_or_else(|| DiagnosticId::from_raw(2_004))?
+        else {
+            return Err(DiagnosticId::from_raw(2_004));
+        };
+        self.resolve_type(
+            graph
+                .scope(scope)
+                .ok_or_else(|| DiagnosticId::from_raw(2_004))?,
+            origin,
+            syntax,
+            graph,
+        )
+    }
+
     fn resolve_contextual_type(
         &self,
         scope: SignatureScope,
@@ -3203,59 +3236,4 @@ fn streamed_header_stubs_are_indexed_by_id_and_owner() {
         .expect("top-level function stub")
         .id;
     assert_eq!(module.owned_stubs(top).count(), 0);
-}
-
-/// Checked local signatures are published per body group, and each group asked the WHOLE
-/// declaration inventory which of its entries are local classes — linear in the module, once per
-/// body: quadratic. The index lists local-class declarations itself, in declaration-id order.
-#[test]
-fn local_class_declarations_are_listed_by_the_index() {
-    let source = SourceFileId::from_raw(0);
-    let mut declarations = DeclarationIds::default();
-    let function = declarations.intern(anchor(source, 0, DeclarationKind::Function));
-    let first_local = declarations.intern(DeclarationAnchor {
-        source,
-        range: Span::new(1, 2),
-        owner: Some(function),
-        kind: DeclarationKind::Classifier,
-        sibling: 0,
-    });
-    let second_local = declarations.intern(DeclarationAnchor {
-        source,
-        range: Span::new(3, 4),
-        owner: Some(function),
-        kind: DeclarationKind::Classifier,
-        sibling: 1,
-    });
-    let header = |kind, owner, local| ResolvedDeclarationHeader {
-        kind,
-        owner,
-        name: None,
-        visibility: Visibility::Public,
-        flags: DeclarationFlags::default().with(DeclarationFlags::LOCAL_CLASS, local),
-        initialization_order: None,
-    };
-    let mut index = ResolvedModuleIndex::default();
-    index.publish_declarations(declarations);
-    assert_eq!(index.local_class_declarations(), &[]);
-    // Out of id order: the list is by identity, not by publication.
-    index.publish_declaration_header(
-        second_local,
-        header(DeclarationKind::Classifier, Some(function), true),
-        Some("Second"),
-    );
-    index.publish_declaration_header(
-        function,
-        header(DeclarationKind::Function, None, false),
-        Some("f"),
-    );
-    index.publish_declaration_header(
-        first_local,
-        header(DeclarationKind::Classifier, Some(function), true),
-        Some("First"),
-    );
-    assert_eq!(
-        index.local_class_declarations(),
-        &[first_local, second_local]
-    );
 }

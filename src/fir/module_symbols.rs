@@ -102,7 +102,9 @@ impl<'a> StreamedModuleSymbols<'a> {
         Some(crate::libraries::AliasExpansion {
             identity: header.identity,
             target: header.target,
-            formals: self.index.type_alias_formals(header.declaration),
+            formals: self
+                .index
+                .type_alias_substitution_formals(header.declaration)?,
             expansion: header.expansion.get(),
             expansion_spelling: header.expansion_spelling.clone(),
         })
@@ -128,7 +130,9 @@ impl<'a> StreamedModuleSymbols<'a> {
         Some(crate::libraries::AliasExpansion {
             identity: header.identity,
             target: header.target,
-            formals: self.index.type_alias_formals(header.declaration),
+            formals: self
+                .index
+                .type_alias_substitution_formals(header.declaration)?,
             expansion: header.expansion.get(),
             expansion_spelling: header.expansion_spelling.clone(),
         })

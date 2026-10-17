@@ -64,20 +64,34 @@ pub(super) fn walk_qualifier<S: SymbolSource + ?Sized>(
 /// Walk the same committed namespace path while retaining the stable identity of the final
 /// classifier declaration selected from a provider record. A typealias record normalizes its
 /// classifier facet to the target, so callers that need the alias template must carry both facts.
-pub(super) fn walk_qualifier_with_declaration_identity<S: SymbolSource + ?Sized>(
+fn walk_qualifier_with_binding_identity<S: SymbolSource + ?Sized>(
     source: &S,
     mut prefix: ResolvedQualifier,
     segments: &[(Option<ExprId>, String)],
-) -> Result<(ResolvedQualifier, Option<ClassifierDeclaration>), QualifierError> {
+    first_segment: u32,
+) -> Result<
+    (
+        ResolvedQualifier,
+        Option<ClassifierDeclaration>,
+        Option<u32>,
+    ),
+    QualifierError,
+> {
     let mut declaration_identity = None;
-    for (segment_expression, segment) in segments {
+    let mut classifier_segment = prefix.classifier().map(|_| first_segment.saturating_sub(1));
+    for (offset, (segment_expression, segment)) in segments.iter().enumerate() {
         prefix = match prefix {
-            ResolvedQualifier::Value => return Ok((ResolvedQualifier::Value, None)),
+            ResolvedQualifier::Value => {
+                return Ok((ResolvedQualifier::Value, None, classifier_segment))
+            }
             ResolvedQualifier::Package(package) => {
                 let namespace = SymbolNamespace::Package(package);
                 let record = source.symbols(namespace, segment);
                 if let Some(classifier) = record.classifier_name {
                     declaration_identity = record.classifier_declaration.clone();
+                    classifier_segment.get_or_insert(
+                        first_segment + u32::try_from(offset).expect("too many qualifier segments"),
+                    );
                     ResolvedQualifier::Classifier(classifier)
                 } else if source.package_exists(package, segment) {
                     declaration_identity = None;
@@ -103,7 +117,16 @@ pub(super) fn walk_qualifier_with_declaration_identity<S: SymbolSource + ?Sized>
             }
         };
     }
-    Ok((prefix, declaration_identity))
+    Ok((prefix, declaration_identity, classifier_segment))
+}
+
+pub(super) fn walk_qualifier_with_declaration_identity<S: SymbolSource + ?Sized>(
+    source: &S,
+    prefix: ResolvedQualifier,
+    segments: &[(Option<ExprId>, String)],
+) -> Result<(ResolvedQualifier, Option<ClassifierDeclaration>), QualifierError> {
+    walk_qualifier_with_binding_identity(source, prefix, segments, 1)
+        .map(|(resolved, declaration, _)| (resolved, declaration))
 }
 
 /// Commit the first namespace facet after value-root selection has declined the spelling. A scoped
@@ -138,19 +161,48 @@ pub(super) fn walk_qualifier_namespace_facets_with_declaration_identity<
     root_name: &str,
     segments: &[(Option<ExprId>, String)],
 ) -> Result<(ResolvedQualifier, Option<ClassifierDeclaration>), QualifierError> {
+    walk_qualifier_namespace_facets_with_binding_identity(
+        source,
+        classifier_root,
+        root_expression,
+        root_name,
+        segments,
+    )
+    .map(|(resolved, declaration, _)| (resolved, declaration))
+}
+
+/// Namespace-facet walk plus the zero-based written segment that first bound as a classifier.
+/// The package/classifier boundary is selected while the path is walked and must not be recovered
+/// later from the final classifier's nesting or the source spelling.
+pub(super) fn walk_qualifier_namespace_facets_with_binding_identity<S: SymbolSource + ?Sized>(
+    source: &S,
+    classifier_root: Option<TypeName>,
+    root_expression: Option<ExprId>,
+    root_name: &str,
+    segments: &[(Option<ExprId>, String)],
+) -> Result<
+    (
+        ResolvedQualifier,
+        Option<ClassifierDeclaration>,
+        Option<u32>,
+    ),
+    QualifierError,
+> {
     if let Some(classifier) = classifier_root {
-        return walk_qualifier_with_declaration_identity(
+        return walk_qualifier_with_binding_identity(
             source,
             ResolvedQualifier::Classifier(classifier),
             segments,
+            1,
         );
     }
     if source.package_exists(TypeName::ROOT, root_name) {
         let package = crate::types::type_name_child(TypeName::ROOT, root_name);
-        return walk_qualifier_with_declaration_identity(
+        return walk_qualifier_with_binding_identity(
             source,
             ResolvedQualifier::Package(package),
             segments,
+            1,
         );
     }
     Err(QualifierError::UnresolvedSegment {
@@ -211,6 +263,17 @@ pub(super) fn classifier_path_with_declaration_identity<S: SymbolSource + ?Sized
     source: &S,
     scoped_root: Option<TypeName>,
 ) -> Result<(TypeName, Option<ClassifierDeclaration>), QualifierError> {
+    classifier_path_with_binding_identity(path, source, scoped_root)
+        .map(|(classifier, declaration, _)| (classifier, declaration))
+}
+
+/// Resolve an absolute classifier import once and retain both the selected declaration and the
+/// zero-based written segment where this same walk first entered a classifier namespace.
+pub(super) fn classifier_path_with_binding_identity<S: SymbolSource + ?Sized>(
+    path: &str,
+    source: &S,
+    scoped_root: Option<TypeName>,
+) -> Result<(TypeName, Option<ClassifierDeclaration>, u32), QualifierError> {
     let segments = path
         .split(['.', '/'])
         .filter(|segment| !segment.is_empty())
@@ -247,12 +310,14 @@ pub(super) fn classifier_path_with_declaration_identity<S: SymbolSource + ?Sized
             });
         }
     };
-    let (resolved, selected_declaration) =
-        walk_qualifier_with_declaration_identity(source, prefix, &segments[1..])?;
+    let (resolved, selected_declaration, classifier_segment) =
+        walk_qualifier_with_binding_identity(source, prefix, &segments[1..], 1)?;
     match resolved {
-        ResolvedQualifier::Classifier(internal) => {
-            Ok((internal, selected_declaration.or(root_declaration)))
-        }
+        ResolvedQualifier::Classifier(internal) => Ok((
+            internal,
+            selected_declaration.or(root_declaration),
+            classifier_segment.expect("a completed classifier path must retain its boundary"),
+        )),
         ResolvedQualifier::Package(_) | ResolvedQualifier::Value => {
             Err(QualifierError::UnresolvedSegment {
                 expression: None,
@@ -334,13 +399,13 @@ mod tests {
                 let package = crate::types::type_name("fixture");
                 if namespace == SymbolNamespace::Package(package) && name == "Transform" {
                     return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
-                        classifier_name: Some(crate::types::type_name("fixture/Target")),
+                        classifier_name: Some(crate::types::type_name("fixture/Outer$Nested")),
                         classifier_declaration: Some(ClassifierDeclaration::TypeAlias(
                             crate::libraries::AliasExpansion {
                                 identity: crate::types::type_name("fixture/Transform"),
-                                target: crate::types::type_name("fixture/Target"),
+                                target: crate::types::type_name("fixture/Outer$Nested"),
                                 formals: Vec::new(),
-                                expansion: crate::types::Ty::obj("fixture/Target"),
+                                expansion: crate::types::Ty::obj("fixture/Outer$Nested"),
                                 expansion_spelling: Default::default(),
                             },
                         )),
@@ -355,9 +420,9 @@ mod tests {
         }
 
         let alias = crate::types::type_name("fixture/Transform");
-        let target = crate::types::type_name("fixture/Target");
+        let target = crate::types::type_name("fixture/Outer$Nested");
         assert_eq!(
-            walk_qualifier_namespace_facets_with_declaration_identity(
+            walk_qualifier_namespace_facets_with_binding_identity(
                 &AliasSource,
                 None,
                 None,
@@ -371,10 +436,11 @@ mod tests {
                         identity: alias,
                         target,
                         formals: Vec::new(),
-                        expansion: crate::types::Ty::obj("fixture/Target"),
+                        expansion: crate::types::Ty::obj("fixture/Outer$Nested"),
                         expansion_spelling: Default::default(),
                     }
-                ))
+                )),
+                Some(1),
             )),
         );
     }

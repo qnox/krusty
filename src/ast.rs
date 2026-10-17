@@ -23,7 +23,7 @@ mod external_modifier_targets;
 mod operators;
 mod property_initializers;
 mod type_refs;
-pub use type_refs::TrFlags;
+pub use type_refs::{QualifierSegmentArguments, TrFlags, TypeRef};
 mod use_site_annotations;
 pub use binary_reference_tokens::BinaryReferenceTokens;
 pub(crate) use call_shape::explicit_call_receiver;
@@ -555,42 +555,6 @@ pub struct ForRange {
     pub kind: RangeKind,
     /// The `..`, `..<`, `until` or `downTo` token.
     pub operator_span: Span,
-}
-
-#[derive(Clone, Debug)]
-pub struct TypeRef {
-    pub name: String,
-    /// Nullability, function-type shape, and use-site projection flags.
-    pub flags: TrFlags,
-    /// The return type of function syntax. Classifier type arguments, including `Array<T>`, live in
-    /// `targs`; keeping one generic classifier in a second representation loses projections and makes
-    /// every type decoder grow an Array-only branch.
-    pub arg: Option<Box<TypeRef>>,
-    /// All generic type arguments on a class type (`Map<K, V>` → `[K, V]`). Empty for non-generic
-    /// types. JVM-erased in descriptors but kept so the front end recovers member/element types.
-    pub targs: Vec<TypeRef>,
-    pub span: Span,
-    /// For function types `(A, B) -> R`: the parameter types. Empty for non-function types and
-    /// zero-argument function types. `arg` holds the return type; see
-    /// [`TypeRef::is_function_type_syntax`] for the structural discriminator.
-    pub fun_params: Vec<TypeRef>,
-    /// Leading physical parameters that bind as context receivers in a lambda.
-    pub fun_context_count: u32,
-    /// The `<…>` lists written on a qualifier segment before the last one (`part1<Int>.part2.Cls`,
-    /// `Outer<A>.Inner`). Their arguments are also in `targs`, after the arguments of every later
-    /// segment; resolution decides which segments are packages.
-    pub qualifier_arguments: Vec<QualifierSegmentArguments>,
-}
-
-/// One `<…>` list written on a segment of a qualified type or annotation reference.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct QualifierSegmentArguments {
-    /// The zero-based segment of the written name the list follows.
-    pub segment: u32,
-    /// How many arguments the list holds.
-    pub count: u32,
-    /// The list, from `<` through `>`.
-    pub span: Span,
 }
 
 #[derive(Clone, Debug)]

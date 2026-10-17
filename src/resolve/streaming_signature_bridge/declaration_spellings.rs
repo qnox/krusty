@@ -5,7 +5,7 @@
 //! production signature collection never reopens `File::alias_spellings` or walks declarations by
 //! parser coordinates.
 
-use super::super::{spelling_of_ref_with, spelling_scope, ClassNames, SymbolTable, TParams};
+use super::super::{spelling_of_ref_with, spelling_scope, TParams};
 use crate::fir::{
     DeclarationId, DeclarationKind, HeaderDeclarationKind, HeaderTypeBoundRange, HeaderTypeId,
     HeaderTypeParameterRange, StreamedHeaderModule,
@@ -89,37 +89,70 @@ fn spelling(
     semantics: &super::ProductionSignatureSemantics<'_>,
     scope_owner: DeclarationId,
     ty: HeaderTypeId,
-    classes: &ClassNames,
     scope: &TParams,
     context: &SpellingContext,
 ) -> Option<Spelled> {
     let materialized = headers
         .syntax
-        .transient_type_ref(ty, &headers.lookup_names)?;
-    let source_spellings = headers
+        .transient_written_type_ref(ty, &headers.lookup_names)?;
+    let structural_ids = headers
         .syntax
-        .transient_source_spellings(ty, &headers.lookup_names)?;
+        .resolved_written_spelling_preorder(ty, &mut |syntax| {
+            semantics
+                .selected_types
+                .spelling(syntax)
+                .map(|spelling| spelling.classifier_segment)
+        })?;
     let signature_scope = crate::fir::SignatureScope {
         owner: scope_owner,
         source: headers.declarations.anchor(scope_owner)?.source,
     };
+    let no_source_substitutions = crate::fx_hash::HashMap::default();
     let spellings = crate::spelling::SourceSpellings {
-        aliases: &source_spellings,
+        aliases: &no_source_substitutions,
         annotations: context.annotations.get(&signature_scope.source)?,
     };
-    let mut resolve_argument = |argument: &crate::ast::TypeRef| {
-        semantics
-            .resolve_signature_type_reference(signature_scope, argument)
-            .unwrap_or(crate::types::Ty::Error)
+    let mut structural_ids = structural_ids.into_iter();
+    let resolved = std::cell::RefCell::new(crate::fx_hash::HashMap::default());
+    let complete = std::cell::Cell::new(true);
+    let mut resolved_spelling = |reference: &crate::ast::TypeRef| {
+        let selected = structural_ids
+            .next()
+            .and_then(|syntax| semantics.selected_types.spelling(syntax))
+            .unwrap_or_else(|| {
+                complete.set(false);
+                super::super::type_spellings::ResolvedTypeSpelling::default()
+            });
+        if let Some(ty) = selected.resolved {
+            resolved
+                .borrow_mut()
+                .insert(reference as *const crate::ast::TypeRef as usize, ty);
+        } else {
+            complete.set(false);
+        }
+        selected
     };
-    Some(spelling_of_ref_with(
+    let mut resolve_argument = |argument: &crate::ast::TypeRef| {
+        resolved
+            .borrow()
+            .get(&(argument as *const crate::ast::TypeRef as usize))
+            .copied()
+            .unwrap_or_else(|| {
+                complete.set(false);
+                crate::types::Ty::Error
+            })
+    };
+    let mut alias_expansion = |identity| semantics.table.libraries.type_alias_expansion(identity);
+    let spelled = spelling_of_ref_with(
         &materialized,
-        classes,
         scope,
         &context.expansions,
+        &mut alias_expansion,
         spellings,
         &mut resolve_argument,
-    ))
+        &mut resolved_spelling,
+    );
+    (complete.get() && structural_ids.next().is_none()).then_some(spelled)
 }
 
 fn bound_spellings(
@@ -127,7 +160,6 @@ fn bound_spellings(
     scope_owner: DeclarationId,
     range: HeaderTypeBoundRange,
     parameters: &[String],
-    classes: &ClassNames,
     scope: &TParams,
     context: &SpellingContext,
 ) -> Option<Vec<Vec<Spelled>>> {
@@ -140,28 +172,24 @@ fn bound_spellings(
                 .bounds(range)
                 .iter()
                 .filter(|bound| headers.lookup_names.get(bound.parameter) == Some(parameter))
-                .map(|bound| {
-                    spelling(
-                        headers,
-                        semantics,
-                        scope_owner,
-                        bound.ty,
-                        classes,
-                        scope,
-                        context,
-                    )
-                })
+                .map(|bound| spelling(headers, semantics, scope_owner, bound.ty, scope, context))
                 .collect()
         })
         .collect()
 }
 
 /// Populate only stable declaration-keyed metadata sidecars from the compact Pass-1 inventory.
-pub(in crate::resolve) fn collect_compact_declared_spellings(
-    table: &mut SymbolTable,
-    headers: &StreamedHeaderModule,
-    file_class_names: &[ClassNames],
+pub(in crate::resolve) fn finalized_compact_declared_spellings(
+    semantics: &super::ProductionSignatureSemantics<'_>,
+    index: &crate::fir::ResolvedModuleIndex,
+    undemanded_ordinary_locals: &crate::fx_hash::HashSet<DeclarationId>,
+) -> (
+    Vec<(DeclarationId, DeclaredSpellings)>,
+    Vec<(DeclarationId, Spelled)>,
+    Vec<DeclarationId>,
 ) {
+    let headers = semantics.headers;
+    let table = semantics.table;
     let annotations = (0..headers.sources.len() as u32)
         .map(crate::fir::SourceFileId::from_raw)
         .map(|source| {
@@ -175,45 +203,11 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
         expansions: table.alias_expansion_spellings.clone(),
         annotations,
     };
-    let classifier_types = table
-        .classes
-        .values()
-        .filter_map(|classifier| {
-            classifier
-                .stable_declaration
-                .map(|declaration| (declaration, classifier.internal))
-        })
-        .collect();
-    let empty_receivers = crate::fx_hash::HashMap::default();
-    let semantics = super::ProductionSignatureSemantics {
-        headers,
-        table,
-        classifier_types: &classifier_types,
-        parameters: crate::fx_hash::HashMap::default(),
-        extension_receivers: &empty_receivers,
-        source_orders: crate::fx_hash::HashMap::default(),
-        signature_origins: crate::fx_hash::HashMap::default(),
-        stable_functions: super::stable_function_index::StableFunctionIndex::default(),
-        scoped_receivers: std::cell::RefCell::new(crate::fx_hash::HashMap::default()),
-        scoped_constraint_inputs: std::cell::RefCell::new(crate::fx_hash::HashMap::default()),
-        scoped_constraints: std::cell::RefCell::new(crate::fx_hash::HashMap::default()),
-        completed_scoped_constraints: std::cell::RefCell::new(crate::fx_hash::HashMap::default()),
-        scoped_constraint_checkpoints: std::cell::RefCell::new(Vec::new()),
-        diagnostics: std::cell::RefCell::new(Vec::new()),
-        selected_calls: Default::default(),
-        selected_types: Default::default(),
-        source_contracts: std::cell::RefCell::new(crate::fx_hash::HashMap::default()),
-        file_import_scopes: super::file_import_scopes::FileImportScopes::default(),
-        classifier_stubs_by_source: std::cell::RefCell::new(None),
-        extension_receivers_by_declaration: std::cell::RefCell::new(None),
-        property_type_parameters_by_declaration: std::cell::RefCell::new(None),
-    };
     let mut records = Vec::new();
+    let mut type_aliases = Vec::new();
+    let mut failures = Vec::new();
     for stub in &headers.stubs {
         let Some(declaration) = headers.syntax.declaration(stub.id) else {
-            continue;
-        };
-        let Some(classes) = file_class_names.get(stub.source.raw() as usize) else {
             continue;
         };
         let record = (|| -> Option<DeclaredSpellings> {
@@ -229,9 +223,9 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                     let (own, scope) = declaration_scope(headers, stub.id, type_parameters)
                         .expect("compact callable scope must be materializable");
                     let ret = match result {
-                        crate::fir::HeaderResultType::Explicit(result) => spelling(
-                            headers, &semantics, stub.id, result, classes, &scope, &context,
-                        ),
+                        crate::fir::HeaderResultType::Explicit(result) => {
+                            spelling(headers, semantics, stub.id, result, &scope, &context)
+                        }
                         crate::fir::HeaderResultType::ImplicitUnit
                         | crate::fir::HeaderResultType::Inferred => Some(Spelled::default()),
                     };
@@ -244,23 +238,22 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                             .map(|parameter| {
                                 spelling(
                                     headers,
-                                    &semantics,
+                                    semantics,
                                     stub.id,
                                     parameter.ty,
-                                    classes,
                                     &scope,
                                     &context,
                                 )
                             })
                             .collect::<Option<Vec<_>>>()?,
                         receiver: match receiver {
-                            Some(receiver) => spelling(
-                                headers, &semantics, stub.id, receiver, classes, &scope, &context,
-                            )?,
+                            Some(receiver) => {
+                                spelling(headers, semantics, stub.id, receiver, &scope, &context)?
+                            }
                             None => Spelled::default(),
                         },
                         type_param_bounds: bound_spellings(
-                            &semantics, stub.id, bounds, &own, classes, &scope, &context,
+                            semantics, stub.id, bounds, &own, &scope, &context,
                         )?,
                         ..DeclaredSpellings::default()
                     })
@@ -268,6 +261,7 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                 HeaderDeclarationKind::Property {
                     receiver,
                     declared_type,
+                    getter_type,
                     type_parameters,
                     bounds,
                     context_parameters,
@@ -276,16 +270,22 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                     let (own, scope) = declaration_scope(headers, stub.id, type_parameters)
                         .expect("compact property scope must be materializable");
                     Some(DeclaredSpellings {
-                        ret: match declared_type {
-                            Some(ty) => spelling(
-                                headers, &semantics, stub.id, ty, classes, &scope, &context,
-                            )?,
+                        ret: match declared_type.or(getter_type) {
+                            Some(ty) => {
+                                spelling(headers, semantics, stub.id, ty, &scope, &context)?
+                            }
+                            None => Spelled::default(),
+                        },
+                        getter_ret: match getter_type {
+                            Some(ty) => {
+                                spelling(headers, semantics, stub.id, ty, &scope, &context)?
+                            }
                             None => Spelled::default(),
                         },
                         receiver: match receiver {
-                            Some(ty) => spelling(
-                                headers, &semantics, stub.id, ty, classes, &scope, &context,
-                            )?,
+                            Some(ty) => {
+                                spelling(headers, semantics, stub.id, ty, &scope, &context)?
+                            }
                             None => Spelled::default(),
                         },
                         params: headers
@@ -295,17 +295,16 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                             .map(|parameter| {
                                 spelling(
                                     headers,
-                                    &semantics,
+                                    semantics,
                                     stub.id,
                                     parameter.ty,
-                                    classes,
                                     &scope,
                                     &context,
                                 )
                             })
                             .collect::<Option<Vec<_>>>()?,
                         type_param_bounds: bound_spellings(
-                            &semantics, stub.id, bounds, &own, classes, &scope, &context,
+                            semantics, stub.id, bounds, &own, &scope, &context,
                         )?,
                         ..DeclaredSpellings::default()
                     })
@@ -315,46 +314,79 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                     bounds,
                     supertypes,
                     base,
+                    context_parameters,
                     primary_parameters,
                     ..
                 } => {
                     let (own, scope) = declaration_scope(headers, stub.id, type_parameters)
                         .expect("compact classifier scope must be materializable");
+                    // Declaration ancestry is still owned by the compact header inventory here;
+                    // `ResolvedModuleIndex` receives that inventory only after signature
+                    // finalization succeeds. Querying the index would therefore miss every primary
+                    // constructor and try to spell parameters whose header is deliberately deferred.
+                    let primary_constructor = headers
+                        .owned_stubs(stub.id)
+                        .find(|candidate| {
+                            candidate.kind == crate::fir::DeclarationKind::Constructor
+                                && headers
+                                    .declarations
+                                    .anchor(candidate.id)
+                                    .is_some_and(|anchor| anchor.sibling == 0)
+                        })
+                        .map(|constructor| constructor.id);
+                    let primary_parameters_deferred =
+                        primary_constructor.is_some_and(|constructor| {
+                            undemanded_ordinary_locals.contains(&constructor)
+                        });
                     Some(DeclaredSpellings {
-                        params: headers
+                        params: if primary_parameters_deferred {
+                            Vec::new()
+                        } else {
+                            headers
+                                .syntax
+                                .parameters(primary_parameters)
+                                .iter()
+                                .map(|parameter| {
+                                    spelling(
+                                        headers,
+                                        semantics,
+                                        stub.id,
+                                        parameter.ty,
+                                        &scope,
+                                        &context,
+                                    )
+                                })
+                                .collect::<Option<Vec<_>>>()?
+                        },
+                        classifier_context_params: headers
                             .syntax
-                            .parameters(primary_parameters)
+                            .parameters(context_parameters)
                             .iter()
                             .map(|parameter| {
                                 spelling(
                                     headers,
-                                    &semantics,
+                                    semantics,
                                     stub.id,
                                     parameter.ty,
-                                    classes,
                                     &scope,
                                     &context,
                                 )
                             })
                             .collect::<Option<Vec<_>>>()?,
                         superclass: match base {
-                            Some(ty) => spelling(
-                                headers, &semantics, stub.id, ty, classes, &scope, &context,
-                            )?,
+                            Some(ty) => {
+                                spelling(headers, semantics, stub.id, ty, &scope, &context)?
+                            }
                             None => Spelled::default(),
                         },
                         supertypes: headers
                             .syntax
                             .type_operands(supertypes)
                             .iter()
-                            .map(|ty| {
-                                spelling(
-                                    headers, &semantics, stub.id, *ty, classes, &scope, &context,
-                                )
-                            })
+                            .map(|ty| spelling(headers, semantics, stub.id, *ty, &scope, &context))
                             .collect::<Option<Vec<_>>>()?,
                         type_param_bounds: bound_spellings(
-                            &semantics, stub.id, bounds, &own, classes, &scope, &context,
+                            semantics, stub.id, bounds, &own, &scope, &context,
                         )?,
                         ..DeclaredSpellings::default()
                     })
@@ -374,10 +406,9 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                             .map(|parameter| {
                                 spelling(
                                     headers,
-                                    &semantics,
+                                    semantics,
                                     stub.id,
                                     parameter.ty,
-                                    classes,
                                     &scope,
                                     &context,
                                 )
@@ -386,13 +417,38 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                         ..DeclaredSpellings::default()
                     })
                 }
-                HeaderDeclarationKind::TypeAlias { .. } => None,
+                HeaderDeclarationKind::TypeAlias {
+                    type_parameters,
+                    target,
+                } => {
+                    if index.type_alias_header(stub.id).is_none() {
+                        return Some(DeclaredSpellings::default());
+                    }
+                    let (_, scope) = declaration_scope(headers, stub.id, type_parameters)
+                        .expect("compact type-alias scope must be materializable");
+                    type_aliases.push((
+                        stub.id,
+                        spelling(headers, semantics, stub.id, target, &scope, &context)?,
+                    ));
+                    Some(DeclaredSpellings::default())
+                }
             }
         })();
-        if let Some(record) = record.filter(|record| !record.is_none()) {
-            records.push((stub.id, record));
+        match record {
+            // Absence is the stable marker that this exact ordinary local header belongs to
+            // Pass 2. Even an empty successful LOCAL_CLASS record must therefore be retained: it
+            // distinguishes an already-bound demanded/inline/default-owned header from a deferred
+            // one whose active lexical checker still owns binding.
+            _ if undemanded_ordinary_locals.contains(&stub.id) => {}
+            Some(record)
+                if !record.is_none()
+                    || stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS) =>
+            {
+                records.push((stub.id, record));
+            }
+            Some(_) => {}
+            None => failures.push(stub.id),
         }
     }
-    drop(semantics);
-    table.stable_declared_spellings.extend(records);
+    (records, type_aliases, failures)
 }

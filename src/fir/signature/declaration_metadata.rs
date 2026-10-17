@@ -22,6 +22,44 @@ pub enum NoArgSuperConstructor {
 }
 
 impl ResolvedModuleIndex {
+    /// Complete the primary-constructor parameter role of an already-published classifier
+    /// spelling record. Classifier parents, bounds, and context parameters can be demanded in
+    /// Pass 1 while the primary constructor remains body-local Pass-2 work (for example, a vararg
+    /// constructor). The empty parameter vector is the deliberate partial-state marker; no other
+    /// spelling role may be replaced here.
+    pub(crate) fn complete_classifier_primary_parameter_spellings(
+        &mut self,
+        declaration: DeclarationId,
+        parameters: Vec<crate::spelling::Spelled>,
+    ) {
+        assert_eq!(
+            self.declaration_anchor(declaration)
+                .map(|anchor| anchor.kind),
+            Some(DeclarationKind::Classifier),
+            "primary-parameter spelling completion belongs to a classifier"
+        );
+        let record = self
+            .declaration_spellings
+            .get_mut(&declaration)
+            .expect("classifier spelling completion requires its stable Pass-1 record");
+        assert!(
+            record.params.is_empty(),
+            "classifier primary-parameter spellings may be completed only once"
+        );
+        record.params = parameters;
+    }
+
+    pub(crate) fn publish_type_alias_spelling(
+        &mut self,
+        declaration: DeclarationId,
+        spelling: crate::spelling::Spelled,
+    ) {
+        self.type_aliases
+            .get_mut(&declaration)
+            .expect("a type-alias spelling requires its published semantic header")
+            .expansion_spelling = spelling;
+    }
+
     /// The position `declaration`'s continuation class takes in its scope's generated-class
     /// sequence, or `None` when the declaration is not a source `suspend` function.
     pub fn continuation_ordinal(&self, declaration: DeclarationId) -> Option<u32> {

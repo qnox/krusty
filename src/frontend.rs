@@ -1502,6 +1502,12 @@ where
             &mut index,
             diags,
         );
+        crate::resolve::check_finalized_top_level_type_alias_bounds(
+            &files[..inferred_end],
+            &index,
+            &symbols,
+            diags,
+        );
         crate::resolve::publish_named_class_constructors(
             &files[..inferred_end],
             &mut index,

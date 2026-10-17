@@ -16,6 +16,107 @@ impl CheckedLocalProperty {
 }
 
 impl Checker<'_> {
+    fn record_checked_local_property_shape(
+        &mut self,
+        owner: TypeName,
+        name: &str,
+        has_receiver: bool,
+        mutable: bool,
+        visibility: Visibility,
+        source_member: crate::libraries::SourceMember,
+        stable_declaration: Option<crate::fir::DeclarationId>,
+        ty: Ty,
+        interface: bool,
+    ) {
+        if has_receiver || ty.mentions_error() || ty.mentions_pending() {
+            return;
+        }
+        let hidden = |declaration| {
+            self.resolved_index.is_some_and(|index| {
+                index
+                    .declaration_applied_annotations(declaration)
+                    .iter()
+                    .any(crate::types::ResolvedAnnotation::is_deprecated_hidden)
+            })
+        };
+        let deprecated_hidden = stable_declaration.is_some_and(hidden);
+        let accessor_available = |sibling| {
+            stable_declaration
+                .and_then(|declaration| {
+                    self.resolved_index?.owned_declaration(
+                        declaration,
+                        crate::fir::DeclarationKind::Accessor,
+                        sibling,
+                    )
+                })
+                .is_none_or(|accessor| !hidden(accessor))
+        };
+        self.checked_local_properties.insert(
+            (owner, name.to_owned()),
+            CheckedLocalProperty {
+                ty,
+                owner,
+                mutable,
+                visibility,
+                interface,
+                source_member,
+                stable_declaration,
+                deprecated_hidden,
+                accessor_availability: crate::libraries::PropertyAccessorAvailability {
+                    getter: accessor_available(0),
+                    setter: accessor_available(1),
+                },
+            },
+        );
+    }
+
+    pub(super) fn record_checked_local_property(
+        &mut self,
+        owner: TypeName,
+        property: &PropDecl,
+        source_member: crate::libraries::SourceMember,
+        stable_declaration: Option<crate::fir::DeclarationId>,
+        ty: Ty,
+        interface: bool,
+    ) {
+        self.record_checked_local_property_shape(
+            owner,
+            &property.name,
+            property.receiver.is_some(),
+            property.is_var,
+            property.visibility,
+            source_member,
+            stable_declaration,
+            ty,
+            interface,
+        );
+    }
+
+    pub(super) fn record_checked_local_constructor_property(
+        &mut self,
+        owner: TypeName,
+        property: &PropParam,
+        source_member: crate::libraries::SourceMember,
+        stable_declaration: Option<crate::fir::DeclarationId>,
+        ty: Ty,
+        interface: bool,
+    ) {
+        if !property.is_property {
+            return;
+        }
+        self.record_checked_local_property_shape(
+            owner,
+            &property.name,
+            false,
+            property.is_var,
+            property.visibility,
+            source_member,
+            stable_declaration,
+            ty,
+            interface,
+        );
+    }
+
     /// The first available property declaration published by a classifier in the active bounded
     /// body. Reads and writes use the same overlay but independently select their accessor.
     pub(super) fn checked_body_local_property(
