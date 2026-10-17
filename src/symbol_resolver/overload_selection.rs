@@ -1496,12 +1496,7 @@ fn best_by_args_at_priority_with_ties<'a>(
 /// A lambda argument (`Ty::Fun`) matches a decoded function-typed parameter of the same arity.
 /// Providers must expose callable shape from metadata; source resolution never derives it from a
 /// runtime classifier's spelling.
-fn fun_arg_matches(
-    src: &dyn SymbolSource,
-    param: &Ty,
-    arg: &Ty,
-    allow_unit_coercion: bool,
-) -> bool {
+fn fun_arg_matches(src: &dyn SymbolSource, param: &Ty, arg: &Ty, lambda_literal: bool) -> bool {
     let Some(arg_arity) = arg.fun_arity() else {
         return false;
     };
@@ -1509,8 +1504,28 @@ fn fun_arg_matches(
         Ty::Nullable(inner) => **inner,
         _ => *param,
     };
-    param.fun_arity().is_some_and(|pn| pn == arg_arity)
-        && fun_return_compatible(src, param, *arg, allow_unit_coercion)
+    // A lambda literal declares only value parameters: `{ name -> }` fits `Scope.(String) -> Unit`,
+    // whose receiver and context parameters bind implicitly. A parameter type written on the
+    // lambda must still accept the value the function type passes there.
+    let declares_value_parameters = |param: Ty| match (param, *arg) {
+        (Ty::Fun(param), Ty::Fun(lambda)) if lambda_literal => {
+            let implicit = param.context_count + usize::from(param.has_receiver);
+            !lambda.has_receiver
+                && lambda.context_count == 0
+                && param.params.len().saturating_sub(implicit) == lambda.params.len()
+                && param.params.iter().skip(implicit).zip(&lambda.params).all(
+                    |(passed, declared)| {
+                        matches!(declared, Ty::Error)
+                            || matches!(passed.non_null(), Ty::TyParam(..))
+                            || matches!(declared.non_null(), Ty::TyParam(..))
+                            || resolution_subtype(src, *passed, *declared)
+                    },
+                )
+        }
+        _ => false,
+    };
+    (param.fun_arity().is_some_and(|pn| pn == arg_arity) || declares_value_parameters(param))
+        && fun_return_compatible(src, param, *arg, lambda_literal)
 }
 
 /// A function-typed argument fits a function-typed parameter's RETURN. A parameter `(T) -> R` with a

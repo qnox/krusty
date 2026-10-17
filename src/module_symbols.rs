@@ -452,6 +452,7 @@ impl<'a> ModuleSymbols<'a> {
         let mut shape = LibraryType {
             // A current-module classifier is by definition a Kotlin declaration.
             is_kotlin: true,
+            is_data: c.is_data(),
             access: c.visibility.into(),
             source_file: Some(c.source_file),
             stable_declaration: c.stable_declaration,
@@ -574,6 +575,7 @@ impl<'a> ModuleSymbols<'a> {
             annotation_targets: None,
             mapped_collection: None,
             annotation_element_defaults: Vec::new(),
+            deprecation: None,
         };
         debug_assert!(
             c.methods
@@ -1027,6 +1029,7 @@ fn fn_info(
     let declared_params = Some(params.clone().into_boxed_slice());
     let call_sig = sig.call_sig();
     let callable = LibraryCallable {
+        deprecation: None,
         annotations: sig.annotations.clone(),
         external_identity: None,
         external_default_provider: None,
@@ -1160,6 +1163,7 @@ fn source_callable(
 ) -> LibraryCallable {
     let declared_params = Some(params.clone().into_boxed_slice());
     LibraryCallable {
+        deprecation: None,
         external_identity: None,
         annotations: Vec::new(),
         external_default_provider: None,

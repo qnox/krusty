@@ -106,6 +106,7 @@ mod tests {
             is_suspend: false,
             is_operator: false,
             is_infix: false,
+            is_synthesized: false,
             is_expect: false,
             is_external: true,
             is_static: false,

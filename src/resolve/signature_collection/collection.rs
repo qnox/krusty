@@ -2913,7 +2913,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 }],
                             );
                         }
-                        declared_callable_order.push("copy".to_string());
+                        if !declared_callable_order.iter().any(|name| name == "copy") {
+                            declared_callable_order.push("copy".to_string());
+                        }
                         let copy = DataCopyShape {
                             properties: data_properties
                                 .iter()
@@ -2933,7 +2935,13 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 "copy",
                             ),
                         };
-                        methods.insert("copy".into(), vec![copy.signature()]);
+                        // A user-written overload and the generated data-class member have distinct
+                        // stable declarations. Keep both in the ordinary candidate family; replacing
+                        // the written overload also orphaned its Pass-1 signature identity.
+                        methods
+                            .entry("copy".into())
+                            .or_default()
+                            .push(copy.signature());
                     }
                     if classifier_is_enum {
                         table.enums.insert(

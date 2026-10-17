@@ -446,6 +446,8 @@ mod tests {
                 package_owner: true,
                 getter_function: Some(accessor),
                 setter_function: None,
+                module_suffix_getter: false,
+                module_suffix_setter: false,
                 physical_getter_ret: None,
                 physical_setter_value: None,
                 getter_constant: None,

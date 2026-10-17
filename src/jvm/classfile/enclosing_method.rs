@@ -3,10 +3,39 @@
 
 use super::{u2, ClassWriter};
 
+/// The emitted enclosure and declaration-header roots retained after a copied class replaces it.
+#[derive(Default)]
+pub(super) struct EnclosingMethodState {
+    current: Option<(String, String, String)>,
+    retained_header_entries: Vec<u16>,
+}
+
+impl EnclosingMethodState {
+    pub(super) fn retained_header_entries(&self) -> &[u16] {
+        &self.retained_header_entries
+    }
+}
+
 impl ClassWriter {
+    /// Record the declaration enclosure visited before an inline object's copied class is
+    /// regenerated at its call site. AnonymousObjectTransformer replaces the attribute, but ASM's
+    /// constant pool retains the declaration owner's class and method name-and-type entries.
+    pub(in crate::jvm) fn retain_replaced_enclosing_method(
+        &mut self,
+        owner: &str,
+        method: &str,
+        descriptor: &str,
+    ) {
+        let owner = self.cp.class(owner);
+        let method = self.cp.name_and_type(method, descriptor);
+        self.enclosing_method
+            .retained_header_entries
+            .extend([owner, method]);
+    }
+
     /// Set the enclosing class and method for a local class.
     pub fn set_enclosing_method(&mut self, owner: &str, method: &str, descriptor: &str) {
-        self.enclosing_method = Some((
+        self.enclosing_method.current = Some((
             owner.to_string(),
             method.to_string(),
             descriptor.to_string(),
@@ -19,14 +48,14 @@ impl ClassWriter {
     /// where the enclosing method's descriptor is not reconstructable; a wrong one would make
     /// `Class.getEnclosingMethod()` throw, while absent is well-defined.
     pub fn set_enclosing_class(&mut self, owner: &str) {
-        self.enclosing_method = Some((owner.to_string(), String::new(), String::new()));
+        self.enclosing_method.current = Some((owner.to_string(), String::new(), String::new()));
     }
 
     /// Intern the `EnclosingMethod` refs (owner class, method NameAndType). kotlinc visits them
     /// before the `InnerClasses` rows, although the attribute is serialized after that table; its
     /// NAME interns later, with the other attribute names.
     pub(super) fn intern_enclosing_method_refs(&mut self) {
-        if let Some((owner, method, desc)) = self.enclosing_method.clone() {
+        if let Some((owner, method, desc)) = self.enclosing_method.current.clone() {
             self.cp.class(&owner);
             if !method.is_empty() {
                 self.cp.name_and_type(&method, &desc);
@@ -36,7 +65,7 @@ impl ClassWriter {
 
     /// Build the attribute (name index, body), consuming the recorded enclosing refs.
     pub(super) fn enclosing_method_attribute(&mut self) -> Option<(u16, Vec<u8>)> {
-        let (owner, method, desc) = self.enclosing_method.take()?;
+        let (owner, method, desc) = self.enclosing_method.current.take()?;
         let name = self.cp.utf8("EnclosingMethod");
         let class_idx = self.cp.class(&owner);
         // An empty method name is the class-only form: `method_index = 0`.

@@ -32,9 +32,12 @@ struct ElementDecode<'a> {
 
 /// The type of the local an element is decoded into. A value-class element (an unsigned one
 /// included) is held as its nullable type, as kotlinc holds it: the local starts `null`, and a
-/// decoded box is unboxed null-safely.
+/// decoded box is unboxed null-safely. A type-parameter element is held as `Any?` whatever its
+/// bound, as kotlinc holds it: the decoded value is narrowed only where the constructor takes it.
 fn decode_local_ty(ir: &IrFile, ty: Ty) -> Ty {
-    if value_class_underlying(ir, &ty).is_some() || ty.is_unsigned() {
+    if ty.non_null().ty_param_name().is_some() {
+        Ty::nullable(class_ty("kotlin/Any"))
+    } else if value_class_underlying(ir, &ty).is_some() || ty.is_unsigned() {
         Ty::nullable(ty.non_null())
     } else {
         ty

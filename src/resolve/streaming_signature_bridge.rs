@@ -31,12 +31,14 @@ mod integer_constants;
 mod local_signatures;
 mod lookups;
 mod operator_conventions;
+mod postponed_argument_mapping;
 mod postponed_calls;
 mod qualified_calls;
 mod receiver_member_level;
 mod rejected_member_call;
 mod scope_resolver;
 mod selected_call_facts;
+mod selected_type_facts;
 mod semantics;
 mod source_contracts;
 mod stable_function_index;
@@ -65,6 +67,7 @@ pub(crate) use local_signatures::{
 pub(crate) use local_signatures::{
     publish_checked_local_signatures, publish_discovered_local_capture_declarations,
 };
+use postponed_argument_mapping::MappedTopLevelSelection;
 pub(crate) use source_contracts::{extract_source_contract_candidates, SourceContractCandidate};
 use top_level_call::SelectedTopLevelCall;
 
@@ -89,6 +92,8 @@ struct ProductionSignatureSemantics<'a> {
     /// What each selected top-level call recorded, by call origin: its contract and the typealias
     /// it constructed through.
     selected_calls: selected_call_facts::SelectedCallFacts,
+    /// Typealias provenance recorded by the compact type-resolution operation that selected it.
+    selected_types: selected_type_facts::SelectedTypeFacts,
     /// Same-module source contracts bound before solving starts, by stable declaration, so a
     /// call of a source function with `returns() implies (x != null)` proves as much in a
     /// Pass-1 block as a library one. Publication into the index still happens at finalization.
@@ -1560,62 +1565,6 @@ impl ProductionSignatureSemantics<'_> {
         });
         let selected = matching.next()?.clone();
         matching.next().is_none().then_some(selected)
-    }
-
-    fn probe_call_arguments(
-        candidates: &[crate::libraries::FunctionInfo],
-        arguments: &[crate::fir::SigCallArgumentProbe<'_>],
-        trailing_lambda: bool,
-    ) -> Option<(Vec<crate::symbol_resolver::CallArgKind>, Vec<Option<usize>>)> {
-        if arguments.iter().any(|argument| {
-            matches!(
-                argument,
-                crate::fir::SigCallArgumentProbe::PostponedLambda { spread: true, .. }
-                    | crate::fir::SigCallArgumentProbe::PostponedCallableReference {
-                        spread: true,
-                        ..
-                    }
-            )
-        }) {
-            return None;
-        }
-        let names = arguments
-            .iter()
-            .map(|argument| match argument {
-                crate::fir::SigCallArgumentProbe::Typed(argument) => {
-                    argument.name.map(str::to_owned)
-                }
-                crate::fir::SigCallArgumentProbe::PostponedLambda { name, .. }
-                | crate::fir::SigCallArgumentProbe::PostponedCallableReference { name, .. } => {
-                    name.map(str::to_owned)
-                }
-            })
-            .collect::<Vec<_>>();
-        let requires_mapping = trailing_lambda || names.iter().any(Option::is_some);
-        let extra_admitted = |first: usize, extra: usize| {
-            Self::same_vararg_element_probe(&arguments[first], &arguments[extra])
-        };
-        let slots = if requires_mapping {
-            Self::mapped_call_slots(
-                candidates,
-                &names,
-                arguments.len(),
-                trailing_lambda,
-                &extra_admitted,
-            )?
-        } else {
-            (0..arguments.len()).map(Some).collect()
-        };
-        let kinds = slots
-            .iter()
-            .map(|source| {
-                source
-                    .and_then(|source| arguments.get(source))
-                    .map(Self::probe_argument_kind)
-                    .unwrap_or(crate::symbol_resolver::CallArgKind::OmittedDefault)
-            })
-            .collect();
-        Some((kinds, slots))
     }
 
     fn probe_argument_kind(
@@ -3795,6 +3744,7 @@ pub(crate) fn finalized_streamed_signature_index(
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
+        selected_types: selected_type_facts::SelectedTypeFacts::default(),
         source_contracts: RefCell::new(HashMap::default()),
         file_import_scopes: file_import_scopes::FileImportScopes::default(),
         classifier_stubs_by_source: RefCell::new(None),
@@ -4461,6 +4411,7 @@ pub(crate) fn finalized_streamed_signature_index(
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
+        selected_types: selected_type_facts::SelectedTypeFacts::default(),
         source_contracts: RefCell::new(HashMap::default()),
         file_import_scopes: file_import_scopes::FileImportScopes::default(),
         classifier_stubs_by_source: RefCell::new(None),

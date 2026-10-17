@@ -677,8 +677,9 @@ Common options (kotlinc-compatible):
                         (legacy -Xjvm-default=all | all-compatibility)
   -Xno-param-assertions omit JVM entry guards for non-null parameters
   -Xno-call-assertions  omit JVM assertions on platform-typed call results
-  -Xlambdas=indy        emit lambdas through LambdaMetafactory (class is not supported)
-  -Xsam-conversions=indy emit SAM conversions through LambdaMetafactory
+  -Xlambdas=indy|class  emit lambdas through LambdaMetafactory, or as kotlin.jvm.internal.Lambda
+                        classes
+  -Xsam-conversions=indy|class emit SAM conversions through LambdaMetafactory or as classes
   -Xplugin=<jar>,<jar>  compiler plugins; kotlinx.serialization runs as krusty's native pass,
                         any other plugin is an error (krusty cannot run FIR/IR plugin jars)
   -P plugin:<id>:<key>=<value>
@@ -703,22 +704,36 @@ mod tests {
         parse(args.iter().map(|s| s.to_string()))
     }
 
-    /// `-progressive` turns on the selected release's progressive features, so it is refused while
-    /// one of them is a feature krusty does not model; every supported release has such a feature.
+    /// `-progressive` accepts releases whose progressive features are all modeled and names the
+    /// first unmodeled feature otherwise.
     #[test]
-    fn progressive_is_refused_while_it_turns_on_an_unmodeled_feature() {
-        for release in ["2.4.0", "2.4.10", "2.4.20"] {
+    fn progressive_accepts_modeled_features_and_refuses_the_first_unmodeled_one() {
+        for release in ["2.4.0", "2.4.10"] {
             let o = parse_args(&[
                 &format!("-Xkotlin-reference-version={release}"),
                 "-progressive",
                 "f.kt",
             ]);
-            assert_eq!(
-                o.errors,
-                ["krusty does not implement the language feature 'ErrorAboutDataClassCopyVisibilityChange' selected by '-progressive'".to_string()],
+            assert_eq!(o.errors, Vec::<String>::new(), "kotlinc {release}");
+            assert!(
+                o.language_settings
+                    .features
+                    .has("ReportTypeVarianceConflictsInDnnAndFlexible"),
                 "kotlinc {release}"
             );
         }
+
+        let o = parse_args(&["-Xkotlin-reference-version=2.4.20", "-progressive", "f.kt"]);
+        assert_eq!(
+            o.errors,
+            ["krusty does not implement the language feature \
+              'ReportDeprecationsOfClassifiersInImplicitInvokes' selected by '-progressive'"
+                .to_string()]
+        );
+        assert!(o
+            .language_settings
+            .features
+            .has("ReportTypeVarianceConflictsInDnnAndFlexible"));
     }
 
     /// `-Xkotlin-reference-version` selects a supported release and refuses any other, rather than

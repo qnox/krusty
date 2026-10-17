@@ -100,15 +100,7 @@ impl ProductionSignatureSemantics<'_> {
             let source_indices = (0..arguments.len()).collect::<Vec<_>>();
             let names = arguments
                 .iter()
-                .map(|argument| match argument {
-                    crate::fir::SigCallArgumentProbe::Typed(argument) => {
-                        argument.name.map(str::to_owned)
-                    }
-                    crate::fir::SigCallArgumentProbe::PostponedLambda { name, .. }
-                    | crate::fir::SigCallArgumentProbe::PostponedCallableReference {
-                        name, ..
-                    } => name.map(str::to_owned),
-                })
+                .map(|argument| argument.name().map(str::to_owned))
                 .collect::<Vec<_>>();
             let call_slots = |constructor: &crate::libraries::LibraryMember| {
                 crate::libraries::map_call_args(
@@ -172,6 +164,24 @@ impl ProductionSignatureSemantics<'_> {
                     let mut constructor = constructor.clone();
                     constructor.owner.get_or_insert(internal);
                     let parameters = parameters(&constructor, &slots);
+                    // A constructor whose parameter cannot take the postponed lambda is
+                    // inapplicable (`Engine(config)` for `Engine { ... }`); it must not shape the
+                    // argument and hide the companion `invoke` the call actually selects. A
+                    // callable reference may still be a reflection value (`KProperty0<T>`).
+                    let admits_postponed =
+                        slots.iter().zip(&parameters).all(|(source, parameter)| {
+                            !source.and_then(|source| arguments.get(source)).is_some_and(
+                                |argument| {
+                                    matches!(
+                                        argument,
+                                        crate::fir::SigCallArgumentProbe::PostponedLambda { .. }
+                                    )
+                                },
+                            ) || resolver.admits_function_value(*parameter)
+                        });
+                    if !admits_postponed {
+                        return None;
+                    }
                     Self::source_ordered_parameters(
                         &parameters,
                         &slots,

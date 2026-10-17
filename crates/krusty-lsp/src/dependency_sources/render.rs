@@ -563,7 +563,7 @@ fn attached_source_in(
             names.push(facade_name);
         }
     }
-    let entries: Vec<String> = archive.file_names().map(str::to_string).collect();
+    let entries = decoded_entry_names(archive.file_names())?;
     let candidates = source_entry_candidates(&entries, package, &names);
 
     let mut fallback = None;
@@ -593,6 +593,17 @@ fn attached_source_in(
         }
     }
     fallback
+}
+
+/// Every entry name of a sources jar, or `None` when one does not decode: candidates chosen from a
+/// partial listing could attach a file other than the one that declares the class.
+fn decoded_entry_names<'a>(
+    names: impl Iterator<Item = zip::result::ZipResult<std::borrow::Cow<'a, str>>>,
+) -> Option<Vec<String>> {
+    names
+        .map(|name| name.map(std::borrow::Cow::into_owned))
+        .collect::<Result<_, _>>()
+        .ok()
 }
 
 fn source_entry_candidates(entries: &[String], package: &str, names: &[&str]) -> Vec<String> {
@@ -1125,4 +1136,31 @@ fn simple_name(tn: TypeName) -> String {
     let rendered = tn.render();
     let simple = rendered.rsplit('/').next().unwrap_or(&rendered);
     simple.replace('$', ".")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::borrow::Cow;
+
+    #[test]
+    fn an_undecodable_sources_entry_name_yields_no_candidates() {
+        let undecodable = zip::result::ZipError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "undecodable entry name",
+        ));
+        let names = [Ok(Cow::Borrowed("p/A.kt")), Err(undecodable)];
+
+        assert_eq!(decoded_entry_names(names.into_iter()), None);
+    }
+
+    #[test]
+    fn decodable_sources_entry_names_are_all_listed() {
+        let names = [Ok(Cow::Borrowed("p/A.kt")), Ok(Cow::Borrowed("p/B.kt"))];
+
+        assert_eq!(
+            decoded_entry_names(names.into_iter()),
+            Some(vec!["p/A.kt".to_string(), "p/B.kt".to_string()])
+        );
+    }
 }

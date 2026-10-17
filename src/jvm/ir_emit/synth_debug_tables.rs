@@ -147,13 +147,17 @@ pub(super) fn attach_synth_debug_tables(
             .iter()
             .position(|property| property.backing_field == Some(field_index as u32));
         let declared_property = declared_index.map(|index| &c.properties[index]);
+        // The accessors' own type: an explicit backing field stores a narrower one.
+        let accessor_ty = declared_property.map_or(f.ty, |property| {
+            declared_property_accessor_jvm(ir, property, f)
+        });
         // A scalar getter result over a reference-returning overridden getter is the wrapper.
         let getter_result = if declared_index
             .is_some_and(|index| override_results.boxes_member_property(c.fq_name, index as u32))
         {
             Ty::nullable(f.ty)
         } else {
-            f.ty
+            accessor_ty
         };
         // A CTOR-parameter property's accessors sit on the class-declaration line; a BODY property's
         // sit on its own `val`/`var` line. A written default accessor has no function of its own, but
@@ -180,7 +184,7 @@ pub(super) fn attach_synth_debug_tables(
             );
         }
         if !f.is_final() && declared_property.is_none_or(|property| property.setter.is_none()) {
-            let pd = desc(f.ty);
+            let pd = desc(accessor_ty);
             // The setter's value param is always slot 1 (`this`=0): guard = `aload_1`(1) + the
             // `<set-?>` String's real ldc width + invokestatic(3).
             let set_pc = if param_assertions && is_nonnull_reference_field(f.ty) {

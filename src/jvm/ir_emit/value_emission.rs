@@ -10,15 +10,15 @@ use crate::types::Ty;
 
 use super::{
     access_bridges, array_jvm_element, bottom_values, boxed_descriptor, bytecode_inline_call,
-    class_ctor_jvm_tys, class_lambda_reflection, constant_emission, constructor_accessors,
+    captured_storage, class_ctor_jvm_tys, constant_emission, constructor_accessors,
     declared_jvm_interface, default_mask_bit, default_mask_count, emit_box_impl,
     emit_constructor_default_arguments, instance_field_jvm_name, ir_ty_to_jvm, jvm_declared_ty,
     jvm_function_interface, jvm_function_invoke_descriptor, jvm_function_params, jvm_tys,
     jvm_value_ty, lambda_class, lambda_class_names, load, method_defaults,
     native_unsigned_impl_target, parse_descriptor_params, physical_call_result_words,
-    prim_newarray_atype, push_zero, ref_class, signature_formatter::JvmSignatureFormatter,
-    singleton_instance_load, slot_words, try_emission, ty_from_descriptor_ret, vararg,
-    JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation, LMF_METAFACTORY_DESC,
+    prim_newarray_atype, push_zero, singleton_instance_load, slot_words, try_emission,
+    ty_from_descriptor_ret, vararg, JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation,
+    LMF_METAFACTORY_DESC,
 };
 
 impl super::Emitter<'_> {
@@ -1618,13 +1618,17 @@ impl super::Emitter<'_> {
                 }) {
                     lambda_mode = LambdaMode::Class;
                 }
+                if self.ir.jvm_unrealized_lambda_classes.contains(impl_fn)
+                    || (lambda_mode == LambdaMode::Class && sam.is_none())
+                {
+                    // The class is discarded; a placeholder keeps its frames computable. Every
+                    // Kotlin function lambda selected for class mode must already have been
+                    // realized in IR. This emitter-owned class path is only the SAM shim.
+                    self.run
+                        .set_emit_error(lambda_class::unrealized(self.ir, *impl_fn));
+                    return code.aconst_null();
+                }
                 if lambda_mode == LambdaMode::Indy {
-                    if self.ir.jvm_unrealized_lambda_classes.contains(impl_fn) {
-                        // The class is discarded; a placeholder keeps its frames computable.
-                        self.run
-                            .set_emit_error(lambda_class::unrealized(self.ir, *impl_fn));
-                        return code.aconst_null();
-                    }
                     self.run.used_indy_lambdas.borrow_mut().insert(*impl_fn);
                 }
                 let f = &self.ir.functions[*impl_fn as usize];
@@ -1707,6 +1711,9 @@ impl super::Emitter<'_> {
                     .map(|c| c.fq_name())
                     .unwrap_or_else(|| self.facade.clone());
                 if lambda_mode == LambdaMode::Class {
+                    let target = sam
+                        .as_ref()
+                        .expect("non-SAM class lambdas are rejected before legacy SAM emission");
                     let (internal, identity) = lambda_class_names::emitted_class_name(
                         self.ir,
                         *impl_fn,
@@ -1715,30 +1722,6 @@ impl super::Emitter<'_> {
                         &self.facade,
                         self.lambda_modes,
                     );
-                    let reflection = if sam.is_none() {
-                        let formatter = JvmSignatureFormatter::with_symbols(
-                            self.ir,
-                            self.classifiers,
-                            self.run,
-                        );
-                        let invoke = class_lambda_reflection::ClassLambdaInvoke {
-                            own: lam_tys,
-                            result: impl_ret,
-                        };
-                        match class_lambda_reflection::reflect(
-                            self.ir, e, *impl_fn, invoke, &formatter,
-                        ) {
-                            Ok(reflection) => reflection,
-                            Err(error) => {
-                                // The class is discarded; a placeholder keeps the frames
-                                // computable.
-                                self.run.set_emit_error(error);
-                                return code.aconst_null();
-                            }
-                        }
-                    } else {
-                        None
-                    };
                     self.run.lambda_classes.borrow_mut().push(LambdaClassPlan {
                         internal: internal.clone(),
                         iface: iface.clone(),
@@ -1748,14 +1731,11 @@ impl super::Emitter<'_> {
                         impl_name: impl_name.clone(),
                         impl_desc: impl_desc.clone(),
                         captures: cap_tys.to_vec(),
-                        arity: *arity as u32,
-                        kotlin_function: sam.is_none(),
                         function_adapter,
                         identity,
                         owner_is_interface: impl_owner_is_interface,
-                        reflection,
                     });
-                    let nullable = sam.as_ref().is_some_and(|target| target.nullable);
+                    let nullable = target.nullable;
                     if nullable {
                         self.emit_capturing_lambda_class(
                             code, &internal, captures, cap_tys, nullable,
@@ -1855,6 +1835,14 @@ impl super::Emitter<'_> {
                 if self.value_ty(*operand).is_jvm_scalar() {
                     return;
                 }
+                // An inlined operand leaves the caller's line forgotten. kotlinc marks the checked
+                // expression's line again at the implicit check, so the check owns an entry even
+                // though the restored caller line is already in effect.
+                if matches!(check, NullCheck::Named(_)) && code.line_forgotten() {
+                    if let Some(line) = code.current_line() {
+                        code.mark_line(line.into());
+                    }
+                }
                 code.dup();
                 // A platform value narrowed to a declared non-null type names the checked expression
                 // in its failure (`getenv(...) must not be null`); `x!!` has no such name and uses the
@@ -1952,37 +1940,7 @@ impl super::Emitter<'_> {
                 holder,
                 elem,
                 value,
-            } => {
-                // A value that cannot carry the operand stack (`msg = try {…} finally {}`) can't
-                // run with the holder on it. Spill it first (as `RefNew` does).
-                let unsigned = self.completes_unsigned_bitwise_value(*value);
-                let saved_assignment = self.unsigned_assignment_line;
-                if unsigned {
-                    // A local assignment keeps the line on the receiver and writes it again at
-                    // the store. A captured local is the same assignment once the holder is gone.
-                    self.unsigned_assignment_line = true;
-                }
-                if self.spills_operand_prefix(*value) {
-                    let temps = self.spill_to_temps(&[*value], code);
-                    self.emit_value(*holder, code);
-                    for &(slot, t, _) in &temps {
-                        load(t, slot, code);
-                    }
-                    self.release_operand_spills(&temps);
-                } else {
-                    self.emit_value(*holder, code);
-                    self.emit_element_value(*elem, *value, code);
-                }
-                self.unsigned_assignment_line = saved_assignment;
-                if unsigned {
-                    self.mark_expression_start(e, code);
-                    code.forget_line();
-                    super::debug_lines::mark_statement(self.ir, e, code);
-                }
-                let (cls, fdesc) = ref_class(elem);
-                let f = self.cw.fieldref(cls, "element", fdesc);
-                code.putfield(f, slot_words(ir_ty_to_jvm(elem)) as i32);
-            }
+            } => captured_storage::captured_assignment::emit(self, e, *holder, *elem, *value, code),
             IrExpr::InvokeFunction {
                 func,
                 args,

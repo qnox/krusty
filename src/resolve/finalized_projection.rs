@@ -393,7 +393,12 @@ pub(crate) fn publish_stable_declaration_metadata(
         // A declared result keeps its own spelling; only an inferred one takes the abbreviation
         // its type was reached through.
         if record.ret.is_none() {
-            record.ret = abbreviation_spelling(table, abbreviation);
+            let result = index
+                .signature(declaration)
+                .expect("an abbreviation belongs to a published signature")
+                .result
+                .get();
+            record.ret = abbreviation_spelling(table, result, abbreviation);
         }
     }
     for (declaration, spellings) in spellings {
@@ -500,6 +505,7 @@ pub(crate) fn publish_stable_declaration_metadata(
 /// side supplies.
 fn abbreviation_spelling(
     table: &SymbolTable,
+    result: crate::types::Ty,
     abbreviation: &crate::fir::ResolvedTypeAbbreviation,
 ) -> Spelled {
     let alias_args = abbreviation
@@ -521,10 +527,37 @@ fn abbreviation_spelling(
                 )
             })
         });
-    Spelled {
+    let alias = Spelled {
         alias: Some(abbreviation.alias),
         args: super::type_spellings::expansion_arg_spellings(template, &alias_args),
         alias_args,
+        unsafe_variance: template.is_some_and(|(rhs, _, _)| rhs.unsafe_variance),
         ..Spelled::default()
-    }
+    };
+    abbreviation
+        .argument_path
+        .iter()
+        .try_fold(
+            (result, Vec::<(usize, crate::types::Ty)>::new()),
+            |(current, mut parents), &index| {
+                let index = usize::try_from(index).ok()?;
+                let child = *current.type_args().get(index)?;
+                parents.push((index, current));
+                Some((child, parents))
+            },
+        )
+        .map(|(_, parents)| {
+            parents
+                .into_iter()
+                .rev()
+                .fold(alias, |child, (index, parent)| {
+                    let mut args = vec![Spelled::default(); parent.type_args().len()];
+                    args[index] = child;
+                    Spelled {
+                        args,
+                        ..Spelled::default()
+                    }
+                })
+        })
+        .expect("an inferred abbreviation path must belong to its resolved result")
 }

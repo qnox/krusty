@@ -373,6 +373,8 @@ struct MethodInfo {
     /// Body emission deliberately left the leading instruction without a source position. This
     /// suppresses the declared-function fallback that would otherwise fill pc 0.
     suppress_entry_line: bool,
+    /// Emission dropped dead code that named a constant (see `CodeBuilder::dropped_constant`).
+    dropped_constant: bool,
     /// What kotlinc's bytecode rewrites need to reshape this method when the class is written.
     rewrite_source: Option<Box<method_rewrite::RewriteSource>>,
     /// `Code` exception table: `(start_pc, end_pc, handler_pc, catch_type)` — `catch_type` is a
@@ -526,8 +528,7 @@ pub struct ClassWriter {
     source_map: crate::jvm::source_map::SourceMap,
     /// The methods the coroutine transformer rewrites when the class is written, and its results.
     coroutines: coroutine_transform::Coroutines,
-    /// Owner, method name, and descriptor for the `EnclosingMethod` attribute.
-    enclosing_method: Option<(String, String, String)>,
+    enclosing_method: enclosing_method::EnclosingMethodState,
     pub internal_name: String,
 }
 
@@ -582,7 +583,7 @@ impl ClassWriter {
             source_file: None,
             source_map: crate::jvm::source_map::SourceMap::default(),
             coroutines: coroutine_transform::Coroutines::default(),
-            enclosing_method: None,
+            enclosing_method: enclosing_method::EnclosingMethodState::default(),
             internal_name: internal_name.to_string(),
         }
     }
@@ -615,23 +616,6 @@ impl ClassWriter {
             self.source_map = crate::jvm::source_map::SourceMap::new(&source_file, &path, lines);
         }
         Some(&mut self.source_map)
-    }
-
-    /// Start the identity source map kotlinc writes for a class generated inside an `inline`
-    /// function (`visitSMAP(…, intoInline = true)`). The map is kept even when the class inlines
-    /// nothing else. A map an earlier splice already started is left as it is.
-    pub fn start_inline_origin_source_map(&mut self, lines: u16) {
-        if self.source_map.is_unstarted() {
-            let Some(source_file) = self.source_file.clone() else {
-                return;
-            };
-            let path = self.internal_name.clone();
-            self.source_map = crate::jvm::source_map::SourceMap::for_regenerated_class(
-                &source_file,
-                &path,
-                lines,
-            );
-        }
     }
 
     /// The class's own source file, for a synthesized class that belongs to it.
@@ -761,6 +745,7 @@ impl ClassWriter {
             code: None,
             implicit_void_return_pc: None,
             suppress_entry_line: false,
+            dropped_constant: false,
             rewrite_source: None,
             exceptions: Vec::new(),
             stackmap: None,
@@ -1206,6 +1191,7 @@ impl ClassWriter {
             code: Some(code.bytes.clone()),
             implicit_void_return_pc: code.implicit_void_return_pc,
             suppress_entry_line: code.suppress_entry_line,
+            dropped_constant: code.dropped_constant,
             // kotlinc's bytecode rewrites run when the class is written: several of this method's
             // tables are attached after it is added, and the rewrite depends on them.
             rewrite_source: (!code.bytes.is_empty())
@@ -1886,7 +1872,12 @@ impl ClassWriter {
             u4(&mut out, bytes.len() as u32);
             out.extend_from_slice(bytes);
         }
-        pool_layout::relayout(out, &relaid, self.unnamed_entries())
+        pool_layout::relayout(
+            out,
+            &relaid,
+            self.unnamed_entries(),
+            self.enclosing_method.retained_header_entries(),
+        )
     }
 }
 
@@ -1985,6 +1976,10 @@ pub struct CodeBuilder {
     /// (operand-height tracking, `max_stack`, `max_locals`) runs unchanged while dead, so a revival
     /// point sees exactly the state it saw before this suppression existed.
     dead: bool,
+    /// Whether a dropped dead instruction named a constant. The constant stays interned, where
+    /// kotlinc's writer, which never sees the instruction, interns nothing; the method's pool
+    /// entries are then laid out again like a rewritten method's.
+    dropped_constant: bool,
     /// Labels bound while `dead` and NOT revived, by label id. They sit at the end of a dropped
     /// region, which is also where the next live instruction lands. Rewrites and side-table
     /// resolution must ignore them rather than attach dead ranges to that live instruction.
@@ -2023,6 +2018,7 @@ impl CodeBuilder {
             implicit_void_return_pc: None,
             suppress_entry_line: false,
             dead: false,
+            dropped_constant: false,
             dead_bound: Vec::new(),
             bind_sequence: Vec::new(),
             next_bind: 0,
@@ -2121,6 +2117,8 @@ impl CodeBuilder {
         if !self.dead {
             self.bytes.push(byte);
             self.bytes.push(arg);
+        } else {
+            self.dropped_constant |= byte == 0x12; // `ldc`
         }
         self.adjust(stack_delta);
     }
@@ -2128,6 +2126,8 @@ impl CodeBuilder {
         if !self.dead {
             self.bytes.push(byte);
             self.bytes.extend_from_slice(&arg.to_be_bytes());
+        } else {
+            self.dropped_constant |= byte != 0x11; // all but `sipush` name a constant
         }
         self.adjust(stack_delta);
     }
@@ -2458,6 +2458,8 @@ impl CodeBuilder {
             self.bytes.extend_from_slice(&iref.to_be_bytes());
             self.bytes.push((arg_words + 1) as u8); // count includes the receiver
             self.bytes.push(0);
+        } else {
+            self.dropped_constant = true;
         }
         self.adjust(ret_words - arg_words - 1);
     }
@@ -2468,6 +2470,8 @@ impl CodeBuilder {
             self.bytes.extend_from_slice(&indy_index.to_be_bytes());
             self.bytes.push(0);
             self.bytes.push(0);
+        } else {
+            self.dropped_constant = true;
         }
         self.adjust(ret_words - arg_words);
     }

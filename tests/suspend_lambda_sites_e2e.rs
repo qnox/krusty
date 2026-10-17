@@ -177,3 +177,18 @@ fn a_wide_lambda_and_its_siblings_get_kotlincs_class_names() {
 fn a_wide_lambda_beside_a_suspend_lambda_class_runs() {
     common::expect_box_ok_with_stdlib(WIDE, "WideRun");
 }
+
+#[test]
+fn a_wide_suspend_lambda_packed_invoke_matches_kotlinc() {
+    match common::class_bytes_diff_against_kotlinc(
+        "Wide",
+        &[],
+        WIDE,
+        "WideKt$box$1$1",
+        "public java.lang.Object invoke(java.lang.Object[])",
+    ) {
+        None => panic!("reference kotlinc is provisioned"),
+        Some(Ok(())) => {}
+        Some(Err(difference)) => panic!("{difference}"),
+    }
+}

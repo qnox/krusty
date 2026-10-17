@@ -201,6 +201,7 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
         scoped_constraint_checkpoints: std::cell::RefCell::new(Vec::new()),
         diagnostics: std::cell::RefCell::new(Vec::new()),
         selected_calls: Default::default(),
+        selected_types: Default::default(),
         source_contracts: std::cell::RefCell::new(crate::fx_hash::HashMap::default()),
         file_import_scopes: super::file_import_scopes::FileImportScopes::default(),
         classifier_stubs_by_source: std::cell::RefCell::new(None),

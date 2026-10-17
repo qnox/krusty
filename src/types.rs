@@ -3,6 +3,7 @@
 
 mod classifier_declarations;
 mod deprecation;
+mod diagnostic_rendering;
 mod intersection;
 pub(crate) use intersection::declaration_approximation;
 mod overridden_declaration;
@@ -13,7 +14,10 @@ pub use classifier_declarations::{
     GeneratedClassifierFact, GeneratedClassifierKind, GeneratedClassifierPurpose,
     SerializationGeneratedMemberStatuses,
 };
-pub use deprecation::{Deprecation, DeprecationLevel};
+pub use deprecation::{
+    DeclaredDeprecation, DeprecatedDeclaration, DeprecatedSinceKotlin, Deprecation,
+    DeprecationLevel,
+};
 pub use overridden_declaration::OverriddenDeclaration;
 pub use semantic_call_role::SemanticCallRole;
 pub use semantic_callable_owner::SemanticCallableOwner;
@@ -1562,19 +1566,6 @@ impl Ty {
                 platform_upper_bound,
             )
         };
-        // The occurrence mark belongs to the parameter name, before kotlinc's owner suffix:
-        // `E? (of fun <E> f)`, not `E (of fun <E> f)?`.
-        let marked_parameter = |inner: Ty, mark: &str| match inner {
-            Ty::TyParam(name, _) => {
-                let rendered = type_parameter(name);
-                let source = type_parameter_source_name(name);
-                Some(match rendered.strip_prefix(source) {
-                    Some(owner) => format!("{source}{mark}{owner}"),
-                    None => format!("{rendered}{mark}"),
-                })
-            }
-            _ => None,
-        };
         match self {
             Ty::Int => "Int".to_string(),
             Ty::Byte => "Byte".to_string(),
@@ -1616,26 +1607,33 @@ impl Ty {
             Ty::Null => "Null".to_string(),
             Ty::Nothing => "Nothing".to_string(),
             Ty::Error => "<error>".to_string(),
-            Ty::Fun(signature) => {
-                let parameters = signature
-                    .params
-                    .iter()
-                    .map(|parameter| render(*parameter))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let suspend = if signature.suspend { "suspend " } else { "" };
-                format!("{suspend}({parameters}) -> {}", render(signature.ret))
+            Ty::Fun(signature) => diagnostic_rendering::function_type(
+                signature,
+                context,
+                type_parameter,
+                classifier,
+                platform_upper_bound,
+            ),
+            // A type parameter's nullability marker belongs to its name, ahead of any owner text a
+            // diagnostic appends: `T? (of class Box<T>)`, `T! (of class Box<T>)`.
+            Ty::Nullable(inner) | Ty::PlatformNullable(inner)
+                if matches!(*inner, Ty::TyParam(..)) =>
+            {
+                diagnostic_rendering::qualified_type_parameter(
+                    *inner,
+                    matches!(self, Ty::Nullable(_)),
+                    type_parameter,
+                )
             }
-            Ty::Nullable(inner) => marked_parameter(*inner, "?")
-                .unwrap_or_else(|| intersection::spell_nullable(*inner, render, true)),
-            Ty::PlatformNullable(inner) => marked_parameter(*inner, "!").unwrap_or_else(|| {
+            Ty::Nullable(inner) => intersection::spell_nullable(*inner, render, true),
+            Ty::PlatformNullable(inner) => {
                 let upper = platform_upper_bound(*inner);
                 if upper == *inner {
                     format!("{}!", render(*inner))
                 } else {
                     format!("(Mutable){}!", render(upper))
                 }
-            }),
+            }
             Ty::InProjection(inner) => match *inner {
                 Ty::OutProjection(conflicting) => {
                     format!("CONFLICTING-PROJECTION {}", render(*conflicting))

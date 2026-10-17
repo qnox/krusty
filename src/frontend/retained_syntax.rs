@@ -1051,6 +1051,10 @@ pub(super) fn compact(file: &mut File) {
     );
     file.infix_calls = remap_u32_set(std::mem::take(&mut file.infix_calls), &expressions);
     file.call_type_args = remap_u32_map(std::mem::take(&mut file.call_type_args), &expressions);
+    file.standalone_type_argument_qualifiers = remap_u32_set(
+        std::mem::take(&mut file.standalone_type_argument_qualifiers),
+        &expressions,
+    );
     file.lambda_param_types =
         remap_u32_map(std::mem::take(&mut file.lambda_param_types), &expressions);
     file.lambda_param_spans =
@@ -1373,5 +1377,28 @@ mod tests {
             &source[syntax.span.lo as usize..syntax.span.hi as usize],
             "<Int>",
         );
+    }
+
+    #[test]
+    fn standalone_type_argument_marker_remaps_with_its_retained_expression_owner() {
+        let source = "fun discarded() = Gone<String>\n\
+            inline fun kept() = Unit<Int>\n";
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let mut file =
+            crate::frontend::parse_source_with_detected_features(source, &mut diagnostics);
+        assert!(!diagnostics.has_errors(), "{:#?}", diagnostics.diags);
+        assert_eq!(file.standalone_type_argument_qualifiers.len(), 2);
+
+        compact(&mut file);
+
+        assert_eq!(file.standalone_type_argument_qualifiers.len(), 1);
+        let &owner = file
+            .standalone_type_argument_qualifiers
+            .iter()
+            .next()
+            .expect("retained standalone qualifier syntax");
+        assert!((owner as usize) < file.expr_arena.len());
+        assert!(matches!(file.expr(ExprId(owner)), Expr::Name(name) if name == "Unit"));
+        assert_eq!(file.call_type_args[&owner].arguments[0].name, "Int");
     }
 }

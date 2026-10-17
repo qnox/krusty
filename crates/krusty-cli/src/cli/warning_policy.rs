@@ -23,7 +23,23 @@ impl WarningName {
     fn parse(name: &str, release: KotlinVersion) -> Option<Self> {
         if let Some(name) = krusty::diag::CompilerWarningName::parse(name) {
             let available = match name {
+                krusty::diag::CompilerWarningName::DataClassCopyVisibilityWillBeChanged
+                | krusty::diag::CompilerWarningName::DataClassInvisibleCopyUsage => {
+                    FeatureTable::for_version(release).is_some_and(|table| {
+                        table
+                            .get("ErrorAboutDataClassCopyVisibilityChange")
+                            .is_some()
+                    })
+                }
+                krusty::diag::CompilerWarningName::ClassLiteralLhsNotAClass => {
+                    FeatureTable::for_version(release)
+                        .is_some_and(|table| table.get("ForbidUselessTypeArgumentsIn25").is_some())
+                }
                 krusty::diag::CompilerWarningName::Deprecation => true,
+                krusty::diag::CompilerWarningName::ExplicitTypeArgumentsInPropertyAccess => {
+                    FeatureTable::for_version(release)
+                        .is_some_and(|table| table.get("ForbidUselessTypeArgumentsIn25").is_some())
+                }
                 krusty::diag::CompilerWarningName::InapplicableOperatorModifier => {
                     FeatureTable::for_version(release).is_some_and(|table| {
                         table
@@ -32,6 +48,10 @@ impl WarningName {
                     })
                 }
                 krusty::diag::CompilerWarningName::TypeArgumentsNotAllowed => {
+                    FeatureTable::for_version(release)
+                        .is_some_and(|table| table.get("ForbidUselessTypeArgumentsIn25").is_some())
+                }
+                krusty::diag::CompilerWarningName::WrongNumberOfTypeArgumentsInGetClass => {
                     FeatureTable::for_version(release)
                         .is_some_and(|table| table.get("ForbidUselessTypeArgumentsIn25").is_some())
                 }
@@ -265,6 +285,38 @@ mod tests {
                 expected_disposition,
                 "{level}"
             );
+        }
+    }
+
+    #[test]
+    fn data_class_copy_warning_names_follow_the_selected_release_catalog() {
+        for (name, identity) in [
+            (
+                "DATA_CLASS_COPY_VISIBILITY_WILL_BE_CHANGED_WARNING",
+                CompilerWarningName::DataClassCopyVisibilityWillBeChanged,
+            ),
+            (
+                "DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING",
+                CompilerWarningName::DataClassInvisibleCopyUsage,
+            ),
+        ] {
+            for release in [
+                KotlinVersion::V2_4_0,
+                KotlinVersion::V2_4_10,
+                KotlinVersion::V2_4_20,
+            ] {
+                let mut policy = WarningPolicy::default();
+                assert_eq!(
+                    policy.configure(&format!("{name}:disabled"), release),
+                    Ok(()),
+                    "{release}: {name}"
+                );
+                assert_eq!(
+                    policy.configured_level(WarningName::Compiler(identity)),
+                    Some(WarningLevel::Disabled),
+                    "{release}: {name}"
+                );
+            }
         }
     }
 

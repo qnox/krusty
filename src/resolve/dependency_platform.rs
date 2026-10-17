@@ -687,6 +687,7 @@ mod tests {
     fn type_shape(is_public: bool) -> LibraryType {
         LibraryType {
             is_kotlin: true,
+            is_data: false,
             access: if is_public {
                 crate::libraries::ClassifierAccess::Public
             } else {
@@ -727,6 +728,7 @@ mod tests {
             annotation_targets: None,
             mapped_collection: None,
             annotation_element_defaults: Vec::new(),
+            deprecation: None,
         }
     }
 

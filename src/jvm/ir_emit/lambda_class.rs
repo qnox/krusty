@@ -18,27 +18,53 @@ pub(super) fn emit_lambda_class(
     opts: &EmitOptions,
 ) -> Vec<u8> {
     const OBJECT: &str = "java/lang/Object";
+    const LAMBDA: &str = "kotlin/jvm/internal/Lambda";
     let class = c.fq_name();
     let arity = u8::try_from(lambda.bridge.param_tys.len())
         .expect("a lambda class's arity fits a numbered FunctionN");
     // The class's generic header: `Object`, then the function type it implements — except when
     // kotlinc's `hasNothingInNonContravariantPosition` leaves that supertype raw (no `Signature`).
     let formatter = JvmSignatureFormatter::new(ir, env);
+    // A `-Xlambdas=class` lambda extends `Lambda` and carries kotlinc's reflection record of the
+    // source lambda; a class the runtime factory forces extends `Object` and carries none.
+    let reflection = match &lambda.kotlin_lambda {
+        Some(origin) => {
+            match class_lambda_reflection::reflect_source(
+                ir,
+                lambda.function_type,
+                lambda.invoke,
+                origin,
+                &formatter,
+            ) {
+                Ok(reflection) => Some(reflection),
+                Err(error) => {
+                    env.run.set_emit_error(error);
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let superclass = if lambda.kotlin_lambda.is_some() {
+        LAMBDA
+    } else {
+        OBJECT
+    };
     let signature = if lambda.raw_supertype {
         None
     } else {
         formatter
-            .ty_at(&lambda.function_type, Wildcards::Suppressed)
-            .map(|function| format!("L{OBJECT};{function}"))
+            .ty_at(&lambda.function_type, Wildcards::Supertype)
+            .map(|function| format!("L{superclass};{function}"))
     };
-    let mut cw = new_writer_generic(&class, signature.as_deref(), OBJECT, opts);
+    let mut cw = new_writer_generic(&class, signature.as_deref(), superclass, opts);
     if let Some(signature) = &signature {
         cw.set_signature(signature);
     }
     cw.set_access(0x0010 | 0x0020 | u16::from(lambda.public_inline)); // FINAL | SUPER | publication
-    let inline_default = lambda.inline_default_owner;
     if let Some((owner, method)) = class_enclosure(ir, env.override_results, c, facade) {
-        let method = inline_default
+        let method = lambda
+            .default_stub_owner
             .map(|function| super::method_defaults::default_stub_method(ir, function, &owner))
             .or(method);
         match method {
@@ -46,18 +72,38 @@ pub(super) fn emit_lambda_class(
             None => cw.set_enclosing_class(&owner),
         }
     }
-    if inline_default.is_some() {
-        let lines = u16::try_from(ir.source_line_count)
-            .unwrap_or(u16::MAX)
-            .max(1);
-        cw.start_inline_origin_source_map(lines);
+    let mut replaced_declaration_enclosure = None;
+    let mut regenerated_inline_class = false;
+    if lambda.inline_origin {
+        match regenerated_inline_origin(ir, env.override_results, lambda.invoke, facade) {
+            Some(origin) => {
+                regenerated_inline_class = true;
+                // AnonymousObjectTransformer visits the declaration class before replacing its
+                // call-site enclosure. Those now-unused constants remain at the front of the
+                // regenerated class's pool.
+                replaced_declaration_enclosure = origin.declaration_enclosure;
+                cw.set_source_file(Some(origin.source_file));
+                cw.start_inline_origin_source_map_at(origin.lines, &origin.path);
+            }
+            None => {
+                let lines = u16::try_from(ir.source_line_count)
+                    .unwrap_or(u16::MAX)
+                    .max(1);
+                cw.start_inline_origin_source_map(lines);
+            }
+        }
     }
     env.inner_classes.register(&mut cw);
     cw.add_interface(&jvm_function_interface(arity));
+    if let Some((owner, Some((name, descriptor)))) = replaced_declaration_enclosure {
+        cw.retain_replaced_enclosing_method(&owner, &name, &descriptor);
+    }
     delegated_property_array::declare(env, c.fq_name, &mut cw);
 
-    // Each captured value's field, typed by the value's declared type: a shared cell is a generic
-    // `Ref$ObjectRef<T>`, whose `Signature` the field and the constructor carry.
+    // Each captured value's field, typed by the value's declared type. A declaration lambda's
+    // shared cell is a generic `Ref$ObjectRef<T>` whose field and constructor carry a `Signature`;
+    // a call-site-regenerated anonymous object deliberately omits those signatures.
+    let regenerated = ir.specialized_functions.contains_key(&lambda.invoke);
     let captures = c
         .fields
         .iter()
@@ -65,10 +111,27 @@ pub(super) fn emit_lambda_class(
         .map(|(index, field)| Capture {
             names: crate::jvm::capture_names::lambda_class_capture(ir, lambda, index)
                 .expect("every field of a lambda class stores one of its captures"),
+            constructor_local: !lambda.captures.get(index).is_some_and(|capture| {
+                matches!(
+                    capture,
+                    crate::ir::IrLambdaCapture::Value { inlined: true, .. }
+                )
+            }),
             ty: jvm_value_ty(&field.ty),
             descriptor: ir_type_desc(&field.ty),
-            signature: parameterized_sig(&formatter, &field.ty),
-            parameter_signature: parameterized_sig_at(&formatter, &field.ty, Wildcards::Declared),
+            // A call-site-regenerated anonymous object carries the declaration-erased descriptor
+            // but publishes no capture-field or constructor generic signature. Its exact
+            // specialization identity was recorded before its emitted name existed.
+            signature: if regenerated {
+                None
+            } else {
+                capture_signature(&formatter, &field.ty, Wildcards::Suppressed)
+            },
+            parameter_signature: if regenerated {
+                None
+            } else {
+                capture_signature(&formatter, &field.ty, Wildcards::Declared)
+            },
         })
         .collect::<Vec<_>>();
     let constructor = format!(
@@ -112,20 +175,31 @@ pub(super) fn emit_lambda_class(
         slot += slot_words(capture.ty);
     }
     code.aload(0);
-    let object = cw.methodref(OBJECT, "<init>", "()V");
-    code.invokespecial(object, 0, 0);
+    if lambda.kotlin_lambda.is_some() {
+        // `Lambda(arity)`: the source arity the lambda's function type declares.
+        code.push_int(i32::from(arity), &mut cw);
+        let lambda_init = cw.methodref(LAMBDA, "<init>", "(I)V");
+        code.invokespecial(lambda_init, 1, 0);
+    } else {
+        let object = cw.methodref(OBJECT, "<init>", "()V");
+        code.invokespecial(object, 0, 0);
+    }
     code.ret_void();
-    let parameters = captures
-        .iter()
-        .map(|capture| {
-            (
-                capture.names.parameter.as_str(),
-                capture.descriptor.as_str(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let locals =
-        function_reference_invoke::reference_constructor_locals(&mut cw, &class, &parameters);
+    // Anonymous-object regeneration drops only a transferred capture's declaration-local row.
+    // Its physical parameter still advances the slot used by every following capture.
+    let mut locals = vec![("this".to_string(), format!("L{class};"), 0u16)];
+    let mut parameter_slot = 1u16;
+    for capture in &captures {
+        if capture.constructor_local {
+            locals.push((
+                capture.names.parameter.clone(),
+                capture.descriptor.clone(),
+                parameter_slot,
+            ));
+        }
+        parameter_slot += slot_words(capture.ty);
+    }
+    cw.reserve_method_lvt(&locals);
     if lambda.public_inline {
         finish_code_sig::<0x0001>(
             &mut cw,
@@ -198,11 +272,24 @@ pub(super) fn emit_lambda_class(
         lambda.invoke,
         arity,
     );
-    if captures.is_empty() || delegated_property_array::exists(env, c.fq_name) {
-        emit_initialization(ir, c, &class, facade, env, &mut cw, captures.is_empty());
+    // A transferred inline capture preserves per-expansion closure identity even when transfer
+    // leaves no fields. Other capture-free specializations retain kotlinc's singleton shape.
+    let fresh_instance = ir
+        .specialized_functions
+        .get(&lambda.invoke)
+        .is_some_and(|specialization| specialization.consumed_inline_capture);
+    let singleton = captures.is_empty() && !fresh_instance;
+    if singleton || delegated_property_array::exists(env, c.fq_name) {
+        emit_initialization(ir, c, &class, facade, env, &mut cw, singleton);
     }
-    if captures.is_empty() {
+    if singleton {
         add_singleton_instance_field(&mut cw, &class);
+    }
+    if regenerated_inline_class {
+        // AnonymousObjectTransformer visits the copied class's InnerClasses rows before it writes
+        // the retained metadata and replaces EnclosingMethod. Seed only the rows this class keeps;
+        // the final writer's later visits then deduplicate them in the same order.
+        cw.seed_inner_class_names();
     }
     if lambda.public_inline {
         let mut xi =
@@ -212,11 +299,72 @@ pub(super) fn emit_lambda_class(
         if lambda.public_inline_abi {
             xi |= super::metadata_policy::METADATA_PUBLIC_ABI_FLAG;
         }
-        cw.set_kotlin_metadata(3, env.metadata_stamp, xi, &[], &[]);
+        // A `-Xlambdas=class` default lambda records its source function like any other.
+        let (d1, d2) = reflection
+            .as_ref()
+            .map_or((&[][..], &[][..]), |reflection| {
+                (&reflection.d1[..], &reflection.d2[..])
+            });
+        cw.set_kotlin_metadata(3, env.metadata_stamp, xi, d1, d2);
+        env.run.finish_class(cw)
+    } else if let Some(reflection) = &reflection {
+        let xi =
+            super::metadata_policy::synthetic_class_xi(super::metadata_policy::SYNTHETIC_LOCAL);
+        cw.set_kotlin_metadata(3, env.metadata_stamp, xi, &reflection.d1, &reflection.d2);
         env.run.finish_class(cw)
     } else {
         finish_local_synthetic_class(cw, env)
     }
+}
+
+struct RegeneratedInlineOrigin {
+    source_file: String,
+    path: String,
+    lines: u16,
+    declaration_enclosure: Option<(String, Option<(String, String)>)>,
+}
+
+/// The declaration source and original enclosure a call-site-specialized lambda class was
+/// regenerated from.
+fn regenerated_inline_origin(
+    ir: &IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
+    mut function: crate::ir::FunId,
+    facade: &str,
+) -> Option<RegeneratedInlineOrigin> {
+    let template = crate::jvm::lambda_classes::specialization_template(ir, function)?;
+    let declaration_facade = ir
+        .foreign_template_facade(template)
+        .map_or(facade, |facade| {
+            crate::jvm::names::classfile_internal_name_of(facade)
+        });
+    let declaration_enclosure = super::enclosure::scope_enclosure(
+        ir,
+        override_results,
+        crate::ir::IrEnclosure::Function(template),
+        declaration_facade,
+    );
+    function = crate::jvm::lambda_classes::specialization_source(ir, function);
+    let source = if ir.foreign_inline_templates.contains(&template) {
+        ir.foreign_template_source(template)?.source
+    } else {
+        ir.source_debug.current()?
+    };
+    let debug = ir.source_debug.file(source)?;
+    let source_file = debug
+        .name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&debug.name)
+        .to_string();
+    let path = ir.lambda_class_names.get(&function)?.render();
+    let lines = u16::try_from(debug.line_count).unwrap_or(u16::MAX).max(1);
+    Some(RegeneratedInlineOrigin {
+        source_file,
+        path,
+        lines,
+        declaration_enclosure,
+    })
 }
 
 fn emit_initialization(
@@ -280,21 +428,37 @@ fn emit_initialization(
     finish_code::<0x0008>(emitter.cw, "<clinit>", "()V", &mut code, locals);
 }
 
+/// The generic `Signature` of a captured value's field or constructor parameter: a parameterized
+/// type, or a type parameter of the enclosing declaration (`TT;`), which the class names through
+/// its `EnclosingMethod`.
+fn capture_signature(
+    formatter: &JvmSignatureFormatter<'_>,
+    ty: &Ty,
+    wildcards: Wildcards,
+) -> Option<String> {
+    match ty.non_null() {
+        Ty::TyParam(..) => formatter.ty_at(ty, wildcards),
+        _ => parameterized_sig_at(formatter, ty, wildcards),
+    }
+}
+
 /// A captured value's field, as the constructor and `invoke` spell it.
 struct Capture {
     names: crate::jvm::capture_names::CaptureNames,
+    /// Whether the regenerated constructor retains this parameter's debug-local row.
+    constructor_local: bool,
     ty: Ty,
     descriptor: String,
     signature: Option<String>,
     parameter_signature: Option<String>,
 }
 
-/// The error for a lambda `LambdaMetafactory` cannot adapt that reaches emission as an
-/// `invokedynamic`: the lambda-class pass did not realize its shape, and the indy would fail to link.
+/// The error for a lambda that requires a real class but whose exact shape the lambda-class pass
+/// could not realize. Emission must fail rather than silently selecting indy or the legacy shim.
 pub(super) fn unrealized(ir: &IrFile, lambda: u32) -> String {
     format!(
-        "internal error: lambda {} needs the class kotlinc writes when LambdaMetafactory cannot \
-         adapt its signature, and its shape is not realized as one yet",
+        "internal error: lambda {} requires a realized Kotlin lambda class, but its shape is not \
+         supported yet",
         ir.functions[lambda as usize].name
     )
 }

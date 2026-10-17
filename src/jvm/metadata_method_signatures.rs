@@ -35,42 +35,6 @@ pub(super) fn requires_function_signature(
     derived != physical
 }
 
-/// The `invoke` a non-suspend lambda class declares beside the erased `FunctionN` bridge.
-///
-/// Parameters keep their JVM types, primitives included. A signed primitive result is boxed; `Unit`
-/// stays `void`, and every other result uses its JVM descriptor.
-pub(super) fn lambda_invoke_descriptor(
-    receiver: Option<Ty>,
-    parameters: &[Ty],
-    result: Ty,
-) -> String {
-    let mut descriptor = String::from("(");
-    for ty in receiver.into_iter().chain(parameters.iter().copied()) {
-        descriptor.push_str(&super::names::type_descriptor(ty));
-    }
-    descriptor.push(')');
-    descriptor.push_str(&lambda_invoke_return(result));
-    descriptor
-}
-
-fn lambda_invoke_return(ty: Ty) -> String {
-    match ty {
-        Ty::Int
-        | Ty::Byte
-        | Ty::Short
-        | Ty::Long
-        | Ty::Float
-        | Ty::Double
-        | Ty::Boolean
-        | Ty::Char => {
-            let wrapper = super::jvm_class_map::wrapper_internal(ty)
-                .expect("a signed primitive has a JVM wrapper");
-            format!("L{wrapper};")
-        }
-        other => super::names::type_descriptor(other),
-    }
-}
-
 /// `requiresSignature` for a backing field: its descriptor is recorded exactly when a reader cannot
 /// rebuild it from the property type (`T`, `Int?`, a value class, `Array<String>`), or the field
 /// holds a delegate of another type.
@@ -161,18 +125,6 @@ mod tests {
             "()Ljava/lang/String;",
             &none
         ));
-        assert_eq!(
-            lambda_invoke_descriptor(None, &[Ty::String], Ty::Long),
-            "(Ljava/lang/String;)Ljava/lang/Long;"
-        );
-        assert_eq!(
-            lambda_invoke_descriptor(Some(Ty::Int), &[], Ty::Unit),
-            "(I)V"
-        );
-        assert_eq!(
-            lambda_invoke_descriptor(None, &[], Ty::Int),
-            "()Ljava/lang/Integer;"
-        );
         let reflective = Ty::obj_args("kotlin/reflect/KSuspendFunction0", &[Ty::Unit]);
         assert!(requires_function_signature(
             Some(reflective),

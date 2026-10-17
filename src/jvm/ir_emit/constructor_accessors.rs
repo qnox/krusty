@@ -9,12 +9,14 @@
 //! package-private `$default` overload instead, which needs no accessor.
 //!
 //! The accessors follow the class's members and bridges. A sealed class's come one per constructor
-//! in declaration order; a private constructor's in the order kotlinc's source-order walk first
-//! meets a call from another class.
+//! in declaration order. A private constructor's is planned with the class's other synthetic
+//! accessors (`static_accessors`), at the first call from another class.
 
 use super::constructor_defaults::emit_ctor_marker_accessor;
 use super::{class_ctor_jvm_tys, jvm_tys, ClassWriter};
-use crate::ir::{CtorDelegateTarget, IrClass, IrConstructorAccess, IrConstructorTarget, IrFile};
+use crate::ir::{
+    ClassId, CtorDelegateTarget, IrClass, IrConstructorAccess, IrConstructorTarget, IrFile,
+};
 use crate::jvm::method_parameters::{
     primary_constructor_identities, secondary_constructor_identities, OwnerConstructorPrefix,
 };
@@ -81,34 +83,49 @@ pub(super) fn hides_secondary(ir: &IrFile, class: &IrClass, ordinal: usize) -> b
             .is_none_or(|generated| generated as usize != ordinal)
 }
 
-/// Emit the accessor of each constructor `class` hides or another class calls privately.
-pub(super) fn emit_accessors(ir: &IrFile, class: &IrClass, owner: &str, cw: &mut ClassWriter) {
-    let ordinals: Vec<u32> = if class.is_sealed {
-        let secondaries = (0..class.secondary_ctors.len())
-            .filter(|&ordinal| hides_secondary(ir, class, ordinal))
-            .map(|ordinal| u32::try_from(ordinal + 1).expect("constructor ordinal fits in u32"));
-        class
-            .has_primary_ctor
-            .then_some(0)
-            .into_iter()
-            .chain(secondaries)
-            .collect()
-    } else {
-        // A constructor taking a value class already has its marker accessor, the only way in.
-        private_constructors_called_from_outside(ir, class.fq_name_id())
-            .into_iter()
-            .filter(|&ordinal| match ordinal.checked_sub(1) {
-                None => !ir.has_value_param_ctor(owner),
-                Some(secondary) => !class.secondary_ctors[secondary as usize].vc_params,
-            })
-            .collect()
-    };
-    for ordinal in ordinals {
+/// Emit the accessor of each constructor a sealed `class` hides. A private constructor's accessor
+/// is planned with the class's other synthetic accessors, at the first call from another class.
+pub(super) fn emit_sealed_accessors(
+    ir: &IrFile,
+    class: &IrClass,
+    owner: &str,
+    cw: &mut ClassWriter,
+) {
+    if !class.is_sealed {
+        return;
+    }
+    let secondaries = (0..class.secondary_ctors.len())
+        .filter(|&ordinal| hides_secondary(ir, class, ordinal))
+        .map(|ordinal| u32::try_from(ordinal + 1).expect("constructor ordinal fits in u32"));
+    for ordinal in class
+        .has_primary_ctor
+        .then_some(0)
+        .into_iter()
+        .chain(secondaries)
+    {
         emit_accessor(ir, class, ordinal, owner, cw);
     }
 }
 
-fn emit_accessor(ir: &IrFile, class: &IrClass, ordinal: u32, owner: &str, cw: &mut ClassWriter) {
+/// The marker accessor of secondary constructor `secondary`, which takes a value class.
+pub(super) fn emit_secondary_marker_accessor(
+    ir: &IrFile,
+    class: &IrClass,
+    secondary: usize,
+    owner: &str,
+    cw: &mut ClassWriter,
+) {
+    let ordinal = u32::try_from(secondary + 1).expect("constructor ordinal fits in u32");
+    emit_accessor(ir, class, ordinal, owner, cw);
+}
+
+pub(super) fn emit_accessor(
+    ir: &IrFile,
+    class: &IrClass,
+    ordinal: u32,
+    owner: &str,
+    cw: &mut ClassWriter,
+) {
     // An enum's constructors all take the constant's name and ordinal first, and so do their
     // accessors.
     let owner_prefix = if class.is_enum {
@@ -144,76 +161,78 @@ fn emit_accessor(ir: &IrFile, class: &IrClass, ordinal: u32, owner: &str, cw: &m
     emit_ctor_marker_accessor(owner, &parameters, &identities, cw);
 }
 
-/// The ordinals of `owner`'s private constructors that another class calls directly, in the order
-/// kotlinc creates their accessors: by the calling class's source position, a class's own
-/// `super(…)` before the calls in its body.
-fn private_constructors_called_from_outside(ir: &IrFile, owner: TypeName) -> Vec<u32> {
-    let private_ordinal = |target: IrConstructorTarget| match target.access {
-        IrConstructorAccess::Private => Some(target.ordinal),
-        _ => None,
+/// Private constructor `target` of a non-sealed class, as `(class, ordinal)`, when code outside
+/// that class calls it through an accessor. A constructor taking a value class already has its
+/// marker accessor, the only way in.
+fn private_target(
+    ir: &IrFile,
+    owner: TypeName,
+    target: IrConstructorTarget,
+) -> Option<(ClassId, u32)> {
+    if target.access != IrConstructorAccess::Private {
+        return None;
+    }
+    let class_id = ir.class_id_by_name(owner)?;
+    let class = &ir.classes[class_id as usize];
+    let hidden_by_value_class = match target.ordinal.checked_sub(1) {
+        None => ir.has_value_param_ctor_of(class.fq_name_id()),
+        Some(secondary) => class.secondary_ctors[secondary as usize].vc_params,
     };
-    // (calling class's source position, kind of call, the call within its kind, ordinal): a
-    // class's `super(…)`, then its secondary constructors' by source position, then constructions
-    // in lowering order. A generated class has no source position and sorts after declared ones.
-    let mut calls: Vec<(u32, u8, u32, u32)> = Vec::new();
-    for (class_id, caller) in ir.classes.iter().enumerate() {
-        if caller.fq_name_id() == owner {
-            continue;
-        }
-        let position = ir
-            .class_source_order(class_id as crate::ir::ClassId)
-            .unwrap_or(u32::MAX);
-        if caller.superclass == owner && super_delegation_is_direct(ir, caller) {
-            calls.extend(
-                private_ordinal(caller.super_ctor).map(|ordinal| (position, 0, 0, ordinal)),
-            );
-        }
-        for secondary in &caller.secondary_ctors {
-            if let CtorDelegateTarget::Super {
-                owner: target_owner,
-                target,
-                ..
-            } = &secondary.delegate
-            {
-                if *target_owner == owner && secondary.default_parameters.is_empty() {
-                    calls.extend(
-                        private_ordinal(*target)
-                            .map(|ordinal| (position, 1, secondary.source_order, ordinal)),
-                    );
-                }
+    (!class.is_sealed && !hidden_by_value_class).then_some((class_id, target.ordinal))
+}
+
+/// The private constructor construction `expression` reaches through its accessor, as `(class,
+/// ordinal)`. A default-argument call goes through the `$default` overload instead.
+pub(super) fn private_construction(
+    ir: &IrFile,
+    expression: crate::ir::ExprId,
+) -> Option<(ClassId, u32)> {
+    let target = *ir.construction_targets.get(&expression)?;
+    let crate::ir::IrExpr::New {
+        internal, defaults, ..
+    } = ir.expr(expression)
+    else {
+        return None;
+    };
+    let caller = *ir.expression_owners.get(&expression)?;
+    if caller == *internal || !defaults.is_empty() {
+        return None;
+    }
+    private_target(ir, *internal, target)
+}
+
+/// Each `super(…)` delegation of another class to a private constructor, as `(line, class,
+/// ordinal)`: a class's primary delegation and its secondary constructors'.
+pub(super) fn private_delegations(ir: &IrFile) -> impl Iterator<Item = (u32, ClassId, u32)> + '_ {
+    ir.classes.iter().flat_map(move |caller| {
+        let primary = (super_delegation_is_direct(ir, caller)
+            && caller.superclass != caller.fq_name_id())
+        .then(|| private_target(ir, caller.superclass, caller.super_ctor))
+        .flatten()
+        .map(|(class, ordinal)| {
+            (
+                caller.primary_delegation_line().unwrap_or(0),
+                class,
+                ordinal,
+            )
+        });
+        let secondaries = caller.secondary_ctors.iter().filter_map(move |secondary| {
+            let CtorDelegateTarget::Super { owner, target, .. } = &secondary.delegate else {
+                return None;
+            };
+            if *owner == caller.fq_name_id() || !secondary.default_parameters.is_empty() {
+                return None;
             }
-        }
-    }
-    for (&construction, &target) in &ir.construction_targets {
-        let Some(ordinal) = private_ordinal(target) else {
-            continue;
-        };
-        let crate::ir::IrExpr::New {
-            internal, defaults, ..
-        } = ir.expr(construction)
-        else {
-            continue;
-        };
-        let Some(&caller) = ir.expression_owners.get(&construction) else {
-            continue;
-        };
-        if *internal != owner || caller == owner || !defaults.is_empty() {
-            continue;
-        }
-        let position = ir
-            .class_id_by_name(caller)
-            .and_then(|class| ir.class_source_order(class))
-            .unwrap_or(u32::MAX);
-        calls.push((position, 2, construction, ordinal));
-    }
-    calls.sort_unstable();
-    let mut ordinals = Vec::new();
-    for (_, _, _, ordinal) in calls {
-        if !ordinals.contains(&ordinal) {
-            ordinals.push(ordinal);
-        }
-    }
-    ordinals
+            private_target(ir, *owner, *target).map(|(class, ordinal)| {
+                (
+                    secondary.lines.delegation_call_line().unwrap_or(0),
+                    class,
+                    ordinal,
+                )
+            })
+        });
+        primary.into_iter().chain(secondaries)
+    })
 }
 
 /// Whether a class's primary `super(…)` names the selected constructor itself rather than its

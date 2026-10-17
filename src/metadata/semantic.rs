@@ -190,6 +190,9 @@ pub struct KotlinFunction {
     pub is_suspend: bool,
     pub is_operator: bool,
     pub is_infix: bool,
+    /// Metadata `MEMBER_KIND == SYNTHESIZED`; providers use this declaration fact while assigning
+    /// exact semantic roles to compiler-generated members.
+    pub is_synthesized: bool,
     pub is_expect: bool,
     /// An `external` function: the target supplies its implementation, so it has no IR body.
     pub is_external: bool,
@@ -381,6 +384,11 @@ pub(crate) fn class_kind(flags: u64) -> TypeKind {
         5 | 6 => TypeKind::Object,
         _ => TypeKind::Class,
     }
+}
+
+/// Class flag `IS_DATA` (bit 10): a `data class` or `data object`.
+pub(crate) fn class_is_data(flags: u64) -> bool {
+    flags & (1 << 10) != 0
 }
 
 pub(crate) fn declaration_visibility(flags: u64) -> Visibility {

@@ -775,6 +775,10 @@ pub struct FunDecl {
     /// may use them concretely (`is T`, `as T`, `T::class`) and codegen specializes them per call.
     pub reified_type_params: crate::fx_hash::HashSet<String>,
     pub span: Span,
+    /// [`Self::span`] widened to the member's modifiers and annotations, which is where kotlinc
+    /// starts a diagnostic about the declaration's inferred type. Only a class member records its
+    /// modifier prefix; any other function starts at its keyword, as [`Self::span`] does.
+    pub declaration_span: Span,
     /// Exact span of the declaration's NAME. Kotlin diagnostics about a declaration as a whole
     /// point here, not at its keyword.
     pub name_span: Span,
@@ -1057,6 +1061,9 @@ pub struct ClassDecl {
     /// `Public` when unmodified. Carried into `@Metadata` `Constructor.flags`; a protected one
     /// also reaches the JVM `<init>` access flags.
     pub primary_ctor_visibility: Visibility,
+    /// Span of an explicit primary-constructor visibility modifier. The data-copy visibility
+    /// migration diagnostic points at the modifier rather than the whole constructor.
+    pub primary_ctor_visibility_span: Option<Span>,
     /// Properties declared in the class *body* (`class C { val x = … }`) — backing field + accessor,
     /// initialized in the primary constructor.
     pub body_props: Vec<PropDecl>,
@@ -1780,6 +1787,10 @@ pub struct File {
     /// `<…>` span in one retained value prevents compaction from remapping semantic input while
     /// leaving diagnostic syntax under an obsolete `ExprId`. Absent means no explicit arguments.
     pub call_type_args: crate::fx_hash::HashMap<u32, CallTypeArguments>,
+    /// Qualifier expressions whose explicit type-argument list ends the postfix expression
+    /// (`val u = Unit<Any>`). The selected classifier identity, not this syntax marker, decides
+    /// whether the access is a deprecated or invalid singleton value access.
+    pub standalone_type_argument_qualifiers: crate::fx_hash::HashSet<u32>,
     pub anonymous_object_classes: crate::fx_hash::HashMap<ExprId, DeclId>,
     /// Anonymous class declaration → exact lexically enclosing source function.
     pub anonymous_object_enclosing_functions:
@@ -2027,8 +2038,23 @@ pub struct File {
     /// `+ForbidUselessTypeArgumentsIn25`: type arguments that select nothing (on a qualifier reaching
     /// a static member, …) are errors rather than deprecation warnings.
     pub forbid_useless_type_arguments: bool,
+    /// Release-owned warning formatting for class-literal diagnostics whose declaration-specific
+    /// leading message is known only after classifier selection.
+    pub useless_type_arguments_warning_format: Option<crate::features::DeprecationWarningFormat>,
     /// Exact per-compilation warning text for the useless-type-argument transition.
     pub type_arguments_not_allowed_warning: Option<String>,
+    /// Exact warning text when the same transition applies to a standalone singleton value.
+    pub explicit_type_arguments_in_property_access_warning: Option<String>,
+    /// `+ErrorAboutDataClassCopyVisibilityChange`: a `data class` whose generated `copy()` exposes its
+    /// non-public primary constructor, and a use of that `copy()`, are errors rather than warnings.
+    pub error_about_data_class_copy_visibility_change: bool,
+    /// Exact per-compilation deprecation text for the non-public-constructor declaration warning.
+    pub data_class_copy_visibility_change_warning: Option<String>,
+    /// Exact per-compilation deprecation text for an inaccessible generated `copy()` usage warning.
+    pub data_class_invisible_copy_usage_warning: Option<String>,
+    /// `+ReportTypeVarianceConflictsInDnnAndFlexible`: the class variance checker also walks a
+    /// definitely-non-null type and a flexible (platform) type. Without it those types are skipped.
+    pub report_type_variance_conflicts_in_dnn_and_flexible: bool,
     /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
     /// parameters whose declared upper bounds contain a cycle.
     pub recursive_type_of: bool,
@@ -2086,6 +2112,7 @@ impl File {
         self.trailing_call_close_paren_ends = Default::default();
         self.infix_calls = Default::default();
         self.call_type_args = Default::default();
+        self.standalone_type_argument_qualifiers = Default::default();
         self.anonymous_object_classes = Default::default();
         self.anonymous_object_enclosing_functions = Default::default();
         self.local_class_name_provenance = Default::default();

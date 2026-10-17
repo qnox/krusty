@@ -7,66 +7,6 @@ use crate::metadata::decode::Pb;
 use crate::types::{type_name, TypeName};
 
 use super::string_table::{resolve_class_name, resolve_string, Rec};
-use super::{MetaConstructor, MetaFn, MetaProp};
-
-/// Declaration availability carried by exact JVM realization methods. Properties use their
-/// metadata-recorded annotation method and constructors use their metadata-recorded `<init>`
-/// descriptor; source spelling is never an association key.
-pub(super) struct RealizationAvailability<'a> {
-    methods: &'a [crate::jvm::classreader::MethodSig],
-}
-
-impl<'a> RealizationAvailability<'a> {
-    pub(super) fn new(methods: &'a [crate::jvm::classreader::MethodSig]) -> Self {
-        Self { methods }
-    }
-
-    fn method(
-        &self,
-        jvm_name: &str,
-        jvm_desc: Option<&str>,
-    ) -> Option<&'a crate::jvm::classreader::MethodSig> {
-        let descriptor = jvm_desc?;
-        self.methods
-            .iter()
-            .find(|method| method.name == jvm_name && method.descriptor == descriptor)
-    }
-
-    pub(super) fn functions(&self, mut declarations: Vec<MetaFn>) -> Vec<MetaFn> {
-        for declaration in &mut declarations {
-            if self
-                .method(&declaration.jvm_name, declaration.jvm_desc)
-                .is_some_and(|method| method.deprecated_hidden)
-            {
-                declaration.flags = declaration.flags.with_deprecated_hidden(true);
-            }
-        }
-        declarations
-    }
-
-    pub(super) fn properties(&self, mut declarations: Vec<MetaProp>) -> Vec<MetaProp> {
-        for declaration in &mut declarations {
-            if let Some(method) = declaration
-                .annotation_method
-                .as_ref()
-                .and_then(|method| self.method(&method.name, Some(method.desc.as_str())))
-            {
-                declaration.deprecated_hidden = method.deprecated_hidden;
-                declaration.hidden_since = method.deprecated_hidden_since;
-            }
-        }
-        declarations
-    }
-
-    pub(super) fn constructors(&self, declarations: &mut [MetaConstructor]) {
-        for declaration in declarations {
-            if let Some(method) = self.method(declaration.jvm_name, declaration.jvm_desc) {
-                declaration.deprecated_hidden = method.deprecated_hidden;
-                declaration.hidden_since = method.deprecated_hidden_since;
-            }
-        }
-    }
-}
 
 pub(super) fn annotation_names(
     bodies: &[Vec<u8>],

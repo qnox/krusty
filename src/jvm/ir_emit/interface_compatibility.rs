@@ -127,7 +127,7 @@ pub(super) fn emit_inherited_default_surface(
             access_bridges::emit_jd_access_bridge(
                 cw,
                 c.fq_name,
-                c.decl_line,
+                super::static_accessors::class_declaration_line(c),
                 access_bridges::JdAccessBridgeMember {
                     name: &name,
                     param_tys: &param_tys,

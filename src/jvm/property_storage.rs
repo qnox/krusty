@@ -240,6 +240,7 @@ mod tests {
             is_lateinit: false,
             owner: None,
             visibility: crate::types::Visibility::Private,
+            getter_jvm_name: None,
             setter_jvm_name: None,
             erased_declared_ty: None,
             accessors: crate::ir::IrStaticAccessors::ABSENT,
