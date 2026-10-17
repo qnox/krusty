@@ -3380,7 +3380,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (six more in a main set). The extractor now (1) rebinds every name asserted `x!!` in a statement
   — outside lambdas — to its non-null value for the rest of the block, including the trailing
   expression; (2) takes an argument spelled `x != null` as a contract candidate whose proof is a
-  `returns() implies actual` effect (`ContractNarrowed { condition: true }`); (3) narrows the
+  `returns() implies actual` effect (`ContractNarrowed { condition: true }`), and so is every
+  `x != null` conjunct of an `&&` condition (`require(a != null && b != null && …)` narrows
+  both; `tests/contract_conjunct_null_checks_e2e.rs`); (3) narrows the
   safe-call receiver of `x?.p == literal` / `x?.p != null` on the true edge of an `if`. The body
   check gained the `x?.p == literal` form too (it had `!= null` only), through the same
   `null_check_narrowings` proof. The `x!!` and `assertTrue` shapes are byte-identical to kotlinc;
