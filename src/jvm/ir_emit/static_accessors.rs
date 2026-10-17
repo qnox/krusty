@@ -1049,6 +1049,16 @@ fn hoisted_field_accessor(
     Some((StaticOwner::Class(owner), accessor))
 }
 
+/// The line a class's synthetic accessors map their bodies to: kotlinc's declaration start, which
+/// includes the class's annotations.
+pub(super) fn class_declaration_line(class: &crate::ir::IrClass) -> u32 {
+    if class.decl_start_line == 0 {
+        class.decl_line
+    } else {
+        class.decl_start_line
+    }
+}
+
 /// Append `owner`'s planned accessors to its class, with kotlinc's debug tables: each maps its
 /// body to the line the owner is declared on (a facade's is the file's first) and names the
 /// parameters it forwards. An interface's accessors are `public static synthetic`, every other

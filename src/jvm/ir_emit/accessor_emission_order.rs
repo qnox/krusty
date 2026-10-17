@@ -30,7 +30,7 @@ pub(super) fn emit(
             &env.run.static_accessor_plan.borrow(),
             StaticOwner::Class(class.fq_name),
             facade,
-            class.decl_start_line.max(class.decl_line),
+            static_accessors::class_declaration_line(class),
             writer,
         );
     } else {
@@ -40,7 +40,7 @@ pub(super) fn emit(
             &env.run.static_accessor_plan.borrow(),
             StaticOwner::Class(class.fq_name),
             facade,
-            class.decl_start_line.max(class.decl_line),
+            static_accessors::class_declaration_line(class),
             writer,
         );
     }
@@ -68,7 +68,7 @@ pub(super) fn emit(
             &env.run.static_accessor_plan.borrow(),
             StaticOwner::Class(class.fq_name),
             facade,
-            class.decl_start_line.max(class.decl_line),
+            static_accessors::class_declaration_line(class),
             writer,
         );
     }

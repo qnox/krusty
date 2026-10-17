@@ -783,9 +783,23 @@ pub(super) fn emit_private_member_access_bridges(
     let bridged = run.private_member_access_bridges.borrow();
     for &fid in class.methods.iter().filter(|fid| bridged.contains(fid)) {
         if ir.functions[fid as usize].is_static {
-            emit_function_reference_access_bridge(ir, fid, owner, cw, false, class.decl_line);
+            emit_function_reference_access_bridge(
+                ir,
+                fid,
+                owner,
+                cw,
+                false,
+                super::static_accessors::class_declaration_line(class),
+            );
         } else {
-            emit_private_member_access_bridge(ir, fid, owner, cw, false, class.decl_line);
+            emit_private_member_access_bridge(
+                ir,
+                fid,
+                owner,
+                cw,
+                false,
+                super::static_accessors::class_declaration_line(class),
+            );
         }
     }
 }

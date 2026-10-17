@@ -2295,7 +2295,7 @@ fn emit_scheduled_member(
                 fq_name,
                 cw,
                 false,
-                c.decl_line,
+                static_accessors::class_declaration_line(c),
             );
         }
         bridge_emission::emit_value_class_interface_entries(
@@ -3394,7 +3394,7 @@ fn emit_interface_class(
                     &fq_name,
                     &mut cw,
                     true,
-                    c.decl_line,
+                    static_accessors::class_declaration_line(c),
                 );
             }
             if ir.function_reference_access_bridges.contains(&fid) {
@@ -3404,7 +3404,7 @@ fn emit_interface_class(
                     &fq_name,
                     &mut cw,
                     true,
-                    c.decl_line,
+                    static_accessors::class_declaration_line(c),
                 );
             }
             // A PRIVATE default stays a plain private instance method: kotlinc gives it no bridge,
@@ -3534,7 +3534,7 @@ fn emit_interface_class(
         &env.run.static_accessor_plan.borrow(),
         StaticOwner::Class(c.fq_name),
         facade,
-        c.decl_start_line.max(c.decl_line),
+        static_accessors::class_declaration_line(c),
         &mut cw,
     );
     for &fid in &jd_bridge_fids {
@@ -4007,7 +4007,7 @@ fn emit_enum_class(
                         &fq,
                         cw,
                         false,
-                        c.decl_line,
+                        static_accessors::class_declaration_line(c),
                     );
                 }
                 // A defaulted member needs its `<name>$default` synthetic here too. The enum writer is a
@@ -4167,7 +4167,7 @@ fn emit_enum_class(
         &env.run.static_accessor_plan.borrow(),
         StaticOwner::Class(c.fq_name),
         facade,
-        c.decl_start_line.max(c.decl_line),
+        static_accessors::class_declaration_line(c),
         &mut cw,
     );
     // `<clinit>` is RESERVED and BUILT here, after the plugin-generated members: kotlinc interns

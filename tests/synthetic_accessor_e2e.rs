@@ -337,3 +337,45 @@ fn a_private_delegated_top_level_property_is_reached_through_facade_accessors() 
         assert_eq!(krusty, kotlinc, "{class}: {declaration}");
     }
 }
+
+/// A synthetic accessor maps its body to the owner's declaration start, which includes the
+/// owner's annotations: a companion property's `access$get…$cp`, a private method's `access$…`
+/// and an object's private function bridge all sit on the `@Ann` line.
+#[test]
+fn accessors_of_an_annotated_owner_sit_on_its_annotation_line() {
+    const SOURCE: &str = "annotation class Ann\n\
+        \n\
+        @Ann\n\
+        class H(val t: Int) {\n\
+        \x20   companion object { val x = 1 }\n\
+        }\n\
+        \n\
+        @Ann\n\
+        class S {\n\
+        \x20   private fun secret() = 4\n\
+        \x20   inner class I { fun g() = secret() }\n\
+        }\n\
+        \n\
+        @Ann\n\
+        object O {\n\
+        \x20   private fun z() = 1\n\
+        \x20   class N { fun w() = z() }\n\
+        }\n";
+    for class in ["H", "S", "O"] {
+        let built = common::compare_with_kotlinc_plugin(
+            "AnnotatedOwnerAccessorLines",
+            SOURCE,
+            class,
+            &[common::stdlib_jar()],
+            "25",
+            &[],
+        )
+        .expect("reference kotlinc is provisioned");
+        assert!(
+            built.krusty_bytes == built.reference_bytes,
+            "{class} differs from kotlinc\n--- kotlinc ---\n{}\n--- krusty ---\n{}",
+            built.reference,
+            built.krusty
+        );
+    }
+}
