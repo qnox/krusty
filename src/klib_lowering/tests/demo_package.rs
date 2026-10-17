@@ -148,6 +148,7 @@ pub(super) fn declaration((name, params, ret): Shape) -> KotlinFunction {
         is_suspend: false,
         is_operator: false,
         is_infix: false,
+        is_synthesized: false,
         is_expect: false,
         is_external: false,
         is_static: false,

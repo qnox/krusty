@@ -1057,6 +1057,9 @@ pub struct ClassDecl {
     /// `Public` when unmodified. Carried into `@Metadata` `Constructor.flags`; a protected one
     /// also reaches the JVM `<init>` access flags.
     pub primary_ctor_visibility: Visibility,
+    /// Span of an explicit primary-constructor visibility modifier. The data-copy visibility
+    /// migration diagnostic points at the modifier rather than the whole constructor.
+    pub primary_ctor_visibility_span: Option<Span>,
     /// Properties declared in the class *body* (`class C { val x = … }`) — backing field + accessor,
     /// initialized in the primary constructor.
     pub body_props: Vec<PropDecl>,
@@ -2035,6 +2038,13 @@ pub struct File {
     pub type_arguments_not_allowed_warning: Option<String>,
     /// Exact warning text when the same transition applies to a standalone singleton value.
     pub explicit_type_arguments_in_property_access_warning: Option<String>,
+    /// `+ErrorAboutDataClassCopyVisibilityChange`: a `data class` whose generated `copy()` exposes its
+    /// non-public primary constructor, and a use of that `copy()`, are errors rather than warnings.
+    pub error_about_data_class_copy_visibility_change: bool,
+    /// Exact per-compilation deprecation text for the non-public-constructor declaration warning.
+    pub data_class_copy_visibility_change_warning: Option<String>,
+    /// Exact per-compilation deprecation text for an inaccessible generated `copy()` usage warning.
+    pub data_class_invisible_copy_usage_warning: Option<String>,
     /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
     /// parameters whose declared upper bounds contain a cycle.
     pub recursive_type_of: bool,
