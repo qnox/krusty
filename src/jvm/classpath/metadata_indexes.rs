@@ -53,6 +53,19 @@ impl ClassMetadataLoadError {
     }
 }
 
+impl super::Classpath {
+    /// Accept one entry's index build. A failure becomes the classpath's terminal load error and
+    /// yields no index, so lookup stops at that entry instead of reading a partial one.
+    pub(super) fn accept_entry_index<T>(
+        &self,
+        built: Result<T, ClassMetadataLoadError>,
+    ) -> Option<T> {
+        built
+            .map_err(|failure| self.record_metadata_load_error(failure))
+            .ok()
+    }
+}
+
 /// The name of entry `entry_id` of the archive at `path`. A name that does not decode fails the
 /// whole build: the entry cannot be classified, so skipping it would publish an index without its
 /// declarations.
@@ -630,14 +643,24 @@ mod tests {
     }
 
     #[test]
-    fn a_jar_classpath_reports_a_recorded_entry_name_failure_as_terminal() {
-        let classpath = super::super::Classpath::new(vec![PathBuf::from("/undecodable/lib.jar")]);
+    fn a_jar_classpath_accepts_an_undecodable_name_as_its_terminal_failure() {
+        let jar = Path::new("/undecodable/lib.jar");
+        let classpath = super::super::Classpath::new(vec![jar.to_path_buf()]);
+        let cache = EntryCache::<TypeIndex>::new();
+        let built = cache.get_or_try_build(&undecodable_key(), || {
+            let mut index = TypeIndex::default();
+            let packages = JarPackages::default();
+            scan_types_archive(
+                &mut undecodable_after_a_facade(),
+                jar,
+                &packages,
+                &mut index,
+            )?;
+            Ok(index)
+        });
         assert!(classpath.validate_lazy_class_loads().is_ok());
-        let archive = undecodable_after_a_facade();
-        let failure = archive_entry_name(&archive, Path::new("/undecodable/lib.jar"), 1)
-            .expect_err("entry 1 does not decode");
-        classpath.record_metadata_load_error(failure);
 
+        assert!(classpath.accept_entry_index(built).is_none());
         let error = classpath
             .validate_lazy_class_loads()
             .expect_err("the failure is terminal");

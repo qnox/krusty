@@ -2677,14 +2677,11 @@ impl Classpath {
             // central-directory passes. Build the entry's authoritative alias table once, then project
             // the requested package by interned identity. `EntryCache` serializes the one cold build
             // across workers; subsequent package misses are an in-memory map filter.
-            let all = match global_entry_types().get_or_try_build(&self.cache_key[entry_id], || {
+            let built = global_entry_types().get_or_try_build(&self.cache_key[entry_id], || {
                 build_entry_types(&self.entries[entry_id], &packages)
-            }) {
-                Ok(index) => index,
-                Err(failure) => {
-                    self.record_metadata_load_error(failure);
-                    return std::sync::Arc::new(TypeIndex::default());
-                }
+            });
+            let Some(all) = self.accept_entry_index(built) else {
+                return std::sync::Arc::new(TypeIndex::default());
             };
             std::sync::Arc::new(TypeIndex {
                 type_aliases: all
@@ -2703,13 +2700,10 @@ impl Classpath {
             })
         } else {
             let built = build_entry_package_types(&self.entries[entry_id], &packages, package);
-            match built {
-                Ok(index) => std::sync::Arc::new(index),
-                Err(failure) => {
-                    self.record_metadata_load_error(failure);
-                    return std::sync::Arc::new(TypeIndex::default());
-                }
-            }
+            let Some(index) = self.accept_entry_index(built) else {
+                return std::sync::Arc::new(TypeIndex::default());
+            };
+            std::sync::Arc::new(index)
         };
         if packages.complete {
             global_entry_pkg_types()
@@ -2866,12 +2860,8 @@ impl Classpath {
                     build_entry_types(e, &packages)
                 })
             };
-            let part = match part {
-                Ok(part) => part,
-                Err(failure) => {
-                    self.record_metadata_load_error(failure);
-                    return std::sync::Arc::new(TypeIndex::default());
-                }
+            let Some(part) = self.accept_entry_index(part) else {
+                return std::sync::Arc::new(TypeIndex::default());
             };
             for (&alias, &target) in &part.type_aliases {
                 // First entry on the classpath wins — kotlinc/java class-resolution order (and this doc's
@@ -2944,9 +2934,7 @@ impl Classpath {
     }
 
     fn ct_sym_bytes(&self, path: &Path, release: u8, internal: &str) -> Option<Vec<u8>> {
-        let index = cached_ct_sym_index(path, release)
-            .map_err(|failure| self.record_metadata_load_error(failure))
-            .ok()??;
+        let index = self.accept_entry_index(cached_ct_sym_index(path, release))??;
         let name = index.names.get(internal)?;
         let entry = index.by_name.get(&name)?;
         self.jar_entry(path, entry)
@@ -3865,13 +3853,10 @@ impl Classpath {
                     build_entry_ext(entry, &packages)
                 })
             };
-            match part {
-                Ok(part) => built_parts.push(part),
-                Err(failure) => {
-                    self.record_metadata_load_error(failure);
-                    return std::rc::Rc::new(Vec::new());
-                }
-            }
+            let Some(part) = self.accept_entry_index(part) else {
+                return std::rc::Rc::new(Vec::new());
+            };
+            built_parts.push(part);
         }
         let parts = std::rc::Rc::new(built_parts);
         if catalog_complete {
