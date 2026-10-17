@@ -1105,7 +1105,7 @@ fn realize_property(
     }
 }
 
-/// Resolve each top-level foreign inline template's declaring source unit to its JVM file facade.
+/// Resolve each foreign inline template's declaring source unit to its JVM file facade.
 pub(super) fn resolve_foreign_template_facades(ir: &mut IrFile, facades: &[String]) {
     let templates = ir
         .foreign_template_sources()
