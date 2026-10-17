@@ -240,6 +240,7 @@ impl ProductionSignatureSemantics<'_> {
         let abbreviation = arguments.map(|arguments| crate::fir::ResolvedTypeAbbreviation {
             alias: alias.identity,
             arguments,
+            argument_path: Box::new([]),
         });
         Some((result, abbreviation))
     }

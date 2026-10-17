@@ -976,6 +976,13 @@ pub trait SignatureSemantics: PostponedArgumentTransaction {
         None
     }
 
+    /// The typealias selected while resolving the compact type expression at `origin`. Selection
+    /// is recorded by the authoritative type-resolution operation; consumers never repeat lookup
+    /// from the source spelling.
+    fn type_result_abbreviation(&self, _origin: OriginId) -> Option<ResolvedTypeAbbreviation> {
+        None
+    }
+
     fn substitute(
         &self,
         base: ResolvedTy,

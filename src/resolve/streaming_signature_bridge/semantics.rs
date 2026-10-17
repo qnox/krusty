@@ -545,7 +545,7 @@ impl ProductionSignatureSemantics<'_> {
         // parameter ownership. Their owning classifier is derived by the lookup only to add its
         // inherited-classifier fallback rung; declarations nested in that classifier remain an
         // ordinary nearer lexical binding.
-        self.resolve_signature_type_reference_at(scope, scope, &reference, true)
+        self.resolve_signature_type_reference_at(scope, scope, &reference, true, None)
     }
 
     pub(super) fn resolve_signature_type_reference(
@@ -553,7 +553,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         reference: &TypeRef,
     ) -> Result<Ty, crate::fir::DiagnosticId> {
-        self.resolve_signature_type_reference_at(scope, scope, reference, true)
+        self.resolve_signature_type_reference_at(scope, scope, reference, true, None)
     }
 
     /// Resolve a callable header bound outside the declaration body's classifier rung while using
@@ -564,7 +564,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         reference: &TypeRef,
     ) -> Result<Ty, crate::fir::DiagnosticId> {
-        self.resolve_signature_type_reference_at(scope, scope, reference, false)
+        self.resolve_signature_type_reference_at(scope, scope, reference, false, None)
     }
 
     /// Resolve a classifier bound in the caller's provisional type-parameter scope and retain the
@@ -596,24 +596,31 @@ impl ProductionSignatureSemantics<'_> {
         lookup_scope: crate::fir::SignatureScope,
         reference: &TypeRef,
         include_scope_owner_body: bool,
+        selected_origin: Option<crate::fir::OriginId>,
     ) -> Result<Ty, crate::fir::DiagnosticId> {
         let resolved = self.with_signature_type_scope(lookup_scope, |lexical| {
-            self.signature_type_ref_at(lookup_scope, lexical, reference, include_scope_owner_body)
-                .map(Ok)
-                .unwrap_or_else(|| {
-                    let failed = self.unresolved_signature_type_ref(
-                        lookup_scope,
-                        lexical,
-                        reference,
-                        include_scope_owner_body,
-                    );
-                    Err(self.record_failed_type_reference(
-                        diagnostic_scope,
-                        lookup_scope,
-                        failed.span,
-                        &failed.name,
-                    ))
-                })
+            self.signature_type_ref_at_with_origin(
+                lookup_scope,
+                lexical,
+                reference,
+                include_scope_owner_body,
+                selected_origin,
+            )
+            .map(Ok)
+            .unwrap_or_else(|| {
+                let failed = self.unresolved_signature_type_ref(
+                    lookup_scope,
+                    lexical,
+                    reference,
+                    include_scope_owner_body,
+                );
+                Err(self.record_failed_type_reference(
+                    diagnostic_scope,
+                    lookup_scope,
+                    failed.span,
+                    &failed.name,
+                ))
+            })
         })?;
         let ty = resolved?;
         if !ty.mentions_error() {
@@ -1234,7 +1241,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
     fn resolve_type(
         &self,
         scope: crate::fir::SignatureScope,
-        _origin: crate::fir::OriginId,
+        origin: crate::fir::OriginId,
         syntax: crate::fir::HeaderTypeId,
         graph: &crate::fir::SignatureGraph,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
@@ -1242,7 +1249,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         // Signature-native type resolution: a type reference in a compact header is a type
         // parameter of the owning declaration chain, a scoped alias/classifier, or a leaf shape.
         // None of those needs a body checker, and Pass 1 has no body to check.
-        let ty = self.resolve_signature_type_reference(scope, &reference)?;
+        let ty =
+            self.resolve_signature_type_reference_at(scope, scope, &reference, true, Some(origin))?;
         crate::fir::ResolvedTy::new(ty).map_err(|_| Self::failure())
     }
 
@@ -3583,17 +3591,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let receiver = receiver.get();
         let receiver = match (receiver, classifier) {
-            (Ty::Obj(internal, []), Some((scope, spelling)))
-                if receiver.is_reference_array()
-                    && self
-                        .signature_source_alias_expansion(scope, spelling)
-                        .is_none() =>
-            {
-                Ty::obj_args_name(
-                    internal,
-                    &[Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
-                )
-            }
+            (Ty::Obj(internal, []), Some(_)) if receiver.is_reference_array() => Ty::obj_args_name(
+                internal,
+                &[Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
+            ),
             (Ty::Obj(internal, []), Some((scope, _))) if unbound => {
                 let classifier =
                     self.with_resolver(scope, |resolver| resolver.classifier(internal))?;
@@ -3633,41 +3634,39 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         if root == "this" {
             return Ok(!self.implicit_receivers(scope).is_empty());
         }
-        for receiver in self.implicit_receivers(scope) {
-            if self
-                .with_resolver(scope, |resolver| {
-                    resolver
-                        .resolve_symbol(
-                            crate::symbol_resolver::SymRecv::Value(receiver),
-                            root,
-                            &[],
-                            &[],
-                        )
-                        .and_then(crate::symbol_resolver::Symbol::value)
-                })
-                .is_ok()
-            {
-                return Ok(true);
-            }
-        }
-        if let Ok(classifier) =
-            self.with_resolver(scope, |resolver| match resolver.classifier_in_scope(root) {
-                crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
-                    Some(classifier)
-                }
-                crate::symbol_resolver::CandidateSelection::Ambiguous
-                | crate::symbol_resolver::CandidateSelection::None => None,
-            })
+        if self.enclosing_constructor_parameter(scope, root).is_some()
+            || self.enclosing_capture_type(scope, root).is_some()
+            || self.enclosing_enum_entry_property(scope, root).is_some()
         {
-            if self.classifier_is_singleton(classifier) {
+            return Ok(true);
+        }
+        // Ask only the value namespace. Generic `resolve_symbol` also exposes a singleton
+        // classifier as a value, which misclassifies a selected typealias root and makes compact
+        // signature evaluation retry it as an unresolved expression.
+        for receiver in self.implicit_receivers(scope) {
+            let selected = self.with_resolver(scope, |resolver| {
+                resolver
+                    .select_member_property(receiver, root)
+                    .map(|_| ())
+                    .or_else(|| {
+                        resolver
+                            .select_extension_property(receiver, root)
+                            .ok()
+                            .flatten()
+                            .map(|_| ())
+                    })
+            });
+            if selected.is_ok() {
                 return Ok(true);
             }
         }
         Ok(self
             .with_resolver(scope, |resolver| {
                 resolver
-                    .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, root, &[], &[])
-                    .and_then(crate::symbol_resolver::Symbol::value)
+                    .top_level_properties(root)
+                    .iter()
+                    .any(|property| property.kind == crate::libraries::PropKind::TopLevel)
+                    .then_some(())
             })
             .is_ok())
     }
@@ -4797,6 +4796,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         origin: crate::fir::OriginId,
     ) -> Option<crate::fir::ResolvedTypeAbbreviation> {
         self.selected_calls.abbreviation(origin)
+    }
+
+    fn type_result_abbreviation(
+        &self,
+        origin: crate::fir::OriginId,
+    ) -> Option<crate::fir::ResolvedTypeAbbreviation> {
+        self.selected_types.abbreviation(origin)
     }
 
     fn substitute(

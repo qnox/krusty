@@ -29,10 +29,12 @@ pub enum Severity {
 pub enum CompilerWarningName {
     DataClassCopyVisibilityWillBeChanged,
     DataClassInvisibleCopyUsage,
+    ClassLiteralLhsNotAClass,
     Deprecation,
     ExplicitTypeArgumentsInPropertyAccess,
     InapplicableOperatorModifier,
     TypeArgumentsNotAllowed,
+    WrongNumberOfTypeArgumentsInGetClass,
     ValueClassCannotBeRecursiveViaTypeParameters,
 }
 
@@ -43,12 +45,16 @@ impl CompilerWarningName {
                 "DATA_CLASS_COPY_VISIBILITY_WILL_BE_CHANGED_WARNING"
             }
             Self::DataClassInvisibleCopyUsage => "DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING",
+            Self::ClassLiteralLhsNotAClass => "CLASS_LITERAL_LHS_NOT_A_CLASS_WARNING",
             Self::Deprecation => "DEPRECATION",
             Self::ExplicitTypeArgumentsInPropertyAccess => {
                 "EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING"
             }
             Self::InapplicableOperatorModifier => "INAPPLICABLE_OPERATOR_MODIFIER_WARNING",
             Self::TypeArgumentsNotAllowed => "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING",
+            Self::WrongNumberOfTypeArgumentsInGetClass => {
+                "WRONG_NUMBER_OF_TYPE_ARGUMENTS_IN_GET_CLASS_WARNING"
+            }
             Self::ValueClassCannotBeRecursiveViaTypeParameters => {
                 "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING"
             }
@@ -61,12 +67,16 @@ impl CompilerWarningName {
                 Self::DataClassCopyVisibilityWillBeChanged
             }
             "DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING" => Self::DataClassInvisibleCopyUsage,
+            "CLASS_LITERAL_LHS_NOT_A_CLASS_WARNING" => Self::ClassLiteralLhsNotAClass,
             "DEPRECATION" => Self::Deprecation,
             "EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING" => {
                 Self::ExplicitTypeArgumentsInPropertyAccess
             }
             "INAPPLICABLE_OPERATOR_MODIFIER_WARNING" => Self::InapplicableOperatorModifier,
             "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING" => Self::TypeArgumentsNotAllowed,
+            "WRONG_NUMBER_OF_TYPE_ARGUMENTS_IN_GET_CLASS_WARNING" => {
+                Self::WrongNumberOfTypeArgumentsInGetClass
+            }
             "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING" => {
                 Self::ValueClassCannotBeRecursiveViaTypeParameters
             }
@@ -84,10 +94,12 @@ mod warning_name_tests {
         let names = [
             CompilerWarningName::DataClassCopyVisibilityWillBeChanged,
             CompilerWarningName::DataClassInvisibleCopyUsage,
+            CompilerWarningName::ClassLiteralLhsNotAClass,
             CompilerWarningName::Deprecation,
             CompilerWarningName::ExplicitTypeArgumentsInPropertyAccess,
             CompilerWarningName::InapplicableOperatorModifier,
             CompilerWarningName::TypeArgumentsNotAllowed,
+            CompilerWarningName::WrongNumberOfTypeArgumentsInGetClass,
             CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
         ];
         assert_eq!(

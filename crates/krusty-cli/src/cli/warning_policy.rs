@@ -31,6 +31,10 @@ impl WarningName {
                             .is_some()
                     })
                 }
+                krusty::diag::CompilerWarningName::ClassLiteralLhsNotAClass => {
+                    FeatureTable::for_version(release)
+                        .is_some_and(|table| table.get("ForbidUselessTypeArgumentsIn25").is_some())
+                }
                 krusty::diag::CompilerWarningName::Deprecation => true,
                 krusty::diag::CompilerWarningName::ExplicitTypeArgumentsInPropertyAccess => {
                     FeatureTable::for_version(release)
@@ -44,6 +48,10 @@ impl WarningName {
                     })
                 }
                 krusty::diag::CompilerWarningName::TypeArgumentsNotAllowed => {
+                    FeatureTable::for_version(release)
+                        .is_some_and(|table| table.get("ForbidUselessTypeArgumentsIn25").is_some())
+                }
+                krusty::diag::CompilerWarningName::WrongNumberOfTypeArgumentsInGetClass => {
                     FeatureTable::for_version(release)
                         .is_some_and(|table| table.get("ForbidUselessTypeArgumentsIn25").is_some())
                 }

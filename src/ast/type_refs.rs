@@ -38,7 +38,9 @@ impl TrFlags {
     const SUPERCLASS: u16 = 1 << 10;
     // The left-hand side of a class literal. A generic typealias written there without type
     // arguments is applied to star projections of its own parameters (`Arr::class` is
-    // `KClass<Arr<*>>`) instead of failing the ordinary arity check.
+    // `KClass<Arr<*>>`) instead of failing the ordinary arity check. When arguments are written,
+    // the class-literal checker is their diagnostic authority because kotlinc judges them by its
+    // own rule rather than as an ordinary type's arity.
     const CLASS_LITERAL_LHS: u16 = 1 << 11;
 
     #[inline]
