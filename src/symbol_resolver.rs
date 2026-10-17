@@ -3748,6 +3748,7 @@ impl ResolvedMember {
         member.default_realization = callable.default_realization;
         member.nonvirtual_realization = callable.nonvirtual_realization;
         member.plugin_expression = callable.plugin_expression;
+        member.deprecation = callable.deprecation;
         Self {
             receiver,
             ret: member.ret,

@@ -13,7 +13,10 @@ pub use classifier_declarations::{
     GeneratedClassifierFact, GeneratedClassifierKind, GeneratedClassifierPurpose,
     SerializationGeneratedMemberStatuses,
 };
-pub use deprecation::{Deprecation, DeprecationLevel};
+pub use deprecation::{
+    DeclaredDeprecation, DeprecatedDeclaration, DeprecatedSinceKotlin, Deprecation,
+    DeprecationLevel,
+};
 pub use overridden_declaration::OverriddenDeclaration;
 pub use semantic_call_role::SemanticCallRole;
 pub use semantic_callable_owner::SemanticCallableOwner;

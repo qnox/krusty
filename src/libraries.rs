@@ -5,6 +5,7 @@ mod array_factories;
 pub(crate) mod builtin_declaration;
 pub(crate) mod builtin_member_realization;
 pub(crate) mod builtin_top_level_realization;
+mod call_arg_mapping_failure;
 mod call_realization;
 mod call_sig;
 mod callable_scope_rung;
@@ -34,6 +35,7 @@ pub use annotation_application::{
     AnnotationApplication, AnnotationElementDefault, AnnotationParameterPolicy,
     AnnotationPositionalPolicy,
 };
+pub use call_arg_mapping_failure::{CallArgMappingError, CallArgMappingFailure};
 pub(crate) use call_realization::KlibBodyCompanionReceiver;
 pub use call_realization::{
     DefaultCallRealization, DirectCFunction, ExternalCallableKind, ExternalCallableRealization,
@@ -250,6 +252,8 @@ pub struct LibraryMember {
     /// Annotation class identities declared on this member. Consumers decide which annotations affect
     /// resolution/emission; the library layer only records their qualified identities.
     pub annotations: Vec<crate::types::TypeName>,
+    /// See [`LibraryCallable::deprecation`].
+    pub deprecation: Option<std::sync::Arc<crate::types::DeprecatedDeclaration>>,
     /// Declared contract effects from metadata.
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
     /// Compiler-known strict-equality refinement for the `equals(Any?)` parameter.
@@ -638,6 +642,7 @@ impl LibraryMember {
         let call_sig = CallSig::metadata_plain(params.len());
         let parameter_plan = physical_parameter_plan::source_parameter_plan(params.len());
         LibraryMember {
+            deprecation: None,
             external_identity: None,
             external_default_provider: None,
             external_property_identity: None,
@@ -936,6 +941,9 @@ pub struct LibraryCallable {
     /// Annotation class identities declared on this callable. Consumers decide which annotations
     /// affect resolution/emission; the library layer only records their qualified identities.
     pub annotations: Vec<crate::types::TypeName>,
+    /// The deprecation in effect for this dependency declaration, with the SYMBOL rendering a use's
+    /// diagnostic names. A source declaration leaves it unset: its checked annotations state it.
+    pub deprecation: Option<std::sync::Arc<crate::types::DeprecatedDeclaration>>,
     /// The callee's DECLARED (un-erased, pre-substitution) parameter types in physical source order:
     /// leading contexts, then an extension receiver when present, then value parameters. An ordinary
     /// member's dispatch receiver is not included. This is the parameter analogue of
@@ -1099,56 +1107,6 @@ pub struct ParamList {
     /// constructor parameter list. The checker consumes the policy without asking whether the
     /// declaration came from source, Kotlin metadata, or a Java classfile.
     pub annotation: Option<AnnotationParameterPolicy>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CallArgMappingFailure {
-    pub errors: Vec<CallArgMappingError>,
-    /// First positional argument rejected after named arguments.
-    pub recovery_argument: Option<usize>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CallArgMappingError {
-    NoParameterNamed { name: String, argument: usize },
-    AlreadyPassed { argument: usize },
-    PositionalAfterNamed { argument: usize },
-    TooManyArguments { argument: usize, expected: usize },
-    TrailingLambdaOnVararg { argument: usize },
-    MissingRequired { name: String },
-}
-
-impl CallArgMappingError {
-    pub(crate) fn highlights_callee(&self) -> bool {
-        matches!(self, Self::MissingRequired { .. })
-    }
-}
-
-impl std::fmt::Display for CallArgMappingError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoParameterNamed { name, .. } => {
-                write!(formatter, "no parameter with name '{name}' found.")
-            }
-            Self::AlreadyPassed { .. } => {
-                formatter.write_str("argument already passed for this parameter.")
-            }
-            Self::PositionalAfterNamed { .. } => {
-                formatter.write_str(
-                    "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.",
-                )
-            }
-            Self::TooManyArguments { expected, .. } => {
-                write!(formatter, "too many arguments: expected at most {expected}")
-            }
-            Self::TrailingLambdaOnVararg { .. } => formatter.write_str(
-                "passing value as a vararg is allowed only inside a parenthesized argument list.",
-            ),
-            Self::MissingRequired { name } => {
-                write!(formatter, "no value passed for parameter '{name}'.")
-            }
-        }
-    }
 }
 
 // Call and parameter metadata are independent inputs to slot assignment.
@@ -1885,6 +1843,7 @@ impl FunctionInfo {
         member.inline = self.flags.inline;
         member.reified = self.flags.reified;
         member.annotations = self.callable.annotations.clone();
+        member.deprecation = self.callable.deprecation.clone();
         member.visibility = self.visibility;
         member.set_suspend(self.flags.suspend);
         member.set_is_operator(self.flags.operator);
@@ -2460,6 +2419,9 @@ pub struct LibraryType {
     /// declaration format records it. A module annotation publishes none; its defaults are
     /// checked default expressions.
     pub annotation_element_defaults: Vec<(Box<str>, AnnotationElementDefault)>,
+    /// A dependency classifier's deprecation in effect, with the SYMBOL rendering a use's diagnostic
+    /// names. A source classifier leaves it unset: its checked annotations state it.
+    pub deprecation: Option<std::sync::Arc<crate::types::DeprecatedDeclaration>>,
 }
 
 impl std::ops::Deref for LibraryType {
@@ -2557,6 +2519,7 @@ impl LibraryType {
             annotation_targets: None,
             mapped_collection: None,
             annotation_element_defaults: Vec::new(),
+            deprecation: None,
         }
     }
 
@@ -2848,6 +2811,7 @@ mod tests {
             annotation_targets: None,
             mapped_collection: None,
             annotation_element_defaults: Vec::new(),
+            deprecation: None,
         };
         f(&mut t);
         t

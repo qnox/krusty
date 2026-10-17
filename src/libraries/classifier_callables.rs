@@ -128,6 +128,7 @@ impl FunctionInfo {
         candidate.flags.return_value_status = member.return_value_status;
         candidate.classifier_static = member.is_classifier_static();
         candidate.callable.annotations = member.annotations.clone();
+        candidate.callable.deprecation = member.deprecation.clone();
         candidate.default_values = member.default_values.clone();
         candidate.stable_declaration = member.stable_declaration;
         candidate.source_member = member.source_member;
