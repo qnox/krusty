@@ -105,6 +105,9 @@ Phase 6 adds a minimal Java *source* front end for mixed compilation.
 
 Integer literals participate in overload applicability using the candidate parameter types. An
 exact `Int` parameter wins over adaptation to `Long`; non-literal `Int` values are not adapted.
+A literal is an input occurrence of a nullable `@OnlyInputTypes` solution as well:
+`ids.contains(2001)` with `ids: Iterable<Long?>` solves `T := Long?` and passes a `Long`
+(`tests/only_input_integer_literal_e2e.rs`).
 Public static fields are valid class-qualified property reads, including in inferred property
 initializers.
 
