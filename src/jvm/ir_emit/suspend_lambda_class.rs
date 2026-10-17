@@ -351,7 +351,7 @@ pub(super) fn emit_suspend_lambda_class(
         &env.run.static_accessor_plan.borrow(),
         StaticOwner::Class(c.fq_name),
         facade,
-        static_accessors::class_declaration_line(c),
+        c.decl_start_line.max(c.decl_line),
         &mut cw,
     );
     // A lambda class is local to the scope it was written in.

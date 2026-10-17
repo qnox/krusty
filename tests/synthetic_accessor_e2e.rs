@@ -379,3 +379,77 @@ fn accessors_of_an_annotated_owner_sit_on_its_annotation_line() {
         );
     }
 }
+
+/// The interface and reference bridges of an annotated owner also sit on its annotation line: a
+/// private interface method's `access$<name>`, the `access$…$jd` bridges an interface declares
+/// and the ones a sub-interface republishes, a function reference's bridge, a companion field's
+/// `$cp` accessor on an enum, and a private method's bridge called from a suspend lambda.
+#[test]
+fn interface_and_reference_bridges_of_an_annotated_owner_sit_on_its_annotation_line() {
+    const SOURCE: &str = "annotation class Ann\n\
+        \n\
+        @Ann\n\
+        interface I2 {\n\
+        \x20   private fun hid() = 2\n\
+        \x20   fun g(): () -> Int = { hid() + 1 }\n\
+        \x20   fun r(): () -> Int = ::hid\n\
+        }\n\
+        \n\
+        @Ann\n\
+        interface J : I2\n\
+        \n\
+        @Ann\n\
+        enum class E2 {\n\
+        \x20   A;\n\
+        \x20   companion object { private val z = 1 }\n\
+        \x20   class N { fun w() = z }\n\
+        }\n\
+        \n\
+        @Ann\n\
+        class F {\n\
+        \x20   private fun h() = 1\n\
+        \x20   fun r(): () -> Int = ::h\n\
+        }\n\
+        \n\
+        @Ann\n\
+        class L {\n\
+        \x20   private fun k() = 3\n\
+        \x20   fun s(): suspend () -> Int = { k() }\n\
+        }\n";
+    let compare = |class: &str| {
+        common::compare_with_kotlinc_plugin(
+            "AnnotatedOwnerBridgeLines",
+            SOURCE,
+            class,
+            &[common::stdlib_jar()],
+            "25",
+            &["-jvm-default=enable".to_string()],
+        )
+        .expect("reference kotlinc is provisioned")
+    };
+    for class in ["J", "E2", "F", "L"] {
+        let built = compare(class);
+        assert!(
+            built.krusty_bytes == built.reference_bytes,
+            "{class} differs from kotlinc\n--- kotlinc ---\n{}\n--- krusty ---\n{}",
+            built.reference,
+            built.krusty
+        );
+    }
+    // kotlinc appends a private interface method's bridge after the `$jd` bridges, a member order
+    // this change leaves alone; each accessor's body and line table already match.
+    let interface = compare("I2");
+    for header in [
+        "public static int access$hid(I2);",
+        "public static kotlin.jvm.functions.Function0 access$g$jd(I2);",
+        "public static kotlin.jvm.functions.Function0 access$r$jd(I2);",
+    ] {
+        let accessor = common::method_block(&interface.reference, header);
+        assert!(!accessor.is_empty(), "kotlinc declares {header}");
+        assert_eq!(
+            common::method_block(&interface.krusty, header),
+            accessor,
+            "{header} matches kotlinc"
+        );
+    }
+}

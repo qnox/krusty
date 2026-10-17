@@ -193,7 +193,7 @@ pub(super) fn emit_enum_entry_subclass(
                 &fq_name,
                 &mut cw,
                 false,
-                super::static_accessors::class_declaration_line(c),
+                c.decl_line,
             );
         }
         if let Some(defaults) = ir.declared_param_defaults(fid) {

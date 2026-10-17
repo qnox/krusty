@@ -3550,7 +3550,7 @@ fn emit_interface_class(
         access_bridges::emit_jd_access_bridge(
             &mut cw,
             c.fq_name,
-            c.decl_line,
+            static_accessors::class_declaration_line(c),
             access_bridges::JdAccessBridgeMember {
                 name: &f.name,
                 param_tys: &physical_params,
