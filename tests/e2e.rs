@@ -2209,8 +2209,6 @@ mod child_serializer_accessor_body_e2e;
 mod child_serializer_accessor_line_e2e;
 #[path = "child_serializer_cache_e2e.rs"]
 mod child_serializer_cache_e2e;
-#[path = "generic_serializable_class_e2e.rs"]
-mod generic_serializable_class_e2e;
 #[path = "child_serializer_cache_member_order_e2e.rs"]
 mod child_serializer_cache_member_order_e2e;
 #[path = "child_serializer_factory_narrowing_e2e.rs"]
@@ -2227,6 +2225,8 @@ mod declaration_debug_lines_e2e;
 mod deprecation_usage_e2e;
 #[path = "extension_receiver_specificity_e2e.rs"]
 mod extension_receiver_specificity_e2e;
+#[path = "generic_serializable_class_e2e.rs"]
+mod generic_serializable_class_e2e;
 #[path = "int_when_switch_e2e.rs"]
 mod int_when_switch_e2e;
 #[path = "library_function_reference_class_e2e.rs"]
