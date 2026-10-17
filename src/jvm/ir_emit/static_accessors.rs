@@ -55,6 +55,12 @@ pub(super) enum StaticAccessor {
     /// `access$set<X>$p(<owner>, value)` that writes the backing field, including when the
     /// property declares a setter.
     FieldSetter { class: u32, property: u32 },
+    /// `access$<name>(<owner>, …)`, calling private member function `function` of a class for
+    /// code emitted in another class.
+    PrivateMember(u32),
+    /// `<init>(…, DefaultConstructorMarker)`, calling private constructor `ordinal` of `class` for
+    /// code in another class.
+    Constructor { class: u32, ordinal: u32 },
     /// `access$get<X>$cp`, reading hoisted companion field `index` on the outer class that holds it.
     HoistedGetter(u32),
     /// `access$set<X>$cp`, writing hoisted companion field `index`.
@@ -339,6 +345,7 @@ pub(super) fn plan(
     env: &EmitEnv,
     contexts: &[EmissionContext],
     class_member_fids: &HashSet<u32>,
+    private_calls: &HashMap<crate::ir::ExprId, (u32, u32)>,
 ) -> StaticAccessorPlan {
     let exporting_private_access = inline_functions_exporting_private_access(ir);
     let protected_calls = env.run.protected_member_access_bridges.borrow();
@@ -351,6 +358,7 @@ pub(super) fn plan(
         property_realizations: env.property_realizations,
         protected_calls: &protected_calls,
         protected: RefCell::default(),
+        private_calls,
         helper_access: env.local_delegate_access,
     };
     let mut carriers: HashMap<TypeName, Vec<Use>> = HashMap::default();
@@ -386,7 +394,14 @@ pub(super) fn plan(
         })
         .collect::<HashMap<_, _>>();
     let root_lines = synthesized_companion_accessor_lines(ir);
-    let mut uses = Vec::new();
+    // A constructor delegation is no expression the walk meets; kotlinc meets it at its call.
+    let mut uses = super::constructor_accessors::private_delegations(ir)
+        .map(|(line, class, ordinal)| Use {
+            line,
+            owner: StaticOwner::Class(ir.classes[class as usize].fq_name),
+            accessor: StaticAccessor::Constructor { class, ordinal },
+        })
+        .collect::<Vec<_>>();
     // An inline declaration exports its private helper even when this module has no caller in
     // another class: compiled clients must have the same public synthetic access boundary.
     uses.extend(
@@ -689,6 +704,9 @@ struct Walk<'a> {
     protected_calls: &'a HashMap<crate::ir::ExprId, ProtectedMemberAccessBridge>,
     /// Each protected-member accessor found, once per owner and signature.
     protected: RefCell<Vec<ProtectedMemberAccessBridge>>,
+    /// The calls reaching a private member of another class, with that member's class and
+    /// function.
+    private_calls: &'a HashMap<crate::ir::ExprId, (u32, u32)>,
     helper_access: &'a crate::jvm::local_delegate_accessors::HelperAccess,
 }
 
@@ -790,6 +808,27 @@ impl Walk<'_> {
                 uses.push(self.protected_use(line, bridge.clone()));
                 continue;
             }
+            if let Some(&(class, function)) = self.private_calls.get(&expression) {
+                let class = &ir.classes[class as usize];
+                if class.methods.contains(&function) {
+                    uses.push(Use {
+                        line,
+                        owner: StaticOwner::Class(class.fq_name),
+                        accessor: StaticAccessor::PrivateMember(function),
+                    });
+                }
+                continue;
+            }
+            if let Some((class, ordinal)) =
+                super::constructor_accessors::private_construction(ir, expression)
+            {
+                uses.push(Use {
+                    line,
+                    owner: StaticOwner::Class(ir.classes[class as usize].fq_name),
+                    accessor: StaticAccessor::Constructor { class, ordinal },
+                });
+                continue;
+            }
             if let Some(read) = super::companion_field::companion_field_read(
                 ir,
                 self.classifiers,
@@ -834,7 +873,9 @@ impl Walk<'_> {
                 }
                 // Placed by `companion_field_accessor`, which already decided it is needed.
                 StaticAccessor::CompanionInstance { .. } => true,
-                StaticAccessor::Protected(_) => true,
+                StaticAccessor::Protected(_)
+                | StaticAccessor::PrivateMember(_)
+                | StaticAccessor::Constructor { .. } => true,
             };
             if needed {
                 uses.push(Use {
@@ -1049,6 +1090,16 @@ fn hoisted_field_accessor(
     Some((StaticOwner::Class(owner), accessor))
 }
 
+/// The line a class's synthetic accessors map their bodies to: kotlinc's declaration start, which
+/// includes the class's annotations.
+pub(super) fn class_declaration_line(class: &crate::ir::IrClass) -> u32 {
+    if class.decl_start_line == 0 {
+        class.decl_line
+    } else {
+        class.decl_start_line
+    }
+}
+
 /// Append `owner`'s planned accessors to its class, with kotlinc's debug tables: each maps its
 /// body to the line the owner is declared on (a facade's is the file's first) and names the
 /// parameters it forwards. An interface's accessors are `public static synthetic`, every other
@@ -1142,6 +1193,16 @@ fn emit_selected(
             StaticAccessor::Function(function) => accessor.function(function, cw),
             StaticAccessor::Getter(index) => accessor.getter(index, cw),
             StaticAccessor::Setter(index) => accessor.setter(index, cw),
+            StaticAccessor::PrivateMember(function) => accessor.private_member(function, cw),
+            StaticAccessor::Constructor { class, ordinal } => {
+                super::constructor_accessors::emit_accessor(
+                    ir,
+                    &ir.classes[class as usize],
+                    ordinal,
+                    &owner.internal_name(facade),
+                    cw,
+                )
+            }
             StaticAccessor::HoistedGetter(index) => accessor.hoisted_getter(index, cw),
             StaticAccessor::HoistedSetter(index) => accessor.hoisted_setter(index, cw),
             StaticAccessor::MemberGetter { class, property } => {
@@ -1638,6 +1699,32 @@ impl Accessor<'_> {
             self.ir.static_field_jvm_name(index),
             &type_descriptor(ty),
         )
+    }
+
+    /// The bridge to a private member function: a static one is called directly, an instance one
+    /// on the receiver the bridge takes first.
+    fn private_member(&self, function: u32, cw: &mut ClassWriter) {
+        let owner = self.owner.internal_name(self.facade);
+        let interface = self.owner.is_interface(self.ir);
+        if self.ir.functions[function as usize].is_static {
+            super::access_bridges::emit_function_reference_access_bridge(
+                self.ir,
+                function,
+                &owner,
+                cw,
+                interface,
+                self.declaration_line,
+            );
+        } else {
+            super::access_bridges::emit_private_member_access_bridge(
+                self.ir,
+                function,
+                &owner,
+                cw,
+                interface,
+                self.declaration_line,
+            );
+        }
     }
 
     fn function(&self, function: u32, cw: &mut ClassWriter) {

@@ -85,6 +85,43 @@ fun bytes(): Int {
     .unwrap_or_else(|why| panic!("{why}"));
 }
 
+/// A postfix statement on property storage keeps its old-value temporary whether or not a receiver
+/// separates the store from the read: kotlinc drops the discarded result only after the update's
+/// scope closes, so a static field, an object field, a hoisted companion field and a top-level
+/// property reached through its accessors all store and reload the old value.
+#[test]
+fn a_postfix_property_statement_keeps_its_temporary_without_a_receiver() {
+    let source = "\
+private var top = 1
+
+class G {
+    private var z = 1
+    var w = 1
+    companion object {
+        private var y = 2
+        var v = 3
+        fun inC() { y++; v++ }
+    }
+    fun own() { z++; w++; y++; v++; top++ }
+}
+
+object O {
+    private var q = 1
+    fun f() { q++ }
+}
+";
+    for class in ["G", "G$Companion", "O"] {
+        common::byte_diff_against_kotlinc_cp(
+            "PostfixPropertyStatements",
+            source,
+            class,
+            &[common::stdlib_jar()],
+        )
+        .expect("the reference kotlinc is provisioned")
+        .unwrap_or_else(|why| panic!("{class}: {why}"));
+    }
+}
+
 #[test]
 fn a_lambda_updates_its_captured_cell_on_jvm_and_native() {
     // This capture shape is target E2E coverage rather than shared conformance: Wasm does not yet

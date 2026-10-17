@@ -791,7 +791,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   body crosses the enclosing suspend function's return boundary directly: it does not flow back
   through the inline call's result adapter. Its returned box is therefore unboxed to the enclosing
   declaration's recorded carrier before the template is spliced; this must not depend on an
-  argument temporary (`tests/inline_lambda_resumed_value_class_e2e.rs`). Tests:
+  argument temporary (`tests/inline_lambda_resumed_value_class_e2e.rs`). A carrier handed over
+  by a call to a dependency's `suspend fun find(): Id?` (with `value class Id(val value: String)`)
+  is boxed again where it enters a generic parameter or receiver (`find() shouldBe Id("x")`), as
+  kotlinc does. No `unbox-impl` is recorded for such a call, so none can cancel the consumer's box
+  (`tests/suspend_value_class_carrier_rebox_e2e.rs`). Tests:
   `tests/suspend_value_class_results_e2e.rs`.
 - **An unintercepted suspension block reports its suspension to the debug probes.** After the value
   of a `suspendCoroutineUninterceptedOrReturn` block, kotlinc writes `dup; getCOROUTINE_SUSPENDED;
@@ -11928,14 +11932,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   ABI flag and public visibility); a private inline function's conversion uses the ordinary
   `$sam$` class. kotlinc writes no `invokedynamic` in an inline function, so a function value
   converted to a Java interface there takes the same wrapper under every `-Xsam-conversions`
-  mode, and a same-file caller's inlined copy constructs the declaration's wrapper. The
+  mode, and a same-module caller's inlined copy constructs the declaration file's wrapper. A copy
+  from another source file carries its exact inline-declaration identity to the JVM facade map; it
+  neither derives that facade from spelling nor declares another wrapper under the caller. The
   construction has no position: the statement line starts at the wrapped value rather than at
   `new`; bridge debug provenance comes from the first exact conversion site. Tests:
   `tests/sam_wrapper_class_e2e.rs` (`java_sam_class_mode_shares_one_wrapper`,
-  `java_sam_in_an_inline_function_is_its_wrapper_class`). A caller that inlines another module's
-  function whose body constructs such a wrapper copies the wrapper into its own class as
-  `<caller>$inlined$sam$…`, once per calling class and shared by every such call in it. The copy
-  replays the original with only its own name remapped: its `@Metadata`, its `EnclosingMethod`
+  `java_sam_in_an_inline_function_is_its_wrapper_class`,
+  `a_cross_file_inline_copy_constructs_the_declarations_sam_wrapper`). A caller that inlines
+  another module's function whose body constructs such a wrapper copies the wrapper into its own
+  class as `<caller>$inlined$sam$…`, once per calling class and shared by every such call in it. The
+  copy replays the original with only its own name remapped: its `@Metadata`, its `EnclosingMethod`
   (the original's file class, with no method), its source file and member order stay, and it has no
   source map because the wrapper has no line numbers. Test:
   `tests/inline_sam_wrapper_copy_e2e.rs`. Corpus:
@@ -13816,6 +13823,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `copy()` the constructor's visibility. Class records carry the `data` modifier, from the
     declaration or the metadata `IS_DATA` flag, so a dependency's `copy()` is checked the same way
     (`tests/data_class_copy_visibility_e2e.rs`).
+  - `ReportTypeVarianceConflictsInDnnAndFlexible`: not a deprecation. The class variance checker
+    (`FirClassVarianceChecker`, `src/resolve/variance_conflicts.rs`) reports a classifier formal
+    declared `in`/`out` that occurs in a position its variance forbids: "type parameter 'T' is
+    declared as 'out' but occurs in 'in' position in type '<declared type>'.", or "… in abbreviated
+    type '<expansion>'." for a direct argument of a type written through a typealias. It walks
+    every classifier (local, inner and anonymous ones too): own bounds and supertypes in `out`
+    position, and each non-private member's own bounds, context parameters, receiver and function
+    value parameters in `in` position and its result in `out` (`invariant` for a `var`); an
+    inferred result reports at the declaration's start, annotations included. An argument's
+    position combines the formal's variance with the use-site projection (a star or conflicting
+    projection is skipped); function types are `FunctionN<in P…, out R>`; `@UnsafeVariance`
+    suppresses. A conflict reports at the written type argument with the same index, else at the
+    nearest written reference (`M<O>` with `typealias M<X> = Map<String, X>` reports at `M<O>`). A
+    definitely-non-null (`T & Any`) or flexible type (a Java result, walked through its mutable
+    lower bound) is walked only with the feature on; off, nothing is reported there and there is no
+    warning. An inner or local classifier's owner wording lists the formals it captures, innermost
+    declaration first, as kotlinc renders them: `class E<out S, out Outer(T) : Number>`. Known
+    gap: kotlinc renders a typealias spelled inside another alias's right-hand side by its alias
+    name (`List<L<O>>`); krusty's expanded `Ty` renders the expansion. (`tests/variance_conflicts_e2e.rs`.)
 - **Pre-release output.** As kotlinc's `LanguageVersionSettings.isPreRelease`, a compilation is
   pre-release when its language version is not stable in the release or any explicitly set feature (an
   `@Enables` argument, `-progressive`, `-XXLanguage`, or a `// LANGUAGE:` directive) is enabled and
@@ -14262,6 +14288,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type parameters: an enclosing class's `T` stays `T`, it is not read as its bound
   (`List<T (of class Generic<T>)>`, not `List<Any>`). Verified against kotlinc 2.4.20.
   (`tests/implicit_receiver_inapplicable_call_e2e.rs`.)
+- **Equally specific overloads prefer the call that uses no default argument.** A trailing lambda
+  can fill `block` of `fun app(block: () -> Unit)` directly or fill it after the defaulted `n` of
+  `fun app(n: Int = 0, block: () -> Unit)`. Both pass every argument to the same parameter type,
+  so they are equally specific, and `app { }` selects the overload without a defaulted argument,
+  also when an expression-bodied caller's result type depends on it (`fun a() = app { }`). The
+  signature pass selects each argument mapping on its own and applies this tie-break only when
+  every mapping selects a candidate and the selections agree on every argument's parameter type;
+  otherwise a postponed lambda's own shape decides later. A mapping whose own selection is
+  undecided keeps the call undecided: with `fun pick(block: (Int) -> Unit)` beside
+  `fun pick(n: Int = 0, block: (String) -> Unit)` and `fun pick(m: Long = 0, block: (Boolean) ->
+  Unit)`, `pick { it + 1 }` is an overload resolution ambiguity, not the `Int` overload, while
+  `pick { x: String -> x.length }` selects the `String` one. The body check follows the same
+  rule: a lambda that declares no parameter types is shaped by the call's candidate, so when two
+  applicable top-level candidates expect incomparable inputs for it (neither parameter or
+  receiver type is a subtype of the other), kotlinc cannot analyze it before choosing. The call reports the overload
+  resolution ambiguity over those candidates and the lambda's `it` is unresolved, rather than the
+  lambda being typed by the first candidate. A lambda with neither parameters nor `it` is checked
+  without a receiver: `pick { length }` over `String.() -> Unit` and `Int.() -> Unit` also reports
+  `unresolved reference 'length'`. Verified against kotlinc 2.4.20.
+  (`tests/default_argument_overload_tie_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 
@@ -18748,7 +18794,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A value-returning splice whose value is not a local read is the other closing `nop`: the lambda
   locals end first, and the `nop` returns to the inline body's line. A same-file expansion still
   writes `SourceDebugExtension` (one file, a second line range, and the debug stratum at the
-  call). Catch, finally, and declaration marks of the copy go through that map. After inlining,
+  call). Catch, finally, and declaration marks of the copy go through that map. A copied line
+  that a range of the same call already covers keeps that range's output line, as kotlinc's
+  copier returns a line it has visited; only an uncovered line stretches the frontier range, so a
+  private inline function's line after a nested published expansion maps to its own range. After inlining,
   the method's exception table is sorted by handler pc, then start pc; the standalone `use`
   method, which was not inlined, keeps emission order. That method's `try` is `Nothing`, not
   `Unit`. A non-`Unit` `try` enters a result temporary after its body once every local the body
@@ -18759,7 +18808,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that result. A `Unit` `try` does not enter one.
   Tests: `tests/inline_use_close_e2e.rs`, `tests/same_module_inline_frame_markers_e2e.rs`,
   `tests/inline_constructor_reference_e2e.rs`,
-  `jvm::source_map::tests::a_same_file_inline_still_writes_a_map`.
+  `jvm::source_map::tests::a_same_file_inline_still_writes_a_map`,
+  `jvm::source_map::tests::a_covered_line_keeps_its_range_over_the_frontier`,
+  `tests/sam_wrapper_class_e2e.rs` (`an_inline_copy_keeps_its_declarations_sam_wrapper_abi`).
 
 - **An inlined `return this` closes the spliced lambda before the load.** `also` and `apply`, and
   any spliced lambda whose value is a plain local read, leave that read as the block's value.

@@ -420,13 +420,6 @@ impl SerializeBody<'_> {
                 let guard = ir.add_expr(IrExpr::When {
                     branches: vec![(Some(cond), enc_stmt)],
                 });
-                // The guard is a statement of the class's own declaration, so it carries the
-                // class's start line. That is also what puts the emitter's "current statement
-                // line" in effect, which the comparison inside the condition returns to.
-                let start_line = ir.classes[foo_id as usize].decl_start_line;
-                if start_line != 0 {
-                    ir.expr_lines.insert(guard, start_line);
-                }
                 stmts.push(guard);
             }
         }
@@ -458,6 +451,17 @@ impl SerializeBody<'_> {
                     named: false,
                 });
                 stmts.insert(0, declaration);
+            }
+            // Every statement of `write$Self` is one of the class's own declaration, so it carries
+            // the class's start line: kotlinc opens the method on that line at its first
+            // instruction, whether that is the cache read, an unconditional element or a guard.
+            // That is also what puts the emitter's "current statement line" in effect, which the
+            // comparison inside a guard's condition returns to.
+            let start_line = ir.classes[foo_id as usize].decl_start_line;
+            if start_line != 0 {
+                for &statement in &stmts {
+                    ir.expr_lines.insert(statement, start_line);
+                }
             }
             let ws_ret = ir.add_expr(IrExpr::Return(None));
             stmts.push(ws_ret);

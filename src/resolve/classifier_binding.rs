@@ -13,6 +13,7 @@ pub(super) struct SelectedTypeAlias {
     pub(super) identity: Option<TypeName>,
     pub(super) formals: Vec<String>,
     pub(super) expansion: Ty,
+    pub(super) expansion_spelling: crate::spelling::Spelled,
 }
 
 type SelectedAliasProvenance = Result<Option<SelectedTypeAlias>, InvalidAliasProvenance>;
@@ -33,6 +34,7 @@ fn selected_alias_from_expansion(
         identity: Some(binding.identity),
         formals: binding.formals,
         expansion: binding.expansion,
+        expansion_spelling: binding.expansion_spelling,
     })
 }
 
@@ -82,6 +84,7 @@ fn same_selected_alias(
             left.identity == right.identity
                 && left.formals == right.formals
                 && left.expansion == right.expansion
+                && left.expansion_spelling == right.expansion_spelling
         }
         (None, Some(_)) | (Some(_), None) => false,
     }
@@ -712,7 +715,8 @@ impl Checker<'_> {
                     Some(previous)
                         if previous.identity == alias.identity
                             && previous.formals == alias.formals
-                            && previous.expansion == alias.expansion => {}
+                            && previous.expansion == alias.expansion
+                            && previous.expansion_spelling == alias.expansion_spelling => {}
                     Some(_) => return Err(InvalidAliasProvenance),
                 }
             }
@@ -733,6 +737,7 @@ impl Checker<'_> {
                     identity: None,
                     formals: alias.formals,
                     expansion: alias.expansion,
+                    expansion_spelling: alias.expansion_spelling,
                 },
             )));
         }
@@ -746,6 +751,7 @@ impl Checker<'_> {
                 identity: Some(binding.identity),
                 formals: binding.formals,
                 expansion: binding.expansion,
+                expansion_spelling: binding.expansion_spelling,
             },
         )))
     }

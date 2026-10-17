@@ -70,6 +70,36 @@ fn attach_generated_companion_debug_metadata(
     attach_generated_declaration_lines(class, &functions, owner_start_line, ir);
 }
 
+/// A plugin callable the frontend declared on a written classifier (a hand-written companion's
+/// `serializer()`) maps to that classifier's declaration start line, as kotlinc maps it.
+fn attach_plugin_callable_lines(
+    classifier: DeclarationId,
+    start_line: u32,
+    index: &ResolvedModuleIndex,
+    ir: &mut IrFile,
+) {
+    if start_line == 0 {
+        return;
+    }
+    for &declaration in index.owned_declarations(classifier) {
+        let Some(function) = index
+            .callable_for_declaration(declaration)
+            .filter(|callable| {
+                index
+                    .callable_behavior(callable.id)
+                    .plugin_expression
+                    .is_some()
+            })
+            .and_then(|callable| ir.checked_callable_functions.get(&callable.id))
+            .copied()
+        else {
+            continue;
+        };
+        ir.fn_decl_lines.insert(function, start_line);
+        ir.fn_sig_lines.insert(function, start_line);
+    }
+}
+
 /// Transfer line-only output metadata while one bounded Pass-2 parser unit is live. This belongs
 /// to the stable metadata boundary rather than checked-FIR lowering: the lowerer never observes
 /// source syntax.
@@ -118,6 +148,7 @@ pub(super) fn accept_active_debug_metadata(
                     index,
                     ir,
                 );
+                attach_plugin_callable_lines(declaration, classifier.decl_start_line, index, ir);
             }
         }
 

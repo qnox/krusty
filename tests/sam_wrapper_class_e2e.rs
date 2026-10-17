@@ -460,3 +460,94 @@ fn java_sam_in_an_inline_function_is_its_wrapper_class() {
     );
     common::expect_box_same_as_kotlinc(&runtime_src, "JavaSamInlineBehavior");
 }
+
+/// An inlined copy belongs to the declaration whose implementation it specializes, not to the
+/// inline caller that happens to contain the copy. A private relay must therefore keep constructing
+/// `published`'s public-ABI `$sam$i$` wrapper rather than replacing it with the private `$sam$` form.
+#[test]
+fn an_inline_copy_keeps_its_declarations_sam_wrapper_abi() {
+    let source = "package provenance\n\
+                  import java.util.function.Supplier\n\
+                  fun take(s: Supplier<String>): String = s.get()\n\
+                  inline fun published(noinline f: () -> String): String = take(f)\n\
+                  private inline fun relay(noinline f: () -> String): String = published(f)\n\
+                  fun call(value: String): String = relay { value }\n";
+    for class in [
+        "provenance/SamWrapperProvenanceKt",
+        "provenance/SamWrapperProvenanceKt$sam$i$java_util_function_Supplier$0",
+    ] {
+        assert_eq!(
+            common::byte_diff_against_kotlinc_cp(
+                "SamWrapperProvenance",
+                source,
+                class,
+                &[common::stdlib_jar()]
+            )
+            .expect("reference kotlinc is provisioned"),
+            Ok(()),
+            "{class}"
+        );
+    }
+}
+
+/// A copy imported from another source file constructs the wrapper published by the declaration
+/// file. The caller must not use `invokedynamic` or declare a second wrapper under its own facade.
+#[test]
+fn a_cross_file_inline_copy_constructs_the_declarations_sam_wrapper() {
+    let classes = common::classes_against_kotlinc_module(&[
+        (
+            "A.kt",
+            "package crossfilesam\n\
+             import java.lang.Runnable\n\
+             import java.util.function.Supplier\n\
+             fun take(supplier: Supplier<String>): String = supplier.get()\n\
+             fun run(action: Runnable): String { action.run(); return \"!\" }\n\
+             inline fun published(noinline f: () -> String): String = take(f)\n\
+             class Host {\n\
+             \x20   inline fun member(noinline f: () -> Unit): String = run(f)\n\
+             }\n",
+        ),
+        (
+            "B.kt",
+            "package crossfilesam\n\
+             fun call(host: Host, value: String): String =\n\
+             \x20   published { value } + host.member {}\n",
+        ),
+    ]);
+    let sam_inventory = |classes: &std::collections::BTreeMap<String, Vec<u8>>| {
+        classes
+            .keys()
+            .filter(|class| class.contains("$sam$"))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let expected_wrappers = [
+        "crossfilesam/AKt$sam$i$java_lang_Runnable$0",
+        "crossfilesam/AKt$sam$i$java_util_function_Supplier$0",
+    ]
+    .map(str::to_string)
+    .to_vec();
+    assert_eq!(
+        sam_inventory(&classes.reference),
+        expected_wrappers,
+        "kotlinc's exact SAM wrapper inventory"
+    );
+    assert_eq!(
+        sam_inventory(&classes.krusty),
+        expected_wrappers,
+        "krusty's exact SAM wrapper inventory"
+    );
+    let differences = classes.differences();
+    for class in [
+        "crossfilesam/AKt$sam$i$java_lang_Runnable$0",
+        "crossfilesam/AKt$sam$i$java_util_function_Supplier$0",
+        "crossfilesam/BKt",
+    ] {
+        assert!(
+            differences
+                .iter()
+                .all(|difference| !difference.starts_with(class)),
+            "{class} differs from kotlinc: {differences:#?}"
+        );
+    }
+}

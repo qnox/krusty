@@ -337,3 +337,156 @@ fn a_private_delegated_top_level_property_is_reached_through_facade_accessors() 
         assert_eq!(krusty, kotlinc, "{class}: {declaration}");
     }
 }
+
+/// A synthetic accessor maps its body to the owner's declaration start, which includes the
+/// owner's annotations: a companion property's `access$get…$cp`, a private method's `access$…`
+/// and an object's private function bridge all sit on the `@Ann` line.
+#[test]
+fn accessors_of_an_annotated_owner_sit_on_its_annotation_line() {
+    const SOURCE: &str = "annotation class Ann\n\
+        \n\
+        @Ann\n\
+        class H(val t: Int) {\n\
+        \x20   companion object { val x = 1 }\n\
+        }\n\
+        \n\
+        @Ann\n\
+        class S {\n\
+        \x20   private fun secret() = 4\n\
+        \x20   inner class I { fun g() = secret() }\n\
+        }\n\
+        \n\
+        @Ann\n\
+        object O {\n\
+        \x20   private fun z() = 1\n\
+        \x20   class N { fun w() = z() }\n\
+        }\n";
+    for class in ["H", "S", "O"] {
+        let built = common::compare_with_kotlinc_plugin(
+            "AnnotatedOwnerAccessorLines",
+            SOURCE,
+            class,
+            &[common::stdlib_jar()],
+            "25",
+            &[],
+        )
+        .expect("reference kotlinc is provisioned");
+        assert!(
+            built.krusty_bytes == built.reference_bytes,
+            "{class} differs from kotlinc\n--- kotlinc ---\n{}\n--- krusty ---\n{}",
+            built.reference,
+            built.krusty
+        );
+    }
+}
+
+/// The interface and reference bridges of an annotated owner also sit on its annotation line: a
+/// private interface method's `access$<name>`, the `access$…$jd` bridges an interface declares
+/// and the ones a sub-interface republishes, a function reference's bridge, a companion field's
+/// `$cp` accessor on an enum, and a private method's bridge called from a suspend lambda.
+#[test]
+fn interface_and_reference_bridges_of_an_annotated_owner_sit_on_its_annotation_line() {
+    const SOURCE: &str = "annotation class Ann\n\
+        \n\
+        @Ann\n\
+        interface I2 {\n\
+        \x20   private fun hid() = 2\n\
+        \x20   fun g(): () -> Int = { hid() + 1 }\n\
+        \x20   fun r(): () -> Int = ::hid\n\
+        }\n\
+        \n\
+        @Ann\n\
+        interface J : I2\n\
+        \n\
+        @Ann\n\
+        enum class E2 {\n\
+        \x20   A;\n\
+        \x20   companion object { private val z = 1 }\n\
+        \x20   class N { fun w() = z }\n\
+        }\n\
+        \n\
+        @Ann\n\
+        class F {\n\
+        \x20   private fun h() = 1\n\
+        \x20   fun r(): () -> Int = ::h\n\
+        }\n\
+        \n\
+        @Ann\n\
+        class L {\n\
+        \x20   private fun k() = 3\n\
+        \x20   fun s(): suspend () -> Int = { k() }\n\
+        }\n";
+    let compare = |class: &str| {
+        common::compare_with_kotlinc_plugin(
+            "AnnotatedOwnerBridgeLines",
+            SOURCE,
+            class,
+            &[common::stdlib_jar()],
+            "25",
+            &["-jvm-default=enable".to_string()],
+        )
+        .expect("reference kotlinc is provisioned")
+    };
+    for class in ["I2", "J", "E2", "F", "L"] {
+        let built = compare(class);
+        assert!(
+            built.krusty_bytes == built.reference_bytes,
+            "{class} differs from kotlinc\n--- kotlinc ---\n{}\n--- krusty ---\n{}",
+            built.reference,
+            built.krusty
+        );
+    }
+}
+
+/// kotlinc creates a class's synthetic accessors in the order its lowering first meets their uses,
+/// whatever their kind: a private constructor's marker accessor, a private method's
+/// `access$<name>`, a private field's `access$get<X>$p` and a companion field's `$cp` accessor
+/// interleave by first use.
+#[test]
+fn synthetic_accessors_of_every_kind_follow_first_use() {
+    const SOURCE: &str = "class P private constructor(val x: Int) {\n\
+        \x20   private fun s() = 1\n\
+        \x20   inner class I { fun g() = s() }\n\
+        \x20   companion object { fun mk() = P(1) }\n\
+        }\n\
+        \n\
+        class Q private constructor(val x: Int) {\n\
+        \x20   companion object { fun mk() = Q(1) }\n\
+        \x20   private fun s() = 1\n\
+        \x20   inner class I { fun g() = s() }\n\
+        }\n\
+        \n\
+        class R {\n\
+        \x20   private fun a() = 1\n\
+        \x20   private val b = 2\n\
+        \x20   private fun c() = 3\n\
+        \x20   inner class I { fun g() = c() + b + a() }\n\
+        }\n\
+        \n\
+        class H(val t: Int) {\n\
+        \x20   companion object {\n\
+        \x20       val x = 1\n\
+        \x20       fun make() = H(1).secret()\n\
+        \x20   }\n\
+        \x20   private fun secret() = 4\n\
+        \x20   private val p = 5\n\
+        \x20   inner class I { fun g() = secret() + p }\n\
+        }\n";
+    for class in ["P", "Q", "R", "H"] {
+        let built = common::compare_with_kotlinc_plugin(
+            "AccessorFirstUseOrder",
+            SOURCE,
+            class,
+            &[common::stdlib_jar()],
+            "25",
+            &[],
+        )
+        .expect("reference kotlinc is provisioned");
+        assert!(
+            built.krusty_bytes == built.reference_bytes,
+            "{class} differs from kotlinc\n--- kotlinc ---\n{}\n--- krusty ---\n{}",
+            built.reference,
+            built.krusty
+        );
+    }
+}

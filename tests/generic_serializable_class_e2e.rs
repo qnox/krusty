@@ -63,3 +63,16 @@ fn a_companion_serializer_has_unbounded_type_parameters() {
     assert_identical("BoundedSerializableNonNull", BOUNDED, "A$Companion");
     assert_identical("BoundedSerializableNullable", BOUNDED, "B$Companion");
 }
+
+/// `deserialize` holds a type-parameter element as `Object` whatever the parameter's bound, and
+/// narrows it to the bound only where the deserialization constructor takes it.
+#[test]
+fn a_bounded_type_parameter_element_is_decoded_into_an_object_local() {
+    let source = "import kotlinx.serialization.Serializable\n\
+        @Serializable\n\
+        class B<T : CharSequence?>(val t: T, val n: Int)\n\
+        @Serializable\n\
+        class C<T : Number>(val t: T)\n";
+    assert_identical("BoundedTypeParameterElement", source, "B$$serializer");
+    assert_identical("BoundedTypeParameterElement", source, "C$$serializer");
+}
