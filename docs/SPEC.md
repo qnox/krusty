@@ -791,7 +791,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   body crosses the enclosing suspend function's return boundary directly: it does not flow back
   through the inline call's result adapter. Its returned box is therefore unboxed to the enclosing
   declaration's recorded carrier before the template is spliced; this must not depend on an
-  argument temporary (`tests/inline_lambda_resumed_value_class_e2e.rs`). Tests:
+  argument temporary (`tests/inline_lambda_resumed_value_class_e2e.rs`). A carrier handed over
+  by a call to a dependency's `suspend fun find(): Id?` (with `value class Id(val value: String)`)
+  is boxed again where it enters a generic parameter or receiver (`find() shouldBe Id("x")`), as
+  kotlinc does. No `unbox-impl` is recorded for such a call, so none can cancel the consumer's box
+  (`tests/suspend_value_class_carrier_rebox_e2e.rs`). Tests:
   `tests/suspend_value_class_results_e2e.rs`.
 - **An unintercepted suspension block reports its suspension to the debug probes.** After the value
   of a `suspendCoroutineUninterceptedOrReturn` block, kotlinc writes `dup; getCOROUTINE_SUSPENDED;
@@ -2749,6 +2753,49 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `org.jetbrains.annotations` and `org.checkerframework.checker.nullness.qual`; kotlinc's other
   nullability annotation families are not read yet. Tests: `tests/java_type_use_nullability_e2e.rs`
   (classfile and Java-source APIs, the complete diagnostics against kotlinc).
+- **A Java type-variable occurrence is flexible, and a declaration inferred from it publishes the
+  flexible type.** FIR's Java type mapping gives `List<T>` the argument `T!`. The classfile provider
+  retains the occurrence's Java provenance in the declaration variable's flexible bound while the
+  common semantic type remains the stable variable `T`; wrapping the shared variable itself would
+  leak a provider detail through mapped collection supertypes and Kotlin source inference.
+  Selected-call publication pairs that declaration-owned shape with the already-selected call
+  identity and committed argument mapping, then carries that fact through generic forwarding,
+  local flow identities, and expression-value control-flow joins. A mutable local keeps the
+  publication shape of its inferred storage declaration beside its independently changing current
+  flow value: assignments can narrow later reads, but do not redeclare that storage. The semantic
+  CFG remains authoritative for the current value and every control-flow edge; the publication
+  sidecar retains only the already-checked declaration identity and never tries to reproduce those
+  edges. Thus `T!` with `X` is published as `X!`,
+  while a nullable `X?` is the rigid `X?` (both bounds nullable).
+  `Collections.singletonList(x)` with `x: X` is therefore
+  `(Mutable)List<X!>!`, and inferred declarations publish that flexible type in `@Metadata`: the
+  lower bound `MutableList<X!>`, the nullable read-only upper bound `List<X!>?`, and the capability
+  `kotlin.jvm.PlatformType`, interned in kotlinc's order (lower, upper, capability). A flexible
+  result fixes no nullability, so the method carries neither `@NotNull` nor `@Nullable`. The checker
+  records both faces against the stable declaration identity; metadata handoff consumes that
+  declaration-owned contract without reopening the source expression.
+  Tests: `tests/java_platform_type_publication_e2e.rs` (byte-identical vs kotlinc),
+  `metadata::type_encoder::tests::platform_type_encodes_a_nullable_flexible_upper_bound`.
+- **A nullable argument fixes a flexible Java type variable to its nullable type.** kotlinc reduces
+  `Foo? <: T!` to `Foo? <: T` (`simplifyLowerConstraint`), so `fun <E> a(x: E?): List<E> =
+  Collections.singletonList(x)` infers `T := E?` and the result `(Mutable)List<E?>!` no longer fits
+  `List<E>`. A `null` argument constrains `T` with `Nothing?`. `E? <: Any?` holds for a type
+  parameter `E`; nullable sides are compared without stripping the target to non-null `Any`. The
+  nullable argument fixes both faces of this root variable, so an invariant expected result cannot
+  reopen the parameter as a non-null flexible interval merely because that interval accepts the
+  original argument.
+  Krusty applies the inference rule at a parameter's root only: a flexible variable nested in a
+  Java array argument still keeps the surrounding structural inference used by kotlinc.
+  Tests: `tests/java_flexible_variable_inference_e2e.rs` (exact diagnostics, a box run, and
+  byte-identical publication).
+- **A declaration inferred from an enhanced Java value publishes its argument marks.** kotlinc's
+  metadata records `EnhancedNullability` as the type annotation
+  `@kotlin.jvm.internal.EnhancedNullability` on each marked position of a declaration's inferred
+  type. The checker records the selected value's normalized marks against the stable declaration
+  identity, and metadata handoff applies them to the declaration spelling. An inferred property's
+  initializer is also guarded like an inferred local's. A declared result type has no inferred
+  marks. Test:
+  `java_platform_type_publication_e2e::inferred_enhanced_java_results_publish_enhanced_nullability_like_kotlinc`.
 - **A PLATFORM value narrowed to a declared non-null type is guarded where it enters.** A Java value
   arrives as `T!` (`Ty::PlatformNullable`), usable as both `T` and `T?`. Where the source commits it to
   a declared non-null type, kotlinc emits `dup` + `ldc "<expression>"` +
@@ -14287,6 +14334,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type parameters: an enclosing class's `T` stays `T`, it is not read as its bound
   (`List<T (of class Generic<T>)>`, not `List<Any>`). Verified against kotlinc 2.4.20.
   (`tests/implicit_receiver_inapplicable_call_e2e.rs`.)
+- **Equally specific overloads prefer the call that uses no default argument.** A trailing lambda
+  can fill `block` of `fun app(block: () -> Unit)` directly or fill it after the defaulted `n` of
+  `fun app(n: Int = 0, block: () -> Unit)`. Both pass every argument to the same parameter type,
+  so they are equally specific, and `app { }` selects the overload without a defaulted argument,
+  also when an expression-bodied caller's result type depends on it (`fun a() = app { }`). The
+  signature pass selects each argument mapping on its own and applies this tie-break only when the
+  selections agree on every argument's parameter type; otherwise a postponed lambda's own shape
+  decides later. Verified against kotlinc 2.4.20. (`tests/default_argument_overload_tie_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 

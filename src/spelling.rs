@@ -71,6 +71,13 @@ pub struct Spelled {
     /// names the `Int` occurrence `count`). `@Metadata` records it after the occurrence's own
     /// annotations as `@kotlin.ParameterName(name = "count")`.
     pub parameter_name: Option<Box<str>>,
+    /// Provider-normalized upper face of an inferred flexible occurrence. The semantic [`Ty`]
+    /// retains the lower face; metadata needs both (`MutableList<T>..List<T>?`, or
+    /// `Array<T>..Array<out T>?`) and must not rediscover the upper classifier in a backend.
+    pub flexible_upper_bound: Option<Ty>,
+    /// This occurrence carries kotlinc's `EnhancedNullability` type attribute. Inferred
+    /// declarations retain argument-position marks from the checked Java value that produced them.
+    pub enhanced_nullability: bool,
 }
 
 /// The spelling of a node that names no alias and records no annotation.
@@ -84,6 +91,8 @@ const EMPTY: Spelled = Spelled {
     expansion_annotations: Vec::new(),
     unsafe_variance: false,
     parameter_name: None,
+    flexible_upper_bound: None,
+    enhanced_nullability: false,
 };
 
 impl Spelled {
@@ -100,7 +109,65 @@ impl Spelled {
             && self.expansion_annotations.is_empty()
             && !self.unsafe_variance
             && self.parameter_name.is_none()
+            && self.flexible_upper_bound.is_none()
+            && !self.enhanced_nullability
             && self.args.iter().all(Spelled::is_none)
+    }
+
+    /// Record provider-owned upper faces for every flexible occurrence in inferred `ty`.
+    pub(crate) fn record_flexible_upper_bounds(&mut self, ty: Ty, upper_bound: &dyn Fn(Ty) -> Ty) {
+        let ty = match ty {
+            Ty::PlatformNullable(lower) => {
+                self.flexible_upper_bound = Some(upper_bound(*lower));
+                *lower
+            }
+            Ty::Nullable(inner)
+            | Ty::DefinitelyNotNull(inner)
+            | Ty::InProjection(inner)
+            | Ty::OutProjection(inner)
+            | Ty::StarProjection(inner) => *inner,
+            other => other,
+        };
+        match ty {
+            Ty::Obj(_, arguments) => {
+                if self.args.len() < arguments.len() {
+                    self.args.resize_with(arguments.len(), Spelled::default);
+                }
+                for (spelling, argument) in self.args.iter_mut().zip(arguments) {
+                    spelling.record_flexible_upper_bounds(*argument, upper_bound);
+                }
+            }
+            Ty::Fun(signature) if !signature.suspend => {
+                let count = signature.params.len() + 1;
+                if self.args.len() < count {
+                    self.args.resize_with(count, Spelled::default);
+                }
+                for (spelling, parameter) in
+                    self.args.iter_mut().zip(signature.params.iter().copied())
+                {
+                    spelling.record_flexible_upper_bounds(parameter, upper_bound);
+                }
+                self.args[signature.params.len()]
+                    .record_flexible_upper_bounds(signature.ret, upper_bound);
+            }
+            // A suspend function's metadata result occupies the continuation argument rather than
+            // the ordinary last function-type slot. The publication sidecar does not carry that
+            // physical layout, so decline nested flexibility instead of attaching it incorrectly.
+            Ty::Fun(_) => {}
+            _ => {}
+        }
+    }
+
+    /// Mark the positions `enhancement` lays out as `EnhancedNullability` occurrences.
+    pub(crate) fn mark_enhanced(&mut self, enhancement: &crate::libraries::TypeEnhancement) {
+        self.enhanced_nullability |= enhancement.head();
+        let arguments = enhancement.arguments();
+        if self.args.len() < arguments.len() {
+            self.args.resize_with(arguments.len(), Spelled::default);
+        }
+        for (spelling, argument) in self.args.iter_mut().zip(arguments) {
+            spelling.mark_enhanced(argument);
+        }
     }
 
     /// This node's spelling for the type argument at `index`, or the empty spelling when the
@@ -493,6 +560,21 @@ mod tests {
             Some(crate::types::type_name("dep/Cargo"))
         );
         assert!(spelled.arg(1).is_none());
+    }
+
+    #[test]
+    fn suspend_function_flexibility_is_not_written_to_an_ordinary_result_slot() {
+        let ty = Ty::fun_with_shape(
+            vec![Ty::String],
+            Ty::platform_nullable(Ty::String),
+            0,
+            false,
+            true,
+        );
+        let mut spelled = Spelled::default();
+        spelled.record_flexible_upper_bounds(ty, &|lower| lower);
+
+        assert!(spelled.is_none());
     }
 
     #[test]

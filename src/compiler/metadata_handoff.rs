@@ -13,6 +13,25 @@ use crate::fir::{
 };
 use crate::ir::IrFile;
 
+/// The finalized header spelling plus checker-owned publication facts for an inferred result.
+/// The stable declaration is the only join key; no source expression crosses this boundary.
+fn published_declaration_spellings(
+    declaration: DeclarationId,
+    info: &crate::resolve::TypeInfo,
+    index: &ResolvedModuleIndex,
+) -> Option<crate::spelling::DeclaredSpellings> {
+    let declared = index.declaration_spellings(declaration);
+    let inferred = info.inferred_declaration_publication(declaration);
+    if declared.is_none() && inferred.is_none() {
+        return None;
+    }
+    let mut spellings = declared.cloned().unwrap_or_default();
+    if let Some(inferred) = inferred {
+        spellings.ret = inferred.clone();
+    }
+    Some(spellings)
+}
+
 fn attach_generated_declaration_lines(
     class: crate::ir::ClassId,
     functions: &[crate::ir::FunId],
@@ -70,6 +89,36 @@ fn attach_generated_companion_debug_metadata(
     attach_generated_declaration_lines(class, &functions, owner_start_line, ir);
 }
 
+/// A plugin callable the frontend declared on a written classifier (a hand-written companion's
+/// `serializer()`) maps to that classifier's declaration start line, as kotlinc maps it.
+fn attach_plugin_callable_lines(
+    classifier: DeclarationId,
+    start_line: u32,
+    index: &ResolvedModuleIndex,
+    ir: &mut IrFile,
+) {
+    if start_line == 0 {
+        return;
+    }
+    for &declaration in index.owned_declarations(classifier) {
+        let Some(function) = index
+            .callable_for_declaration(declaration)
+            .filter(|callable| {
+                index
+                    .callable_behavior(callable.id)
+                    .plugin_expression
+                    .is_some()
+            })
+            .and_then(|callable| ir.checked_callable_functions.get(&callable.id))
+            .copied()
+        else {
+            continue;
+        };
+        ir.fn_decl_lines.insert(function, start_line);
+        ir.fn_sig_lines.insert(function, start_line);
+    }
+}
+
 /// Transfer line-only output metadata while one bounded Pass-2 parser unit is live. This belongs
 /// to the stable metadata boundary rather than checked-FIR lowering: the lowerer never observes
 /// source syntax.
@@ -118,6 +167,7 @@ pub(super) fn accept_active_debug_metadata(
                     index,
                     ir,
                 );
+                attach_plugin_callable_lines(declaration, classifier.decl_start_line, index, ir);
             }
         }
 
@@ -271,9 +321,16 @@ fn attach_function_metadata(
         ir.fn_param_annotations
             .insert(function_id, parameter_annotations);
     }
-    if let Some(spelling) = index.declaration_spellings(declaration) {
+    if let Some(spelling) = published_declaration_spellings(declaration, info, index) {
         ir.fn_declared_spellings
             .insert(function_id, spelling.clone());
+        if let Some(published) = ir
+            .package_functions
+            .iter_mut()
+            .find(|published| published.function == function_id)
+        {
+            published.spellings = spelling;
+        }
     }
 }
 
@@ -382,6 +439,9 @@ fn attach_property_metadata(
         .iter_mut()
         .find(|package_property| package_property.property == property_id)
     {
+        if let Some(spelling) = published_declaration_spellings(declaration, info, index) {
+            package_property.spellings = spelling;
+        }
         package_property.suppressed_source_annotation_application =
             super::declaration_metadata::top_level_property_retains_suppressed_source_application(
                 property, info,
@@ -518,11 +578,11 @@ pub(super) fn attach_checked_declaration_metadata(
         if let Some((source_order, spelling)) = property.and_then(|property| {
             Some((
                 index.source_order(property)?,
-                index.declaration_spellings(property)?,
+                published_declaration_spellings(property, info, index)?,
             ))
         }) {
             ir.prop_declared_spellings
-                .insert((classifier, source_order), spelling.clone());
+                .insert((classifier, source_order), spelling);
         }
     };
     let constructor_property_declaration = |property_index: usize| {

@@ -368,6 +368,11 @@ impl Checker<'_> {
                     .last()
                     .cloned()
             },
+            &|lower| {
+                crate::assignable::platform_shape_upper_bound(
+                    crate::assignable::TypeOracle::platform_flexible_upper_bound(self, lower),
+                )
+            },
         )
     }
 

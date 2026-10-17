@@ -198,6 +198,7 @@ pub(crate) fn spelling_of_ref_with(
         expansion_annotations,
         unsafe_variance,
         parameter_name: None,
+        ..Spelled::default()
     }
 }
 
@@ -348,6 +349,8 @@ fn substitute_expansion_spelling(
         expansion_annotations: spelling.expansion_annotations.clone(),
         unsafe_variance: spelling.unsafe_variance,
         parameter_name: spelling.parameter_name.clone(),
+        flexible_upper_bound: spelling.flexible_upper_bound,
+        enhanced_nullability: spelling.enhanced_nullability,
     }
 }
 

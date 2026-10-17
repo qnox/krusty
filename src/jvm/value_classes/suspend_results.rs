@@ -101,6 +101,21 @@ pub(super) fn record_suspend_results(
     forced
 }
 
+/// Whether the suspend call `call` hands over `value_class`'s carrier rather than its box.
+pub(super) fn hands_over_carrier(
+    ir: &IrFile,
+    under: &Under,
+    call: crate::ir::ExprId,
+    value_class: TypeName,
+) -> bool {
+    matches!(
+        ir.value_class_suspend_calls.get(&call),
+        Some(IrValueClassSuspendResult::Carrier { carrier, .. })
+            if carrier.non_null().canonical_semantic()
+                == erase(&under[&value_class], under).canonical_semantic()
+    )
+}
+
 /// A call that hands over its value class's box already is the value its checked coercion to that
 /// class names. Keep the box, as a call to a same-module callee returning the box does, so each
 /// consumer takes the carrier at its own boundary and a reference consumer, `Any` included, keeps

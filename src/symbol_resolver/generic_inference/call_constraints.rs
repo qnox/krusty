@@ -109,6 +109,13 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
                 );
             }
         }
+        let flexible_variable = flexible_variable_argument(shape, actual);
+        if let Some((Ty::TyParam(formal, _), _)) = flexible_variable {
+            constraints
+                .nullable_flexible_roots
+                .insert(formal.to_string());
+        }
+        let (shape, actual) = flexible_variable.unwrap_or((shape, actual));
         collect_call_inference_constraints(
             source,
             shape,
@@ -150,6 +157,10 @@ struct CallInferenceConstraints {
     lower: GSigBinds,
     lower_inputs: crate::fx_hash::HashMap<String, Vec<(Ty, ConstraintOrigin)>>,
     upper: crate::fx_hash::HashMap<String, Vec<Ty>>,
+    /// Java root-flexible variables fixed by a nullable value argument. Both interval faces become
+    /// that nullable type, so a later invariant expected result must not widen the variable back to
+    /// a non-null type whose flexible parameter would merely accept the original argument.
+    nullable_flexible_roots: crate::fx_hash::HashSet<String>,
 }
 
 /// Type-variable constraints implied by one semantic assignability relation (`actual <: expected`).
@@ -288,6 +299,8 @@ pub(crate) struct InferredCallBindings {
     pub lower_inputs: crate::fx_hash::HashMap<String, Vec<Ty>>,
     pub upper_only: crate::fx_hash::HashSet<String>,
     pub upper_bounds: crate::fx_hash::HashMap<String, Vec<Ty>>,
+    /// Variables whose flexible root parameter was collapsed to a nullable argument.
+    pub nullable_flexible_roots: crate::fx_hash::HashSet<String>,
     pub bound_violation: Option<GenericBoundViolation>,
 }
 
@@ -646,6 +659,7 @@ impl CallInferenceConstraints {
                 .collect(),
             upper_only,
             upper_bounds: self.upper,
+            nullable_flexible_roots: self.nullable_flexible_roots,
             bound_violation,
         }
     }

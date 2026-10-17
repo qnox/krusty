@@ -802,3 +802,29 @@ fn mixed_nullable_and_bare_any_bound_keeps_the_bound_violation() {
         })
     );
 }
+
+#[test]
+fn nullable_input_fixes_a_root_flexible_variable_before_expected_result_inference() {
+    let any = Ty::platform_nullable(Ty::obj("kotlin/Any"));
+    let variable = Ty::ty_param("T", any);
+    let signature = GenericSig {
+        formals: vec!["T".to_string()],
+        formal_bounds: vec![vec![any]],
+        receiver: None,
+        params: vec![Ty::platform_nullable(variable)],
+        ret: Ty::platform_nullable(Ty::obj_args("kotlin/collections/MutableList", &[variable])),
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let actual = Ty::nullable(Ty::String);
+
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [(0, actual, false)],
+        None,
+    );
+
+    assert_eq!(inferred.bindings.get("T"), Some(&actual));
+    assert_eq!(inferred.nullable_flexible_roots.len(), 1);
+    assert!(inferred.nullable_flexible_roots.contains("T"));
+}
