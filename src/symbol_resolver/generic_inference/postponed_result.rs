@@ -1,6 +1,7 @@
 //! Completion of a postponed producer whose result has no proper call-site constraint.
 
 use super::{GSigBinds, GenericSig, Ty};
+use crate::types::TypeName;
 
 /// Complete the declaration-owned variables of an unconstrained producer.
 ///
@@ -30,25 +31,26 @@ pub(crate) fn unconstrained_result_bindings(signature: &GenericSig) -> GSigBinds
         .collect()
 }
 
-/// Complete every still-unbound variable whose declared upper bound refers to itself.
+/// Complete every still-unbound variable whose declared upper bound is the constructed classifier
+/// applied to that variable itself.
 ///
-/// Kotlin approximates a self-bounded variable with no other constraint by its bound, with the
-/// recursive occurrence replaced by a star and the whole argument projected `out`: `Box("x")` for
+/// Kotlin approximates such a self type with no other constraint by its bound, with the recursive
+/// occurrence replaced by a star and the whole argument projected `out`: `Box("x")` for
 /// `class Box<SELF : Box<SELF>>` types as `Box<out Box<*>>`, so `withPort(): SELF` reads `Box<*>`
-/// and a fluent chain keeps its members. A variable without a self-reference keeps its existing
+/// and a fluent chain keeps its members. A recursive bound on another classifier
+/// (`C<T : Comparable<T>>`) is not a self type; kotlinc cannot infer it and it keeps its existing
 /// completion.
 fn complete_self_bounded_formals(
+    owner: TypeName,
     formals: &[String],
     formal_bounds: &[Vec<Ty>],
     binds: &mut GSigBinds,
 ) {
     for (formal, bounds) in formals.iter().zip(formal_bounds) {
-        let Some(&bound) = bounds.first() else {
+        let Some(bound) = self_type_bound(owner, formal, bounds) else {
             continue;
         };
-        if binds.contains_key(formal)
-            || !crate::types::ty_mentions_param(bound, std::slice::from_ref(formal))
-        {
+        if binds.contains_key(formal) {
             continue;
         }
         // The star carries the bound it reads as, exactly as a written `Box<*>` does.
@@ -65,16 +67,25 @@ fn complete_self_bounded_formals(
     }
 }
 
+/// The declared bound of `formal` when it is a self type of `owner` (`SELF : Box<SELF>` in `Box`).
+fn self_type_bound(owner: TypeName, formal: &str, bounds: &[Ty]) -> Option<Ty> {
+    let &bound = bounds.first()?;
+    (bound.non_null().obj_internal() == Some(owner)
+        && crate::types::ty_mentions_param(bound, &[formal.to_string()]))
+    .then_some(bound)
+}
+
 /// The classifier arguments of a constructor result once argument and expected-type inference are
-/// done. A bound variable keeps its binding, a self-bounded one completes as
+/// done. A bound variable keeps its binding, a self type of `owner` completes as
 /// [`complete_self_bounded_formals`] describes, and any other takes its first declared bound.
 pub(crate) fn completed_constructor_result_arguments(
+    owner: TypeName,
     formals: &[String],
     formal_bounds: &[Vec<Ty>],
     bindings: &GSigBinds,
 ) -> Vec<Ty> {
     let mut completed = bindings.clone();
-    complete_self_bounded_formals(formals, formal_bounds, &mut completed);
+    complete_self_bounded_formals(owner, formals, formal_bounds, &mut completed);
     formals
         .iter()
         .enumerate()
@@ -381,13 +392,18 @@ mod tests {
     fn a_self_bounded_constructor_variable_completes_to_its_starred_bound() {
         let any = Ty::nullable(Ty::obj("kotlin/Any"));
         let recursive = Ty::obj_args("sample/Builder", &[Ty::ty_param("SELF", any)]);
+        let comparable = Ty::obj_args(
+            "kotlin/Comparable",
+            &[Ty::ty_param("C", Ty::obj("kotlin/Any"))],
+        );
         let plain = Ty::obj("sample/Settings");
-        let formals = ["SELF".to_string(), "S".to_string()];
+        let formals = ["SELF".to_string(), "C".to_string(), "S".to_string()];
 
         assert_eq!(
             completed_constructor_result_arguments(
+                crate::types::type_name("sample/Builder"),
                 &formals,
-                &[vec![recursive], vec![plain]],
+                &[vec![recursive], vec![comparable], vec![plain]],
                 &GSigBinds::default(),
             ),
             vec![
@@ -398,6 +414,7 @@ mod tests {
                         &[Ty::star_projection(any)],
                     ))],
                 )),
+                comparable,
                 plain,
             ]
         );

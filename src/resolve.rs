@@ -65843,6 +65843,7 @@ impl<'a> Checker<'a> {
                 }
                 let result_arguments =
                     crate::symbol_resolver::completed_constructor_result_arguments(
+                        internal,
                         classifier.type_params(),
                         classifier.type_param_bounds(),
                         &bindings,
