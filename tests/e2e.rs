@@ -663,8 +663,6 @@ mod deep_nested_type_e2e;
 mod default_args_member_e2e;
 #[path = "default_args_synthetic_e2e.rs"]
 mod default_args_synthetic_e2e;
-#[path = "default_argument_overload_tie_e2e.rs"]
-mod default_argument_overload_tie_e2e;
 #[path = "default_constructor_header_pool_e2e.rs"]
 mod default_constructor_header_pool_e2e;
 #[path = "default_import_resolution_e2e.rs"]
@@ -1663,6 +1661,8 @@ mod open_end_range_membership_e2e;
 mod optional_expectation_annotation_e2e;
 #[path = "outcome_lists_guard_e2e.rs"]
 mod outcome_lists_guard_e2e;
+#[path = "e2e/overload_resolution.rs"]
+mod overload_resolution;
 #[path = "override_default_stub_e2e.rs"]
 mod override_default_stub_e2e;
 #[path = "override_formal_identity_e2e.rs"]
@@ -2251,14 +2251,6 @@ mod operator_index_e2e;
 mod opt_in_usage_e2e;
 #[path = "optimization_gate_e2e.rs"]
 mod optimization_gate_e2e;
-#[path = "overload_declaration_specificity_e2e.rs"]
-mod overload_declaration_specificity_e2e;
-#[path = "overloaded_extension_e2e.rs"]
-mod overloaded_extension_e2e;
-#[path = "overloaded_inferred_return_e2e.rs"]
-mod overloaded_inferred_return_e2e;
-#[path = "overloaded_receiver_extension_expectation_e2e.rs"]
-mod overloaded_receiver_extension_expectation_e2e;
 #[path = "override_candidate_rendering_e2e.rs"]
 mod override_candidate_rendering_e2e;
 #[path = "override_type_parameter_bounds_e2e.rs"]
