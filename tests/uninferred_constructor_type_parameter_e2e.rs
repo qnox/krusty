@@ -61,6 +61,31 @@ fn a_dependency_constructor_type_parameter_is_not_inferred_either() {
     common::expect_identical_rejection(&result, "uninferred_dependency_constructor");
 }
 
+#[test]
+fn every_unconstrained_joined_branch_is_still_rejected() {
+    let main = "class D<T>(val n: Int)\n\
+        fun box(flag: Boolean): String {\n\
+            if (flag) D(1) else D(2)\n\
+            when (flag) { true -> D(3); else -> D(4) }\n\
+            return \"OK\"\n\
+        }\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", main)], &[]);
+    common::expect_identical_rejection(&result, "all unconstrained joined constructors");
+}
+
+#[test]
+fn a_rejected_dependency_constructor_does_not_publish_inference_evidence() {
+    let Some(classes) = common::compile_lib(
+        "uninferred_private_constructor_dependency",
+        "package lib\nclass Hidden<T> private constructor()\n",
+    ) else {
+        return;
+    };
+    let main = "import lib.Hidden\nfun box(): String { Hidden(); return \"OK\" }\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", main)], &[classes]);
+    common::expect_identical_rejection(&result, "rejected dependency constructor evidence");
+}
+
 /// A branch of a `when` with an `else` arm joins its siblings' inference even as a statement: the
 /// first arm fixes `TV`, so the bare `Buildee()` arm is accepted. An inner class of a generic class
 /// has no type parameter of its own to infer.
@@ -80,6 +105,7 @@ class Outer<T>(val x: T) {
 }
 
 fun box(): String {
+    if (true) build { setTypeVariable(TargetType()) } else Buildee()
     when ("") {
         "true" -> build { setTypeVariable(TargetType()) }
         "false" -> build {}

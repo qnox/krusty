@@ -60667,8 +60667,7 @@ impl<'a> Checker<'a> {
                     self.normal_completion(arm.body),
                 ));
             }
-            // Recheck a symbolic generic call against the other arms' common result type. Conditions
-            // and guards are not rechecked.
+            // Recheck a symbolic generic call against the other arms; conditions and guards stay fixed.
             let fixed = self.expectation_fixes_branches(scope, e, expected);
             if arm_results.len() >= 2 {
                 for i in 0..arm_results.len() {
@@ -60727,6 +60726,10 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            self.join_conditional_constructor_evidence(
+                scope,
+                arm_results.iter().map(|record| (record.body, record.ty)),
+            );
             for record in &arm_results {
                 self.report_unbound_conditional_branch(scope, record.body);
             }
@@ -65987,9 +65990,6 @@ impl<'a> Checker<'a> {
         let Some(member) = members.get(candidate_index).cloned() else {
             return Ok(LibraryConstructorSelection::NoMatch);
         };
-        if let Some(Some(bindings)) = member_bindings.get(candidate_index) {
-            self.record_library_constructor_evidence(call, internal, classifier, bindings);
-        }
         let annotation = if classifier.is_annotation() {
             let Some(construction) = dependency_annotation_defaults::dependency_construction(
                 self.libraries,
@@ -66067,6 +66067,9 @@ impl<'a> Checker<'a> {
         }
         self.check_selected_constructor_lambdas(scope, args, &selected.argument_types);
         self.commit_constructor(call, target.clone());
+        if let Some(Some(bindings)) = member_bindings.get(candidate_index) {
+            self.record_library_constructor_evidence(call, internal, classifier, bindings);
+        }
         Ok(LibraryConstructorSelection::Selected)
     }
 

@@ -168,6 +168,10 @@ impl Checker<'_> {
                         else_flow = flow;
                         ty
                     });
+                    self.join_conditional_constructor_evidence(
+                        scope,
+                        [(then_branch, tt), (eb, et)],
+                    );
                     self.report_unbound_conditional_branch(scope, then_branch);
                     self.report_unbound_conditional_branch(scope, eb);
                     self.publish_joined_local_flow(

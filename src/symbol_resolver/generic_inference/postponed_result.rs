@@ -89,7 +89,8 @@ fn self_type_bound(owner: TypeName, formal: &str, formals: &[String], bounds: &[
 /// expected-type inference are done.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConstructorFormalEvidence {
-    /// A written type argument, an argument, the expected type or an enclosing call bound it.
+    /// A written type argument, an argument, the expected type, an enclosing call or a joined
+    /// conditional sibling bound it.
     Bound,
     /// Nothing bound it, and it is a self type of the classifier: Kotlin completes it to its
     /// starred bound, as [`complete_self_bounded_formals`] describes.

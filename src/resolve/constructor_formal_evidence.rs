@@ -10,7 +10,11 @@ use super::*;
 use crate::symbol_resolver::ConstructorFormalEvidence;
 
 /// The evidence of one constructor call, in the classifier's own type-parameter order.
-pub(super) type CallEvidence = Vec<(String, ConstructorFormalEvidence)>;
+#[derive(Clone)]
+pub(super) struct CallEvidence {
+    owner: TypeName,
+    formals: Vec<(String, ConstructorFormalEvidence)>,
+}
 
 impl Checker<'_> {
     /// Record the evidence of a source constructor call from its inferred declaration-order
@@ -80,15 +84,21 @@ impl Checker<'_> {
             formal_bounds,
             bindings,
         );
-        self.constructor_formal_evidence
-            .insert(call, formals.iter().cloned().zip(evidence).collect());
+        self.constructor_formal_evidence.insert(
+            call,
+            CallEvidence {
+                owner,
+                formals: formals.iter().cloned().zip(evidence).collect(),
+            },
+        );
     }
 
     /// Check one branch of an `if` with an `else` or a `when` with an `else` arm. kotlinc completes
     /// such a conditional as one synthetic call even in statement position, so a sibling branch can
     /// fix a constructor type parameter this branch leaves open (`when (s) { "a" -> build {
-    /// set(T()) }; else -> Buildee() }`). That joint system is not modelled here; a branch that is
-    /// a statement therefore withholds only the constructor report, never a generic call's.
+    /// set(T()) }; else -> Buildee() }`). Retain that open evidence until every branch has been
+    /// checked; [`Self::join_conditional_constructor_evidence`] consumes only a sibling's proven
+    /// application and the normal completion-root report handles anything still open.
     pub(super) fn joined_branch_result(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -102,11 +112,87 @@ impl Checker<'_> {
         }
         self.discarded_exprs.insert(branch);
         let ty = self.expr_with_context(scope, branch, false);
-        self.constructor_formal_evidence.remove(&branch);
-        if self.report_unbound_call_result_type_parameter(scope, branch) {
+        let result = conditional_branch::branch_value_expression(self.file, branch);
+        if !self.constructor_formal_evidence.contains_key(&result)
+            && self.report_unbound_call_result_type_parameter(scope, result)
+        {
             Ty::Error
         } else {
             ty
+        }
+    }
+
+    /// Join the fixed classifier arguments established by sibling branches into constructor
+    /// evidence before the completion-root diagnostic runs.
+    ///
+    /// Constructor result completion substitutes a declared bound for an unconstrained formal, so
+    /// the resulting `D<Any?>` is not itself evidence for another bare `D()` branch. A sibling
+    /// constructor can contribute an argument only when its record says that ordinal was actually
+    /// fixed. A non-constructor branch contributes its selected semantic result application. This
+    /// is deliberately a provenance join, not another lookup or overload-selection path.
+    pub(super) fn join_conditional_constructor_evidence(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        branches: impl IntoIterator<Item = (ExprId, Ty)>,
+    ) {
+        let branches = branches.into_iter().collect::<Vec<_>>();
+        let mut newly_bound = Vec::new();
+        for (target_branch, _) in &branches {
+            let target_call =
+                conditional_branch::branch_value_expression(self.file, *target_branch);
+            let Some(target) = self.constructor_formal_evidence.get(&target_call).cloned() else {
+                continue;
+            };
+            for (ordinal, (_, evidence)) in target.formals.iter().enumerate() {
+                if *evidence != ConstructorFormalEvidence::Unconstrained {
+                    continue;
+                }
+                let sibling_bound = branches.iter().any(|(sibling_branch, sibling_ty)| {
+                    let sibling_call =
+                        conditional_branch::branch_value_expression(self.file, *sibling_branch);
+                    if sibling_call == target_call {
+                        return false;
+                    }
+                    let sibling_evidence = self.constructor_formal_evidence.get(&sibling_call);
+                    if sibling_evidence.is_some_and(|sibling| {
+                        if sibling.owner == target.owner {
+                            sibling.formals.get(ordinal).is_some_and(|(_, evidence)| {
+                                *evidence == ConstructorFormalEvidence::Unconstrained
+                            })
+                        } else {
+                            // Without the derived classifier's declaration substitution, an open
+                            // formal cannot be mapped soundly onto the target owner's ordinal.
+                            sibling.formals.iter().any(|(_, evidence)| {
+                                *evidence == ConstructorFormalEvidence::Unconstrained
+                            })
+                        }
+                    }) {
+                        return false;
+                    }
+                    let source = self.fed_source();
+                    crate::symbol_resolver::applied_hierarchy(&source, *sibling_ty)
+                        .into_iter()
+                        .find(|(owner, _, _)| *owner == target.owner)
+                        .and_then(|(_, applied, _)| applied.type_args().get(ordinal).copied())
+                        .is_some_and(|argument| {
+                            argument != Ty::Error
+                                && !argument.mentions_pending()
+                                && Self::type_is_lexically_fixed(scope, argument)
+                        })
+                });
+                if sibling_bound {
+                    newly_bound.push((target_call, ordinal));
+                }
+            }
+        }
+        for (call, ordinal) in newly_bound {
+            if let Some((_, evidence)) = self
+                .constructor_formal_evidence
+                .get_mut(&call)
+                .and_then(|evidence| evidence.formals.get_mut(ordinal))
+            {
+                *evidence = ConstructorFormalEvidence::Bound;
+            }
         }
     }
 
@@ -123,6 +209,7 @@ impl Checker<'_> {
             .get(&call)
             .and_then(|evidence| {
                 evidence
+                    .formals
                     .iter()
                     .find(|(_, evidence)| *evidence == ConstructorFormalEvidence::Unconstrained)
                     .map(|(formal, _)| formal.clone())
@@ -130,6 +217,7 @@ impl Checker<'_> {
         else {
             return false;
         };
+        self.constructor_formal_evidence.remove(&call);
         let message = format!(
             "cannot infer type for type parameter '{}'. Specify it explicitly.",
             crate::types::type_parameter_source_name(&formal)
