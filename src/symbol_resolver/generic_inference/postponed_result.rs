@@ -47,7 +47,7 @@ fn complete_self_bounded_formals(
     binds: &mut GSigBinds,
 ) {
     for (formal, bounds) in formals.iter().zip(formal_bounds) {
-        let Some(bound) = self_type_bound(owner, formal, bounds) else {
+        let Some(bound) = self_type_bound(owner, formal, formals, bounds) else {
             continue;
         };
         if binds.contains_key(formal) {
@@ -68,10 +68,20 @@ fn complete_self_bounded_formals(
 }
 
 /// The declared bound of `formal` when it is a self type of `owner` (`SELF : Box<SELF>` in `Box`).
-fn self_type_bound(owner: TypeName, formal: &str, bounds: &[Ty]) -> Option<Ty> {
+///
+/// The bound names no other formal of `owner`: for `MB<T, SELF : MB<T, SELF>>` kotlinc does not
+/// complete `SELF`, even with `T` inferred (`MB("v")` reports `cannot infer type for type
+/// parameter 'SELF'`), so that `SELF` keeps its existing completion.
+fn self_type_bound(owner: TypeName, formal: &str, formals: &[String], bounds: &[Ty]) -> Option<Ty> {
     let &bound = bounds.first()?;
+    let others = formals
+        .iter()
+        .filter(|other| *other != formal)
+        .cloned()
+        .collect::<Vec<_>>();
     (bound.non_null().obj_internal() == Some(owner)
-        && crate::types::ty_mentions_param(bound, &[formal.to_string()]))
+        && crate::types::ty_mentions_param(bound, &[formal.to_string()])
+        && !crate::types::ty_mentions_param(bound, &others))
     .then_some(bound)
 }
 
@@ -417,6 +427,29 @@ mod tests {
                 comparable,
                 plain,
             ]
+        );
+    }
+
+    /// A recursive bound that also names another formal is not completed, even with that formal
+    /// inferred: kotlinc reports `cannot infer type for type parameter 'SELF'` for `MB("v")`.
+    #[test]
+    fn a_self_bound_naming_another_formal_is_not_completed() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let recursive = Ty::obj_args(
+            "sample/MB",
+            &[Ty::ty_param("T", any), Ty::ty_param("SELF", any)],
+        );
+        let formals = ["T".to_string(), "SELF".to_string()];
+        let inferred = GSigBinds::from_iter([("T".to_string(), Ty::obj("kotlin/String"))]);
+
+        assert_eq!(
+            completed_constructor_result_arguments(
+                crate::types::type_name("sample/MB"),
+                &formals,
+                &[vec![any], vec![recursive]],
+                &inferred,
+            ),
+            vec![Ty::obj("kotlin/String"), recursive]
         );
     }
 }
