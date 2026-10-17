@@ -3744,25 +3744,18 @@ pub(crate) fn lower_value_classes(
     // 7. A lambda used as `() -> T` (a `FunctionN`) erases its result to `Object`, so a value-class
     //    result must be boxed at the lambda body's tail (`call { X(..) }` hands back a boxed `X`).
     let mut lambda_impls: Vec<(u32, ExprId)> = Vec::new();
-    let mut inline_bodies: Vec<ExprId> = Vec::new();
     for e in &ir.exprs {
-        if let IrExpr::Lambda {
-            impl_fn,
-            inline_body,
-            ..
-        } = e
-        {
+        if let IrExpr::Lambda { impl_fn, .. } = e {
             // A lambda SAM-converted to a method that DECLARES this very value class as its return is
-            // exempt from ALL of the tail boxing below — see the note on the loop. Its inline body
-            // shares the same tail node, so it must be exempt from `box_vc_tail` too.
+            // exempt from ALL of the tail boxing below — see the note on the loop. A spliced inline
+            // body is never boxed here: it keeps the representation its own type gives it, and the
+            // consumer of its value adapts it (the byte splice coerces it to `invoke`'s `Object`
+            // after the lambda's locals end, as kotlinc does).
             if sam_declares_vc_return(ir, &orig_rets, *impl_fn, &callable_under) {
                 continue;
             }
             if let Some(body) = ir.functions.get(*impl_fn as usize).and_then(|f| f.body) {
                 lambda_impls.push((*impl_fn, body));
-            }
-            if let Some(b) = inline_body {
-                inline_bodies.push(*b);
             }
         }
     }
@@ -3799,9 +3792,6 @@ pub(crate) fn lower_value_classes(
             // A lambda returning `Any`/an interface (not a value class itself) still boxes a value-class tail.
             box_vc_tail(ir, body, &callable_under, &orig_rets, false);
         }
-    }
-    for body in inline_bodies {
-        box_vc_tail(ir, body, &callable_under, &orig_rets, false);
     }
 
     // Synthesized accessors use the same callable universe as property operations. In particular,

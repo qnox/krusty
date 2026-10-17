@@ -1423,6 +1423,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a custom value class through a bare-`T` box boundary; `Ok`/`Err`-style factories over a two-parameter
   value class with an `Any?` carrier), `generic_hof_vc_binding_e2e::nullable_generic_return_keeps_null`,
   and the `cross_file_*_value_class_return_*` cases in `tests/reference_adaptation_e2e.rs`.
+- **A library inline call's expanded lambda yields the value class as the call's type gives it.**
+  `s.let { Id(it) }`, `s.run { Id(this) }` and `with(s) { Id(this) }` are expanded in place: the
+  lambda's body becomes the call's value, and the lambda's implementation loses its body. That
+  value is the call's result, not a `FunctionN.invoke` result, so it is not boxed as a lambda tail
+  is. kotlinc boxes it into the generic `R` slot and unboxes it at the call, and its optimizer
+  removes the pair; krusty boxed it and then read the box as the carrier, returning `Id` from a
+  method declared to return `String` and casting it to `String` behind `?.let`. A spliced lambda
+  body therefore keeps its own representation everywhere, and only the consumer of its value adapts
+  it. A body spliced into a library's inline bytecode (`map { Id(it) }`) is coerced to the replaced
+  `invoke`'s `Object` after the lambda's locals end, which is where kotlinc places the `box-impl`.
+  Test: `inline_lambda_value_class_result_e2e`.
 - **A value class over an `Object` carrier read out of a type-parameter slot is the BOX.**
   `Iterator<Slot>.next()`, `List<Slot>.get` and a `for` over `Iterable<Slot>` for
   `value class Slot(val raw: Any?)` return a bare `T`, so the slot holds `Slot`'s box and the read
