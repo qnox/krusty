@@ -11,6 +11,7 @@ mod assertions;
 mod binding_stability;
 #[cfg(test)]
 mod binding_stability_tests;
+mod body_local_ownership;
 #[cfg(feature = "trace")]
 mod body_trace;
 #[cfg(test)]

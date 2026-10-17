@@ -5,6 +5,7 @@ use crate::fir::{
 use crate::ir::{FnParamInfo, IrFile, IrFunction};
 
 use super::{
+    body_local_ownership::{semantic_owner, SemanticOwner},
     constructors::{
         accept_constructor_body, finalize_constructor_field_indices, finalize_constructors,
         predeclare_constructors,
@@ -27,6 +28,9 @@ use super::{
     tailrec::{finish_tailrec_body, Frame as TailrecFrame},
     FirLoweringFailure, LocalCallableLoweringContext,
 };
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirFileLoweringFailure {
@@ -1217,6 +1221,10 @@ impl<'a> CommonIrBodySink<'a> {
             if index.is_suppressed_generated_callable(declaration) {
                 continue;
             }
+            let enclosing = match semantic_owner(index, declaration) {
+                SemanticOwner::Complete(enclosing) => enclosing,
+                SemanticOwner::Deferred => continue,
+            };
             let Some(callable) = index.callable_for_declaration(declaration) else {
                 if index.is_body_local_declaration(declaration) {
                     continue;
@@ -1280,7 +1288,6 @@ impl<'a> CommonIrBodySink<'a> {
                     );
                 }
             }
-            let enclosing = index.enclosing_classifier(declaration);
             let entry_class = anchor
                 .owner
                 .and_then(|owner| self.ir.checked_enum_entry_classes.get(&owner).copied());
