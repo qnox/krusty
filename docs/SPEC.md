@@ -3105,6 +3105,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the parameter at that slot (and it mentions no open formal), that parameter is the argument's
   expectation and the call is re-evaluated under it before selection. Test:
   `streaming_signature_tests::a_member_call_hands_its_parameter_to_a_nested_generic_call_in_pass_one`.
+- **A nested call probed before the outer call selects is not a verdict.** With no single
+  declared signature to read ahead (a member on an implicit receiver, or an overloaded top-level
+  function), `instance(mapOf("m" to emptyList()))` types its argument with no expectation. That
+  probe cannot infer `mapOf`'s `K`/`V`, and reported `argument type mismatch: actual type is
+  'Pair<String, V>', but 'Pair<K, V>' was expected.` although the selected candidate then re-checks
+  the argument under `Map<String, List<Cfg>>` and it is fine; kotlinc accepts the call. Such a probe's
+  diagnostics are now held under the argument and dropped when the selected candidate re-checks it
+  with its parameter, as callable-reference probes already were; a probe that is never re-checked
+  keeps its diagnostics. Tests: `probe_argument_call_e2e::a_nested_generic_argument_takes_the_selected_parameter`,
+  `probe_argument_call_e2e::the_selected_parameter_still_reports_a_real_mismatch`.
 - **A postponed lambda body is checked under the expected return type.** Signature inference
   materializes `{ HashMap() }` / `{ mutableMapOf() }` / `{ if (c) ArrayList() else ArrayList() }`
   only after the surrounding call has a function type for that argument (`() -> T` on

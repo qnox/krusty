@@ -20499,26 +20499,29 @@ impl<'a> Checker<'a> {
                     {
                         return Ty::Error;
                     }
-                    let postponed_reference_mark =
-                        matches!(self.file.expr(a), Expr::CallableRef { .. })
-                            .then(|| {
-                                let shape = selected_lambda_shape?;
-                                let declared = *shape.argument_parameters.get(i)?;
-                                shape
-                                    .generic_formals
-                                    .iter()
-                                    .any(|formal| {
-                                        !known_generic_bindings.contains_key(formal)
-                                            && ty_mentions_param(
-                                                declared,
-                                                std::slice::from_ref(formal),
-                                            )
-                                    })
-                                    .then_some(self.diags.diags.len())
-                            })
-                            .flatten();
+                    let probe_mark = matches!(self.file.expr(a), Expr::CallableRef { .. })
+                        .then(|| {
+                            let shape = selected_lambda_shape?;
+                            let declared = *shape.argument_parameters.get(i)?;
+                            shape
+                                .generic_formals
+                                .iter()
+                                .any(|formal| {
+                                    !known_generic_bindings.contains_key(formal)
+                                        && ty_mentions_param(declared, std::slice::from_ref(formal))
+                                })
+                                .then_some(self.diags.diags.len())
+                        })
+                        .flatten()
+                        // A nested call typed before any candidate supplies its parameter is
+                        // a probe too: the selected candidate re-checks it against the
+                        // parameter, and only that verdict stands.
+                        .or_else(|| {
+                            (known_sig.is_none() && matches!(self.file.expr(a), Expr::Call { .. }))
+                                .then_some(self.diags.diags.len())
+                        });
                     let checked = self.expr(scope, a);
-                    if let Some(mark) = postponed_reference_mark {
+                    if let Some(mark) = probe_mark {
                         self.postponed_diagnostics
                             .capture_since(a, self.diags, mark);
                     }
