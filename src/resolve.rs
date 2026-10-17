@@ -59864,7 +59864,7 @@ impl<'a> Checker<'a> {
                 self.callable_ref_lhs_classifier_type(scope, receiver, expression)
                     .ok()
                     .flatten()
-                    .map(|(_, ty)| ty)
+                    .map(|(_, ty, _)| ty)
             })
         } else {
             None
@@ -61447,7 +61447,7 @@ impl<'a> Checker<'a> {
         receiver: ExprId,
         name: &str,
     ) -> UnboundRefSelection {
-        let Ok(Some((internal, receiver_ty))) =
+        let Ok(Some((internal, receiver_ty, _))) =
             self.callable_ref_lhs_classifier_type(scope, receiver, expression)
         else {
             return UnboundRefSelection::NotClassifier;

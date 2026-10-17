@@ -105,7 +105,7 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         expression: ExprId,
         diagnostic_site: ExprId,
-    ) -> Result<Option<(TypeName, Ty)>, QualifierError> {
+    ) -> Result<Option<(TypeName, Ty, bool)>, QualifierError> {
         let mut segments = Vec::new();
         callable_ref_lhs_classifier_segments(self.file, expression, &mut segments)?;
         let Some((root_expression, root_name)) = segments.first() else {
@@ -145,21 +145,23 @@ impl Checker<'_> {
             }
         };
 
-        let mut applied_parent = match (prefix, root_alias) {
-            (ResolvedQualifier::Classifier(internal), alias) => {
-                Some(self.applied_callable_ref_classifier(
-                    scope,
-                    *root_expression,
-                    diagnostic_site,
-                    internal,
-                    root_name,
-                    alias,
-                    None,
-                    class_literal,
-                ))
-            }
-            (ResolvedQualifier::Package(_) | ResolvedQualifier::Value, _) => None,
-        };
+        let (mut applied_parent, mut final_class_literal_arguments_checked) =
+            match (prefix, root_alias) {
+                (ResolvedQualifier::Classifier(internal), alias) => {
+                    let (applied, checked) = self.applied_callable_ref_classifier(
+                        scope,
+                        *root_expression,
+                        diagnostic_site,
+                        internal,
+                        root_name,
+                        alias,
+                        None,
+                        class_literal,
+                    );
+                    (Some(applied), checked)
+                }
+                (ResolvedQualifier::Package(_) | ResolvedQualifier::Value, _) => (None, false),
+            };
 
         for (segment_expression, segment) in segments.iter().skip(1) {
             let (next_prefix, selected_alias) = match prefix {
@@ -219,9 +221,9 @@ impl Checker<'_> {
                 }
             };
             prefix = next_prefix;
-            applied_parent = match prefix {
+            let (next_applied, checked) = match prefix {
                 ResolvedQualifier::Classifier(internal) => {
-                    Some(self.applied_callable_ref_classifier(
+                    let (applied, checked) = self.applied_callable_ref_classifier(
                         scope,
                         *segment_expression,
                         diagnostic_site,
@@ -230,16 +232,21 @@ impl Checker<'_> {
                         selected_alias,
                         applied_parent,
                         class_literal,
-                    ))
+                    );
+                    (Some(applied), checked)
                 }
-                ResolvedQualifier::Package(_) | ResolvedQualifier::Value => None,
+                ResolvedQualifier::Package(_) | ResolvedQualifier::Value => (None, false),
             };
+            applied_parent = next_applied;
+            final_class_literal_arguments_checked = checked;
         }
 
         match (prefix, applied_parent) {
-            (ResolvedQualifier::Classifier(internal), Some(applied)) => {
-                Ok(Some((internal, applied)))
-            }
+            (ResolvedQualifier::Classifier(internal), Some(applied)) => Ok(Some((
+                internal,
+                applied,
+                final_class_literal_arguments_checked,
+            ))),
             (ResolvedQualifier::Package(_), _) => Err(QualifierError::UnresolvedSegment {
                 expression: Some(expression),
                 name: segments
@@ -262,7 +269,7 @@ impl Checker<'_> {
         alias: Option<super::classifier_binding::SelectedTypeAlias>,
         bound_outer: Option<Ty>,
         class_literal: bool,
-    ) -> Ty {
+    ) -> (Ty, bool) {
         let arguments = self
             .file
             .call_type_args
@@ -270,17 +277,27 @@ impl Checker<'_> {
             .map(|syntax| syntax.arguments.clone())
             .unwrap_or_default();
         let alias_was_applied = alias.is_some();
-        let applied = if let Some(alias) = alias {
+        let (applied, class_literal_arguments_checked) = if let Some(alias) = alias {
             crate::trace_compiler!(
                 "resolve",
                 "selected callable-reference typealias identity={:?} target={internal:?}",
                 alias.identity,
             );
-            if !class_literal && arguments.is_empty() {
+            if class_literal && !arguments.is_empty() {
+                (
+                    self.check_class_literal_alias_type_arguments(
+                        diagnostic_site,
+                        segment_expression,
+                        display_name,
+                        alias,
+                    ),
+                    true,
+                )
+            } else if !class_literal && arguments.is_empty() {
                 // An ordinary callable reference on an object typealias does not apply the
                 // alias's unused type parameters. It selects the already-normalized object target;
                 // only a class literal gives omitted parameters generated star arguments.
-                Ty::obj_name(internal)
+                (Ty::obj_name(internal), false)
             } else {
                 let alias_arguments = if class_literal && arguments.is_empty() {
                     super::alias_projection::AliasArguments::StarProjected
@@ -297,29 +314,29 @@ impl Checker<'_> {
                     span,
                 );
                 self.report_alias_projection_conflicts(&applied.conflicts, applied.ty);
-                applied.ty
+                (applied.ty, false)
             }
         } else if arguments.is_empty() {
-            Ty::obj_name(internal)
+            (Ty::obj_name(internal), false)
         } else {
             let applied = self.classifier_type_with_arguments(scope, internal, &arguments);
             self.check_written_application_bounds(&arguments, applied);
-            applied
+            (applied, false)
         };
         if applied == Ty::Error {
-            return Ty::Error;
+            return (Ty::Error, class_literal_arguments_checked);
         }
         // Alias application has already produced the complete expanded type, including captured
         // arguments of an inner target. Rebuilding that type from this segment and `bound_outer`
         // would discard captures when a package-qualified alias has no syntactic parent classifier.
         if alias_was_applied {
-            return applied;
+            return (applied, class_literal_arguments_checked);
         }
         let Some(classifier) = self.resolver().classifier(internal) else {
-            return applied;
+            return (applied, class_literal_arguments_checked);
         };
         if classifier.own_type_parameter_count == classifier.type_params().len() {
-            return applied;
+            return (applied, class_literal_arguments_checked);
         }
 
         // A raw inner classifier token/reference (`Outer.Inner::class`) names classifier identity;
@@ -327,7 +344,7 @@ impl Checker<'_> {
         // outer arguments. Preserve the raw type when every segment is unapplied. An applied parent
         // (`Outer<T>.Inner::class`) still supplies exact captures through the path below.
         if arguments.is_empty() && bound_outer.is_some_and(|outer| outer.type_args().is_empty()) {
-            return applied;
+            return (applied, class_literal_arguments_checked);
         }
 
         // `classifier_type_with_arguments` fills captured positions with declaration formals for an
@@ -350,12 +367,15 @@ impl Checker<'_> {
             "constructor_ref",
             "applied callable-reference classifier={internal:?} segment={segment_expression:?} applied={applied:?} own_instance={own_instance:?} bound_outer={bound_outer:?}",
         );
-        self.attach_captured_classifier_arguments(
-            scope,
-            diagnostic_site,
-            internal,
-            own_instance,
-            bound_outer,
+        (
+            self.attach_captured_classifier_arguments(
+                scope,
+                diagnostic_site,
+                internal,
+                own_instance,
+                bound_outer,
+            ),
+            class_literal_arguments_checked,
         )
     }
 

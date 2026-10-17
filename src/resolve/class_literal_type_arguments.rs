@@ -92,21 +92,26 @@ impl Checker<'_> {
 
         // The checker-visible representation of a reified `T::class` is its declaration-owned
         // semantic parameter. The lowering marker must not leak into generic inference.
-        let unbound = if let Expr::Name(name) = self.file.expr(receiver).clone() {
-            if scope.tparam_contains(&name) {
-                scope.reified_tparam(&name)
+        let (unbound, type_arguments_checked) =
+            if let Expr::Name(name) = self.file.expr(receiver).clone() {
+                if scope.tparam_contains(&name) {
+                    (scope.reified_tparam(&name), false)
+                } else {
+                    (self.class_literal_unbound_ty(scope, receiver, &name), false)
+                }
             } else {
-                self.class_literal_unbound_ty(scope, receiver, &name)
-            }
-        } else {
-            // A qualified type name is an unbound literal like a simple imported classifier.
-            self.callable_ref_lhs_classifier_type(scope, receiver, literal)
-                .ok()
-                .flatten()
-                .map(|(_, ty)| ty)
-        };
+                // A qualified type name is an unbound literal like a simple imported classifier.
+                self.callable_ref_lhs_classifier_type(scope, receiver, literal)
+                    .ok()
+                    .flatten()
+                    .map_or((None, false), |(_, ty, checked)| (Some(ty), checked))
+            };
         unbound.map(|ty| {
-            let ty = self.validate_class_literal_type_arguments(literal, receiver, ty);
+            let ty = if type_arguments_checked {
+                ty
+            } else {
+                self.validate_class_literal_type_arguments(literal, receiver, ty)
+            };
             let Ty::Obj(internal, []) = ty else {
                 return ty;
             };
@@ -176,7 +181,33 @@ impl Checker<'_> {
             let ty = self.obj_with_targs_name(scope, classifier, &reference);
             return Some(self.validate_class_literal_type_arguments(literal, receiver, ty));
         };
-        let alias = WrittenAlias::selected(name, alias);
+        Some(self.check_class_literal_alias_type_arguments(literal, receiver, name, alias))
+    }
+
+    /// Apply kotlinc's class-literal-only rule to the written arguments of the already-selected
+    /// `alias`. The selected declaration travels from the scope/qualifier walk; this operation never
+    /// retries lookup from `source_name`.
+    pub(super) fn check_class_literal_alias_type_arguments(
+        &mut self,
+        literal: ExprId,
+        receiver: ExprId,
+        source_name: &str,
+        alias: super::classifier_binding::SelectedTypeAlias,
+    ) -> Ty {
+        let arguments = self
+            .file
+            .call_type_args
+            .get(&receiver.0)
+            .map_or(0, Vec::len);
+        debug_assert!(arguments != 0);
+        let list = self
+            .file
+            .type_argument_list_spans
+            .get(&receiver.0)
+            .copied()
+            .expect("written class-literal type arguments retain their list span");
+        let forbid = self.file.forbid_useless_type_arguments;
+        let alias = WrittenAlias::selected(source_name, alias);
         let source = self.fed_source();
         let useless_type = useless_alias_type(&alias.formals, alias.expansion, &mut |owner| {
             source.classifier(owner)
@@ -196,7 +227,7 @@ impl Checker<'_> {
                 "WRONG_NUMBER_OF_TYPE_ARGUMENTS_IN_GET_CLASS_WARNING",
                 &message,
             );
-            return Some(useless_type.unwrap_or(Ty::Error));
+            return useless_type.unwrap_or(Ty::Error);
         }
         self.report_deprecation_error(
             self.span(literal),
@@ -206,8 +237,8 @@ impl Checker<'_> {
             NOT_A_CLASS,
         );
         if !useless {
-            return Some(Ty::Error);
+            return Ty::Error;
         }
-        Some(useless_type.expect("useless alias has a projected semantic type"))
+        useless_type.expect("useless alias has a projected semantic type")
     }
 }

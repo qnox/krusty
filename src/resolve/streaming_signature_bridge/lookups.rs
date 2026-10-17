@@ -482,9 +482,11 @@ impl ProductionSignatureSemantics<'_> {
                 },
             ));
         }
-        if formals.len() != reference.targs.len() && reference.is_class_literal_lhs() {
-            // The checker reports these arguments (`class_literal_type_arguments`). kotlinc types a
-            // literal whose arguments select nothing as the expansion, and rejects any other.
+        if reference.is_class_literal_lhs() && !reference.targs.is_empty() {
+            // The checker reports these arguments (`class_literal_type_arguments`) regardless of
+            // whether their count fits. They select nothing: a useless alias is typed with every
+            // formal star-projected, and every other alias is rejected. Keep signature inference
+            // identical to the checked body rather than applying an exact-arity argument here.
             return Some(
                 super::super::class_literal_type_arguments::useless_alias_type(
                     &formals,

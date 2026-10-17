@@ -150,6 +150,68 @@ fn forbidden_useless_class_literal_type_arguments_are_errors() {
     assert_matches_kotlinc(&[("Literals.kt", LITERALS)], &[FORBID], &errors, &[]);
 }
 
+const QUALIFIED_ALIASES: &str = "\
+package aliases
+typealias Str = String
+typealias Boxed<T> = String
+typealias Arr<T> = Array<T>
+";
+
+const QUALIFIED_LITERALS: &str = "\
+val s = aliases.Str<Int>::class
+val b = aliases.Boxed<Int>::class
+val a = aliases.Arr<Int>::class
+";
+
+fn qualified_diagnostics(suffix: &str) -> Vec<String> {
+    vec![
+        format!(
+            "Qualified.kt:1:20: no type arguments expected for 'typealias Str = String'.{suffix}"
+        ),
+        format!("Qualified.kt:2:9: {NOT_A_CLASS}{suffix}"),
+        format!("Qualified.kt:3:9: {NOT_A_CLASS}{suffix}"),
+    ]
+}
+
+/// A qualified path consumes the alias identity selected while walking that path. It must not
+/// apply the alias first and fall into the generic class-literal diagnostic.
+#[test]
+fn qualified_alias_type_arguments_follow_the_class_literal_rule() {
+    assert_matches_kotlinc(
+        &[
+            ("Aliases.kt", QUALIFIED_ALIASES),
+            ("Qualified.kt", QUALIFIED_LITERALS),
+        ],
+        &[],
+        &[],
+        &qualified_diagnostics(&format!(" {DEPRECATION}")),
+    );
+    assert_matches_kotlinc(
+        &[
+            ("Aliases.kt", QUALIFIED_ALIASES),
+            ("Qualified.kt", QUALIFIED_LITERALS),
+        ],
+        &[FORBID],
+        &qualified_diagnostics(""),
+        &[],
+    );
+}
+
+/// Signature solving and body checking must both discard the written `Int` and publish
+/// `KClass<Array<*>>` for this inferred property. The classfile comparison observes the finalized
+/// getter signature, not only the expression's transient checker type.
+#[test]
+fn an_inferred_useless_array_alias_literal_is_star_projected() {
+    common::assert_class_matches_kotlinc(
+        "InferredUselessAliasClassLiteral",
+        "\
+typealias Arr<T> = Array<T>
+val literal = Arr<Int>::class
+",
+        "InferredUselessAliasClassLiteralKt",
+    );
+}
+
 /// An alias whose expansion has type arguments and is not an array, and a generic class itself,
 /// never accepted type arguments on a class literal. The useless `Str<Int, Int>` beside them keeps
 /// its warning, which kotlinc does not print beside an error.
