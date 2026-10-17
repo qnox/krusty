@@ -152,7 +152,9 @@ impl Emitter<'_> {
                 code.inlined_line(line.min(u32::from(u16::MAX)) as u16);
             }
         }
-        if self.ir.expr_source_lines.contains_key(&value) {
+        if self.ir.expr_source_lines.contains_key(&value)
+            || super::debug_lines::enters_nested_copied_lambda_frame(self.ir, statement, value)
+        {
             if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {
                 self.mark_expression_line(statement, statement_line, code);
             }

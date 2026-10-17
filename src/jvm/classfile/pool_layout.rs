@@ -11,6 +11,8 @@
 //!   ([`Unnamed::Kept`]): ASM's writer keeps what each visit of the copied class interned, such as
 //!   the original's `EnclosingMethod` a regenerated inline object replaces. Even then, an entry
 //!   a rewritten method interned and nothing names after the rewrite goes;
+//! - an emitted call-site copy can retain only the declaration-header roots its transformation
+//!   visited before replacing them, without keeping other unnamed entries;
 //! - the entries of a rewritten method ([`RelaidMethod`]) that only rewritten code names are
 //!   placed where the method's constants began, in the order ASM's `MethodWriter` interns the
 //!   rewritten body: catch types, then each instruction's operands, then the local-variable
@@ -70,8 +72,13 @@ enum Kept {
 }
 
 /// `class` with its pool laid out again (see the module documentation).
-pub(super) fn relayout(class: Vec<u8>, relaid: &[RelaidMethod], unnamed: Unnamed) -> Vec<u8> {
-    match relaid_class(&class, relaid, unnamed) {
+pub(super) fn relayout(
+    class: Vec<u8>,
+    relaid: &[RelaidMethod],
+    unnamed: Unnamed,
+    retained: &[u16],
+) -> Vec<u8> {
+    match relaid_class(&class, relaid, unnamed, retained) {
         Ok(Some(laid_out)) => laid_out,
         Ok(None) => class,
         Err(kept) => {
@@ -86,9 +93,10 @@ fn relaid_class(
     class: &[u8],
     relaid: &[RelaidMethod],
     unnamed: Unnamed,
+    retained: &[u16],
 ) -> Result<Option<Vec<u8>>, Kept> {
     let read = index_slots::read(class).map_err(Kept::Unread)?;
-    let order = Layout::of(&read, relaid, unnamed).order();
+    let order = Layout::of(&read, relaid, unnamed, retained).order();
     let unchanged = order
         .iter()
         .map(|&index| usize::from(index))
@@ -126,7 +134,12 @@ struct Anchor {
 }
 
 impl<'a> Layout<'a> {
-    fn of(read: &'a ClassSlots, relaid: &[RelaidMethod], unnamed: Unnamed) -> Self {
+    fn of(
+        read: &'a ClassSlots,
+        relaid: &[RelaidMethod],
+        unnamed: Unnamed,
+        retained: &[u16],
+    ) -> Self {
         let count = read.entries.len();
         let mut kept = vec![false; count];
         let mut fixed = vec![false; count];
@@ -222,6 +235,12 @@ impl<'a> Layout<'a> {
             for index in unowned {
                 reach(read, index, &mut kept);
             }
+        }
+        // A copied declaration header can be visited and then replaced while ASM reuses the same
+        // ClassWriter. Keep only the roots that visit interned, plus the entries they name; unlike
+        // `Unnamed::Kept`, this does not retain unrelated constants from an emitted class.
+        for &index in retained {
+            reach(read, index, &mut kept);
         }
         let movable: Vec<bool> = (0..count)
             .map(|index| kept[index] && (leading[index] || !fixed[index] && owned[index]))

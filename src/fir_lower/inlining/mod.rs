@@ -1,9 +1,4 @@
-//! Call-site expansion of retained same-module inline bodies.
-//!
-//! Pass 1 retains checked FIR only for semantic inline declarations. The file sink lowers those
-//! bodies before ordinary callers; this module clones that checked common-IR template at a call,
-//! applies the checker's type substitutions, rebases body-local values, and turns inline-function
-//! returns into an expression-local loop exit.
+//! Call-site expansion of retained checked same-module inline bodies into expression-local frames.
 
 use crate::fx_hash::{HashMap, HashSet};
 
@@ -23,7 +18,10 @@ use super::BodyLowering;
 mod converted_inline_lambda;
 mod escaping_anonymous;
 mod escaping_lambda;
+mod lambda_splice_contract;
 mod property_accessors;
+
+pub(super) use lambda_splice_contract::LambdaParameterBinding;
 
 #[cfg(test)]
 mod escaping_inline_object;
@@ -170,6 +168,30 @@ fn supplied_operand_plan(
     })
 }
 
+/// Direct lambda values whose invocation the declared-lambda splicer will consume. This query is
+/// intentionally mutation-free so escaping specialization can exclude those non-escaping values
+/// before any later exposure rewrite commits.
+fn directly_spliceable_invocations(
+    ir: &crate::ir::IrFile,
+    copies: &[(ExprId, ExprId)],
+) -> Vec<ExprId> {
+    copies
+        .iter()
+        .map(|&(_, copy)| copy)
+        .filter(|expression| {
+            matches!(
+                ir.expr(*expression),
+                IrExpr::InvokeFunction { func, .. }
+                    if lambda_splice_contract::invocation_is_spliceable(
+                        ir,
+                        *expression,
+                        *func,
+                    )
+            )
+        })
+        .collect()
+}
+
 /// Build the inline expansion's semantic bindings from the checker's recorded substitutions.
 ///
 /// Declaration headers are intentionally not accepted here. Whether a substitution may drive a
@@ -232,10 +254,9 @@ impl BodyLowering<'_> {
             self.next_temporary,
         )?;
         self.next_temporary = self.next_temporary.checked_add(locals)?;
-        if cloned
-            .values()
-            .any(|copied| value_indices(self.ir.expr(*copied)).contains(&SPLICED))
-        {
+        if cloned.values().any(|copied| {
+            lambda_splice_contract::value_indices(self.ir.expr(*copied)).contains(&SPLICED)
+        }) {
             return None;
         }
         let declaration = self.ir.add_expr(IrExpr::Variable {
@@ -276,7 +297,7 @@ impl BodyLowering<'_> {
             {
                 return None;
             }
-            if value_indices(self.ir.expr(capture)).contains(&SPLICED) {
+            if lambda_splice_contract::value_indices(self.ir.expr(capture)).contains(&SPLICED) {
                 return None;
             }
         }
@@ -695,7 +716,11 @@ impl BodyLowering<'_> {
         let highest_local = cloned
             .keys()
             .filter(|source| !protected.contains(source))
-            .filter_map(|source| value_indices(self.ir.expr(*source)).into_iter().max())
+            .filter_map(|source| {
+                lambda_splice_contract::value_indices(self.ir.expr(*source))
+                    .into_iter()
+                    .max()
+            })
             .filter(|index| *index >= parameter_count)
             .max();
         let local_count = highest_local
@@ -848,21 +873,71 @@ impl BodyLowering<'_> {
         // declaration's check. Clone the implementation when this expansion fixes a type it uses.
         let mut escaping_copies = copies.clone();
         escaping_copies.extend(default_copies);
-        escaping_lambda::specialize(
+        let anonymous_owned_substitution_edges =
+            escaping_anonymous::owned_substituted_lambda_capture_edges(
+                self.ir,
+                escaping_copies
+                    .iter()
+                    .filter(|(source, _)| !protected.contains(source))
+                    .map(|(_, copy)| *copy),
+                &substituted_inline_lambdas,
+            );
+        let directly_spliced_lambdas = directly_spliceable_invocations(self.ir, &copies)
+            .into_iter()
+            .filter_map(|invocation| match self.ir.expr(invocation) {
+                IrExpr::InvokeFunction { func, .. } => Some(*func),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let escaping_lambda_plan = escaping_lambda::plan(
             self.ir,
             &escaping_copies,
             &protected,
-            &bindings,
+            &directly_spliced_lambdas,
+            &substituted_inline_lambdas,
+            &anonymous_owned_substitution_edges,
             &reified_bindings,
-            caller_declaration,
-            self.expansion_enclosure,
-            self.in_default_argument,
-            &caller_source_name,
-            target,
-            &callee,
-        );
+        )?;
+        // A function-value conversion between an inline parameter and its lambda is a
+        // callable reference stored in a local. The invocation reads that local, so the
+        // splice below never sees the lambda. Retarget the invocation when that local is
+        // only invoked; the carrier is then not evaluated.
+        let converted_unit_results =
+            self.expose_inline_lambdas_behind_function_value_conversions(&copies);
+        // `run { x(i) }` copies the inline lambda into an unnamed temporary and invokes that
+        // temporary. Retarget the invocation while the substituted lambda is still the
+        // temporary's initializer, before the direct-lambda splice below.
+        self.expose_inline_lambdas_behind_capture_copies(&copies, &substituted_inline_lambdas);
+
+        let inline_invocations = directly_spliceable_invocations(self.ir, &copies);
+        // A default lambda's implementation stays a method of the declaration's default stub,
+        // which the expansion's splice must not consume.
+        let default_lambda_methods = default_lambda_implementations
+            .iter()
+            .map(|&function| {
+                (
+                    function,
+                    self.ir
+                        .functions
+                        .get(function as usize)
+                        .and_then(|f| f.body),
+                    self.ir.inline_only_fns.contains(&function),
+                )
+            })
+            .collect::<Vec<_>>();
+        let default_lambda_implementation_set = default_lambda_implementations
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        let mut preflight_temporary = self.next_temporary;
+        for &invocation in &inline_invocations {
+            preflight_temporary =
+                lambda_splice_contract::preflight(self.ir, invocation, preflight_temporary)?;
+        }
         // An anonymous object's methods are not children of the inlined template. Cloning only the
-        // `new` reuses the declaration class, whose reified parameter is erased.
+        // `new` reuses the declaration class, whose reified parameter is erased. This is the final
+        // fallible specialization: both lambda transformations above have already been preflighted,
+        // and every operation after it commits without declining the containing expansion.
         if let Err(failure) = escaping_anonymous::specialize(
             self.ir,
             escaping_copies
@@ -883,60 +958,71 @@ impl BodyLowering<'_> {
             *malformed_anonymous = Some(failure);
             return None;
         }
-
-        // A function-value conversion between an inline parameter and its lambda is a
-        // callable reference stored in a local. The invocation reads that local, so the
-        // splice below never sees the lambda. Retarget the invocation when that local is
-        // only invoked; the carrier is then not evaluated.
-        let converted_unit_results =
-            self.expose_inline_lambdas_behind_function_value_conversions(&copies);
-        // `run { x(i) }` copies the inline lambda into an unnamed temporary and invokes that
-        // temporary. Retarget the invocation while the substituted lambda is still the
-        // temporary's initializer, before the direct-lambda splice below.
-        self.expose_inline_lambdas_behind_capture_copies(&copies, &substituted_inline_lambdas);
-
-        let inline_invocations = copies
-            .iter()
-            .map(|&(_, copy)| copy)
-            .filter(|expression| {
-                matches!(
-                    self.ir.expr(*expression),
-                    IrExpr::InvokeFunction { func, .. }
-                        if lambda_invocation_is_spliceable(self.ir, *expression, *func)
-                )
-            })
-            .collect::<Vec<_>>();
-        // A default lambda's implementation stays a method of the declaration's default stub,
-        // which the expansion's splice must not consume.
-        let default_lambda_methods = default_lambda_implementations
-            .iter()
-            .map(|&function| {
-                (
-                    function,
-                    self.ir
-                        .functions
-                        .get(function as usize)
-                        .and_then(|f| f.body),
-                    self.ir.inline_only_fns.contains(&function),
-                )
-            })
-            .collect::<Vec<_>>();
+        let mut directly_spliced_implementations = HashSet::default();
         for invocation in inline_invocations {
+            let consumed = match self.ir.expr(invocation) {
+                IrExpr::InvokeFunction { func, .. } => match self.ir.expr(*func) {
+                    IrExpr::Lambda { impl_fn, .. } => Some((
+                        *impl_fn,
+                        self.ir.functions[*impl_fn as usize].body,
+                        self.ir.inline_only_fns.contains(impl_fn),
+                    )),
+                    _ => None,
+                },
+                _ => None,
+            };
             self.splice_inline_lambda(
                 invocation,
                 LambdaParameterBinding::Declared {
                     callee: Some(&callee),
                 },
-            )?;
+            )
+            .expect("the complete declared-lambda splice list was preflighted before commit");
+            if let Some((implementation, body, inline_only)) = consumed {
+                // Body suppression is a commit action, not part of the splice. Restore it after
+                // each successful splice so a later decline leaves the original call executable.
+                self.ir.functions[implementation as usize].body = body;
+                if !inline_only {
+                    self.ir.inline_only_fns.remove(&implementation);
+                }
+                if !default_lambda_implementation_set.contains(&implementation) {
+                    directly_spliced_implementations.insert(implementation);
+                }
+            }
         }
         for invocation in converted_unit_results {
             self.discard_converted_lambda_result(invocation);
         }
         for (function, body, inline_only) in default_lambda_methods {
-            self.ir.functions.get_mut(function as usize)?.body = body;
+            self.ir.functions[function as usize].body = body;
             if !inline_only {
                 self.ir.inline_only_fns.remove(&function);
             }
+        }
+        let inlined_escaping_implementations = escaping_lambda::apply(
+            self.ir,
+            escaping_lambda_plan,
+            &bindings,
+            &reified_bindings,
+            caller_declaration,
+            self.expansion_enclosure,
+            self.in_default_argument,
+            &caller_source_name,
+            function,
+            source_owner,
+            callee_source,
+            target,
+            &callee,
+        );
+        // Consuming a source lambda implementation is the only irreversible part of escaping
+        // inline-lambda specialization. Commit it only after every transformation that can decline
+        // this expansion has succeeded; otherwise the original call still needs that body.
+        for function in inlined_escaping_implementations
+            .into_iter()
+            .chain(directly_spliced_implementations)
+        {
+            self.ir.inline_only_fns.insert(function);
+            self.ir.functions[function as usize].body = None;
         }
 
         // kotlinc opens the expansion's frame once its operands are bound.
@@ -1172,7 +1258,7 @@ impl BodyLowering<'_> {
         else {
             return None;
         };
-        if !lambda_invocation_is_spliceable(self.ir, invocation, func) {
+        if !lambda_splice_contract::invocation_is_spliceable(self.ir, invocation, func) {
             return None;
         }
         let (impl_fn, captures, inline_body, indexed_parameters) = match self.ir.expr(func).clone()
@@ -1359,63 +1445,6 @@ impl BodyLowering<'_> {
     }
 }
 
-/// Whether `invocation` and its inline `lambda` have the parameter shape the splicer consumes.
-/// A caller that exposes a lambda hidden behind a semantic wrapper uses this same gate before
-/// retargeting the invocation, so the preparatory rewrite and the splice cannot drift apart.
-fn lambda_invocation_is_spliceable(
-    ir: &crate::ir::IrFile,
-    invocation: ExprId,
-    lambda: ExprId,
-) -> bool {
-    let IrExpr::InvokeFunction { args, .. } = ir.expr(invocation) else {
-        return false;
-    };
-    let arg_count = args.len();
-    match ir.expr(lambda).clone() {
-        IrExpr::Lambda {
-            impl_fn,
-            arity,
-            captures,
-            inline_body: Some(_),
-            ..
-        } => {
-            // A suspend lambda's arity counts the continuation its invocation passes implicitly.
-            let suspend = ir.suspend_funs.contains(&impl_fn);
-            arg_count + usize::from(suspend) == usize::from(arity)
-                && ir
-                    .functions
-                    .get(impl_fn as usize)
-                    .is_some_and(|function| function.params.len() == captures.len() + arg_count)
-        }
-        IrExpr::CallableReference(_) => {
-            let Some((impl_fn, captures, _, arity)) =
-                super::source_calls::inline_argument_template(ir, lambda)
-            else {
-                return false;
-            };
-            arg_count == arity
-                && ir
-                    .functions
-                    .get(impl_fn as usize)
-                    .is_some_and(|function| function.params.len() == captures.len() + arg_count)
-        }
-        _ => false,
-    }
-}
-
-/// How a spliced lambda's parameters meet the arguments of its invocation.
-#[derive(Clone, Copy)]
-pub(super) enum LambdaParameterBinding<'callee> {
-    /// A named parameter becomes a local of the splice holding its argument, as at an inline
-    /// function's call site. `callee` names the inline callable whose frame the body opens inside,
-    /// when the splice realizes one: the body then declares that frame's inline-depth marker.
-    Declared { callee: Option<&'callee str> },
-    /// Every argument is a read of a value the parameter simply becomes, with no local of its own:
-    /// kotlinc's `IrInlinable.inline`, which remaps the lambda's parameters onto the variables it
-    /// is given. An argument that is not such a read cannot be spliced this way.
-    Remapped,
-}
-
 fn mark_subtree(ir: &crate::ir::IrFile, root: ExprId, marked: &mut HashSet<ExprId>) {
     let mut pending = vec![root];
     while let Some(expression) = pending.pop() {
@@ -1423,17 +1452,6 @@ fn mark_subtree(ir: &crate::ir::IrFile, root: ExprId, marked: &mut HashSet<ExprI
             continue;
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-    }
-}
-
-fn value_indices(expression: &IrExpr) -> Vec<u32> {
-    match expression {
-        IrExpr::GetValue(index)
-        | IrExpr::SetValue { var: index, .. }
-        | IrExpr::Variable { index, .. } => vec![*index],
-        IrExpr::Try { catches, .. } => catches.iter().map(|catch| catch.var).collect(),
-        IrExpr::Checked(IrCheckedOperation::RangeLoop { variable, .. }) => vec![*variable],
-        _ => Vec::new(),
     }
 }
 
@@ -2228,7 +2246,7 @@ mod expansion_mode_tests {
 
 #[cfg(test)]
 mod value_rebasing_tests {
-    use super::{rebase_values, value_indices};
+    use super::{lambda_splice_contract, rebase_values};
     use crate::fir::FirRangeOperation;
     use crate::ir::{IrCheckedOperation, IrExpr};
     use crate::types::Ty;
@@ -2250,9 +2268,9 @@ mod value_rebasing_tests {
             with_index: None,
         });
 
-        assert_eq!(value_indices(&expression), vec![4]);
+        assert_eq!(lambda_splice_contract::value_indices(&expression), vec![4]);
         assert_eq!(rebase_values(&mut expression, 2, &[], 20), Some(()));
-        assert_eq!(value_indices(&expression), vec![22]);
+        assert_eq!(lambda_splice_contract::value_indices(&expression), vec![22]);
     }
 }
 

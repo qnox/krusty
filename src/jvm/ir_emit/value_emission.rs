@@ -10,13 +10,13 @@ use crate::types::Ty;
 
 use super::{
     access_bridges, array_jvm_element, bottom_values, boxed_descriptor, bytecode_inline_call,
-    class_ctor_jvm_tys, class_lambda_reflection, constant_emission, constructor_accessors,
-    declared_jvm_interface, default_mask_bit, default_mask_count, emit_box_impl,
-    emit_constructor_default_arguments, instance_field_jvm_name, ir_ty_to_jvm, jvm_declared_ty,
-    jvm_function_interface, jvm_function_invoke_descriptor, jvm_function_params, jvm_tys,
-    jvm_value_ty, lambda_class, lambda_class_names, load, method_defaults,
+    captured_storage, class_ctor_jvm_tys, class_lambda_reflection, constant_emission,
+    constructor_accessors, declared_jvm_interface, default_mask_bit, default_mask_count,
+    emit_box_impl, emit_constructor_default_arguments, instance_field_jvm_name, ir_ty_to_jvm,
+    jvm_declared_ty, jvm_function_interface, jvm_function_invoke_descriptor, jvm_function_params,
+    jvm_tys, jvm_value_ty, lambda_class, lambda_class_names, load, method_defaults,
     native_unsigned_impl_target, parse_descriptor_params, physical_call_result_words,
-    prim_newarray_atype, push_zero, ref_class, signature_formatter::JvmSignatureFormatter,
+    prim_newarray_atype, push_zero, signature_formatter::JvmSignatureFormatter,
     singleton_instance_load, slot_words, try_emission, ty_from_descriptor_ret, vararg,
     JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation, LMF_METAFACTORY_DESC,
 };
@@ -1960,37 +1960,7 @@ impl super::Emitter<'_> {
                 holder,
                 elem,
                 value,
-            } => {
-                // A value that cannot carry the operand stack (`msg = try {…} finally {}`) can't
-                // run with the holder on it. Spill it first (as `RefNew` does).
-                let unsigned = self.completes_unsigned_bitwise_value(*value);
-                let saved_assignment = self.unsigned_assignment_line;
-                if unsigned {
-                    // A local assignment keeps the line on the receiver and writes it again at
-                    // the store. A captured local is the same assignment once the holder is gone.
-                    self.unsigned_assignment_line = true;
-                }
-                if self.spills_operand_prefix(*value) {
-                    let temps = self.spill_to_temps(&[*value], code);
-                    self.emit_value(*holder, code);
-                    for &(slot, t, _) in &temps {
-                        load(t, slot, code);
-                    }
-                    self.release_operand_spills(&temps);
-                } else {
-                    self.emit_value(*holder, code);
-                    self.emit_element_value(*elem, *value, code);
-                }
-                self.unsigned_assignment_line = saved_assignment;
-                if unsigned {
-                    self.mark_expression_start(e, code);
-                    code.forget_line();
-                    super::debug_lines::mark_statement(self.ir, e, code);
-                }
-                let (cls, fdesc) = ref_class(elem);
-                let f = self.cw.fieldref(cls, "element", fdesc);
-                code.putfield(f, slot_words(ir_ty_to_jvm(elem)) as i32);
-            }
+            } => captured_storage::captured_assignment::emit(self, e, *holder, *elem, *value, code),
             IrExpr::InvokeFunction {
                 func,
                 args,
