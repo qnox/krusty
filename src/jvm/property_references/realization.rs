@@ -71,6 +71,11 @@ pub(crate) struct PropertyReferenceRealization {
     /// a method that answers to it makes a spelling the authority over a declaration.
     pub getter_function: Option<FunId>,
     pub setter_function: Option<FunId>,
+    /// The selected module declaration requires the module suffix on this accessor. These facts
+    /// are recorded while the property identity is still available; the late JVM naming pass
+    /// must not rediscover them from an owner and spelling.
+    pub module_suffix_getter: bool,
+    pub module_suffix_setter: bool,
     /// The PHYSICAL return the selected getter declares, whenever the declaration publishes one.
     ///
     /// A specialized generic property (`Pair<UInt, _>::first`) has semantic type `UInt` while its

@@ -98,6 +98,11 @@ impl IrCompanionBlocks {
         self.properties.push(property);
     }
 
+    /// Every block property this file declares.
+    pub fn properties(&self) -> impl Iterator<Item = &IrCompanionBlockProperty> {
+        self.properties.iter()
+    }
+
     /// The block properties `class` declares, for its `@Metadata`.
     pub fn properties_of(
         &self,
