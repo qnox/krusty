@@ -65,3 +65,37 @@ fn the_serializer_of_a_class_with_a_hand_written_companion_matches_kotlinc() {
         }
     }
 }
+
+/// The generated `serializer()` follows the members a hand-written companion declares, and the
+/// class lists its generated `$serializer` after every declared nested classifier, the companion
+/// included. A synthesized companion still comes after `$serializer`.
+#[test]
+fn a_hand_written_companion_keeps_its_declared_members_and_nested_order() {
+    let (plugin, cp) =
+        plugin_and_runtime().expect("the serialization plugin and runtime are provisioned");
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               class Token(val value: String) {\n\
+               \x20   class Before\n\
+               \x20   companion object {\n\
+               \x20       fun make(): Token = Token(\"made\")\n\
+               \x20       fun two(): Int = 2\n\
+               \x20   }\n\
+               \x20   class After\n\
+               }\n\
+               @Serializable\n\
+               class Plain(val value: Int) {\n\
+               \x20   class Inner\n\
+               }\n";
+    for class in ["Token", "Token$Companion", "Plain"] {
+        let built = compare_with_kotlinc_plugin("DeclaredCompanion", src, class, &cp, "25", &extra)
+            .expect("reference kotlinc and javap are provisioned");
+        if built.krusty_bytes != built.reference_bytes {
+            // The first lines name the scratch file and its checksum; the class itself follows.
+            let body = |text: &str| text.lines().skip(3).map(str::to_string).collect::<Vec<_>>();
+            assert_eq!(body(&built.krusty), body(&built.reference), "{class}");
+            panic!("{class}: same disassembly, different bytes");
+        }
+    }
+}

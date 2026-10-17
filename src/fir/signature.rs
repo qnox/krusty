@@ -2541,6 +2541,18 @@ impl ResolvedModuleIndex {
                 );
             }
         }
+        // The last source order inside each owner's declaration subtree.
+        let mut subtree_ends = HashMap::<DeclarationId, u32>::default();
+        for (&declaration, &order) in &self.source_orders {
+            let mut owner = declarations
+                .anchor(declaration)
+                .and_then(|anchor| anchor.owner);
+            while let Some(current) = owner {
+                let end = subtree_ends.entry(current).or_insert(order);
+                *end = (*end).max(order);
+                owner = declarations.anchor(current).and_then(|anchor| anchor.owner);
+            }
+        }
         // A retained inline/default body can discover compiler-generated capture storage after the
         // parser declaration stream has been inventoried. Such a field has no independent source
         // position: its exact ordering anchor is its owning declaration. Do not put it into the
@@ -2562,10 +2574,24 @@ impl ResolvedModuleIndex {
                 {
                     continue;
                 }
-                let Some(order) = declarations
-                    .anchor(declaration)
-                    .and_then(|anchor| anchor.owner)
-                    .and_then(|owner| self.source_orders.get(&owner).copied())
+                let Some(anchor) = declarations.anchor(declaration) else {
+                    continue;
+                };
+                let Some(owner) = anchor.owner else {
+                    continue;
+                };
+                // A generated callable of a classifier (a plugin's companion `serializer()`)
+                // follows every written member of that classifier, so it orders after the
+                // classifier's last source declaration rather than at the classifier itself.
+                let member_of_classifier = anchor.kind == DeclarationKind::Function
+                    && declarations
+                        .anchor(owner)
+                        .is_some_and(|owner| owner.kind == DeclarationKind::Classifier);
+                let after_members = subtree_ends
+                    .get(&owner)
+                    .filter(|_| member_of_classifier)
+                    .map(|end| end + 1);
+                let Some(order) = after_members.or_else(|| self.source_orders.get(&owner).copied())
                 else {
                     continue;
                 };
