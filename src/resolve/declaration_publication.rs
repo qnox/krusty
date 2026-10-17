@@ -5,7 +5,7 @@
 //! The compiler metadata handoff consumes that explicit contract; it never reopens an AST body or
 //! asks a backend to reconstruct provider semantics.
 
-use super::{ty_mentions_param, Checker, ResolvedCall, Signature, TypeInfo};
+use super::{ty_mentions_param, Checker, Signature, TypeInfo};
 use crate::ast::ExprId;
 use crate::fir::DeclarationId;
 use crate::fx_hash::HashMap;
@@ -33,6 +33,12 @@ enum FlexibleShape {
     #[default]
     None,
     Obj(TypeName, Vec<FlexibleValue>),
+    Fun {
+        context_count: usize,
+        has_receiver: bool,
+        params: Vec<FlexibleValue>,
+        ret: Box<FlexibleValue>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +54,9 @@ impl FlexibleValue {
             && match &self.shape {
                 FlexibleShape::None => true,
                 FlexibleShape::Obj(_, arguments) => arguments.iter().all(FlexibleValue::is_none),
+                FlexibleShape::Fun { params, ret, .. } => {
+                    params.iter().all(FlexibleValue::is_none) && ret.is_none()
+                }
             }
     }
 
@@ -79,24 +88,50 @@ impl FlexibleValue {
                         .collect(),
                 )
             }
+            (
+                FlexibleShape::Fun {
+                    context_count: left_contexts,
+                    has_receiver: left_receiver,
+                    params: left_params,
+                    ret: left_ret,
+                },
+                FlexibleShape::Fun {
+                    context_count: right_contexts,
+                    has_receiver: right_receiver,
+                    params: right_params,
+                    ret: right_ret,
+                },
+            ) if left_contexts == right_contexts
+                && left_receiver == right_receiver
+                && left_params.len() == right_params.len() =>
+            {
+                FlexibleShape::Fun {
+                    context_count: *left_contexts,
+                    has_receiver: *left_receiver,
+                    params: left_params
+                        .iter()
+                        .zip(right_params)
+                        .map(|(left, right)| left.meet(right))
+                        .collect(),
+                    ret: Box::new(left_ret.meet(right_ret)),
+                }
+            }
             _ => FlexibleShape::None,
         };
+        let (publication, upper) =
+            if self.publication == other.publication && self.upper == other.upper {
+                (self.publication.clone(), self.upper)
+            } else {
+                (None, None)
+            };
         FlexibleValue {
             source: if self.source == other.source {
                 self.source
             } else {
                 None
             },
-            publication: if self.publication == other.publication {
-                self.publication.clone()
-            } else {
-                None
-            },
-            upper: if self.upper == other.upper {
-                self.upper
-            } else {
-                None
-            },
+            publication,
+            upper,
             shape,
         }
     }
@@ -115,7 +150,53 @@ impl FlexibleValue {
                         .collect(),
                 )
             }
+            (
+                FlexibleShape::Fun {
+                    context_count: left_contexts,
+                    has_receiver: left_receiver,
+                    params: left_params,
+                    ret: left_ret,
+                },
+                FlexibleShape::Fun {
+                    context_count: right_contexts,
+                    has_receiver: right_receiver,
+                    params: right_params,
+                    ret: right_ret,
+                },
+            ) if left_contexts == right_contexts
+                && left_receiver == right_receiver
+                && left_params.len() == right_params.len() =>
+            {
+                FlexibleShape::Fun {
+                    context_count: *left_contexts,
+                    has_receiver: *left_receiver,
+                    params: left_params
+                        .iter()
+                        .zip(right_params)
+                        .map(|(left, right)| left.overlay(right))
+                        .collect(),
+                    ret: Box::new(left_ret.overlay(right_ret)),
+                }
+            }
             _ => FlexibleShape::None,
+        };
+        let preferred_interval = |preferred: &FlexibleValue, fallback: &FlexibleValue| {
+            let preferred_interval = (&preferred.publication, preferred.upper);
+            let fallback_interval = (&fallback.publication, fallback.upper);
+            if preferred.publication.is_none() && preferred.upper.is_none() {
+                (fallback.publication.clone(), fallback.upper)
+            } else if (fallback.publication.is_none() && fallback.upper.is_none())
+                || preferred_interval == fallback_interval
+            {
+                (preferred.publication.clone(), preferred.upper)
+            } else {
+                (None, None)
+            }
+        };
+        let (publication, upper) = match (&self.shape, &other.shape) {
+            (FlexibleShape::None, _) => preferred_interval(other, self),
+            (_, FlexibleShape::None) => preferred_interval(self, other),
+            _ => preferred_interval(self, other),
         };
         FlexibleValue {
             source: match (&self.shape, &other.shape) {
@@ -124,13 +205,8 @@ impl FlexibleValue {
                 _ if self.source == other.source => self.source,
                 _ => None,
             },
-            publication: match (&self.shape, &other.shape) {
-                (FlexibleShape::None, _) => other.publication.clone().or(self.publication.clone()),
-                (_, FlexibleShape::None) => self.publication.clone().or(other.publication.clone()),
-                _ if self.publication == other.publication => self.publication.clone(),
-                _ => None,
-            },
-            upper: self.upper.or(other.upper),
+            publication,
+            upper,
             shape,
         }
     }
@@ -162,6 +238,36 @@ impl FlexibleValue {
             {
                 fact.apply(ty, spelling);
             }
+        } else if let (
+            FlexibleShape::Fun {
+                context_count,
+                has_receiver,
+                params,
+                ret,
+            },
+            Ty::Fun(signature),
+        ) = (&self.shape, ty)
+        {
+            if signature.suspend
+                || *context_count != signature.context_count
+                || *has_receiver != signature.has_receiver
+                || params.len() != signature.params.len()
+            {
+                return;
+            }
+            let count = signature.params.len() + 1;
+            if spelling.args.len() < count {
+                spelling.args.resize_with(count, Spelled::default);
+            }
+            for ((spelling, fact), ty) in spelling
+                .args
+                .iter_mut()
+                .zip(params)
+                .zip(signature.params.iter().copied())
+            {
+                fact.apply(ty, spelling);
+            }
+            ret.apply(signature.ret, &mut spelling.args[signature.params.len()]);
         }
     }
 
@@ -195,6 +301,22 @@ impl FlexibleValue {
                     owner,
                     arguments.iter().copied().map(Self::rigid_shape).collect(),
                 ),
+            },
+            Ty::Fun(signature) if !signature.suspend => FlexibleValue {
+                source: Some(ty),
+                publication: None,
+                upper: None,
+                shape: FlexibleShape::Fun {
+                    context_count: signature.context_count,
+                    has_receiver: signature.has_receiver,
+                    params: signature
+                        .params
+                        .iter()
+                        .copied()
+                        .map(Self::rigid_shape)
+                        .collect(),
+                    ret: Box::new(Self::rigid_shape(signature.ret)),
+                },
             },
             _ => FlexibleValue::default(),
         }
@@ -231,16 +353,33 @@ impl FlexibleValue {
                         .collect(),
                 ),
             },
-            // Function metadata layout remains an explicit decline.
+            Ty::Fun(signature) if !signature.suspend => FlexibleValue {
+                source: Some(ty),
+                publication: None,
+                upper: None,
+                shape: FlexibleShape::Fun {
+                    context_count: signature.context_count,
+                    has_receiver: signature.has_receiver,
+                    params: signature
+                        .params
+                        .iter()
+                        .copied()
+                        .map(|parameter| Self::semantic(parameter, upper_bound))
+                        .collect(),
+                    ret: Box::new(Self::semantic(signature.ret, upper_bound)),
+                },
+            },
+            // A suspend function's metadata result occupies its continuation slot. This sidecar
+            // deliberately does not reconstruct that physical layout.
             Ty::Fun(_) => FlexibleValue::default(),
             _ => FlexibleValue::default(),
         }
     }
 
     /// Pair a declaration-owned result with the already-selected semantic result. Recursion is
-    /// permitted only across the same classifier and arity. Function types are deliberately
-    /// declined here: suspend functions encode their result under the physical continuation slot,
-    /// not as an ordinary last argument, and publication must not guess that metadata layout.
+    /// permitted only across the same classifier and arity. Regular function types retain their
+    /// semantic parameter/result shape; suspend functions are declined because their result is
+    /// encoded under the physical continuation slot and publication must not guess that layout.
     fn selected(declared: Ty, selected: Ty, upper_bound: &dyn Fn(Ty) -> Ty) -> FlexibleValue {
         let mut head = None;
         let (declared, selected) = match (declared, selected) {
@@ -291,7 +430,32 @@ impl FlexibleValue {
                         .collect(),
                 )
             }
-            (Ty::Fun(_), Ty::Fun(_)) => FlexibleShape::None,
+            (Ty::Fun(declared), Ty::Fun(selected))
+                if !declared.suspend
+                    && !selected.suspend
+                    && declared.context_count == selected.context_count
+                    && declared.has_receiver == selected.has_receiver
+                    && declared.params.len() == selected.params.len() =>
+            {
+                FlexibleShape::Fun {
+                    context_count: declared.context_count,
+                    has_receiver: declared.has_receiver,
+                    params: declared
+                        .params
+                        .iter()
+                        .copied()
+                        .zip(selected.params.iter().copied())
+                        .map(|(declared, selected)| {
+                            FlexibleValue::selected(declared, selected, upper_bound)
+                        })
+                        .collect(),
+                    ret: Box::new(FlexibleValue::selected(
+                        declared.ret,
+                        selected.ret,
+                        upper_bound,
+                    )),
+                }
+            }
             _ => FlexibleShape::None,
         };
         FlexibleValue {
@@ -347,7 +511,41 @@ impl FlexibleValue {
                     shape: FlexibleShape::None,
                 },
             },
-            // See `selected`: a function/suspend-function metadata layout is not reconstructed.
+            Ty::Fun(signature) if !signature.suspend => match &self.shape {
+                FlexibleShape::Fun {
+                    context_count,
+                    has_receiver,
+                    params,
+                    ret,
+                } if *context_count == signature.context_count
+                    && *has_receiver == signature.has_receiver
+                    && params.len() == signature.params.len() =>
+                {
+                    FlexibleValue {
+                        source: self.source,
+                        publication: self.publication.clone(),
+                        upper: self.upper,
+                        shape: FlexibleShape::Fun {
+                            context_count: *context_count,
+                            has_receiver: *has_receiver,
+                            params: signature
+                                .params
+                                .iter()
+                                .copied()
+                                .zip(params)
+                                .map(|(parameter, fact)| fact.substitute(parameter, binding))
+                                .collect(),
+                            ret: Box::new(ret.substitute(signature.ret, binding)),
+                        },
+                    }
+                }
+                _ => FlexibleValue {
+                    source: self.source,
+                    publication: self.publication.clone(),
+                    upper: self.upper,
+                    shape: FlexibleShape::None,
+                },
+            },
             Ty::Fun(_) => FlexibleValue::default(),
             _ => self.clone(),
         }
@@ -380,72 +578,6 @@ struct FlexibleLocalDeclaration {
     /// prevents a reused/stale flow identity from publishing a different declaration shape.
     declared: Ty,
     value: FlexibleValue,
-}
-
-fn constrain_flexible_parameters(
-    checker: &Checker<'_>,
-    formals: &[String],
-    declared: Ty,
-    actual: Ty,
-    fact: &FlexibleValue,
-    constraints: &mut HashMap<String, Vec<FlexibleValue>>,
-) {
-    match declared {
-        Ty::TyParam(name, _) if formals.iter().any(|formal| formal == name) => {
-            constraints
-                .entry(name.to_string())
-                .or_default()
-                .push(fact.clone());
-        }
-        Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::DefinitelyNotNull(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner)
-        | Ty::StarProjection(inner) => constrain_flexible_parameters(
-            checker,
-            formals,
-            *inner,
-            actual.non_null(),
-            fact,
-            constraints,
-        ),
-        Ty::Obj(owner, declared_arguments) => {
-            let Some((view, view_fact)) = checker.flexible_supertype_view(actual, fact, owner)
-            else {
-                return;
-            };
-            let Ty::Obj(actual_owner, actual_arguments) = view.non_null() else {
-                return;
-            };
-            let FlexibleShape::Obj(fact_owner, facts) = &view_fact.shape else {
-                return;
-            };
-            if owner != actual_owner
-                || owner != *fact_owner
-                || declared_arguments.len() != actual_arguments.len()
-                || facts.len() != actual_arguments.len()
-            {
-                return;
-            }
-            for ((declared, actual), fact) in declared_arguments
-                .iter()
-                .copied()
-                .zip(actual_arguments.iter().copied())
-                .zip(facts)
-            {
-                constrain_flexible_parameters(
-                    checker,
-                    formals,
-                    declared,
-                    actual,
-                    fact,
-                    constraints,
-                );
-            }
-        }
-        _ => {}
-    }
 }
 
 /// A literal `null` is an expression-only sentinel. Once inference publishes it as a declaration
@@ -572,6 +704,31 @@ impl Checker<'_> {
             FlexibleValue::rigid_shape(applied).substitute(symbolic_view, &argument_fact);
         view.publication = fact.publication.clone();
         Some((applied, view))
+    }
+
+    fn constrain_flexible_parameters(
+        &self,
+        formals: &[String],
+        declared: Ty,
+        actual: Ty,
+        fact: &FlexibleValue,
+        constraints: &mut HashMap<String, Vec<FlexibleValue>>,
+    ) {
+        super::selected_result_publication::constrain_parameters(
+            formals,
+            declared,
+            actual,
+            fact,
+            constraints,
+            super::selected_result_publication::StarProjectionPolicy::Descend,
+            &mut |actual, fact, owner| {
+                let (view, view_fact) = self.flexible_supertype_view(actual, fact, owner)?;
+                let FlexibleShape::Obj(fact_owner, facts) = view_fact.shape else {
+                    return None;
+                };
+                (fact_owner == owner).then_some((view, facts))
+            },
+        );
     }
 
     fn bind_class_flexible_parameters_from(
@@ -808,52 +965,12 @@ impl Checker<'_> {
     fn selected_call_flexible_publication(
         &self,
         expression: ExprId,
-        call: &ResolvedCall,
+        call: &super::ResolvedCall,
     ) -> FlexibleValue {
-        let (signature, result, explicit_dispatch_owner, implicit_dispatch) = match call {
-            ResolvedCall::Member(selected) => (
-                selected.member.generic_sig.as_ref(),
-                selected.member.ret,
-                selected.member.owner,
-                None,
-            ),
-            ResolvedCall::Companion(selected) => {
-                (selected.generic_sig.as_ref(), selected.ret, None, None)
-            }
-            ResolvedCall::TopLevel(selected) => (
-                selected.callable.generic_sig.as_deref(),
-                selected.callable.ret,
-                None,
-                None,
-            ),
-            ResolvedCall::Extension(selected) => (
-                selected.callable.generic_sig.as_deref(),
-                selected.callable.ret,
-                None,
-                None,
-            ),
-            ResolvedCall::LocalFunction(selected) => (
-                selected.sig.generic_sig.as_ref(),
-                selected.sig.ret,
-                None,
-                None,
-            ),
-            ResolvedCall::MemberExtension {
-                generic_sig,
-                ret,
-                declared_ret,
-                owner,
-                dispatch_receiver,
-                ..
-            } => (
-                generic_sig.as_deref(),
-                declared_ret.unwrap_or(*ret),
-                None,
-                Some((*owner, dispatch_receiver.ty)),
-            ),
-        };
-        let selected = self.expr_types[expression.0 as usize];
-        let declared = signature.map_or(result, |signature| signature.ret);
+        let target = call.selected_result_target();
+        let signature = target.signature;
+        let selected = target.selected;
+        let declared = target.declared;
         let fact = FlexibleValue::selected(declared, selected, &|lower| {
             self.flexible_upper_bound(lower)
         });
@@ -861,16 +978,26 @@ impl Checker<'_> {
             return fact;
         };
         let mut bindings = HashMap::default();
-        if let (Some(owner), Some(&receiver)) = (
-            explicit_dispatch_owner,
-            self.flexible_values.receivers.get(&expression),
-        ) {
-            self.bind_class_flexible_parameters(owner, receiver, &mut bindings);
-        }
-        if let Some((owner, actual)) = implicit_dispatch {
-            let dispatch_fact =
-                FlexibleValue::semantic(actual, &|lower| self.flexible_upper_bound(lower));
-            self.bind_class_flexible_parameters_from(owner, actual, &dispatch_fact, &mut bindings);
+        match target.dispatch {
+            Some(super::selected_result_publication::DispatchBinding::Explicit(owner)) => {
+                if let Some(&receiver) = self.flexible_values.receivers.get(&expression) {
+                    self.bind_class_flexible_parameters(owner, receiver, &mut bindings);
+                }
+            }
+            Some(super::selected_result_publication::DispatchBinding::Implicit {
+                owner,
+                actual,
+            }) => {
+                let dispatch_fact =
+                    FlexibleValue::semantic(actual, &|lower| self.flexible_upper_bound(lower));
+                self.bind_class_flexible_parameters_from(
+                    owner,
+                    actual,
+                    &dispatch_fact,
+                    &mut bindings,
+                );
+            }
+            None => {}
         }
         if self
             .flexible_values
@@ -884,11 +1011,13 @@ impl Checker<'_> {
         };
         let mut constraints: HashMap<String, Vec<FlexibleValue>> = HashMap::default();
         if let (Some(parameter), Some(&receiver)) = (
-            signature.receiver,
+            target
+                .receiver_parameter
+                .then_some(signature.receiver)
+                .flatten(),
             self.flexible_values.receivers.get(&expression),
         ) {
-            constrain_flexible_parameters(
-                self,
+            self.constrain_flexible_parameters(
                 &signature.formals,
                 parameter,
                 self.expr_types[receiver.0 as usize],
@@ -907,8 +1036,7 @@ impl Checker<'_> {
             };
             let actual = self.expr_types[argument.argument.0 as usize];
             let argument_fact = self.flexible_value(argument.argument);
-            constrain_flexible_parameters(
-                self,
+            self.constrain_flexible_parameters(
                 &signature.formals,
                 parameter,
                 actual,
@@ -950,8 +1078,7 @@ impl Checker<'_> {
         );
         let mut constraints = HashMap::default();
         if let (Some(parameter), Some(receiver)) = (signature.receiver, receiver) {
-            constrain_flexible_parameters(
-                self,
+            self.constrain_flexible_parameters(
                 &signature.formals,
                 parameter,
                 self.expr_types[receiver.0 as usize],
@@ -1009,8 +1136,7 @@ impl Checker<'_> {
             } else {
                 parameter
             };
-            constrain_flexible_parameters(
-                self,
+            self.constrain_flexible_parameters(
                 &declaration.formals,
                 parameter,
                 self.expr_types[argument.argument.0 as usize],
@@ -1169,31 +1295,111 @@ mod tests {
     }
 
     #[test]
-    fn function_shapes_are_declined_instead_of_guessing_suspend_metadata_slots() {
+    fn regular_function_shapes_preserve_flexible_parameters_and_results() {
         let variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
-        for (context_count, has_receiver, suspend) in [
-            (0, false, false),
-            (0, true, false),
-            (1, false, false),
-            (0, false, true),
-            (1, true, true),
-        ] {
+        for (context_count, has_receiver) in [(0, false), (0, true), (1, false)] {
             let parameters = vec![variable; context_count + usize::from(has_receiver) + 1];
             let declared = Ty::fun_with_shape(
                 parameters.clone(),
                 variable,
                 context_count,
                 has_receiver,
-                suspend,
+                false,
             );
             let selected = Ty::fun_with_shape(
                 vec![Ty::String; parameters.len()],
                 Ty::String,
                 context_count,
                 has_receiver,
-                suspend,
+                false,
+            );
+            let fact = FlexibleValue::selected(declared, selected, &|lower| lower);
+            assert!(!fact.is_none());
+            let mut spelling = Spelled::default();
+            fact.apply(selected, &mut spelling);
+            assert_eq!(spelling.args.len(), parameters.len() + 1);
+            assert!(spelling
+                .args
+                .iter()
+                .all(|argument| argument.flexible_upper_bound == Some(Ty::String)));
+        }
+    }
+
+    #[test]
+    fn suspend_function_shapes_are_declined_instead_of_guessing_continuation_layout() {
+        let variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
+        for (context_count, has_receiver) in [(0, false), (1, true)] {
+            let parameters = vec![variable; context_count + usize::from(has_receiver) + 1];
+            let declared = Ty::fun_with_shape(
+                parameters.clone(),
+                variable,
+                context_count,
+                has_receiver,
+                true,
+            );
+            let selected = Ty::fun_with_shape(
+                vec![Ty::String; parameters.len()],
+                Ty::String,
+                context_count,
+                has_receiver,
+                true,
             );
             assert!(FlexibleValue::selected(declared, selected, &|lower| lower).is_none());
+        }
+    }
+
+    #[test]
+    fn overlay_drops_conflicting_flexible_intervals_atomically() {
+        let left = FlexibleValue {
+            source: Some(Ty::String),
+            publication: Some(FlexiblePublication {
+                lower: Ty::String,
+                shape: FlexibleShape::None,
+            }),
+            upper: Some(Ty::String),
+            shape: FlexibleShape::None,
+        };
+        let right = FlexibleValue {
+            source: Some(Ty::obj("sample/Other")),
+            publication: Some(FlexiblePublication {
+                lower: Ty::obj("sample/Other"),
+                shape: FlexibleShape::None,
+            }),
+            upper: Some(Ty::nullable(Ty::obj("sample/Other"))),
+            shape: FlexibleShape::None,
+        };
+
+        let overlaid = left.overlay(&right);
+        assert_eq!(overlaid.publication, None);
+        assert_eq!(overlaid.upper, None);
+    }
+
+    #[test]
+    fn meet_drops_both_faces_of_a_partially_matching_flexible_interval() {
+        let interval = FlexibleValue {
+            source: Some(Ty::String),
+            publication: Some(FlexiblePublication {
+                lower: Ty::String,
+                shape: FlexibleShape::None,
+            }),
+            upper: Some(Ty::nullable(Ty::String)),
+            shape: FlexibleShape::None,
+        };
+        let same_upper = FlexibleValue {
+            publication: Some(FlexiblePublication {
+                lower: Ty::obj("sample/Other"),
+                shape: FlexibleShape::None,
+            }),
+            ..interval.clone()
+        };
+        let same_lower = FlexibleValue {
+            upper: Some(Ty::String),
+            ..interval.clone()
+        };
+
+        for met in [interval.meet(&same_upper), interval.meet(&same_lower)] {
+            assert_eq!(met.publication, None);
+            assert_eq!(met.upper, None);
         }
     }
 
@@ -1230,13 +1436,17 @@ mod tests {
         let declared = Ty::obj_args("kotlin/collections/List", &[variable]);
         let projected = FlexibleValue::rigid_shape(selected)
             .substitute(declared, &|name| (name == "T").then(|| nested.clone()));
+        let expected_nested = FlexibleValue {
+            shape: FlexibleShape::Obj(Ty::String.obj_internal().unwrap(), Vec::new()),
+            ..nested
+        };
 
         assert_eq!(projected.source, Some(selected));
         assert_eq!(
             projected.shape,
             FlexibleShape::Obj(
                 Ty::obj("kotlin/collections/List").obj_internal().unwrap(),
-                vec![nested],
+                vec![expected_nested],
             )
         );
     }

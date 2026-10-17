@@ -240,6 +240,7 @@ use source_type_resolution::{
 };
 mod scope;
 mod selected_argument_commitment;
+mod selected_result_publication;
 use selected_argument_commitment::{
     indexed_operator_argument_parameters, indexed_operator_argument_slots, SelectedArgumentBinding,
     SelectedArgumentCommitment,

@@ -17,7 +17,7 @@
 use super::{Checker, Local, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor};
 use crate::ast::ExprId;
 use crate::fx_hash::HashMap;
-use crate::libraries::{GenericSig, ResultEnhancement, TypeEnhancement};
+use crate::libraries::{GenericSig, TypeEnhancement};
 use crate::types::{Ty, TypeName};
 
 /// The checker's record of marked values that a later check reads back through a local.
@@ -188,68 +188,28 @@ impl Checker<'_> {
         receiver: Option<(Ty, TypeEnhancement)>,
         arguments: Option<&super::SelectedArgumentCommitment>,
     ) -> TypeEnhancement {
-        let not_null = |enhancement| enhancement == ResultEnhancement::NotNull;
-        let (signature, result, enhanced, receiver_parameter) = match call {
-            ResolvedCall::Member(selected) => (
-                selected.member.generic_sig.as_ref(),
-                selected.member.ret,
-                (
-                    &selected.member.enhanced_result,
-                    not_null(selected.member.call_sig.result_enhancement),
-                ),
-                false,
-            ),
-            ResolvedCall::Companion(member) => (
-                member.generic_sig.as_ref(),
-                member.ret,
-                (
-                    &member.enhanced_result,
-                    not_null(member.call_sig.result_enhancement),
-                ),
-                false,
-            ),
-            ResolvedCall::TopLevel(selected) => (
-                selected.callable.generic_sig.as_deref(),
-                selected.callable.ret,
-                (
-                    &selected.callable.enhanced_result,
-                    not_null(selected.call_sig.result_enhancement),
-                ),
-                false,
-            ),
-            ResolvedCall::Extension(selected) => (
-                selected.callable.generic_sig.as_deref(),
-                selected.callable.ret,
-                (&selected.callable.enhanced_result, false),
-                true,
-            ),
-            _ => return TypeEnhancement::NONE,
+        let target = call.selected_result_target();
+        let Some((enhanced, head)) = target.enhancement else {
+            return TypeEnhancement::NONE;
         };
-        let (enhanced, head) = enhanced;
-        let marks = enhanced.marks.with_head(head);
+        let marks = enhanced.with_head(head);
         let mut bindings = HashMap::default();
-        // A specialized member's result no longer names its classifier's type parameters; the
-        // result its declaring classifier states does.
-        let declared = match (&enhanced.declared, &receiver) {
-            (Some((classifier, declared)), Some((receiver_ty, receiver_marks))) => {
-                self.bind_class_parameters(
-                    *classifier,
-                    *receiver_ty,
-                    receiver_marks,
-                    &mut bindings,
-                );
-                *declared
-            }
-            _ => signature.map_or(result, |signature| signature.ret),
-        };
-        if let (Some(signature), Some(arguments)) = (signature, arguments) {
-            let receiver = receiver.filter(|_| receiver_parameter);
+        if let (
+            Some(super::selected_result_publication::DispatchBinding::Explicit(owner)),
+            Some((receiver_ty, receiver_marks)),
+        ) = (target.dispatch, &receiver)
+        {
+            self.bind_class_parameters(owner, *receiver_ty, receiver_marks, &mut bindings);
+        }
+        if let (Some(signature), Some(arguments)) = (target.signature, arguments) {
+            let receiver = receiver.filter(|_| target.receiver_parameter);
             bind_callable_parameters(self, signature, receiver.as_ref(), arguments, &mut bindings);
         }
         if bindings.is_empty() {
-            return marks;
+            marks
+        } else {
+            marks.substitute(target.declared, &|name| bindings.get(name).cloned())
         }
-        marks.substitute(declared, &|name| bindings.get(name).cloned())
     }
 
     /// Bind the type parameters of `owner` to the marks of the matching type arguments of a
@@ -398,41 +358,23 @@ fn constrain(
     marks: &TypeEnhancement,
     constraints: &mut HashMap<String, Vec<TypeEnhancement>>,
 ) {
-    match declared {
-        Ty::TyParam(name, _) if formals.iter().any(|formal| formal == name) => {
-            constraints
-                .entry(name.to_string())
-                .or_default()
-                .push(marks.clone());
-        }
-        Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::DefinitelyNotNull(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner) => {
-            constrain(checker, formals, *inner, actual, marks, constraints);
-        }
-        Ty::Obj(class, declared_arguments) if !declared_arguments.is_empty() => {
+    super::selected_result_publication::constrain_parameters(
+        formals,
+        declared,
+        actual,
+        marks,
+        constraints,
+        super::selected_result_publication::StarProjectionPolicy::Stop,
+        &mut |actual, marks, owner| {
             let actual = match actual.non_null() {
                 Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
                 other => other,
             };
-            let Some((view, view_marks)) = checker.supertype_view(actual, marks, class) else {
-                return;
-            };
-            for (index, (&declared, &actual)) in
-                declared_arguments.iter().zip(view.type_args()).enumerate()
-            {
-                constrain(
-                    checker,
-                    formals,
-                    declared,
-                    actual,
-                    view_marks.argument(index),
-                    constraints,
-                );
-            }
-        }
-        _ => {}
-    }
+            let (view, view_marks) = checker.supertype_view(actual, marks, owner)?;
+            let facts = (0..view.type_args().len())
+                .map(|index| view_marks.argument(index).clone())
+                .collect();
+            Some((view, facts))
+        },
+    );
 }

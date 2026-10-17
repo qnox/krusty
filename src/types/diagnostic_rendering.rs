@@ -73,3 +73,48 @@ pub(super) fn qualified_type_parameter(
         None => format!("{rendered}{marker}"),
     }
 }
+
+/// Render a platform type, including a provider-declared mutable/read-only classifier pair
+/// (`MutableList<E>..List<E>` -> `(Mutable)List<E!>!`). The provider supplies the upper identity;
+/// this diagnostic boundary only formats that already-normalized semantic relation.
+pub(super) fn platform_type(
+    inner: Ty,
+    context: &[Ty],
+    type_parameter: &dyn Fn(&str) -> String,
+    classifier: &dyn Fn(TypeName) -> Option<String>,
+    platform_upper_bound: &dyn Fn(Ty) -> Ty,
+) -> String {
+    let render = |ty: Ty| {
+        ty.source_name_with_classifier_in(context, type_parameter, classifier, platform_upper_bound)
+    };
+    let upper = platform_upper_bound(inner);
+    let (Ty::Obj(lower_owner, arguments), Ty::Obj(upper_owner, _)) = (inner, upper) else {
+        return format!("{}!", render(inner));
+    };
+    if lower_owner == upper_owner {
+        return format!("{}!", render(inner));
+    }
+
+    let face = upper_owner
+        .segment_ref()
+        .replace('$', ".")
+        .split('.')
+        .map(|segment| format!("(Mutable){segment}"))
+        .collect::<Vec<_>>()
+        .join(".");
+    if arguments.is_empty() {
+        return format!("{face}!");
+    }
+    let arguments = arguments
+        .iter()
+        .map(|argument| {
+            let flexible = match *argument {
+                Ty::TyParam(..) | Ty::Obj(..) | Ty::Fun(_) => Ty::platform_nullable(*argument),
+                argument => argument,
+            };
+            render(flexible)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{face}<{arguments}>!")
+}

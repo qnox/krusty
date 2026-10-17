@@ -1626,14 +1626,13 @@ impl Ty {
                 )
             }
             Ty::Nullable(inner) => intersection::spell_nullable(*inner, render, true),
-            Ty::PlatformNullable(inner) => {
-                let upper = platform_upper_bound(*inner);
-                if upper == *inner {
-                    format!("{}!", render(*inner))
-                } else {
-                    format!("(Mutable){}!", render(upper))
-                }
-            }
+            Ty::PlatformNullable(inner) => diagnostic_rendering::platform_type(
+                *inner,
+                context,
+                type_parameter,
+                classifier,
+                platform_upper_bound,
+            ),
             Ty::InProjection(inner) => match *inner {
                 Ty::OutProjection(conflicting) => {
                     format!("CONFLICTING-PROJECTION {}", render(*conflicting))

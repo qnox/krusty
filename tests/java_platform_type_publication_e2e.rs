@@ -227,3 +227,13 @@ fn inferred_enhanced_java_results_publish_enhanced_nullability_like_kotlinc() {
         &["EnhancedKt", "Holder"],
     );
 }
+
+#[test]
+fn inferred_java_function_result_publishes_nested_platform_types_like_kotlinc() {
+    common::assert_classes_identical_to_kotlinc_jdk(
+        "PublishedFunction",
+        "fun published(block: (String) -> String) =\n\
+         \x20   java.util.Collections.singletonList(block).get(0)\n",
+        &["PublishedFunctionKt"],
+    );
+}

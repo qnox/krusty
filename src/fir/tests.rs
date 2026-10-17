@@ -2937,6 +2937,7 @@ fn mutable_local_publication_keeps_the_declared_value_abbreviation() {
     let abbreviation = ResolvedTypeAbbreviation {
         alias: crate::types::type_name("sample/PublishedAlias"),
         arguments: Box::new([]),
+        argument_path: Box::new([]),
     };
     let mut graph = SignatureGraph::default();
     let scope = graph.add_scope(SignatureScope {
