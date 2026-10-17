@@ -62,14 +62,13 @@ pub(super) fn declarations(
         .collect()
 }
 
-/// Classifiers whose complete nominal header belongs to Pass 1. An undemanded body-local
-/// classifier keeps only its stable inventory identity until Pass 2 atomically publishes the
-/// header, formals, and applied type-argument layout.
-pub(super) fn pass_one_classifiers<'a>(
-    headers: &'a crate::fir::StreamedHeaderModule,
-    declarations: &'a HashSet<DeclarationId>,
-) -> impl Iterator<Item = &'a crate::fir::DeclarationStub> + 'a {
-    headers.stubs.iter().filter(|stub| {
-        stub.kind == crate::fir::DeclarationKind::Classifier && !declarations.contains(&stub.id)
-    })
+/// Nominal classifier headers belong to Pass 1 even when their executable local signatures need
+/// an active lexical body. Their formals and applied layouts publish in the same pass.
+pub(super) fn classifiers(
+    headers: &crate::fir::StreamedHeaderModule,
+) -> impl Iterator<Item = &crate::fir::DeclarationStub> {
+    headers
+        .stubs
+        .iter()
+        .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
 }

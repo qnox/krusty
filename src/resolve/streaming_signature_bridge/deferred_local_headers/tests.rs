@@ -4,7 +4,7 @@ use crate::libraries::EmptySymbolSource;
 use crate::source::SourceInput;
 
 #[test]
-fn deferred_local_classifier_publishes_header_and_generic_layout_atomically() {
+fn local_classifier_publishes_header_and_generic_layout_atomically() {
     let source = r#"
 package sample
 
@@ -71,9 +71,13 @@ fun build() {
         .constructor_property_declaration(parser_local, 0)
         .expect("stable Local constructor property");
 
-    assert!(index.classifier_header(shadow).is_none());
-    assert!(index.classifier_type_arguments(shadow).is_none());
-    assert!(index.classifier_header(local).is_none());
+    assert!(index.classifier_header(shadow).is_some());
+    assert_eq!(index.classifier_own_type_parameter_count(shadow), Some(1));
+    assert_eq!(
+        index.classifier_type_arguments(shadow).map(<[_]>::len),
+        Some(1)
+    );
+    assert!(index.classifier_header(local).is_some());
     assert!(index.signature(property).is_none());
     let checked = analysis.types[0]
         .as_ref()

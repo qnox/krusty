@@ -4784,9 +4784,7 @@ pub(crate) fn finalized_streamed_signature_index(
         index.publish_property_parameter_identities(property, std::iter::empty(), None);
     }
     // Publish classifier headers after the full declaration inventory so source order is irrelevant.
-    'classifier_publication: for stub in
-        deferred_local_headers::pass_one_classifiers(headers, &undemanded_ordinary_locals)
-    {
+    'classifier_publication: for stub in deferred_local_headers::classifiers(headers) {
         macro_rules! skip_classifier {
             ($declaration:expr) => {{
                 failed.push($declaration);
@@ -4965,10 +4963,11 @@ pub(crate) fn finalized_streamed_signature_index(
         }
     }
     for stub in &headers.stubs {
-        if undemanded_ordinary_locals.contains(&stub.id) {
+        if undemanded_ordinary_locals.contains(&stub.id) && stub.kind != DeclarationKind::Classifier
+        {
             // The active body pass owns this entire declaration header, including its generic
-            // contract. Publishing only its type-parameter bounds here would split one written
-            // header across phases and make a later lexical alias bind twice.
+            // contract. Classifier formals are the exception: their nominal header is already
+            // complete above and body checking needs its applied layout before entering Pass 2.
             continue;
         }
         let Some(declaration) = headers.syntax.declaration(stub.id) else {
