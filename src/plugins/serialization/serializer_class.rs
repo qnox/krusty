@@ -572,12 +572,20 @@ pub(super) fn complete(
                 .collect::<Vec<_>>();
             let descriptor_name = annotations::class_serial_name(ir, class_id);
             let descriptor_owner = ir.classes[class_id as usize].fq_name_id();
-            Some(add_cached_descriptor(
+            let cached = add_cached_descriptor(
                 ir,
                 descriptor_owner,
                 descriptor_name,
                 &descriptor_elements,
-            ))
+                companion_lines(ir, class_id),
+            );
+            ir.classes[class_id as usize]
+                .field_annotations
+                .push(crate::ir::FieldAnnotations {
+                    field: "$cachedDescriptor".to_string(),
+                    annotations: annotations::jvm_field_annotations(),
+                });
+            Some(cached)
         } else {
             None
         };
@@ -829,4 +837,21 @@ fn add_type_serializer_getters(ir: &mut IrFile, serializer: ClassId, n_tp: usize
             },
         );
     }
+}
+
+/// The source span of `class_id`'s companion: a declared companion's own lines, else the class's,
+/// which a plugin-generated companion takes.
+fn companion_lines(ir: &IrFile, class_id: ClassId) -> (u32, u32) {
+    let class = &ir.classes[class_id as usize];
+    class
+        .companion_class
+        .and_then(|companion| {
+            ir.classes.iter().find(|candidate| {
+                candidate.fq_name == companion && !candidate.is_compiler_generated
+            })
+        })
+        .filter(|companion| companion.decl_start_line != 0)
+        .map_or((class.decl_start_line, class.decl_end_line), |companion| {
+            (companion.decl_start_line, companion.decl_end_line)
+        })
 }

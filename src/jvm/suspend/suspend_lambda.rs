@@ -23,7 +23,7 @@ use super::cps::{
 use super::{append_continuation, box_returns, continuation_ty, ensure_tail_return, int_ty};
 use crate::fx_hash::HashSet;
 use crate::ir::{
-    Callee, ClassId, ExprId, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole, IrTypeOp,
+    ClassId, ExprId, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole, IrTypeOp,
 };
 use crate::jvm::lambda_classes::{site, Site};
 use crate::types::{Ty, TypeName};
@@ -640,7 +640,7 @@ fn adopt_lifted_callables(ir: &mut IrFile, fid: u32, class: ClassId) {
         })
         .map(|(&position, _)| position)
         .collect::<HashSet<_>>();
-    let mut declared = ir
+    let declared = ir
         .lifted_functions
         .iter()
         .filter(|(_, (other, site))| {
@@ -655,46 +655,9 @@ fn adopt_lifted_callables(ir: &mut IrFile, fid: u32, class: ClassId) {
         })
         .map(|(&function, _)| function)
         .collect::<Vec<_>>();
-    declared.sort_unstable();
-    let owner = ir.classes[class as usize].fq_name;
-    for &function in &declared {
-        for other in &mut ir.classes {
-            other.methods.retain(|&method| method != function);
-        }
-        ir.class_method_owners.remove(&function);
-        ir.classes[class as usize].methods.push(function);
-        ir.note_class_method(class, function);
-        ir.class_static_local_functions.insert(function, owner);
-    }
-    // A local function of a class member was lowered to a static call on that class. Its calls
-    // follow it to the lambda class, as kotlinc's do; the member's class has no such method.
-    if declared.is_empty() {
-        return;
-    }
-    for expression in &mut ir.exprs {
-        if let IrExpr::Call {
-            callee:
-                Callee::ClassStatic {
-                    owner: called,
-                    function,
-                }
-                | Callee::ClassStaticWithDefaults {
-                    owner: called,
-                    function,
-                    ..
-                }
-                | Callee::ClassStaticDefault {
-                    owner: called,
-                    function,
-                },
-            ..
-        } = expression
-        {
-            if declared.binary_search(function).is_ok() {
-                *called = owner;
-            }
-        }
-    }
+    crate::jvm::lifted_declaration_ownership::move_lifted_declarations_to_class(
+        ir, class, &declared,
+    );
 }
 
 fn become_invoke_suspend(ir: &mut IrFile, fid: u32, class: TypeName) {

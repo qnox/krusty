@@ -24,4 +24,8 @@ pub enum SemanticCallRole {
     /// The standard library iterator declaration whose selected receiver is indexed as a
     /// `CharSequence` by Kotlin's for-loop lowering.
     KotlinCharSequenceIterator,
+    /// The compiler-synthesized `copy` declaration of a data class. Source declarations carry the
+    /// equivalent stable declaration flag; dependency providers derive this role from Kotlin
+    /// metadata's synthesized-member kind while that metadata is still authoritative.
+    DataClassCopy,
 }

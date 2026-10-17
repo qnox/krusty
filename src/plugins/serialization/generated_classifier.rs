@@ -26,12 +26,14 @@ pub(super) fn publish_serializer_accessor_declaration(
         return;
     }
     let serializer = type_name(KSERIALIZER_FQ);
+    // kotlinc's accessor declares its own unbounded copy of each class type parameter, whatever
+    // the class parameter's bound: its metadata records no upper bound.
+    let any = crate::types::Ty::nullable(crate::types::Ty::obj("kotlin/Any"));
     let parameters = ctx
         .type_parameters
         .type_params()
         .iter()
-        .zip(ctx.type_parameters.type_param_bounds())
-        .map(|(name, &bound)| crate::types::Ty::ty_param(name, bound))
+        .map(|name| crate::types::Ty::ty_param(name, any))
         .collect::<Vec<_>>();
     let class = crate::types::Ty::obj_args_name(ctx.classifier, &parameters);
     let params = parameters
@@ -44,12 +46,7 @@ pub(super) fn publish_serializer_accessor_declaration(
     let ret = crate::types::Ty::obj_args_name(serializer, &[class]);
     let generic_sig = (!parameters.is_empty()).then(|| crate::libraries::GenericSig {
         formals: ctx.type_parameters.type_params().clone(),
-        formal_bounds: ctx
-            .type_parameters
-            .type_param_bounds()
-            .iter()
-            .map(|&bound| vec![bound])
-            .collect(),
+        formal_bounds: vec![Vec::new(); parameters.len()],
         receiver: None,
         params: params.clone(),
         ret,
@@ -197,7 +194,7 @@ mod tests {
                 ),
                 generic_sig: Some(crate::libraries::GenericSig {
                     formals: vec!["T".to_string()],
-                    formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]],
+                    formal_bounds: vec![Vec::new()],
                     receiver: None,
                     params: vec![Ty::obj_args(
                         KSERIALIZER_FQ,

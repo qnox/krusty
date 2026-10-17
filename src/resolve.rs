@@ -54,6 +54,7 @@ mod anonymous_receiver_labels;
 mod applied_hierarchy;
 mod checked_annotation_publication;
 mod checked_constant_publication;
+pub(crate) mod data_class_copy_visibility;
 pub(crate) mod operator_override_relations;
 pub(crate) use actualization_names::actualization_type_bindings;
 #[cfg(test)]
@@ -73,6 +74,7 @@ mod callable_reference_selection;
 mod candidate_display;
 mod class_literal_array_of_nothing;
 mod class_literal_receiver;
+mod class_literal_type_arguments;
 use candidate_display::{
     ambiguous_classifier_message, classifier_access_display_from_shape,
     inaccessible_classifier_message,
@@ -1082,26 +1084,26 @@ impl MemberExtFunSig {
     }
 }
 
-/// Bit-packed boolean modifiers for a [`ClassSig`]. The eight per-class flags below each cost a full
-/// byte as a separate `bool` field (plus struct padding); collapsed into one `u8` they save several
+/// Bit-packed boolean modifiers for a [`ClassSig`]. The per-class flags below each cost a full
+/// byte as a separate `bool` field (plus struct padding); collapsed into one `u16` they save several
 /// bytes per sig, and the compiler builds a few thousand. Built with the `with_*` chain from
-/// [`ClassFlags::default`]; read through the `ClassSig::is_*` / `has_*` accessors. All eight bits are
-/// in use — a ninth flag needs a wider field.
+/// [`ClassFlags::default`]; read through the `ClassSig::is_*` / `has_*` accessors.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ClassFlags(u8);
+pub struct ClassFlags(u16);
 
 impl ClassFlags {
-    const INTERFACE: u8 = 1 << 0;
-    const OBJECT: u8 = 1 << 1;
-    const ABSTRACT: u8 = 1 << 2;
-    const FUN_INTERFACE: u8 = 1 << 3;
-    const SEALED: u8 = 1 << 4;
-    const FINAL: u8 = 1 << 5;
-    const HAS_ABSTRACT_MEMBERS: u8 = 1 << 6;
-    const ANNOTATION: u8 = 1 << 7;
+    const INTERFACE: u16 = 1 << 0;
+    const OBJECT: u16 = 1 << 1;
+    const ABSTRACT: u16 = 1 << 2;
+    const FUN_INTERFACE: u16 = 1 << 3;
+    const SEALED: u16 = 1 << 4;
+    const FINAL: u16 = 1 << 5;
+    const HAS_ABSTRACT_MEMBERS: u16 = 1 << 6;
+    const ANNOTATION: u16 = 1 << 7;
+    const DATA: u16 = 1 << 8;
 
     #[inline]
-    const fn with(mut self, mask: u8, on: bool) -> Self {
+    const fn with(mut self, mask: u16, on: bool) -> Self {
         if on {
             self.0 |= mask;
         } else {
@@ -1110,7 +1112,7 @@ impl ClassFlags {
         self
     }
     #[inline]
-    const fn has(self, mask: u8) -> bool {
+    const fn has(self, mask: u16) -> bool {
         self.0 & mask != 0
     }
 
@@ -1146,6 +1148,10 @@ impl ClassFlags {
     pub const fn with_annotation(self, on: bool) -> Self {
         self.with(Self::ANNOTATION, on)
     }
+    #[inline]
+    pub const fn with_data(self, on: bool) -> Self {
+        self.with(Self::DATA, on)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1170,6 +1176,7 @@ fn source_class_flags(class: &ClassDecl) -> ClassFlags {
                 || class.body_props.iter().any(|property| property.is_abstract),
         )
         .with_annotation(class.is_annotation())
+        .with_data(class.is_data)
 }
 
 /// Classifier flags read from the compact Pass-1 declaration inventory.
@@ -1204,6 +1211,7 @@ fn streamed_source_class_flags(
         .with_final(flags.has(crate::fir::DeclarationFlags::FINAL))
         .with_has_abstract_members(has_abstract_members)
         .with_annotation(flags.has(crate::fir::DeclarationFlags::ANNOTATION_CLASS))
+        .with_data(flags.has(crate::fir::DeclarationFlags::DATA))
 }
 
 /// Capture the source-level callable inventory before functions and properties are normalized into
@@ -1798,6 +1806,11 @@ impl ClassSig {
     #[inline]
     pub fn is_annotation(&self) -> bool {
         self.flags.has(ClassFlags::ANNOTATION)
+    }
+    /// True for a Kotlin `data class`.
+    #[inline]
+    pub fn is_data(&self) -> bool {
+        self.flags.has(ClassFlags::DATA)
     }
     #[inline]
     pub fn set_is_abstract(&mut self, on: bool) {
@@ -24448,6 +24461,7 @@ val result = object { fun value(): String = captured }
     fn import_test_classifier(alias_target: Option<TypeName>) -> crate::libraries::LibraryType {
         crate::libraries::LibraryType {
             is_kotlin: true,
+            is_data: false,
             access: crate::libraries::ClassifierAccess::Public,
             source_file: None,
             stable_declaration: None,
@@ -27211,6 +27225,7 @@ fun box(): String {
                     };
                 return Some(std::sync::Arc::new(crate::libraries::LibraryType {
                     is_kotlin: true,
+                    is_data: false,
                     access: crate::libraries::ClassifierAccess::Public,
                     source_file: None,
                     stable_declaration: None,
@@ -27341,6 +27356,7 @@ fun box(): String {
                     .collect();
                 std::sync::Arc::new(crate::libraries::LibraryType {
                     is_kotlin: true,
+                    is_data: false,
                     access: crate::libraries::ClassifierAccess::Public,
                     source_file: None,
                     stable_declaration: None,
@@ -37618,11 +37634,7 @@ impl<'a> Checker<'a> {
         if supplied == expected {
             return false;
         }
-        let wording = match expected {
-            0 => "no type arguments expected".to_string(),
-            1 => "one type argument expected".to_string(),
-            count => format!("{count} type arguments expected"),
-        };
+        let wording = candidate_display::type_argument_count_wording(expected);
         let callee = self.call_callee_name_span(call);
         self.diags.error(
             Span::new(callee.hi, callee.hi.saturating_add(1)),
@@ -40617,6 +40629,7 @@ impl<'a> Checker<'a> {
         if member.is_member_extension() {
             return self.reject_member_extension_reference(expression, &member.name);
         }
+        self.check_data_class_copy_usage(self.member_name_span(expression, &member.name), &member);
         if !type_arguments.is_empty() {
             self.resolved_call_type_args
                 .insert(expression, type_arguments.into_iter().map(Some).collect());
@@ -40689,6 +40702,7 @@ impl<'a> Checker<'a> {
         if member.is_member_extension() {
             return Some(self.reject_member_extension_reference(expression, &member.name));
         }
+        self.check_data_class_copy_usage(self.member_name_span(expression, &member.name), &member);
         self.apply_checked_source_callable_result(receiver, &mut member);
         if member.ret == Ty::Nothing {
             return None;
@@ -48834,6 +48848,7 @@ impl<'a> Checker<'a> {
         if !body_local_class {
             self.check_bodyless_operator_declarations(scope, cl, d, current_owner);
         }
+        self.check_data_class_copy_visibility(scope, cl);
         for m in &cl.methods {
             if m.is_abstract() && !matches!(m.body, FunBody::None) {
                 self.diags.error(
@@ -59843,7 +59858,7 @@ impl<'a> Checker<'a> {
                 self.callable_ref_lhs_classifier_type(scope, receiver, expression)
                     .ok()
                     .flatten()
-                    .map(|(_, ty)| ty)
+                    .map(|(_, ty, _)| ty)
             })
         } else {
             None
@@ -61426,7 +61441,7 @@ impl<'a> Checker<'a> {
         receiver: ExprId,
         name: &str,
     ) -> UnboundRefSelection {
-        let Ok(Some((internal, receiver_ty))) =
+        let Ok(Some((internal, receiver_ty, _))) =
             self.callable_ref_lhs_classifier_type(scope, receiver, expression)
         else {
             return UnboundRefSelection::NotClassifier;
@@ -61938,45 +61953,7 @@ impl<'a> Checker<'a> {
                 let Some(recv) = receiver else {
                     return unsupported(self);
                 };
-                // A bare name that resolves to a reference TYPE is an UNBOUND literal (`String::class`).
-                // Otherwise it's a BOUND literal on a value (`x::class`, `this::class`): type-check the
-                // receiver — a non-reference receiver (a primitive `Int::class`, an unresolved name) is
-                // skipped, not mis-read.
-                // The checker-visible representation of a reified `T::class`: the SEMANTIC type
-                // parameter, distinct from the lowering marker below. `KClass<T>` must carry the
-                // enclosing function's own `T` so a delegated generic member call infers its formal
-                // from the argument (`fun <T : Any> services(type: KClass<T>): List<T>` called as
-                // `services(T::class)` from a reified extension returns the EXTENSION's `List<T>`,
-                // not the member's unbound formal). The `Obj(T)` name marker must not leak into
-                // inference: it reads as a plain classifier named "T" and poisons every binding it
-                // reaches.
-                let unbound = if let Expr::Name(n) = self.file.expr(recv).clone() {
-                    // `T::class` on a REIFIED type parameter is an unbound literal: the lowerer
-                    // substitutes its declaration-owned identity to the call-site type
-                    // (`reified_subst`) when it expands the inline body. Only a REIFIED `T` is
-                    // accepted — kotlinc rejects a class literal on a non-reified type parameter.
-                    self.class_literal_unbound_ty(scope, recv, &n)
-                        .or_else(|| scope.reified_tparam(&n))
-                } else {
-                    // A QUALIFIED type name (`pkg.Cls::class`, `java.util.ArrayList::class`,
-                    // `Outer.Nested::class`) is an unbound literal exactly like the simple name an
-                    // import would bind — the receiver is a classifier, not a value to evaluate.
-                    self.callable_ref_lhs_classifier_type(scope, recv, e)
-                        .ok()
-                        .flatten()
-                        .map(|(_, ty)| ty)
-                };
-                let unbound = unbound.map(|ty| {
-                    let ty = self.validate_class_literal_type_arguments(e, recv, ty);
-                    let Ty::Obj(internal, []) = ty else {
-                        return ty;
-                    };
-                    let classifier = self
-                        .fed_source()
-                        .classifier(internal)
-                        .expect("a resolved class-literal classifier must retain its declaration");
-                    class_literal_receiver::star_projected_class_literal_receiver(ty, &classifier)
-                });
+                let unbound = self.class_literal_unbound_receiver(scope, e, recv);
                 if unbound == Some(Ty::Error) {
                     return self.set(e, Ty::Error);
                 }
@@ -63676,6 +63653,7 @@ impl<'a> Checker<'a> {
             self.diags.error(self.call_callee_name_span(call), message);
             return Some(Ty::Error);
         }
+        self.check_data_class_copy_usage(self.call_callee_name_span(call), &selected.member);
         self.reject_non_public_api_from_public_inline(
             call,
             Self::is_public_api_for_inline_access(

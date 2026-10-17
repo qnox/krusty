@@ -11,7 +11,9 @@
 //! member's lambda captures its static's carrier (`$arg0`) rather than the instance (`this$0`). A lambda that captures nothing
 //! is a singleton read from its `INSTANCE` field.
 //!
-//! The conflicts taken so far: a value class whose declared underlying type is neither nullable
+//! High-arity lambdas also take this path because `FunctionN.invoke(Object[])` needs the packed
+//! bridge the realized class writes. The adaptation conflicts taken so far: a value class whose
+//! declared underlying type is neither nullable
 //! nor primitive, as a parameter or the result (the factory cannot box such a value, and it knows
 //! nothing of the mangled name its specialized method takes); and, before language level 2.4, a
 //! `Nothing`/`Nothing?` parameter or inferred result, which maps to `Void` and has no adaptee at all.
@@ -59,6 +61,17 @@ pub(super) struct LambdaMethods {
     functions: crate::fx_hash::HashSet<FunId>,
 }
 
+/// The semantic roles a realized class has besides the lambda's implementation.
+#[derive(Clone, Default)]
+struct ClassRole {
+    /// The lambda is, or is nested in, an inline function's default argument.
+    default: Option<InlineDefaultClassContext>,
+    /// The inline function whose body declares the lambda.
+    scope: Option<inline_scope::InlineScope>,
+    /// The source form of a `-Xlambdas=class` Kotlin lambda.
+    kotlin_lambda: Option<crate::ir::IrLambdaOrigin>,
+}
+
 #[derive(Clone, Copy)]
 struct InlineDefaultClassContext {
     /// The inline declaration whose default lambda is the root of this class tree.
@@ -67,15 +80,6 @@ struct InlineDefaultClassContext {
     /// immediately surrounding realized lambda's `invoke` method.
     direct_owner: Option<FunId>,
     parent_lambda: Option<FunId>,
-}
-
-/// The inline function a realized lambda class is written in, if any.
-#[derive(Clone, Copy, Default)]
-struct InlineOrigin {
-    /// The lambda is, or is nested in, an inline function's default argument.
-    default: Option<InlineDefaultClassContext>,
-    /// The inline function whose body declares the lambda.
-    scope: Option<inline_scope::InlineScope>,
 }
 
 /// Every lambda class that belongs to an inline default's materialized class tree.
@@ -277,7 +281,6 @@ fn site_in_roots(
     };
     let lambda = &ir.exprs[node as usize];
     let IrExpr::Lambda {
-        arity,
         captures,
         sam: None,
         ..
@@ -293,14 +296,13 @@ fn site_in_roots(
         None => crate::jvm::local_class_names::callable_reference_name(ir, node)?,
     };
     let function_type = ir.logical_types.get(&node).copied()?;
-    let fits = usize::from(*arity) <= crate::jvm::names::MAX_NUMBERED_FUNCTION_ARITY;
     let mut template_copies = inline_template_copies(ir, fid, every_emitted_root);
     if shared {
         template_copies.extend(nodes.into_iter().filter(|&other| other != node));
         template_copies.sort_unstable();
         template_copies.dedup();
     }
-    (fits && !inline_call_argument(ir, node)).then(|| Site {
+    (!inline_call_argument(ir, node)).then(|| Site {
         node,
         template_copies,
         class,
@@ -427,6 +429,7 @@ pub(super) fn emitted_roots(ir: &IrFile, every_emitted_root: bool) -> Vec<ExprId
         }
     }
     if every_emitted_root {
+        roots.extend(ir.class_ctor_default_roots());
         for class in &ir.classes {
             roots.extend(class.init_body);
             roots.extend(class.super_arg_prelude.iter().copied());
@@ -453,9 +456,10 @@ pub(super) fn emitted_roots(ir: &IrFile, every_emitted_root: bool) -> Vec<ExprId
     roots
 }
 
-/// Whether the body declares a lambda or local function of its own. Its lifted function would have
-/// to move into the lambda's class with it, which this step does not do.
-fn nests_lifted_functions(ir: &IrFile, body: ExprId, allow_nested_lambdas: bool) -> bool {
+/// Whether the body declares a lambda whose independently emitted implementation cannot move with
+/// this class. Lifted local declarations are adopted by [`realize_class`] through their stable
+/// lifting identities.
+fn nests_unrealized_lambda(ir: &IrFile, body: ExprId, allow_nested_lambdas: bool) -> bool {
     crate::ir::value_namespace_expressions(ir, body)
         .iter()
         .any(|&expression| match &ir.exprs[expression as usize] {
@@ -465,13 +469,6 @@ fn nests_lifted_functions(ir: &IrFile, body: ExprId, allow_nested_lambdas: bool)
             IrExpr::Lambda { impl_fn, .. } => {
                 !allow_nested_lambdas && !ir.specialized_functions.contains_key(impl_fn)
             }
-            IrExpr::Call {
-                callee:
-                    crate::ir::Callee::Local(function)
-                    | crate::ir::Callee::LocalDefault(function)
-                    | crate::ir::Callee::LocalWithDefaults { function, .. },
-                ..
-            } => ir.lifted_functions.contains_key(function),
             _ => false,
         })
 }
@@ -482,15 +479,21 @@ fn nests_lifted_functions(ir: &IrFile, body: ExprId, allow_nested_lambdas: bool)
 /// that value as a class (`FileKt$f$1`), a singleton when the lambda captures nothing, and names
 /// the stub as the class's `EnclosingMethod`.
 pub(in crate::jvm) fn inline_default_owner(ir: &IrFile, fid: FunId) -> Option<FunId> {
+    default_argument_owner(ir, fid).filter(|function| ir.inline_fns.contains(function))
+}
+
+/// The function whose default argument `fid` implements, inline or not.
+fn default_argument_owner(ir: &IrFile, fid: FunId) -> Option<FunId> {
     ir.fn_params.iter().find_map(|(function, info)| {
-        (ir.inline_fns.contains(function)
-            && info.defaults.as_ref().is_some_and(|defaults| {
+        info.defaults
+            .as_ref()
+            .is_some_and(|defaults| {
                 defaults
                     .iter()
                     .flatten()
                     .any(|&expression| default_expression_lambda(ir, expression) == Some(fid))
-            }))
-        .then_some(*function)
+            })
+            .then_some(*function)
     })
 }
 
@@ -551,7 +554,8 @@ struct Capture {
     shared_holder: Option<TypeName>,
 }
 
-/// Realize every lambda whose function type `LambdaMetafactory` cannot adapt as a class of its own.
+/// Realize every lambda whose function type needs a class, including `FunctionN`'s packed bridge
+/// and shapes `LambdaMetafactory` cannot adapt.
 /// A lambda of a shape this step does not realize is recorded instead, so emitting it as an
 /// `invokedynamic`, which cannot link, is an error rather than a silent fallback. A lambda an inline
 /// call's splice consumes is recorded too: the splice emits no value for it.
@@ -561,9 +565,14 @@ pub(super) fn realize(
     facade: &str,
     delegates: &super::local_delegate_closures::Requirements,
     current_source: crate::ir::IrModuleSource,
-    adapt_factory: bool,
+    lambdas_mode: crate::jvm::ir_emit::LambdaMode,
 ) -> Result<LambdaMethods, ()> {
+    // Under `indy` a lambda is a class only where the runtime factory cannot build it; under
+    // `class` every Kotlin function lambda is one, extending `kotlin.jvm.internal.Lambda`.
+    let class_lambdas = lambdas_mode == crate::jvm::ir_emit::LambdaMode::Class;
+    let adapt_factory = !class_lambdas;
     let methods = LambdaMethods::collect(ir);
+    let mut kotlin_lambda_sites = Vec::new();
     let mut lambdas = ir
         .exprs
         .iter()
@@ -612,10 +621,13 @@ pub(super) fn realize(
         let Ty::Fun(signature) = function_type.non_null() else {
             continue;
         };
+        let high_arity = crate::jvm::names::uses_function_n(signature.params.len());
         if signature.suspend
             || (delegate_source.is_none()
                 && inline_default.is_none()
                 && !inline_scoped
+                && !class_lambdas
+                && !high_arity
                 && (!adapt_factory
                     || (!runtime_reified
                         && !inline_anonymous
@@ -673,7 +685,7 @@ pub(super) fn realize(
             }
             let body = ir.functions[fid as usize].body.ok_or(())?;
             let captures = captures(ir, fid, body, &sites[0]).ok_or(())?;
-            if nests_lifted_functions(ir, body, runtime_reified) {
+            if nests_unrealized_lambda(ir, body, runtime_reified) {
                 return Err(());
             }
             realize_class(
@@ -683,7 +695,7 @@ pub(super) fn realize(
                 &sites[0],
                 signature,
                 &captures,
-                InlineOrigin::default(),
+                ClassRole::default(),
             );
             if let Some(result) = super::local_delegate_closures::invoke_result(ir, fid) {
                 let signed_result = ir.functions[fid as usize].ret;
@@ -716,26 +728,38 @@ pub(super) fn realize(
             }
             continue;
         }
+        let source_class_lambda = class_lambdas || high_arity;
+        let kotlin_lambda = if source_class_lambda {
+            ir.lambda_origins.get(&fid).cloned()
+        } else {
+            None
+        };
         match class_shape(
             ir,
             fid,
             every_emitted_root,
             inline_scope.map(|scope| scope.node),
-            runtime_reified || inline_default.is_some() || inline_scoped,
+            runtime_reified || inline_default.is_some() || inline_scoped || source_class_lambda,
             class_name,
         ) {
-            Ok((site, body, captures)) => realize_class(
-                ir,
-                fid,
-                body,
-                &site,
-                signature,
-                &captures,
-                InlineOrigin {
-                    default: inline_default,
-                    scope: inline_scope,
-                },
-            ),
+            Ok((site, body, captures)) => {
+                if source_class_lambda {
+                    kotlin_lambda_sites.push((site.class, site.node));
+                }
+                realize_class(
+                    ir,
+                    fid,
+                    body,
+                    &site,
+                    signature,
+                    &captures,
+                    ClassRole {
+                        default: inline_default,
+                        scope: inline_scope,
+                        kotlin_lambda,
+                    },
+                );
+            }
             Err(shape) => {
                 crate::trace_compiler!(
                     "value_classes",
@@ -745,7 +769,35 @@ pub(super) fn realize(
             }
         }
     }
+    enclose_in_lambda_classes(ir, &kotlin_lambda_sites);
     Ok(methods)
+}
+
+/// A `-Xlambdas=class` lambda is a declaration scope: a lambda class built in another lambda's body
+/// is enclosed by that lambda's class `invoke`, where an implementation method would leave it to
+/// the scope the outer lambda is written in.
+fn enclose_in_lambda_classes(ir: &mut IrFile, sites: &[(TypeName, ExprId)]) {
+    let invokes = ir
+        .classes
+        .iter()
+        .filter_map(|class| class.lambda.as_ref())
+        .map(|lambda| lambda.invoke)
+        .collect::<Vec<_>>();
+    let mut owners = crate::fx_hash::HashMap::default();
+    for invoke in invokes {
+        let Some(body) = ir.functions[invoke as usize].body else {
+            continue;
+        };
+        for expression in crate::ir::value_namespace_expressions(ir, body) {
+            owners.insert(expression, invoke);
+        }
+    }
+    for &(class, node) in sites {
+        let (Some(&invoke), Some(class)) = (owners.get(&node), ir.class_id_by_name(class)) else {
+            continue;
+        };
+        ir.classes[class as usize].enclosure = Some(crate::ir::IrEnclosure::Function(invoke));
+    }
 }
 
 /// Several inline copies may construct the same retained declaration closure. They have one
@@ -791,8 +843,8 @@ fn class_shape(
     let site = site_in_roots(ir, fid, every_emitted_root, inline_declaration, class_name)
         .ok_or("no single named value outside an inline call")?;
     let body = ir.functions[fid as usize].body.ok_or("no body")?;
-    if nests_lifted_functions(ir, body, allow_nested_lambdas) {
-        return Err("its body declares a lambda or local function");
+    if nests_unrealized_lambda(ir, body, allow_nested_lambdas) {
+        return Err("its body declares an unrealized lambda");
     }
     let captures = captures(ir, fid, body, &site).ok_or("a capture has no field identity")?;
     Ok((site, body, captures))
@@ -981,14 +1033,17 @@ fn realize_class(
     site: &Site,
     signature: &crate::types::FnSig,
     captures: &[Capture],
-    origin: InlineOrigin,
+    role: ClassRole,
 ) {
     let fresh_instance = ir
         .specialized_functions
         .get(&fid)
         .is_some_and(|specialization| specialization.consumed_inline_capture);
+    let inline_default = role.default;
+    let kotlin_lambda = role.kotlin_lambda.is_some();
     super::shared_captures::realize_lambda_capture_parameters(ir, fid, captures.len());
-    let class = declare_class(ir, fid, site, signature, captures, origin);
+    let class = declare_class(ir, fid, site, signature, captures, role);
+    adopt_lifted_declarations(ir, fid, class);
     // `invoke` takes `this` and the lambda's own parameters; each captured value is read from its
     // field.
     let expressions = crate::ir::value_namespace_expressions(ir, body);
@@ -1027,7 +1082,15 @@ fn realize_class(
             }
         }
         _ => match signature.ret {
-            ret if is_primitive(ret) => Ty::nullable(ret),
+            // A numbered FunctionN class has a typed override whose generic result is boxed. Past
+            // the numbered interfaces, the specialized method is not that interface slot: it
+            // keeps the body's scalar result and the separately emitted packed-array bridge owns
+            // boxing it into Object.
+            ret if is_primitive(ret)
+                && !crate::jvm::names::uses_function_n(signature.params.len()) =>
+            {
+                Ty::nullable(ret)
+            }
             ret => ret,
         },
     };
@@ -1038,6 +1101,20 @@ fn realize_class(
         if result == Ty::Unit && matches!(ir.exprs[value as usize], IrExpr::UnitInstance) {
             ir.exprs[expression as usize] = IrExpr::Return(None);
         } else if result != signature.ret {
+            // An expression body arrives as a statement-less block. Box its value itself, so an
+            // erased generic result (`go { id(1) }`) is cast to the wrapper rather than unboxed
+            // and boxed again.
+            let mut value = value;
+            while let IrExpr::Block {
+                stmts,
+                value: Some(inner),
+            } = &ir.exprs[value as usize]
+            {
+                if !stmts.is_empty() {
+                    break;
+                }
+                value = *inner;
+            }
             let boxed = ir.add_expr(IrExpr::TypeOp {
                 op: crate::ir::IrTypeOp::ImplicitCoercion,
                 arg: value,
@@ -1047,9 +1124,10 @@ fn realize_class(
         }
     }
     become_invoke(ir, fid, class, captures.len(), result);
-    if origin.default.is_some() && site.function_type.mentions_ty_param() {
-        // The class captures the inline declaration's type parameters; its specialized `invoke`
-        // does not redeclare them, but its method Signature still names those exact identities.
+    if (inline_default.is_some() || kotlin_lambda) && site.function_type.mentions_ty_param() {
+        // The class captures the enclosing declaration's type parameters; its specialized
+        // `invoke` does not redeclare them, but its method Signature still names those exact
+        // identities.
         ir.signatures.insert(
             fid,
             crate::ir::IrGenericSig {
@@ -1072,6 +1150,37 @@ fn realize_class(
         ir.fn_decl_lines.insert(fid, line);
     }
     replace_value(ir, site, fresh_instance);
+}
+
+/// Move every lifted declaration whose nearest enclosing lambda is `fid` into `fid`'s class.
+///
+/// The relation is selected from the stable lifting sequence and path, never from a generated
+/// method or class spelling. Calls already carry the selected `FunId`; only a class-static call's
+/// physical owner changes after its target moves.
+fn adopt_lifted_declarations(ir: &mut IrFile, fid: FunId, class: ClassId) {
+    let lifted_in_scope = |candidate: &crate::fir::FirLiftingSite, scope| {
+        candidate.lifted
+            && candidate.path[..candidate.path.len().saturating_sub(1)]
+                .iter()
+                .rev()
+                .find(|step| step.kind == crate::lifting_provenance::LiftingCallableKind::Lambda)
+                .is_some_and(|step| step.position == scope)
+    };
+    let Some((sequence, site)) = ir.lifted_functions.get(&fid) else {
+        return;
+    };
+    let Some(scope) = site.path.last().map(|step| step.position) else {
+        return;
+    };
+    let declared = ir
+        .lifted_functions
+        .iter()
+        .filter(|(&function, (other, candidate))| {
+            function != fid && other == sequence && lifted_in_scope(candidate, scope)
+        })
+        .map(|(&function, _)| function)
+        .collect::<Vec<_>>();
+    super::lifted_declaration_ownership::move_lifted_declarations_to_class(ir, class, &declared);
 }
 
 fn replace_value(ir: &mut IrFile, site: &Site, fresh_instance: bool) {
@@ -1117,17 +1226,25 @@ fn declare_class(
     site: &Site,
     signature: &crate::types::FnSig,
     captures: &[Capture],
-    origin: InlineOrigin,
+    role: ClassRole,
 ) -> ClassId {
-    let inline_default = origin.default;
+    let ClassRole {
+        default: inline_default,
+        scope: inline_scope,
+        kotlin_lambda,
+    } = role;
     let mut class = crate::ir::IrClass::synthetic(site.class);
-    class.superclass = crate::types::type_name("java/lang/Object");
+    class.superclass = crate::types::type_name(if kotlin_lambda.is_some() {
+        "kotlin/jvm/internal/Lambda"
+    } else {
+        "java/lang/Object"
+    });
     // The value is built by the inline function's `$default` stub, so that stub is the
     // enclosing method. A lambda nested in another lambda of an inline function is enclosed by that
     // lambda's `invoke`. A lambda the source names directly keeps its recorded scope.
     class.enclosure = inline_default
         .and_then(|context| context.direct_owner.or(context.parent_lambda))
-        .or(origin.scope.and_then(|scope| scope.parent_lambda))
+        .or(inline_scope.and_then(|scope| scope.parent_lambda))
         .map(crate::ir::IrEnclosure::Function)
         .or_else(|| ir.callable_reference_enclosures.get(&site.node).copied());
     class
@@ -1168,11 +1285,22 @@ fn declare_class(
         });
     }
     let inline_default_owner = inline_default.and_then(|context| context.direct_owner);
+    // A non-inline function's `$default` stub builds its default lambda too; it is the class's
+    // enclosing method like an inline default's.
+    let default_stub_owner = inline_default_owner.or_else(|| {
+        kotlin_lambda
+            .is_some()
+            .then(|| default_argument_owner(ir, fid))
+            .flatten()
+    });
+    if class.enclosure.is_none() {
+        class.enclosure = default_stub_owner.map(crate::ir::IrEnclosure::Function);
+    }
     // Whatever inline function the class is written in, a caller in another package may construct
     // it, so it is public on the JVM; only a non-private owner publishes it in the Kotlin ABI.
     let inline_owner = inline_default
         .map(|context| context.root_owner)
-        .or(origin.scope.map(|scope| scope.owner));
+        .or(inline_scope.map(|scope| scope.owner));
     let public_inline = inline_owner.is_some();
     let public_inline_abi = !ir.specialized_functions.contains_key(&fid)
         && inline_owner.is_some_and(|owner| !ir.method_visibility(owner).is_private());
@@ -1191,10 +1319,11 @@ fn declare_class(
         // Only a lambda the inline function itself declares; one nested in it is the outer
         // class's code, already mapped.
         inline_origin: inline_default_owner.is_some()
-            || origin.scope.is_some_and(|scope| scope.direct),
+            || inline_scope.is_some_and(|scope| scope.direct),
         requires_reification,
         extension_receiver_label,
         inline_default_owner,
+        default_stub_owner,
         invoke: fid,
         function_type: site.function_type,
         raw_supertype: raw_supertype(ir, fid, signature),
@@ -1221,7 +1350,9 @@ fn declare_class(
             .captured_receivers
             .clone(),
         lifting_root: super::lifted_names::lifting_root(ir, fid),
+        lifting_scope: super::lifted_names::lifting_scope(ir, fid),
         bridge: crate::ir::IrInvokeBridge::logical(signature.params.clone(), signature.ret),
+        kotlin_lambda,
     });
     ir.add_class(class)
 }
@@ -1382,6 +1513,7 @@ mod method_domain_tests {
             extension_receiver_label: None,
             inline_origin: false,
             inline_default_owner: None,
+            default_stub_owner: None,
             invoke: 3,
             function_type: Ty::fun(vec![], Ty::Unit),
             raw_supertype: false,
@@ -1389,7 +1521,9 @@ mod method_domain_tests {
             shared_capture_holders: vec![],
             captured_receivers: vec![],
             lifting_root: None,
+            lifting_scope: None,
             bridge: crate::ir::IrInvokeBridge::logical(vec![], Ty::Unit),
+            kotlin_lambda: None,
         });
         closure.methods = vec![3, 4];
         ir.classes.push(closure);

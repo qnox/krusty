@@ -1080,6 +1080,7 @@ impl MfnFlags {
     pub(super) const IS_ABSTRACT: u16 = 1 << 8;
     pub(super) const IS_FINAL: u16 = 1 << 9;
     pub(super) const IS_COMPANION_BLOCK_MEMBER: u16 = 1 << 10;
+    pub(super) const IS_SYNTHESIZED: u16 = 1 << 11;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -1138,6 +1139,10 @@ impl MfnFlags {
     #[inline]
     pub const fn with_is_companion_block_member(self, on: bool) -> Self {
         self.with(Self::IS_COMPANION_BLOCK_MEMBER, on)
+    }
+    #[inline]
+    pub const fn with_is_synthesized(self, on: bool) -> Self {
+        self.with(Self::IS_SYNTHESIZED, on)
     }
 }
 
@@ -1301,6 +1306,8 @@ pub struct KotlinMeta {
     /// `Class.flags.CLASS_KIND` is `COMPANION_OBJECT`. [`Self::class_kind`] folds it into `Object`;
     /// a declaration rendering still names the companion.
     pub is_companion_object: bool,
+    /// `Flags.IS_DATA` from the Kotlin `Class.flags` word: a `data class` or `data object`.
+    pub is_data: bool,
     /// `Class.type_parameter` and `Class.supertype`/`supertype_id`, decoded in source terms. These
     /// define the semantic class graph for a Kotlin class; the classfile's superclass/interfaces are
     /// only its JVM realization and must never be unioned into this list.
@@ -1353,6 +1360,7 @@ impl Default for KotlinMeta {
             class_kind: None,
             is_fun_interface: false,
             is_companion_object: false,
+            is_data: false,
             class_type_parameters: crate::types::TypeParameters::default(),
             class_supertypes: Vec::new(),
             class_functions: std::sync::Arc::from([]),
@@ -1544,6 +1552,7 @@ pub fn decode_metadata_within(
         class_kind: class_flags.map(class_identity::class_kind),
         is_fun_interface: class_flags.is_some_and(|flags| flags & (1u64 << 14) != 0),
         is_companion_object: class_flags.is_some_and(|flags| (flags >> 6) & 0x7 == 6),
+        is_data: class_flags.is_some_and(crate::metadata::semantic::class_is_data),
         class_type_parameters: crate::types::TypeParameters::new(
             class_type_params,
             class_type_param_bounds,
@@ -2179,6 +2188,7 @@ fn decode_functions(
                             .with_is_operator(pf.is_operator)
                             .with_is_infix(pf.is_infix)
                             .with_is_companion_block_member(pf.is_companion && !pf.has_receiver)
+                            .with_is_synthesized(pf.is_synthesized)
                             .with_has_reified_type_params(
                                 pf.type_params.iter().any(|parameter| parameter.reified),
                             ),

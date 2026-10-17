@@ -108,6 +108,18 @@ pub(super) fn emit_accessors(ir: &IrFile, class: &IrClass, owner: &str, cw: &mut
     }
 }
 
+/// The marker accessor of secondary constructor `secondary`, which takes a value class.
+pub(super) fn emit_secondary_marker_accessor(
+    ir: &IrFile,
+    class: &IrClass,
+    secondary: usize,
+    owner: &str,
+    cw: &mut ClassWriter,
+) {
+    let ordinal = u32::try_from(secondary + 1).expect("constructor ordinal fits in u32");
+    emit_accessor(ir, class, ordinal, owner, cw);
+}
+
 fn emit_accessor(ir: &IrFile, class: &IrClass, ordinal: u32, owner: &str, cw: &mut ClassWriter) {
     // An enum's constructors all take the constant's name and ordinal first, and so do their
     // accessors.

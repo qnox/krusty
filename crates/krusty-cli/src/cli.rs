@@ -677,8 +677,9 @@ Common options (kotlinc-compatible):
                         (legacy -Xjvm-default=all | all-compatibility)
   -Xno-param-assertions omit JVM entry guards for non-null parameters
   -Xno-call-assertions  omit JVM assertions on platform-typed call results
-  -Xlambdas=indy        emit lambdas through LambdaMetafactory (class is not supported)
-  -Xsam-conversions=indy emit SAM conversions through LambdaMetafactory
+  -Xlambdas=indy|class  emit lambdas through LambdaMetafactory, or as kotlin.jvm.internal.Lambda
+                        classes
+  -Xsam-conversions=indy|class emit SAM conversions through LambdaMetafactory or as classes
   -Xplugin=<jar>,<jar>  compiler plugins; kotlinx.serialization runs as krusty's native pass,
                         any other plugin is an error (krusty cannot run FIR/IR plugin jars)
   -P plugin:<id>:<key>=<value>
@@ -707,7 +708,11 @@ mod tests {
     /// one of them is a feature krusty does not model; every supported release has such a feature.
     #[test]
     fn progressive_is_refused_while_it_turns_on_an_unmodeled_feature() {
-        for release in ["2.4.0", "2.4.10", "2.4.20"] {
+        for (release, feature) in [
+            ("2.4.0", "ReportTypeVarianceConflictsInDnnAndFlexible"),
+            ("2.4.10", "ReportTypeVarianceConflictsInDnnAndFlexible"),
+            ("2.4.20", "ReportDeprecationsOfClassifiersInImplicitInvokes"),
+        ] {
             let o = parse_args(&[
                 &format!("-Xkotlin-reference-version={release}"),
                 "-progressive",
@@ -715,7 +720,7 @@ mod tests {
             ]);
             assert_eq!(
                 o.errors,
-                ["krusty does not implement the language feature 'ErrorAboutDataClassCopyVisibilityChange' selected by '-progressive'".to_string()],
+                [format!("krusty does not implement the language feature '{feature}' selected by '-progressive'")],
                 "kotlinc {release}"
             );
         }
