@@ -430,6 +430,11 @@ fn class_signature(formatter: &JvmSignatureFormatter, shape: &Shape, result: &st
         "L{SUSPEND_LAMBDA};L{}<",
         jvm_function_interface(shape.arity)
     );
+    if is_high_arity_function(shape.arity) {
+        signature.push_str(OBJECT_DESC);
+        signature.push_str(">;");
+        return signature;
+    }
     for parameter in &shape.parameters {
         signature.push_str(
             &formatter
@@ -698,13 +703,31 @@ fn emit_invoke(
 /// typed `invoke`'s recorded `FunctionN` values, erased.
 fn emit_bridge(ir: &IrFile, cw: &mut ClassWriter, shape: &Shape, lambda: &SuspendLambdaClass) {
     let descriptor = jvm_function_invoke_descriptor(shape.arity);
+    let high_arity = is_high_arity_function(shape.arity);
     cw.seed_utf8("invoke");
     cw.seed_utf8(&descriptor);
-    let locals_count = 1 + u16::from(shape.arity);
+    let locals_count = if high_arity {
+        2
+    } else {
+        1 + u16::from(shape.arity)
+    };
     let mut code = CodeBuilder::new(locals_count);
+    if high_arity {
+        super::function_reference_invoke::check_argument_count(
+            cw,
+            &mut code,
+            usize::from(shape.arity),
+        );
+    }
     code.aload(0);
     for (index, parameter) in shape.parameters.iter().enumerate() {
-        code.aload(1 + index as u16);
+        if high_arity {
+            super::function_reference_invoke::load_erased_function_argument(
+                cw, &mut code, true, index,
+            );
+        } else {
+            code.aload(1 + index as u16);
+        }
         if parameter.physical.is_jvm_scalar() {
             unbox_prim_from(
                 cw,
@@ -717,7 +740,16 @@ fn emit_bridge(ir: &IrFile, cw: &mut ClassWriter, shape: &Shape, lambda: &Suspen
             code.checkcast(class);
         }
     }
-    code.aload(locals_count - 1);
+    if high_arity {
+        super::function_reference_invoke::load_erased_function_argument(
+            cw,
+            &mut code,
+            true,
+            shape.parameters.len(),
+        );
+    } else {
+        code.aload(locals_count - 1);
+    }
     let continuation = cw.class_ref(CONTINUATION);
     code.checkcast(continuation);
     let argument_words: u16 = shape
@@ -729,21 +761,32 @@ fn emit_bridge(ir: &IrFile, cw: &mut ClassWriter, shape: &Shape, lambda: &Suspen
     let invoke = cw.methodref(&shape.class, "invoke", &shape.invoke_desc());
     code.invokevirtual(invoke, argument_words as i32, 1);
     code.areturn();
-    finish_code::<0x1041>(cw, "invoke", &descriptor, &mut code, locals_count);
-    let erased = vec![Ty::obj("java/lang/Object"); usize::from(shape.arity)];
-    let names = crate::jvm::parameter_names::suspend_lambda_member(
-        ir,
-        &lambda.member_parameters,
-        SuspendLambdaMember::Invoke,
-        &erased,
-    );
-    let locals = std::iter::once(("this".to_string(), shape.self_desc(), 0u16))
-        .chain(
-            names
-                .into_iter()
-                .zip(1u16..)
-                .map(|(name, slot)| (name, OBJECT_DESC.to_string(), slot)),
-        )
-        .collect::<Vec<_>>();
+    if high_arity {
+        finish_code::<0x1051>(cw, "invoke", &descriptor, &mut code, locals_count);
+    } else {
+        finish_code::<0x1041>(cw, "invoke", &descriptor, &mut code, locals_count);
+    }
+    let locals = if high_arity {
+        vec![
+            ("this".to_string(), shape.self_desc(), 0u16),
+            ("args".to_string(), "[Ljava/lang/Object;".to_string(), 1u16),
+        ]
+    } else {
+        let erased = vec![Ty::obj("java/lang/Object"); usize::from(shape.arity)];
+        let names = crate::jvm::parameter_names::suspend_lambda_member(
+            ir,
+            &lambda.member_parameters,
+            SuspendLambdaMember::Invoke,
+            &erased,
+        );
+        std::iter::once(("this".to_string(), shape.self_desc(), 0u16))
+            .chain(
+                names
+                    .into_iter()
+                    .zip(1u16..)
+                    .map(|(name, slot)| (name, OBJECT_DESC.to_string(), slot)),
+            )
+            .collect::<Vec<_>>()
+    };
     cw.set_method_debug("invoke", &descriptor, None, &locals);
 }

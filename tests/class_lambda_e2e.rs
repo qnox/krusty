@@ -36,6 +36,10 @@ fun useFloat(h: FloatHandler): Float = h.handle(1.5f)
 fun useLambda(f: (Int) -> Int): Int = f(3)
 fun useString(f: (String) -> Int): Int = f("hey")
 fun useTwo(a: (Int) -> Int, b: (Int) -> Int): Int = a(1) + b(2)
+fun useLocal(seed: Int): Int = useLambda { value ->
+    fun add(delta: Int): Int = value + seed + delta
+    add(4)
+}
 
 interface Defaulted { fun go(): Int = useLambda { it * 4 } }
 class Impl : Defaulted
@@ -83,10 +87,11 @@ fun box(): String {
     val viaClassInit = named.h() + named.q + named.member()
     val collide = Collide()
     val viaCollidingNames = collide.x() * 10 + collide.q
+    val viaLocal = useLocal(5)
     val ok = plain == 6 && closing == 13 && sam == 6 && text == 3 &&
         real == 3.0f && pair == 33 && viaDefault == 12 && viaBothConstructors == 14 &&
-        viaClassInit == 57 && viaCollidingNames == 12
-    return if (ok) "OK" else "fail: $plain $closing $sam $text $real $pair $viaDefault $viaBothConstructors $viaClassInit $viaCollidingNames"
+        viaClassInit == 57 && viaCollidingNames == 12 && viaLocal == 12
+    return if (ok) "OK" else "fail: $plain $closing $sam $text $real $pair $viaDefault $viaBothConstructors $viaClassInit $viaCollidingNames $viaLocal"
 }
 "#;
 
@@ -666,4 +671,155 @@ class Outer<T : CharSequence> {
 }
 "#;
     assert_class_lambda_invoke_matches_kotlinc(source, &["Outer$inner$1", "Outer$outer$1"]);
+}
+
+/// Compile `source` (file `B.kt`) with both compilers under `-Xlambdas=class` and require every
+/// class kotlinc writes to be byte-identical: the lambda classes extend `Lambda`, hold the body in
+/// their typed `invoke`, and the callers construct them.
+fn assert_class_mode_identical_to_kotlinc(source: &str) {
+    let work = common::scratch_dir().expect("allocate class-lambda byte fixture");
+    let source_path = work.join("B.kt");
+    std::fs::write(&source_path, source).expect("write fixture");
+    let krusty_output = work.join("krusty-out");
+    let reference_output = work.join("reference-out");
+    std::fs::create_dir_all(&krusty_output).expect("create krusty output");
+    std::fs::create_dir_all(&reference_output).expect("create kotlinc output");
+    let stdlib = common::stdlib_jar();
+    let krusty = std::process::Command::new(common::krusty_binary())
+        .args(["-d", krusty_output.to_str().expect("UTF-8 output")])
+        // This isolated byte fixture supplies its complete stdlib classpath and uses no
+        // reflection. Do not make its local run depend on a kotlin-reflect distribution jar.
+        .arg("-no-reflect")
+        .args(["-Xlambdas=class"])
+        .args(["-classpath", stdlib.to_str().expect("UTF-8 stdlib")])
+        .arg(&source_path)
+        .output()
+        .expect("run krusty");
+    assert!(
+        krusty.status.success(),
+        "krusty rejected the class-lambda byte fixture: {}",
+        String::from_utf8_lossy(&krusty.stderr)
+    );
+    let (code, stderr) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        reference_output.to_string_lossy().into_owned(),
+        "-Xlambdas=class".to_string(),
+        source_path.to_string_lossy().into_owned(),
+    ])
+    .expect("kotlinc");
+    assert_eq!(
+        code, 0,
+        "kotlinc rejected the class-lambda byte fixture: {stderr}"
+    );
+    let mut krusty_classes = Vec::new();
+    let mut reference_classes = Vec::new();
+    collect_classes(&krusty_output, &krusty_output, &mut krusty_classes);
+    collect_classes(&reference_output, &reference_output, &mut reference_classes);
+    krusty_classes.sort();
+    reference_classes.sort();
+    assert_eq!(
+        krusty_classes, reference_classes,
+        "class set differs from kotlinc"
+    );
+    let differing = reference_classes
+        .iter()
+        .filter(|name| {
+            let ours =
+                std::fs::read(krusty_output.join(format!("{name}.class"))).expect("read krusty");
+            let theirs = std::fs::read(reference_output.join(format!("{name}.class")))
+                .expect("read kotlinc");
+            ours != theirs
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let _ = std::fs::remove_dir_all(work);
+    assert_eq!(
+        differing,
+        Vec::<String>::new(),
+        "classes differ from kotlinc"
+    );
+}
+
+/// Each lambda shape becomes kotlinc's `Lambda` subclass: a singleton, captured values in final
+/// synthetic fields, a capture of the enclosing function's type parameter (`TT;`), a receiver
+/// lambda (its guard names `$this$<label>`), an anonymous function and a labeled return (whose
+/// unreachable tail interns nothing), lambdas nested in a lambda (the inner one encloses the outer
+/// class's `invoke`), and lambdas initializing object and class properties.
+const CLASS_LAMBDA_SHAPES: &str = r#"
+package p
+
+fun <T> go(f: () -> T): T = f()
+fun go2(f: (Int, String) -> Unit) = f(1, "a")
+fun goR(f: String.(Int) -> Unit) = "r".f(2)
+
+fun nested(x: Int): Int = go { go { x + 1 } }
+fun unitLambda() = go2 { a, b -> println("$a$b") }
+fun receiver() = goR { println(length + it) }
+fun <T> generic(t: T): () -> T = { t }
+val prop: (Int) -> Int = { it * 2 }
+class K {
+  val f: () -> String = { toString() }
+  fun m(s: String) = go { s + this }
+  companion object { val g = { 42 } }
+}
+object O { val h = { "o" } }
+fun local(): Int {
+  fun inner(y: Int) = go { y }
+  return inner(3)
+}
+fun stored(): List<() -> Int> = listOf({ 1 }, { 2 })
+fun nothing(): () -> Nothing = { throw IllegalStateException() }
+fun anon() = go(fun(): Int { return 5 })
+fun labeled() = go lbl@{ return@lbl 7 }
+"#;
+
+#[test]
+fn class_lambda_shapes_are_identical_to_kotlinc() {
+    assert_class_mode_identical_to_kotlinc(CLASS_LAMBDA_SHAPES);
+}
+
+/// A local function declared and called by the lambda belongs to the lambda class beside
+/// `invoke`; retaining it on the facade is both a byte mismatch and a private-owner access bug.
+#[test]
+fn class_lambda_owns_local_function_bytes_like_kotlinc() {
+    assert_class_mode_identical_to_kotlinc(
+        r#"
+fun use(f: (Int) -> Int): Int = f(3)
+fun local(seed: Int): Int = use { value ->
+    fun add(delta: Int): Int = value + seed + delta
+    add(4)
+}
+fun box(): String = if (local(5) == 12) "OK" else "fail"
+"#,
+    );
+}
+
+/// `FunctionN`'s packed `Object[]` bridge is a supported class representation, so arity 23 must
+/// take the same IR-owned class path as the numbered function interfaces.
+#[test]
+fn high_arity_class_lambda_bytes_match_kotlinc() {
+    assert_class_mode_identical_to_kotlinc(
+        r#"
+fun high(seed: Int): Any = {
+    p00: Int, p01: Int, p02: Int, p03: Int, p04: Int, p05: Int,
+    p06: Int, p07: Int, p08: Int, p09: Int, p10: Int, p11: Int,
+    p12: Int, p13: Int, p14: Int, p15: Int, p16: Int, p17: Int,
+    p18: Int, p19: Int, p20: Int, p21: Int, p22: Int ->
+    seed + p00 + p01 + p02 + p03 + p04 + p05 + p06 + p07 + p08 + p09 + p10 +
+        p11 + p12 + p13 + p14 + p15 + p16 + p17 + p18 + p19 + p20 + p21 + p22
+}
+"#,
+    );
+}
+
+/// A lambda copied into a `$default` body keeps one declaration-owned class and its exact
+/// enclosure instead of reaching the emitter's legacy class shim.
+#[test]
+fn default_argument_class_lambda_bytes_match_kotlinc() {
+    assert_class_mode_identical_to_kotlinc(
+        r#"
+fun use(seed: Int, f: () -> Int = { seed + 1 }): Int = f()
+fun box(): String = if (use(4) == 5) "OK" else "fail"
+"#,
+    );
 }

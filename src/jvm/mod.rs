@@ -55,6 +55,7 @@ pub mod java_stub;
 pub mod jvm_class_map;
 pub mod jvm_libraries;
 mod lambda_classes;
+mod lifted_declaration_ownership;
 mod lifted_names;
 mod local_class_names;
 mod local_delegate_accessors;

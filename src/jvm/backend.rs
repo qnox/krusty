@@ -77,8 +77,8 @@ pub(crate) struct BackendPassFacts {
     /// into its enclosing class. Lifted naming consumes this explicit placement fact so a nested
     /// callable keeps its moved parent's physical path.
     physical_top_lambda_ordinals: crate::jvm::lifted_names::PhysicalTopLambdaOrdinals,
-    /// The lifted names of the callables suspend lambdas declare, within their classes.
-    suspend_lambda_scoped_names: crate::jvm::lifted_names::SuspendLambdaScopedNames,
+    /// The lifted names of callables declared within realized lambda classes.
+    lambda_class_scoped_names: crate::jvm::lifted_names::LambdaClassScopedNames,
     lambda_methods: crate::jvm::lambda_classes::LambdaMethods,
     /// Checked property operations realized before representation passes. Companion hoisting
     /// reads it to attach a private accessor to the operation that moves into `<clinit>`.
@@ -344,7 +344,7 @@ fn run_backend_passes_after_plugins(
     // Every body of the file is lowered, so each lifting sequence is whole, and the value-class
     // pass has named the functions kotlinc names their lifted callables after: name those callables
     // before any pass renders a debug name from them.
-    facts.suspend_lambda_scoped_names = crate::jvm::lifted_names::number(
+    facts.lambda_class_scoped_names = crate::jvm::lifted_names::number(
         ir,
         &facts.local_delegate_access,
         &facts.physical_top_lambda_ordinals,
@@ -415,7 +415,7 @@ fn run_backend_passes_after_plugins(
     crate::jvm::lifted_names::realize(
         ir,
         &facts.override_results,
-        &facts.suspend_lambda_scoped_names,
+        &facts.lambda_class_scoped_names,
         &facts.emit_time_machines,
     );
     // After lifted names are fixed. The module suffix must not leak into `$lambda$N`: kotlinc
@@ -1272,7 +1272,7 @@ impl Backend for JvmBackend {
             &facade,
             &delegate_closures,
             current_source,
-            self.lambda_modes.lambdas == crate::jvm::ir_emit::LambdaMode::Indy,
+            self.lambda_modes.lambdas,
         ) {
             Ok(methods) => methods,
             Err(()) => {
