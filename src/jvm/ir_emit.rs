@@ -923,9 +923,19 @@ fn attach_synth_nullability(
             continue;
         };
         let (getter, setter) = accessor_jvm_names(c, &f.name);
-        cw.set_method_nullability(&getter, &format!("(){}", desc(f.ty)), Some(a), &[]);
+        // The accessor's own descriptor: an explicit backing field (`val x: Any? field: String`)
+        // stores a narrower type than the getter returns.
+        let accessor_desc = c
+            .properties
+            .iter()
+            .find(|property| property.backing_field == Some(index as u32))
+            .map_or_else(
+                || desc(f.ty),
+                |property| desc(declared_property_accessor_jvm(ir, property, f)),
+            );
+        cw.set_method_nullability(&getter, &format!("(){accessor_desc}"), Some(a), &[]);
         if !f.is_final() {
-            cw.set_method_nullability(&setter, &format!("({})V", desc(f.ty)), None, &[Some(a)]);
+            cw.set_method_nullability(&setter, &format!("({accessor_desc})V"), None, &[Some(a)]);
         }
     }
     // Data-class synthesized methods: `copy` returns the class (`@NotNull`), `toString` returns
