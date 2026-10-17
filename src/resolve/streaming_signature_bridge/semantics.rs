@@ -2415,43 +2415,19 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     ))
                     .collect::<Vec<_>>(),
             );
-            let (kinds, slots) =
-                Self::probe_call_arguments(&candidates, arguments, trailing_lambda)?;
-            let (selected, specialized_parameters) = resolver
-                .select_top_level_function_candidates(
-                    spelling,
-                    candidates.clone(),
-                    &kinds,
-                    &resolved_type_arguments,
-                )
-                .and_then(|(selected, _)| {
-                    let parameters = crate::symbol_resolver::specialized_function_params(
-                        &selected,
-                        &kinds,
-                        &resolved_type_arguments,
-                    );
-                    let value_parameters = parameters.get(selected.context_count..)?.to_vec();
-                    Some((selected, Some(value_parameters)))
-                })
-                .or_else(|| {
-                    let mut visible = candidates.iter().filter(|candidate| {
-                        candidate.kind == crate::libraries::FnKind::TopLevel
-                            && resolver.non_member_callable_accessible(candidate)
-                    });
-                    let selected = visible.next()?.clone();
-                    visible.next().is_none().then(|| {
-                        let parameters = crate::symbol_resolver::specialized_function_params(
-                            &selected,
-                            &kinds,
-                            &resolved_type_arguments,
-                        );
-                        let value_parameters = parameters
-                            .get(selected.context_count..)
-                            .unwrap_or_default()
-                            .to_vec();
-                        (selected, Some(value_parameters))
-                    })
-                })?;
+            let MappedTopLevelSelection {
+                selected,
+                value_parameters: mut specialized_parameters,
+                kinds,
+                slots,
+            } = Self::select_mapped_top_level_candidate(
+                resolver,
+                spelling,
+                &candidates,
+                arguments,
+                trailing_lambda,
+                &resolved_type_arguments,
+            )?;
             Some({
                 // `select_symbol` has already run the ordinary top-level generic inference
                 // engine. Its callable parameters are the selected declaration's value
@@ -2459,8 +2435,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 // arguments instead of rebuilding inference in the signature graph. The
                 // unique-candidate branch is only a provisional shape used when postponed
                 // arguments prevent applicability from being decided yet.
-                let mut specialized_parameters = specialized_parameters
-                    .unwrap_or_else(|| selected.semantic_params().into_owned());
                 if let Some(generic) = selected.generic_sig.as_ref() {
                     let mut bindings = crate::symbol_resolver::seeded_gsig_binds(
                         generic,

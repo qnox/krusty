@@ -663,6 +663,8 @@ mod deep_nested_type_e2e;
 mod default_args_member_e2e;
 #[path = "default_args_synthetic_e2e.rs"]
 mod default_args_synthetic_e2e;
+#[path = "default_argument_overload_tie_e2e.rs"]
+mod default_argument_overload_tie_e2e;
 #[path = "default_constructor_header_pool_e2e.rs"]
 mod default_constructor_header_pool_e2e;
 #[path = "default_import_resolution_e2e.rs"]
