@@ -2316,7 +2316,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   typed `invoke`, and before the erased bridge, local functions first, then lambdas with each nested
   lambda before its enclosing one. A lambda an inline call splices is no closure and stays in the
   body. The names apply only to a lambda realized as its class; one that keeps the lifted-function
-  path keeps the names it had (`tests/suspend_lambda_nested_declarations_e2e.rs`).
+  path keeps the names it had (`tests/suspend_lambda_nested_declarations_e2e.rs`). Calls to a
+  local function of a class member's suspend lambda were lowered as static calls on the member's
+  class; they follow the function into the lambda class, so the member's class gets no
+  `access$invokeSuspend$twice` bridge to a method it does not have
+  (`tests/suspend_lambda_local_function_e2e.rs`).
 - **Internal instance members are public and named `name$<module>`.** An `internal` method or
   property accessor is `ACC_PUBLIC` in bytecode, with `$` and the compilation's module name
   appended. The module is sanitized by keeping letters, digits, and `_` and turning every other
