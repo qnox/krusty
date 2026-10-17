@@ -2694,9 +2694,17 @@ impl IrTypeParameter {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct IrTypeAliasFormal {
+    /// Name written by the source declaration and emitted in Kotlin metadata.
+    pub source_name: String,
+    /// Stable semantic identity carried by every resolved occurrence in the expansion.
+    pub semantic_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct IrTypeAlias {
     pub name: String,
-    pub formals: Vec<String>,
+    pub formals: Vec<IrTypeAliasFormal>,
     pub expansion: Ty,
     pub visibility: crate::types::Visibility,
     pub expansion_spelling: crate::spelling::Spelled,

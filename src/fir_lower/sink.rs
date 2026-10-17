@@ -936,12 +936,16 @@ impl<'a> CommonIrBodySink<'a> {
                     let Some(parameter) = index.type_parameter(alias, ordinal) else {
                         break;
                     };
-                    formals.push(
-                        index
+                    formals.push(crate::ir::IrTypeAliasFormal {
+                        source_name: index
                             .type_parameter_name(parameter)
                             .ok_or(FirFileLoweringFailure::UnsupportedCallableOwner(alias))?
                             .to_owned(),
-                    );
+                        semantic_name: index
+                            .type_parameter_semantic_name(parameter)
+                            .ok_or(FirFileLoweringFailure::UnsupportedCallableOwner(alias))?
+                            .to_owned(),
+                    });
                 }
                 type_aliases.push(crate::ir::IrTypeAlias {
                     name,
