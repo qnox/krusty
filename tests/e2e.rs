@@ -1683,6 +1683,8 @@ mod same_module_inline_frame_markers_e2e;
 mod serialization_explicit_companion_e2e;
 #[path = "setter_return_line_e2e.rs"]
 mod setter_return_line_e2e;
+#[path = "signature_postponed_candidates_e2e.rs"]
+mod signature_postponed_candidates_e2e;
 #[path = "source_map_annotation_parts_e2e.rs"]
 mod source_map_annotation_parts_e2e;
 #[path = "special_collection_bridge_e2e.rs"]
