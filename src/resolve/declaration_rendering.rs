@@ -143,7 +143,11 @@ pub(super) fn declared_member(source: &dyn SymbolSource, member: &LibraryMember)
 
 /// A selected constructor as its classifier declares it. Selection specializes `params` and
 /// `ret`; the declaration-owned generic signature retains the source type parameters and result.
-pub(super) fn declared_constructor(source: &dyn SymbolSource, member: &LibraryMember) -> String {
+pub(super) fn declared_constructor(
+    source: &dyn SymbolSource,
+    owner: TypeName,
+    member: &LibraryMember,
+) -> String {
     let signature = member
         .generic_sig
         .clone()
@@ -152,7 +156,7 @@ pub(super) fn declared_constructor(source: &dyn SymbolSource, member: &LibraryMe
             formal_bounds: Vec::new(),
             receiver: None,
             params: member.params.clone(),
-            ret: member.ret,
+            ret: Ty::obj_name(owner),
             return_policy: crate::libraries::GenericReturnPolicy::Exact,
         });
     let type_parameters = type_parameters_display(

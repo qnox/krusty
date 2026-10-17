@@ -121,7 +121,7 @@ pub(in crate::resolve) fn constructor_message(
     };
     format!(
         "cannot access '{}': it is {visibility} in '{}'.",
-        super::super::declaration_rendering::declared_constructor(source, member),
+        super::super::declaration_rendering::declared_constructor(source, owner, member),
         owner_display(owner),
     )
 }
