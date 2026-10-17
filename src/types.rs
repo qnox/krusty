@@ -1541,7 +1541,7 @@ impl Ty {
         context: &[Ty],
         type_parameter: &dyn Fn(&str) -> String,
     ) -> String {
-        self.source_name_with_classifier_in(context, type_parameter, &|_| None)
+        self.source_name_with_classifier_in(context, type_parameter, &|_| None, &|lower| lower)
     }
 
     /// Render one type for a diagnostic while allowing the frontend to replace an opaque semantic
@@ -1552,7 +1552,29 @@ impl Ty {
         context: &[Ty],
         type_parameter: &dyn Fn(&str) -> String,
         classifier: &dyn Fn(TypeName) -> Option<String>,
+        platform_upper_bound: &dyn Fn(Ty) -> Ty,
     ) -> String {
+        let render = |ty: Ty| {
+            ty.source_name_with_classifier_in(
+                context,
+                type_parameter,
+                classifier,
+                platform_upper_bound,
+            )
+        };
+        // The occurrence mark belongs to the parameter name, before kotlinc's owner suffix:
+        // `E? (of fun <E> f)`, not `E (of fun <E> f)?`.
+        let marked_parameter = |inner: Ty, mark: &str| match inner {
+            Ty::TyParam(name, _) => {
+                let rendered = type_parameter(name);
+                let source = type_parameter_source_name(name);
+                Some(match rendered.strip_prefix(source) {
+                    Some(owner) => format!("{source}{mark}{owner}"),
+                    None => format!("{rendered}{mark}"),
+                })
+            }
+            _ => None,
+        };
         match self {
             Ty::Int => "Int".to_string(),
             Ty::Byte => "Byte".to_string(),
@@ -1585,13 +1607,7 @@ impl Ty {
                 } else {
                     let arguments = args
                         .iter()
-                        .map(|argument| {
-                            argument.source_name_with_classifier_in(
-                                context,
-                                type_parameter,
-                                classifier,
-                            )
-                        })
+                        .map(|argument| render(*argument))
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!("{base}<{arguments}>")
@@ -1604,68 +1620,39 @@ impl Ty {
                 let parameters = signature
                     .params
                     .iter()
-                    .map(|parameter| {
-                        parameter.source_name_with_classifier_in(
-                            context,
-                            type_parameter,
-                            classifier,
-                        )
-                    })
+                    .map(|parameter| render(*parameter))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let suspend = if signature.suspend { "suspend " } else { "" };
-                format!(
-                    "{suspend}({parameters}) -> {}",
-                    signature.ret.source_name_with_classifier_in(
-                        context,
-                        type_parameter,
-                        classifier
-                    )
-                )
+                format!("{suspend}({parameters}) -> {}", render(signature.ret))
             }
-            Ty::Nullable(inner) => intersection::spell_nullable(
-                *inner,
-                |ty| ty.source_name_with_classifier_in(context, type_parameter, classifier),
-                true,
-            ),
-            Ty::PlatformNullable(inner) => {
-                format!(
-                    "{}!",
-                    inner.source_name_with_classifier_in(context, type_parameter, classifier)
-                )
-            }
+            Ty::Nullable(inner) => marked_parameter(*inner, "?")
+                .unwrap_or_else(|| intersection::spell_nullable(*inner, render, true)),
+            Ty::PlatformNullable(inner) => marked_parameter(*inner, "!").unwrap_or_else(|| {
+                let upper = platform_upper_bound(*inner);
+                if upper == *inner {
+                    format!("{}!", render(*inner))
+                } else {
+                    format!("(Mutable){}!", render(upper))
+                }
+            }),
             Ty::InProjection(inner) => match *inner {
-                Ty::OutProjection(conflicting) => format!(
-                    "CONFLICTING-PROJECTION {}",
-                    conflicting
-                        .source_name_with_classifier_in(context, type_parameter, classifier,)
-                ),
-                _ => format!(
-                    "in {}",
-                    inner.source_name_with_classifier_in(context, type_parameter, classifier)
-                ),
+                Ty::OutProjection(conflicting) => {
+                    format!("CONFLICTING-PROJECTION {}", render(*conflicting))
+                }
+                _ => format!("in {}", render(*inner)),
             },
             Ty::OutProjection(inner) => match *inner {
-                Ty::InProjection(conflicting) => format!(
-                    "CONFLICTING-PROJECTION {}",
-                    conflicting
-                        .source_name_with_classifier_in(context, type_parameter, classifier,)
-                ),
-                _ => format!(
-                    "out {}",
-                    inner.source_name_with_classifier_in(context, type_parameter, classifier)
-                ),
+                Ty::InProjection(conflicting) => {
+                    format!("CONFLICTING-PROJECTION {}", render(*conflicting))
+                }
+                _ => format!("out {}", render(*inner)),
             },
             Ty::StarProjection(_) => "*".to_string(),
-            Ty::DefinitelyNotNull(inner) => format!(
-                "{} & Any",
-                inner.source_name_with_classifier_in(context, type_parameter, classifier)
-            ),
+            Ty::DefinitelyNotNull(inner) => format!("{} & Any", render(*inner)),
             Ty::Intersection(parts) => parts
                 .iter()
-                .map(|part| {
-                    part.source_name_with_classifier_in(context, type_parameter, classifier)
-                })
+                .map(|part| render(*part))
                 .collect::<Vec<_>>()
                 .join(" & "),
             Ty::TyParam(n, _) => type_parameter(n),

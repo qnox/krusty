@@ -170,7 +170,9 @@ mod operator_calls;
 mod operator_declarations;
 mod opt_in_usage;
 use operator_calls::{range_operator, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess};
+mod declaration_publication;
 mod enhanced_values;
+use declaration_publication::inferred_declaration_ty;
 mod overload_diagnostics;
 mod override_plans;
 mod parameter_defaults;
@@ -770,66 +772,7 @@ pub struct Signature {
     pub plugin_expression: Option<crate::libraries::PluginExpressionDeclaration>,
 }
 
-/// A literal `null` is an expression-only sentinel. Once inference publishes it as a declaration
-/// type, Kotlin's semantic type is the nullable bottom type `Nothing?`.
-fn inferred_declaration_ty(ty: Ty) -> Ty {
-    if ty == Ty::Null {
-        Ty::nullable(Ty::Nothing)
-    } else {
-        ty
-    }
-}
-
 impl Signature {
-    fn set_inferred_return(&mut self, ret: Ty) -> bool {
-        let ret = inferred_declaration_ty(ret);
-        // Collection can recover an exact symbolic return directly from the declaration (for
-        // example `fun <T> use(f: () -> T) = f()`). A later body pass may observe only that value's
-        // erased bound. Update the physical/checking return, but never replace a declaration-backed
-        // symbolic result with its erasure. A newly inferred symbolic shape (`List<T>`) still replaces
-        // a non-symbolic collection placeholder.
-        let inferred_generic_ret = self.generic_sig.as_ref().map(|generic| {
-            let declaration_bindings = generic
-                .formals
-                .iter()
-                .enumerate()
-                .map(|(index, formal)| {
-                    (
-                        crate::types::type_parameter_source_name(formal).to_string(),
-                        Ty::ty_param(
-                            formal,
-                            generic
-                                .formal_bounds
-                                .get(index)
-                                .and_then(|bounds| bounds.first())
-                                .copied()
-                                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
-                        ),
-                    )
-                })
-                .collect::<HashMap<_, _>>();
-            let ret = crate::symbol_resolver::ty_subst_keep_unbound(ret, &declaration_bindings);
-            if ty_mentions_param(generic.ret, &generic.formals)
-                && !ty_mentions_param(ret, &generic.formals)
-            {
-                generic.ret
-            } else {
-                ret
-            }
-        });
-        let changed = self.ret != ret
-            || self
-                .generic_sig
-                .as_ref()
-                .zip(inferred_generic_ret)
-                .is_some_and(|(generic, inferred)| generic.ret != inferred);
-        self.ret = ret;
-        if let Some((generic, inferred)) = self.generic_sig.as_mut().zip(inferred_generic_ret) {
-            generic.ret = inferred;
-        }
-        changed
-    }
-
     #[inline]
     pub fn vararg(&self) -> bool {
         self.flags.has(SigFlags::VARARG)
@@ -7535,6 +7478,9 @@ pub struct TypeInfo {
     /// Pass 2. `SourceMember` embeds parser-arena coordinates, so a reparsed unit must never use it
     /// to join against a candidate collected in Pass 1.
     pub(crate) checked_declaration_results: HashMap<crate::fir::DeclarationId, Ty>,
+    /// Provider-normalized metadata facts for inferred declaration results, keyed by their stable
+    /// identities. The metadata handoff consumes this contract without reopening source bodies.
+    inferred_declaration_publications: declaration_publication::InferredDeclarationPublications,
     /// Direct source supertypes of a body-local classifier, checked on the classifier's exact
     /// lexical Pass-2 rung and kept parallel to `ClassDecl::supertypes`. Local interface
     /// delegation publication consumes this stable-identity map immediately; neither syntax nor a
@@ -32964,6 +32910,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         inferred_method_rets: HashMap::default(),
         inferred_source_member_rets: HashMap::default(),
         inferred_stable_declaration_rets: HashMap::default(),
+        inferred_declaration_publications: Default::default(),
         inferred_member_ext_fun_rets: HashMap::default(),
         checked_local_properties: HashMap::default(),
         checked_local_methods: HashMap::default(),
@@ -34446,6 +34393,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         inferred_method_rets,
         inferred_source_member_rets,
         inferred_stable_declaration_rets,
+        inferred_declaration_publications,
         inferred_member_ext_fun_rets,
         checked_local_properties: _,
         checked_local_methods: _,
@@ -34775,6 +34723,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         explicit_backing_field_types,
         checked_source_member_results: inferred_source_member_rets,
         checked_declaration_results: inferred_stable_declaration_rets,
+        inferred_declaration_publications,
         checked_local_supertypes,
         resolved_call_type_args,
         resolved_call_type_argument_bounds,
@@ -35559,6 +35508,7 @@ struct Checker<'a> {
     inferred_method_rets: HashMap<(TypeName, String, Vec<Ty>), Ty>,
     inferred_source_member_rets: HashMap<crate::libraries::SourceMember, Ty>,
     inferred_stable_declaration_rets: HashMap<crate::fir::DeclarationId, Ty>,
+    inferred_declaration_publications: declaration_publication::InferredDeclarationPublications,
     inferred_member_ext_fun_rets: HashMap<(TypeName, String, Ty, Vec<Ty>), Ty>,
     /// Final property declarations discovered while checking one bounded ordinary body. The
     /// finalized module provider is immutable during that check, so later expressions in the same
@@ -47626,6 +47576,11 @@ impl<'a> Checker<'a> {
                 self.check_fun_body(scope, f);
             }
         }
+        if !self.signature_defaults_only && check_ordinary_body && f.ret.is_none() {
+            if let (Some(declaration), FunBody::Expr(body)) = (stable_declaration, &f.body) {
+                self.record_inferred_declaration_publication(declaration, *body, self.ret_ty);
+            }
+        }
         if infer_ret {
             self.check_operator_declaration(
                 f,
@@ -48046,6 +48001,13 @@ impl<'a> Checker<'a> {
             };
             if p.declared_ty().is_none() {
                 self.report_unbound_call_result_type_parameter(scope, init);
+                if let Some(declaration) = stable_property {
+                    self.record_inferred_property_publication(
+                        declaration,
+                        init,
+                        resolved_property_ty,
+                    );
+                }
             }
             if let Some(declared) = declared {
                 if p.declared_ty().is_some() {
@@ -51203,7 +51165,15 @@ impl<'a> Checker<'a> {
                             (None, None) => self.expr(&initializer_scope, init),
                         };
                         if declared.is_none() && it != Ty::Error {
-                            body_inferred_property_type = Some(inferred_declaration_ty(it));
+                            let inferred = inferred_declaration_ty(it);
+                            if let Some(declaration) = stable_property {
+                                self.record_inferred_property_publication(
+                                    declaration,
+                                    init,
+                                    inferred,
+                                );
+                            }
+                            body_inferred_property_type = Some(inferred);
                         }
                         if bp.declared_ty().is_none() {
                             self.report_unbound_call_result_type_parameter(
@@ -52045,6 +52015,11 @@ impl<'a> Checker<'a> {
                 }
             } else {
                 self.check_fun_body(scope, f);
+            }
+        }
+        if (!self.signature_defaults_only || default_owned_method) && f.ret.is_none() {
+            if let (Some(declaration), FunBody::Expr(body)) = (stable_declaration, &f.body) {
+                self.record_inferred_declaration_publication(declaration, *body, self.ret_ty);
             }
         }
         if infer_ret {

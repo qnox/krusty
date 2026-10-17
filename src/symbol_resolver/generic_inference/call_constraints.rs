@@ -109,6 +109,7 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
                 );
             }
         }
+        let (shape, actual) = flexible_variable_argument(shape, actual).unwrap_or((shape, actual));
         collect_call_inference_constraints(
             source,
             shape,

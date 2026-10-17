@@ -2420,7 +2420,16 @@ impl<'a> SymbolResolver<'a> {
                     semantic
                         .params
                         .iter()
-                        .map(|parameter| ty_subst_keep_unbound(*parameter, &bindings))
+                        .map(|parameter| {
+                            instantiate_slot(
+                                &self.src,
+                                Some(&semantic),
+                                *parameter,
+                                &bindings,
+                                TypePosition::In,
+                                UnboundSpecialization::Preserve,
+                            )
+                        })
                         .collect(),
                     &o.call_sig.platform_nullable_params,
                     &arg_tys,
@@ -2561,10 +2570,24 @@ impl<'a> SymbolResolver<'a> {
                 if vararg && !gsig.params.is_empty() {
                     let fixed = gsig.params.len() - 1;
                     if let Some(inner) = gsig.params[fixed].array_read_elem() {
-                        vararg_elem = Some(ty_subst(inner, bindings));
+                        vararg_elem = Some(instantiate_slot(
+                            &self.src,
+                            Some(gsig),
+                            inner,
+                            bindings,
+                            TypePosition::In,
+                            UnboundSpecialization::UseUpperBound,
+                        ));
                     }
                 }
-                ty_subst(gsig.ret, bindings)
+                instantiate_slot(
+                    &self.src,
+                    Some(gsig),
+                    gsig.ret,
+                    bindings,
+                    TypePosition::Out,
+                    UnboundSpecialization::UseUpperBound,
+                )
             })
             .unwrap_or(*ret);
         // The signature owns post-substitution behavior, so every provider and callable origin

@@ -1329,6 +1329,8 @@ mod java_constructor_expected_type_e2e;
 mod java_ctor_sam_conversion_e2e;
 #[path = "java_flexible_collection_e2e.rs"]
 mod java_flexible_collection_e2e;
+#[path = "java_flexible_variable_inference_e2e.rs"]
+mod java_flexible_variable_inference_e2e;
 #[path = "java_fluent_setter_e2e.rs"]
 mod java_fluent_setter_e2e;
 #[path = "java_instance_e2e.rs"]
@@ -1345,6 +1347,8 @@ mod java_nested_static_e2e;
 mod java_not_null_null_argument_e2e;
 #[path = "java_parameters_attribute_e2e.rs"]
 mod java_parameters_attribute_e2e;
+#[path = "java_platform_type_publication_e2e.rs"]
+mod java_platform_type_publication_e2e;
 #[path = "java_source_interop_e2e.rs"]
 mod java_source_interop_e2e;
 mod java_static_modules;

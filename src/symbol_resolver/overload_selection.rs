@@ -1178,12 +1178,28 @@ pub(super) fn indexed_call_shape(
     }
     let params = signature.params[value_start..]
         .iter()
-        .map(|parameter| ty_subst_keep_unbound(*parameter, &bindings))
+        .map(|parameter| {
+            instantiate_slot(
+                source,
+                Some(&signature),
+                *parameter,
+                &bindings,
+                TypePosition::In,
+                UnboundSpecialization::Preserve,
+            )
+        })
         .collect::<Vec<_>>();
     let inferred_ret = if overload.is_extension() {
         specialize_signature_output_type(source, signature.ret, &bindings)
     } else {
-        ty_subst_keep_unbound(signature.ret, &bindings)
+        instantiate_slot(
+            source,
+            Some(&signature),
+            signature.ret,
+            &bindings,
+            TypePosition::Out,
+            UnboundSpecialization::Preserve,
+        )
     };
     let ret = if overload.is_extension() {
         specialized_extension_return(lib, overload, inferred_ret)

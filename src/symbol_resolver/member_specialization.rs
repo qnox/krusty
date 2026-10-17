@@ -236,9 +236,20 @@ fn specialize_member_type_with_unbound(
         Ty::Nullable(inner) => Ty::nullable(specialize_member_type_with_unbound(
             source, *inner, bindings, position, unbound,
         )),
-        Ty::PlatformNullable(inner) => Ty::platform_nullable(specialize_member_type_with_unbound(
-            source, *inner, bindings, position, unbound,
-        )),
+        Ty::PlatformNullable(inner) => {
+            let declared = *inner;
+            let specialized =
+                specialize_member_type_with_unbound(source, declared, bindings, position, unbound);
+            // A flexible variable is the interval `T..T?`. A nullable binding makes both faces
+            // identical and therefore produces that rigid nullable type; every other binding
+            // retains the flexible wrapper. This belongs to selected-slot instantiation, not the
+            // general type-substitution walk used by aliases, hierarchy projection, and bounds.
+            if matches!(declared, Ty::TyParam(..)) && specialized.is_nullable() {
+                specialized
+            } else {
+                Ty::platform_nullable(specialized)
+            }
+        }
         Ty::InProjection(inner) => Ty::in_projection(specialize_member_type_with_unbound(
             source,
             *inner,
@@ -324,6 +335,7 @@ pub(crate) fn instantiate_slot(
     if !bindings
         .values()
         .any(|binding| binding.projection_inner().is_some())
+        && !contains_flexible_variable(ty)
     {
         return match unbound {
             UnboundSpecialization::Preserve => ty_subst_keep_unbound(ty, bindings),
@@ -344,6 +356,30 @@ pub(crate) fn instantiate_slot(
         }
     });
     specialize_member_type_with_unbound(source, ty, bindings, position, unbound)
+}
+
+fn contains_flexible_variable(ty: Ty) -> bool {
+    match ty {
+        Ty::PlatformNullable(inner) if matches!(*inner, Ty::TyParam(..)) => true,
+        Ty::DefinitelyNotNull(inner)
+        | Ty::Nullable(inner)
+        | Ty::PlatformNullable(inner)
+        | Ty::InProjection(inner)
+        | Ty::OutProjection(inner)
+        | Ty::StarProjection(inner) => contains_flexible_variable(*inner),
+        Ty::Obj(_, arguments) | Ty::Intersection(arguments) => {
+            arguments.iter().copied().any(contains_flexible_variable)
+        }
+        Ty::Fun(signature) => {
+            signature
+                .params
+                .iter()
+                .copied()
+                .any(contains_flexible_variable)
+                || contains_flexible_variable(signature.ret)
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn specialize_signature_input_type(
@@ -639,7 +675,10 @@ pub(super) fn specialize_call_sig(
 
 #[cfg(test)]
 mod projected_member_view_tests {
-    use super::{member_slots_are_applied, specialize_member_type, GSigBinds, TypePosition};
+    use super::{
+        instantiate_slot, member_slots_are_applied, specialize_member_type, GSigBinds,
+        TypePosition, UnboundSpecialization,
+    };
     use crate::libraries::LibraryType;
     use crate::symbol_source::SymbolSource;
     use crate::types::{type_name, Ty, TypeName};
@@ -714,5 +753,34 @@ mod projected_member_view_tests {
             provider_t,
             &provider_formals
         ));
+    }
+
+    #[test]
+    fn flexible_variable_instantiation_collapses_only_a_nullable_binding() {
+        let variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
+        let flexible = Ty::platform_nullable(variable);
+
+        assert_eq!(
+            instantiate_slot(
+                &Source,
+                None,
+                flexible,
+                &bindings(Ty::nullable(Ty::String)),
+                TypePosition::Out,
+                UnboundSpecialization::Preserve,
+            ),
+            Ty::nullable(Ty::String)
+        );
+        assert_eq!(
+            instantiate_slot(
+                &Source,
+                None,
+                flexible,
+                &bindings(Ty::String),
+                TypePosition::Out,
+                UnboundSpecialization::Preserve,
+            ),
+            Ty::platform_nullable(Ty::String)
+        );
     }
 }
