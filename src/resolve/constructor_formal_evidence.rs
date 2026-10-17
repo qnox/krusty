@@ -241,6 +241,12 @@ impl Checker<'_> {
         self.report_constructor_evidence(call, evidence)
     }
 
+    /// Consume evidence at a completion boundary whose enclosing value has already selected the
+    /// diagnostic. A nested constructor must not report again or survive as a stale sidecar entry.
+    pub(super) fn discard_constructor_evidence(&mut self, call: ExprId) {
+        self.constructor_formal_evidence.remove(&call);
+    }
+
     fn report_constructor_evidence(&mut self, call: ExprId, evidence: CallEvidence) -> bool {
         let Some((formal, _)) = evidence
             .formals

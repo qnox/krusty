@@ -169,8 +169,12 @@ impl Checker<'_> {
                         ty
                     });
                     self.join_constructor_branches(scope, [(then_branch, tt), (eb, et)]);
-                    self.report_unbound_conditional_branch(scope, then_branch);
-                    self.report_unbound_conditional_branch(scope, eb);
+                    self.report_unbound_conditional_branch(
+                        scope,
+                        then_branch,
+                        !wanted.value_required,
+                    );
+                    self.report_unbound_conditional_branch(scope, eb, !wanted.value_required);
                     self.publish_joined_local_flow(
                         scope,
                         &locals,
@@ -197,7 +201,11 @@ impl Checker<'_> {
                     )
                 }
                 None => {
-                    self.report_unbound_conditional_branch(scope, then_branch);
+                    self.report_unbound_conditional_branch(
+                        scope,
+                        then_branch,
+                        !wanted.value_required,
+                    );
                     let (false_reads, false_intersections) =
                         self.implicit_false_edge_state(scope, cond, &locals, &entry_reads);
                     let else_exit = control_flow_join::LocalFlowExit {

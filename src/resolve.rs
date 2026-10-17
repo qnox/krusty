@@ -57989,8 +57989,8 @@ impl<'a> Checker<'a> {
             let rt = self.rebind_conditional_branch(rhs, lt, rt, fixed, |c, exp| {
                 c.expr_expected(&rhs_scope, rhs, exp)
             });
-            self.report_unbound_conditional_branch(scope, lhs);
-            self.report_unbound_conditional_branch(scope, rhs);
+            self.report_unbound_conditional_branch(scope, lhs, false);
+            self.report_unbound_conditional_branch(scope, rhs, false);
             // The elvis value when lhs is non-null: a nullable-primitive lhs (`Int?`) unwraps to its
             // unboxed primitive, while an ordinary nullable reference `T?` unwraps to `T`.
             crate::trace_compiler!(
@@ -60731,7 +60731,7 @@ impl<'a> Checker<'a> {
                 arm_results.iter().map(|record| (record.body, record.ty)),
             );
             for record in &arm_results {
-                self.report_unbound_conditional_branch(scope, record.body);
+                self.report_unbound_conditional_branch(scope, record.body, !value_required);
             }
             let result = conditional_branch::join_results(
                 self,

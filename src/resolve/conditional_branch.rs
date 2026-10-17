@@ -263,15 +263,17 @@ impl Checker<'_> {
         &mut self,
         scope: &CheckerScope<'_>,
         branch: ExprId,
+        complete_constructor: bool,
     ) {
         if self.postponed_argument_depth != 0 {
             return;
         }
-        let discarded = self.discarded_exprs.contains(&branch);
         let branch = branch_value_expression(self.file, branch);
         let Some(signature) = self.unbound_call_result_signature(branch).cloned() else {
-            if discarded {
+            if complete_constructor {
                 self.report_uninferred_constructor_type_parameter(branch);
+            } else {
+                self.discard_constructor_evidence(branch);
             }
             return;
         };
