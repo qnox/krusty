@@ -727,6 +727,7 @@ mod tests {
             annotation_targets: None,
             mapped_collection: None,
             annotation_element_defaults: Vec::new(),
+            deprecation: None,
         }
     }
 

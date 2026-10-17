@@ -7848,6 +7848,7 @@ pub enum ResolvedCall {
         physical_ret: Ty,
         /// Selected callable capabilities, on the semantic target so later consumers ask whether this
         /// exact call suspends or splices without a lookup or an origin branch.
+        deprecation: Option<std::sync::Arc<crate::types::DeprecatedDeclaration>>,
         inline: InlineKind,
         inline_body_plan: Option<Box<crate::libraries::InlineBodyPlan>>,
         /// Exact declaration type-parameter ordinals carrying `reified`, retained independently of
@@ -24481,6 +24482,7 @@ val result = object { fun value(): String = captured }
             annotation_targets: None,
             mapped_collection: None,
             annotation_element_defaults: Vec::new(),
+            deprecation: None,
         }
     }
 
@@ -27245,6 +27247,7 @@ fun box(): String {
                     annotation_targets: None,
                     mapped_collection: None,
                     annotation_element_defaults: Vec::new(),
+                    deprecation: None,
                 }));
             }
             [
@@ -27380,6 +27383,7 @@ fun box(): String {
                     annotation_targets: None,
                     mapped_collection: None,
                     annotation_element_defaults: Vec::new(),
+                    deprecation: None,
                 })
             })
         }
@@ -35162,6 +35166,7 @@ pub(crate) struct MemberExtensionFunctionCandidate {
     argument_parameters: Vec<(usize, usize)>,
     visibility: Visibility,
     is_operator: bool,
+    deprecation: Option<std::sync::Arc<crate::types::DeprecatedDeclaration>>,
     inline: InlineKind,
     inline_body_plan: Option<Box<crate::libraries::InlineBodyPlan>>,
     suspend: bool,
