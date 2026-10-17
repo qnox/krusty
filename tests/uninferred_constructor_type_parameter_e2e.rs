@@ -74,6 +74,40 @@ fn every_unconstrained_joined_branch_is_still_rejected() {
 }
 
 #[test]
+fn value_conditionals_complete_each_open_source_constructor_call() {
+    let main = "class D<T>(val n: Int)\n\
+        fun box(flag: Boolean): String {\n\
+            val fromIf = if (flag) D(1) else D(2)\n\
+            val fromWhen = when (flag) { true -> D(3); else -> D(4) }\n\
+            val fromElvis = null ?: D(5)\n\
+            val fromTry = try { D(6) } catch (ignored: Exception) { D(7) }\n\
+            return \"OK\"\n\
+        }\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", main)], &[]);
+    common::expect_identical_rejection(&result, "source conditional constructor completion");
+}
+
+#[test]
+fn value_conditionals_complete_each_open_dependency_constructor_call() {
+    let Some(classes) = common::compile_lib(
+        "uninferred_conditional_constructor_dependency",
+        "package lib\nclass D<T>(val n: Int)\n",
+    ) else {
+        return;
+    };
+    let main = "import lib.D\n\
+        fun box(flag: Boolean): String {\n\
+            val fromIf = if (flag) D(1) else D(2)\n\
+            val fromWhen = when (flag) { true -> D(3); else -> D(4) }\n\
+            val fromElvis = null ?: D(5)\n\
+            val fromTry = try { D(6) } catch (ignored: Exception) { D(7) }\n\
+            return \"OK\"\n\
+        }\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", main)], &[classes]);
+    common::expect_identical_rejection(&result, "dependency conditional constructor completion");
+}
+
+#[test]
 fn a_rejected_dependency_constructor_does_not_publish_inference_evidence() {
     let Some(classes) = common::compile_lib(
         "uninferred_private_constructor_dependency",

@@ -134,12 +134,11 @@ impl Checker<'_> {
         &mut self,
         scope: &CheckerScope<'_>,
         branch: ExprId,
-        expected: Option<Ty>,
-        value_required: bool,
+        wanted: Wanted,
         joined: bool,
     ) -> Ty {
-        if !joined || expected.is_some() || value_required {
-            return self.expr_result(scope, branch, expected, value_required);
+        if !joined || wanted.expected.is_some() || wanted.value_required {
+            return self.expr_result(scope, branch, wanted.expected, wanted.value_required);
         }
         self.discarded_exprs.insert(branch);
         let ty = self.expr_with_context(scope, branch, false);
@@ -227,6 +226,22 @@ impl Checker<'_> {
         }
     }
 
+    /// Whether a conditional branch's selected constructor still owns an open classifier formal.
+    ///
+    /// A completed upper bound is only the call's provisional result. In particular it must not be
+    /// fed into an elvis sibling as though it were a constraint supplied by source.
+    pub(super) fn constructor_branch_is_open(&self, branch: ExprId) -> bool {
+        let call = conditional_branch::branch_value_expression(self.file, branch);
+        self.constructor_formal_evidence
+            .get(&call)
+            .is_some_and(|evidence| {
+                evidence
+                    .formals
+                    .iter()
+                    .any(|(_, evidence)| *evidence == ConstructorFormalEvidence::Unconstrained)
+            })
+    }
+
     /// Report a completed constructor call whose class type parameter nothing constrained. kotlinc
     /// reports `cannot infer type for type parameter` for `C(1)` with
     /// `class C<T : Comparable<T>>(val n: Int)`. A self type is completed instead (see
@@ -239,12 +254,6 @@ impl Checker<'_> {
             return false;
         };
         self.report_constructor_evidence(call, evidence)
-    }
-
-    /// Consume evidence at a completion boundary whose enclosing value has already selected the
-    /// diagnostic. A nested constructor must not report again or survive as a stale sidecar entry.
-    pub(super) fn discard_constructor_evidence(&mut self, call: ExprId) {
-        self.constructor_formal_evidence.remove(&call);
     }
 
     fn report_constructor_evidence(&mut self, call: ExprId, evidence: CallEvidence) -> bool {

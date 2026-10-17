@@ -256,6 +256,24 @@ impl Checker<'_> {
             .then_some(signature)
     }
 
+    /// Complete all selected result calls owned by one conditional expression.
+    ///
+    /// Sibling provenance is joined before any diagnostic consumes a call's retained constructor
+    /// evidence. The completion boundary is shared by value and statement positions; an enclosing
+    /// postponed argument keeps ownership because [`Self::report_unbound_conditional_branch`]
+    /// declines while that argument is still being probed.
+    pub(super) fn complete_conditional_branches(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        branches: impl IntoIterator<Item = (ExprId, Ty)>,
+    ) {
+        let branches = branches.into_iter().collect::<Vec<_>>();
+        self.join_constructor_branches(scope, branches.iter().copied());
+        for (branch, _) in branches {
+            self.report_unbound_conditional_branch(scope, branch);
+        }
+    }
+
     /// Report a conditional branch whose selected generic call remains symbolic after sibling
     /// rebinding. A call defaulted to its formal's bound has no symbolic remainder and is not
     /// diagnosed here.
@@ -263,18 +281,13 @@ impl Checker<'_> {
         &mut self,
         scope: &CheckerScope<'_>,
         branch: ExprId,
-        complete_constructor: bool,
     ) {
         if self.postponed_argument_depth != 0 {
             return;
         }
         let branch = branch_value_expression(self.file, branch);
         let Some(signature) = self.unbound_call_result_signature(branch).cloned() else {
-            if complete_constructor {
-                self.report_uninferred_constructor_type_parameter(branch);
-            } else {
-                self.discard_constructor_evidence(branch);
-            }
+            self.report_uninferred_constructor_type_parameter(branch);
             return;
         };
         let actual = self.expr_types[branch.0 as usize];

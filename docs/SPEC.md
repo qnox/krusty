@@ -9608,12 +9608,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor, never the selected parameters: those are already specialized, so `Seq(s)` for
   `class Seq<T : CharSequence>(val x: T)` with `s: CharSequence` would otherwise look unconstrained,
   and a named or defaulted argument (`Named(x = s)`) would be matched to the wrong parameter. A
-  branch of an `if` with an `else` or a `when` with an `else` arm defers the report until the branch
-  results are joined: kotlinc completes the conditional as one call, so a sibling branch can fix the
-  parameter (`else -> Buildee()` beside `build { setTypeVariable(TargetType()) }`, KT-60291). The
-  join reads the retained per-formal provenance, so a declared-bound fallback in one bare `D()` is
-  not mistaken for evidence that fixes another bare `D()`; when no arm constrains the formal, every
-  remaining open call is reported. A `when` without `else` is not joined and reports immediately.
+  branch of an `if` with an `else`, a `when` with an `else` arm, an elvis or a `try` defers the report
+  until the branch results are joined: kotlinc completes the conditional as one call, so a sibling
+  branch can fix the parameter (`else -> Buildee()` beside
+  `build { setTypeVariable(TargetType()) }`, KT-60291). The join reads the retained per-formal
+  provenance, so a declared-bound fallback in one bare `D()` is not mistaken for evidence that fixes
+  another bare `D()`; when no branch constrains the formal, every remaining open call is reported at
+  its callee. A `when` without `else` is not joined and reports immediately.
   Evidence is published only after the selected constructor commits, so an inaccessible or rejected
   candidate cannot add a second inference diagnostic. An inner class has no type parameter of its
   own, so `Outer(42).Inner(100)` reports nothing. Owner:

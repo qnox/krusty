@@ -57275,12 +57275,13 @@ impl<'a> Checker<'a> {
         finally: Option<ExprId>,
     ) -> Ty {
         let t = {
+            let joined = !catches.is_empty();
             // A catch begins on an exceptional edge from any point of the try body: it gets the
             // entry facts minus every narrowing the body writes. Normal exits keep only the facts
             // common to all of them. No syntax coordinate or body survives FIR.
             let entry_flow = scope.flow_snapshot();
             let (bt, written) = self.try_body_written_bindings(|checker| {
-                checker.expr_result(scope, body, wanted.expected, wanted.value_required)
+                checker.joined_branch_result(scope, body, wanted, joined)
             });
             let mut all_exit_writes = catch_flow::TryBodyWrites::default();
             let mut exit_flows = self
@@ -57330,7 +57331,7 @@ impl<'a> Checker<'a> {
                     let catch_scope = scope.child(ScopeKind::Block);
                     let scope = &catch_scope;
                     checker.declare(scope, &c.name, cty, false);
-                    checker.expr_result(scope, c.body, wanted.expected, wanted.value_required)
+                    checker.joined_branch_result(scope, c.body, wanted, joined)
                 });
                 all_exit_writes.extend(catch_writes);
                 if self.normal_completion(c.body) {
@@ -57365,6 +57366,7 @@ impl<'a> Checker<'a> {
                 &branch_types,
                 result,
             );
+            self.complete_conditional_branches(scope, branch_types.iter().copied());
             scope.restore_common_flow(&exit_flows);
             let normal_continuation = scope.flow_snapshot();
             all_exit_writes.extend(written);
@@ -57978,7 +57980,9 @@ impl<'a> Checker<'a> {
                 // `null ?: run { statement }` must infer `run` from its lambda as `Unit`; forcing
                 // the non-null form of `Null` (`Nothing`) into the RHS instead asks the lambda to
                 // return `Nothing` and rejects every normally-completing statement.
-                None if lt == Ty::Nothing => self.expr(&rhs_scope, rhs),
+                None if lt == Ty::Nothing || self.constructor_branch_is_open(lhs) => {
+                    self.expr(&rhs_scope, rhs)
+                }
                 None => self.expr_expected(&rhs_scope, rhs, lt),
             };
             let fixed = self.expectation_fixes_branches(scope, e, conditional_expected);
@@ -57989,8 +57993,7 @@ impl<'a> Checker<'a> {
             let rt = self.rebind_conditional_branch(rhs, lt, rt, fixed, |c, exp| {
                 c.expr_expected(&rhs_scope, rhs, exp)
             });
-            self.report_unbound_conditional_branch(scope, lhs, false);
-            self.report_unbound_conditional_branch(scope, rhs, false);
+            self.complete_conditional_branches(scope, [(lhs, lt), (rhs, rt)]);
             // The elvis value when lhs is non-null: a nullable-primitive lhs (`Int?`) unwraps to its
             // unboxed primitive, while an ordinary nullable reference `T?` unwraps to `T`.
             crate::trace_compiler!(
@@ -60513,6 +60516,10 @@ impl<'a> Checker<'a> {
         arms: Vec<WhenArm>,
     ) -> Ty {
         let t = {
+            let branch_wanted = Wanted {
+                expected,
+                value_required,
+            };
             let subj_ty = subject.map(|s| self.expr(scope, s));
             struct ArmResult {
                 body: ExprId,
@@ -60642,7 +60649,7 @@ impl<'a> Checker<'a> {
                             let guard_ty = c.expr(scope, guard);
                             c.expect_assignable(Ty::Boolean, guard_ty, c.span(guard), "when guard");
                         }
-                        c.joined_branch_result(scope, arm.body, expected, value_required, has_else)
+                        c.joined_branch_result(scope, arm.body, branch_wanted, has_else)
                     })
                 };
                 if self.completed_normally(arm.body) {
@@ -60726,13 +60733,10 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            self.join_constructor_branches(
+            self.complete_conditional_branches(
                 scope,
                 arm_results.iter().map(|record| (record.body, record.ty)),
             );
-            for record in &arm_results {
-                self.report_unbound_conditional_branch(scope, record.body, !value_required);
-            }
             let result = conditional_branch::join_results(
                 self,
                 scope,

@@ -36,13 +36,7 @@ impl Checker<'_> {
         self.apply_condition_exclusions(scope, cond, then);
         // `if (this is B)` narrows the implicit receiver to `B` for the branch body.
         let ty = self.with_this_narrow(self.this_is_narrowing(scope, cond, !then), |c| {
-            let actual = c.joined_branch_result(
-                scope,
-                branch,
-                wanted.expected,
-                wanted.value_required,
-                joined,
-            );
+            let actual = c.joined_branch_result(scope, branch, wanted, joined);
             let Some(expected) = wanted.expected else {
                 return actual;
             };
@@ -168,13 +162,7 @@ impl Checker<'_> {
                         else_flow = flow;
                         ty
                     });
-                    self.join_constructor_branches(scope, [(then_branch, tt), (eb, et)]);
-                    self.report_unbound_conditional_branch(
-                        scope,
-                        then_branch,
-                        !wanted.value_required,
-                    );
-                    self.report_unbound_conditional_branch(scope, eb, !wanted.value_required);
+                    self.complete_conditional_branches(scope, [(then_branch, tt), (eb, et)]);
                     self.publish_joined_local_flow(
                         scope,
                         &locals,
@@ -201,11 +189,7 @@ impl Checker<'_> {
                     )
                 }
                 None => {
-                    self.report_unbound_conditional_branch(
-                        scope,
-                        then_branch,
-                        !wanted.value_required,
-                    );
+                    self.report_unbound_conditional_branch(scope, then_branch);
                     let (false_reads, false_intersections) =
                         self.implicit_false_edge_state(scope, cond, &locals, &entry_reads);
                     let else_exit = control_flow_join::LocalFlowExit {
