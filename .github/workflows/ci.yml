@@ -57,6 +57,10 @@ jobs:
 
   ci:
     runs-on: ubuntu-latest
+    outputs:
+      # Release packaging waits for coverage, then starts only while this master commit is still the
+      # publishable tip. The release job repeats the check while holding the publisher lock.
+      release_candidate: ${{ steps.release_candidate.outputs.publish }}
     env:
       # Coverage mappings are compiler-version dependent. Keep the committed baseline and the
       # instrumenting compiler on the same immutable nightly.
@@ -76,7 +80,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      - uses: actions/setup-java@v6.0.1
+      - uses: actions/setup-java@v6.1.0
         with:
           distribution: zulu
           java-version: '25'
@@ -178,6 +182,10 @@ jobs:
         with:
           path: target/cache/kotlin-toolchain-oracle
           key: kotlin-toolchain-oracle-${{ github.sha }}
+      - name: select the current master release candidate
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        id: release_candidate
+        run: scripts/release-publisher.sh check >> "$GITHUB_OUTPUT"
 
   # Each artifact family has one producer. They run on separate hosted runners so the conformance
   # matrix waits for the slowest required build instead of serializing every unrelated target graph
@@ -234,6 +242,11 @@ jobs:
 
   build-tool-bins:
     runs-on: ubuntu-latest
+    outputs:
+      # Every consumer already waits for this artifact family. Publish the manifest-derived matrix
+      # here instead of scheduling a separate ten-second runner solely for these two values.
+      matrix: ${{ steps.versions.outputs.matrix }}
+      max: ${{ steps.versions.outputs.max }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -241,6 +254,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      - name: select supported Kotlin versions
+        id: versions
+        run: |
+          echo "matrix=$(just matrix-json)" >> "$GITHUB_OUTPUT"
+          echo "max=$(just max-version)" >> "$GITHUB_OUTPUT"
       - name: build compiler and Gradle test binaries
         run: |
           set -euo pipefail
@@ -264,31 +282,15 @@ jobs:
             krusty-build-tests
           if-no-files-found: error
 
-  # Supported-version matrix + the max version (for the badge later), from the kotlin-versions manifest.
-  versions:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set.outputs.matrix }}
-      max: ${{ steps.set.outputs.max }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
-      - id: set
-        run: |
-          echo "matrix=$(just matrix-json)" >> "$GITHUB_OUTPUT"
-          echo "max=$(just max-version)" >> "$GITHUB_OUTPUT"
-
   conformance:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
     # JVM consumes no focused KLIB test binary, so keep it off that producer's critical path. Native
     # and Wasm both enforce KLIB implementation coverage below and therefore wait for the artifact.
-    needs: [build-conformance-bin, build-tool-bins, versions]
+    needs: [build-conformance-bin, build-tool-bins]
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJson(needs.versions.outputs.matrix) }}
+        version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [jvm]
     runs-on: ubuntu-latest
     steps: &conformance-steps
@@ -299,7 +301,7 @@ jobs:
       # Kotlin's CLI corpus names JDK 8, 11, 17 and 21 homes; kotlin_cli_jvm_conformance finds them
       # through the JAVA_HOME_<release>_X64 variables this exports and fails a case it cannot run.
       # The last version listed stays JAVA_HOME.
-      - uses: actions/setup-java@v6.0.1
+      - uses: actions/setup-java@v6.1.0
         with:
           distribution: zulu
           java-version: |
@@ -345,7 +347,7 @@ jobs:
       # Only the maximum-version Native row runs the focused kotlinc-native oracle checks. The
       # ordinary Native conformance step below already provisions the exact compiler distribution.
       - name: cache Kotlin/Native dependencies
-        if: matrix.target == 'native' && matrix.version == needs.versions.outputs.max
+        if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max
         uses: actions/cache@v6
         with:
           path: |
@@ -353,7 +355,7 @@ jobs:
             target/cache/krusty-deps
           key: native-conformance-konan-${{ runner.os }}-${{ runner.arch }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
       - name: restore recorded kotlinc-native bytes
-        if: matrix.target == 'native' && matrix.version == needs.versions.outputs.max
+        if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max
         id: native-recordings
         uses: actions/cache/restore@v6
         with:
@@ -362,7 +364,7 @@ jobs:
           restore-keys: |
             recorded-kotlinc-native-bytes-${{ matrix.version }}-
       - name: select kotlinc-native recording mode
-        if: matrix.target == 'native' && matrix.version == needs.versions.outputs.max
+        if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max
         id: native-recording-mode
         env:
           CACHE_HIT: ${{ steps.native-recordings.outputs.cache-hit }}
@@ -491,7 +493,7 @@ jobs:
       - name: run focused KLIB semantics and Native oracle coverage
         # The corpus step records its failure and enforcement follows this step, so the focused
         # decoder/oracle coverage remains independent just as it was in its former standalone job.
-        if: matrix.target == 'native' && matrix.version == needs.versions.outputs.max && (success() || steps.native_box.outcome == 'failure' || steps.native_focused.outcome == 'failure')
+        if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max && (success() || steps.native_box.outcome == 'failure' || steps.native_focused.outcome == 'failure')
         env:
           KRUSTY_TEST_TIMEOUT_SECONDS: "600"
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
@@ -515,7 +517,7 @@ jobs:
             native_value_classes_e2e::a_value_class_needs_no_jvm_inline_on_native --nocapture
           timeout 600s ./klib-unit-tests klib_ --nocapture
       - name: save recorded kotlinc-native bytes
-        if: matrix.target == 'native' && matrix.version == needs.versions.outputs.max && steps.native-recording-mode.outputs.write == '1'
+        if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max && steps.native-recording-mode.outputs.write == '1'
         uses: actions/cache/save@v6
         with:
           path: target/cache/native-recordings
@@ -553,7 +555,7 @@ jobs:
         # The maximum Native row already runs every focused KLIB unit test above. The remaining
         # Native rows and every Wasm row run this one provider-owned ratchet against their exact
         # selected stdlib, so no version or target can hide a newly bodyless declaration.
-        if: matrix.target == 'wasm' || (matrix.target == 'native' && matrix.version != needs.versions.outputs.max)
+        if: matrix.target == 'wasm' || (matrix.target == 'native' && matrix.version != needs.build-tool-bins.outputs.max)
         env:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_REQUIRE_KLIB: "1"
@@ -608,11 +610,11 @@ jobs:
   # inventory; this is not a separate semantic suite or target-specific case list.
   conformance-klib:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
-    needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins, versions]
+    needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins]
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJson(needs.versions.outputs.matrix) }}
+        version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [native, wasm]
     runs-on: ubuntu-latest
     steps: *conformance-steps
@@ -667,7 +669,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      - uses: actions/setup-java@v6.0.1
+      - uses: actions/setup-java@v6.1.0
         with:
           distribution: zulu
           java-version: '17'
@@ -692,11 +694,11 @@ jobs:
   # Kotlin version, driving the shared krusty binary. Release publishes these bytes unchanged.
   build-tools:
     name: build-tools (${{ matrix.kotlin }})
-    needs: [build-tool-bins, versions]
+    needs: [build-tool-bins]
     strategy:
       fail-fast: false
       matrix:
-        kotlin: ${{ fromJson(needs.versions.outputs.matrix) }}
+        kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -705,7 +707,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      - uses: actions/setup-java@v6.0.1
+      - uses: actions/setup-java@v6.1.0
         with:
           distribution: zulu
           java-version: '17'
@@ -748,7 +750,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      - uses: actions/setup-java@v6.0.1
+      - uses: actions/setup-java@v6.1.0
         with:
           distribution: zulu
           java-version: '17'
@@ -798,12 +800,16 @@ jobs:
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
             ./krusty-build-tests --ignored $tests
 
-  # Build the release binaries per OS/arch (master only). Independent of conformance so it can run in
-  # parallel; publishing is what waits on the gate.
+  # Build the release binaries per OS/arch only after coverage proves that this master commit is
+  # still the publishable tip. Superseded master runs keep all validation but do not occupy six
+  # runners with artifacts the monotonic publisher will reject. Cap the surviving matrix so release
+  # packaging cannot starve pull-request gates.
   build-release:
-    if: github.ref == 'refs/heads/master'
+    needs: [ci]
+    if: github.ref == 'refs/heads/master' && needs.ci.outputs.release_candidate == 'true'
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         target:
           - { triple: x86_64-unknown-linux-gnu,  os: ubuntu-latest }
@@ -865,7 +871,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, versions, build-release]
+    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, build-tool-bins, build-release]
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
@@ -907,7 +913,7 @@ jobs:
       - name: verify Build Tools API implementation release assets
         if: steps.tip.outputs.publish == 'true'
         env:
-          KOTLIN_VERSIONS: ${{ needs.versions.outputs.matrix }}
+          KOTLIN_VERSIONS: ${{ needs.build-tool-bins.outputs.matrix }}
         run: |
           set -euo pipefail
           version=$(just version)
@@ -943,34 +949,34 @@ jobs:
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         uses: actions/download-artifact@v8
         with:
-          name: pct-${{ needs.versions.outputs.max }}
+          name: pct-${{ needs.build-tool-bins.outputs.max }}
       - name: download max-version JVM byte equality
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         uses: actions/download-artifact@v8
         with:
-          name: jvm-byte-equality-${{ needs.versions.outputs.max }}
+          name: jvm-byte-equality-${{ needs.build-tool-bins.outputs.max }}
       - name: download max-version Native conformance
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         uses: actions/download-artifact@v8
         with:
-          name: native-pct-${{ needs.versions.outputs.max }}
+          name: native-pct-${{ needs.build-tool-bins.outputs.max }}
       - name: compute conformance badge payload
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         id: c
         env:
-          MAX_VERSION: ${{ needs.versions.outputs.max }}
+          MAX_VERSION: ${{ needs.build-tool-bins.outputs.max }}
         run: bash scripts/conformance-badge.sh fields conformance pct.txt "$MAX_VERSION" >> "$GITHUB_OUTPUT"
       - name: compute JVM byte-equality badge payload
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         id: b
         env:
-          MAX_VERSION: ${{ needs.versions.outputs.max }}
+          MAX_VERSION: ${{ needs.build-tool-bins.outputs.max }}
         run: bash scripts/conformance-badge.sh fields jvm-byte-equality jvm-byte-equality.txt "$MAX_VERSION" >> "$GITHUB_OUTPUT"
       - name: compute Native conformance badge payload
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
         id: n
         env:
-          MAX_VERSION: ${{ needs.versions.outputs.max }}
+          MAX_VERSION: ${{ needs.build-tool-bins.outputs.max }}
         run: bash scripts/conformance-badge.sh fields native-conformance native-pct.txt "$MAX_VERSION" >> "$GITHUB_OUTPUT"
       - name: publish conformance badge → gist
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
@@ -1010,7 +1016,7 @@ jobs:
           gistID: ${{ vars.CONFORMANCE_GIST_ID }}
           filename: krusty-kotlin.json
           label: Kotlin
-          message: ${{ needs.versions.outputs.max }}
+          message: ${{ needs.build-tool-bins.outputs.max }}
           color: blue
       - name: drop the release lock
         if: always() && steps.lock.outputs.lock != ''

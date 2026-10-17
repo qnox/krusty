@@ -179,6 +179,7 @@ pub(crate) fn classifier_shape(
     Ok(LibraryType {
         access: class.visibility.into(),
         is_kotlin: true,
+        is_data: crate::metadata::semantic::class_is_data(class.metadata_flags),
         source_file: None,
         stable_declaration: None,
         is_nested: class.is_nested,
@@ -239,6 +240,7 @@ pub(crate) fn classifier_shape(
         annotation_targets: (kind == TypeKind::Annotation).then(|| declared_targets(class)),
         mapped_collection: None,
         annotation_element_defaults: Vec::new(),
+        deprecation: None,
     })
 }
 

@@ -133,9 +133,8 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
         // A reference-typed facade static carries kotlinc's nullability annotation like any other
         // backing field, except a `lateinit` one, which holds null until assigned.
-        let nullability = field_nullability_kind(s.ty);
         let field_ann = (!s.is_lateinit)
-            .then(|| super::nullability_annotation(nullability))
+            .then(|| super::declared_static_annotation(s))
             .flatten();
         // A `const val` initialized by a compile-time literal carries a `ConstantValue` attribute (the
         // JVM initializes the field; its `<clinit>` store is omitted below) — byte-identical to kotlinc.
@@ -288,15 +287,11 @@ pub(in crate::jvm) fn declared_default_static_accessor_signature(
     let storage = &ir.statics[static_index as usize];
     let descriptor = type_descriptor(jvm_declared_ty(&storage.ty));
     let (name, descriptor) = match side {
-        PropertyAccessorSide::Getter => (
-            property_getter_name(&storage.name),
-            format!("(){descriptor}"),
-        ),
+        PropertyAccessorSide::Getter => {
+            (storage.default_getter_jvm_name(), format!("(){descriptor}"))
+        }
         PropertyAccessorSide::Setter => (
-            storage
-                .setter_jvm_name
-                .clone()
-                .unwrap_or_else(|| property_setter_name(&storage.name)),
+            storage.default_setter_jvm_name(),
             format!("({descriptor})V"),
         ),
     };
@@ -362,7 +357,9 @@ pub(super) fn emit_default_static_accessor(
                 nullability: acc_ann,
                 annotations: declared.map(|declared| &declared.setter),
             },
-            param_assertions && nullability == 1,
+            // The guard checks the stored value: a non-null `N` over a `String?` carrier admits
+            // null there, so kotlinc emits none.
+            param_assertions && nullability == 1 && field_nullability_kind(s.ty) == 1,
         );
         return;
     }
@@ -607,15 +604,9 @@ pub(super) fn declare(
         let acc = if synthetic { acc | 0x1000 } else { acc };
         // Reference-typed statics, including private hoisted fields, carry nullability annotations,
         // except a `lateinit` one, which holds null until assigned.
-        let ann =
-            (!synthetic && !s.is_lateinit && (desc.starts_with('L') || desc.starts_with('[')))
-                .then(|| {
-                    if s.ty.is_nullable() {
-                        "Lorg/jetbrains/annotations/Nullable;"
-                    } else {
-                        "Lorg/jetbrains/annotations/NotNull;"
-                    }
-                });
+        let ann = (!synthetic && !s.is_lateinit)
+            .then(|| super::declared_static_annotation(s))
+            .flatten();
         let signature = property_jvm_signatures(signature_formatter, &s.ty, None)
             .field
             .filter(|_| !s.property_delegate);
@@ -717,7 +708,7 @@ pub(super) fn emit_enum_static_fields(
         // `Lazy<KSerializer<Object>>`), and a reference-typed one carries kotlinc's nullability
         // annotation — the same treatment the class and facade field tables give their statics.
         let signatures = property_jvm_signatures(signature_formatter, &s.ty, None);
-        let ann = nullability_annotation(field_nullability_kind(s.ty)).filter(|_| !s.is_lateinit);
+        let ann = super::declared_static_annotation(s).filter(|_| !s.is_lateinit);
         // A folded `const val` is its `ConstantValue`; `<clinit>` does not store it.
         let constant = (s.init)
             .filter(|_| s.is_const && !s.is_var && !ir.is_jvm_companion_hoisted_static(index))
@@ -832,13 +823,16 @@ pub(super) fn emit_class_static_initializer(
     byte_parity: bool,
     cw: &mut ClassWriter,
 ) {
-    let clinit_statics: Vec<(u32, &crate::ir::IrStatic, crate::ir::ExprId)> = ir
+    let mut clinit_statics: Vec<(u32, &crate::ir::IrStatic, crate::ir::ExprId)> = ir
         .statics
         .iter()
         .enumerate()
         .filter(|(_, s)| s.owner_matches(fq_name))
         .filter_map(|(index, s)| Some((index as u32, s, clinit_initializer(ir, s)?)))
         .collect();
+    // Generated statics (no source position) initialize after the declared ones, whatever order
+    // the passes created them in.
+    clinit_statics.sort_by_key(|&(_, s, _)| s.source_order == u32::MAX);
     if c.companion_class.is_some()
         || !clinit_statics.is_empty()
         || delegated_property_array::exists(env, c.fq_name)
@@ -895,6 +889,8 @@ pub(super) fn emit_class_static_initializer(
         // Every hoisted-property store gets an entry at its pc, mapping to the property's
         // declaration line in the COMPANION source. The `Companion` construction itself has no
         // entry.
+        // A generated static that ends the initializer returns on its declaration's last line.
+        let mut closing_line = None;
         for &(static_index, s, _) in &clinit_statics {
             let Some(init) = stored_clinit_initializer(ir, s) else {
                 continue;
@@ -911,13 +907,22 @@ pub(super) fn emit_class_static_initializer(
             } else {
                 s.line
             };
-            if line != 0 {
+            if line != 0 && clinit_lines.last().map(|&(_, last)| last) != Some(line) {
                 clinit_lines.push((pc, line));
             }
             e.emit_static_initializer_store(fq_name, static_index, init, &mut clinit);
+            closing_line = (s.source_order == u32::MAX)
+                .then_some(s.accessor_lines.declaration_end)
+                .filter(|&end| end != 0);
         }
         if let Some(body) = companion_initializer {
             e.emit_companion_clinit_body(c, fq_name, body, &mut clinit, &mut clinit_lines);
+            closing_line = None;
+        }
+        if let Some(end) =
+            closing_line.filter(|&end| clinit_lines.last().is_some_and(|&(_, last)| last != end))
+        {
+            clinit_lines.push((clinit.bytes.len() as u16, end));
         }
         clinit.ret_void();
         clinit.ensure_locals(e.frame.max());
@@ -1111,7 +1116,7 @@ impl Emitter<'_> {
             if !emitted_by_owner && companion_blocks::getter_owned(self.ir, i) {
                 let m = self.cw.methodref(
                     &owner_name,
-                    &property_getter_name(&name),
+                    &self.ir.statics[i as usize].default_getter_jvm_name(),
                     &format!("(){}", type_descriptor(jt)),
                 );
                 code.invokestatic(m, 0, slot_words(jt) as i32);
@@ -1291,10 +1296,7 @@ impl Emitter<'_> {
             let owner_name = owner.render();
             let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(owner));
             if !emitted_by_owner && companion_blocks::setter_owned(self.ir, index) {
-                let setter = self.ir.statics[index as usize]
-                    .setter_jvm_name
-                    .clone()
-                    .unwrap_or_else(|| property_setter_name(&name));
+                let setter = self.ir.statics[index as usize].default_setter_jvm_name();
                 let m =
                     self.cw
                         .methodref(&owner_name, &setter, &format!("({})V", type_descriptor(jt)));

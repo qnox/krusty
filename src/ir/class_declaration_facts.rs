@@ -1,7 +1,7 @@
 //! Declaration facts a file records about its classes: synthetic and deprecated marks, constructor
 //! defaults, generic and field signatures. Lowering records them once; backends read them by class.
 
-use super::{IrClass, IrFile, IrGenericSig, IrTypeParameter};
+use super::{ExprId, IrClass, IrFile, IrGenericSig, IrTypeParameter};
 use crate::types::{Ty, TypeName};
 
 impl IrFile {
@@ -39,6 +39,13 @@ impl IrFile {
 
     pub fn class_ctor_defaults_name(&self, internal: TypeName) -> Option<&Vec<Option<u32>>> {
         self.class_ctor_defaults.get(&internal)
+    }
+
+    /// Checked primary-constructor default expressions, each an independently emitted value root.
+    pub(crate) fn class_ctor_default_roots(&self) -> impl Iterator<Item = ExprId> + '_ {
+        self.class_ctor_defaults
+            .values()
+            .flat_map(|defaults| defaults.iter().flatten().copied())
     }
 
     pub fn take_class_ctor_defaults_name(

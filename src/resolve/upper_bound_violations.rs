@@ -24,11 +24,22 @@ use crate::spelling::Spelled;
 use crate::symbol_source::SymbolSource as _;
 use crate::types::{Ty, TypeName};
 
+/// Transient context owned by upper-bound checking while one type reference is resolved.
+#[derive(Default)]
+pub(super) struct UpperBoundViolationState {
+    /// The type reference whose outermost application is exempt from the upper-bound check: a type
+    /// operator's target or a callable's type-parameter bound.
+    unchecked_reference: Option<Span>,
+    /// A typealias declaration's right-hand side is being checked: an argument that is a type
+    /// parameter or carries arguments is checked only through its nested applications.
+    alias_declaration: bool,
+}
+
 impl Checker<'_> {
     /// Check the written arguments of `reference`, which the checker resolved to the classifier
     /// application `resolved`. Arguments nested in `reference` are applications of their own.
     pub(super) fn check_type_reference_bounds(&mut self, reference: &TypeRef, resolved: Ty) {
-        if self.unchecked_bounds_reference == Some(reference.span) {
+        if self.upper_bound_violations.unchecked_reference == Some(reference.span) {
             return;
         }
         self.check_written_application_bounds(&reference.targs, resolved);
@@ -59,6 +70,17 @@ impl Checker<'_> {
         })
     }
 
+    /// Check every declared bound of one callable after its type-parameter scope is installed.
+    pub(super) fn check_callable_type_parameter_bounds(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        bounds: &[(String, TypeRef)],
+    ) {
+        for (_, bound) in bounds {
+            self.check_callable_type_parameter_bound(scope, bound);
+        }
+    }
+
     /// Run `resolve` with the outermost application of `reference` exempt from the bound check.
     pub(super) fn with_unchecked_outermost_bounds<R>(
         &mut self,
@@ -71,9 +93,12 @@ impl Checker<'_> {
         {
             return resolve(self);
         }
-        let previous = self.unchecked_bounds_reference.replace(reference.span);
+        let previous = self
+            .upper_bound_violations
+            .unchecked_reference
+            .replace(reference.span);
         let result = resolve(self);
-        self.unchecked_bounds_reference = previous;
+        self.upper_bound_violations.unchecked_reference = previous;
         result
     }
 
@@ -93,7 +118,21 @@ impl Checker<'_> {
             other => other,
         }
         .non_null();
-        if spelled.alias.is_some() {
+        if let Some(alias) = spelled.alias {
+            let arguments = spelled
+                .alias_args
+                .iter()
+                .map(|(resolved, _)| *resolved)
+                .collect::<Vec<_>>();
+            if let Some((formals, template)) = self.source_alias_expansion(alias) {
+                self.check_alias_application_bounds(
+                    &formals,
+                    template,
+                    &reference.targs,
+                    &arguments,
+                    reference.span,
+                );
+            }
             // The written arguments of an alias application are applications of their own.
             for (argument, (resolved, spelled)) in reference.targs.iter().zip(&spelled.alias_args) {
                 self.check_finalized_type_bounds(argument, *resolved, spelled);
@@ -127,6 +166,138 @@ impl Checker<'_> {
         }
     }
 
+    /// Check the application of a typealias with `formals` and expansion `template` to the written
+    /// `arguments`, which resolved to `resolved` (projections kept), at `reference`.
+    ///
+    /// kotlinc checks the expansion's outermost application in full. Below it, only the arguments
+    /// that are exactly a formal are checked, and only the applications that mention a formal are
+    /// entered: the rest of the expansion is the declaration's own, checked where it is declared.
+    /// A violating argument that is exactly a formal is reported at the use-site argument written
+    /// for it; any other at the alias reference.
+    pub(super) fn check_alias_application_bounds(
+        &mut self,
+        formals: &[String],
+        template: Ty,
+        arguments: &[TypeRef],
+        resolved: &[Ty],
+        reference: Span,
+    ) {
+        if self.upper_bound_violations.unchecked_reference == Some(reference) {
+            return;
+        }
+        let bindings = formals
+            .iter()
+            .cloned()
+            .zip(resolved.iter().copied())
+            .collect::<crate::symbol_resolver::GSigBinds>();
+        let application = AliasApplication {
+            formals,
+            bindings: &bindings,
+            arguments,
+            reference,
+        };
+        self.check_alias_template_bounds(&application, template, true);
+    }
+
+    fn check_alias_template_bounds(
+        &mut self,
+        application: &AliasApplication<'_>,
+        template: Ty,
+        outermost: bool,
+    ) {
+        let template = match template {
+            Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
+            other => other,
+        }
+        .non_null();
+        let components = match template {
+            Ty::Obj(classifier, template_arguments) => {
+                if let Some(declaration) = self.fed_source().classifier(classifier) {
+                    let formals = bounded_formals(&declaration);
+                    if formals.iter().any(|formal| !formal.bounds.is_empty()) {
+                        let resolved = template_arguments
+                            .iter()
+                            .map(|argument| {
+                                crate::types::ty_subst_alias_expansion(
+                                    *argument,
+                                    application.bindings,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let spans = template_arguments
+                            .iter()
+                            .zip(&resolved)
+                            .map(|(argument, resolved)| {
+                                let span = match application.formal_argument(*argument) {
+                                    Some(written) => type_argument_span(written),
+                                    None => outermost.then_some(application.reference),
+                                };
+                                span.filter(|_| {
+                                    !self.upper_bound_violations.alias_declaration
+                                        || is_alias_checked(*resolved)
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        let owner = classifier_type_parameter_owner(
+                            &self.fed_source(),
+                            classifier,
+                            &declaration,
+                        );
+                        self.check_type_argument_bounds(&formals, &owner, &resolved, &spans);
+                    }
+                }
+                template_arguments.to_vec()
+            }
+            Ty::Fun(signature) => signature
+                .params
+                .iter()
+                .copied()
+                .chain(std::iter::once(signature.ret))
+                .collect(),
+            _ => Vec::new(),
+        };
+        for component in components {
+            if application.mentions_formal(component) {
+                self.check_alias_template_bounds(application, component, false);
+            }
+        }
+    }
+
+    /// Check the right-hand side of a typealias declaration, which Pass 1 finalized as `expansion`
+    /// with the alias spellings `spelled`. A type argument that is a type parameter or has type
+    /// arguments of its own is not checked there; the applications nested in it are.
+    pub(super) fn check_type_alias_declaration_bounds(
+        &mut self,
+        target: &TypeRef,
+        expansion: Ty,
+        spelled: &Spelled,
+    ) {
+        let previous = std::mem::replace(&mut self.upper_bound_violations.alias_declaration, true);
+        self.check_finalized_type_bounds(target, expansion, spelled);
+        self.upper_bound_violations.alias_declaration = previous;
+    }
+
+    /// Run `resolve`, the resolution of a typealias declaration's right-hand side, under the
+    /// declaration's bound-check rule (see [`Self::check_type_alias_declaration_bounds`]).
+    pub(super) fn resolving_alias_declaration<R>(
+        &mut self,
+        resolve: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous = std::mem::replace(&mut self.upper_bound_violations.alias_declaration, true);
+        let result = resolve(self);
+        self.upper_bound_violations.alias_declaration = previous;
+        result
+    }
+
+    /// Resolve one lexical typealias target under the declaration-site bound rule.
+    pub(super) fn resolve_alias_declaration_target(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        target: &TypeRef,
+    ) -> Ty {
+        self.resolving_alias_declaration(|checker| checker.type_ref_ty(scope, target))
+    }
+
     /// Check the written `arguments` of the application of `classifier`, whose resolved arguments
     /// (projections kept, own arguments first) are `resolved`.
     fn check_classifier_argument_bounds(
@@ -140,7 +311,15 @@ impl Checker<'_> {
         if formals.iter().all(|formal| formal.bounds.is_empty()) {
             return false;
         }
-        let spans = arguments.iter().map(type_argument_span).collect::<Vec<_>>();
+        let spans = arguments
+            .iter()
+            .zip(resolved.iter().copied().chain(std::iter::repeat(Ty::Error)))
+            .map(|(argument, resolved)| {
+                type_argument_span(argument).filter(|_| {
+                    !self.upper_bound_violations.alias_declaration || is_alias_checked(resolved)
+                })
+            })
+            .collect::<Vec<_>>();
         let owner = classifier_type_parameter_owner(&self.fed_source(), classifier, declaration);
         self.check_type_argument_bounds(&formals, &owner, resolved, &spans)
     }
@@ -269,6 +448,68 @@ impl Checker<'_> {
 }
 
 impl<'a> Checker<'a> {
+    /// Check every stable top-level typealias declaration retained by this file. The syntax only
+    /// supplies diagnostic spans; the stable identity supplies the finalized expansion.
+    pub(super) fn check_file_type_alias_bounds(&mut self) {
+        let aliases = self.file.type_alias_decls.clone();
+        for alias in aliases {
+            let identity = crate::types::type_name_child(self.source_package_name(), &alias.name);
+            let Some(header) = self
+                .resolved_index
+                .and_then(|index| index.type_alias_by_identity(identity))
+                .cloned()
+            else {
+                continue;
+            };
+            self.check_type_alias_declaration_bounds(
+                &alias.target,
+                header.expansion.get(),
+                &header.expansion_spelling,
+            );
+        }
+    }
+
+    /// Check stable aliases owned by `declaration`. Pass 1's declaration identities and source
+    /// order pair retained syntax with finalized headers; target spellings are never resolved again.
+    pub(super) fn check_stable_nested_type_alias_bounds(
+        &mut self,
+        class: &crate::ast::ClassDecl,
+        declaration: crate::fir::DeclarationId,
+    ) {
+        let Some(index) = self.resolved_index else {
+            return;
+        };
+        let mut declarations = index
+            .owned_declarations(declaration)
+            .iter()
+            .copied()
+            .filter(|owned| index.type_alias_header(*owned).is_some())
+            .collect::<Vec<_>>();
+        declarations.sort_unstable_by_key(|owned| index.source_order(*owned).unwrap_or(u32::MAX));
+        if declarations.len() != class.type_aliases.len() {
+            return;
+        }
+        let aliases = class
+            .type_aliases
+            .iter()
+            .cloned()
+            .zip(declarations)
+            .filter_map(|(syntax, declaration)| {
+                index
+                    .type_alias_header(declaration)
+                    .cloned()
+                    .map(|header| (syntax, header))
+            })
+            .collect::<Vec<_>>();
+        for (syntax, header) in aliases {
+            self.check_type_alias_declaration_bounds(
+                &syntax.target,
+                header.expansion.get(),
+                &header.expansion_spelling,
+            );
+        }
+    }
+
     /// Check the supertypes of `class`, which Pass 1 finalized in the header of `declaration`.
     pub(super) fn check_finalized_supertype_bounds(
         &mut self,
@@ -289,6 +530,11 @@ impl<'a> Checker<'a> {
                 .zip(header.interfaces.iter())
                 .enumerate()
             {
+                self.record_finalized_supertype(
+                    reference,
+                    resolved.get(),
+                    spellings.supertype(index),
+                );
                 self.check_finalized_type_bounds(
                     reference,
                     resolved.get(),
@@ -312,6 +558,7 @@ impl<'a> Checker<'a> {
                 fun_params: Vec::new(),
                 fun_context_count: 0,
             };
+            self.record_finalized_supertype(&reference, superclass.get(), &spellings.superclass);
             self.check_finalized_type_bounds(&reference, superclass.get(), &spellings.superclass);
         }
     }
@@ -342,7 +589,11 @@ impl<'a> Checker<'a> {
                         .and_then(|property| property.extension_receiver)
                 });
             if let Some(finalized) = finalized {
-                self.check_finalized_type_bounds(reference, finalized.get(), &spellings.receiver);
+                self.record_finalized_declaration_type(
+                    reference,
+                    finalized.get(),
+                    &spellings.receiver,
+                );
             }
         }
         let Some(signature) = index.signature(declaration) else {
@@ -355,16 +606,20 @@ impl<'a> Checker<'a> {
                 .enumerate()
             {
                 let finalized = finalized.get();
-                let declared = if *is_vararg {
-                    finalized.non_null().array_read_elem().unwrap_or(finalized)
-                } else {
-                    finalized
-                };
-                self.check_finalized_type_bounds(reference, declared, spellings.param(position));
+                self.record_finalized_parameter_type(
+                    reference,
+                    *is_vararg,
+                    finalized,
+                    spellings.param(position),
+                );
             }
         }
         if let Some(reference) = ret {
-            self.check_finalized_type_bounds(reference, signature.result.get(), &spellings.ret);
+            self.record_finalized_declaration_type(
+                reference,
+                signature.result.get(),
+                &spellings.ret,
+            );
         }
     }
 
@@ -397,9 +652,7 @@ impl<'a> Checker<'a> {
             function.reified_type_params.contains(name)
         });
         let owned = self.publish_function_type_parameter_owner(&method_scope, function);
-        for (_, bound) in &function.type_param_bounds {
-            self.check_callable_type_parameter_bound(&method_scope, bound);
-        }
+        self.check_callable_type_parameter_bounds(&method_scope, &function.type_param_bounds);
         let value_parameters = function
             .params
             .iter()
@@ -449,9 +702,7 @@ impl<'a> Checker<'a> {
             );
         property_scope.declare_property_tparams(property, &parameters);
         let owned = self.publish_property_type_parameter_owner(&property_scope, property);
-        for (_, bound) in &property.type_param_bounds {
-            self.check_callable_type_parameter_bound(&property_scope, bound);
-        }
+        self.check_callable_type_parameter_bounds(&property_scope, &property.type_param_bounds);
         self.check_bodyless_member_bounds(
             declaration,
             property.receiver.as_ref(),
@@ -522,4 +773,43 @@ fn bounded_formals(declaration: &LibraryType) -> Vec<BoundedFormal<'_>> {
             bounds,
         })
         .collect()
+}
+
+/// Whether a typealias declaration's right-hand side checks an argument that resolved to
+/// `argument`: not a type parameter and without type arguments of its own.
+fn is_alias_checked(argument: Ty) -> bool {
+    let argument = match argument {
+        Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
+        other => other,
+    }
+    .non_null();
+    !argument.is_ty_param() && argument.type_args().is_empty()
+}
+
+/// One application of a typealias, as its expansion's bound check reads it.
+struct AliasApplication<'a> {
+    formals: &'a [String],
+    bindings: &'a crate::symbol_resolver::GSigBinds,
+    arguments: &'a [TypeRef],
+    reference: Span,
+}
+
+impl AliasApplication<'_> {
+    /// The written use-site argument when the template argument `template` is exactly a formal.
+    fn formal_argument(&self, template: Ty) -> Option<&TypeRef> {
+        let Ty::TyParam(parameter, _) = template else {
+            return None;
+        };
+        let index = self.formals.iter().position(|formal| formal == parameter)?;
+        self.arguments.get(index)
+    }
+
+    /// Whether `template` mentions one of the alias's formals.
+    fn mentions_formal(&self, template: Ty) -> bool {
+        let mut mentioned = Vec::new();
+        mentioned_type_parameters(template, &mut mentioned);
+        mentioned
+            .iter()
+            .any(|parameter| self.formals.iter().any(|formal| formal == parameter))
+    }
 }

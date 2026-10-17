@@ -19,7 +19,6 @@ struct SerializedClass {
     serializer_name: TypeName,
     serializer_type_parameters: Vec<crate::ir::IrTypeParameter>,
     type_params: Vec<String>,
-    type_param_bounds: Vec<(String, Ty)>,
     type_parameter_tys: Vec<Ty>,
     serialized_ty: Ty,
     type_serializers: Vec<Ty>,
@@ -34,24 +33,15 @@ struct SerializedClass {
 impl SerializedClass {
     fn of(ir: &IrFile, class_id: ClassId) -> Self {
         let class_name = ir.classes[class_id as usize].fq_name_id();
-        let serializer_type_parameters = ir
+        let source_type_parameters = ir
             .class_signature_name(class_name)
             .map(|signature| signature.type_params.clone())
             .unwrap_or_default();
-        let type_params = serializer_type_parameters
+        let type_params = source_type_parameters
             .iter()
             .map(|parameter| parameter.name.clone())
             .collect::<Vec<_>>();
-        let type_param_bounds = serializer_type_parameters
-            .iter()
-            .flat_map(|parameter| {
-                parameter
-                    .bounds
-                    .iter()
-                    .map(|(bound, _)| (parameter.name.clone(), *bound))
-            })
-            .collect::<Vec<_>>();
-        let type_parameter_tys = serializer_type_parameters
+        let type_parameter_tys = source_type_parameters
             .iter()
             .map(|parameter| {
                 let bound = parameter
@@ -62,6 +52,16 @@ impl SerializedClass {
                 Ty::ty_param(&parameter.semantic_name, bound)
             })
             .collect::<Vec<_>>();
+        // kotlinc's generated `$serializer` repeats the source parameter names but not their
+        // bounds. The source bounds still shape the serialized type and generated bodies above;
+        // they are not declarations of the generated classifier itself.
+        let serializer_type_parameters = source_type_parameters
+            .into_iter()
+            .map(|mut parameter| {
+                parameter.bounds.clear();
+                parameter
+            })
+            .collect();
         let serialized_ty = if type_parameter_tys.is_empty() {
             Ty::obj_name(class_name)
         } else {
@@ -85,7 +85,6 @@ impl SerializedClass {
             class_name,
             serializer_type_parameters,
             type_params,
-            type_param_bounds,
             type_parameter_tys,
             serialized_ty,
             type_serializers,
@@ -117,7 +116,6 @@ pub(super) fn declare(
         serializer_name,
         serializer_type_parameters,
         type_params,
-        type_param_bounds,
         type_parameter_tys,
         serialized_ty,
         owner_start_line,
@@ -159,7 +157,6 @@ pub(super) fn declare(
     // `GeneratedSerializer` supplies the default type-parameter serializer member.
     ser.interfaces = vec![crate::types::type_name(GENERATED_SERIALIZER_FQ)].into();
     ser.type_params = type_params.clone();
-    ser.type_param_bounds = type_param_bounds;
     ser.supertypes = vec![kserializer_of(serialized_ty)];
     // Field 0 is the final descriptor; generic serializer fields 1..=N hold the final
     // type-parameter serializers supplied to the constructor.
@@ -575,12 +572,20 @@ pub(super) fn complete(
                 .collect::<Vec<_>>();
             let descriptor_name = annotations::class_serial_name(ir, class_id);
             let descriptor_owner = ir.classes[class_id as usize].fq_name_id();
-            Some(add_cached_descriptor(
+            let cached = add_cached_descriptor(
                 ir,
                 descriptor_owner,
                 descriptor_name,
                 &descriptor_elements,
-            ))
+                companion_lines(ir, class_id),
+            );
+            ir.classes[class_id as usize]
+                .field_annotations
+                .push(crate::ir::FieldAnnotations {
+                    field: "$cachedDescriptor".to_string(),
+                    annotations: annotations::jvm_field_annotations(),
+                });
+            Some(cached)
         } else {
             None
         };
@@ -832,4 +837,21 @@ fn add_type_serializer_getters(ir: &mut IrFile, serializer: ClassId, n_tp: usize
             },
         );
     }
+}
+
+/// The source span of `class_id`'s companion: a declared companion's own lines, else the class's,
+/// which a plugin-generated companion takes.
+fn companion_lines(ir: &IrFile, class_id: ClassId) -> (u32, u32) {
+    let class = &ir.classes[class_id as usize];
+    class
+        .companion_class
+        .and_then(|companion| {
+            ir.classes.iter().find(|candidate| {
+                candidate.fq_name == companion && !candidate.is_compiler_generated
+            })
+        })
+        .filter(|companion| companion.decl_start_line != 0)
+        .map_or((class.decl_start_line, class.decl_end_line), |companion| {
+            (companion.decl_start_line, companion.decl_end_line)
+        })
 }

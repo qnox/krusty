@@ -12,7 +12,7 @@
 //! `UInt.MAX_VALUE` was written as `-1`.
 
 use super::common::compare_with_kotlinc_plugin;
-use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
+use super::serialization_companion_byte_parity_e2e::{member_body, plugin_and_runtime};
 use super::serialization_test_support::both_compilers_box_files;
 
 /// Two value classes with different carriers (a reference and a primitive), each used as a
@@ -159,6 +159,14 @@ const GENERIC_MODEL: &str = "import kotlinx.serialization.Serializable\n\
     @JvmInline\n\
     value class Grouped<K, V>(\n\
     \x20   val value: Map<K, List<V>>,\n\
+    )\n\
+    @Serializable\n\
+    class Holder<T>(\n\
+    \x20   val boxed: Boxed<T>,\n\
+    )\n\
+    @Serializable\n\
+    class Counted(\n\
+    \x20   val count: Boxed<Int>,\n\
     )\n";
 
 const GENERIC_MAIN: &str = "import kotlinx.serialization.builtins.serializer\n\
@@ -166,10 +174,15 @@ const GENERIC_MAIN: &str = "import kotlinx.serialization.builtins.serializer\n\
     fun box(): String {\n\
     \x20   val boxed = Boxed.serializer(Int.serializer())\n\
     \x20   val grouped = Grouped.serializer(String.serializer(), Int.serializer())\n\
+    \x20   val holder = Holder.serializer(String.serializer())\n\
+    \x20   val d = Json.encodeToString(Counted.serializer(), Counted(Boxed(7)))\n\
     \x20   val a = Json.encodeToString(boxed, Boxed(4))\n\
     \x20   val b = Json.encodeToString(grouped, Grouped(mapOf(\"k\" to listOf(1, 2))))\n\
+    \x20   val c = Json.encodeToString(holder, Holder(Boxed(\"h\")))\n\
     \x20   return a + \" \" + Json.decodeFromString(boxed, a).value + \" \" + b + \" \" +\n\
-    \x20       Json.decodeFromString(grouped, b).value\n\
+    \x20       Json.decodeFromString(grouped, b).value + \" \" + c + \" \" +\n\
+    \x20       Json.decodeFromString(holder, c).boxed.value + \" \" + d + \" \" +\n\
+    \x20       Json.decodeFromString(Counted.serializer(), d).count.value\n\
     }\n";
 
 #[test]
@@ -179,7 +192,7 @@ fn a_generic_serializer_round_trips_through_its_type_serializers() {
             &[("Model.kt", GENERIC_MODEL), ("Main.kt", GENERIC_MAIN)],
             "generic_value_class_serializers"
         ),
-        "4 4 {\"k\":[1,2]} {k=[1, 2]}"
+        "4 4 {\"k\":[1,2]} {k=[1, 2]} {\"boxed\":\"h\"} h {\"count\":7} 7"
     );
 }
 
@@ -202,6 +215,33 @@ fn a_two_parameter_value_class_serializer_is_kotlincs() {
         GENERIC_MODEL,
         "Grouped$$serializer",
     );
+}
+
+/// A property of a generic value class is written as the value class's box: `write$Self` passes it
+/// to `encodeSerializableElement`, whose value parameter is a type parameter. Its carrier is
+/// `Object` too, and krusty unboxed the box it had just made, so the runtime serializer received
+/// the bare carrier and failed its cast.
+#[test]
+fn a_generic_value_class_property_is_written_as_its_box() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializableGenericValueClassHolder",
+        GENERIC_MODEL,
+        "Holder",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = member_body(&built.reference, "write$Self$");
+    assert!(want.len() > 1, "the reference declares write$Self");
+    assert_eq!(member_body(&built.krusty, "write$Self$"), want);
 }
 
 const UNSIGNED_MODEL: &str = "import kotlinx.serialization.Serializable\n\
@@ -252,5 +292,169 @@ fn an_unsigned_element_serializer_is_kotlincs() {
         "SerializableValueClassFilter",
         UNSIGNED_MODEL,
         "Filter$$serializer",
+    );
+}
+
+/// A carrier whose property names its serializer, by `with =`, by `@Contextual`, or on the type
+/// itself. The last two declarations each sit on one line, as the annotation does.
+const OVERRIDE_MODEL: &str = "import kotlinx.serialization.Contextual\n\
+    import kotlinx.serialization.KSerializer\n\
+    import kotlinx.serialization.Serializable\n\
+    import kotlinx.serialization.descriptors.PrimitiveKind\n\
+    import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor\n\
+    import kotlinx.serialization.encoding.Decoder\n\
+    import kotlinx.serialization.encoding.Encoder\n\
+    \n\
+    object Upper : KSerializer<String> {\n\
+    \x20   override val descriptor = PrimitiveSerialDescriptor(\"Upper\", PrimitiveKind.STRING)\n\
+    \x20   override fun serialize(encoder: Encoder, value: String) =\n\
+    \x20       encoder.encodeString(value.uppercase())\n\
+    \x20   override fun deserialize(decoder: Decoder): String = decoder.decodeString().lowercase()\n\
+    }\n\
+    \n\
+    @Serializable\n\
+    @JvmInline\n\
+    value class Shout(\n\
+    \x20   @Serializable(with = Upper::class) val text: String,\n\
+    )\n\
+    \n\
+    @Serializable\n\
+    @JvmInline\n\
+    value class Resolved(\n\
+    \x20   @Contextual val text: String?,\n\
+    )\n\
+    \n\
+    @Serializable @JvmInline value class Typed(val text: @Serializable(with = Upper::class) String)\n\
+    @Serializable class Point(val x: Int)\n";
+
+const OVERRIDE_MAIN: &str = "import kotlinx.serialization.json.Json\n\
+    fun box(): String {\n\
+    \x20   val shout = Json.encodeToString(Shout.serializer(), Shout(\"ab\"))\n\
+    \x20   val shoutBack = Json.decodeFromString(Shout.serializer(), shout)\n\
+    \x20   val resolved = Json.encodeToString(Resolved.serializer(), Resolved(\"cd\"))\n\
+    \x20   val resolvedBack = Json.decodeFromString(Resolved.serializer(), resolved)\n\
+    \x20   val typed = Json.encodeToString(Typed.serializer(), Typed(\"ef\"))\n\
+    \x20   val typedBack = Json.decodeFromString(Typed.serializer(), typed)\n\
+    \x20   return shout + \" \" + shoutBack.text + \" \" + resolved + \" \" + resolvedBack.text +\n\
+    \x20       \" \" + typed + \" \" + typedBack.text\n\
+    }\n";
+
+#[test]
+fn a_carrier_serializer_named_by_its_property_is_used() {
+    assert_eq!(
+        both_compilers_box_files(
+            &[("Model.kt", OVERRIDE_MODEL), ("Main.kt", OVERRIDE_MAIN)],
+            "value_class_carrier_serializers"
+        ),
+        "\"AB\" ab \"cd\" cd \"EF\" ef"
+    );
+}
+
+#[test]
+fn a_property_serializer_on_the_carrier_is_kotlincs() {
+    assert_class_matches_kotlinc_in(
+        "SerializableValueClassShout",
+        OVERRIDE_MODEL,
+        "Shout$$serializer",
+    );
+}
+
+#[test]
+fn a_contextual_carrier_is_kotlincs() {
+    assert_class_matches_kotlinc_in(
+        "SerializableValueClassResolved",
+        OVERRIDE_MODEL,
+        "Resolved$$serializer",
+    );
+}
+
+#[test]
+fn a_one_line_value_class_serializer_is_kotlincs() {
+    assert_class_matches_kotlinc_in(
+        "SerializableValueClassTyped",
+        OVERRIDE_MODEL,
+        "Typed$$serializer",
+    );
+}
+
+#[test]
+fn a_one_line_class_serializer_is_kotlincs() {
+    assert_class_matches_kotlinc_in(
+        "SerializableValueClassPoint",
+        OVERRIDE_MODEL,
+        "Point$$serializer",
+    );
+}
+
+const GENERIC_CONTEXTUAL_MODEL: &str = "import kotlinx.serialization.Contextual\n\
+    import kotlinx.serialization.Serializable\n\
+    @Serializable\n\
+    @JvmInline\n\
+    value class Generic<T>(\n\
+    \x20   @Contextual val value: T,\n\
+    )\n\
+    @Serializable\n\
+    @JvmInline\n\
+    value class Strict<T : Any>(\n\
+    \x20   @Contextual val value: T,\n\
+    )\n\
+    @Serializable\n\
+    @JvmInline\n\
+    value class Loose<T : Any?>(\n\
+    \x20   @Contextual val value: T,\n\
+    )\n";
+
+const GENERIC_CONTEXTUAL_MAIN: &str = "import kotlinx.serialization.builtins.serializer\n\
+    import kotlinx.serialization.json.Json\n\
+    fun box(): String {\n\
+    \x20   val serializer = Generic.serializer(String.serializer())\n\
+    \x20   val text = Json.encodeToString(serializer, Generic(\"gh\"))\n\
+    \x20   val back = Json.decodeFromString(serializer, text)\n\
+    \x20   return text + \" \" + back.value\n\
+    }\n";
+
+#[test]
+fn a_generic_contextual_carrier_uses_its_type_parameter_serializer() {
+    assert_eq!(
+        both_compilers_box_files(
+            &[
+                ("Model.kt", GENERIC_CONTEXTUAL_MODEL),
+                ("Main.kt", GENERIC_CONTEXTUAL_MAIN),
+            ],
+            "generic_contextual_value_class_carrier"
+        ),
+        "\"gh\" gh"
+    );
+}
+
+#[test]
+fn a_generic_contextual_carrier_serializer_is_kotlincs() {
+    assert_class_matches_kotlinc_in(
+        "SerializableGenericContextualValueClass",
+        GENERIC_CONTEXTUAL_MODEL,
+        "Generic$$serializer",
+    );
+}
+
+/// A value-class carrier follows the type parameter's resolved bound: unconstrained `T` can carry
+/// null and uses nullable serializer calls, while `T : Any` keeps the non-null calls. The existing
+/// `Generic<T>` comparison above pins the first half; this pins the contrasting bound.
+#[test]
+fn a_non_null_bounded_generic_contextual_carrier_serializer_is_kotlincs() {
+    assert_class_matches_kotlinc_in(
+        "SerializableStrictGenericContextualValueClass",
+        GENERIC_CONTEXTUAL_MODEL,
+        "Strict$$serializer",
+    );
+}
+
+/// An explicit nullable upper bound takes the same carrier-coding branch as the implicit nullable
+/// bound above, while preserving the declaration's distinct generic signature.
+#[test]
+fn an_explicit_nullable_bounded_generic_contextual_carrier_serializer_is_kotlincs() {
+    assert_class_matches_kotlinc_in(
+        "SerializableLooseGenericContextualValueClass",
+        GENERIC_CONTEXTUAL_MODEL,
+        "Loose$$serializer",
     );
 }

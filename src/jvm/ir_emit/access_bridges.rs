@@ -236,6 +236,8 @@ impl ProtectedMemberAccessBridge {
 
 pub(super) struct MemberAccessBridges {
     pub private: crate::fx_hash::HashSet<u32>,
+    /// Each call that reaches a bridged private member, with that member's class and function.
+    pub private_calls: crate::fx_hash::HashMap<crate::ir::ExprId, (u32, u32)>,
     pub protected: crate::fx_hash::HashMap<crate::ir::ExprId, ProtectedMemberAccessBridge>,
 }
 
@@ -396,6 +398,7 @@ pub(super) fn cross_owner_member_calls(
 ) -> MemberAccessBridges {
     let exporting = static_accessors::inline_functions_exporting_private_access(ir);
     let mut private = crate::fx_hash::HashSet::default();
+    let mut private_calls = crate::fx_hash::HashMap::default();
     let mut protected = crate::fx_hash::HashMap::default();
     let mut scan = |owner: &str,
                     caller: Option<crate::ir::ClassId>,
@@ -470,6 +473,7 @@ pub(super) fn cross_owner_member_calls(
                     && visibility.is_private()
                 {
                     private.insert(target);
+                    private_calls.insert(expression, (class, target));
                 }
                 if visibility == crate::types::Visibility::Protected {
                     let receiver_owner = receiver
@@ -767,26 +771,10 @@ pub(super) fn cross_owner_member_calls(
             );
         }
     }
-    MemberAccessBridges { private, protected }
-}
-
-/// The `access$…` bridges of `class`'s private members that another class calls, after its declared
-/// members as kotlinc's synthetic-accessor lowering appends them. A member realized as a static
-/// value-class `-impl` gets a bridge over the same parameters.
-pub(super) fn emit_private_member_access_bridges(
-    ir: &IrFile,
-    class: &IrClass,
-    owner: &str,
-    cw: &mut ClassWriter,
-    run: &EmitRun,
-) {
-    let bridged = run.private_member_access_bridges.borrow();
-    for &fid in class.methods.iter().filter(|fid| bridged.contains(fid)) {
-        if ir.functions[fid as usize].is_static {
-            emit_function_reference_access_bridge(ir, fid, owner, cw, false, class.decl_line);
-        } else {
-            emit_private_member_access_bridge(ir, fid, owner, cw, false, class.decl_line);
-        }
+    MemberAccessBridges {
+        private,
+        private_calls,
+        protected,
     }
 }
 

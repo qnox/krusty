@@ -2,6 +2,8 @@
 
 use crate::ir::IrClass;
 
+pub(super) mod captured_assignment;
+
 /// Whether instance field `field_index` stores a constructor-prefix value: the enclosing instance
 /// of an inner class, or a value a local class or anonymous object captures.
 ///

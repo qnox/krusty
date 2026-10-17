@@ -54,6 +54,7 @@ mod anonymous_receiver_labels;
 mod applied_hierarchy;
 mod checked_annotation_publication;
 mod checked_constant_publication;
+pub(crate) mod data_class_copy_visibility;
 pub(crate) mod operator_override_relations;
 pub(crate) use actualization_names::actualization_type_bindings;
 #[cfg(test)]
@@ -73,6 +74,7 @@ mod callable_reference_selection;
 mod candidate_display;
 mod class_literal_array_of_nothing;
 mod class_literal_receiver;
+mod class_literal_type_arguments;
 use candidate_display::{
     ambiguous_classifier_message, classifier_access_display_from_shape,
     inaccessible_classifier_message,
@@ -132,6 +134,7 @@ mod implicit_receiver_calls;
 mod implicit_rungs;
 mod inline_access;
 mod inner_constructor_calls;
+mod nested_producer_bindings;
 use inner_constructor_calls::BoundInnerConstruction;
 mod import_diagnostics;
 mod inspection_analysis;
@@ -210,6 +213,7 @@ mod source_fragment;
 mod source_generic_signatures;
 mod source_signature_display;
 mod source_type_resolution;
+mod standalone_qualifier_type_arguments;
 mod static_access_type_arguments;
 mod symbol_display;
 mod type_test_planning;
@@ -277,6 +281,7 @@ mod type_join;
 mod type_parameter_owners;
 mod upper_bound_violations;
 mod value_class_parameters;
+mod variance_conflicts;
 mod when_exhaustiveness;
 mod when_flow;
 
@@ -1080,26 +1085,26 @@ impl MemberExtFunSig {
     }
 }
 
-/// Bit-packed boolean modifiers for a [`ClassSig`]. The eight per-class flags below each cost a full
-/// byte as a separate `bool` field (plus struct padding); collapsed into one `u8` they save several
+/// Bit-packed boolean modifiers for a [`ClassSig`]. The per-class flags below each cost a full
+/// byte as a separate `bool` field (plus struct padding); collapsed into one `u16` they save several
 /// bytes per sig, and the compiler builds a few thousand. Built with the `with_*` chain from
-/// [`ClassFlags::default`]; read through the `ClassSig::is_*` / `has_*` accessors. All eight bits are
-/// in use — a ninth flag needs a wider field.
+/// [`ClassFlags::default`]; read through the `ClassSig::is_*` / `has_*` accessors.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ClassFlags(u8);
+pub struct ClassFlags(u16);
 
 impl ClassFlags {
-    const INTERFACE: u8 = 1 << 0;
-    const OBJECT: u8 = 1 << 1;
-    const ABSTRACT: u8 = 1 << 2;
-    const FUN_INTERFACE: u8 = 1 << 3;
-    const SEALED: u8 = 1 << 4;
-    const FINAL: u8 = 1 << 5;
-    const HAS_ABSTRACT_MEMBERS: u8 = 1 << 6;
-    const ANNOTATION: u8 = 1 << 7;
+    const INTERFACE: u16 = 1 << 0;
+    const OBJECT: u16 = 1 << 1;
+    const ABSTRACT: u16 = 1 << 2;
+    const FUN_INTERFACE: u16 = 1 << 3;
+    const SEALED: u16 = 1 << 4;
+    const FINAL: u16 = 1 << 5;
+    const HAS_ABSTRACT_MEMBERS: u16 = 1 << 6;
+    const ANNOTATION: u16 = 1 << 7;
+    const DATA: u16 = 1 << 8;
 
     #[inline]
-    const fn with(mut self, mask: u8, on: bool) -> Self {
+    const fn with(mut self, mask: u16, on: bool) -> Self {
         if on {
             self.0 |= mask;
         } else {
@@ -1108,7 +1113,7 @@ impl ClassFlags {
         self
     }
     #[inline]
-    const fn has(self, mask: u8) -> bool {
+    const fn has(self, mask: u16) -> bool {
         self.0 & mask != 0
     }
 
@@ -1144,6 +1149,10 @@ impl ClassFlags {
     pub const fn with_annotation(self, on: bool) -> Self {
         self.with(Self::ANNOTATION, on)
     }
+    #[inline]
+    pub const fn with_data(self, on: bool) -> Self {
+        self.with(Self::DATA, on)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1168,6 +1177,7 @@ fn source_class_flags(class: &ClassDecl) -> ClassFlags {
                 || class.body_props.iter().any(|property| property.is_abstract),
         )
         .with_annotation(class.is_annotation())
+        .with_data(class.is_data)
 }
 
 /// Classifier flags read from the compact Pass-1 declaration inventory.
@@ -1202,6 +1212,7 @@ fn streamed_source_class_flags(
         .with_final(flags.has(crate::fir::DeclarationFlags::FINAL))
         .with_has_abstract_members(has_abstract_members)
         .with_annotation(flags.has(crate::fir::DeclarationFlags::ANNOTATION_CLASS))
+        .with_data(flags.has(crate::fir::DeclarationFlags::DATA))
 }
 
 /// Capture the source-level callable inventory before functions and properties are normalized into
@@ -1796,6 +1807,11 @@ impl ClassSig {
     #[inline]
     pub fn is_annotation(&self) -> bool {
         self.flags.has(ClassFlags::ANNOTATION)
+    }
+    /// True for a Kotlin `data class`.
+    #[inline]
+    pub fn is_data(&self) -> bool {
+        self.flags.has(ClassFlags::DATA)
     }
     #[inline]
     pub fn set_is_abstract(&mut self, on: bool) {
@@ -7847,6 +7863,7 @@ pub enum ResolvedCall {
         physical_ret: Ty,
         /// Selected callable capabilities, on the semantic target so later consumers ask whether this
         /// exact call suspends or splices without a lookup or an origin branch.
+        deprecation: Option<std::sync::Arc<crate::types::DeprecatedDeclaration>>,
         inline: InlineKind,
         inline_body_plan: Option<Box<crate::libraries::InlineBodyPlan>>,
         /// Exact declaration type-parameter ordinals carrying `reified`, retained independently of
@@ -10512,6 +10529,7 @@ struct LexicalTypeAlias {
     target: TypeName,
     formals: Vec<String>,
     expansion: Ty,
+    expansion_spelling: crate::spelling::Spelled,
 }
 
 /// A lexical binding: a value (local, parameter, narrowing shadow) or a callable overload set.
@@ -12917,8 +12935,14 @@ impl<'a> Checker<'a> {
 
     /// The value a resolved classifier identity denotes in expression position. `None` means it is
     /// only a qualifier; the enclosing member/call/class-literal operation consumes the classifier.
-    fn classifier_value_ty(&mut self, expression: ExprId, internal: TypeName) -> Option<Ty> {
+    fn classifier_value_ty(
+        &mut self,
+        expression: ExprId,
+        internal: TypeName,
+        through_alias: bool,
+    ) -> Option<Ty> {
         if internal == type_name("kotlin/Unit") {
+            self.check_standalone_qualifier_type_arguments(expression, internal, through_alias);
             self.expr_lowers.insert(
                 expression,
                 ExprLowering::SingletonValue(SingletonValue {
@@ -12928,6 +12952,7 @@ impl<'a> Checker<'a> {
             return Some(Ty::Unit);
         }
         let singleton = self.classifier_singleton_value(internal)?;
+        self.check_standalone_qualifier_type_arguments(expression, internal, through_alias);
         let ty = Ty::obj_name(singleton.classifier);
         self.expr_lowers
             .insert(expression, ExprLowering::SingletonValue(singleton));
@@ -12950,7 +12975,7 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         expected: Option<Ty>,
     ) -> ClassifierValueCall {
-        let Some(receiver_ty) = self.classifier_value_ty(receiver, classifier) else {
+        let Some(receiver_ty) = self.classifier_value_ty(receiver, classifier, false) else {
             return ClassifierValueCall::NoValue;
         };
         self.set(receiver, receiver_ty);
@@ -13236,7 +13261,7 @@ impl<'a> Checker<'a> {
         expected: Option<Ty>,
     ) -> Option<InvokeResolution> {
         let span = self.span(call);
-        let receiver = self.classifier_value_ty(callee, classifier)?;
+        let receiver = self.classifier_value_ty(callee, classifier, false)?;
         self.set(callee, receiver);
         let argument_types = self.invoke_operator_arg_tys(scope, call, receiver, args);
         Some(self.record_invoke(
@@ -13461,14 +13486,28 @@ impl<'a> Checker<'a> {
             let Some(classifier) = record.classifier_name else {
                 continue;
             };
-            if self.classifier_singleton_value(classifier).is_some()
-                && !explicit.contains(&classifier)
-            {
-                explicit.push(classifier);
+            let through_alias = matches!(
+                record.classifier_declaration,
+                Some(crate::libraries::ClassifierDeclaration::TypeAlias(_))
+            );
+            if self.classifier_singleton_value(classifier).is_some() {
+                if let Some((_, selected_through_alias)) = explicit
+                    .iter_mut()
+                    .find(|(selected, _)| *selected == classifier)
+                {
+                    // Preserve the existing value-namespace deduplication by semantic classifier.
+                    // Mixed ordinary/alias provenance cannot prove that the selected access was
+                    // written through an alias, so only unanimous alias candidates retain it.
+                    *selected_through_alias &= through_alias;
+                } else {
+                    explicit.push((classifier, through_alias));
+                }
             }
         }
         match explicit.as_slice() {
-            [classifier] => return self.classifier_value_ty(expression, *classifier),
+            [(classifier, through_alias)] => {
+                return self.classifier_value_ty(expression, *classifier, *through_alias);
+            }
             [_, _, ..] => {
                 self.diags.error(
                     self.span(expression),
@@ -13484,11 +13523,14 @@ impl<'a> Checker<'a> {
                 .classifier_levels()
                 .iter()
                 .map(|level| {
-                    crate::symbol_resolver::classifier_candidates_at_import_level(
+                    crate::symbol_resolver::scoped_classifier_candidates_at_import_level(
                         &source, name, level,
                     )
                     .into_iter()
-                    .filter(|classifier| self.classifier_singleton_value(*classifier).is_some())
+                    .filter(|candidate| {
+                        self.classifier_singleton_value(candidate.classifier)
+                            .is_some()
+                    })
                     .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>()
@@ -13500,7 +13542,13 @@ impl<'a> Checker<'a> {
         for candidates in levels {
             match candidates.as_slice() {
                 [] => continue,
-                [classifier] => return self.classifier_value_ty(expression, *classifier),
+                [candidate] => {
+                    return self.classifier_value_ty(
+                        expression,
+                        candidate.classifier,
+                        candidate.alias.is_some(),
+                    );
+                }
                 [_, _, ..] => {
                     self.diags.error(
                         self.span(expression),
@@ -20502,26 +20550,24 @@ impl<'a> Checker<'a> {
                     {
                         return Ty::Error;
                     }
-                    let postponed_reference_mark =
-                        matches!(self.file.expr(a), Expr::CallableRef { .. })
-                            .then(|| {
-                                let shape = selected_lambda_shape?;
-                                let declared = *shape.argument_parameters.get(i)?;
-                                shape
-                                    .generic_formals
-                                    .iter()
-                                    .any(|formal| {
-                                        !known_generic_bindings.contains_key(formal)
-                                            && ty_mentions_param(
-                                                declared,
-                                                std::slice::from_ref(formal),
-                                            )
-                                    })
-                                    .then_some(self.diags.diags.len())
-                            })
-                            .flatten();
+                    // A callable reference whose parameter still mentions an open formal, or a
+                    // nested call typed before any candidate supplies its parameter, is a probe:
+                    // the selected candidate re-checks it, and only that verdict stands.
+                    let probe = match self.file.expr(a) {
+                        Expr::CallableRef { .. } => selected_lambda_shape
+                            .and_then(|shape| Some((shape, *shape.argument_parameters.get(i)?)))
+                            .is_some_and(|(shape, declared)| {
+                                shape.generic_formals.iter().any(|formal| {
+                                    !known_generic_bindings.contains_key(formal)
+                                        && ty_mentions_param(declared, std::slice::from_ref(formal))
+                                })
+                            }),
+                        Expr::Call { .. } => known_sig.is_none(),
+                        _ => false,
+                    };
+                    let probe_mark = probe.then_some(self.diags.diags.len());
                     let checked = self.expr(scope, a);
-                    if let Some(mark) = postponed_reference_mark {
+                    if let Some(mark) = probe_mark {
                         self.postponed_diagnostics
                             .capture_since(a, self.diags, mark);
                     }
@@ -21442,7 +21488,8 @@ impl<'a> Checker<'a> {
                         self.read_classifier_member(callee, owner, &declared_name)
                     });
                 if let Some(ct) = imported_classifier_value.or_else(|| {
-                    bare_classifier.and_then(|internal| self.classifier_value_ty(callee, internal))
+                    bare_classifier
+                        .and_then(|internal| self.classifier_value_ty(callee, internal, false))
                 }) {
                     crate::trace_compiler!(
                         "resolve",
@@ -24417,6 +24464,7 @@ val result = object { fun value(): String = captured }
     fn import_test_classifier(alias_target: Option<TypeName>) -> crate::libraries::LibraryType {
         crate::libraries::LibraryType {
             is_kotlin: true,
+            is_data: false,
             access: crate::libraries::ClassifierAccess::Public,
             source_file: None,
             stable_declaration: None,
@@ -24453,6 +24501,7 @@ val result = object { fun value(): String = captured }
             annotation_targets: None,
             mapped_collection: None,
             annotation_element_defaults: Vec::new(),
+            deprecation: None,
         }
     }
 
@@ -27179,6 +27228,7 @@ fun box(): String {
                     };
                 return Some(std::sync::Arc::new(crate::libraries::LibraryType {
                     is_kotlin: true,
+                    is_data: false,
                     access: crate::libraries::ClassifierAccess::Public,
                     source_file: None,
                     stable_declaration: None,
@@ -27217,6 +27267,7 @@ fun box(): String {
                     annotation_targets: None,
                     mapped_collection: None,
                     annotation_element_defaults: Vec::new(),
+                    deprecation: None,
                 }));
             }
             [
@@ -27308,6 +27359,7 @@ fun box(): String {
                     .collect();
                 std::sync::Arc::new(crate::libraries::LibraryType {
                     is_kotlin: true,
+                    is_data: false,
                     access: crate::libraries::ClassifierAccess::Public,
                     source_file: None,
                     stable_declaration: None,
@@ -27352,6 +27404,7 @@ fun box(): String {
                     annotation_targets: None,
                     mapped_collection: None,
                     annotation_element_defaults: Vec::new(),
+                    deprecation: None,
                 })
             })
         }
@@ -31161,7 +31214,14 @@ fun use() {
 
     #[test]
     fn bool_operator_misuse() {
-        err_contains("fun f(a: Int): Boolean = a && a", "cannot be applied");
+        let (errors, _) = check("fun f(a: Int): Boolean = a && a");
+        assert_eq!(
+            errors,
+            [
+                "condition type mismatch: inferred type is 'Int' but 'Boolean' was expected.",
+                "condition type mismatch: inferred type is 'Int' but 'Boolean' was expected.",
+            ]
+        );
     }
 
     #[test]
@@ -32930,6 +32990,8 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         command_line_opt_ins: std::cell::OnceCell::new(),
         resolved_type_bounds: HashMap::default(),
         resolved_declaration_types: HashMap::default(),
+        selected_type_alias_applications: HashMap::default(),
+        resolved_unsafe_variance_occurrences: HashSet::default(),
         resolved_declaration_type_parameters: HashMap::default(),
         lexical_type_parameter_bounds: Default::default(),
         class_literal_targets: HashMap::default(),
@@ -32937,7 +32999,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         bound_annotation_identities: HashMap::default(),
         ret_ty: Ty::Unit,
         type_parameter_owners: HashMap::default(),
-        unchecked_bounds_reference: None,
+        upper_bound_violations: Default::default(),
         expected: None,
         callable_reference_literal_constraints: HashMap::default(),
         active_callable_reference: None,
@@ -34188,6 +34250,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         for &declaration_start in &file.type_alias_declaration_starts {
             c.check_declaration_type_parameter_annotations(scope, declaration_start);
         }
+        c.check_file_type_alias_bounds();
     }
 
     if fragment.is_type_use_annotations() {
@@ -35126,6 +35189,7 @@ pub(crate) struct MemberExtensionFunctionCandidate {
     argument_parameters: Vec<(usize, usize)>,
     visibility: Visibility,
     is_operator: bool,
+    deprecation: Option<std::sync::Arc<crate::types::DeprecatedDeclaration>>,
     inline: InlineKind,
     inline_body_plan: Option<Box<crate::libraries::InlineBodyPlan>>,
     suspend: bool,
@@ -35469,6 +35533,13 @@ struct Checker<'a> {
     command_line_opt_ins: std::cell::OnceCell<Vec<TypeName>>,
     resolved_type_bounds: HashMap<(u32, u32), (Ty, bool)>,
     resolved_declaration_types: HashMap<(u32, u32), Ty>,
+    /// Alias templates retained when their source occurrences are first selected. Variance
+    /// diagnostics consume this bounded checker state and never reopen scope lookup by spelling.
+    selected_type_alias_applications:
+        HashMap<(u32, u32), alias_projection::SelectedAliasApplication>,
+    /// Type occurrences whose `@UnsafeVariance` annotation was bound to the well-known identity.
+    /// Variance checking consumes this fact and never selects an annotation again by spelling.
+    resolved_unsafe_variance_occurrences: HashSet<(u32, u32)>,
     resolved_declaration_type_parameters: HashMap<u32, Vec<String>>,
     /// All bounds of body-local type parameters, keyed by declaration-owned semantic identity.
     /// Local functions have no stable module header, but assignability still needs the same bound
@@ -35484,9 +35555,7 @@ struct Checker<'a> {
     /// kotlinc's owner wording (`fun <T : B> f`) of each declaration-owned type parameter checked
     /// so far, keyed by semantic identity, solely for diagnostics.
     type_parameter_owners: HashMap<&'static str, String>,
-    /// The type reference whose outermost application is exempt from the upper-bound check while
-    /// it is resolved: a type operator's target or a callable's type-parameter bound.
-    unchecked_bounds_reference: Option<Span>,
+    upper_bound_violations: upper_bound_violations::UpperBoundViolationState,
     /// Expected type for the next expression. Consumed by [`Self::expr`]; result-position
     /// propagation must re-arm it through [`Self::expr_expected`].
     expected: Option<Ty>,
@@ -36856,6 +36925,9 @@ impl<'a> Checker<'a> {
         match binary_result_with(&prohibited_identity, &equality_compatible, op, lt, rt) {
             Ok(result) => result,
             Err(BinaryRefusal::ErrorOperand) => Ty::Error,
+            // `&&`/`||` operands were checked as two condition sites by `expr_inner_binary`.
+            // Do not replace those exact diagnostics with one overload-style binary error.
+            Err(BinaryRefusal::Mismatch) if matches!(op, BinOp::And | BinOp::Or) => Ty::Error,
             Err(BinaryRefusal::Mismatch) => self.bin_err(op, lt, rt, span),
             Err(BinaryRefusal::ProhibitedIdentity) => {
                 self.diags.error(
@@ -37572,11 +37644,7 @@ impl<'a> Checker<'a> {
         if supplied == expected {
             return false;
         }
-        let wording = match expected {
-            0 => "no type arguments expected".to_string(),
-            1 => "one type argument expected".to_string(),
-            count => format!("{count} type arguments expected"),
-        };
+        let wording = candidate_display::type_argument_count_wording(expected);
         let callee = self.call_callee_name_span(call);
         self.diags.error(
             Span::new(callee.hi, callee.hi.saturating_add(1)),
@@ -39159,6 +39227,20 @@ impl<'a> Checker<'a> {
                 let Some(&declared_parameter) = signature.params.get(parameter) else {
                     continue;
                 };
+                let declared_parameter = if candidate.call_sig.vararg_index == Some(parameter)
+                    && !self.file.is_spread_arg(args[argument])
+                {
+                    declared_parameter
+                        .array_read_elem()
+                        .unwrap_or(declared_parameter)
+                } else {
+                    declared_parameter
+                };
+                let open_formal = nested_producer_bindings::open_variable(
+                    &signature,
+                    type_args,
+                    declared_parameter,
+                );
                 let substituted =
                     crate::symbol_resolver::ty_subst_keep_unbound(declared_parameter, &bindings);
                 let nested_expected = match substituted {
@@ -39202,44 +39284,32 @@ impl<'a> Checker<'a> {
                         None if nested_expected.mentions_ty_param() => {
                             crate::symbol_resolver::unconstrained_result_bindings(&generic_sig)
                         }
+                        // An outer variable typed only by another argument's lower bound is not
+                        // fixed yet: the nested result becomes a second lower bound, and the
+                        // variable their common supertype.
+                        None if open_formal.is_some() => {
+                            let upper = open_formal.and_then(|formal| {
+                                expected_result_bindings.as_ref()?.get(formal).copied()
+                            });
+                            match nested_producer_bindings::open_variable_bindings(
+                                &source,
+                                &generic_sig,
+                                nested_expected,
+                                upper,
+                                |actual, bound| self.receiver_is_assignable(actual, bound),
+                            ) {
+                                Some(bindings) => bindings,
+                                None => continue,
+                            }
+                        }
                         None => continue,
                     }
                 };
-                // A symbolic outer expectation may bind the nested producer's formal directly to
-                // an outer call variable. That relation is valid only when the OUTER variable's
-                // own upper bound satisfies the nested declaration's bound. For
-                // `<Y : Any> produce(): Box<Y>` passed to `<X> consume(Box<X>)`, `Y = X` is not a
-                // solution while `X` still has its default `Any?` bound; the producer contributes
-                // its denotable `Any` bound and thereby constrains `X` to non-null. Enforce that
-                // declaration bound before projecting the nested result into the outer call.
-                for (index, formal) in generic_sig.formals.iter().enumerate() {
-                    let Some(actual) = nested_bindings.get(formal).copied() else {
-                        continue;
-                    };
-                    let Some(actual_bound) = actual.non_null().ty_param_bound() else {
-                        continue;
-                    };
-                    let Some(required) = generic_sig
-                        .formal_bounds
-                        .get(index)
-                        .and_then(|bounds| bounds.first())
-                        .copied()
-                        .filter(|bound| {
-                            !generic_sig.formals.iter().any(|nested| {
-                                crate::types::ty_mentions_param(
-                                    *bound,
-                                    std::slice::from_ref(nested),
-                                )
-                            })
-                        })
-                    else {
-                        continue;
-                    };
-                    if actual.is_nullable() || !self.receiver_is_assignable(actual_bound, required)
-                    {
-                        nested_bindings.insert(formal.clone(), required);
-                    }
-                }
+                nested_producer_bindings::enforce_declared_bounds(
+                    &generic_sig,
+                    &mut nested_bindings,
+                    |actual, bound| self.receiver_is_assignable(actual, bound),
+                );
                 crate::trace_compiler!(
                     "resolve",
                     "postponed argument call={call:?} parameter={parameter} nested_bindings={nested_bindings:?}",
@@ -39265,6 +39335,16 @@ impl<'a> Checker<'a> {
                 // solution here; its readable upper is a bound, not a concrete outer binding.
                 for formal in nested_constraints.upper_only {
                     inferred_nested.entry(formal).or_insert(Ty::Nothing);
+                }
+                // The producer's result is a lower bound for a bare outer variable.
+                if open_formal.is_some() {
+                    nested_producer_bindings::join_lower_bounds(
+                        &source,
+                        &signature,
+                        &receiver_bindings,
+                        &mut bindings,
+                        &mut inferred_nested,
+                    );
                 }
                 crate::trace_compiler!(
                     "resolve",
@@ -40559,6 +40639,7 @@ impl<'a> Checker<'a> {
         if member.is_member_extension() {
             return self.reject_member_extension_reference(expression, &member.name);
         }
+        self.check_data_class_copy_usage(self.member_name_span(expression, &member.name), &member);
         if !type_arguments.is_empty() {
             self.resolved_call_type_args
                 .insert(expression, type_arguments.into_iter().map(Some).collect());
@@ -40631,6 +40712,7 @@ impl<'a> Checker<'a> {
         if member.is_member_extension() {
             return Some(self.reject_member_extension_reference(expression, &member.name));
         }
+        self.check_data_class_copy_usage(self.member_name_span(expression, &member.name), &member);
         self.apply_checked_source_callable_result(receiver, &mut member);
         if member.ret == Ty::Nothing {
             return None;
@@ -45745,6 +45827,7 @@ impl<'a> Checker<'a> {
 
     /// Resolve a syntactic type without erasing source nullability.
     fn type_ref_ty(&mut self, scope: &CheckerScope<'_>, r: &TypeRef) -> Ty {
+        self.retain_resolved_type_use_annotations(scope, r);
         let (resolved, conflicts) = self.type_ref_ty_resolved(scope, r);
         // Nullability on the written use is part of the intermediate type kotlinc quotes. The
         // conflict spans belong to this application; nested alias arguments already reported theirs.
@@ -45759,6 +45842,7 @@ impl<'a> Checker<'a> {
             Some(scope.tparam_bound(&r.name))
         } else if scope.type_alias(&r.name).is_some() {
             self.scoped_source_alias_ty(scope, r).map(|applied| {
+                self.retain_selected_alias_application(r, &applied);
                 conflicts = applied.conflicts;
                 applied.ty
             })
@@ -45785,14 +45869,16 @@ impl<'a> Checker<'a> {
                         Some(if r.is_import() {
                             alias.expansion
                         } else {
-                            let applied = self.alias_application_ty(
+                            let applied = self.alias_application_ty_with_spelling(
                                 scope,
                                 alias.formals,
                                 alias.expansion,
+                                alias.expansion_spelling,
                                 &r.name,
                                 alias_projection::AliasArguments::of(r),
                                 r.span,
                             );
+                            self.retain_selected_alias_application(r, &applied);
                             conflicts = applied.conflicts;
                             applied.ty
                         })
@@ -45810,6 +45896,7 @@ impl<'a> Checker<'a> {
                     // Primitive/function aliases have no classifier facet, so no classifier was
                     // selected above. Resolve that sole alias binding through the normal type path.
                     self.scoped_source_alias_ty(scope, r).map(|applied| {
+                        self.retain_selected_alias_application(r, &applied);
                         conflicts = applied.conflicts;
                         applied.ty
                     })
@@ -45832,6 +45919,7 @@ impl<'a> Checker<'a> {
         } {
             Ty::from_name(&primitive_alias).unwrap_or(Ty::Error)
         } else if let Some(applied) = self.scoped_source_alias_ty(scope, r) {
+            self.retain_selected_alias_application(r, &applied);
             conflicts = applied.conflicts;
             applied.ty
         } else {
@@ -45863,7 +45951,7 @@ impl<'a> Checker<'a> {
         );
         let declaration_scope = scope.child(ScopeKind::Block);
         declaration_scope.declare_tparams(&alias.type_params, &parameters, |_| false);
-        let expansion = self.type_ref_ty(&declaration_scope, &alias.target);
+        let expansion = self.resolve_alias_declaration_target(&declaration_scope, &alias.target);
         if expansion == Ty::Error {
             self.report_unresolved_type_ref(&alias.target);
             return None;
@@ -45884,6 +45972,10 @@ impl<'a> Checker<'a> {
             target,
             formals,
             expansion,
+            // Body-local aliases are not stable metadata declarations. Their ordinary source
+            // occurrence still supplies use-site provenance; a dedicated local template sidecar
+            // can fill this slot when local alias type-use annotations become supported.
+            expansion_spelling: Default::default(),
         };
         scope.rebind(
             &alias.name,
@@ -47287,9 +47379,7 @@ impl<'a> Checker<'a> {
             self.check_function_annotation_applications(scope, f, "top level function");
         self.check_infix_declaration(f, false);
         let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
-        for (_, bound) in &f.type_param_bounds {
-            self.check_callable_type_parameter_bound(scope, bound);
-        }
+        self.check_callable_type_parameter_bounds(scope, &f.type_param_bounds);
         self.check_duplicate_param_names(&f.params, f.context_count, f.span);
         // Duplicate type-parameter names (`fun <T, T> f()`) are illegal (conflicting declaration).
         {
@@ -47799,9 +47889,7 @@ impl<'a> Checker<'a> {
         });
         self.check_declaration_type_parameter_annotations(scope, p.span.lo);
         let owned_type_parameters = self.publish_property_type_parameter_owner(scope, p);
-        for (_, bound) in &p.type_param_bounds {
-            self.check_callable_type_parameter_bound(scope, bound);
-        }
+        self.check_callable_type_parameter_bounds(scope, &p.type_param_bounds);
         self.check_duplicate_param_names(&p.context_params, p.context_params.len(), p.span);
         let prev_extension_receiver = self.this_extension_receiver;
         // For an extension property (`val Recv.name: T get() = …`), `this` inside the
@@ -48776,6 +48864,7 @@ impl<'a> Checker<'a> {
         if !body_local_class {
             self.check_bodyless_operator_declarations(scope, cl, d, current_owner);
         }
+        self.check_data_class_copy_visibility(scope, cl);
         for m in &cl.methods {
             if m.is_abstract() && !matches!(m.body, FunBody::None) {
                 self.diags.error(
@@ -48858,6 +48947,7 @@ impl<'a> Checker<'a> {
             .and_then(|classifier| classifier.stable_declaration)
         {
             self.check_finalized_supertype_bounds(cl, declaration);
+            self.check_stable_nested_type_alias_bounds(cl, declaration);
         }
         if !body_local_class && self.active_declarations.is_none() {
             // The retained inspection pipeline keeps the original declaration AST so editor
@@ -49191,7 +49281,7 @@ impl<'a> Checker<'a> {
             scope.declare_tparams(&cl.type_params, &class_tparams, |name| {
                 inherited_reified_type_parameters.contains(name)
             });
-            self.publish_class_type_parameter_owner(scope, cl);
+            self.publish_class_type_parameter_owner(scope, cl, current_owner);
             scope.declare_context_receivers(&class_context_receivers);
             let mut context_names = crate::fx_hash::HashSet::default();
             for receiver in &class_context_receivers {
@@ -49997,9 +50087,10 @@ impl<'a> Checker<'a> {
                             &property_scope,
                             bp.span.lo,
                         );
-                        for (_, bound) in &bp.type_param_bounds {
-                            self.check_callable_type_parameter_bound(&property_scope, bound);
-                        }
+                        self.check_callable_type_parameter_bounds(
+                            &property_scope,
+                            &bp.type_param_bounds,
+                        );
                         self.check_duplicate_param_names(
                             &bp.context_params,
                             bp.context_params.len(),
@@ -51037,6 +51128,7 @@ impl<'a> Checker<'a> {
                     let owned_type_parameters =
                         self.publish_property_type_parameter_owner(scope, bp);
                     self.check_declaration_type_parameter_annotations(scope, bp.span.lo);
+                    self.check_callable_type_parameter_bounds(scope, &bp.type_param_bounds);
                     self.check_duplicate_param_names(
                         &bp.context_params,
                         bp.context_params.len(),
@@ -51147,15 +51239,16 @@ impl<'a> Checker<'a> {
                     // reported); the inference error is emitted after the accessor checks only
                     // when they stayed silent.
                     let body_diag_mark = self.diags.diags.len();
+                    let checked_declared_property = bp
+                        .declared_ty()
+                        .map(|declared| self.check_declaration_type(scope, declared));
                     if let Some(init) = bp.init.filter(|_| check_ordinary_property_body) {
                         // A solved inferred signature is the initializer's output, never its
                         // contextual input. Feeding the Pass-1 result back here can bind an
                         // otherwise unbound generic call (`val x = Result.failure(...)`) and hide
                         // the required inference diagnostic. Only source-written property/storage
                         // types constrain the ordinary Pass-2 initializer.
-                        let declared = bp
-                            .declared_ty()
-                            .map(|declared| self.check_declaration_type(scope, declared))
+                        let declared = checked_declared_property
                             .filter(|ty| !ty.mentions_error() && !ty.mentions_pending())
                             .map(|property_ty| {
                                 if bp.explicit_backing_field.is_some() {
@@ -51226,9 +51319,7 @@ impl<'a> Checker<'a> {
                             current_owner.expect("a checked member property has an owning class"),
                         );
                         let this_ref = extension_receiver.unwrap_or(owner_ref);
-                        let expected_property = bp
-                            .declared_ty()
-                            .map(|declared| self.check_declaration_type(scope, declared))
+                        let expected_property = checked_declared_property
                             .filter(|ty| !ty.mentions_error() && !ty.mentions_pending());
                         let mut site =
                             DelegateConventionSite::of(bp, Some(owner_ref), extension_receiver);
@@ -51294,10 +51385,7 @@ impl<'a> Checker<'a> {
                         self.this_extension_receiver = Some(receiver_span);
                         self.symbolic_signature_inference = true;
                     }
-                    let prop_ty = bp
-                        .ty
-                        .as_ref()
-                        .map(|r| self.check_declaration_type(scope, r))
+                    let prop_ty = checked_declared_property
                         .or_else(|| declared_property.map(|(property_ty, _)| property_ty))
                         .filter(|ty| !ty.mentions_error() && !ty.mentions_pending())
                         .or(body_inferred_property_type)
@@ -51465,6 +51553,7 @@ impl<'a> Checker<'a> {
             for _ in 0..label_depth {
                 self.this_labels.pop();
             }
+            self.check_class_variance(scope, cl, d, current_owner);
         }
         // Enum entry constructor arguments (e.g. `RED(0xff0000)`) are type-checked in a
         // static classifier-receiver scope. There is no entry INSTANCE yet: `this` is the nearest
@@ -51726,9 +51815,7 @@ impl<'a> Checker<'a> {
         });
         let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
         let suppression_depth = self.check_function_annotation_applications(scope, f, "function");
-        for (_, bound) in &f.type_param_bounds {
-            self.check_callable_type_parameter_bound(scope, bound);
-        }
+        self.check_callable_type_parameter_bounds(scope, &f.type_param_bounds);
         let dispatch_this = scope.this_ty();
         let dispatch_extension_receiver = self.this_extension_receiver;
         let stable_declaration = stable_declaration.or_else(|| {
@@ -58670,7 +58757,7 @@ impl<'a> Checker<'a> {
         let source = self.fed_source();
         match expected_nested_classifier(&source, expected, name) {
             InheritedNestedClassifier::Found(classifier) => {
-                let value = self.classifier_value_ty(expression, classifier)?;
+                let value = self.classifier_value_ty(expression, classifier, false)?;
                 self.receiver_is_assignable(value, expected)
                     .then_some(value)
             }
@@ -59361,10 +59448,12 @@ impl<'a> Checker<'a> {
                     self.set(e, ty)
                 } else if let Some(ty) = self.imported_classifier_value_ty(scope, e, &n) {
                     ty
-                } else if let Ok(ResolvedQualifier::Classifier(internal)) =
-                    self.qualifier(scope, QualifierInput::Root(&n))
+                } else if let (InheritedNestedClassifier::Found(internal), _, selected_alias) =
+                    self.select_classifier_binding(scope, &n)
                 {
-                    if let Some(ty) = self.classifier_value_ty(e, internal) {
+                    if let Some(ty) =
+                        self.classifier_value_ty(e, internal, selected_alias.is_some())
+                    {
                         return self.set(e, ty);
                     }
                     self.diags
@@ -59461,8 +59550,11 @@ impl<'a> Checker<'a> {
                     self.apply_condition_exclusions(scope, lhs, op == BinOp::And);
                     self.expr(scope, rhs)
                 };
-                // `check_binary` enforces both operands are `Boolean` (and reports the same
-                // "operator cannot be applied" error as the non-`&&` path otherwise).
+                // Logical operands are conditions, not overloadable binary-operator arguments.
+                // Diagnose each invalid condition at its own expression, matching the condition
+                // diagnostics used by `if`, `while`, and subjectless `when`.
+                self.expect_assignable(Ty::Boolean, lt, self.span(lhs), "logical condition");
+                self.expect_assignable(Ty::Boolean, rt, self.span(rhs), "logical condition");
                 let bt = self.check_binary(op, lt, rt, self.span(e));
                 return self.set(e, bt);
             }
@@ -59791,7 +59883,7 @@ impl<'a> Checker<'a> {
                 self.callable_ref_lhs_classifier_type(scope, receiver, expression)
                     .ok()
                     .flatten()
-                    .map(|(_, ty)| ty)
+                    .map(|(_, ty, _)| ty)
             })
         } else {
             None
@@ -60031,16 +60123,26 @@ impl<'a> Checker<'a> {
             // latter when both exist.
             let member_qualifier = receiver_qualifier.clone().and_then(|prefix| {
                 let source = self.fed_source();
-                walk_qualifier(&source, prefix, &[(Some(e), name.clone())])
+                walk_qualifier_with_declaration_identity(
+                    &source,
+                    prefix,
+                    &[(Some(e), name.clone())],
+                )
             });
-            if let Some(internal) = member_qualifier
-                .ok()
-                .and_then(ResolvedQualifier::classifier)
-            {
+            if let Ok((ResolvedQualifier::Classifier(internal), declaration)) = member_qualifier {
                 if self.reject_inaccessible_classifier_expression(e, internal) {
                     return self.set(e, Ty::Error);
                 }
-                if let Some(ty) = self.classifier_value_ty(e, internal) {
+                let Ok(selected_alias) =
+                    self.selected_provider_alias(internal, declaration.as_ref())
+                else {
+                    self.diags.error(
+                        self.member_name_span(e, &name),
+                        crate::diagnostic_wording::unresolved_reference_on(&name, None),
+                    );
+                    return self.set(e, Ty::Error);
+                };
+                if let Some(ty) = self.classifier_value_ty(e, internal, selected_alias.is_some()) {
                     return self.set(e, ty);
                 }
             }
@@ -61364,7 +61466,7 @@ impl<'a> Checker<'a> {
         receiver: ExprId,
         name: &str,
     ) -> UnboundRefSelection {
-        let Ok(Some((internal, receiver_ty))) =
+        let Ok(Some((internal, receiver_ty, _))) =
             self.callable_ref_lhs_classifier_type(scope, receiver, expression)
         else {
             return UnboundRefSelection::NotClassifier;
@@ -61876,45 +61978,7 @@ impl<'a> Checker<'a> {
                 let Some(recv) = receiver else {
                     return unsupported(self);
                 };
-                // A bare name that resolves to a reference TYPE is an UNBOUND literal (`String::class`).
-                // Otherwise it's a BOUND literal on a value (`x::class`, `this::class`): type-check the
-                // receiver — a non-reference receiver (a primitive `Int::class`, an unresolved name) is
-                // skipped, not mis-read.
-                // The checker-visible representation of a reified `T::class`: the SEMANTIC type
-                // parameter, distinct from the lowering marker below. `KClass<T>` must carry the
-                // enclosing function's own `T` so a delegated generic member call infers its formal
-                // from the argument (`fun <T : Any> services(type: KClass<T>): List<T>` called as
-                // `services(T::class)` from a reified extension returns the EXTENSION's `List<T>`,
-                // not the member's unbound formal). The `Obj(T)` name marker must not leak into
-                // inference: it reads as a plain classifier named "T" and poisons every binding it
-                // reaches.
-                let unbound = if let Expr::Name(n) = self.file.expr(recv).clone() {
-                    // `T::class` on a REIFIED type parameter is an unbound literal: the lowerer
-                    // substitutes its declaration-owned identity to the call-site type
-                    // (`reified_subst`) when it expands the inline body. Only a REIFIED `T` is
-                    // accepted — kotlinc rejects a class literal on a non-reified type parameter.
-                    self.class_literal_unbound_ty(scope, recv, &n)
-                        .or_else(|| scope.reified_tparam(&n))
-                } else {
-                    // A QUALIFIED type name (`pkg.Cls::class`, `java.util.ArrayList::class`,
-                    // `Outer.Nested::class`) is an unbound literal exactly like the simple name an
-                    // import would bind — the receiver is a classifier, not a value to evaluate.
-                    self.callable_ref_lhs_classifier_type(scope, recv, e)
-                        .ok()
-                        .flatten()
-                        .map(|(_, ty)| ty)
-                };
-                let unbound = unbound.map(|ty| {
-                    let ty = self.validate_class_literal_type_arguments(e, recv, ty);
-                    let Ty::Obj(internal, []) = ty else {
-                        return ty;
-                    };
-                    let classifier = self
-                        .fed_source()
-                        .classifier(internal)
-                        .expect("a resolved class-literal classifier must retain its declaration");
-                    class_literal_receiver::star_projected_class_literal_receiver(ty, &classifier)
-                });
+                let unbound = self.class_literal_unbound_receiver(scope, e, recv);
                 if unbound == Some(Ty::Error) {
                     return self.set(e, Ty::Error);
                 }
@@ -63614,6 +63678,7 @@ impl<'a> Checker<'a> {
             self.diags.error(self.call_callee_name_span(call), message);
             return Some(Ty::Error);
         }
+        self.check_data_class_copy_usage(self.call_callee_name_span(call), &selected.member);
         self.reject_non_public_api_from_public_inline(
             call,
             Self::is_public_api_for_inline_access(
@@ -65833,22 +65898,13 @@ impl<'a> Checker<'a> {
                     });
                     continue;
                 }
-                let result_arguments = classifier
-                    .type_params()
-                    .iter()
-                    .enumerate()
-                    .map(|(index, formal)| {
-                        bindings.get(formal).copied().unwrap_or_else(|| {
-                            classifier
-                                .type_param_bounds()
-                                .get(index)
-                                .and_then(|bounds| bounds.first())
-                                .copied()
-                                .filter(|bound| *bound != Ty::Error)
-                                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
-                        })
-                    })
-                    .collect::<Vec<_>>();
+                let result_arguments =
+                    crate::symbol_resolver::completed_constructor_result_arguments(
+                        internal,
+                        classifier.type_params(),
+                        classifier.type_param_bounds(),
+                        &bindings,
+                    );
                 member.ret = Ty::obj_args_name(internal, &result_arguments);
                 member.params = signature
                     .params

@@ -58,6 +58,10 @@ pub struct Spelled {
     /// (`typealias Marked = @Kept Item` makes every `Marked` occurrence an annotated `Item`). The
     /// abbreviation names only what this occurrence wrote.
     pub expansion_annotations: Vec<TypeUseAnnotation>,
+    /// The checked occurrence carries Kotlin's semantic `@UnsafeVariance` marker even when that
+    /// annotation has `SOURCE` retention and is therefore absent from [`Self::annotations`]. This
+    /// is a bind-once semantic sidecar: metadata encoders deliberately ignore it.
+    pub(crate) unsafe_variance: bool,
     /// The name this occurrence's function-type parameter was written with (`(count: Int) -> Unit`
     /// names the `Int` occurrence `count`). `@Metadata` records it after the occurrence's own
     /// annotations as `@kotlin.ParameterName(name = "count")`.
@@ -72,6 +76,7 @@ const EMPTY: Spelled = Spelled {
     args: Vec::new(),
     annotations: Vec::new(),
     expansion_annotations: Vec::new(),
+    unsafe_variance: false,
     parameter_name: None,
 };
 
@@ -87,6 +92,7 @@ impl Spelled {
             && self.alias.is_none()
             && self.annotations.is_empty()
             && self.expansion_annotations.is_empty()
+            && !self.unsafe_variance
             && self.parameter_name.is_none()
             && self.args.iter().all(Spelled::is_none)
     }
@@ -187,10 +193,15 @@ pub struct AnnotationOccurrence {
     pub span: crate::diag::Span,
 }
 
-/// What the checker made of each source type-use application: `Some` with its folded value, or
-/// `None` for a `SOURCE`-retained one, which `@Metadata` does not record.
+/// What the checker made of each source type-use application. `metadata` is absent for a
+/// `SOURCE`-retained annotation, while semantic facts needed after sealing remain typed here.
+pub(crate) struct CheckedTypeUseAnnotation {
+    pub(crate) metadata: Option<ResolvedAnnotation>,
+    pub(crate) unsafe_variance: bool,
+}
+
 pub(crate) type CheckedTypeUseAnnotations =
-    crate::fx_hash::HashMap<AnnotationOccurrence, Option<ResolvedAnnotation>>;
+    crate::fx_hash::HashMap<AnnotationOccurrence, CheckedTypeUseAnnotation>;
 
 impl Spelled {
     /// Replace every bound source application in this tree with its checked value, dropping the
@@ -201,12 +212,16 @@ impl Spelled {
         checked: &CheckedTypeUseAnnotations,
         unchecked: &mut Vec<AnnotationOccurrence>,
     ) {
+        let mut unsafe_variance = self.unsafe_variance;
         for annotations in [&mut self.annotations, &mut self.expansion_annotations] {
             *annotations = std::mem::take(annotations)
                 .into_iter()
                 .filter_map(|annotation| match annotation {
                     TypeUseAnnotation::Bound(occurrence) => match checked.get(&occurrence) {
-                        Some(value) => value.clone().map(TypeUseAnnotation::Checked),
+                        Some(value) => {
+                            unsafe_variance |= value.unsafe_variance;
+                            value.metadata.clone().map(TypeUseAnnotation::Checked)
+                        }
                         None => {
                             unchecked.push(occurrence);
                             None
@@ -216,6 +231,7 @@ impl Spelled {
                 })
                 .collect();
         }
+        self.unsafe_variance = unsafe_variance;
         for (_, argument) in &mut self.alias_args {
             argument.seal(checked, unchecked);
         }
@@ -471,5 +487,32 @@ mod tests {
             Some(crate::types::type_name("dep/Cargo"))
         );
         assert!(spelled.arg(1).is_none());
+    }
+
+    #[test]
+    fn sealing_keeps_source_retained_unsafe_variance_as_a_semantic_fact() {
+        let occurrence = AnnotationOccurrence {
+            source: 3,
+            span: crate::diag::Span::new(11, 26),
+        };
+        let mut spelled = Spelled {
+            annotations: vec![TypeUseAnnotation::Bound(occurrence)],
+            ..Spelled::default()
+        };
+        let checked = CheckedTypeUseAnnotations::from_iter([(
+            occurrence,
+            CheckedTypeUseAnnotation {
+                metadata: None,
+                unsafe_variance: true,
+            },
+        )]);
+        let mut unchecked = Vec::new();
+
+        spelled.seal(&checked, &mut unchecked);
+
+        assert!(spelled.annotations.is_empty());
+        assert!(spelled.unsafe_variance);
+        assert!(unchecked.is_empty());
+        assert!(!spelled.is_none());
     }
 }

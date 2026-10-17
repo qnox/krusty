@@ -18,7 +18,7 @@ pub(super) fn emit(
     env: &EmitEnv<'_>,
     writer: &mut ClassWriter,
 ) {
-    constructor_accessors::emit_accessors(ir, class, fq_name, writer);
+    constructor_accessors::emit_sealed_accessors(ir, class, fq_name, writer);
     let marker_accessor = class.has_primary_ctor
         && marker_accessor_emitted_last(ir, class)
         && has_ctor_marker_accessor(ir, class);
@@ -30,7 +30,7 @@ pub(super) fn emit(
             &env.run.static_accessor_plan.borrow(),
             StaticOwner::Class(class.fq_name),
             facade,
-            class.decl_start_line.max(class.decl_line),
+            static_accessors::class_declaration_line(class),
             writer,
         );
     } else {
@@ -40,7 +40,7 @@ pub(super) fn emit(
             &env.run.static_accessor_plan.borrow(),
             StaticOwner::Class(class.fq_name),
             facade,
-            class.decl_start_line.max(class.decl_line),
+            static_accessors::class_declaration_line(class),
             writer,
         );
     }
@@ -61,6 +61,17 @@ pub(super) fn emit(
             writer,
         );
     }
+    // kotlinc adds a value-class constructor's marker accessor after every declared member: the
+    // primary's, then each secondary's in declaration order.
+    if !class.is_sealed && !class.is_enum {
+        for (ordinal, constructor) in class.secondary_ctors.iter().enumerate() {
+            if constructor.vc_params {
+                constructor_accessors::emit_secondary_marker_accessor(
+                    ir, class, ordinal, fq_name, writer,
+                );
+            }
+        }
+    }
     if companion_marker {
         static_accessors::emit_after_companion_marker(
             ir,
@@ -68,7 +79,7 @@ pub(super) fn emit(
             &env.run.static_accessor_plan.borrow(),
             StaticOwner::Class(class.fq_name),
             facade,
-            class.decl_start_line.max(class.decl_line),
+            static_accessors::class_declaration_line(class),
             writer,
         );
     }

@@ -640,7 +640,7 @@ fn adopt_lifted_callables(ir: &mut IrFile, fid: u32, class: ClassId) {
         })
         .map(|(&position, _)| position)
         .collect::<HashSet<_>>();
-    let mut declared = ir
+    let declared = ir
         .lifted_functions
         .iter()
         .filter(|(_, (other, site))| {
@@ -655,17 +655,9 @@ fn adopt_lifted_callables(ir: &mut IrFile, fid: u32, class: ClassId) {
         })
         .map(|(&function, _)| function)
         .collect::<Vec<_>>();
-    declared.sort_unstable();
-    let owner = ir.classes[class as usize].fq_name;
-    for function in declared {
-        for other in &mut ir.classes {
-            other.methods.retain(|&method| method != function);
-        }
-        ir.class_method_owners.remove(&function);
-        ir.classes[class as usize].methods.push(function);
-        ir.note_class_method(class, function);
-        ir.class_static_local_functions.insert(function, owner);
-    }
+    crate::jvm::lifted_declaration_ownership::move_lifted_declarations_to_class(
+        ir, class, &declared,
+    );
 }
 
 fn become_invoke_suspend(ir: &mut IrFile, fid: u32, class: TypeName) {

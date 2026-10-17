@@ -142,15 +142,12 @@ pub(super) fn emit(
     clinit.link();
     cw.add_method(0x0008, "<clinit>", "()V", &clinit);
 
-    // A one-line source object already maps its generated store to the closing line.
-    let returns_to_closing_line = if c.is_source_declared {
-        !after_source.is_empty()
-            && clinit_line_entries
-                .last()
-                .is_some_and(|&(_, line)| line != c.decl_end_line)
-    } else {
-        !clinit_line_entries.is_empty()
-    };
+    // A one-line object already maps its last store to the closing line, which needs no entry of
+    // its own.
+    let returns_to_closing_line = (!c.is_source_declared || !after_source.is_empty())
+        && clinit_line_entries
+            .last()
+            .is_some_and(|&(_, line)| line != c.decl_end_line);
     if returns_to_closing_line && c.decl_end_line != 0 {
         clinit_line_entries.push((clinit_return, c.decl_end_line));
     }
@@ -275,7 +272,7 @@ fn add_late_member_field(
     let physical_name = instance_field_jvm_name(ir, run, c, field_index);
     let descriptor = ir_type_desc(&field.ty);
     let nullability = field_visibility::publishes_field_nullability(c, field_index)
-        .then(|| nullability_annotation(field_nullability_kind(field.ty)))
+        .then(|| super::declared_field_annotation(c, field_index))
         .flatten();
     cw.add_field_late_sig(
         acc,

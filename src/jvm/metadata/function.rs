@@ -1,6 +1,6 @@
-//! A metadata function. Context parameters, `@OnlyInputTypes` formals, and a strict-equality
-//! bound are absent on almost every declaration, so the common record keeps one pointer and
-//! allocates that side record only when one of those facts is present.
+//! A metadata function. Context parameters, `@OnlyInputTypes` formals, a strict-equality bound,
+//! and realization deprecation are absent on almost every declaration, so the common record keeps
+//! one pointer and allocates that side record only when one of those facts is present.
 
 use std::sync::Arc;
 
@@ -59,7 +59,7 @@ pub struct MetaFn {
 }
 
 /// Facts present on a small minority of metadata functions.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct FunctionExtras {
     /// Leading context parameters. Named context parameters retain the same metadata shape as ordinary
     /// value parameters; legacy unnamed context receivers have an empty name.
@@ -79,6 +79,9 @@ struct FunctionExtras {
     /// `@DeprecatedSinceKotlin(hiddenSince)` version. The declaration is no longer a candidate at
     /// or above this API level.
     hidden_since: Option<LanguageVersion>,
+    /// The deprecation the realization method states, stamped after decode beside the
+    /// `deprecated_hidden` flag.
+    deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
 }
 
 /// The decoded function before its rare facts are packed into [`FunctionExtras`].
@@ -131,6 +134,7 @@ fn pack_extras(
             equality_bound,
             since_kotlin,
             hidden_since,
+            deprecation: None,
         }))
     }
 }
@@ -204,6 +208,11 @@ impl MetaFn {
     pub fn is_companion_block_member(&self) -> bool {
         self.flags.has(MfnFlags::IS_COMPANION_BLOCK_MEMBER)
     }
+    /// Kotlin metadata's exact `Function.flags.MEMBER_KIND == SYNTHESIZED` declaration fact.
+    #[inline]
+    pub fn is_synthesized(&self) -> bool {
+        self.flags.has(MfnFlags::IS_SYNTHESIZED)
+    }
     #[inline]
     pub fn ret_nullable(&self) -> bool {
         self.flags.has(MfnFlags::RET_NULLABLE)
@@ -224,6 +233,24 @@ impl MetaFn {
     /// API version at which `@DeprecatedSinceKotlin` removes this declaration from resolution.
     pub fn hidden_since(&self) -> Option<LanguageVersion> {
         self.extras.as_ref().and_then(|extras| extras.hidden_since)
+    }
+
+    pub(in crate::jvm) fn deprecation(&self) -> Option<&crate::types::DeclaredDeprecation> {
+        self.extras
+            .as_ref()
+            .and_then(|extras| extras.deprecation.as_deref())
+    }
+
+    pub(super) fn set_deprecation(
+        &mut self,
+        deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
+    ) {
+        let Some(deprecation) = deprecation else {
+            return;
+        };
+        self.extras
+            .get_or_insert_with(|| Box::new(FunctionExtras::default()))
+            .deprecation = Some(deprecation);
     }
 
     pub fn context_params(&self) -> &[MetaValueParam] {
@@ -380,6 +407,7 @@ mod tests {
         assert!(function.context_parameter_kinds().is_empty());
         assert!(function.only_input_type_formals().is_empty());
         assert_eq!(function.equality_bound(), None);
+        assert_eq!(function.deprecation(), None);
         // Four empty vectors and an `Option<Ty>` used to sit on every function. The side
         // record is one pointer. Pin the size so those fields cannot move back onto `MetaFn`.
         assert_eq!(size_of::<MetaFn>(), 296);
@@ -400,7 +428,8 @@ mod tests {
         decoded.only_input_type_formals = vec!["T".to_string()];
         decoded.reified_type_parameter_ordinals = vec![1];
         decoded.equality_bound = Some(equality_bound);
-        let function = MetaFn::from_decoded(decoded);
+        let mut function = MetaFn::from_decoded(decoded);
+        function.set_deprecation(Some(Box::new(crate::types::DeclaredDeprecation::Java)));
         assert_eq!(function.context_params().len(), 1);
         assert_eq!(function.context_params()[0].name, "ctx");
         assert_eq!(
@@ -410,6 +439,10 @@ mod tests {
         assert_eq!(function.only_input_type_formals(), &["T".to_string()]);
         assert_eq!(function.reified_type_parameter_ordinals(), &[1]);
         assert_eq!(function.equality_bound(), Some(equality_bound));
+        assert_eq!(
+            function.deprecation(),
+            Some(&crate::types::DeclaredDeprecation::Java)
+        );
         assert_eq!(function.context_count(), 1);
     }
 }

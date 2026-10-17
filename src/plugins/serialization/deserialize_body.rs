@@ -110,6 +110,17 @@ impl ElementDecode<'_> {
             dispatch_receiver: Some(cdk),
             args: vec![dk, idxc, inst, prev],
         });
+        // The previous value is the element's own boxed local; declaring the runtime parameters
+        // keeps a value-class element boxed for the `Object` slot instead of unboxing it there.
+        ir.call_declared_params.insert(
+            raw,
+            Box::new([
+                class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+                Ty::Int,
+                class_ty("kotlinx/serialization/DeserializationStrategy"),
+                Ty::nullable(class_ty("kotlin/Any")),
+            ]),
+        );
         ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::Cast,
             arg: raw,

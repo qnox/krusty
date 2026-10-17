@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use super::LanguageVersionPolicy;
+use super::{DeprecationWarningFormat, LanguageVersionPolicy};
 use crate::kotlin_version::KotlinVersion;
 use crate::language_version::LanguageVersion;
 
@@ -129,14 +129,13 @@ impl LanguageFeature {
     /// kotlinc's `toDeprecationWarningMessage`: the warning a diagnostic reports while this feature,
     /// which turns it into an error, is still off.
     pub fn deprecation_warning_message(&self, message: &str) -> String {
-        let mut warning = message.to_string();
-        if warning.ends_with('.') {
-            warning.push(' ');
-        } else if !warning.ends_with(char::is_whitespace) {
-            warning.push_str(". ");
+        self.deprecation_warning_format().message(message)
+    }
+
+    pub(super) fn deprecation_warning_format(&self) -> DeprecationWarningFormat {
+        DeprecationWarningFormat {
+            suffix: self.deprecation_warning_suffix(),
         }
-        warning.push_str(&self.deprecation_warning_suffix());
-        warning
     }
 
     /// The release-selected suffix of kotlinc's `toDeprecationWarningMessage`. Keeping this

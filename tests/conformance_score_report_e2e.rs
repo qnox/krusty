@@ -553,9 +553,9 @@ fn preview_lanes_and_release_carry_all_target_reports_distinctly() {
         "only master publishes"
     );
     for needle in [
-        "name: pct-${{ needs.versions.outputs.max }}\n",
-        "name: jvm-byte-equality-${{ needs.versions.outputs.max }}\n",
-        "name: native-pct-${{ needs.versions.outputs.max }}\n",
+        "name: pct-${{ needs.build-tool-bins.outputs.max }}\n",
+        "name: jvm-byte-equality-${{ needs.build-tool-bins.outputs.max }}\n",
+        "name: native-pct-${{ needs.build-tool-bins.outputs.max }}\n",
         "id: c\n",
         "run: bash scripts/conformance-badge.sh fields conformance pct.txt \"$MAX_VERSION\" >> \"$GITHUB_OUTPUT\"\n",
         "id: b\n",

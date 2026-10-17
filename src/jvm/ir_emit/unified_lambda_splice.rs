@@ -537,6 +537,9 @@ impl Emitter<'_> {
             // The erased `invoke` result is `Object`. Coerce from the BODY's value type, not the
             // contextual lambda declaration return: a block accepted as `() -> Any?` can still
             // produce a primitive `Boolean`/`Int` here.
+            // kotlinc ends the lambda's locals with its body; the coercion to `invoke`'s result
+            // follows them.
+            let locals_end = u16::try_from(scratch.bytes.len()).unwrap_or(u16::MAX);
             self.coerce_invoke_result(facts.result, body_ret, &mut scratch);
             scratch.link_local_branches(); // enclosing-loop transfers remain owned by the caller
             let lam_insns = crate::jvm::inline::disassemble_lambda(
@@ -549,6 +552,7 @@ impl Emitter<'_> {
             bodies.push(crate::jvm::inline::LambdaBody {
                 body: lam_insns,
                 locals: lam_locals_declared,
+                locals_end,
                 lines: scratch.line_marks().to_vec(),
                 handlers: scratch.resolved_exceptions(),
             });

@@ -39,6 +39,13 @@ pub(super) struct LocalDeclarations {
     /// Specialized suspend lambdas regenerated into a caller. The caller references them without
     /// an `InnerClasses` row; the class itself and classes it encloses still list the row.
     call_sites: Rc<crate::fx_hash::HashSet<String>>,
+    /// Runtime capture holders referenced only by instructions copied from an inline declaration,
+    /// by the physical caller class that received those instructions. The copied instruction does
+    /// not replay the declaration class's `visitInnerClass` event.
+    copied_inline_holders: Rc<HashMap<String, HashSet<String>>>,
+    /// Capture holders the same physical caller independently introduces in its own source body.
+    /// Such an introduction still visits the row even when another reference was copied inline.
+    independent_capture_holders: Rc<HashMap<String, HashSet<String>>>,
     /// The table orders the file's writers computed, shared by all of them.
     orders: Rc<TableOrders>,
 }
@@ -196,6 +203,17 @@ impl ClassWriter {
         }
     }
 
+    pub(crate) fn set_copied_inline_capture_holders(
+        &mut self,
+        copied: Rc<HashMap<String, HashSet<String>>>,
+        independent: Rc<HashMap<String, HashSet<String>>>,
+    ) {
+        if let InnerClassTable::Referenced(own) = &mut self.inner_class_table {
+            own.copied_inline_holders = copied;
+            own.independent_capture_holders = independent;
+        }
+    }
+
     /// The table orders shared by the writers of one file.
     pub(crate) fn set_table_orders(&mut self, orders: Rc<TableOrders>) {
         if let InnerClassTable::Referenced(own) = &mut self.inner_class_table {
@@ -225,6 +243,9 @@ impl ClassWriter {
         spec: &InnerClassSpec,
         inner_present: bool,
     ) -> bool {
+        if self.copied_inline_capture_holder(&spec.inner) {
+            return false;
+        }
         if self.call_site_regenerated(&spec.inner) {
             return self.internal_name == spec.inner || self.declared_in_class(&spec.inner);
         }
@@ -234,6 +255,22 @@ impl ClassWriter {
             || self.declares(&spec.inner)
             || self.annotation_class_refs.contains(&spec.inner)
             || self.descriptor_mentions(&spec.inner)
+    }
+
+    fn copied_inline_capture_holder(&self, inner: &str) -> bool {
+        match &self.inner_class_table {
+            InnerClassTable::Referenced(local) => {
+                local
+                    .copied_inline_holders
+                    .get(&self.internal_name)
+                    .is_some_and(|holders| holders.contains(inner))
+                    && !local
+                        .independent_capture_holders
+                        .get(&self.internal_name)
+                        .is_some_and(|holders| holders.contains(inner))
+            }
+            InnerClassTable::Visited => false,
+        }
     }
 
     /// Whether `inner` is a call-site suspend lambda the referencing class must not list.
@@ -544,8 +581,8 @@ fn qualified_names(rows: &[InnerClassSpec], paths: &HashMap<String, String>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{declaration_order, HashMap, InnerClassSpec, Rc, TableOrders};
-    use crate::jvm::classfile::ClassWriter;
+    use super::{declaration_order, HashMap, HashSet, InnerClassSpec, Rc, TableOrders};
+    use crate::jvm::classfile::{ClassWriter, ACC_FINAL, ACC_PUBLIC, ACC_STATIC};
 
     fn row(key: &str, inner: &str) -> (String, usize, InnerClassSpec) {
         (
@@ -558,6 +595,51 @@ mod tests {
                 access: 0,
             },
         )
+    }
+
+    #[test]
+    fn copied_inline_capture_holder_is_omitted_only_from_recorded_caller() {
+        let holder = InnerClassSpec {
+            inner: "kotlin/jvm/internal/Ref$ObjectRef".to_string(),
+            outer: Some("kotlin/jvm/internal/Ref".to_string()),
+            name: Some("ObjectRef".to_string()),
+            access: ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+        };
+        let mut holders = HashSet::default();
+        holders.insert(holder.inner.clone());
+        let mut omitted = HashMap::default();
+        omitted.insert("CallerKt".to_string(), holders);
+        let omitted = Rc::new(omitted);
+        let independent = Rc::new(HashMap::default());
+
+        let mut caller = ClassWriter::new("CallerKt", "java/lang/Object");
+        caller.add_inner_class(holder.clone());
+        caller.set_copied_inline_capture_holders(omitted.clone(), independent.clone());
+        caller.class_ref(&holder.inner);
+        let caller = crate::jvm::classreader::parse_class(&caller.finish()).expect("parse caller");
+        assert!(caller.inner_classes.is_empty());
+
+        let mut specialized = ClassWriter::new("CallerKt$specialized", "java/lang/Object");
+        specialized.add_inner_class(holder.clone());
+        specialized.set_copied_inline_capture_holders(omitted.clone(), independent);
+        specialized.class_ref(&holder.inner);
+        let specialized = crate::jvm::classreader::parse_class(&specialized.finish())
+            .expect("parse specialized class");
+        assert_eq!(specialized.inner_classes.len(), 1);
+        assert_eq!(specialized.inner_classes[0].inner, holder.inner);
+
+        let mut holders = HashSet::default();
+        holders.insert(holder.inner.clone());
+        let mut independent = HashMap::default();
+        independent.insert("CallerKt".to_string(), holders);
+        let mut mixed = ClassWriter::new("CallerKt", "java/lang/Object");
+        mixed.add_inner_class(holder.clone());
+        mixed.set_copied_inline_capture_holders(omitted, Rc::new(independent));
+        mixed.class_ref(&holder.inner);
+        let mixed = crate::jvm::classreader::parse_class(&mixed.finish())
+            .expect("parse mixed-origin caller");
+        assert_eq!(mixed.inner_classes.len(), 1);
+        assert_eq!(mixed.inner_classes[0].inner, holder.inner);
     }
 
     #[test]

@@ -282,6 +282,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         projected.inheritance.is_extensible =
             !flags.has(DeclarationFlags::INTERFACE) && !flags.has(DeclarationFlags::FINAL);
         projected.sam_eligible = flags.has(DeclarationFlags::FUN_INTERFACE);
+        projected.is_data = flags.has(DeclarationFlags::DATA);
         projected.annotations = self
             .index
             .declaration_annotations(owner)
@@ -438,7 +439,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         let exposes_constructors = !flags.has(DeclarationFlags::INTERFACE)
             && !flags.has(DeclarationFlags::SINGLETON)
             && !flags.has(DeclarationFlags::ENUM);
-        for (_, declaration) in declarations.into_iter().filter(|(_, declaration)| {
+        for (sibling, declaration) in declarations.into_iter().filter(|(_, declaration)| {
             exposes_constructors && !self.declaration_is_hidden_at_use(*declaration)
         }) {
             let Some(signature) = self.index.signature(declaration) else {
@@ -469,6 +470,9 @@ impl<'a> StreamedModuleSymbols<'a> {
                 .map_or(declaration_header.visibility, |header| header.visibility);
             constructor.annotations = self.index.declaration_annotations(declaration).to_vec();
             constructor.stable_declaration = Some(declaration);
+            // The primary constructor is the classifier's first constructor sibling; secondary
+            // constructors follow it in declaration order.
+            constructor.set_is_primary_constructor(sibling == 0);
             if !parameter_names.is_empty() {
                 let type_arguments = parameters_for_classifier(&parameter_names, &parameter_bounds);
                 constructor.generic_sig = Some(GenericSig {
@@ -631,6 +635,7 @@ impl<'a> StreamedModuleSymbols<'a> {
     ) -> LibraryCallable {
         let declared_params = Some(parameters.clone().into_boxed_slice());
         LibraryCallable {
+            deprecation: None,
             external_identity: None,
             annotations: Vec::new(),
             external_default_provider: None,

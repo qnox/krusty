@@ -344,6 +344,7 @@ pub(super) fn candidate(
         argument_parameters: instantiated.argument_parameters,
         visibility: shape.function.signature.visibility,
         is_operator: shape.is_operator,
+        deprecation: shape.diagnostic_candidate.callable.deprecation.clone(),
         inline: InlineKind::from_flags(
             shape.function.signature.is_inline(),
             shape.function.signature.requires_splice(),
@@ -396,6 +397,7 @@ impl MemberExtensionFunctionCandidate {
             context_args: self.context_args.clone(),
             ret: self.ret,
             physical_ret: self.physical_ret,
+            deprecation: self.deprecation.clone(),
             inline: self.inline,
             inline_body_plan: self.inline_body_plan.clone(),
             reified_type_parameter_ordinals: self

@@ -216,12 +216,15 @@ impl ClassWriter {
             let Some(rewritten) = rewritten else {
                 self.methods[index].drop_empty_locals();
                 // ASM's `MethodWriter` interns a method's catch types before its code, while
-                // krusty interns one when it emits the handler. Lay out a method that catches
-                // like a rewritten one, in ASM's order.
-                if self.methods[index]
-                    .exceptions
-                    .iter()
-                    .any(|&(_, _, _, catch_type)| catch_type != 0)
+                // krusty interns one when it emits the handler; and it never interns the
+                // constants of dead code krusty dropped as it emitted. Lay out such a method like
+                // a rewritten one, in ASM's order.
+                let method = &self.methods[index];
+                if method.dropped_constant
+                    || method
+                        .exceptions
+                        .iter()
+                        .any(|&(_, _, _, catch_type)| catch_type != 0)
                 {
                     relaid.push(RelaidMethod {
                         index,

@@ -278,6 +278,8 @@ mod class_literal_e2e;
 mod class_literal_equality_e2e;
 #[path = "class_literal_star_projection_e2e.rs"]
 mod class_literal_star_projection_e2e;
+#[path = "class_literal_type_arguments_e2e.rs"]
+mod class_literal_type_arguments_e2e;
 #[path = "class_member_order_e2e.rs"]
 mod class_member_order_e2e;
 #[path = "class_metadata_roundtrip.rs"]
@@ -585,6 +587,8 @@ mod contextual_lambda_expected_return_e2e;
 mod continuation_spill_order_e2e;
 #[path = "contract_calls_in_place_e2e.rs"]
 mod contract_calls_in_place_e2e;
+#[path = "contract_conjunct_null_checks_e2e.rs"]
+mod contract_conjunct_null_checks_e2e;
 #[path = "contract_declarations_e2e.rs"]
 mod contract_declarations_e2e;
 #[path = "contract_erasure_e2e.rs"]
@@ -627,6 +631,8 @@ mod ctor_lambda_return_binds_type_param_e2e;
 mod ctor_numeric_widening_e2e;
 #[path = "custom_floating_range_membership_e2e.rs"]
 mod custom_floating_range_membership_e2e;
+#[path = "data_class_copy_visibility_e2e.rs"]
+mod data_class_copy_visibility_e2e;
 #[path = "data_class_metadata_wiring_e2e.rs"]
 mod data_class_metadata_wiring_e2e;
 #[path = "data_class_nullable_value_class_e2e.rs"]
@@ -1163,6 +1169,8 @@ mod inline_erased_capture_e2e;
 mod inline_erased_parameter_e2e;
 #[path = "inline_finally_marker_e2e.rs"]
 mod inline_finally_marker_e2e;
+#[path = "inline_function_lambda_class_e2e.rs"]
+mod inline_function_lambda_class_e2e;
 #[path = "inline_lambda_as_value_e2e.rs"]
 mod inline_lambda_as_value_e2e;
 #[path = "inline_lambda_caller_loop_jump_e2e.rs"]
@@ -1201,6 +1209,8 @@ mod inline_lambda_suspend_member_e2e;
 mod inline_lambda_unintercepted_probe_e2e;
 #[path = "inline_lambda_value_argument_e2e.rs"]
 mod inline_lambda_value_argument_e2e;
+#[path = "inline_lambda_value_class_result_e2e.rs"]
+mod inline_lambda_value_class_result_e2e;
 #[path = "inline_lambda_value_return_e2e.rs"]
 mod inline_lambda_value_return_e2e;
 #[path = "inline_object_regeneration_e2e.rs"]
@@ -1334,6 +1344,8 @@ mod java_instance_e2e;
 #[path = "java_interface_mutable_collection_face_e2e.rs"]
 mod java_interface_mutable_collection_face_e2e;
 mod java_member_modules;
+#[path = "java_self_bounded_constructor_e2e.rs"]
+mod java_self_bounded_constructor_e2e;
 #[path = "local_function_reference_inference_e2e.rs"]
 mod local_function_reference_inference_e2e;
 java_member_modules::declare!();
@@ -1637,6 +1649,12 @@ mod nothing_type_argument_signature_e2e;
 mod nullable_double_type_param_equality_e2e;
 #[path = "nullable_uint_property_e2e.rs"]
 mod nullable_uint_property_e2e;
+#[path = "object_qualifier_type_arguments_e2e.rs"]
+mod object_qualifier_type_arguments_e2e;
+#[path = "only_input_integer_literal_e2e.rs"]
+mod only_input_integer_literal_e2e;
+#[path = "only_input_type_producer_e2e.rs"]
+mod only_input_type_producer_e2e;
 #[path = "open_end_range_membership_e2e.rs"]
 mod open_end_range_membership_e2e;
 #[path = "optional_expectation_annotation_e2e.rs"]
@@ -1671,6 +1689,8 @@ mod same_module_inline_frame_markers_e2e;
 mod serialization_explicit_companion_e2e;
 #[path = "setter_return_line_e2e.rs"]
 mod setter_return_line_e2e;
+#[path = "signature_postponed_candidates_e2e.rs"]
+mod signature_postponed_candidates_e2e;
 #[path = "source_map_annotation_parts_e2e.rs"]
 mod source_map_annotation_parts_e2e;
 #[path = "special_collection_bridge_e2e.rs"]
@@ -1689,6 +1709,8 @@ mod suspend_argument_operands_e2e;
 mod suspend_coroutine_inline_e2e;
 #[path = "suspend_function_boxing_e2e.rs"]
 mod suspend_function_boxing_e2e;
+#[path = "suspend_lambda_local_function_e2e.rs"]
+mod suspend_lambda_local_function_e2e;
 #[path = "suspend_lambda_private_property_e2e.rs"]
 mod suspend_lambda_private_property_e2e;
 #[path = "suspend_lambda_shared_capture_e2e.rs"]
@@ -1787,6 +1809,8 @@ mod value_class_suspend_override_e2e;
 mod value_class_suspend_resume_e2e;
 #[path = "value_class_try_value_e2e.rs"]
 mod value_class_try_value_e2e;
+#[path = "variance_conflicts_e2e.rs"]
+mod variance_conflicts_e2e;
 
 #[path = "diagnostic_wording_versions_e2e.rs"]
 mod diagnostic_wording_versions_e2e;
@@ -2048,6 +2072,8 @@ mod nested_generic_constructor_e2e;
 mod nested_hof_capture_e2e;
 #[path = "nested_lambda_capture_e2e.rs"]
 mod nested_lambda_capture_e2e;
+#[path = "nested_producer_lower_bound_inference_e2e.rs"]
+mod nested_producer_lower_bound_inference_e2e;
 #[path = "nested_string_template_e2e.rs"]
 mod nested_string_template_e2e;
 #[path = "nested_try_finally_e2e.rs"]
@@ -2146,6 +2172,10 @@ mod object_value_inference_e2e;
 mod omitted_default_generic_overload_e2e;
 #[path = "one_armed_when_fallthrough_e2e.rs"]
 mod one_armed_when_fallthrough_e2e;
+#[path = "platform_implicit_receiver_member_e2e.rs"]
+mod platform_implicit_receiver_member_e2e;
+#[path = "platform_null_check_line_e2e.rs"]
+mod platform_null_check_line_e2e;
 #[path = "private_constructor_accessors_e2e.rs"]
 mod private_constructor_accessors_e2e;
 #[path = "private_inline_property_ref_e2e.rs"]
@@ -2211,10 +2241,14 @@ mod child_serializer_lazy_factory_e2e;
 mod class_static_signature_e2e;
 #[path = "declaration_debug_lines_e2e.rs"]
 mod declaration_debug_lines_e2e;
+#[path = "deprecation_classpath_e2e.rs"]
+mod deprecation_classpath_e2e;
 #[path = "deprecation_usage_e2e.rs"]
 mod deprecation_usage_e2e;
 #[path = "extension_receiver_specificity_e2e.rs"]
 mod extension_receiver_specificity_e2e;
+#[path = "generic_serializable_class_e2e.rs"]
+mod generic_serializable_class_e2e;
 #[path = "int_when_switch_e2e.rs"]
 mod int_when_switch_e2e;
 #[path = "library_function_reference_class_e2e.rs"]
@@ -2313,6 +2347,8 @@ mod private_inline_property_access_e2e;
 mod private_member_extension_accessor_e2e;
 #[path = "private_set_e2e.rs"]
 mod private_set_e2e;
+#[path = "probe_argument_call_e2e.rs"]
+mod probe_argument_call_e2e;
 #[path = "projected_receiver_extension_e2e.rs"]
 mod projected_receiver_extension_e2e;
 #[path = "projected_smart_cast_e2e.rs"]

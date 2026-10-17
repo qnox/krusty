@@ -629,7 +629,9 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 env,
             );
         }
-        if sc.vc_params && !c.is_sealed {
+        // A class's marker accessors follow its members, the primary's first (see
+        // `accessor_emission_order`); an enum's stays beside its constructor.
+        if sc.vc_params && !c.is_sealed && c.is_enum {
             let parameter_identities =
                 crate::jvm::method_parameters::secondary_constructor_identities(
                     ir,

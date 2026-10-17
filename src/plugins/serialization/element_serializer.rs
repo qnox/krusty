@@ -91,14 +91,15 @@ pub(super) fn child_cache_element_plan(
         return Ok(None);
     };
     // kotlinc caches every element whose serializer is a constructed instance rather than a
-    // singleton: a standard serializer's, an enum's, an object's `ObjectSerializer`, or an
-    // external companion's accessor.
+    // singleton: a standard serializer's, an enum's, an object's `ObjectSerializer`, a generic
+    // class's generated serializer, or an external companion's accessor.
     let cacheable = constructed_standard_serializer(classifier).is_some()
         || ir
             .classes
             .iter()
             .any(|class| class.fq_name_id() == classifier && class.is_enum)
         || super::cached_serializer::local_serializable_object(ir, ctx, classifier).is_some()
+        || super::cached_serializer::local_generic_serializable_class(ir, ctx, classifier)
         || constructs_custom_serializer(ir, classifier)
         || matches!(
             ctx.external_serializer(classifier),
@@ -321,46 +322,45 @@ pub(super) fn contextual_property_plan(
     if ty.mentions_ty_param() {
         return Ok(None);
     }
+    contextual_property_plan_in(ir, ctx, ty, TypeParameterSerializers::NONE, annotated)
+        .map(Some)
+        .ok_or(UnderivableChildCacheElement)
+}
+
+/// Select a contextual property's complete serializer in code that can read the generic
+/// `$serializer` instance's type-parameter serializer fields. Unlike the static child cache, this
+/// plan can retain those fields as the contextual serializer's fallback and type arguments.
+fn contextual_property_plan_in(
+    ir: &IrFile,
+    ctx: &PluginContext,
+    ty: &Ty,
+    scope: TypeParameterSerializers<'_>,
+    annotated: &Spelled,
+) -> Option<ElementSerializerPlan> {
     let nn = ty.non_null();
-    let classifier = nn
-        .kotlin_class_internal()
-        .ok_or(UnderivableChildCacheElement)?;
-    let fallback = serializer_plan(
-        ir,
-        ctx,
-        &nn,
-        TypeParameterSerializers::NONE,
-        annotated,
-        FileContextual::Ignored,
-    )
-    .map(|own| {
-        // A nullable property's fallback is its type's serializer made nullable.
-        Box::new(if ty.is_nullable() {
-            ElementSerializerPlan::Nullable(Box::new(own))
-        } else {
-            own
-        })
-    });
+    let classifier = nn.kotlin_class_internal()?;
+    let fallback =
+        serializer_plan(ir, ctx, &nn, scope, annotated, FileContextual::Ignored).map(|own| {
+            // A nullable property's fallback is its type's serializer made nullable.
+            Box::new(if ty.is_nullable() {
+                ElementSerializerPlan::Nullable(Box::new(own))
+            } else {
+                own
+            })
+        });
     let arguments = nn
         .type_args()
         .iter()
         .enumerate()
         .map(|(ordinal, argument)| {
-            type_argument_serializer_plan(
-                ir,
-                ctx,
-                argument,
-                TypeParameterSerializers::NONE,
-                annotated.arg(ordinal),
-            )
+            type_argument_serializer_plan(ir, ctx, argument, scope, annotated.arg(ordinal))
         })
-        .collect::<Option<Vec<_>>>()
-        .ok_or(UnderivableChildCacheElement)?;
-    Ok(Some(ElementSerializerPlan::ContextualProperty {
+        .collect::<Option<Vec<_>>>()?;
+    Some(ElementSerializerPlan::ContextualProperty {
         classifier,
         fallback,
         arguments,
-    }))
+    })
 }
 
 fn serializer_plan(
@@ -885,6 +885,20 @@ pub(super) fn emit_cached_element_serializer(
 ) -> ExprId {
     let serializer = emit_element_serializer(ir, plan);
     narrow_to_kserializer(ir, serializer)
+}
+
+/// The serializer a `@Contextual` property is coded with where kotlinc builds it in place: the
+/// same `ContextualSerializer(<type>::class, fallback, typeArgumentsSerializers)` its
+/// `childSerializers()` caches.
+pub(super) fn contextual_property_serializer(
+    ir: &mut IrFile,
+    ctx: &PluginContext,
+    ty: &Ty,
+    scope: TypeParameterSerializers<'_>,
+    annotated: &Spelled,
+) -> Option<ExprId> {
+    let plan = contextual_property_plan_in(ir, ctx, ty, scope, annotated)?;
+    Some(emit_element_serializer(ir, plan))
 }
 
 pub(super) fn element_serializer_expr(

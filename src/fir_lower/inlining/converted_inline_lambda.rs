@@ -341,7 +341,7 @@ fn spliceable_invocations(
         let Some(carrier) = converted.get(slot) else {
             continue;
         };
-        if !super::lambda_invocation_is_spliceable(ir, copy, carrier.lambda) {
+        if !super::lambda_splice_contract::invocation_is_spliceable(ir, copy, carrier.lambda) {
             continue;
         }
         invocations.push(SpliceableInvoke {

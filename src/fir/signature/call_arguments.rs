@@ -51,3 +51,14 @@ pub enum SigCallArgumentProbe<'a> {
         spread: bool,
     },
 }
+
+impl<'a> SigCallArgumentProbe<'a> {
+    /// The parameter name this argument is written against (`name = value`), if any.
+    pub fn name(&self) -> Option<&'a str> {
+        match self {
+            SigCallArgumentProbe::Typed(argument) => argument.name,
+            SigCallArgumentProbe::PostponedLambda { name, .. }
+            | SigCallArgumentProbe::PostponedCallableReference { name, .. } => *name,
+        }
+    }
+}

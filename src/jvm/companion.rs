@@ -431,6 +431,7 @@ pub(super) fn lower_companion_properties(
             is_lateinit: candidate.is_lateinit,
             owner: Some(ir.classes[candidate.outer as usize].fq_name),
             visibility: candidate.visibility,
+            getter_jvm_name: None,
             setter_jvm_name: None,
             erased_declared_ty: None,
             accessors,

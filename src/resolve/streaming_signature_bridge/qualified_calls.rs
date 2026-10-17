@@ -136,9 +136,20 @@ impl ProductionSignatureSemantics<'_> {
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
         let (qualifier, name) = spelling.rsplit_once('.').ok_or_else(Self::failure)?;
         self.with_qualified_package_resolver(scope, qualifier, |_, resolver| {
-            let candidates = self.implicit_context_candidates(
-                scope,
-                resolver.accessible_top_level_candidates(name).into_iter(),
+            let argument_names = arguments
+                .iter()
+                .map(|argument| argument.name().map(str::to_owned))
+                .collect::<Vec<_>>();
+            // Postponed arguments cannot decide applicability yet; the overloads their shape
+            // already excludes must not make the remaining one ambiguous.
+            let candidates = Self::structurally_applicable_call_candidates(
+                self.implicit_context_candidates(
+                    scope,
+                    resolver.accessible_top_level_candidates(name).into_iter(),
+                ),
+                &argument_names,
+                arguments.len(),
+                trailing_lambda,
             );
             let (kinds, _slots) =
                 Self::probe_call_arguments(&candidates, arguments, trailing_lambda)

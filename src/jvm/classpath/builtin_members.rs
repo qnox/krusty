@@ -137,6 +137,7 @@ impl Classpath {
                         },
                     );
                     crate::libraries::LibraryMember {
+                        deprecation: None,
                         external_identity: None,
                         external_default_provider: None,
                         external_property_identity: None,

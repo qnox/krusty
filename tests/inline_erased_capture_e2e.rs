@@ -15,6 +15,23 @@ fn both_compilers_box(main: &str, stem: &str) {
     common::expect_box_ok_files_with_stdlib(&[("Main.kt", main)], stem);
 }
 
+const LATER_ESCAPING_DECLINE: &str = r#"
+    var global = 0
+
+    fun consume(block: () -> Unit) = block()
+
+    inline fun runBoth(crossinline first: () -> Unit, crossinline second: () -> Unit) {
+        consume { first() }
+        consume { second() }
+    }
+
+    fun box(): String {
+        var local = 0
+        runBoth({ global += 1 }, { local += 2 })
+        return if (global == 1 && local == 2) "OK" else "FAIL $global/$local"
+    }
+"#;
+
 #[test]
 fn inlined_type_parameter_cell_matches_the_erased_lambda() {
     // `apply` is not inline, so the lambda escapes and keeps the shared implementation.
@@ -78,6 +95,26 @@ fn generic_value_class_captured_by_a_non_inline_lambda_keeps_the_primitive_holde
         "#,
         "vc-capture-generic",
     );
+}
+
+#[test]
+fn failed_later_escaping_specialization_keeps_earlier_argument_body() {
+    both_compilers_box(
+        LATER_ESCAPING_DECLINE,
+        "escaping-specialization-transaction",
+    );
+}
+
+#[test]
+fn failed_later_escaping_specialization_leaves_kotlincs_exact_class_inventory() {
+    let classes = common::classes_against_kotlinc_module(&[("Main.kt", LATER_ESCAPING_DECLINE)]);
+    let differences = classes.differences();
+    assert_eq!(
+        classes.krusty.keys().collect::<Vec<_>>(),
+        classes.reference.keys().collect::<Vec<_>>(),
+        "a declined plan must not leave an orphan class"
+    );
+    assert_eq!(differences, Vec::<String>::new());
 }
 
 #[test]

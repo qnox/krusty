@@ -12,11 +12,16 @@
 //! a setter's its writes. Both render the property. A constructor call reports once, for the more
 //! severe of the constructor's and its classifier's deprecations, rendered as the constructor.
 //! Uses inside a deprecated declaration are reported like any other.
+//!
+//! A dependency declaration's provider publishes the deprecation in effect with the declaration's
+//! rendering ([`DeprecatedDeclaration`]); one of this compilation's declarations states it in its
+//! checked annotations. A use reads whichever the selected declaration carries.
 
 use super::symbol_display::source_declaration_display;
 use super::*;
 use crate::fir::DeclarationKind;
-use crate::types::{Deprecation, DeprecationLevel};
+use crate::types::{DeprecatedDeclaration, Deprecation, DeprecationLevel};
+use std::sync::Arc;
 
 /// One deprecated declaration a reference uses, with the rendering its diagnostic names.
 struct DeprecatedUse {
@@ -49,8 +54,7 @@ impl Checker<'_> {
                     None => self
                         .resolved_calls
                         .get(&expression)
-                        .and_then(call_declaration)
-                        .and_then(|declaration| self.declaration_deprecated_use(declaration)),
+                        .and_then(|call| self.call_deprecated_use(call)),
                 };
                 (span, used)
             }
@@ -58,8 +62,7 @@ impl Checker<'_> {
                 let used = if args.is_some() {
                     self.resolved_calls
                         .get(&expression)
-                        .and_then(call_declaration)
-                        .and_then(|declaration| self.declaration_deprecated_use(declaration))
+                        .and_then(|call| self.call_deprecated_use(call))
                 } else {
                     self.read_deprecated_use(expression)
                 };
@@ -95,35 +98,46 @@ impl Checker<'_> {
             Stmt::AssignMember { name, .. } => self.assignment_member_name_span(statement, name),
             _ => return,
         };
-        let declaration = match self.stmt_lowers.get(&statement) {
+        let (declaration, setter) = match self.stmt_lowers.get(&statement) {
             Some(
                 StmtLowering::MemberPropertyWrite {
-                    stable_declaration, ..
-                }
-                | StmtLowering::AssociatedPropertyWrite {
-                    stable_declaration, ..
+                    stable_declaration,
+                    setter,
+                    ..
                 }
                 | StmtLowering::MemberExtensionPropertyWrite {
-                    stable_declaration, ..
+                    stable_declaration,
+                    setter,
+                    ..
                 },
-            ) => *stable_declaration,
+            ) => (*stable_declaration, setter.as_deref()),
+            Some(StmtLowering::AssociatedPropertyWrite {
+                stable_declaration, ..
+            }) => (*stable_declaration, None),
             Some(
                 StmtLowering::ExtensionPropertyWrite { access }
                 | StmtLowering::TopLevelPropertySet(access),
-            ) => access.property.stable_declaration,
+            ) => (
+                access.property.stable_declaration,
+                access.property.setter.as_ref(),
+            ),
             Some(StmtLowering::ImplicitPropertyWrite(target)) => match target.as_ref() {
                 ImplicitPropertyWriteTarget::Member {
                     stable_declaration, ..
-                } => *stable_declaration,
-                ImplicitPropertyWriteTarget::Extension { access, .. } => {
-                    access.property.stable_declaration
-                }
+                } => (*stable_declaration, None),
+                ImplicitPropertyWriteTarget::Extension { access, .. } => (
+                    access.property.stable_declaration,
+                    access.property.setter.as_ref(),
+                ),
             },
-            _ => None,
+            _ => (None, None),
         };
-        let used = declaration.and_then(|declaration| {
-            self.property_deprecated_use(declaration, PropertyAccess::Write)
-        });
+        let used = match declaration {
+            Some(declaration) => self.property_deprecated_use(declaration, PropertyAccess::Write),
+            None => {
+                dependency_deprecated_use(setter.and_then(|setter| setter.deprecation.as_ref()))
+            }
+        };
         self.report_deprecated_use(span, used);
     }
 
@@ -177,52 +191,97 @@ impl Checker<'_> {
 
     /// The deprecated declaration a property read or singleton read uses.
     fn read_deprecated_use(&self, expression: ExprId) -> Option<DeprecatedUse> {
-        let declaration = match self.expr_lowers.get(&expression) {
-            None => self.constant_property_reads.get(&expression).copied(),
+        let (declaration, getter) = match self.expr_lowers.get(&expression) {
+            None => (self.constant_property_reads.get(&expression).copied(), None),
             Some(lowering) => match lowering {
                 ExprLowering::MemberPropertyRead {
+                    stable_declaration,
+                    accessor,
+                    ..
+                } => (*stable_declaration, accessor.as_deref()),
+                ExprLowering::MemberExtensionPropertyRead {
+                    stable_declaration,
+                    getter,
+                    ..
+                } => (*stable_declaration, getter.as_deref()),
+                ExprLowering::AssociatedPropertyRead {
                     stable_declaration, ..
-                }
-                | ExprLowering::AssociatedPropertyRead {
-                    stable_declaration, ..
-                }
-                | ExprLowering::MemberExtensionPropertyRead {
-                    stable_declaration, ..
-                } => *stable_declaration,
+                } => (*stable_declaration, None),
                 ExprLowering::TopLevelPropertyGet(access)
-                | ExprLowering::ExtensionPropertyGet { access } => {
-                    access.property.stable_declaration
-                }
+                | ExprLowering::ExtensionPropertyGet { access } => (
+                    access.property.stable_declaration,
+                    Some(&access.property.getter),
+                ),
                 ExprLowering::SingletonValue(singleton) => {
                     return self.classifier_deprecated_use(singleton.classifier)
                 }
-                _ => None,
+                _ => (None, None),
             },
         };
-        self.property_deprecated_use(declaration?, PropertyAccess::Read)
+        match declaration {
+            Some(declaration) => self.property_deprecated_use(declaration, PropertyAccess::Read),
+            None => {
+                dependency_deprecated_use(getter.and_then(|getter| getter.deprecation.as_ref()))
+            }
+        }
     }
 
     fn reference_deprecated_use(&self, lowering: &ExprLowering) -> Option<DeprecatedUse> {
-        let declaration = match lowering {
-            ExprLowering::ConstructorRef { constructor, .. } => constructor.stable_declaration,
-            ExprLowering::TopLevelFunctionRef(reference) => reference.stable_declaration,
+        let (declaration, dependency) = match lowering {
+            ExprLowering::ConstructorRef { constructor, .. } => (
+                constructor.stable_declaration,
+                constructor.deprecation.as_ref(),
+            ),
+            ExprLowering::TopLevelFunctionRef(reference) => (
+                reference.stable_declaration,
+                reference.target.deprecation.as_ref(),
+            ),
             ExprLowering::AdaptedRef {
-                stable_declaration, ..
-            } => *stable_declaration,
+                stable_declaration,
+                target,
+                ..
+            } => (*stable_declaration, target.deprecation.as_ref()),
             ExprLowering::CallableReference { target, .. }
             | ExprLowering::AdaptedCallableReference { target, .. } => match target {
                 CallableReferenceTarget::Classifier(member)
-                | CallableReferenceTarget::Member { member, .. } => member.stable_declaration,
+                | CallableReferenceTarget::Member { member, .. } => {
+                    (member.stable_declaration, member.deprecation.as_ref())
+                }
                 CallableReferenceTarget::Extension {
-                    stable_declaration, ..
-                } => *stable_declaration,
-                CallableReferenceTarget::Property(property) => property.stable_declaration,
-                CallableReferenceTarget::TopLevelProperty(property) => property.stable_declaration,
-                CallableReferenceTarget::ClassifierProperty { .. } => None,
+                    callable,
+                    stable_declaration,
+                } => (*stable_declaration, callable.deprecation.as_ref()),
+                CallableReferenceTarget::Property(property) => (
+                    property.stable_declaration,
+                    property.getter.deprecation.as_ref(),
+                ),
+                CallableReferenceTarget::TopLevelProperty(property) => (
+                    property.stable_declaration,
+                    property.getter.deprecation.as_ref(),
+                ),
+                CallableReferenceTarget::ClassifierProperty { .. } => (None, None),
             },
-            _ => None,
-        }?;
-        self.declaration_deprecated_use(declaration)
+            _ => (None, None),
+        };
+        match declaration {
+            Some(declaration) => self.declaration_deprecated_use(declaration),
+            None => dependency_deprecated_use(dependency),
+        }
+    }
+
+    /// The deprecated declaration a call selected.
+    fn call_deprecated_use(&self, call: &ResolvedCall) -> Option<DeprecatedUse> {
+        if let Some(declaration) = call_declaration(call) {
+            return self.declaration_deprecated_use(declaration);
+        }
+        dependency_deprecated_use(match call {
+            ResolvedCall::Member(selected) => selected.member.deprecation.as_ref(),
+            ResolvedCall::Companion(member) => member.deprecation.as_ref(),
+            ResolvedCall::TopLevel(call) => call.callable.deprecation.as_ref(),
+            ResolvedCall::Extension(call) => call.callable.deprecation.as_ref(),
+            ResolvedCall::MemberExtension { deprecation, .. } => deprecation.as_ref(),
+            ResolvedCall::LocalFunction(_) => None,
+        })
     }
 
     /// The deprecated declaration a constructor call uses: the more severe of the constructor's
@@ -236,7 +295,10 @@ impl Checker<'_> {
                 stable_declaration, ..
             } => *stable_declaration,
             ResolvedConstructor::Plain { member, .. }
-            | ResolvedConstructor::PlainSlots { member, .. } => member.stable_declaration,
+            | ResolvedConstructor::PlainSlots { member, .. } => match member.stable_declaration {
+                Some(declaration) => Some(declaration),
+                None => return dependency_deprecated_use(member.deprecation.as_ref()),
+            },
             ResolvedConstructor::Synthetic { ctor, .. } => ctor.declaration.stable_declaration,
         }?;
         let index = self.resolved_index?;
@@ -292,8 +354,13 @@ impl Checker<'_> {
     }
 
     fn classifier_deprecated_use(&self, classifier: TypeName) -> Option<DeprecatedUse> {
-        let declaration = self.resolved_index?.classifier_declaration(classifier)?;
-        self.declaration_deprecated_use(declaration)
+        if let Some(declaration) = self
+            .resolved_index
+            .and_then(|index| index.classifier_declaration(classifier))
+        {
+            return self.declaration_deprecated_use(declaration);
+        }
+        dependency_deprecated_use(self.resolver().classifier(classifier)?.deprecation.as_ref())
     }
 
     /// The deprecation a source declaration's checked annotations declare. A common source's
@@ -342,6 +409,17 @@ impl Checker<'_> {
             }
         }
     }
+}
+
+/// What a dependency declaration's provider published for its uses.
+fn dependency_deprecated_use(
+    published: Option<&Arc<DeprecatedDeclaration>>,
+) -> Option<DeprecatedUse> {
+    let published = published?;
+    Some(DeprecatedUse {
+        symbol: published.symbol.to_string(),
+        deprecation: published.deprecation.clone(),
+    })
 }
 
 /// The selected declaration of a call, when this compilation declares it.

@@ -542,6 +542,7 @@ pub(super) fn function_assertions(
     // receiver's local variable. Its guard then quotes that name rather than `<this>`. A lambda's
     // implementation takes its receiver as such a parameter too (`$this$<label>`).
     let replaced = ir.lambda_own_params_from.contains_key(&function)
+        || is_lambda_class_invoke(ir, function)
         || ir
             .vc_declared_sigs
             .get(&function)
@@ -567,6 +568,17 @@ pub(super) fn function_assertions(
             })
             .collect(),
     )
+}
+
+/// Whether `function` is the `invoke` of a realized lambda class, whose receiver keeps the
+/// lambda's local name.
+fn is_lambda_class_invoke(ir: &IrFile, function: u32) -> bool {
+    ir.classes.iter().any(|class| {
+        class
+            .lambda
+            .as_ref()
+            .is_some_and(|lambda| lambda.invoke == function)
+    })
 }
 
 /// kotlinc's name for an extension receiver that a static taking the interface instance first

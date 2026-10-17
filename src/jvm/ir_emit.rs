@@ -68,6 +68,7 @@ mod default_impls;
 mod delegated_property_array;
 mod field_nullability;
 use field_nullability::{
+    declared_field_annotation, declared_property_annotation, declared_static_annotation,
     field_nullability_kind, is_nonnull_reference_field, nullability_annotation,
 };
 mod discarding;
@@ -398,11 +399,10 @@ impl EmitRun {
     }
 }
 
-/// One synthetic lambda class to write under [`LambdaMode::Class`].
+/// One emitter-owned SAM class to write under [`LambdaMode::Class`].
 ///
-/// The lambda body stays where the indy strategy put it — a private static on the enclosing class —
-/// and the synthesized `invoke` delegates to it. kotlinc instead moves the body into `invoke` and
-/// emits no static, so the CLASS SET matches but the enclosing class keeps one extra private method.
+/// Kotlin function lambdas are realized in IR, with their body owned by the realized class. This
+/// plan remains only for SAM conversions whose implementation stays a static method on its owner.
 #[derive(Clone, Debug)]
 struct LambdaClassPlan {
     /// Internal name of the class to write (`LKt$box$plain$1`).
@@ -418,11 +418,6 @@ struct LambdaClassPlan {
     impl_desc: String,
     /// Captured values, in implementation-parameter order; empty ⇒ a singleton `INSTANCE`.
     captures: Vec<Ty>,
-    /// Source-level arity, passed to `kotlin.jvm.internal.Lambda`'s constructor.
-    arity: u32,
-    /// Only a Kotlin function type extends `kotlin/jvm/internal/Lambda`; a user SAM conversion
-    /// extends `java/lang/Object` (kotlinc emits no `FunctionBase` for a non-`FunctionN` target).
-    kotlin_function: bool,
     /// A fun-interface conversion of a callable reference implements Kotlin's FunctionAdapter
     /// equality contract by delegating to its single captured function value.
     function_adapter: bool,
@@ -430,9 +425,6 @@ struct LambdaClassPlan {
     /// constant, not a `Methodref` (`IncompatibleClassChangeError` otherwise).
     owner_is_interface: bool,
     identity: lambda_class_names::LambdaClassIdentity,
-    /// The generic signature and `@Metadata` kotlin-reflect reads for `toString()`. Absent for a
-    /// user SAM conversion and for a synthesized adapter that is not a source lambda.
-    reflection: Option<class_lambda_reflection::ClassLambdaReflection>,
 }
 
 impl EmitRun {
@@ -819,7 +811,7 @@ fn attach_synth_nullability(
             if !field_visibility::publishes_field_nullability(c, index) {
                 continue;
             }
-            if let Some(a) = ann(f.ty) {
+            if let Some(a) = declared_field_annotation(c, index) {
                 cw.set_field_nullability(
                     &instance_field_jvm_name(ir, run, c, index),
                     &desc(jvm_value_ty(&f.ty)),
@@ -845,7 +837,7 @@ fn attach_synth_nullability(
             })
             .filter(|(_, s)| !s.is_lateinit)
         {
-            if let Some(a) = ann(jvm_declared_ty(&s.ty)) {
+            if let Some(a) = declared_static_annotation(s) {
                 cw.set_field_nullability(
                     ir.static_field_jvm_name(index as u32),
                     &desc(jvm_declared_ty(&s.ty)),
@@ -912,14 +904,29 @@ fn attach_synth_nullability(
         cw.set_method_param_annotations("<init>", &ctor_desc, &user);
     }
     // Accessors: a reference getter annotates its return; a `var` reference setter its parameter.
-    for f in c.fields.iter().filter(|f| !f.is_compiler_generated()) {
-        let Some(a) = ann(f.ty) else {
+    for (index, f) in c
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| !f.is_compiler_generated())
+    {
+        let Some(a) = declared_property_annotation(c, index) else {
             continue;
         };
         let (getter, setter) = accessor_jvm_names(c, &f.name);
-        cw.set_method_nullability(&getter, &format!("(){}", desc(f.ty)), Some(a), &[]);
+        // The accessor's own descriptor: an explicit backing field (`val x: Any? field: String`)
+        // stores a narrower type than the getter returns.
+        let accessor_desc = c
+            .properties
+            .iter()
+            .find(|property| property.backing_field == Some(index as u32))
+            .map_or_else(
+                || desc(f.ty),
+                |property| desc(declared_property_accessor_jvm(ir, property, f)),
+            );
+        cw.set_method_nullability(&getter, &format!("(){accessor_desc}"), Some(a), &[]);
         if !f.is_final() {
-            cw.set_method_nullability(&setter, &format!("({})V", desc(f.ty)), None, &[Some(a)]);
+            cw.set_method_nullability(&setter, &format!("({accessor_desc})V"), None, &[Some(a)]);
         }
     }
     // Data-class synthesized methods: `copy` returns the class (`@NotNull`), `toString` returns
@@ -939,7 +946,9 @@ fn attach_synth_nullability(
             let function = &ir.functions[fid as usize];
             // `copy`'s parameters mirror the primary-constructor properties, so each reference param
             // takes the SAME `@NotNull`/`@Nullable` annotation kotlinc puts on the constructor's.
-            let copy_params: Vec<Option<&str>> = data_fields.iter().map(|f| ann(f.ty)).collect();
+            let copy_params: Vec<Option<&str>> = (0..data_fields.len())
+                .map(|index| declared_property_annotation(c, index))
+                .collect();
             cw.set_method_nullability(
                 &function.name,
                 &ir_method_desc(&function.params, &function.ret),
@@ -965,8 +974,8 @@ fn attach_synth_nullability(
                 &[Some("Lorg/jetbrains/annotations/Nullable;")],
             );
         }
-        for (i, f) in data_fields.iter().enumerate() {
-            if let Some(a) = ann(f.ty) {
+        for i in 0..data_fields.len() {
+            if let Some(a) = declared_property_annotation(c, i) {
                 let fid = ir
                     .data_class_member(c.fq_name_id(), IrDataClassMemberRole::Component(i as u32))
                     .expect("a data-class component records its generated identity");
@@ -1293,6 +1302,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
             ir,
             facts.metadata.override_results,
             facade,
+            opts.lambda_modes,
         ),
     };
     emit_all_with_class_meta(ir, facade, &env, facts.metadata.facade, opts, &|_| None)
@@ -1497,8 +1507,13 @@ fn emit_pass(
         .protected_member_access_bridges
         .borrow_mut()
         .clone_from(&member_access_bridges.protected);
-    *env.run.static_accessor_plan.borrow_mut() =
-        static_accessors::plan(ir, env, &contexts, &class_member_fids);
+    *env.run.static_accessor_plan.borrow_mut() = static_accessors::plan(
+        ir,
+        env,
+        &contexts,
+        &class_member_fids,
+        &member_access_bridges.private_calls,
+    );
     let mut cw = new_writer(facade, "java/lang/Object", opts);
     // The facade constructs the file's local classes, and a class that references one as a class
     // constant must list it in `InnerClasses` — reflection cross-checks the two sides and throws
@@ -1688,31 +1703,13 @@ fn emit_pass(
     Some(out)
 }
 
-/// Write one synthetic lambda class for [`LambdaMode::Class`].
+/// Write one synthetic class for a SAM conversion that cannot use `invokedynamic`.
 ///
-/// Shape, as kotlinc emits it: `final class Outer$fn$N extends kotlin/jvm/internal/Lambda implements
-/// FunctionN`, whose constructor passes the source arity to `Lambda.<init>(I)V`. A non-capturing
-/// lambda additionally gets a `static final INSTANCE` initialized in `<clinit>`; a capturing one
-/// stores each captured value in a field and reads it back in `invoke`.
-///
-/// A source lambda declares kotlinc's typed `invoke` when its implementation has that physical
-/// shape, plus the erased `FunctionN.invoke` bridge used for dispatch. Arguments are adapted to the
-/// implementation's physical types and the result is adapted back to the declared function type,
-/// exactly as the metafactory's adapter would have done under `indy`.
+/// Kotlin function lambdas selected for class mode have already become IR classes. Keeping this
+/// path SAM-only makes a missed realization an emission error instead of a second implementation.
 fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Vec<u8>) {
-    let super_name = if plan.kotlin_function {
-        "kotlin/jvm/internal/Lambda"
-    } else {
-        "java/lang/Object"
-    };
-    let signature = plan
-        .reflection
-        .as_ref()
-        .map(|reflection| reflection.signature.as_str());
-    let mut cw = new_writer_generic(&plan.internal, signature, super_name, opts);
-    if let Some(signature) = signature {
-        cw.set_signature(signature);
-    }
+    const OBJECT: &str = "java/lang/Object";
+    let mut cw = new_writer_generic(&plan.internal, None, OBJECT, opts);
     cw.set_access(0x0030); // ACC_FINAL | ACC_SUPER
     cw.add_interface(&plan.iface);
     if plan.function_adapter {
@@ -1736,14 +1733,8 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         slot += slot_words(*ty);
     }
     ctor.aload(0);
-    if plan.kotlin_function {
-        ctor.push_int(plan.arity as i32, &mut cw);
-        let sup = cw.methodref(super_name, "<init>", "(I)V");
-        ctor.invokespecial(sup, 1, 0);
-    } else {
-        let sup = cw.methodref(super_name, "<init>", "()V");
-        ctor.invokespecial(sup, 0, 0);
-    }
+    let sup = cw.methodref(OBJECT, "<init>", "()V");
+    ctor.invokespecial(sup, 0, 0);
     for (index, ty) in plan.captures.iter().enumerate() {
         ctor.aload(0);
         load_slot(&mut ctor, capture_slots[index], *ty);
@@ -1769,25 +1760,6 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         .get(plan.captures.len()..)
         .unwrap_or(&[])
         .to_vec();
-    // A Kotlin lambda's class declares kotlinc's typed `invoke` over the lambda's own parameters,
-    // which its metadata names; the erased `FunctionN.invoke` is a bridge to it. A typed `invoke`
-    // that erases to the interface slot (`invoke(Object)Object` over an unbounded `T`) is that
-    // slot itself, with no bridge.
-    let typed_invoke = plan
-        .reflection
-        .as_ref()
-        .and_then(|reflection| reflection.typed_invoke.as_ref())
-        .filter(|typed| typed.descriptor != plan.sam_desc);
-    if let Some(typed) = typed_invoke {
-        class_mode_lambda_members::emit_typed_lambda_invoke(
-            &mut cw,
-            plan,
-            &field_descs,
-            &own_params,
-            impl_ret,
-            typed,
-        );
-    }
     let mut invoke_locals: u16 = 1;
     let mut arg_slots = Vec::new();
     for param in &sam_params {
@@ -1795,15 +1767,7 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         invoke_locals += if *param == "J" || *param == "D" { 2 } else { 1 };
     }
     let mut invoke = CodeBuilder::new(invoke_locals);
-    if typed_invoke.is_some() {
-        invoke.aload(0);
-    }
-    for (index, ty) in plan
-        .captures
-        .iter()
-        .enumerate()
-        .filter(|_| typed_invoke.is_none())
-    {
+    for (index, ty) in plan.captures.iter().enumerate() {
         invoke.aload(0);
         let field = cw.fieldref(
             &plan.internal,
@@ -1812,18 +1776,22 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         );
         invoke.getfield(field, slot_words(*ty) as i32);
     }
-    let high_arity = plan.kotlin_function && is_high_arity_function(plan.arity as u8);
-    if high_arity {
-        // FunctionN's single erased parameter is `Object[]`; unpack each semantic argument in order
-        // and adapt it to the existing implementation method's physical slot.
-        for (index, want) in own_params.iter().copied().enumerate() {
-            invoke.aload(arg_slots[0]);
-            invoke.push_int(index as i32, &mut cw);
-            invoke.array_load(0x32, 1); // aaload
+    for (index, physical) in sam_params.iter().enumerate() {
+        let want = own_params.get(index).copied().unwrap_or(Ty::Unit);
+        if *physical == "J" {
+            invoke.lload(arg_slots[index]);
+        } else if *physical == "D" {
+            invoke.dload(arg_slots[index]);
+        } else if *physical == "F" {
+            invoke.fload(arg_slots[index]);
+        } else if descriptor_is_reference(physical) {
+            invoke.aload(arg_slots[index]);
             let wanted = type_descriptor(want);
             if !matches!(want, Ty::Unit) && !descriptor_is_reference(&wanted) {
-                unbox_prim_from(&mut cw, &mut invoke, Ty::obj("java/lang/Object"), want);
-            } else if wanted != "Ljava/lang/Object;" {
+                // The erased slot carries a wrapper wherever the body wants a scalar.
+                unbox_prim_from_descriptor(&mut cw, &mut invoke, physical, want);
+            } else if wanted != *physical {
+                // The implementation may have a more specific reference type than the SAM slot.
                 let internal = wanted
                     .strip_prefix('L')
                     .and_then(|rest| rest.strip_suffix(';'))
@@ -1832,54 +1800,9 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
                 let target = cw.class_ref(&internal);
                 invoke.checkcast(target);
             }
-        }
-    } else {
-        for (index, physical) in sam_params.iter().enumerate() {
-            let want = own_params.get(index).copied().unwrap_or(Ty::Unit);
-            if *physical == "J" {
-                invoke.lload(arg_slots[index]);
-            } else if *physical == "D" {
-                invoke.dload(arg_slots[index]);
-            } else if *physical == "F" {
-                invoke.fload(arg_slots[index]);
-            } else if descriptor_is_reference(physical) {
-                invoke.aload(arg_slots[index]);
-                let wanted = type_descriptor(want);
-                if !matches!(want, Ty::Unit) && !descriptor_is_reference(&wanted) {
-                    // The erased slot carries a wrapper wherever the body wants a scalar.
-                    unbox_prim_from_descriptor(&mut cw, &mut invoke, physical, want);
-                } else if wanted != *physical {
-                    // `Function1.invoke` declares `Object`; the body declares the real type. Under
-                    // `indy` the metafactory's adapter inserted this cast — nothing else does here,
-                    // and without it the class fails verification on a specific reference parameter.
-                    let internal = wanted
-                        .strip_prefix('L')
-                        .and_then(|rest| rest.strip_suffix(';'))
-                        .map(str::to_owned)
-                        .unwrap_or(wanted);
-                    let target = cw.class_ref(&internal);
-                    invoke.checkcast(target);
-                }
-            } else {
-                invoke.iload(arg_slots[index]);
-            }
-        }
-    }
-    if let Some(typed) = typed_invoke {
-        let typed_desc = typed.descriptor.as_str();
-        let own_words: i32 = own_params.iter().map(|t| slot_words(*t) as i32).sum();
-        let typed = cw.methodref(&plan.internal, "invoke", typed_desc);
-        if typed_desc.ends_with(")V") {
-            invoke.invokevirtual(typed, own_words, 0);
-            let unit = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
-            invoke.getstatic(unit, 1);
         } else {
-            invoke.invokevirtual(typed, own_words, 1);
+            invoke.iload(arg_slots[index]);
         }
-        invoke.areturn();
-        // ACC_PUBLIC | ACC_BRIDGE | ACC_SYNTHETIC: the erased slot of the typed `invoke`.
-        cw.add_method(0x1041, &plan.sam_method, &plan.sam_desc, &invoke);
-        return class_mode_lambda_members::finish_lambda_class(cw, plan, &field_descs, opts);
     }
     let impl_words: i32 = impl_params.iter().map(|t| slot_words(*t) as i32).sum();
     let impl_ref = if plan.owner_is_interface {
@@ -1903,23 +1826,9 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
     } else {
         return_primitive(&mut invoke, impl_ret);
     }
-    // A typed `invoke` that erases to the interface slot is the slot itself, and keeps its generic
-    // `Signature` (`(TT;)TT;`).
-    let slot_signature = plan
-        .reflection
-        .as_ref()
-        .and_then(|reflection| reflection.typed_invoke.as_ref())
-        .filter(|typed| typed.descriptor == plan.sam_desc)
-        .and_then(|typed| typed.signature.as_deref());
     // ACC_PUBLIC | ACC_FINAL: the interface slot, implemented once.
-    cw.add_method_sig(
-        0x0011,
-        &plan.sam_method,
-        &plan.sam_desc,
-        &invoke,
-        slot_signature,
-    );
-    class_mode_lambda_members::finish_lambda_class(cw, plan, &field_descs, opts)
+    cw.add_method(0x0011, &plan.sam_method, &plan.sam_desc, &invoke);
+    class_mode_lambda_members::finish_lambda_class(cw, plan, &field_descs)
 }
 
 /// Take the lambda classes recorded while emitting the class just finished, and write them.
@@ -2276,7 +2185,7 @@ fn emit_scheduled_member(
                 fq_name,
                 cw,
                 false,
-                c.decl_line,
+                static_accessors::class_declaration_line(c),
             );
         }
         bridge_emission::emit_value_class_interface_entries(
@@ -2626,7 +2535,7 @@ fn emit_class(
             // the local `type_parameter` above is the `Signature` attribute's spelling, a wider source
             // that must not become a second answer to the same question.
             let field_ann = field_visibility::publishes_field_nullability(c, field_index)
-                .then(|| nullability_annotation(field_nullability_kind(*ty)))
+                .then(|| declared_field_annotation(c, field_index))
                 .flatten();
             cw.add_field_late_sig(
                 acc,
@@ -3097,7 +3006,6 @@ fn emit_class(
     // `<clinit>` follows both.
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
-    access_bridges::emit_private_member_access_bridges(ir, c, &fq_name, &mut cw, env.run);
     accessor_emission_order::emit(ir, c, &fq_name, facade, env, &mut cw);
     if !static_storage(ir, c) {
         static_fields::emit_class_static_initializer(
@@ -3363,21 +3271,6 @@ fn emit_interface_class(
                 !f.is_static,
                 env,
             );
-            if env
-                .run
-                .private_member_access_bridges
-                .borrow()
-                .contains(&fid)
-            {
-                access_bridges::emit_private_member_access_bridge(
-                    ir,
-                    fid,
-                    &fq_name,
-                    &mut cw,
-                    true,
-                    c.decl_line,
-                );
-            }
             if ir.function_reference_access_bridges.contains(&fid) {
                 access_bridges::emit_function_reference_access_bridge(
                     ir,
@@ -3385,7 +3278,7 @@ fn emit_interface_class(
                     &fq_name,
                     &mut cw,
                     true,
-                    c.decl_line,
+                    static_accessors::class_declaration_line(c),
                 );
             }
             // A PRIVATE default stays a plain private instance method: kotlinc gives it no bridge,
@@ -3515,7 +3408,7 @@ fn emit_interface_class(
         &env.run.static_accessor_plan.borrow(),
         StaticOwner::Class(c.fq_name),
         facade,
-        c.decl_start_line.max(c.decl_line),
+        static_accessors::class_declaration_line(c),
         &mut cw,
     );
     for &fid in &jd_bridge_fids {
@@ -3531,7 +3424,7 @@ fn emit_interface_class(
         access_bridges::emit_jd_access_bridge(
             &mut cw,
             c.fq_name,
-            c.decl_line,
+            static_accessors::class_declaration_line(c),
             access_bridges::JdAccessBridgeMember {
                 name: &f.name,
                 param_tys: &physical_params,
@@ -3720,7 +3613,7 @@ fn emit_enum_class(
     for (field_index, (f, t)) in c.fields.iter().zip(&field_tys).enumerate() {
         let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
         let nullability = (!f.is_lateinit())
-            .then(|| nullability_annotation(field_nullability_kind(f.ty)))
+            .then(|| declared_field_annotation(c, field_index))
             .flatten();
         let signature =
             property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref())
@@ -3988,7 +3881,7 @@ fn emit_enum_class(
                         &fq,
                         cw,
                         false,
-                        c.decl_line,
+                        static_accessors::class_declaration_line(c),
                     );
                 }
                 // A defaulted member needs its `<name>$default` synthetic here too. The enum writer is a
@@ -4141,14 +4034,14 @@ fn emit_enum_class(
     // before `<clinit>`, forwarders first.
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
-    constructor_accessors::emit_accessors(ir, c, &fq, &mut cw);
+    constructor_accessors::emit_sealed_accessors(ir, c, &fq, &mut cw);
     static_accessors::emit(
         ir,
         env.run,
         &env.run.static_accessor_plan.borrow(),
         StaticOwner::Class(c.fq_name),
         facade,
-        c.decl_start_line.max(c.decl_line),
+        static_accessors::class_declaration_line(c),
         &mut cw,
     );
     // `<clinit>` is RESERVED and BUILT here, after the plugin-generated members: kotlinc interns
@@ -5390,9 +5283,6 @@ struct Emitter<'a> {
     /// The exact selector currently emitted by a safe-call guard. Its copied inline frame may
     /// need to adapt a value before the selector joins the null arm.
     active_safe_call_selector: Option<u32>,
-    /// An erased copied result whose enclosing safe-call selector owns adaptation, but whose
-    /// trailing spliced lambda must perform it before closing its locals and inline frame.
-    pending_pre_close_copied_result: Option<block_scope::PendingPreCloseCopiedResult>,
     /// A chain's receiver temporaries declared after its first guard already jumped to the shared
     /// null exit, by that exit: none of them is assigned on every path into it.
     safe_call_exit_temporaries: HashMap<Label, Vec<u32>>,
@@ -5424,6 +5314,7 @@ struct Emitter<'a> {
     suspend_lambda_parameter_reads: HashSet<crate::ir::ExprId>,
     /// Function-value invocations whose consumer takes `invoke`'s erased `Object` as it is.
     erased_invocations: HashSet<crate::ir::ExprId>,
+    inline_coercions: block_scope::InlineCoercionState,
     /// The next state's ordinal. A state belongs to an emission SITE, not to an expression: an
     /// inline function that invokes its lambda twice splices the same body twice, and each copy
     /// suspends on its own locals. Both passes emit the same sequence, so both number it alike.
@@ -5564,7 +5455,6 @@ impl<'a> Emitter<'a> {
             safe_call_null_exits: HashMap::default(),
             stack_resident_value: None,
             active_safe_call_selector: None,
-            pending_pre_close_copied_result: None,
             safe_call_exit_temporaries: HashMap::default(),
             var_types: collect_body_var_types(ir, roots.iter().copied()),
             value_stores: non_null_operands::ValueStores::collect(ir, &roots),
@@ -5577,6 +5467,7 @@ impl<'a> Emitter<'a> {
             transformed_suspensions: Default::default(),
             suspend_lambda_parameter_reads: HashSet::default(),
             erased_invocations: HashSet::default(),
+            inline_coercions: block_scope::InlineCoercionState::default(),
             machine_next_ordinal: 0,
             machine_entered: false,
             machine_resumes: Vec::new(),

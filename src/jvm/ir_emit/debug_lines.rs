@@ -211,6 +211,53 @@ impl Emitter<'_> {
                 return u32::from(synthetic);
             }
         }
+        // A class regenerated from a foreign inline declaration keeps that declaration file as
+        // its primary source. Unprovenanced expressions are the caller's lambda body spliced into
+        // the copy; map those under the current source without inventing an inline-call debug
+        // stratum. Expressions cloned from the declaration implementation carry its exact source
+        // identity and retain their raw primary lines.
+        if let Some(template) = self.regenerated_inline_template() {
+            let provenance = self.ir.inline_copy_provenance(expression);
+            // The declaration body and a lambda supplied by its caller can live in the same file.
+            // Their stable function identities, not that shared file identity, decide which path
+            // owns the line in the regenerated class's source map.
+            if provenance
+                .and_then(|frames| frames.last())
+                .is_some_and(|frame| frame.function == template)
+            {
+                return line;
+            }
+            let source = provenance
+                .and_then(|frames| frames.last())
+                .map(|frame| frame.source)
+                .or_else(|| self.ir.source_debug.current());
+            if let Some(source) = source {
+                let mapped = if self.ir.source_debug.is_current(source) {
+                    self.ir
+                        .source_debug
+                        .file(source)
+                        .map(|identity| (identity.name.to_string(), self.facade.clone()))
+                } else {
+                    provenance
+                        .and_then(|frames| frames.last())
+                        .and_then(|frame| {
+                            self.copied_inline_file(frame.function, frame.owner, frame.source)
+                        })
+                };
+                if let Some((source_file, path)) = mapped {
+                    if let Some(mapped) = self.cw.source_map_for_inlining(1).and_then(|map| {
+                        map.map_copied_line(
+                            &source_file,
+                            &path,
+                            u16::try_from(line).unwrap_or(u16::MAX),
+                            None,
+                        )
+                    }) {
+                        return u32::from(mapped);
+                    }
+                }
+            }
+        }
         // The source line stays the declaration's raw line. A nested same-module expansion has
         // several semantic frames, but this physical copy is emitted from the outermost body;
         // kotlinc maps that raw line under the outer call instead of recursively feeding an inner
@@ -250,6 +297,11 @@ impl Emitter<'_> {
                 )
             })
             .map_or(line, u32::from)
+    }
+
+    fn regenerated_inline_template(&self) -> Option<crate::ir::FunId> {
+        let function = self.function?;
+        crate::jvm::lambda_classes::specialization_template(self.ir, function)
     }
 
     /// The source file and JVM path a copied inline line is mapped under.
@@ -459,5 +511,99 @@ impl Emitter<'_> {
                 code.mark_line_retained(line);
             }
         }
+    }
+}
+
+/// Whether evaluating `expression` enters a copied lambda source frame nested below
+/// `declaration_expression`'s frame.
+///
+/// Captured-inline specialization keeps the declaration invocation as an effect-free wrapper
+/// around the supplied lambda's copied frame. The wrapper deliberately retains its declaration
+/// source identity; consumers use this exact provenance transition to restore their own line after
+/// the nested value has run.
+pub(super) fn enters_nested_copied_lambda_frame(
+    ir: &crate::ir::IrFile,
+    declaration_expression: ExprId,
+    expression: ExprId,
+) -> bool {
+    let Some(outer) = ir.inline_copy_provenance(declaration_expression) else {
+        return false;
+    };
+    let outer_depth = outer.len();
+    let mut current = expression;
+    loop {
+        match ir.expr(current) {
+            IrExpr::Block { stmts, value } => {
+                if stmts.iter().any(|&statement| {
+                    matches!(
+                        ir.debug_local_provenance(statement),
+                        Some(crate::ir::IrDebugLocalProvenance::LambdaFrameMarker { .. })
+                    )
+                }) {
+                    return ir
+                        .inline_copy_provenance(current)
+                        .is_some_and(|frames| frames.len() > outer_depth);
+                }
+                match (stmts.is_empty(), value) {
+                    (true, Some(value)) => current = *value,
+                    _ => return false,
+                }
+            }
+            IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => current = *arg,
+            _ => return false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::enters_nested_copied_lambda_frame;
+    use crate::ir::{IrDebugLocalProvenance, IrExpr, IrFile};
+
+    #[test]
+    fn nested_copied_lambda_frame_is_proven_by_deeper_source_identity() {
+        let mut ir = IrFile::default();
+        let marker = ir.add_expr(IrExpr::InlineFrameMarker);
+        ir.set_debug_local_provenance(
+            marker,
+            IrDebugLocalProvenance::LambdaFrameMarker {
+                implementation: 1,
+                depth: 0,
+            },
+        );
+        let value = ir.add_expr(IrExpr::UnitInstance);
+        let frame = ir.add_expr(IrExpr::Block {
+            stmts: vec![marker],
+            value: Some(value),
+        });
+        let wrapper = ir.add_expr(IrExpr::Block {
+            stmts: Vec::new(),
+            value: Some(frame),
+        });
+        ir.record_inline_copy_owner(wrapper, 0, None, crate::fir::SourceFileId::from_raw(0));
+        ir.copy_inline_copy_mark(wrapper, frame);
+
+        assert!(!enters_nested_copied_lambda_frame(&ir, wrapper, wrapper));
+
+        ir.record_inline_copy_owner(frame, 1, None, crate::fir::SourceFileId::from_raw(1));
+        assert!(enters_nested_copied_lambda_frame(&ir, wrapper, wrapper));
+        let coerced = ir.add_expr(IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg: wrapper,
+            type_operand: crate::types::Ty::Unit,
+        });
+        assert!(enters_nested_copied_lambda_frame(&ir, wrapper, coerced));
+
+        let effect = ir.add_expr(IrExpr::UnitInstance);
+        let effectful = ir.add_expr(IrExpr::Block {
+            stmts: vec![effect],
+            value: Some(frame),
+        });
+        ir.copy_inline_copy_mark(wrapper, effectful);
+        assert!(!enters_nested_copied_lambda_frame(&ir, wrapper, effectful));
     }
 }
