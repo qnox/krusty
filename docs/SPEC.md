@@ -11928,11 +11928,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   ABI flag and public visibility); a private inline function's conversion uses the ordinary
   `$sam$` class. kotlinc writes no `invokedynamic` in an inline function, so a function value
   converted to a Java interface there takes the same wrapper under every `-Xsam-conversions`
-  mode, and a same-file caller's inlined copy constructs the declaration's wrapper. The
+  mode, and a same-module caller's inlined copy constructs the declaration file's wrapper. A copy
+  from another source file carries its exact inline-declaration identity to the JVM facade map; it
+  neither derives that facade from spelling nor declares another wrapper under the caller. The
   construction has no position: the statement line starts at the wrapped value rather than at
   `new`; bridge debug provenance comes from the first exact conversion site. Tests:
   `tests/sam_wrapper_class_e2e.rs` (`java_sam_class_mode_shares_one_wrapper`,
-  `java_sam_in_an_inline_function_is_its_wrapper_class`). Corpus:
+  `java_sam_in_an_inline_function_is_its_wrapper_class`,
+  `a_cross_file_inline_copy_constructs_the_declarations_sam_wrapper`). Corpus:
   `inlineClasses/funInterface/mangledSamWrappers`, `mangledSamWrappersGeneric`,
   `callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction`,
   `coroutines/suspendConversion/suspendConversionBetweenFunInterfaces`, and

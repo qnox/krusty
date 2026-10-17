@@ -45,6 +45,7 @@ pub(super) fn realize(
     class_java_sam: bool,
 ) -> SamWrapperRealizations {
     let mut realizations = SamWrapperRealizations::default();
+    let facade = crate::types::type_name(facade);
     let owners = expression_functions(ir);
     let scopes = conversion_scopes(ir, &owners);
     let mut sites = ir
@@ -63,13 +64,19 @@ pub(super) fn realize(
             };
             let node = ExprId::try_from(node).expect("IR expression index exceeds ExprId");
             let inline_scope = scopes.get(&node).copied();
-            if !wraps(target, class_java_sam, inline_scope.is_some()) {
+            let foreign_facade = foreign_inline_wrapper_facade(ir, node);
+            if !wraps(
+                target,
+                class_java_sam,
+                inline_scope.is_some() || foreign_facade.is_some(),
+            ) {
                 return None;
             }
             let [value] = captures.as_slice() else {
                 panic!("a checked function-value SAM conversion captures exactly its value")
             };
-            let public_inline = inline_scope == Some(InlineScope::Published);
+            let public_inline =
+                inline_scope == Some(InlineScope::Published) || foreign_facade.is_some();
             let source_line = ir.expr_source_lines.get(&node).copied().unwrap_or(0);
             Some((
                 node,
@@ -77,29 +84,44 @@ pub(super) fn realize(
                 target.clone(),
                 *arity,
                 public_inline,
+                foreign_facade,
                 source_line,
             ))
         })
         .collect::<Vec<_>>();
     sites.sort_unstable_by_key(|(node, ..)| *node);
     let mut wrappers: HashMap<(TypeName, bool, usize), TypeName> = HashMap::default();
-    for (node, value, target, arity, public_inline, source_line) in sites {
+    for (node, value, target, arity, public_inline, foreign_facade, source_line) in sites {
         let function_arity = wrapped_function_arity(ir, value, &target, arity);
-        let wrapper = *wrappers
-            .entry((target.classifier, public_inline, function_arity))
-            .or_insert_with(|| {
-                declare_wrapper(
-                    ir,
-                    facade,
-                    &target,
-                    arity,
-                    public_inline,
-                    source_line,
-                    function_arity,
-                )
-            });
+        let wrapper = match foreign_facade {
+            Some(foreign_facade) => wrapper_name(
+                foreign_facade,
+                &target,
+                public_inline,
+                function_arity,
+                arity,
+            ),
+            None => *wrappers
+                .entry((target.classifier, public_inline, function_arity))
+                .or_insert_with(|| {
+                    declare_wrapper(
+                        ir,
+                        facade,
+                        &target,
+                        arity,
+                        public_inline,
+                        source_line,
+                        function_arity,
+                    )
+                }),
+        };
         let enclosed_by_cast = conversion_is_cast_operand(ir, node);
-        let construction = wrapper_construction(wrapper, value);
+        let constructor_parameter = foreign_facade.map(|_| {
+            Ty::obj(&crate::jvm::names::function_interface_internal_name(
+                function_arity,
+            ))
+        });
+        let construction = wrapper_construction(wrapper, value, constructor_parameter);
         // An explicit cast of the conversion is the only checkcast kotlinc emits. Otherwise the
         // construction is cast to the interface it converts to.
         let construction = if enclosed_by_cast {
@@ -132,16 +154,28 @@ pub(super) fn realize(
     realizations
 }
 
-fn wrapper_construction(wrapper: TypeName, value: ExprId) -> IrExpr {
+fn wrapper_construction(
+    wrapper: TypeName,
+    value: ExprId,
+    constructor_parameter: Option<Ty>,
+) -> IrExpr {
     IrExpr::New {
         internal: wrapper,
         args: vec![value],
-        ctor_params: None,
+        ctor_params: constructor_parameter.map(|parameter| vec![parameter]),
         ctor_desc: None,
         external_target: None,
         defaults: Box::new([]),
         default_prefix_count: 0,
     }
+}
+
+/// The exact declaration facade whose public inline SAM wrapper a copied conversion constructs.
+/// Inline-copy provenance is ordered declaration frame first, so nested expansions keep naming the
+/// conversion's owning declaration rather than the caller whose body contains the copy.
+fn foreign_inline_wrapper_facade(ir: &IrFile, node: ExprId) -> Option<TypeName> {
+    let declaration = ir.inline_copy_provenance(node)?.first()?.function;
+    ir.foreign_template_facade(declaration)
 }
 
 /// The conversion node is the operand of an explicit cast, so that cast is the checkcast.
@@ -331,7 +365,7 @@ fn wrapped_function_arity(ir: &IrFile, value: ExprId, target: &IrSamTarget, arit
 
 fn declare_wrapper(
     ir: &mut IrFile,
-    facade: &str,
+    facade: TypeName,
     target: &IrSamTarget,
     arity: u8,
     public_inline: bool,
@@ -339,16 +373,7 @@ fn declare_wrapper(
     function_arity: usize,
 ) -> TypeName {
     let suspend_adapted = target.suspend && function_arity != usize::from(arity) + 1;
-    let name = crate::types::type_name(&format!(
-        "{facade}$sam${}{}{}$0",
-        if public_inline { "i$" } else { "" },
-        wrapper_segment(target.classifier),
-        if suspend_adapted {
-            format!("${function_arity}")
-        } else {
-            String::new()
-        }
-    ));
+    let name = wrapper_name(facade, target, public_inline, function_arity, arity);
     let function_type = Ty::obj(&crate::jvm::names::function_interface_internal_name(
         function_arity,
     ));
@@ -439,6 +464,27 @@ fn declare_wrapper(
         function_adapter,
     });
     name
+}
+
+/// Exact compiler-generated child identity of one file facade's wrapper for `target`.
+fn wrapper_name(
+    facade: TypeName,
+    target: &IrSamTarget,
+    public_inline: bool,
+    function_arity: usize,
+    arity: u8,
+) -> TypeName {
+    let suspend_adapted = target.suspend && function_arity != usize::from(arity) + 1;
+    facade.nested_child(&format!(
+        "sam${}{}{}$0",
+        if public_inline { "i$" } else { "" },
+        wrapper_segment(target.classifier),
+        if suspend_adapted {
+            format!("${function_arity}")
+        } else {
+            String::new()
+        }
+    ))
 }
 
 /// kotlinc's spelling of the interface in the wrapper's name: its Kotlin fully qualified name with

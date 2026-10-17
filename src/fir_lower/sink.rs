@@ -608,10 +608,8 @@ impl<'a> CommonIrBodySink<'a> {
         self.ir.inline_fns.insert(function);
         self.ir.inline_only_fns.insert(function);
         self.ir.foreign_inline_templates.insert(function);
-        if dispatch_receiver.is_none() {
-            let source = super::module_declarations::source(index, declaration)?;
-            self.ir.record_foreign_template_source(function, source);
-        }
+        let source = super::module_declarations::source(index, declaration)?;
+        self.ir.record_foreign_template_source(function, source);
         // A member template's body may describe its classifiers' type parameters at run time.
         let mut classifier = index.enclosing_classifier(declaration);
         while let Some(header) = classifier {
