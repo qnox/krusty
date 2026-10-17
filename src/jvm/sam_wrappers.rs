@@ -211,8 +211,10 @@ fn conversion_scopes(ir: &IrFile, owners: &HashMap<ExprId, FunId>) -> HashMap<Ex
         .filter_map(|&(node, implementation, source)| {
             // An inlined copy carries its caller's expression owner but not its ABI. Only the
             // declaration implementation establishes whether this stable source is published or
-            // private; every specialization below queries that decision by `source`.
-            if implementation != source {
+            // private; every specialization below queries that decision by `source`. A same-module
+            // expansion clones the conversion with the same implementation, so the copy is told
+            // apart by its inline-copy mark.
+            if implementation != source || ir.is_inline_copy(node) {
                 return None;
             }
             let function = *owners.get(&node)?;

@@ -18742,7 +18742,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A value-returning splice whose value is not a local read is the other closing `nop`: the lambda
   locals end first, and the `nop` returns to the inline body's line. A same-file expansion still
   writes `SourceDebugExtension` (one file, a second line range, and the debug stratum at the
-  call). Catch, finally, and declaration marks of the copy go through that map. After inlining,
+  call). Catch, finally, and declaration marks of the copy go through that map. A copied line
+  that a range of the same call already covers keeps that range's output line, as kotlinc's
+  copier returns a line it has visited; only an uncovered line stretches the frontier range, so a
+  private inline function's line after a nested published expansion maps to its own range. After inlining,
   the method's exception table is sorted by handler pc, then start pc; the standalone `use`
   method, which was not inlined, keeps emission order. That method's `try` is `Nothing`, not
   `Unit`. A non-`Unit` `try` enters a result temporary after its body once every local the body
@@ -18753,7 +18756,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that result. A `Unit` `try` does not enter one.
   Tests: `tests/inline_use_close_e2e.rs`, `tests/same_module_inline_frame_markers_e2e.rs`,
   `tests/inline_constructor_reference_e2e.rs`,
-  `jvm::source_map::tests::a_same_file_inline_still_writes_a_map`.
+  `jvm::source_map::tests::a_same_file_inline_still_writes_a_map`,
+  `jvm::source_map::tests::a_covered_line_keeps_its_range_over_the_frontier`,
+  `tests/sam_wrapper_class_e2e.rs` (`an_inline_copy_keeps_its_declarations_sam_wrapper_abi`).
 
 - **An inlined `return this` closes the spliced lambda before the load.** `also` and `apply`, and
   any spliced lambda whose value is a plain local read, leave that read as the block's value.
