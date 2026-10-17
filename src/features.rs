@@ -134,7 +134,10 @@ const MODELED_FEATURES: &[&str] = &[
     "MultiPlatformProjects",
     "NameBasedDestructuring",
     "NestedTypeAliases",
+    "NullableNothingInReifiedPosition",
     "PrioritizedEnumEntries",
+    "ProhibitIntersectionReifiedTypeParameter",
+    "ReportReificationProblemsInDnnAndFlexible",
     "UnitConversionsOnArbitraryExpressions",
     "WhenGuards",
 ];
@@ -236,6 +239,14 @@ impl LangFeatures {
         self.table()
             .get(feature)
             .map(|feature| feature.deprecation_warning_message(message))
+    }
+
+    /// The release-selected suffix for a deprecation whose base message is constructed after
+    /// parsing. `None` means the selected compiler predates the split warning diagnostic.
+    pub(crate) fn deprecation_warning_suffix(&self, feature: &str) -> Option<String> {
+        self.table()
+            .get(feature)
+            .map(|feature| feature.deprecation_warning_suffix())
     }
 
     /// The explicitly set features and their states, by name.

@@ -29,6 +29,9 @@ pub enum Severity {
 pub enum CompilerWarningName {
     Deprecation,
     InapplicableOperatorModifier,
+    TypeIntersectionAsReified,
+    TypeIntersectionAsReifiedDeprecation,
+    TypeParameterAsReifiedDeprecation,
     TypeArgumentsNotAllowed,
     ValueClassCannotBeRecursiveViaTypeParameters,
 }
@@ -38,6 +41,13 @@ impl CompilerWarningName {
         match self {
             Self::Deprecation => "DEPRECATION",
             Self::InapplicableOperatorModifier => "INAPPLICABLE_OPERATOR_MODIFIER_WARNING",
+            Self::TypeIntersectionAsReified => "TYPE_INTERSECTION_AS_REIFIED_WARNING",
+            Self::TypeIntersectionAsReifiedDeprecation => {
+                "TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING"
+            }
+            Self::TypeParameterAsReifiedDeprecation => {
+                "TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING"
+            }
             Self::TypeArgumentsNotAllowed => "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING",
             Self::ValueClassCannotBeRecursiveViaTypeParameters => {
                 "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING"
@@ -49,6 +59,13 @@ impl CompilerWarningName {
         Some(match name {
             "DEPRECATION" => Self::Deprecation,
             "INAPPLICABLE_OPERATOR_MODIFIER_WARNING" => Self::InapplicableOperatorModifier,
+            "TYPE_INTERSECTION_AS_REIFIED_WARNING" => Self::TypeIntersectionAsReified,
+            "TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING" => {
+                Self::TypeIntersectionAsReifiedDeprecation
+            }
+            "TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING" => {
+                Self::TypeParameterAsReifiedDeprecation
+            }
             "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING" => Self::TypeArgumentsNotAllowed,
             "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING" => {
                 Self::ValueClassCannotBeRecursiveViaTypeParameters
@@ -67,6 +84,9 @@ mod warning_name_tests {
         let names = [
             CompilerWarningName::Deprecation,
             CompilerWarningName::InapplicableOperatorModifier,
+            CompilerWarningName::TypeIntersectionAsReified,
+            CompilerWarningName::TypeIntersectionAsReifiedDeprecation,
+            CompilerWarningName::TypeParameterAsReifiedDeprecation,
             CompilerWarningName::TypeArgumentsNotAllowed,
             CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
         ];

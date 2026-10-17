@@ -362,6 +362,13 @@ pub(super) fn candidate(
         owner: shape.owner,
         physical_name: shape.function.physical_name.clone(),
         type_arguments: instantiated.type_arguments,
+        type_parameters: shape
+            .function
+            .signature
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.formals.clone().into_boxed_slice())
+            .unwrap_or_default(),
     }
 }
 
@@ -396,6 +403,7 @@ impl MemberExtensionFunctionCandidate {
                 .reified_type_parameter_ordinals
                 .clone()
                 .into_boxed_slice(),
+            type_parameters: self.type_parameters.clone(),
             suspend: self.suspend,
             declared_ret: self.declared_ret,
             overridden_results: self.overridden_results.clone(),
