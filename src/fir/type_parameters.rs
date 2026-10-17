@@ -113,8 +113,10 @@ impl ResolvedModuleIndex {
             // provider and have no compact source count to await.
             return true;
         };
+        // A classifier may append captured lexical parameters after its own source formals. The
+        // lifecycle count describes only the written prefix; those applied-layout slots do not
+        // make an otherwise complete declaration generic contract incomplete.
         (0..count).all(|ordinal| self.type_parameter(declaration, ordinal).is_some())
-            && self.type_parameter(declaration, count).is_none()
     }
 
     /// Bound ordinals with the primary concrete-class constituent first and source order preserved
