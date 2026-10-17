@@ -2287,9 +2287,6 @@ pub struct IrFile {
     /// would carry the enclosing fn's return type, mismatching the lambda's). The splice reads the
     /// lambda's `inline_body`, not this method, so the backend must NOT emit a `FunId` in this set.
     pub inline_only_fns: crate::fx_hash::HashSet<u32>,
-    /// Lambda impl functions spliced as the value of an external inline call (`let`, `run`, `with`):
-    /// the spliced body is that call's result, not a `FunctionN.invoke` result.
-    pub inline_call_value_lambdas: crate::fx_hash::HashSet<u32>,
     /// Retained inline declarations from another source unit, materialized only as call-site
     /// cloning templates in the active common-IR arena. They are never emitted as declarations in
     /// this file, and a non-inlined fallback keeps its stable module callable edge.

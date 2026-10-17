@@ -244,7 +244,7 @@ impl BodyLowering<'_> {
             .iter()
             .map(|operand| plan_value(self, *operand))
             .collect::<Option<Vec<_>>>()?;
-        let (inline_body, callee_receiver, spliced) = self.materialize_external_inline_lambda(
+        let (inline_body, callee_receiver) = self.materialize_external_inline_lambda(
             &mut statements,
             &args,
             lambda_parameter,
@@ -272,13 +272,6 @@ impl BodyLowering<'_> {
                 plan_value,
             )?
         };
-        // Only a plan that returns the invocation result itself makes the spliced body the call's
-        // value; a recovery wraps that result and `apply`/`also` return a parameter instead.
-        if let Some(implementation) =
-            spliced.filter(|_| returned_value.is_none() && recovery.is_none())
-        {
-            self.ir.inline_call_value_lambdas.insert(implementation);
-        }
         let expansion = if let Some(returned_value) = returned_value {
             statements.push(value);
             // A plan returning its receiver reads the inlined callee's receiver parameter. The
@@ -1228,12 +1221,12 @@ impl BodyLowering<'_> {
         frame: &crate::fir::FirInlineBodyFrame,
         call_line: Option<u32>,
         preamble_in_body: bool,
-    ) -> Option<(ExprId, Option<u32>, Option<u32>)> {
+    ) -> Option<(ExprId, Option<u32>)> {
         let function = *args.get(lambda_parameter)?;
         let invoke_function = |lowering: &mut Self| {
             lowering
                 .invoke_external_function_value(function, lambda_ty, invocation_operands, call_line)
-                .map(|invocation| (invocation, None, None))
+                .map(|invocation| (invocation, None))
         };
         let lambda_slot = match self.ir.expr(function) {
             IrExpr::GetValue(slot) => *slot,
@@ -1458,11 +1451,7 @@ impl BodyLowering<'_> {
             statements.extend(preamble);
             inline_body
         };
-        Some((
-            inline_body,
-            callee_receiver,
-            (!callable_reference).then_some(implementation),
-        ))
+        Some((inline_body, callee_receiver))
     }
 
     /// The lambda parameter bindings and `$i$a$` marker open the spliced body, so they sit inside
