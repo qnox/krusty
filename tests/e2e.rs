@@ -2643,7 +2643,6 @@ mod supertype_scan_arrow_e2e;
 #[path = "inline_lambda_operand_stack_e2e.rs"]
 mod inline_lambda_operand_stack_e2e;
 
-
 #[path = "synthetic_accessor_e2e.rs"]
 mod synthetic_accessor_e2e;
 #[path = "synthetic_accessor_pool_e2e.rs"]
