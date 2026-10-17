@@ -3122,6 +3122,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   with its parameter, as callable-reference probes already were; a probe that is never re-checked
   keeps its diagnostics. Tests: `probe_argument_call_e2e::a_nested_generic_argument_takes_the_selected_parameter`,
   `probe_argument_call_e2e::the_selected_parameter_still_reports_a_real_mismatch`.
+- **A result-only producer witnesses an `@OnlyInputTypes` variable with its completed type.**
+  `assertEquals(emptyList(), calls)` with `calls: MutableList<String>` solves `T = List<String>`.
+  Kotlin admits that solution because `emptyList()` is completed to `List<String>`; its type once
+  the call is solved is an input type. The witness search only saw the producer's provisional
+  `List<E>`, so no occurrence admitted both arguments and every `assertEquals` overload was
+  rejected. A result-only producer argument now also offers the ordinary solution as its witness
+  when it can be completed to it. Test:
+  `only_input_type_producer_e2e::a_result_only_producer_witnesses_the_only_input_type`.
 - **A postponed lambda body is checked under the expected return type.** Signature inference
   materializes `{ HashMap() }` / `{ mutableMapOf() }` / `{ if (c) ArrayList() else ArrayList() }`
   only after the surrounding call has a function type for that argument (`() -> T` on

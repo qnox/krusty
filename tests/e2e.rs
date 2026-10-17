@@ -1645,6 +1645,8 @@ mod nullable_uint_property_e2e;
 mod object_qualifier_type_arguments_e2e;
 #[path = "only_input_integer_literal_e2e.rs"]
 mod only_input_integer_literal_e2e;
+#[path = "only_input_type_producer_e2e.rs"]
+mod only_input_type_producer_e2e;
 #[path = "open_end_range_membership_e2e.rs"]
 mod open_end_range_membership_e2e;
 #[path = "optional_expectation_annotation_e2e.rs"]
