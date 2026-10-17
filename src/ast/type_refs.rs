@@ -22,7 +22,9 @@ pub struct TypeRef {
     pub fun_params: Vec<TypeRef>,
     pub fun_context_count: u32,
     /// Type-argument lists written before the last qualified-name segment.
-    pub qualifier_arguments: Vec<QualifierSegmentArguments>,
+    /// This syntax is rare and must not widen every expression carrying an inline `TypeRef`.
+    /// A boxed slice keeps the common empty representation to two words rather than `Vec`'s three.
+    pub qualifier_arguments: Box<[QualifierSegmentArguments]>,
 }
 
 /// One `<…>` list written on a segment of a qualified type or annotation reference.
@@ -143,7 +145,7 @@ impl TypeRef {
             span: annotation.span,
             fun_params: Vec::new(),
             fun_context_count: 0,
-            qualifier_arguments: Vec::new(),
+            qualifier_arguments: Box::new([]),
         }
     }
 

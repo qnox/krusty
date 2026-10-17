@@ -57,7 +57,10 @@ class Outer {
             .copied(),
         Some(local)
     );
-    assert!(index.classifier_header(local).is_none());
+    assert!(
+        index.classifier_header(local).is_some(),
+        "the nominal local classifier header is available before its body members"
+    );
     assert!(matches!(
         super::semantic_owner(&index, read),
         super::SemanticOwner::Deferred
@@ -157,7 +160,10 @@ class Outer {
         .first()
         .copied()
         .expect("stable local classifier");
-    assert!(index.classifier_header(local).is_none());
+    assert!(
+        index.classifier_header(local).is_some(),
+        "the nominal local classifier header does not make its body realization complete"
+    );
     assert!(index.signature(mark).is_none());
 
     index

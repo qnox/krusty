@@ -34,16 +34,19 @@ impl ResolvedModuleIndex {
                 self.classifier_header(declaration).is_some()
                     && self.classifier_type_arguments(declaration).is_some()
                     && self.classifier_hierarchy(declaration).is_some()
+                    && self.declaration_type_parameters_complete(declaration)
             }
             DeclarationKind::Function
             | DeclarationKind::Constructor
             | DeclarationKind::Accessor => {
                 self.signature(declaration).is_some()
                     && self.callable_for_declaration(declaration).is_some()
+                    && self.declaration_type_parameters_complete(declaration)
             }
             DeclarationKind::Property => {
                 self.signature(declaration).is_some()
                     && self.property_for_declaration(declaration).is_some()
+                    && self.declaration_type_parameters_complete(declaration)
             }
             DeclarationKind::EnumEntry
             | DeclarationKind::TypeAlias

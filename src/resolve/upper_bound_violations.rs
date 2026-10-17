@@ -597,7 +597,7 @@ impl<'a> Checker<'a> {
                 span,
                 fun_params: Vec::new(),
                 fun_context_count: 0,
-                qualifier_arguments: Vec::new(),
+                qualifier_arguments: Box::new([]),
             };
             self.record_finalized_declaration_type(
                 &reference,

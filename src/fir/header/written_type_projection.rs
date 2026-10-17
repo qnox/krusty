@@ -96,7 +96,7 @@ impl HeaderSyntaxArena {
             qualifier_arguments: self
                 .qualifier_arguments
                 .get(&id)
-                .map(|lists| lists.to_vec())
+                .cloned()
                 .unwrap_or_default(),
         })
     }
@@ -223,7 +223,7 @@ mod tests {
             span,
             fun_params: Vec::new(),
             fun_context_count: 0,
-            qualifier_arguments: Vec::new(),
+            qualifier_arguments: Box::new([]),
         }
     }
 
@@ -239,7 +239,7 @@ mod tests {
             span: shared,
             fun_params: vec![receiver],
             fun_context_count: 0,
-            qualifier_arguments: Vec::new(),
+            qualifier_arguments: Box::new([]),
         };
         let expanded = function(leaf("\0formal", shared));
         let written = function(leaf("String", shared));

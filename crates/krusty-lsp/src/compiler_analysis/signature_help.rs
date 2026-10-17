@@ -1629,7 +1629,7 @@ mod tests {
             span: Span::new(0, 0),
             fun_params: Vec::new(),
             fun_context_count: 0,
-            qualifier_arguments: Vec::new(),
+            qualifier_arguments: Box::new([]),
         };
         let semantic = Ty::obj_args("left/Box", &[Ty::obj("kotlin/Any")]);
 

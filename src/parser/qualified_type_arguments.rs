@@ -82,7 +82,7 @@ impl Parser<'_> {
                     span,
                     fun_params: Vec::new(),
                     fun_context_count: 0,
-                    qualifier_arguments: Vec::new(),
+                    qualifier_arguments: Box::new([]),
                 });
             } else {
                 let mut argument = self.parse_type();

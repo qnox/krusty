@@ -54,7 +54,7 @@ impl Checker<'_> {
             span: self.file.expr_spans[expression.0 as usize],
             fun_params: Vec::new(),
             fun_context_count: 0,
-            qualifier_arguments: Vec::new(),
+            qualifier_arguments: Box::new([]),
         };
         let ty = self.type_ref_ty(scope, &reference);
         if ty == Ty::Error {

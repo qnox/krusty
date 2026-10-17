@@ -26,9 +26,35 @@ pub(super) fn semantic_owner(
         let Some(nearest) = nearest else {
             return SemanticOwner::Complete(None);
         };
-        return match index.classifier_header(nearest) {
-            Some(owner) => SemanticOwner::Complete(Some(owner)),
-            None => SemanticOwner::Deferred,
+        let complete = index.declaration_semantic_header_complete(nearest)
+            && index
+                .owned_declarations(nearest)
+                .iter()
+                .copied()
+                .filter(|candidate| {
+                    index.declaration_anchor(*candidate).is_some_and(|anchor| {
+                        matches!(
+                            anchor.kind,
+                            crate::fir::DeclarationKind::Function
+                                | crate::fir::DeclarationKind::Constructor
+                                | crate::fir::DeclarationKind::Property
+                                | crate::fir::DeclarationKind::Accessor
+                        )
+                    })
+                })
+                .filter(|candidate| !index.is_suppressed_generated_callable(*candidate))
+                .filter(|candidate| {
+                    !index.declaration_header(*candidate).is_some_and(|header| {
+                        header
+                            .flags
+                            .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+                            && header.kind == crate::fir::DeclarationKind::Property
+                    })
+                })
+                .all(|candidate| index.declaration_semantic_header_complete(candidate));
+        return match (complete, index.classifier_header(nearest)) {
+            (true, Some(owner)) => SemanticOwner::Complete(Some(owner)),
+            (false, _) | (true, None) => SemanticOwner::Deferred,
         };
     }
     SemanticOwner::Complete(index.enclosing_classifier(declaration))

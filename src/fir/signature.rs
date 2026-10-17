@@ -1510,8 +1510,8 @@ pub struct ResolvedModuleIndex {
     /// Callable headers retained only while an invalid/locally deferred declaration has no
     /// signature. Pass-2 local publication may replace one with its finalized checked header.
     diagnostic_callables: crate::fx_hash::HashSet<CallableId>,
-    classifier_type_arguments: HashMap<DeclarationId, Box<[TypeParameterId]>>,
-    classifier_own_type_parameter_counts: HashMap<DeclarationId, u32>,
+    pub(super) classifier_type_arguments: HashMap<DeclarationId, Box<[TypeParameterId]>>,
+    pub(super) classifier_own_type_parameter_counts: HashMap<DeclarationId, u32>,
     pub(super) callable_parameters: HashMap<CallableId, Box<[super::ResolvedValueParameterHeader]>>,
     /// File-independent closed defaults for source annotation constructors. Ordinary executable
     /// defaults stay in retained checked bodies; annotation construction needs this declaration
@@ -1536,6 +1536,10 @@ pub struct ResolvedModuleIndex {
     property_parameter_identities_published: HashSet<PropertyId>,
     property_setter_parameter_identities: HashMap<PropertyId, ResolvedParameterIdentity>,
     pub(super) type_parameters: HashMap<(DeclarationId, u32), TypeParameterId>,
+    /// Number of source formals declared directly by each compact declaration. This is a
+    /// lifecycle fact: a signature/callable pair is not a complete semantic header while its
+    /// generic contract is still waiting for active Pass 2 binding.
+    pub(super) declaration_type_parameter_counts: HashMap<DeclarationId, u32>,
     pub(super) type_parameter_owners: Vec<(DeclarationId, u32)>,
     pub(super) type_parameter_headers: Vec<super::ResolvedTypeParameterHeader>,
     pub(super) package_function_origins: super::source_coordinates::PackageFunctionSourceOrigins,
@@ -2150,84 +2154,6 @@ impl ResolvedModuleIndex {
         })
     }
 
-    /// Source parameter names owned by a finalized type alias, in declaration order.
-    pub fn type_alias_formals(&self, declaration: DeclarationId) -> Vec<String> {
-        (0..)
-            .map_while(|ordinal| self.type_parameter(declaration, ordinal))
-            .filter_map(|parameter| self.type_parameter_name(parameter).map(str::to_owned))
-            .collect()
-    }
-
-    /// Type-parameter identities carried by an applied classifier type, in the same order as
-    /// [`Ty::type_args`]: parameters declared by the classifier, followed by lexically captured
-    /// parameters from nearest owner outward.
-    pub fn classifier_type_arguments(
-        &self,
-        classifier: DeclarationId,
-    ) -> Option<&[TypeParameterId]> {
-        self.classifier_type_arguments
-            .get(&classifier)
-            .map(Box::as_ref)
-    }
-
-    pub fn classifier_own_type_parameter_count(&self, classifier: DeclarationId) -> Option<u32> {
-        self.classifier_own_type_parameter_counts
-            .get(&classifier)
-            .copied()
-    }
-
-    /// The classifier applied to its own stable semantic type-parameter identities.
-    ///
-    /// This is the root for publishing an applied hierarchy. Starting from a bare nominal type
-    /// would substitute every missing argument with its upper bound and erase declaration
-    /// variables from generic supertype edges.
-    pub fn classifier_self_type(&self, classifier: DeclarationId) -> Option<Ty> {
-        let identity = self.classifier_header(classifier)?.classifier;
-        let arguments = self
-            .classifier_type_arguments(classifier)
-            .unwrap_or_default()
-            .iter()
-            .map(|parameter| {
-                let header = self.type_parameter_header(*parameter)?;
-                let semantic_name = self.type_parameter_semantic_name(*parameter)?;
-                let bound = header
-                    .bounds
-                    .first()
-                    .map(|bound| bound.ty.get())
-                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                Some(Ty::ty_param(semantic_name, bound))
-            })
-            .collect::<Option<Vec<_>>>()?;
-        Some(Ty::obj_args_name(identity, &arguments))
-    }
-
-    pub(crate) fn publish_classifier_type_arguments(
-        &mut self,
-        classifier: DeclarationId,
-        own_count: u32,
-        parameters: impl IntoIterator<Item = TypeParameterId>,
-    ) {
-        assert!(
-            self.classifiers.contains_key(&classifier),
-            "classifier type arguments require a published classifier header"
-        );
-        let parameters = parameters.into_iter().collect::<Box<[_]>>();
-        assert!(
-            own_count as usize <= parameters.len(),
-            "own classifier parameters must be a prefix of its applied layout"
-        );
-        assert!(
-            self.classifier_own_type_parameter_counts
-                .insert(classifier, own_count)
-                .is_none()
-                && self
-                    .classifier_type_arguments
-                    .insert(classifier, parameters)
-                    .is_none(),
-            "a classifier type-argument layout may be published only once"
-        );
-    }
-
     /// Bind an already-selected source constructor shape to its stable module declaration. This is
     /// identity publication, not overload selection: the resolver has already fixed primary versus
     /// secondary and the complete semantic parameter list.
@@ -2641,6 +2567,7 @@ impl ResolvedModuleIndex {
             && self.property_return_value_statuses.is_empty()
             && self.function_typed_parameter_callables.is_empty()
             && self.properties.is_empty()
+            && self.declaration_type_parameter_counts.is_empty()
     }
 
     pub fn callable(&self, callable: CallableId) -> Option<ResolvedCallableHeader> {
@@ -3251,6 +3178,8 @@ impl ResolvedModuleIndex {
                 .map(|parameters| parameters.len() * std::mem::size_of::<TypeParameterId>())
                 .sum::<usize>()
             + self.classifier_own_type_parameter_counts.len()
+                * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<u32>())
+            + self.declaration_type_parameter_counts.len()
                 * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<u32>())
             + self.callable_parameter_storage_payload_bytes()
             + self.annotation_constructor_defaults.len()

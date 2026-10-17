@@ -6,6 +6,36 @@ use crate::types::Ty;
 
 use super::super::SymbolTable;
 
+pub(super) fn publish_declared_counts(
+    headers: &crate::fir::StreamedHeaderModule,
+    index: &mut crate::fir::ResolvedModuleIndex,
+) {
+    for stub in &headers.stubs {
+        let Some(declaration) = headers.syntax.declaration(stub.id) else {
+            continue;
+        };
+        let count = match declaration.kind {
+            crate::fir::HeaderDeclarationKind::Callable {
+                type_parameters, ..
+            }
+            | crate::fir::HeaderDeclarationKind::Property {
+                type_parameters, ..
+            }
+            | crate::fir::HeaderDeclarationKind::Classifier {
+                type_parameters, ..
+            }
+            | crate::fir::HeaderDeclarationKind::TypeAlias {
+                type_parameters, ..
+            } => headers.syntax.type_parameters(type_parameters).len(),
+            crate::fir::HeaderDeclarationKind::Constructor { .. } => 0,
+        };
+        index.publish_declaration_type_parameter_count(
+            stub.id,
+            u32::try_from(count).expect("too many declaration type parameters"),
+        );
+    }
+}
+
 /// Resolve a classifier type-parameter bound in the declaration's ordinary signature scope,
 /// with this declaration's provisional semantic identities on the nearest classifier rung. The
 /// ordinary type-reference path owns classifier arguments and their projected bounds; publication
@@ -336,6 +366,61 @@ pub(super) fn flags(
         crate::types::TypeVariance::Invariant
     };
     crate::fir::ResolvedTypeParameterFlags::new(variance, flags.is_non_null(), flags.is_reified())
+}
+
+pub(super) fn publish(
+    index: &mut crate::fir::ResolvedModuleIndex,
+    declaration: crate::fir::DeclarationId,
+    packed: &[crate::fir::HeaderTypeParameter],
+    declared_names: &[String],
+    declared_bounds: &[(String, crate::fir::HeaderTypeId, TypeRef)],
+    symbolic: &super::super::TParams,
+    stable: Option<&GenericSig>,
+    table: &SymbolTable,
+) -> Result<(), crate::fir::UnpublishableType> {
+    let parameters = declared_names
+        .iter()
+        .zip(packed)
+        .enumerate()
+        .map(|(ordinal, (source_name, parameter))| {
+            let semantic = symbolic.bound(source_name);
+            let semantic_name = semantic_name(
+                stable,
+                ordinal,
+                semantic.ty_param_name().unwrap_or(source_name),
+            );
+            let declared_bound_count = declared_bounds
+                .iter()
+                .filter(|(owner, _, _)| owner == source_name)
+                .count();
+            // `TParams` also carries inherited constraints after the written bounds. Publication
+            // keeps exactly the written generic contract: kotlinc signs `T : U` as `T extends U`.
+            let local_bounds = (declared_bound_count > 0)
+                .then(|| {
+                    let mut bounds = vec![semantic
+                        .ty_param_bound()
+                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))];
+                    bounds.extend(
+                        symbolic
+                            .extra_bounds_of(source_name)
+                            .into_iter()
+                            .take(declared_bound_count - 1),
+                    );
+                    bounds
+                })
+                .unwrap_or_default();
+            (
+                u32::try_from(ordinal).expect("too many declaration type parameters"),
+                source_name.clone(),
+                semantic_name.to_owned(),
+                flags(parameter.flags),
+                bounds(stable, ordinal, local_bounds, table),
+            )
+        })
+        .collect::<Vec<_>>();
+    index
+        .publish_type_parameters_atomically(declaration, parameters)
+        .map(drop)
 }
 
 fn mentions_external_formal(ty: Ty, own_formals: &[String]) -> bool {

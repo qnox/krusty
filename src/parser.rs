@@ -139,7 +139,7 @@ fn simple_type_ref(name: &str, span: crate::diag::Span) -> TypeRef {
         span,
         fun_params: Vec::new(),
         fun_context_count: 0,
-        qualifier_arguments: Vec::new(),
+        qualifier_arguments: Box::new([]),
     }
 }
 
@@ -3287,7 +3287,7 @@ impl<'a> Parser<'a> {
                             span: sup_span,
                             fun_params: ft.fun_params.clone(),
                             fun_context_count: ft.fun_context_count,
-                            qualifier_arguments: Vec::new(),
+                            qualifier_arguments: Box::new([]),
                         });
                     }
                     if let Some(delegation) = self.parse_interface_delegation(
@@ -3399,7 +3399,7 @@ impl<'a> Parser<'a> {
                         span: sup_span,
                         fun_params: Vec::new(),
                         fun_context_count: 0,
-                        qualifier_arguments: Vec::new(),
+                        qualifier_arguments: Box::new([]),
                     });
                     delegation_supertype = u32::try_from(ifaces.len() - 1).ok();
                 }
@@ -3960,7 +3960,7 @@ impl<'a> Parser<'a> {
                     span,
                     fun_params,
                     fun_context_count,
-                    qualifier_arguments: Vec::new(),
+                    qualifier_arguments: Box::new([]),
                 }
             } else if let [_] = params.as_slice() {
                 // A PARENTHESIZED type used for grouping (no `->` follows the `)`), most commonly to make
@@ -4042,7 +4042,7 @@ impl<'a> Parser<'a> {
                 span,
                 fun_params: Vec::new(),
                 fun_context_count: 0,
-                qualifier_arguments,
+                qualifier_arguments: qualifier_arguments.into_boxed_slice(),
             };
             // Receiver (extension) function type `Recv.() -> R` ≡ `Function1<Recv, R>`, and
             // `Recv.(A) -> R` ≡ `Function2<Recv, A, R>`. The receiver folds in as the first function
@@ -4151,7 +4151,7 @@ impl<'a> Parser<'a> {
                 span: Span::new(receiver_start, receiver_hi),
                 fun_params: Vec::new(),
                 fun_context_count: 0,
-                qualifier_arguments: Vec::new(),
+                qualifier_arguments: Box::new([]),
             }),
             declaration_name,
         )

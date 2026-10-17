@@ -254,12 +254,12 @@ package contextual.parts
 class Marker
 class Value
 fun build() {
-    context(contextual.parts.Marker)
+    context(marker: contextual.parts.Marker)
     class Local(value: contextual<Any>.parts.Value)
 }
 ",
         )],
-        &["-XXLanguage:+ContextReceivers"],
+        &["-XXLanguage:+ContextParameters"],
         &[],
         &[warning("ContextualConstructor.kt:7:34")],
     );

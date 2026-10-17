@@ -370,7 +370,7 @@ impl Checker<'_> {
                     .file
                     .annotation_qualifier_arguments
                     .get(&annotation.span.lo)
-                    .cloned()
+                    .map(|arguments| arguments.clone().into_boxed_slice())
                     .unwrap_or_default(),
             };
             self.type_ref_ty_reported(scope, &reference)

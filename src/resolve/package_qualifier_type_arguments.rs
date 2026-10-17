@@ -45,9 +45,13 @@ pub(super) fn without_package_arguments(
     let mut reference = reference.clone();
     let kept = reference.targs.len().saturating_sub(stripped);
     reference.targs.truncate(kept);
-    reference
+    reference.qualifier_arguments = reference
         .qualifier_arguments
-        .retain(|list| !lists.contains(list));
+        .iter()
+        .filter(|list| !lists.contains(list))
+        .copied()
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
     Some(reference)
 }
 

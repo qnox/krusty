@@ -4580,6 +4580,7 @@ pub(crate) fn finalized_streamed_signature_index(
         }
     }
     let (mut index, mut finalization_failures) = solver.finalize_recovering(&evaluator);
+    type_parameter_publication::publish_declared_counts(headers, &mut index);
     finalization_failures.extend(auxiliary_failures);
     finalization_failures.sort_by_key(|(declaration, _)| declaration.raw());
     finalization_failures.dedup_by_key(|(declaration, _)| *declaration);
@@ -4991,7 +4992,7 @@ pub(crate) fn finalized_streamed_signature_index(
             skip_classifier!(stub.id);
         }
     }
-    for stub in &headers.stubs {
+    'type_parameter_publication: for stub in &headers.stubs {
         if deferred_local_headers.contains(&stub.id) && stub.kind != DeclarationKind::Classifier {
             // The active body pass owns this entire declaration header, including its generic
             // contract. Classifier formals are the exception: their nominal header is already
@@ -5027,6 +5028,20 @@ pub(crate) fn finalized_streamed_signature_index(
         if packed.is_empty() {
             continue;
         }
+        // A body-local declaration can have a stable source ABI while one of its generic bounds
+        // still needs the active lexical rung. That is a deferred semantic header, not a reason to
+        // abandon publication of every later module declaration. Pass 2 completes the same stable
+        // identity from its checked bound occurrences.
+        macro_rules! defer_local_or_stop {
+            ($declaration:expr) => {{
+                let declaration = $declaration;
+                if deferred_local_candidates.contains(&declaration) {
+                    deferred_local_headers.insert(declaration);
+                    continue 'type_parameter_publication;
+                }
+                stop_with_failure!(declaration);
+            }};
+        }
         let declared_names = packed
             .iter()
             .map(|parameter| headers.lookup_names.get(parameter.name).map(str::to_owned))
@@ -5037,7 +5052,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 "signature finalization declined {:?}: type parameter name is not interned",
                 stub.id,
             );
-            stop_with_failure!(stub.id);
+            defer_local_or_stop!(stub.id);
         };
         let declared_bounds = bounds
             .map(|bounds| headers.syntax.bounds(bounds))
@@ -5059,7 +5074,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 "signature finalization declined {:?}: type parameter bound is not interned",
                 stub.id,
             );
-            stop_with_failure!(stub.id);
+            defer_local_or_stop!(stub.id);
         };
         // Reuse callable collection's semantic generic contract from its complete lexical scope.
         let stable_generic = matches!(
@@ -5079,51 +5094,21 @@ pub(crate) fn finalized_streamed_signature_index(
             stub.source,
             declaration_start,
         ) else {
-            stop_with_failure!(stub.id);
+            defer_local_or_stop!(stub.id);
         };
-        for (ordinal, (source_name, parameter)) in declared_names.iter().zip(packed).enumerate() {
-            let semantic = symbolic.bound(source_name);
-            let semantic_name = type_parameter_publication::semantic_name(
-                stable_generic,
-                ordinal,
-                semantic.ty_param_name().unwrap_or(source_name),
-            );
-            let declared_bound_count = declared_bounds
-                .iter()
-                .filter(|(owner, _, _)| owner == source_name)
-                .count();
-            // `TParams` also carries the constraints inherited through a bare parameter edge
-            // (`T : U` sees `U`'s bounds) for member lookup, after the written ones. The declaration
-            // publishes only what is written on this parameter: kotlinc signs `T extends U`.
-            let local_bounds = (declared_bound_count > 0)
-                .then(|| {
-                    let mut bounds = vec![semantic
-                        .ty_param_bound()
-                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))];
-                    bounds.extend(
-                        symbolic
-                            .extra_bounds_of(source_name)
-                            .into_iter()
-                            .take(declared_bound_count - 1),
-                    );
-                    bounds
-                })
-                .unwrap_or_default();
-            let resolved_bounds =
-                type_parameter_publication::bounds(stable_generic, ordinal, local_bounds, table);
-            if index
-                .publish_type_parameter(
-                    stub.id,
-                    u32::try_from(ordinal).expect("too many declaration type parameters"),
-                    source_name,
-                    semantic_name,
-                    type_parameter_publication::flags(parameter.flags),
-                    resolved_bounds,
-                )
-                .is_err()
-            {
-                stop_with_failure!(stub.id);
-            }
+        if type_parameter_publication::publish(
+            &mut index,
+            stub.id,
+            packed,
+            &declared_names,
+            &declared_bounds,
+            &symbolic,
+            stable_generic,
+            table,
+        )
+        .is_err()
+        {
+            defer_local_or_stop!(stub.id);
         }
     }
     // Syntaxless frontend-plugin callables already carry their complete semantic generic shape.

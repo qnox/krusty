@@ -1059,21 +1059,7 @@ fn publish_checked_local_signatures_selected(
         ) {
             continue;
         }
-        let already_complete = match anchor.kind {
-            DeclarationKind::Function
-            | DeclarationKind::Constructor
-            | DeclarationKind::Accessor => {
-                signature_published && index.callable_for_declaration(declaration).is_some()
-            }
-            DeclarationKind::Property => {
-                signature_published && index.property_for_declaration(declaration).is_some()
-            }
-            DeclarationKind::Classifier
-            | DeclarationKind::EnumEntry
-            | DeclarationKind::TypeAlias
-            | DeclarationKind::Initializer
-            | DeclarationKind::Script => false,
-        };
+        let already_complete = index.declaration_semantic_header_complete(declaration);
         if active.is_some() && pass_one_finalized_headers.contains(&declaration) {
             if !already_complete {
                 crate::trace_compiler!(
@@ -1154,45 +1140,53 @@ fn publish_checked_local_signatures_selected(
                     }
                     let semantic_names =
                         info.resolved_declaration_type_parameters(method.signature_span.lo);
-                    let mut type_parameters_failed =
-                        semantic_names.len() != method.type_params.len();
-                    for (ordinal, source_name) in method.type_params.iter().enumerate() {
-                        if index.type_parameter(declaration, ordinal as u32).is_some() {
-                            continue;
-                        }
-                        let Some(semantic_name) = semantic_names.get(ordinal) else {
-                            type_parameters_failed = true;
-                            break;
-                        };
-                        let bounds = method
-                            .type_param_bounds
+                    let prepared_type_parameters = (semantic_names.len()
+                        == method.type_params.len())
+                    .then(|| {
+                        method
+                            .type_params
                             .iter()
-                            .filter(|(formal, _)| formal == source_name)
-                            .map(|(_, bound)| info.resolved_type_bound(bound))
-                            .collect::<Option<Vec<_>>>();
-                        let Some(bounds) = bounds else {
-                            type_parameters_failed = true;
-                            break;
-                        };
-                        if index
-                            .publish_type_parameter(
-                                declaration,
-                                ordinal as u32,
-                                source_name,
-                                semantic_name,
-                                ResolvedTypeParameterFlags::new(
-                                    crate::types::TypeVariance::Invariant,
-                                    false,
-                                    method.reified_type_params.contains(source_name),
-                                ),
-                                bounds,
-                            )
-                            .is_err()
-                        {
-                            type_parameters_failed = true;
-                            break;
-                        }
-                    }
+                            .zip(semantic_names)
+                            .enumerate()
+                            .map(|(ordinal, (source_name, semantic_name))| {
+                                let bounds = method
+                                    .type_param_bounds
+                                    .iter()
+                                    .filter(|(formal, _)| formal == source_name)
+                                    .map(|(_, bound)| info.resolved_type_bound(bound))
+                                    .collect::<Option<Vec<_>>>()?;
+                                Some((
+                                    ordinal as u32,
+                                    source_name.clone(),
+                                    semantic_name.clone(),
+                                    ResolvedTypeParameterFlags::new(
+                                        crate::types::TypeVariance::Invariant,
+                                        false,
+                                        method.reified_type_params.contains(source_name),
+                                    ),
+                                    bounds,
+                                ))
+                            })
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .flatten();
+                    let existing_type_parameters = (0..method.type_params.len())
+                        .filter(|&ordinal| {
+                            index.type_parameter(declaration, ordinal as u32).is_some()
+                        })
+                        .count();
+                    assert!(
+                        existing_type_parameters == 0
+                            || existing_type_parameters == method.type_params.len(),
+                        "a declaration generic contract is published atomically"
+                    );
+                    let type_parameters_failed = match prepared_type_parameters {
+                        Some(parameters) if existing_type_parameters == 0 => index
+                            .publish_type_parameters_atomically(declaration, parameters)
+                            .is_err(),
+                        Some(_) => false,
+                        None => true,
+                    };
                     if type_parameters_failed
                         || (!signature_published
                             && index
@@ -1200,6 +1194,17 @@ fn publish_checked_local_signatures_selected(
                                 .is_err())
                     {
                         failed.push(declaration);
+                        continue;
+                    }
+                    if signature_published && index.callable_for_declaration(declaration).is_some()
+                    {
+                        // Pass 1 had already published the source ABI and callable shape; only the
+                        // generic contract was deferred. Completing its type parameters above is
+                        // the entire Pass-2 transaction, so do not republish the same identity.
+                        assert!(
+                            index.declaration_semantic_header_complete(declaration),
+                            "Pass-2 generic completion must finalize the semantic header"
+                        );
                         continue;
                     }
                     let receiver = match method.receiver.as_ref() {

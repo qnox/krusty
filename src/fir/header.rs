@@ -417,7 +417,7 @@ impl HeaderSyntaxArena {
         });
         if !ty.qualifier_arguments.is_empty() {
             self.qualifier_arguments
-                .insert(id, ty.qualifier_arguments.clone().into_boxed_slice());
+                .insert(id, ty.qualifier_arguments.clone());
         }
         id
     }
