@@ -51235,15 +51235,16 @@ impl<'a> Checker<'a> {
                     // reported); the inference error is emitted after the accessor checks only
                     // when they stayed silent.
                     let body_diag_mark = self.diags.diags.len();
+                    let checked_declared_property = bp
+                        .declared_ty()
+                        .map(|declared| self.check_declaration_type(scope, declared));
                     if let Some(init) = bp.init.filter(|_| check_ordinary_property_body) {
                         // A solved inferred signature is the initializer's output, never its
                         // contextual input. Feeding the Pass-1 result back here can bind an
                         // otherwise unbound generic call (`val x = Result.failure(...)`) and hide
                         // the required inference diagnostic. Only source-written property/storage
                         // types constrain the ordinary Pass-2 initializer.
-                        let declared = bp
-                            .declared_ty()
-                            .map(|declared| self.check_declaration_type(scope, declared))
+                        let declared = checked_declared_property
                             .filter(|ty| !ty.mentions_error() && !ty.mentions_pending())
                             .map(|property_ty| {
                                 if bp.explicit_backing_field.is_some() {
@@ -51314,9 +51315,7 @@ impl<'a> Checker<'a> {
                             current_owner.expect("a checked member property has an owning class"),
                         );
                         let this_ref = extension_receiver.unwrap_or(owner_ref);
-                        let expected_property = bp
-                            .declared_ty()
-                            .map(|declared| self.check_declaration_type(scope, declared))
+                        let expected_property = checked_declared_property
                             .filter(|ty| !ty.mentions_error() && !ty.mentions_pending());
                         let mut site =
                             DelegateConventionSite::of(bp, Some(owner_ref), extension_receiver);
@@ -51382,10 +51381,7 @@ impl<'a> Checker<'a> {
                         self.this_extension_receiver = Some(receiver_span);
                         self.symbolic_signature_inference = true;
                     }
-                    let prop_ty = bp
-                        .ty
-                        .as_ref()
-                        .map(|r| self.check_declaration_type(scope, r))
+                    let prop_ty = checked_declared_property
                         .or_else(|| declared_property.map(|(property_ty, _)| property_ty))
                         .filter(|ty| !ty.mentions_error() && !ty.mentions_pending())
                         .or(body_inferred_property_type)

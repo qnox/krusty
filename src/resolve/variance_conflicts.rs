@@ -231,18 +231,25 @@ impl Checker<'_> {
         for supertype in base.iter().chain(&cl.supertypes) {
             occurrences.push(self.supertype_occurrence(supertype, Position::Out));
         }
+        self.report_variance_conflicts(&walk, occurrences);
         for property in cl.props.iter().filter(|property| property.is_property) {
             if property.visibility == Visibility::Private {
                 continue;
             }
+            let policy_depth = self.push_declaration_policies(
+                scope,
+                &property.annotations,
+                &property.annotation_args,
+            );
             let position = if property.is_var {
                 Position::Invariant
             } else {
                 Position::Out
             };
-            occurrences.push(self.parameter_occurrence(&property.ty, property.is_vararg, position));
+            let occurrence = self.parameter_occurrence(&property.ty, property.is_vararg, position);
+            self.report_variance_conflicts(&walk, vec![occurrence]);
+            self.active_lexical_policies.truncate(policy_depth);
         }
-        self.report_variance_conflicts(&walk, occurrences);
         for (index, method) in cl.methods.iter().enumerate() {
             if method.visibility != Visibility::Private {
                 self.check_method_variance(&walk, d, owner, index, method);
@@ -342,8 +349,11 @@ impl Checker<'_> {
             variances: walk.variances,
             dnn_and_flexible: walk.dnn_and_flexible,
         };
+        let policy_depth =
+            self.push_declaration_policies(scope, &method.annotations, &method.annotation_args);
         self.report_variance_conflicts(&walk, occurrences);
         self.retire_type_parameter_owners(&owned);
+        self.active_lexical_policies.truncate(policy_depth);
     }
 
     fn check_property_variance(
@@ -383,7 +393,7 @@ impl Checker<'_> {
         } else {
             Position::Out
         };
-        match &property.ty {
+        match property.declared_ty() {
             Some(declared) => occurrences.push(self.declared_occurrence(declared, position)),
             None => {
                 let declaration = self.active_declarations.and_then(|active| {
@@ -418,8 +428,11 @@ impl Checker<'_> {
             variances: walk.variances,
             dnn_and_flexible: walk.dnn_and_flexible,
         };
+        let policy_depth =
+            self.push_declaration_policies(scope, &property.annotations, &property.annotation_args);
         self.report_variance_conflicts(&walk, occurrences);
         self.retire_type_parameter_owners(&owned);
+        self.active_lexical_policies.truncate(policy_depth);
     }
 
     /// The result a member published, or the one this body unit inferred for a member of a local
@@ -550,6 +563,14 @@ impl Checker<'_> {
             let containing =
                 self.diagnostic_type_name(self.displayed_type(walk, occurrence.ty, &origin), &[]);
             for conflict in conflicts {
+                let diagnostic = if conflict.abbreviated {
+                    "TYPE_VARIANCE_CONFLICT_IN_EXPANDED_TYPE"
+                } else {
+                    "TYPE_VARIANCE_CONFLICT_ERROR"
+                };
+                if self.suppresses_diagnostic(diagnostic) {
+                    continue;
+                }
                 let kind = if conflict.abbreviated {
                     "abbreviated type"
                 } else {

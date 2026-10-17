@@ -714,11 +714,7 @@ mod tests {
                 "-progressive",
                 "f.kt",
             ]);
-            assert_eq!(
-                o.errors,
-                Vec::<String>::new(),
-                "kotlinc {release}"
-            );
+            assert_eq!(o.errors, Vec::<String>::new(), "kotlinc {release}");
             assert!(
                 o.language_settings
                     .features
@@ -727,22 +723,17 @@ mod tests {
             );
         }
 
-        let o = parse_args(&[
-            "-Xkotlin-reference-version=2.4.20",
-            "-progressive",
-            "f.kt",
-        ]);
+        let o = parse_args(&["-Xkotlin-reference-version=2.4.20", "-progressive", "f.kt"]);
         assert_eq!(
             o.errors,
             ["krusty does not implement the language feature \
               'ReportDeprecationsOfClassifiersInImplicitInvokes' selected by '-progressive'"
                 .to_string()]
         );
-        assert!(
-            o.language_settings
-                .features
-                .has("ReportTypeVarianceConflictsInDnnAndFlexible")
-        );
+        assert!(o
+            .language_settings
+            .features
+            .has("ReportTypeVarianceConflictsInDnnAndFlexible"));
     }
 
     /// `-Xkotlin-reference-version` selects a supported release and refuses any other, rather than

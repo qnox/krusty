@@ -272,6 +272,51 @@ fn inferred_property_uses_its_stable_member_identity_and_declaration_span() {
     );
 }
 
+/// An accessor-only return annotation is the property's declared semantic type. Its written
+/// occurrence owns the diagnostic anchor and any alias or `@UnsafeVariance` provenance.
+#[test]
+fn getter_return_type_is_checked_as_the_declared_property_type() {
+    let source = "class A<in T> {\n    val p get(): List<T> = TODO()\n}";
+    assert_matches_kotlinc(
+        source,
+        &[],
+        &[conflict(
+            "2:23",
+            "T",
+            "in",
+            "out",
+            "List<T (of class A<in T>)>",
+        )],
+    );
+
+    let safe = "class Safe<in T> {\n    val p get(): @UnsafeVariance T = TODO()\n    fun broken(): Missing = TODO()\n}";
+    assert_matches_kotlinc(
+        safe,
+        &[],
+        &["3:19: unresolved reference 'Missing'.".to_string()],
+    );
+}
+
+/// Variance diagnostics belong to the declaration whose signature contains the occurrence. Its
+/// lexical suppression policy is reopened for this post-body class check.
+#[test]
+fn member_declaration_suppressions_cover_variance_conflicts() {
+    let source = r#"class A<out T> {
+    @Suppress("TYPE_VARIANCE_CONFLICT_ERROR") fun direct(value: T) {}
+}
+class B<in T> {
+    @Suppress("TYPE_VARIANCE_CONFLICT_ERROR") val produced: T get() = TODO()
+}
+class C<out T>(@Suppress("TYPE_VARIANCE_CONFLICT_ERROR") var value: T)
+fun broken(): Missing = TODO()
+"#;
+    assert_matches_kotlinc(
+        source,
+        &[],
+        &["8:15: unresolved reference 'Missing'.".to_string()],
+    );
+}
+
 /// An alias template's resolved `@UnsafeVariance` applies to each occurrence of its formal. An
 /// unannotated template that uses one formal twice reports both semantic occurrences: the first at
 /// the alias application and the second at the written argument, in kotlinc's order.
