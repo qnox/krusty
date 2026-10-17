@@ -33,6 +33,7 @@ fn an_unconstrained_constructor_type_parameter_is_not_inferred() {
             val s: CharSequence = \"\"\n\
             val seq = Seq(s)\n\
             val named = Named(x = s)\n\
+            when (s) { \"c\" -> D(8) }\n\
             return \"OK\"\n\
         }\n";
     let result = common::compiler_diagnostics(&[("Classes.kt", CLASSES), ("Main.kt", main)], &[]);
@@ -58,4 +59,36 @@ fn a_dependency_constructor_type_parameter_is_not_inferred_either() {
         }\n";
     let result = common::compiler_diagnostics(&[("Main.kt", main)], &[classes]);
     common::expect_identical_rejection(&result, "uninferred_dependency_constructor");
+}
+
+/// A branch of a `when` with an `else` arm joins its siblings' inference even as a statement: the
+/// first arm fixes `TV`, so the bare `Buildee()` arm is accepted. An inner class of a generic class
+/// has no type parameter of its own to infer.
+#[test]
+fn a_joined_branch_and_an_inner_class_constructor_are_accepted() {
+    common::expect_box_same_as_kotlinc(
+        r#"
+class TargetType
+class Buildee<TV> {
+    fun setTypeVariable(value: TV) { storage = value }
+    private var storage: TV = TargetType() as TV
+}
+fun <PTV> build(instructions: Buildee<PTV>.() -> Unit): Buildee<PTV> = Buildee<PTV>().apply(instructions)
+
+class Outer<T>(val x: T) {
+    inner class Inner(val y: Int) { val xx = x }
+}
+
+fun box(): String {
+    when ("") {
+        "true" -> build { setTypeVariable(TargetType()) }
+        "false" -> build {}
+        else -> Buildee()
+    }
+    val inner = Outer(42).Inner(100)
+    return if (inner.xx == 42 && inner.y == 100) "OK" else "FAIL"
+}
+"#,
+        "JoinedBranchConstructor",
+    );
 }

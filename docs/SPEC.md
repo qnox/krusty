@@ -9607,7 +9607,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   report reads what constructor inference recorded for each formal when it selected the
   constructor, never the selected parameters: those are already specialized, so `Seq(s)` for
   `class Seq<T : CharSequence>(val x: T)` with `s: CharSequence` would otherwise look unconstrained,
-  and a named or defaulted argument (`Named(x = s)`) would be matched to the wrong parameter. Owner:
+  and a named or defaulted argument (`Named(x = s)`) would be matched to the wrong parameter. A
+  branch of an `if` with an `else` or a `when` with an `else` arm withholds the report even as a
+  statement: kotlinc completes the conditional as one call, so a sibling branch can fix the
+  parameter (`else -> Buildee()` beside `build { setTypeVariable(TargetType()) }`, KT-60291). That
+  joint system is not modelled, so a branch nothing constrains in any arm is accepted there, where
+  kotlinc still reports it. A `when` without `else` is not joined and reports. An inner class has
+  no type parameter of its own, so `Outer(42).Inner(100)` reports nothing. Owner:
   `src/resolve/constructor_formal_evidence.rs`. Test:
   `tests/uninferred_constructor_type_parameter_e2e.rs`.
 

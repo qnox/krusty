@@ -19,6 +19,7 @@ impl Checker<'_> {
         branch: ExprId,
         then: bool,
         wanted: Wanted,
+        joined: bool,
     ) -> (Ty, Vec<Ty>, Vec<Vec<Ty>>, CompletedFlow) {
         let locals = self.stable_local_vars(scope);
         let declared = locals
@@ -35,7 +36,13 @@ impl Checker<'_> {
         self.apply_condition_exclusions(scope, cond, then);
         // `if (this is B)` narrows the implicit receiver to `B` for the branch body.
         let ty = self.with_this_narrow(self.this_is_narrowing(scope, cond, !then), |c| {
-            let actual = c.expr_result(scope, branch, wanted.expected, wanted.value_required);
+            let actual = c.joined_branch_result(
+                scope,
+                branch,
+                wanted.expected,
+                wanted.value_required,
+                joined,
+            );
             let Some(expected) = wanted.expected else {
                 return actual;
             };
@@ -89,8 +96,14 @@ impl Checker<'_> {
                 .map(|local| local.declared)
                 .collect::<Vec<_>>();
             let entry_reads = self.local_edge_reads(scope, &locals, &declared);
-            let (tt, then_reads, then_intersections, mut then_flow) =
-                self.if_branch_ty(scope, cond, then_branch, true, wanted);
+            let (tt, then_reads, then_intersections, mut then_flow) = self.if_branch_ty(
+                scope,
+                cond,
+                then_branch,
+                true,
+                wanted,
+                else_branch.is_some(),
+            );
             let mut then_exit = self.take_local_flow_exit(
                 scope,
                 &entry,
@@ -101,7 +114,7 @@ impl Checker<'_> {
             match else_branch {
                 Some(eb) => {
                     let (et, else_reads, else_intersections, mut else_flow) =
-                        self.if_branch_ty(scope, cond, eb, false, wanted);
+                        self.if_branch_ty(scope, cond, eb, false, wanted, true);
                     let mut else_exit = self.take_local_flow_exit(
                         scope,
                         &entry,
@@ -121,6 +134,7 @@ impl Checker<'_> {
                                     expected: Some(exp),
                                     value_required: wanted.value_required,
                                 },
+                                true,
                             );
                             then_exit = c.take_local_flow_exit(
                                 scope,
@@ -142,6 +156,7 @@ impl Checker<'_> {
                                 expected: Some(exp),
                                 value_required: wanted.value_required,
                             },
+                            true,
                         );
                         else_exit = c.take_local_flow_exit(
                             scope,

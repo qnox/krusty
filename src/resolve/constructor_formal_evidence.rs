@@ -84,6 +84,32 @@ impl Checker<'_> {
             .insert(call, formals.iter().cloned().zip(evidence).collect());
     }
 
+    /// Check one branch of an `if` with an `else` or a `when` with an `else` arm. kotlinc completes
+    /// such a conditional as one synthetic call even in statement position, so a sibling branch can
+    /// fix a constructor type parameter this branch leaves open (`when (s) { "a" -> build {
+    /// set(T()) }; else -> Buildee() }`). That joint system is not modelled here; a branch that is
+    /// a statement therefore withholds only the constructor report, never a generic call's.
+    pub(super) fn joined_branch_result(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        branch: ExprId,
+        expected: Option<Ty>,
+        value_required: bool,
+        joined: bool,
+    ) -> Ty {
+        if !joined || expected.is_some() || value_required {
+            return self.expr_result(scope, branch, expected, value_required);
+        }
+        self.discarded_exprs.insert(branch);
+        let ty = self.expr_with_context(scope, branch, false);
+        self.constructor_formal_evidence.remove(&branch);
+        if self.report_unbound_call_result_type_parameter(scope, branch) {
+            Ty::Error
+        } else {
+            ty
+        }
+    }
+
     /// Report a completed constructor call whose class type parameter nothing constrained. kotlinc
     /// reports `cannot infer type for type parameter` for `C(1)` with
     /// `class C<T : Comparable<T>>(val n: Int)`. A self type is completed instead (see

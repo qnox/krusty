@@ -60524,7 +60524,7 @@ impl<'a> Checker<'a> {
                 this_narrow: Option<Ty>,
             }
             let mut arm_results = Vec::with_capacity(arms.len());
-            let mut has_else = false;
+            let has_else = arms.iter().any(|arm| arm.conditions.is_empty());
             // A `when` may have at most one `else` branch (kotlinc rejects a second one).
             if arms.iter().filter(|a| a.conditions.is_empty()).count() > 1 {
                 self.diags.error(
@@ -60549,9 +60549,6 @@ impl<'a> Checker<'a> {
             let mut fallthrough_declined: Vec<(String, Ty)> = Vec::new();
             let mut completing_flows = Vec::new();
             for arm in &arms {
-                if arm.conditions.is_empty() {
-                    has_else = true;
-                }
                 let incoming_fallthrough_casts = fallthrough_casts.clone();
                 let incoming_fallthrough_declined = fallthrough_declined.clone();
                 // Keep accumulated false-branch facts in the arm's child scope. Subject-form
@@ -60645,7 +60642,7 @@ impl<'a> Checker<'a> {
                             let guard_ty = c.expr(scope, guard);
                             c.expect_assignable(Ty::Boolean, guard_ty, c.span(guard), "when guard");
                         }
-                        c.expr_result(scope, arm.body, expected, value_required)
+                        c.joined_branch_result(scope, arm.body, expected, value_required, has_else)
                     })
                 };
                 if self.completed_normally(arm.body) {
