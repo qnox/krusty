@@ -4357,6 +4357,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `for` is always a statement) before a loop's update, and before the bottom condition of a
   `do…while` whose condition has no source line of its own; a written `do…while` condition marks its
   own. `tests/loop_control_lines_e2e.rs` (full-byte against kotlinc).
+- **An implicit null check after an inlined call marks its line.** A platform value an inlined
+  call produces (`Collections.synchronizedList(…).apply { … }` returned as `List<String>`) is
+  checked with `dup; ldc; checkNotNullExpressionValue`. The inlined call restored the caller's line
+  and left it forgotten, and kotlinc marks the line again at the start of that check, so the check
+  has its own entry for the line already in effect (`line 4: 27`, then `line 4: 28` at the `dup`).
+  The JVM emitter re-marks the line in effect before a named check while the line is forgotten.
+  `tests/platform_null_check_line_e2e.rs` (full-byte against kotlinc).
 - **The line after a call kotlinc inlines.** After an inlined call, kotlinc's
   `markLineNumberAfterInlineIfNeeded` re-emits the line in effect when the call sits inside a
   condition and otherwise forgets it, so the next expression's mark is written even on the same
