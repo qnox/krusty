@@ -5,12 +5,448 @@
 //! The compiler metadata handoff consumes that explicit contract; it never reopens an AST body or
 //! asks a backend to reconstruct provider semantics.
 
-use super::{ty_mentions_param, Checker, Signature, TypeInfo};
+use super::{ty_mentions_param, Checker, ResolvedCall, Signature, TypeInfo};
 use crate::ast::ExprId;
 use crate::fir::DeclarationId;
 use crate::fx_hash::HashMap;
 use crate::spelling::Spelled;
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
+
+/// The provider-owned flexible occurrences carried by one checked value. Unlike [`Ty`], this is
+/// publication-only provenance: ordinary Kotlin inference must continue to see a selected source
+/// argument as its rigid semantic type.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct FlexibleValue {
+    /// Exact checked semantic type whose classifier owns `shape`. Contextual adaptation may later
+    /// change an expression's visible type; projection must still start from this identity rather
+    /// than correlate same-position arguments across different classifiers.
+    source: Option<Ty>,
+    /// Provider lower face selected for declaration publication. Unlike `source`, this identity is
+    /// not rewritten when ordinary flow views the current value through a supertype.
+    publication: Option<FlexiblePublication>,
+    upper: Option<Ty>,
+    shape: FlexibleShape,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum FlexibleShape {
+    #[default]
+    None,
+    Obj(TypeName, Vec<FlexibleValue>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FlexiblePublication {
+    lower: Ty,
+    shape: FlexibleShape,
+}
+
+impl FlexibleValue {
+    fn is_none(&self) -> bool {
+        self.publication.is_none()
+            && self.upper.is_none()
+            && match &self.shape {
+                FlexibleShape::None => true,
+                FlexibleShape::Obj(_, arguments) => arguments.iter().all(FlexibleValue::is_none),
+            }
+    }
+
+    fn without_head(mut self) -> Self {
+        self.publication = None;
+        self.upper = None;
+        self
+    }
+
+    fn inferred_declaration_ty(&self, fallback: Ty) -> Ty {
+        self.publication
+            .as_ref()
+            .map(|publication| Ty::platform_nullable(publication.lower))
+            .unwrap_or(fallback)
+    }
+
+    /// Facts present on every value reaching one join survive the join. A mismatched upper face is
+    /// not a publishable flexible interval.
+    fn meet(&self, other: &Self) -> Self {
+        let shape = match (&self.shape, &other.shape) {
+            (FlexibleShape::Obj(left_owner, left), FlexibleShape::Obj(right_owner, right))
+                if left_owner == right_owner && left.len() == right.len() =>
+            {
+                FlexibleShape::Obj(
+                    *left_owner,
+                    left.iter()
+                        .zip(right)
+                        .map(|(left, right)| left.meet(right))
+                        .collect(),
+                )
+            }
+            _ => FlexibleShape::None,
+        };
+        FlexibleValue {
+            source: if self.source == other.source {
+                self.source
+            } else {
+                None
+            },
+            publication: if self.publication == other.publication {
+                self.publication.clone()
+            } else {
+                None
+            },
+            upper: if self.upper == other.upper {
+                self.upper
+            } else {
+                None
+            },
+            shape,
+        }
+    }
+
+    fn overlay(&self, other: &Self) -> Self {
+        let shape = match (&self.shape, &other.shape) {
+            (FlexibleShape::None, shape) | (shape, FlexibleShape::None) => shape.clone(),
+            (FlexibleShape::Obj(left_owner, left), FlexibleShape::Obj(right_owner, right))
+                if left_owner == right_owner && left.len() == right.len() =>
+            {
+                FlexibleShape::Obj(
+                    *left_owner,
+                    left.iter()
+                        .zip(right)
+                        .map(|(left, right)| left.overlay(right))
+                        .collect(),
+                )
+            }
+            _ => FlexibleShape::None,
+        };
+        FlexibleValue {
+            source: match (&self.shape, &other.shape) {
+                (FlexibleShape::None, _) => other.source.or(self.source),
+                (_, FlexibleShape::None) => self.source.or(other.source),
+                _ if self.source == other.source => self.source,
+                _ => None,
+            },
+            publication: match (&self.shape, &other.shape) {
+                (FlexibleShape::None, _) => other.publication.clone().or(self.publication.clone()),
+                (_, FlexibleShape::None) => self.publication.clone().or(other.publication.clone()),
+                _ if self.publication == other.publication => self.publication.clone(),
+                _ => None,
+            },
+            upper: self.upper.or(other.upper),
+            shape,
+        }
+    }
+
+    fn apply(&self, ty: Ty, spelling: &mut Spelled) {
+        if let Some(upper) = self.upper {
+            spelling.flexible_upper_bound = Some(upper);
+        }
+        let ty = match ty.non_null() {
+            Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
+                *inner
+            }
+            other => other,
+        };
+        if let (FlexibleShape::Obj(fact_owner, arguments), Ty::Obj(owner, type_arguments)) =
+            (&self.shape, ty)
+        {
+            if *fact_owner != owner || arguments.len() != type_arguments.len() {
+                return;
+            }
+            if spelling.args.len() < arguments.len() {
+                spelling.args.resize_with(arguments.len(), Spelled::default);
+            }
+            for ((spelling, fact), ty) in spelling
+                .args
+                .iter_mut()
+                .zip(arguments)
+                .zip(type_arguments.iter().copied())
+            {
+                fact.apply(ty, spelling);
+            }
+        }
+    }
+
+    fn apply_to_inferred_declaration(&self, ty: Ty, spelling: &mut Spelled) {
+        if let Some(publication) = &self.publication {
+            FlexibleValue {
+                source: Some(publication.lower),
+                publication: None,
+                upper: None,
+                shape: publication.shape.clone(),
+            }
+            .apply(ty, spelling);
+        } else {
+            self.apply(ty, spelling);
+        }
+    }
+
+    fn rigid_shape(ty: Ty) -> Self {
+        match ty {
+            Ty::Nullable(inner)
+            | Ty::PlatformNullable(inner)
+            | Ty::DefinitelyNotNull(inner)
+            | Ty::InProjection(inner)
+            | Ty::OutProjection(inner)
+            | Ty::StarProjection(inner) => Self::rigid_shape(*inner),
+            Ty::Obj(owner, arguments) => FlexibleValue {
+                source: Some(ty),
+                publication: None,
+                upper: None,
+                shape: FlexibleShape::Obj(
+                    owner,
+                    arguments.iter().copied().map(Self::rigid_shape).collect(),
+                ),
+            },
+            _ => FlexibleValue::default(),
+        }
+    }
+
+    fn semantic(ty: Ty, upper_bound: &dyn Fn(Ty) -> Ty) -> Self {
+        match ty {
+            Ty::PlatformNullable(inner) => {
+                let lower = inner.platform_lower_bound();
+                let mut fact = Self::semantic(*inner, upper_bound);
+                fact.publication = Some(FlexiblePublication {
+                    lower,
+                    shape: fact.shape.clone(),
+                });
+                fact.upper = Some(upper_bound(lower));
+                fact
+            }
+            Ty::Nullable(inner) | Ty::DefinitelyNotNull(inner) => {
+                Self::semantic(*inner, upper_bound).without_head()
+            }
+            Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
+                Self::semantic(*inner, upper_bound)
+            }
+            Ty::Obj(owner, arguments) => FlexibleValue {
+                source: Some(ty),
+                publication: None,
+                upper: None,
+                shape: FlexibleShape::Obj(
+                    owner,
+                    arguments
+                        .iter()
+                        .copied()
+                        .map(|argument| Self::semantic(argument, upper_bound))
+                        .collect(),
+                ),
+            },
+            // Function metadata layout remains an explicit decline.
+            Ty::Fun(_) => FlexibleValue::default(),
+            _ => FlexibleValue::default(),
+        }
+    }
+
+    /// Pair a declaration-owned result with the already-selected semantic result. Recursion is
+    /// permitted only across the same classifier and arity. Function types are deliberately
+    /// declined here: suspend functions encode their result under the physical continuation slot,
+    /// not as an ordinary last argument, and publication must not guess that metadata layout.
+    fn selected(declared: Ty, selected: Ty, upper_bound: &dyn Fn(Ty) -> Ty) -> FlexibleValue {
+        let mut head = None;
+        let (declared, selected) = match (declared, selected) {
+            (Ty::PlatformNullable(declared), Ty::PlatformNullable(selected)) => {
+                head = Some(upper_bound(*selected));
+                (*declared, *selected)
+            }
+            // A nullable solution collapses both faces to one rigid type.
+            (Ty::PlatformNullable(declared), Ty::Nullable(selected)) => (*declared, *selected),
+            (Ty::PlatformNullable(declared), selected) => (*declared, selected),
+            (Ty::Nullable(declared), Ty::Nullable(selected))
+            | (Ty::DefinitelyNotNull(declared), Ty::DefinitelyNotNull(selected))
+            | (Ty::InProjection(declared), Ty::InProjection(selected))
+            | (Ty::OutProjection(declared), Ty::OutProjection(selected))
+            | (Ty::StarProjection(declared), Ty::StarProjection(selected)) => {
+                (*declared, *selected)
+            }
+            pair => pair,
+        };
+
+        if matches!(declared, Ty::TyParam(_, bound) if matches!(*bound, Ty::PlatformNullable(_))) {
+            let upper =
+                (!selected.is_nullable()).then(|| upper_bound(selected.platform_lower_bound()));
+            return FlexibleValue {
+                source: Some(selected),
+                publication: upper.map(|_| FlexiblePublication {
+                    lower: selected.platform_lower_bound(),
+                    shape: FlexibleShape::None,
+                }),
+                upper,
+                shape: FlexibleShape::None,
+            };
+        }
+
+        let shape = match (declared, selected) {
+            (Ty::Obj(declared_owner, declared), Ty::Obj(selected_owner, selected))
+                if declared_owner == selected_owner && declared.len() == selected.len() =>
+            {
+                FlexibleShape::Obj(
+                    declared_owner,
+                    declared
+                        .iter()
+                        .copied()
+                        .zip(selected.iter().copied())
+                        .map(|(declared, selected)| {
+                            FlexibleValue::selected(declared, selected, upper_bound)
+                        })
+                        .collect(),
+                )
+            }
+            (Ty::Fun(_), Ty::Fun(_)) => FlexibleShape::None,
+            _ => FlexibleShape::None,
+        };
+        FlexibleValue {
+            source: (!matches!(&shape, FlexibleShape::None) || head.is_some()).then_some(selected),
+            publication: head.map(|_| FlexiblePublication {
+                lower: selected.platform_lower_bound(),
+                shape: shape.clone(),
+            }),
+            upper: head,
+            shape,
+        }
+    }
+
+    fn substitute(
+        &self,
+        declared: Ty,
+        binding: &dyn Fn(&str) -> Option<FlexibleValue>,
+    ) -> FlexibleValue {
+        match declared {
+            Ty::TyParam(name, _) => binding(name)
+                .map(|argument| self.overlay(&argument))
+                .unwrap_or_else(|| self.clone()),
+            Ty::Nullable(inner) | Ty::DefinitelyNotNull(inner) => {
+                self.substitute(*inner, binding).without_head()
+            }
+            Ty::PlatformNullable(inner)
+            | Ty::InProjection(inner)
+            | Ty::OutProjection(inner)
+            | Ty::StarProjection(inner) => self.substitute(*inner, binding),
+            Ty::Obj(owner, arguments) => match &self.shape {
+                FlexibleShape::Obj(fact_owner, facts)
+                    if owner == *fact_owner && arguments.len() == facts.len() =>
+                {
+                    FlexibleValue {
+                        source: self.source,
+                        publication: self.publication.clone(),
+                        upper: self.upper,
+                        shape: FlexibleShape::Obj(
+                            owner,
+                            arguments
+                                .iter()
+                                .copied()
+                                .zip(facts)
+                                .map(|(argument, fact)| fact.substitute(argument, binding))
+                                .collect(),
+                        ),
+                    }
+                }
+                _ => FlexibleValue {
+                    source: self.source,
+                    publication: self.publication.clone(),
+                    upper: self.upper,
+                    shape: FlexibleShape::None,
+                },
+            },
+            // See `selected`: a function/suspend-function metadata layout is not reconstructed.
+            Ty::Fun(_) => FlexibleValue::default(),
+            _ => self.clone(),
+        }
+    }
+}
+
+/// Publication facts owned by checked value identities. A fact is frozen when its expression is
+/// checked; inferred declarations consume this table instead of reopening their source bodies.
+#[derive(Default)]
+pub(super) struct FlexibleValues {
+    expressions: HashMap<ExprId, FlexibleValue>,
+    /// Value-flow facts staged by the expression checker that owns the relevant branch/operand
+    /// decision. The final expression recorder consumes this checked handoff without reading AST.
+    staged: HashMap<ExprId, FlexibleValue>,
+    declarations: HashMap<u32, FlexibleLocalDeclaration>,
+    reads: HashMap<ExprId, FlexibleValue>,
+    receivers: HashMap<ExprId, ExprId>,
+    explicit_type_arguments: crate::fx_hash::HashSet<ExprId>,
+    /// Checked safe-call results have a nullable outer face even when the selected member itself
+    /// returned a platform value. Nested argument occurrences remain owned by that selected value.
+    nullable_results: crate::fx_hash::HashSet<ExprId>,
+    constructor_declarations:
+        HashMap<ExprId, super::constructor_commitment::ConstructorDeclarationShape>,
+}
+
+#[derive(Clone)]
+struct FlexibleLocalDeclaration {
+    /// The semantic storage type this publication fact describes. Assignments change a mutable
+    /// local's current value, not its inferred declaration type; keeping the type beside the fact
+    /// prevents a reused/stale flow identity from publishing a different declaration shape.
+    declared: Ty,
+    value: FlexibleValue,
+}
+
+fn constrain_flexible_parameters(
+    checker: &Checker<'_>,
+    formals: &[String],
+    declared: Ty,
+    actual: Ty,
+    fact: &FlexibleValue,
+    constraints: &mut HashMap<String, Vec<FlexibleValue>>,
+) {
+    match declared {
+        Ty::TyParam(name, _) if formals.iter().any(|formal| formal == name) => {
+            constraints
+                .entry(name.to_string())
+                .or_default()
+                .push(fact.clone());
+        }
+        Ty::Nullable(inner)
+        | Ty::PlatformNullable(inner)
+        | Ty::DefinitelyNotNull(inner)
+        | Ty::InProjection(inner)
+        | Ty::OutProjection(inner)
+        | Ty::StarProjection(inner) => constrain_flexible_parameters(
+            checker,
+            formals,
+            *inner,
+            actual.non_null(),
+            fact,
+            constraints,
+        ),
+        Ty::Obj(owner, declared_arguments) => {
+            let Some((view, view_fact)) = checker.flexible_supertype_view(actual, fact, owner)
+            else {
+                return;
+            };
+            let Ty::Obj(actual_owner, actual_arguments) = view.non_null() else {
+                return;
+            };
+            let FlexibleShape::Obj(fact_owner, facts) = &view_fact.shape else {
+                return;
+            };
+            if owner != actual_owner
+                || owner != *fact_owner
+                || declared_arguments.len() != actual_arguments.len()
+                || facts.len() != actual_arguments.len()
+            {
+                return;
+            }
+            for ((declared, actual), fact) in declared_arguments
+                .iter()
+                .copied()
+                .zip(actual_arguments.iter().copied())
+                .zip(facts)
+            {
+                constrain_flexible_parameters(
+                    checker,
+                    formals,
+                    declared,
+                    actual,
+                    fact,
+                    constraints,
+                );
+            }
+        }
+        _ => {}
+    }
+}
 
 /// A literal `null` is an expression-only sentinel. Once inference publishes it as a declaration
 /// type, Kotlin's semantic type is the nullable bottom type `Nothing?`.
@@ -77,6 +513,561 @@ pub(super) struct InferredDeclarationPublications {
 }
 
 impl Checker<'_> {
+    fn flexible_upper_bound(&self, lower: Ty) -> Ty {
+        crate::assignable::platform_shape_upper_bound(
+            crate::assignable::TypeOracle::platform_flexible_upper_bound(self, lower),
+        )
+    }
+
+    /// View one value's publication facts through an already-declared supertype. The hierarchy
+    /// supplies exact classifier identities and symbolic argument expressions; no source spelling
+    /// or positional cross-classifier correlation is involved.
+    fn flexible_supertype_view(
+        &self,
+        actual: Ty,
+        fact: &FlexibleValue,
+        target: TypeName,
+    ) -> Option<(Ty, FlexibleValue)> {
+        // `actual` may already be contextually adapted (`MutableList<T>` read as `List<T>`), while
+        // the publication shape still belongs to the selected producer's lower classifier. Start
+        // from that exact checked source identity when present; never zip its arguments onto the
+        // adapted classifier by position.
+        let actual = match fact.source.unwrap_or(actual).non_null() {
+            Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
+            other => other,
+        };
+        let class = actual.kotlin_class_internal()?;
+        if class == target {
+            return Some((actual, fact.clone()));
+        }
+        let source = self.fed_source();
+        let (_, applied, _) = crate::symbol_resolver::applied_hierarchy(&source, actual)
+            .into_iter()
+            .find(|(owner, _, _)| *owner == target)?;
+        let declaration = self.resolver().classifier(class)?;
+        let parameters = declaration.type_params();
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let symbolic = Ty::obj_args_name(
+            class,
+            &parameters
+                .iter()
+                .map(|parameter| Ty::ty_param(parameter, any))
+                .collect::<Vec<_>>(),
+        );
+        let (_, symbolic_view, _) = crate::symbol_resolver::applied_hierarchy(&source, symbolic)
+            .into_iter()
+            .find(|(owner, _, _)| *owner == target)?;
+        let argument_fact = |name: &str| {
+            let index = parameters.iter().position(|parameter| parameter == name)?;
+            match &fact.shape {
+                FlexibleShape::Obj(owner, arguments)
+                    if *owner == class && arguments.len() == parameters.len() =>
+                {
+                    arguments.get(index).cloned()
+                }
+                _ => None,
+            }
+        };
+        let mut view =
+            FlexibleValue::rigid_shape(applied).substitute(symbolic_view, &argument_fact);
+        view.publication = fact.publication.clone();
+        Some((applied, view))
+    }
+
+    fn bind_class_flexible_parameters_from(
+        &self,
+        owner: TypeName,
+        actual: Ty,
+        fact: &FlexibleValue,
+        bindings: &mut HashMap<String, FlexibleValue>,
+    ) {
+        let Some((_, view)) = self.flexible_supertype_view(actual, fact, owner) else {
+            return;
+        };
+        let Some(classifier) = self.resolver().classifier(owner) else {
+            return;
+        };
+        let FlexibleShape::Obj(view_owner, arguments) = view.shape else {
+            return;
+        };
+        if view_owner != owner || arguments.len() != classifier.type_params().len() {
+            return;
+        }
+        for (formal, argument) in classifier.type_params().iter().zip(arguments) {
+            if !argument.is_none() {
+                bindings.insert(formal.clone(), argument);
+            }
+        }
+    }
+
+    fn bind_class_flexible_parameters(
+        &self,
+        owner: TypeName,
+        receiver: ExprId,
+        bindings: &mut HashMap<String, FlexibleValue>,
+    ) {
+        self.bind_class_flexible_parameters_from(
+            owner,
+            self.expr_types[receiver.0 as usize],
+            &self.flexible_value(receiver),
+            bindings,
+        );
+    }
+
+    pub(super) fn record_flexible_local(
+        &mut self,
+        flow_identity: u32,
+        initializer: ExprId,
+        declared: Ty,
+    ) {
+        let fact = self.flexible_value(initializer);
+        if fact.is_none() {
+            self.flexible_values.declarations.remove(&flow_identity);
+        } else {
+            self.flexible_values.declarations.insert(
+                flow_identity,
+                FlexibleLocalDeclaration {
+                    declared,
+                    value: fact,
+                },
+            );
+        }
+    }
+
+    pub(super) fn record_constructor_declaration_shape(
+        &mut self,
+        expression: ExprId,
+        declaration: super::constructor_commitment::ConstructorDeclarationShape,
+    ) {
+        self.flexible_values
+            .constructor_declarations
+            .insert(expression, declaration);
+    }
+
+    pub(super) fn discard_constructor_declaration_shape(&mut self, expression: ExprId) {
+        self.flexible_values
+            .constructor_declarations
+            .remove(&expression);
+    }
+
+    pub(super) fn record_flexible_local_assignment(&mut self, local: &super::Local) {
+        // The ordinary data-flow engine owns the assigned value and every control-flow edge. This
+        // sidecar owns only the inferred storage type's publication interval, which an assignment
+        // does not change. Retain it exactly while this is the same mutable local declaration;
+        // otherwise kill the stale identity instead of trying to reproduce the semantic CFG.
+        let valid = matches!(local.origin, super::ReceiverFnValueOrigin::Local)
+            && local.is_var
+            && local.write_ty == Some(local.declared_ty)
+            && self
+                .flexible_values
+                .declarations
+                .get(&local.flow_identity)
+                .is_some_and(|fact| fact.declared == local.declared_ty);
+        if !valid {
+            self.flexible_values
+                .declarations
+                .remove(&local.flow_identity);
+        }
+    }
+
+    pub(super) fn record_flexible_local_read(
+        &mut self,
+        read: ExprId,
+        local: &super::Local,
+        read_ty: Ty,
+    ) {
+        if !matches!(local.origin, super::ReceiverFnValueOrigin::Local)
+            || local.ty != local.declared_ty
+        {
+            self.flexible_values.reads.remove(&read);
+            return;
+        }
+        let fact = self
+            .flexible_values
+            .declarations
+            .get(&local.flow_identity)
+            .filter(|fact| fact.declared == local.declared_ty)
+            .map(|fact| fact.value.clone());
+        let fact = match (fact, read_ty.non_null().kotlin_class_internal()) {
+            (Some(fact), Some(target)) if read_ty != local.declared_ty => self
+                .flexible_supertype_view(local.declared_ty, &fact, target)
+                .filter(|(view, _)| view.non_null() == read_ty.non_null())
+                .map(|(_, fact)| fact),
+            (fact, _) => fact,
+        };
+        if let Some(fact) = fact.filter(|fact| !fact.is_none()) {
+            self.flexible_values.reads.insert(read, fact);
+        } else {
+            self.flexible_values.reads.remove(&read);
+        }
+    }
+
+    fn flexible_value(&self, expression: ExprId) -> FlexibleValue {
+        self.flexible_values
+            .expressions
+            .get(&expression)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The declaration type owned by a checked value. Ordinary flow may view the current value
+    /// through a provider upper face, but that does not replace the lower classifier selected for
+    /// an inferred declaration's flexible interval.
+    pub(super) fn inferred_declaration_value_ty(&self, expression: ExprId, fallback: Ty) -> Ty {
+        self.flexible_value(expression)
+            .inferred_declaration_ty(fallback)
+    }
+
+    pub(super) fn record_flexible_call_inputs(
+        &mut self,
+        expression: ExprId,
+        receiver: Option<ExprId>,
+        explicit_type_arguments: bool,
+    ) {
+        if let Some(receiver) = receiver {
+            self.flexible_values.receivers.insert(expression, receiver);
+        } else {
+            self.flexible_values.receivers.remove(&expression);
+        }
+        if explicit_type_arguments {
+            self.flexible_values
+                .explicit_type_arguments
+                .insert(expression);
+        } else {
+            self.flexible_values
+                .explicit_type_arguments
+                .remove(&expression);
+        }
+    }
+
+    pub(super) fn record_flexible_nullable_result(&mut self, expression: ExprId) {
+        self.flexible_values.nullable_results.insert(expression);
+    }
+
+    pub(super) fn checked_call_receiver(&self, expression: ExprId) -> Option<ExprId> {
+        self.flexible_values.receivers.get(&expression).copied()
+    }
+
+    pub(super) fn has_checked_explicit_type_arguments(&self, expression: ExprId) -> bool {
+        self.flexible_values
+            .explicit_type_arguments
+            .contains(&expression)
+    }
+
+    pub(super) fn record_flexible_alias(
+        &mut self,
+        expression: ExprId,
+        value: ExprId,
+        without_head: bool,
+    ) {
+        let mut fact = self.flexible_value(value);
+        if without_head {
+            fact = fact.without_head();
+        }
+        self.stage_flexible_value(expression, fact);
+    }
+
+    pub(super) fn record_flexible_join(
+        &mut self,
+        expression: ExprId,
+        values: impl IntoIterator<Item = ExprId>,
+        joined: Ty,
+        without_head: bool,
+    ) {
+        let target = joined.non_null().kotlin_class_internal();
+        let mut facts = values
+            .into_iter()
+            .filter(|value| self.expr_types[value.0 as usize] != Ty::Nothing)
+            .map(|value| {
+                let actual = self.expr_types[value.0 as usize];
+                let fact = self.flexible_value(value);
+                target.map_or(fact.clone(), |target| {
+                    self.flexible_supertype_view(actual, &fact, target)
+                        .filter(|(view, _)| view.non_null() == joined.non_null())
+                        .map_or_else(FlexibleValue::default, |(_, projected)| projected)
+                })
+            });
+        let mut fact = facts
+            .next()
+            .map(|first| facts.fold(first, |known, next| known.meet(&next)))
+            .unwrap_or_default();
+        if without_head {
+            fact = fact.without_head();
+        }
+        self.stage_flexible_value(expression, fact);
+    }
+
+    fn stage_flexible_value(&mut self, expression: ExprId, fact: FlexibleValue) {
+        if fact.is_none() {
+            self.flexible_values.staged.remove(&expression);
+        } else {
+            self.flexible_values.staged.insert(expression, fact);
+        }
+    }
+
+    fn selected_call_flexible_publication(
+        &self,
+        expression: ExprId,
+        call: &ResolvedCall,
+    ) -> FlexibleValue {
+        let (signature, result, explicit_dispatch_owner, implicit_dispatch) = match call {
+            ResolvedCall::Member(selected) => (
+                selected.member.generic_sig.as_ref(),
+                selected.member.ret,
+                selected.member.owner,
+                None,
+            ),
+            ResolvedCall::Companion(selected) => {
+                (selected.generic_sig.as_ref(), selected.ret, None, None)
+            }
+            ResolvedCall::TopLevel(selected) => (
+                selected.callable.generic_sig.as_deref(),
+                selected.callable.ret,
+                None,
+                None,
+            ),
+            ResolvedCall::Extension(selected) => (
+                selected.callable.generic_sig.as_deref(),
+                selected.callable.ret,
+                None,
+                None,
+            ),
+            ResolvedCall::LocalFunction(selected) => (
+                selected.sig.generic_sig.as_ref(),
+                selected.sig.ret,
+                None,
+                None,
+            ),
+            ResolvedCall::MemberExtension {
+                generic_sig,
+                ret,
+                declared_ret,
+                owner,
+                dispatch_receiver,
+                ..
+            } => (
+                generic_sig.as_deref(),
+                declared_ret.unwrap_or(*ret),
+                None,
+                Some((*owner, dispatch_receiver.ty)),
+            ),
+        };
+        let selected = self.expr_types[expression.0 as usize];
+        let declared = signature.map_or(result, |signature| signature.ret);
+        let fact = FlexibleValue::selected(declared, selected, &|lower| {
+            self.flexible_upper_bound(lower)
+        });
+        let Some(signature) = signature else {
+            return fact;
+        };
+        let mut bindings = HashMap::default();
+        if let (Some(owner), Some(&receiver)) = (
+            explicit_dispatch_owner,
+            self.flexible_values.receivers.get(&expression),
+        ) {
+            self.bind_class_flexible_parameters(owner, receiver, &mut bindings);
+        }
+        if let Some((owner, actual)) = implicit_dispatch {
+            let dispatch_fact =
+                FlexibleValue::semantic(actual, &|lower| self.flexible_upper_bound(lower));
+            self.bind_class_flexible_parameters_from(owner, actual, &dispatch_fact, &mut bindings);
+        }
+        if self
+            .flexible_values
+            .explicit_type_arguments
+            .contains(&expression)
+        {
+            return fact.substitute(declared, &|formal| bindings.get(formal).cloned());
+        }
+        let Some(arguments) = self.resolved_call_arg_slots.get(&expression) else {
+            return fact.substitute(declared, &|formal| bindings.get(formal).cloned());
+        };
+        let mut constraints: HashMap<String, Vec<FlexibleValue>> = HashMap::default();
+        if let (Some(parameter), Some(&receiver)) = (
+            signature.receiver,
+            self.flexible_values.receivers.get(&expression),
+        ) {
+            constrain_flexible_parameters(
+                self,
+                &signature.formals,
+                parameter,
+                self.expr_types[receiver.0 as usize],
+                &self.flexible_value(receiver),
+                &mut constraints,
+            );
+        }
+        for argument in &arguments.argument_bindings {
+            let Some(&parameter) = signature.params.get(argument.parameter) else {
+                continue;
+            };
+            let parameter = if argument.vararg_element {
+                parameter.array_read_elem().unwrap_or(parameter)
+            } else {
+                parameter
+            };
+            let actual = self.expr_types[argument.argument.0 as usize];
+            let argument_fact = self.flexible_value(argument.argument);
+            constrain_flexible_parameters(
+                self,
+                &signature.formals,
+                parameter,
+                actual,
+                &argument_fact,
+                &mut constraints,
+            );
+        }
+        for (formal, facts) in constraints {
+            let fact = facts
+                .iter()
+                .skip(1)
+                .fold(facts[0].clone(), |known, next| known.meet(next));
+            bindings.insert(formal, fact);
+        }
+        fact.substitute(declared, &|formal| bindings.get(formal).cloned())
+    }
+
+    pub(super) fn record_flexible_member_extension_property(
+        &mut self,
+        expression: ExprId,
+        property: &super::MemberExtensionProperty,
+    ) {
+        let receiver = self.checked_call_receiver(expression);
+        let signature = property.publication_signature.as_ref();
+        let declared = signature.ret;
+        let selected = property.ty;
+        let fact = FlexibleValue::selected(declared, selected, &|lower| {
+            self.flexible_upper_bound(lower)
+        });
+        let mut bindings = HashMap::default();
+        let dispatch_ty = property.dispatch_receiver.ty;
+        let dispatch_fact =
+            FlexibleValue::semantic(dispatch_ty, &|lower| self.flexible_upper_bound(lower));
+        self.bind_class_flexible_parameters_from(
+            property.owner,
+            dispatch_ty,
+            &dispatch_fact,
+            &mut bindings,
+        );
+        let mut constraints = HashMap::default();
+        if let (Some(parameter), Some(receiver)) = (signature.receiver, receiver) {
+            constrain_flexible_parameters(
+                self,
+                &signature.formals,
+                parameter,
+                self.expr_types[receiver.0 as usize],
+                &self.flexible_value(receiver),
+                &mut constraints,
+            );
+        }
+        for (formal, facts) in constraints {
+            let met = facts
+                .iter()
+                .skip(1)
+                .fold(facts[0].clone(), |known, next| known.meet(next));
+            bindings.insert(formal, met);
+        }
+        self.stage_flexible_value(
+            expression,
+            fact.substitute(declared, &|formal| bindings.get(formal).cloned()),
+        );
+    }
+
+    fn constructor_flexible_publication(&self, expression: ExprId) -> FlexibleValue {
+        let selected = self.expr_types[expression.0 as usize];
+        let Ty::Obj(owner, selected_arguments) = selected.non_null() else {
+            return FlexibleValue::default();
+        };
+        if self
+            .flexible_values
+            .explicit_type_arguments
+            .contains(&expression)
+        {
+            return FlexibleValue::rigid_shape(selected);
+        }
+        let Some(declaration) = self
+            .flexible_values
+            .constructor_declarations
+            .get(&expression)
+        else {
+            return FlexibleValue::default();
+        };
+        if declaration.formals.len() != selected_arguments.len()
+            || declaration.formals.len() != declaration.bounds.len()
+        {
+            return FlexibleValue::default();
+        }
+        let Some(arguments) = self.resolved_call_arg_slots.get(&expression) else {
+            return FlexibleValue::default();
+        };
+        let mut constraints: HashMap<String, Vec<FlexibleValue>> = HashMap::default();
+        for argument in &arguments.argument_bindings {
+            let Some(&parameter) = declaration.parameters.get(argument.parameter) else {
+                continue;
+            };
+            let parameter = if argument.vararg_element {
+                parameter.array_read_elem().unwrap_or(parameter)
+            } else {
+                parameter
+            };
+            constrain_flexible_parameters(
+                self,
+                &declaration.formals,
+                parameter,
+                self.expr_types[argument.argument.0 as usize],
+                &self.flexible_value(argument.argument),
+                &mut constraints,
+            );
+        }
+        let bindings = constraints
+            .into_iter()
+            .map(|(formal, facts)| {
+                let fact = facts
+                    .iter()
+                    .skip(1)
+                    .fold(facts[0].clone(), |known, next| known.meet(next));
+                (formal, fact)
+            })
+            .collect::<HashMap<_, _>>();
+        FlexibleValue::rigid_shape(selected).substitute(
+            Ty::obj_args_name(
+                owner,
+                &declaration
+                    .formals
+                    .iter()
+                    .zip(&declaration.bounds)
+                    .map(|(formal, bound)| Ty::ty_param(formal, *bound))
+                    .collect::<Vec<_>>(),
+            ),
+            &|formal| bindings.get(formal).cloned(),
+        )
+    }
+
+    /// Freeze the publication provenance of one expression immediately after checking it. This
+    /// consumes only checked identities and decisions staged by the expression-owning checker:
+    /// selected calls/constructors, local reads, and already-joined value-flow facts. It never
+    /// reopens source syntax.
+    pub(super) fn record_flexible_value(&mut self, expression: ExprId) {
+        let mut fact = if let Some(fact) = self.flexible_values.reads.get(&expression) {
+            fact.clone()
+        } else if let Some(fact) = self.flexible_values.staged.get(&expression) {
+            fact.clone()
+        } else if let Some(call) = self.resolved_calls.get(&expression) {
+            self.selected_call_flexible_publication(expression, call)
+        } else if self.resolved_constructors.contains_key(&expression) {
+            self.constructor_flexible_publication(expression)
+        } else {
+            FlexibleValue::default()
+        };
+        if self.flexible_values.nullable_results.contains(&expression) {
+            fact = fact.without_head();
+        }
+        if fact.is_none() {
+            self.flexible_values.expressions.remove(&expression);
+        } else {
+            self.flexible_values.expressions.insert(expression, fact);
+        }
+    }
+
     /// Freeze the checked value facts of one inferred declaration before its active source unit is
     /// discarded. `ty` is the already-finalized semantic declaration type.
     pub(super) fn record_inferred_declaration_publication(
@@ -89,11 +1080,9 @@ impl Checker<'_> {
             return;
         }
         let mut result = Spelled::default();
-        result.record_flexible_upper_bounds(ty, &|lower| {
-            crate::assignable::platform_shape_upper_bound(
-                crate::assignable::TypeOracle::platform_flexible_upper_bound(self, lower),
-            )
-        });
+        let fact = self.flexible_value(value);
+        result.record_flexible_upper_bounds(ty, &|lower| self.flexible_upper_bound(lower));
+        fact.apply_to_inferred_declaration(ty, &mut result);
         result.mark_enhanced(&self.value_enhancement(value).declared());
         if result.is_none() {
             return;
@@ -125,5 +1114,205 @@ impl TypeInfo {
         self.inferred_declaration_publications
             .results
             .get(&declaration)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn declared_list(variable: Ty) -> Ty {
+        Ty::platform_nullable(Ty::obj_args("kotlin/collections/MutableList", &[variable]))
+    }
+
+    #[test]
+    fn selected_java_variable_flexibility_is_publication_only() {
+        let variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
+        let selected = declared_list(Ty::String);
+        let fact = FlexibleValue::selected(declared_list(variable), selected, &|lower| lower);
+        let mut spelling = Spelled::default();
+        fact.apply(selected, &mut spelling);
+
+        assert_eq!(spelling.flexible_upper_bound, Some(selected.non_null()));
+        assert_eq!(spelling.args.len(), 1);
+        assert_eq!(spelling.args[0].flexible_upper_bound, Some(Ty::String));
+    }
+
+    #[test]
+    fn nullable_java_variable_binding_has_no_flexible_occurrence() {
+        let variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
+        let nullable = Ty::nullable(Ty::String);
+        let fact =
+            FlexibleValue::selected(declared_list(variable), declared_list(nullable), &|lower| {
+                lower
+            });
+        let mut spelling = Spelled::default();
+        fact.apply(declared_list(nullable), &mut spelling);
+
+        assert_eq!(spelling.args.len(), 1);
+        assert_eq!(spelling.args[0].flexible_upper_bound, None);
+    }
+
+    #[test]
+    fn mismatched_classifier_or_arity_never_correlates_argument_facts() {
+        let variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
+        for selected in [
+            Ty::platform_nullable(Ty::obj_args("sample/Other", &[Ty::String])),
+            Ty::platform_nullable(Ty::obj_args(
+                "kotlin/collections/MutableList",
+                &[Ty::String, Ty::Int],
+            )),
+        ] {
+            let fact = FlexibleValue::selected(declared_list(variable), selected, &|lower| lower);
+            assert!(matches!(fact.shape, FlexibleShape::None));
+        }
+    }
+
+    #[test]
+    fn function_shapes_are_declined_instead_of_guessing_suspend_metadata_slots() {
+        let variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
+        for (context_count, has_receiver, suspend) in [
+            (0, false, false),
+            (0, true, false),
+            (1, false, false),
+            (0, false, true),
+            (1, true, true),
+        ] {
+            let parameters = vec![variable; context_count + usize::from(has_receiver) + 1];
+            let declared = Ty::fun_with_shape(
+                parameters.clone(),
+                variable,
+                context_count,
+                has_receiver,
+                suspend,
+            );
+            let selected = Ty::fun_with_shape(
+                vec![Ty::String; parameters.len()],
+                Ty::String,
+                context_count,
+                has_receiver,
+                suspend,
+            );
+            assert!(FlexibleValue::selected(declared, selected, &|lower| lower).is_none());
+        }
+    }
+
+    #[test]
+    fn a_forwarding_result_substitutes_the_argument_owned_fact() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let variable = Ty::ty_param("T", any);
+        let selected = declared_list(Ty::String);
+        let argument = FlexibleValue::selected(
+            declared_list(Ty::ty_param(
+                "E",
+                Ty::platform_nullable(Ty::obj("kotlin/Any")),
+            )),
+            selected,
+            &|lower| lower,
+        );
+        let result = FlexibleValue::default()
+            .substitute(variable, &|name| (name == "T").then(|| argument.clone()));
+
+        assert_eq!(result, argument);
+    }
+
+    #[test]
+    fn projected_result_shape_is_owned_by_the_resolved_target_classifier() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let variable = Ty::ty_param("T", any);
+        let nested = FlexibleValue {
+            source: Some(Ty::String),
+            publication: None,
+            upper: Some(Ty::String),
+            shape: FlexibleShape::None,
+        };
+        let selected = Ty::obj_args("kotlin/collections/List", &[Ty::String]);
+        let declared = Ty::obj_args("kotlin/collections/List", &[variable]);
+        let projected = FlexibleValue::rigid_shape(selected)
+            .substitute(declared, &|name| (name == "T").then(|| nested.clone()));
+
+        assert_eq!(projected.source, Some(selected));
+        assert_eq!(
+            projected.shape,
+            FlexibleShape::Obj(
+                Ty::obj("kotlin/collections/List").obj_internal().unwrap(),
+                vec![nested],
+            )
+        );
+    }
+
+    #[test]
+    fn joins_do_not_correlate_slots_from_different_classifier_identities() {
+        let nested = FlexibleValue {
+            source: Some(Ty::String),
+            publication: None,
+            upper: Some(Ty::String),
+            shape: FlexibleShape::None,
+        };
+        let left = FlexibleValue {
+            source: None,
+            publication: None,
+            upper: None,
+            shape: FlexibleShape::Obj(
+                Ty::obj("sample/Left").obj_internal().unwrap(),
+                vec![nested.clone()],
+            ),
+        };
+        let right = FlexibleValue {
+            source: None,
+            publication: None,
+            upper: None,
+            shape: FlexibleShape::Obj(
+                Ty::obj("sample/Right").obj_internal().unwrap(),
+                vec![nested],
+            ),
+        };
+
+        assert!(left.meet(&right).is_none());
+    }
+
+    #[test]
+    fn substitution_does_not_correlate_slots_from_a_different_classifier() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let nested = FlexibleValue {
+            source: Some(Ty::String),
+            publication: None,
+            upper: Some(Ty::String),
+            shape: FlexibleShape::None,
+        };
+        let selected = FlexibleValue {
+            source: None,
+            publication: None,
+            upper: None,
+            shape: FlexibleShape::Obj(
+                Ty::obj("sample/Other").obj_internal().unwrap(),
+                vec![nested.clone()],
+            ),
+        };
+        let declared = Ty::obj_args("sample/Box", &[Ty::ty_param("T", any)]);
+
+        let result = selected.substitute(declared, &|name| (name == "T").then(|| nested.clone()));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn upper_face_flow_does_not_replace_the_provider_publication_shape() {
+        let provider = declared_list(Ty::String);
+        let variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
+        let current = Ty::platform_nullable(Ty::obj_args("kotlin/collections/List", &[Ty::String]));
+        let initializer =
+            FlexibleValue::selected(declared_list(variable), provider, &|lower| lower);
+        let projected = FlexibleValue {
+            source: Some(current.non_null()),
+            publication: initializer.publication.clone(),
+            upper: None,
+            shape: FlexibleValue::rigid_shape(current).shape,
+        };
+
+        assert_eq!(projected.inferred_declaration_ty(current), provider);
+        let mut spelling = Spelled::default();
+        spelling.record_flexible_upper_bounds(provider, &|lower| lower);
+        projected.apply_to_inferred_declaration(provider, &mut spelling);
+        assert_eq!(spelling.args[0].flexible_upper_bound, Some(Ty::String));
     }
 }

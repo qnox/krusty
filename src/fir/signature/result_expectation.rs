@@ -26,9 +26,10 @@ impl SignatureGraph {
                 true
             }
             Some(SigExpr::Sequence { result, .. })
-            | Some(SigExpr::ScopedReceiver { result, .. }) => {
-                self.apply_result_expectation(result, expected)
-            }
+            | Some(SigExpr::ScopedReceiver { result, .. })
+            | Some(SigExpr::MutableLocalFlow {
+                current: result, ..
+            }) => self.apply_result_expectation(result, expected),
             Some(SigExpr::Join { operands, .. }) => {
                 let operands = self.operands(operands).to_vec();
                 operands

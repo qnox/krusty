@@ -2153,6 +2153,7 @@ struct TestSignatureSemantics {
     evaluations: Cell<u32>,
     operations: RefCell<Vec<String>>,
     call_dependency: Option<DeclarationId>,
+    call_abbreviation: Option<(OriginId, ResolvedTypeAbbreviation)>,
 }
 
 impl TestSignatureSemantics {
@@ -2161,6 +2162,7 @@ impl TestSignatureSemantics {
             evaluations: Cell::new(0),
             operations: RefCell::new(Vec::new()),
             call_dependency: None,
+            call_abbreviation: None,
         }
     }
 
@@ -2170,11 +2172,25 @@ impl TestSignatureSemantics {
             ..Self::new()
         }
     }
+
+    fn with_call_abbreviation(origin: OriginId, abbreviation: ResolvedTypeAbbreviation) -> Self {
+        Self {
+            call_abbreviation: Some((origin, abbreviation)),
+            ..Self::new()
+        }
+    }
 }
 
 impl PostponedArgumentTransaction for TestSignatureSemantics {}
 
 impl SignatureSemantics for TestSignatureSemantics {
+    fn call_result_abbreviation(&self, origin: OriginId) -> Option<ResolvedTypeAbbreviation> {
+        self.call_abbreviation
+            .as_ref()
+            .filter(|(selected, _)| *selected == origin)
+            .map(|(_, abbreviation)| abbreviation.clone())
+    }
+
     fn classifier_type(
         &self,
         _declaration: DeclarationId,
@@ -2865,6 +2881,129 @@ fn signature_solver_demands_dependencies_once_and_memoizes_the_answer() {
     assert_eq!(index.signature(a).unwrap().result.get(), Ty::String);
     assert_eq!(index.signature(b).unwrap().result.get(), Ty::String);
     assert_eq!(semantics.evaluations.get(), 2);
+}
+
+#[test]
+fn inferred_function_result_keeps_mutable_local_declaration_across_assignment_flow() {
+    let published = DeclarationId::from_raw(40);
+    let current_only = DeclarationId::from_raw(41);
+    let provider = Ty::platform_nullable(Ty::obj_args(
+        "kotlin/collections/MutableList",
+        &[Ty::platform_nullable(Ty::String)],
+    ));
+    let current = Ty::platform_nullable(Ty::obj_args(
+        "kotlin/collections/List",
+        &[Ty::platform_nullable(Ty::String)],
+    ));
+    let mut graph = SignatureGraph::default();
+    let declared = graph.add_expr(SigExpr::Known(ResolvedTy::new(provider).unwrap()));
+    let assigned = graph.add_expr(SigExpr::Known(ResolvedTy::new(current).unwrap()));
+    let read = graph.add_expr(SigExpr::MutableLocalFlow {
+        current: assigned,
+        declared,
+    });
+    let effects = graph.add_operands([declared, assigned]);
+    let body = graph.add_expr(SigExpr::Sequence {
+        effects,
+        result: read,
+    });
+    graph.add_inferred_constraint(
+        &inferred_stub(published, InferredSignatureKind::ExpressionFunction),
+        body,
+        OriginId::from_raw(0),
+    );
+    graph.add_inferred_constraint(
+        &inferred_stub(current_only, InferredSignatureKind::ExpressionFunction),
+        assigned,
+        OriginId::from_raw(0),
+    );
+
+    let semantics = TestSignatureSemantics::new();
+    let index = SignatureSolver::new(graph, [published, current_only])
+        .finalize(&ResolverBackedSignatureEvaluator::new(&semantics))
+        .unwrap();
+
+    assert_eq!(index.signature(published).unwrap().result.get(), provider);
+    assert_eq!(index.signature(current_only).unwrap().result.get(), current);
+}
+
+#[test]
+fn mutable_local_publication_keeps_the_declared_value_abbreviation() {
+    let declaration = DeclarationId::from_raw(42);
+    let declared_origin = OriginId::from_raw(10);
+    let current_origin = OriginId::from_raw(11);
+    let declared_ty = Ty::obj("sample/Declared");
+    let current_ty = Ty::obj("sample/Current");
+    let abbreviation = ResolvedTypeAbbreviation {
+        alias: crate::types::type_name("sample/PublishedAlias"),
+        arguments: Box::new([]),
+    };
+    let mut graph = SignatureGraph::default();
+    let scope = graph.add_scope(SignatureScope {
+        owner: declaration,
+        source: SourceFileId::from_raw(0),
+    });
+    let mut call = |origin, ty| {
+        let expected = graph.add_expr(SigExpr::Known(ResolvedTy::new(ty).unwrap()));
+        let spelling = graph.intern_name("selected");
+        let target = graph.add_callable_selection(DeferredCallableSelection {
+            scope,
+            spelling,
+            lexical_classifier: None,
+            origin,
+            expected: Some(expected),
+            type_arguments: OperandRange::default(),
+            trailing_lambda: false,
+        });
+        let arguments = graph.add_call_arguments([]);
+        graph.add_expr(SigExpr::Call {
+            target,
+            arguments,
+            qualified: None,
+        })
+    };
+    let declared = call(declared_origin, declared_ty);
+    let current = call(current_origin, current_ty);
+    let result = graph.add_expr(SigExpr::MutableLocalFlow { current, declared });
+    graph.add_inferred_constraint(
+        &inferred_stub(declaration, InferredSignatureKind::ExpressionFunction),
+        result,
+        OriginId::from_raw(0),
+    );
+
+    let semantics =
+        TestSignatureSemantics::with_call_abbreviation(declared_origin, abbreviation.clone());
+    let index = SignatureSolver::new(graph, [declaration])
+        .finalize(&ResolverBackedSignatureEvaluator::new(&semantics))
+        .unwrap();
+    let signature = index.signature(declaration).unwrap();
+
+    assert_eq!(signature.result.get(), declared_ty);
+    assert_eq!(signature.result_abbreviation, Some(abbreviation));
+}
+
+#[test]
+fn mutable_local_publication_propagates_a_failed_declaration_value() {
+    let declaration = DeclarationId::from_raw(43);
+    let missing = DeclarationId::from_raw(44);
+    let mut graph = SignatureGraph::default();
+    let declared = graph.add_expr(SigExpr::DeclarationType(missing));
+    let current = graph.add_expr(SigExpr::Known(ResolvedTy::new(Ty::String).unwrap()));
+    let result = graph.add_expr(SigExpr::MutableLocalFlow { current, declared });
+    graph.add_inferred_constraint(
+        &inferred_stub(declaration, InferredSignatureKind::ExpressionFunction),
+        result,
+        OriginId::from_raw(0),
+    );
+
+    let semantics = TestSignatureSemantics::new();
+    let evaluator = ResolverBackedSignatureEvaluator::new(&semantics);
+    let mut solver = SignatureSolver::new(graph, [declaration]);
+
+    assert_eq!(
+        solver.resolve(declaration, &evaluator).unwrap_err(),
+        DiagnosticId::from_raw(1_044)
+    );
 }
 
 #[test]

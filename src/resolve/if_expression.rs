@@ -169,7 +169,7 @@ impl Checker<'_> {
                         flows.push(else_flow);
                     }
                     CompletedFlow::publish_common(self, scope, &flows);
-                    conditional_branch::join_adapted_branches(
+                    let joined = conditional_branch::join_adapted_branches(
                         self,
                         scope,
                         wanted.expected,
@@ -178,9 +178,12 @@ impl Checker<'_> {
                         eb,
                         et,
                         e,
-                    )
+                    );
+                    self.record_flexible_join(e, [then_branch, eb], joined, false);
+                    joined
                 }
                 None => {
+                    self.record_flexible_join(e, std::iter::empty(), Ty::Unit, false);
                     self.report_unbound_conditional_branch(scope, then_branch);
                     let (false_reads, false_intersections) =
                         self.implicit_false_edge_state(scope, cond, &locals, &entry_reads);

@@ -358,6 +358,78 @@ pub(crate) fn instantiate_slot(
     specialize_member_type_with_unbound(source, ty, bindings, position, unbound)
 }
 
+/// Instantiate every value-parameter slot from one semantic declaration signature. Keeping the
+/// walk here makes projected/flexible slot policy one responsibility; candidate selection supplies
+/// bindings but does not duplicate the substitution contract.
+pub(crate) fn instantiate_signature_parameters(
+    source: &dyn SymbolSource,
+    signature: &GenericSig,
+    bindings: &GSigBinds,
+    unbound: UnboundSpecialization,
+) -> Vec<Ty> {
+    signature
+        .params
+        .iter()
+        .map(|parameter| {
+            instantiate_slot(
+                source,
+                Some(signature),
+                *parameter,
+                bindings,
+                TypePosition::In,
+                unbound,
+            )
+        })
+        .collect()
+}
+
+/// Instantiate the result slot from one semantic declaration signature under the same policy as
+/// [`instantiate_signature_parameters`].
+pub(crate) fn instantiate_signature_result(
+    source: &dyn SymbolSource,
+    signature: &GenericSig,
+    bindings: &GSigBinds,
+    unbound: UnboundSpecialization,
+) -> Ty {
+    instantiate_slot(
+        source,
+        Some(signature),
+        signature.ret,
+        bindings,
+        TypePosition::Out,
+        unbound,
+    )
+}
+
+/// Instantiate the source element type when the selected trailing array parameter is consumed as
+/// a vararg. Equal arity alone is not enough: one ordinary element and one spread array both have
+/// one argument, so the already-applied parameter and actual shapes decide which call was selected.
+pub(crate) fn instantiate_vararg_element(
+    source: &dyn SymbolSource,
+    signature: &GenericSig,
+    applied_parameters: &[Ty],
+    actual_arguments: &[Ty],
+    bindings: &GSigBinds,
+) -> Option<Ty> {
+    let vararg = applied_parameters
+        .last()
+        .is_some_and(|parameter| parameter.array_elem().is_some())
+        && (applied_parameters.len() != actual_arguments.len()
+            || actual_arguments.last() != applied_parameters.last());
+    if !vararg || signature.params.is_empty() {
+        return None;
+    }
+    let inner = signature.params.last()?.array_read_elem()?;
+    Some(instantiate_slot(
+        source,
+        Some(signature),
+        inner,
+        bindings,
+        TypePosition::In,
+        UnboundSpecialization::UseUpperBound,
+    ))
+}
+
 fn contains_flexible_variable(ty: Ty) -> bool {
     match ty {
         Ty::PlatformNullable(inner) if matches!(*inner, Ty::TyParam(..)) => true,

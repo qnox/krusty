@@ -86,7 +86,8 @@ pub(crate) use member_hierarchy::{
     supertype_preorder, InheritedNestedClassifier, OverrideInputShape,
 };
 pub(crate) use member_specialization::{
-    apply_property_bindings, instantiate_slot, specialize_inline_collection_transform,
+    apply_property_bindings, instantiate_signature_parameters, instantiate_signature_result,
+    instantiate_slot, instantiate_vararg_element, specialize_inline_collection_transform,
     specialize_inline_iteration_traversal, specialize_signature_input_type,
     specialize_signature_output_type, specialize_signature_receiver_type, TypePosition,
     UnboundSpecialization,
@@ -2417,20 +2418,12 @@ impl<'a> SymbolResolver<'a> {
                     return None;
                 }
                 let params = apply_platform_call_parameter_nullability(
-                    semantic
-                        .params
-                        .iter()
-                        .map(|parameter| {
-                            instantiate_slot(
-                                &self.src,
-                                Some(&semantic),
-                                *parameter,
-                                &bindings,
-                                TypePosition::In,
-                                UnboundSpecialization::Preserve,
-                            )
-                        })
-                        .collect(),
+                    instantiate_signature_parameters(
+                        &self.src,
+                        &semantic,
+                        &bindings,
+                        UnboundSpecialization::Preserve,
+                    ),
                     &o.call_sig.platform_nullable_params,
                     &arg_tys,
                     o.call_sig.vararg,
@@ -2559,33 +2552,12 @@ impl<'a> SymbolResolver<'a> {
             .generic_sig
             .as_ref()
             .map(|gsig| {
-                // A vararg call binds `T` from the ELEMENTS, not from the array param. Detect it by the
-                // trailing array parameter receiving element-wise args — NOT merely by arity: a SINGLE
-                // element (`listOf(pair)`) has `params.len() == args.len()`, yet still spreads into the
-                // vararg, so a plain `zip` would unify `Array<T>` against the non-array `Pair` and leave
-                // `T` unbound (→ `List<Any>`). A spread (`listOf(*arr)`) passes the array itself — same
-                // arity AND the last arg IS the array param — so it is not a vararg here.
-                let vararg = params.last().is_some_and(|p| p.array_elem().is_some())
-                    && (params.len() != arg_tys.len() || arg_tys.last() != params.last());
-                if vararg && !gsig.params.is_empty() {
-                    let fixed = gsig.params.len() - 1;
-                    if let Some(inner) = gsig.params[fixed].array_read_elem() {
-                        vararg_elem = Some(instantiate_slot(
-                            &self.src,
-                            Some(gsig),
-                            inner,
-                            bindings,
-                            TypePosition::In,
-                            UnboundSpecialization::UseUpperBound,
-                        ));
-                    }
-                }
-                instantiate_slot(
+                vararg_elem =
+                    instantiate_vararg_element(&self.src, gsig, params, &arg_tys, bindings);
+                instantiate_signature_result(
                     &self.src,
-                    Some(gsig),
-                    gsig.ret,
+                    gsig,
                     bindings,
-                    TypePosition::Out,
                     UnboundSpecialization::UseUpperBound,
                 )
             })
@@ -3153,31 +3125,21 @@ impl<'a> SymbolResolver<'a> {
             }) {
                 return None;
             }
-            let semantic_params = semantic
-                .params
-                .iter()
-                .map(|parameter| {
-                    instantiate_slot(
-                        &self.src,
-                        Some(&semantic),
-                        *parameter,
-                        &bindings,
-                        TypePosition::In,
-                        UnboundSpecialization::UseUpperBound,
-                    )
-                })
-                .collect::<Vec<_>>();
+            let semantic_params = instantiate_signature_parameters(
+                &self.src,
+                &semantic,
+                &bindings,
+                UnboundSpecialization::UseUpperBound,
+            );
             if mapping.iter().any(|(parameter, argument)| {
                 !self.arg_fits_or_subtype(&semantic_params[*parameter], &args[*argument])
             }) {
                 return None;
             }
-            let ret_ty = instantiate_slot(
+            let ret_ty = instantiate_signature_result(
                 &self.src,
-                Some(&semantic),
-                semantic.ret,
+                &semantic,
                 &bindings,
-                TypePosition::Out,
                 UnboundSpecialization::UseUpperBound,
             );
             crate::trace_compiler!(

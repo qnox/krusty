@@ -853,15 +853,20 @@ fn encode_type_with_parameter(
     let (nullable, flexible, base) = match ty {
         Ty::Nullable(inner) => (true, false, *inner),
         Ty::PlatformNullable(inner) => (false, true, *inner),
-        other => (false, false, other),
+        other => (false, spelled.flexible_upper_bound.is_some(), other),
     };
     if flexible {
         // A provider has already normalized the exact upper face. Encode the lower first, then the
         // upper, and intern the capability last, matching kotlinc's string-table visitation order.
+        // Occurrence-level flexibility may live only in the declaration spelling sidecar: the
+        // shared semantic type deliberately keeps a selected Kotlin argument rigid. Clear the mark
+        // while encoding each face so it describes this node once rather than recursing.
+        let mut face = spelled.clone();
+        face.flexible_upper_bound = None;
         let mut message = encode_type_with_parameter(
             strings,
             base,
-            spelled,
+            &face,
             type_parameters,
             forced_parameter,
             expansion,
@@ -870,7 +875,7 @@ fn encode_type_with_parameter(
         let upper = encode_type_with_parameter(
             strings,
             Ty::nullable(upper),
-            spelled,
+            &face,
             type_parameters,
             forced_parameter,
             expansion,
@@ -1555,9 +1560,53 @@ mod tests {
             .position(|pair| pair == [0x20, capability as u8])
             .expect("the flexibility capability is encoded");
         assert_eq!(
+            bytes
+                .windows(2)
+                .filter(|pair| *pair == [0x20, capability as u8])
+                .count(),
+            1,
+            "one flexible occurrence carries one capability"
+        );
+        assert_eq!(
             bytes[at + 2],
             0x2a,
             "the upper bound follows the capability"
+        );
+    }
+
+    #[test]
+    fn declaration_spelling_can_publish_flexibility_without_changing_semantic_type() {
+        let mut strings = StringTable::default();
+        let encoded = encode_declared_type(
+            &mut strings,
+            Ty::String,
+            &Spelled {
+                flexible_upper_bound: Some(Ty::String),
+                ..Spelled::default()
+            },
+            &TypeParameters::new(),
+        )
+        .unwrap();
+
+        let capability = strings.names["kotlin.jvm.PlatformType"];
+        let canonical = encoded.canonical();
+        let bytes = canonical.as_bytes();
+        assert_eq!(
+            bytes,
+            &[0x20, 0x01, 0x2a, 0x04, 0x18, 0x01, 0x30, 0x00, 0x30, 0x00],
+            "the sidecar emits one lower face, capability and nullable upper face"
+        );
+        assert_eq!(
+            bytes
+                .windows(2)
+                .filter(|pair| *pair == [0x20, capability as u8])
+                .count(),
+            1,
+            "the sidecar occurrence must carry exactly one platform capability"
+        );
+        assert!(
+            bytes.contains(&0x2a),
+            "the sidecar occurrence has an upper face"
         );
     }
 }

@@ -125,7 +125,7 @@ impl Spelled {
                     spelling.record_flexible_upper_bounds(*argument, upper_bound);
                 }
             }
-            Ty::Fun(signature) => {
+            Ty::Fun(signature) if !signature.suspend => {
                 let count = signature.params.len() + 1;
                 if self.args.len() < count {
                     self.args.resize_with(count, Spelled::default);
@@ -138,6 +138,10 @@ impl Spelled {
                 self.args[signature.params.len()]
                     .record_flexible_upper_bounds(signature.ret, upper_bound);
             }
+            // A suspend function's metadata result occupies the continuation argument rather than
+            // the ordinary last function-type slot. The publication sidecar does not carry that
+            // physical layout, so decline nested flexibility instead of attaching it incorrectly.
+            Ty::Fun(_) => {}
             _ => {}
         }
     }
@@ -534,5 +538,20 @@ mod tests {
             Some(crate::types::type_name("dep/Cargo"))
         );
         assert!(spelled.arg(1).is_none());
+    }
+
+    #[test]
+    fn suspend_function_flexibility_is_not_written_to_an_ordinary_result_slot() {
+        let ty = Ty::fun_with_shape(
+            vec![Ty::String],
+            Ty::platform_nullable(Ty::String),
+            0,
+            false,
+            true,
+        );
+        let mut spelled = Spelled::default();
+        spelled.record_flexible_upper_bounds(ty, &|lower| lower);
+
+        assert!(spelled.is_none());
     }
 }

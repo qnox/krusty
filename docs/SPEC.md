@@ -2716,23 +2716,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nullability annotation families are not read yet. Tests: `tests/java_type_use_nullability_e2e.rs`
   (classfile and Java-source APIs, the complete diagnostics against kotlinc).
 - **A Java type-variable occurrence is flexible, and a declaration inferred from it publishes the
-  flexible type.** FIR's Java type mapping gives `List<T>` the argument `T!`, so the classfile
-  provider normalizes every Java type-variable occurrence to `T!` (its bound flexible too).
-  Selected-slot instantiation follows kotlinc's flexible bounds: `T!` with `X` is `X!`, and with a
-  nullable `X?` it is the rigid `X?` (both bounds nullable). `Collections.singletonList(x)` with
-  `x: X` is therefore `(Mutable)List<X!>!`, and inferred declarations publish that flexible type in
-  `@Metadata`: the lower bound `MutableList<X!>`, the nullable read-only upper bound `List<X!>?`,
-  and the capability `kotlin.jvm.PlatformType`, interned in kotlinc's order (lower, upper,
-  capability). A flexible result fixes no nullability, so the method carries neither `@NotNull` nor
-  `@Nullable`. The checker records both faces against the stable declaration identity; metadata
-  handoff consumes that declaration-owned contract without reopening the source expression.
+  flexible type.** FIR's Java type mapping gives `List<T>` the argument `T!`. The classfile provider
+  retains the occurrence's Java provenance in the declaration variable's flexible bound while the
+  common semantic type remains the stable variable `T`; wrapping the shared variable itself would
+  leak a provider detail through mapped collection supertypes and Kotlin source inference.
+  Selected-call publication pairs that declaration-owned shape with the already-selected call
+  identity and committed argument mapping, then carries that fact through generic forwarding,
+  local flow identities, and expression-value control-flow joins. A mutable local keeps the
+  publication shape of its inferred storage declaration beside its independently changing current
+  flow value: assignments can narrow later reads, but do not redeclare that storage. The semantic
+  CFG remains authoritative for the current value and every control-flow edge; the publication
+  sidecar retains only the already-checked declaration identity and never tries to reproduce those
+  edges. Thus `T!` with `X` is published as `X!`,
+  while a nullable `X?` is the rigid `X?` (both bounds nullable).
+  `Collections.singletonList(x)` with `x: X` is therefore
+  `(Mutable)List<X!>!`, and inferred declarations publish that flexible type in `@Metadata`: the
+  lower bound `MutableList<X!>`, the nullable read-only upper bound `List<X!>?`, and the capability
+  `kotlin.jvm.PlatformType`, interned in kotlinc's order (lower, upper, capability). A flexible
+  result fixes no nullability, so the method carries neither `@NotNull` nor `@Nullable`. The checker
+  records both faces against the stable declaration identity; metadata handoff consumes that
+  declaration-owned contract without reopening the source expression.
   Tests: `tests/java_platform_type_publication_e2e.rs` (byte-identical vs kotlinc),
   `metadata::type_encoder::tests::platform_type_encodes_a_nullable_flexible_upper_bound`.
 - **A nullable argument fixes a flexible Java type variable to its nullable type.** kotlinc reduces
   `Foo? <: T!` to `Foo? <: T` (`simplifyLowerConstraint`), so `fun <E> a(x: E?): List<E> =
   Collections.singletonList(x)` infers `T := E?` and the result `(Mutable)List<E?>!` no longer fits
   `List<E>`. A `null` argument constrains `T` with `Nothing?`. `E? <: Any?` holds for a type
-  parameter `E`; nullable sides are compared without stripping the target to non-null `Any`.
+  parameter `E`; nullable sides are compared without stripping the target to non-null `Any`. The
+  nullable argument fixes both faces of this root variable, so an invariant expected result cannot
+  reopen the parameter as a non-null flexible interval merely because that interval accepts the
+  original argument.
   Krusty applies the inference rule at a parameter's root only: a flexible variable nested in a
   Java array argument still keeps the surrounding structural inference used by kotlinc.
   Tests: `tests/java_flexible_variable_inference_e2e.rs` (exact diagnostics, a box run, and

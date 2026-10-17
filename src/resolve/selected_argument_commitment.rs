@@ -48,6 +48,39 @@ impl IntoIterator for SelectedArgumentCommitment {
 }
 
 impl Checker<'_> {
+    /// Publish the exact source-to-parameter mapping already selected by the source-constructor
+    /// engine through the same checked commitment consumed by every other call. The first expanded
+    /// vararg element occupies the parameter slot (matching [`map_call_args`]); every element
+    /// remains distinct in `argument_bindings`.
+    pub(super) fn commit_source_constructor_argument_mapping(
+        &mut self,
+        call: ExprId,
+        parameter_count: usize,
+        argument_bindings: &[SelectedArgumentBinding],
+        omitted: &[usize],
+    ) {
+        let mut slots = vec![None; parameter_count];
+        for binding in argument_bindings {
+            if let Some(slot) = slots.get_mut(binding.parameter) {
+                slot.get_or_insert(binding.argument);
+            }
+        }
+        let mut declares_default = vec![false; parameter_count];
+        for &parameter in omitted {
+            if let Some(declared) = declares_default.get_mut(parameter) {
+                *declared = true;
+            }
+        }
+        self.resolved_call_arg_slots.insert(
+            call,
+            SelectedArgumentCommitment {
+                slots,
+                declares_default,
+                argument_bindings: argument_bindings.to_vec(),
+            },
+        );
+    }
+
     /// Validate the source arguments of one already-selected callable and commit their semantic
     /// parameter slots. Selection owns WHICH callable won; this origin-neutral seam owns Kotlin's
     /// named/default/vararg/trailing-lambda mapping for every selected callable.

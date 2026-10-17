@@ -15,7 +15,7 @@
 //! [`super::platform_value_narrowing`] consumes them to decide kotlinc's implicit not-null casts.
 
 use super::{Checker, Local, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor};
-use crate::ast::{Expr, ExprId};
+use crate::ast::ExprId;
 use crate::fx_hash::HashMap;
 use crate::libraries::{GenericSig, ResultEnhancement, TypeEnhancement};
 use crate::types::{Ty, TypeName};
@@ -33,9 +33,19 @@ pub(super) struct EnhancedLocals {
 impl Checker<'_> {
     /// Record the marks the local, just declared without a type, takes from its
     /// `initializer`.
-    pub(super) fn record_enhanced_local(&mut self, flow_identity: u32, initializer: ExprId) {
+    pub(super) fn record_enhanced_local(
+        &mut self,
+        flow_identity: u32,
+        initializer: ExprId,
+        mutable: bool,
+    ) {
+        if mutable {
+            self.enhanced_locals.declarations.remove(&flow_identity);
+            return;
+        }
         let marks = self.value_enhancement(initializer).declared();
         if marks.is_none() {
+            self.enhanced_locals.declarations.remove(&flow_identity);
             return;
         }
         self.enhanced_locals
@@ -46,10 +56,12 @@ impl Checker<'_> {
     /// Record the marks the loop variable takes from the elements of `iterable`.
     pub(super) fn record_enhanced_loop_variable(&mut self, flow_identity: u32, iterable: ExprId) {
         let Some(protocol) = self.iterator_protocols.get(&iterable) else {
+            self.enhanced_locals.declarations.remove(&flow_identity);
             return;
         };
         let marks = protocol.enhancement.element.declared();
         if marks.is_none() {
+            self.enhanced_locals.declarations.remove(&flow_identity);
             return;
         }
         self.enhanced_locals
@@ -59,11 +71,17 @@ impl Checker<'_> {
 
     /// Record that `read` reads `local` at its declared type.
     pub(super) fn record_enhanced_local_read(&mut self, read: ExprId, local: &Local) {
-        if !matches!(local.origin, ReceiverFnValueOrigin::Local) || local.ty != local.declared_ty {
+        if !matches!(local.origin, ReceiverFnValueOrigin::Local)
+            || local.is_var
+            || local.ty != local.declared_ty
+        {
+            self.enhanced_locals.reads.remove(&read);
             return;
         }
         if let Some(marks) = self.enhanced_locals.declarations.get(&local.flow_identity) {
             self.enhanced_locals.reads.insert(read, marks.clone());
+        } else {
+            self.enhanced_locals.reads.remove(&read);
         }
     }
 
@@ -88,13 +106,13 @@ impl Checker<'_> {
         let Some(call) = self.resolved_calls.get(&e) else {
             return TypeEnhancement::NONE;
         };
-        let receiver = self.call_receiver(e).map(|receiver| {
+        let receiver = self.checked_call_receiver(e).map(|receiver| {
             (
                 self.expr_types[receiver.0 as usize],
                 self.value_enhancement(receiver),
             )
         });
-        let explicit_type_arguments = self.file.call_type_args.contains_key(&e.0);
+        let explicit_type_arguments = self.has_checked_explicit_type_arguments(e);
         let arguments = (!explicit_type_arguments)
             .then(|| self.resolved_call_arg_slots.get(&e))
             .flatten();
@@ -116,12 +134,14 @@ impl Checker<'_> {
             ResolvedConstructor::Source {
                 owner,
                 declaration_params,
-                argument_bindings,
                 ..
             } => {
-                if self.file.call_type_args.contains_key(&e.0) {
+                if self.has_checked_explicit_type_arguments(e) {
                     return TypeEnhancement::NONE;
                 }
+                let Some(arguments) = self.resolved_call_arg_slots.get(&e) else {
+                    return TypeEnhancement::NONE;
+                };
                 let Some(classifier) = self.resolver().classifier(*owner) else {
                     return TypeEnhancement::NONE;
                 };
@@ -132,7 +152,7 @@ impl Checker<'_> {
                     formals,
                     declaration_params,
                     None,
-                    argument_bindings,
+                    &arguments.argument_bindings,
                     &mut bindings,
                 );
                 let argument_count = self.expr_types[e.0 as usize].type_args().len();
@@ -149,7 +169,7 @@ impl Checker<'_> {
         let Some(signature) = member.generic_sig.as_ref() else {
             return TypeEnhancement::NONE;
         };
-        if self.file.call_type_args.contains_key(&e.0) {
+        if self.has_checked_explicit_type_arguments(e) {
             return TypeEnhancement::NONE;
         }
         let Some(arguments) = self.resolved_call_arg_slots.get(&e) else {
@@ -230,18 +250,6 @@ impl Checker<'_> {
             return marks;
         }
         marks.substitute(declared, &|name| bindings.get(name).cloned())
-    }
-
-    /// The explicit source receiver of the selected call or property read `e`.
-    fn call_receiver(&self, e: ExprId) -> Option<ExprId> {
-        match self.file.expr(e) {
-            Expr::Call { callee, .. } => match self.file.expr(*callee) {
-                Expr::Member { receiver, .. } => Some(*receiver),
-                _ => None,
-            },
-            Expr::SafeCall { receiver, .. } | Expr::Member { receiver, .. } => Some(*receiver),
-            _ => None,
-        }
     }
 
     /// Bind the type parameters of `owner` to the marks of the matching type arguments of a

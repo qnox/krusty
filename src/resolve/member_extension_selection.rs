@@ -350,6 +350,19 @@ pub(super) fn candidate(
         ),
         inline_body_plan: shape.function.inline_body_plan.clone(),
         suspend: shape.function.signature.is_suspend(),
+        generic_sig: shape
+            .function
+            .signature
+            .generic_sig
+            .clone()
+            .map(|mut signature| {
+                // Member-extension selection stores its source receiver beside `Signature`; ordinary
+                // generic signatures omit it because physical member parameters begin after that
+                // receiver. Publication needs the declaration-owned receiver shape on the selected
+                // target so a generic result can bind from the exact checked receiver expression.
+                signature.receiver = Some(shape.function.receiver_ty);
+                Box::new(signature)
+            }),
         declared_params: shape
             .function
             .signature
@@ -397,6 +410,7 @@ impl MemberExtensionFunctionCandidate {
                 .clone()
                 .into_boxed_slice(),
             suspend: self.suspend,
+            generic_sig: self.generic_sig.clone(),
             declared_ret: self.declared_ret,
             overridden_results: self.overridden_results.clone(),
             interface,
