@@ -65879,22 +65879,13 @@ impl<'a> Checker<'a> {
                     });
                     continue;
                 }
-                let result_arguments = classifier
-                    .type_params()
-                    .iter()
-                    .enumerate()
-                    .map(|(index, formal)| {
-                        bindings.get(formal).copied().unwrap_or_else(|| {
-                            classifier
-                                .type_param_bounds()
-                                .get(index)
-                                .and_then(|bounds| bounds.first())
-                                .copied()
-                                .filter(|bound| *bound != Ty::Error)
-                                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
-                        })
-                    })
-                    .collect::<Vec<_>>();
+                let result_arguments =
+                    crate::symbol_resolver::completed_constructor_result_arguments(
+                        internal,
+                        classifier.type_params(),
+                        classifier.type_param_bounds(),
+                        &bindings,
+                    );
                 member.ret = Ty::obj_args_name(internal, &result_arguments);
                 member.params = signature
                     .params

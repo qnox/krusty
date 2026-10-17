@@ -9594,6 +9594,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   use-site projection is reported on that keyword, for that application only:
   `conflicting projection in type alias expansion in intermediate type 'Box<CONFLICTING-PROJECTION String>?'`.
   Tests: `tests/typealias_projection_e2e.rs`. Corpus: `reflection/typeOf/typeAliasedType.kt`.
+- **A self-bounded constructor variable with no other constraint completes to its starred bound.**
+  `Builder("x")` for Java `class Builder<SELF extends Builder<SELF>>` has no argument or expected
+  type evidence for `SELF`. kotlinc completes it to the declared bound with the recursive occurrence
+  replaced by a star and the argument projected `out`, so the call types as `Builder<out Builder<*>>`
+  and a fluent `withPort(): SELF` reads `Builder<*>`. krusty completed `SELF` to the raw bound
+  `Builder<SELF>`, so the second fluent call returned the bare `SELF` and the third failed as an
+  unresolved member. Only a bound that is the constructed classifier itself is such a self type: for
+  `C<T : Comparable<T>>`, `C(1)` has no completion in kotlinc (`cannot infer type for type
+  parameter 'T'`), and krusty keeps its existing bound completion there. Nor is a bound that also
+  names another formal: for `MB<T, SELF : MB<T, SELF>>`, kotlinc reports `cannot infer type for
+  type parameter 'SELF'` for `MB("v")` even with `T` inferred. Owner:
+  `src/symbol_resolver/generic_inference/postponed_result.rs`. Test:
+  `tests/java_self_bounded_constructor_e2e.rs::a_self_bounded_constructor_result_keeps_a_fluent_chain_typed`.
 - **Omitted typealias arguments on a constructor call are inferred, not written.** `LinkedHashMap(a)`
   calls the stdlib's `typealias LinkedHashMap<K, V> = java.util.LinkedHashMap<K, V>` without type
   arguments, so the alias's `K`/`V` are type variables of the call, decided by the value arguments and
