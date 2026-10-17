@@ -413,7 +413,7 @@ impl<'a> JvmClassRealization<'a> {
                     let result = if boxed {
                         Ty::nullable(property.ty)
                     } else {
-                        field.ty
+                        declared_property_accessor_jvm(ir, property, field)
                     };
                     (!visibility.is_private() && !is_jvm_field(c, &property.name))
                         .then(|| (default_getter, format!("(){}", desc(result))))

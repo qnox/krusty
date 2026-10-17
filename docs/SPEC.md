@@ -11802,6 +11802,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   class see the public type and call the getter. Tests: `tests/explicit_backing_field_e2e.rs`.
   Corpus:
   six `properties/backingField/*ValueClassExplicitBackingField` tests.
+- **An explicit backing field's accessors are typed by the property.** `val x: Any? field: String`
+  stores a `String`, but its getter is `getX()Ljava/lang/Object;`. The getter's `@Nullable`, its
+  line table and `this` local, and the getter signature in the class metadata all name that
+  descriptor, not the field's. Tests: `tests/explicit_backing_field_e2e.rs`.
 - **An untyped backing field initializer is resolved against the property type.** kotlinc's
   `transformBackingField` gives the initializer of `val failed: List<F> field = mutableListOf()`
   the property's return type as its expected type, then keeps the initializer's own resolved type
