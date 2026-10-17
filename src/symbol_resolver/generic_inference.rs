@@ -1902,6 +1902,30 @@ pub(crate) fn infer_generic_return_bindings_from_symbols(
     infer_generic_return_bindings_impl(Some(source), &projected, expected, admits)
 }
 
+/// Bindings for a nested producer whose result cannot reach `lower`, the type an outer call
+/// variable already has from another argument's lower-bound evidence.
+///
+/// Kotlin keeps both as lower bounds of the outer variable and fixes it to their common supertype
+/// (`eq(mutable, emptyList())` gives `List<String>`), so the producer is typed against `lower`'s
+/// supertype of its own result classifier: `MutableList<String>` is read as `List<String>`.
+pub(crate) fn infer_generic_return_bindings_from_lower_face(
+    source: &dyn SymbolSource,
+    generic_sig: &GenericSig,
+    lower: Ty,
+    admits: impl FnMut(Ty, Ty) -> bool,
+) -> Option<GSigBinds> {
+    let Ty::Obj(owner, _) = generic_sig.ret.non_null() else {
+        return None;
+    };
+    let face = supertype_with_classifier(source, lower.non_null(), owner)?;
+    let face = if lower.is_nullable() {
+        Ty::nullable(face)
+    } else {
+        face
+    };
+    infer_generic_return_bindings_from_symbols(source, generic_sig, face, admits)
+}
+
 /// The denotable face of a platform lower bound that `actual` inhabits.
 ///
 /// A Java collection parameter is published as its mutable lower bound (`List<T>` becomes
