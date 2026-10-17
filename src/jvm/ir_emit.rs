@@ -68,8 +68,8 @@ mod default_impls;
 mod delegated_property_array;
 mod field_nullability;
 use field_nullability::{
-    declared_field_annotation, field_nullability_kind, is_nonnull_reference_field,
-    nullability_annotation,
+    declared_field_annotation, declared_property_annotation, declared_static_annotation,
+    field_nullability_kind, is_nonnull_reference_field, nullability_annotation,
 };
 mod discarding;
 use discarding::discard;
@@ -846,7 +846,7 @@ fn attach_synth_nullability(
             })
             .filter(|(_, s)| !s.is_lateinit)
         {
-            if let Some(a) = ann(jvm_declared_ty(&s.ty)) {
+            if let Some(a) = declared_static_annotation(s) {
                 cw.set_field_nullability(
                     ir.static_field_jvm_name(index as u32),
                     &desc(jvm_declared_ty(&s.ty)),
@@ -919,7 +919,7 @@ fn attach_synth_nullability(
         .enumerate()
         .filter(|(_, f)| !f.is_compiler_generated())
     {
-        let Some(a) = declared_field_annotation(c, index) else {
+        let Some(a) = declared_property_annotation(c, index) else {
             continue;
         };
         let (getter, setter) = accessor_jvm_names(c, &f.name);
@@ -946,7 +946,7 @@ fn attach_synth_nullability(
             // `copy`'s parameters mirror the primary-constructor properties, so each reference param
             // takes the SAME `@NotNull`/`@Nullable` annotation kotlinc puts on the constructor's.
             let copy_params: Vec<Option<&str>> = (0..data_fields.len())
-                .map(|index| declared_field_annotation(c, index))
+                .map(|index| declared_property_annotation(c, index))
                 .collect();
             cw.set_method_nullability(
                 &function.name,
@@ -974,7 +974,7 @@ fn attach_synth_nullability(
             );
         }
         for i in 0..data_fields.len() {
-            if let Some(a) = declared_field_annotation(c, i) {
+            if let Some(a) = declared_property_annotation(c, i) {
                 let fid = ir
                     .data_class_member(c.fq_name_id(), IrDataClassMemberRole::Component(i as u32))
                     .expect("a data-class component records its generated identity");
@@ -3728,7 +3728,7 @@ fn emit_enum_class(
     for (field_index, (f, t)) in c.fields.iter().zip(&field_tys).enumerate() {
         let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
         let nullability = (!f.is_lateinit())
-            .then(|| nullability_annotation(field_nullability_kind(f.ty)))
+            .then(|| declared_field_annotation(c, field_index))
             .flatten();
         let signature =
             property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref())

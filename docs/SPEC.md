@@ -15028,7 +15028,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc. The field's descriptor still decides whether the position is a reference at all
   (`val i: I` over `Int` stores an `int` and has no annotation). The parameter guards and the
   constructor line table keep classifying the stored type: `N` admits null, so kotlinc emits no
-  `checkNotNullParameter` for it. Tests: `tests/nullable_value_class_nullability_e2e.rs`.
+  `checkNotNullParameter` for it, a top-level `var`'s setter included. The same holds for a
+  top-level property's facade field, a named object's and an enum's fields, and a companion
+  property hoisted onto its outer class. An explicit backing field (`val x: Any? field: String`)
+  declares its own type, so its field keeps that type's annotation. Tests:
+  `tests/nullable_value_class_nullability_e2e.rs`.
 
 - **A `try` and a `return` own their own `LineNumberTable` entries.** Four rules, each measured
   against the reference compiler and each previously absent, so a debugger stepping through a
