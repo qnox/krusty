@@ -2150,6 +2150,8 @@ mod object_value_inference_e2e;
 mod omitted_default_generic_overload_e2e;
 #[path = "one_armed_when_fallthrough_e2e.rs"]
 mod one_armed_when_fallthrough_e2e;
+#[path = "platform_implicit_receiver_member_e2e.rs"]
+mod platform_implicit_receiver_member_e2e;
 #[path = "private_constructor_accessors_e2e.rs"]
 mod private_constructor_accessors_e2e;
 #[path = "private_inline_property_ref_e2e.rs"]
