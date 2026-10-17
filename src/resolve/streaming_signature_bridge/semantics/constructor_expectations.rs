@@ -164,14 +164,18 @@ impl ProductionSignatureSemantics<'_> {
                     let mut constructor = constructor.clone();
                     constructor.owner.get_or_insert(internal);
                     let parameters = parameters(&constructor, &slots);
-                    // A constructor whose parameter cannot take the postponed lambda or reference
-                    // is inapplicable (`Engine(config)` for `Engine { ... }`); it must not shape
-                    // the argument and hide the companion `invoke` the call actually selects.
+                    // A constructor whose parameter cannot take the postponed lambda is
+                    // inapplicable (`Engine(config)` for `Engine { ... }`); it must not shape the
+                    // argument and hide the companion `invoke` the call actually selects. A
+                    // callable reference may still be a reflection value (`KProperty0<T>`).
                     let admits_postponed =
                         slots.iter().zip(&parameters).all(|(source, parameter)| {
                             !source.and_then(|source| arguments.get(source)).is_some_and(
                                 |argument| {
-                                    !matches!(argument, crate::fir::SigCallArgumentProbe::Typed(_))
+                                    matches!(
+                                        argument,
+                                        crate::fir::SigCallArgumentProbe::PostponedLambda { .. }
+                                    )
                                 },
                             ) || resolver.admits_function_value(*parameter)
                         });

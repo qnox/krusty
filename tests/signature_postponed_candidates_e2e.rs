@@ -69,3 +69,45 @@ fn postponed_lambdas_are_shaped_by_the_candidates_that_take_them() {
         );
     }
 }
+
+/// A lambda's written parameter type must accept what an overload passes there: `{ value: String ->
+/// }` does not fit `Scope.(Int) -> Unit` merely because both take one value parameter.
+const SHAPED_LIBRARY: &str = r#"
+package lib
+
+class Scope {
+    val log = StringBuilder()
+    fun mark(step: String) { log.append(step) }
+}
+
+fun select(body: Scope.(Int) -> Unit): String = "receiver"
+fun select(body: (String) -> Unit): String = "plain"
+"#;
+
+const SHAPED_MAIN: &str = r#"
+class Holder {
+    fun selected() = lib.select { value: String -> value.length }
+}
+
+fun box(): String {
+    if (Holder().selected() != "plain") return "plain"
+    return "OK"
+}
+"#;
+
+#[test]
+fn a_written_lambda_parameter_type_excludes_a_receiver_overload() {
+    let sources = [("Library.kt", SHAPED_LIBRARY), ("Main.kt", SHAPED_MAIN)];
+    common::assert_sources_accepted_like_kotlinc(&sources, &[]);
+    let classes = common::classes_against_kotlinc_module(&sources);
+    assert_eq!(
+        classes.krusty.keys().collect::<Vec<_>>(),
+        classes.reference.keys().collect::<Vec<_>>()
+    );
+    for (class, reference) in &classes.reference {
+        assert!(
+            classes.krusty[class] == *reference,
+            "{class} differs from kotlinc"
+        );
+    }
+}

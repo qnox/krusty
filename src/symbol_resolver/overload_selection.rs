@@ -1489,17 +1489,22 @@ fn fun_arg_matches(src: &dyn SymbolSource, param: &Ty, arg: &Ty, lambda_literal:
         _ => *param,
     };
     // A lambda literal declares only value parameters: `{ name -> }` fits `Scope.(String) -> Unit`,
-    // whose receiver and context parameters bind implicitly.
+    // whose receiver and context parameters bind implicitly. A parameter type written on the
+    // lambda must still accept the value the function type passes there.
     let declares_value_parameters = |param: Ty| match (param, *arg) {
-        (Ty::Fun(param), Ty::Fun(lambda)) => {
-            lambda_literal
-                && !lambda.has_receiver
+        (Ty::Fun(param), Ty::Fun(lambda)) if lambda_literal => {
+            let implicit = param.context_count + usize::from(param.has_receiver);
+            !lambda.has_receiver
                 && lambda.context_count == 0
-                && param
-                    .params
-                    .len()
-                    .saturating_sub(param.context_count + usize::from(param.has_receiver))
-                    == lambda.params.len()
+                && param.params.len().saturating_sub(implicit) == lambda.params.len()
+                && param.params.iter().skip(implicit).zip(&lambda.params).all(
+                    |(passed, declared)| {
+                        matches!(declared, Ty::Error)
+                            || matches!(passed.non_null(), Ty::TyParam(..))
+                            || matches!(declared.non_null(), Ty::TyParam(..))
+                            || resolution_subtype(src, *passed, *declared)
+                    },
+                )
         }
         _ => false,
     };
