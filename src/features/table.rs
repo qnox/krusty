@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use super::LanguageVersionPolicy;
+use super::{DeprecationWarningFormat, LanguageVersionPolicy};
 use crate::kotlin_version::KotlinVersion;
 use crate::language_version::LanguageVersion;
 
@@ -129,24 +129,22 @@ impl LanguageFeature {
     /// kotlinc's `toDeprecationWarningMessage`: the warning a diagnostic reports while this feature,
     /// which turns it into an error, is still off.
     pub fn deprecation_warning_message(&self, message: &str) -> String {
-        let mut warning = message.to_string();
-        if warning.ends_with('.') {
-            warning.push(' ');
-        } else if !warning.ends_with(char::is_whitespace) {
-            warning.push_str(". ");
-        }
-        match self.since_version {
-            Some(since) => warning.push_str(&format!(
-                "This will become an error in language version {since}."
-            )),
-            None => warning.push_str("This will become an error in a future release."),
-        }
+        self.deprecation_warning_format().message(message)
+    }
+
+    pub(super) fn deprecation_warning_format(&self) -> DeprecationWarningFormat {
+        let mut suffix = match self.since_version {
+            Some(since) => {
+                format!("This will become an error in language version {since}.")
+            }
+            None => "This will become an error in a future release.".to_string(),
+        };
         if let Some(issue) = &self.issue {
-            warning.push_str(&format!(
+            suffix.push_str(&format!(
                 " See https://youtrack.jetbrains.com/issue/{issue}."
             ));
         }
-        warning
+        DeprecationWarningFormat { suffix }
     }
 
     /// kotlinc's `forcesPreReleaseBinariesIfEnabled`: enabling a feature that no stable language

@@ -10,7 +10,6 @@
 
 use super::*;
 
-const FEATURE: &str = "ForbidUselessTypeArgumentsIn25";
 const NOT_A_CLASS: &str = "only classes are allowed on the left-hand side of a class literal.";
 
 /// The typealias a class literal's left-hand side names.
@@ -137,22 +136,28 @@ impl Checker<'_> {
             .file
             .call_type_args
             .get(&receiver.0)
-            .map_or(0, Vec::len);
+            .map_or(0, |arguments| arguments.len());
         if arguments == 0 {
             return None;
         }
-        let list = *self.file.type_argument_list_spans.get(&receiver.0)?;
+        let list = self.file.call_type_args.get(&receiver.0)?.span;
         let forbid = self.file.forbid_useless_type_arguments;
         if self.qualifier_root_is_value(scope, name) {
             return None;
         }
         if let Some(reified) = scope.reified_tparam(name) {
+            let message = "type arguments are not allowed for type parameters.";
+            let warning = self
+                .file
+                .useless_type_arguments_warning_format
+                .as_ref()
+                .map(|format| format.message(message));
             self.report_deprecation_error(
                 list,
-                FEATURE,
                 forbid,
-                "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING",
-                "type arguments are not allowed for type parameters.",
+                warning.as_deref(),
+                crate::diag::CompilerWarningName::TypeArgumentsNotAllowed,
+                message,
             );
             // The diagnostic leaves the literal's type alone, as in kotlinc.
             return Some(reified);
@@ -181,7 +186,7 @@ impl Checker<'_> {
             let ty = self.obj_with_targs_name(scope, classifier, &reference);
             return Some(self.validate_class_literal_type_arguments(literal, receiver, ty));
         };
-        Some(self.check_class_literal_alias_type_arguments(literal, receiver, name, alias))
+        Some(self.check_class_literal_alias_type_arguments(scope, literal, receiver, name, alias))
     }
 
     /// Apply kotlinc's class-literal-only rule to the written arguments of the already-selected
@@ -189,6 +194,7 @@ impl Checker<'_> {
     /// retries lookup from `source_name`.
     pub(super) fn check_class_literal_alias_type_arguments(
         &mut self,
+        scope: &CheckerScope<'_>,
         literal: ExprId,
         receiver: ExprId,
         source_name: &str,
@@ -198,13 +204,13 @@ impl Checker<'_> {
             .file
             .call_type_args
             .get(&receiver.0)
-            .map_or(0, Vec::len);
+            .map_or(0, |arguments| arguments.len());
         debug_assert!(arguments != 0);
         let list = self
             .file
-            .type_argument_list_spans
+            .call_type_args
             .get(&receiver.0)
-            .copied()
+            .map(|arguments| arguments.span)
             .expect("written class-literal type arguments retain their list span");
         let forbid = self.file.forbid_useless_type_arguments;
         let alias = WrittenAlias::selected(source_name, alias);
@@ -220,25 +226,47 @@ impl Checker<'_> {
                 candidate_display::type_argument_count_wording(alias.formals.len()),
                 alias.display
             );
+            let warning = self
+                .file
+                .useless_type_arguments_warning_format
+                .as_ref()
+                .map(|format| format.message(&message));
             self.report_deprecation_error(
                 list,
-                FEATURE,
                 forbidden,
-                "WRONG_NUMBER_OF_TYPE_ARGUMENTS_IN_GET_CLASS_WARNING",
+                warning.as_deref(),
+                crate::diag::CompilerWarningName::WrongNumberOfTypeArgumentsInGetClass,
                 &message,
             );
             return useless_type.unwrap_or(Ty::Error);
         }
+        let applied = useless.then(|| {
+            let arguments = self.file.call_type_args[&receiver.0].arguments.clone();
+            self.alias_application_ty(
+                scope,
+                alias.formals.clone(),
+                alias.expansion,
+                source_name,
+                super::alias_projection::AliasArguments::Written(&arguments),
+                self.file.expr_spans[receiver.0 as usize],
+            )
+            .ty
+        });
+        let warning = self
+            .file
+            .useless_type_arguments_warning_format
+            .as_ref()
+            .map(|format| format.message(NOT_A_CLASS));
         self.report_deprecation_error(
             self.span(literal),
-            FEATURE,
             forbidden,
-            "CLASS_LITERAL_LHS_NOT_A_CLASS_WARNING",
+            warning.as_deref(),
+            crate::diag::CompilerWarningName::ClassLiteralLhsNotAClass,
             NOT_A_CLASS,
         );
         if !useless {
             return Ty::Error;
         }
-        useless_type.expect("useless alias has a projected semantic type")
+        applied.expect("a useless exact-arity alias application has a semantic type")
     }
 }

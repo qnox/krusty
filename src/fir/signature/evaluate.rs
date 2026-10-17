@@ -2078,6 +2078,32 @@ fn result_abbreviation<S: SignatureSemantics>(
         SigExpr::Call { target, .. } => {
             semantics.call_result_abbreviation(graph.callable_selection(target)?.origin)
         }
+        SigExpr::ClassLiteral {
+            classifier: Some(classifier),
+            ..
+        } => {
+            fn selected_type_abbreviation<S: SignatureSemantics>(
+                semantics: &S,
+                graph: &SignatureGraph,
+                expression: SigExprId,
+            ) -> Option<ResolvedTypeAbbreviation> {
+                match graph.expr(expression)? {
+                    SigExpr::Type { origin, .. } => semantics.type_result_abbreviation(origin),
+                    SigExpr::Nullable(base) | SigExpr::NonNullable(base) => {
+                        selected_type_abbreviation(semantics, graph, base)
+                    }
+                    _ => None,
+                }
+            }
+
+            selected_type_abbreviation(semantics, graph, classifier).map(|mut abbreviation| {
+                let mut path = Vec::with_capacity(abbreviation.argument_path.len() + 1);
+                path.push(0);
+                path.extend_from_slice(&abbreviation.argument_path);
+                abbreviation.argument_path = path.into_boxed_slice();
+                abbreviation
+            })
+        }
         SigExpr::Sequence { result, .. } => result_abbreviation(semantics, graph, result, memo),
         SigExpr::Nullable(base) | SigExpr::NonNullable(base) => {
             result_abbreviation(semantics, graph, base, memo)

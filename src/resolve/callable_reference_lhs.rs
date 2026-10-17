@@ -286,6 +286,7 @@ impl Checker<'_> {
             if class_literal && !arguments.is_empty() {
                 (
                     self.check_class_literal_alias_type_arguments(
+                        scope,
                         diagnostic_site,
                         segment_expression,
                         display_name,

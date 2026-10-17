@@ -197,17 +197,26 @@ fn qualified_alias_type_arguments_follow_the_class_literal_rule() {
     );
 }
 
-/// Signature solving and body checking must both discard the written `Int` and publish
-/// `KClass<Array<*>>` for this inferred property. The classfile comparison observes the finalized
-/// getter signature, not only the expression's transient checker type.
+/// The arguments remain diagnostically useless, but kotlinc still lets an exact-arity alias
+/// application contribute to the inferred declaration signature: this publishes
+/// `KClass<Array<Int>>`, not `KClass<Array<*>>`.
 #[test]
-fn an_inferred_useless_array_alias_literal_is_star_projected() {
-    common::assert_class_matches_kotlinc(
-        "InferredUselessAliasClassLiteral",
-        "\
+fn an_inferred_useless_array_alias_literal_preserves_its_applied_type() {
+    let source = "\
 typealias Arr<T> = Array<T>
 val literal = Arr<Int>::class
-",
+";
+    assert_matches_kotlinc(
+        &[("InferredUselessAliasClassLiteral.kt", source)],
+        &[],
+        &[],
+        &[format!(
+            "InferredUselessAliasClassLiteral.kt:2:15: {NOT_A_CLASS} {DEPRECATION}"
+        )],
+    );
+    common::assert_class_matches_kotlinc(
+        "InferredUselessAliasClassLiteral",
+        source,
         "InferredUselessAliasClassLiteralKt",
     );
 }

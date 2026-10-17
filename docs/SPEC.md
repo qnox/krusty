@@ -13733,10 +13733,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
       'typealias Yes2<T> = String'.`, on the list; a fitting count reports "only classes are
       allowed on the left-hand side of a class literal." on the literal. A useless form is a
       deprecation warning until the feature, and any other alias (`Lst<Int>::class` for
-      `typealias Lst<T> = List<T>`) is always the error. A useless literal keeps its type, the
-      expansion with each formal star-projected, and a reified one keeps `KClass<T>`. Signature
-      solving types an implicitly typed property's class literal with the same rule and leaves
-      the diagnostic to the checker (`TrFlags::CLASS_LITERAL_LHS`).
+      `typealias Lst<T> = List<T>`) is always the error. An exact-arity useless application still
+      applies its written arguments to the expansion: `Arr<Int>::class` denotes
+      `KClass<Array<Int>>`, while the checker independently reports those arguments as useless. A
+      wrong-arity application has no substitution and retains the projected expansion only while
+      the checker owns its exact diagnostic. A reified parameter keeps `KClass<T>`. Signature
+      solving follows the same rule for an implicitly typed property
+      (`TrFlags::CLASS_LITERAL_LHS`).
       (`tests/class_literal_type_arguments_e2e.rs`.)
   - `ErrorAboutDataClassCopyVisibilityChange`: a `data class` whose primary constructor is not
     public is reported at the constructor's visibility modifier unless it is annotated
