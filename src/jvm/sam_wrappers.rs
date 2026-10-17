@@ -8,8 +8,8 @@
 //! the interface and `FunctionAdapter`. Its one field holds the function value; its single method,
 //! typed as the interface declares it, calls the value's `invoke`; and `equals`/`hashCode` compare
 //! the wrapped values, so two wrappers of one function are equal. A function value converted to a
-//! Java interface uses that same shared class only under `-Xsam-conversions=class`, and then
-//! implements only the Java interface.
+//! Java interface uses that same shared class under `-Xsam-conversions=class` or inside an
+//! `inline` function, and then implements only the Java interface.
 //!
 //! Checked lowering marks such a conversion on its SAM target and captures the value as the
 //! conversion's lambda. This pass replaces each such lambda with a construction of the file's
@@ -37,7 +37,8 @@ impl SamWrapperRealizations {
 
 /// Wrap every function value converted to a Kotlin fun interface in the file's wrapper class for
 /// that interface. `class_java_sam` is `-Xsam-conversions=class`: a function value converted to a
-/// Java interface then uses the same shared class, without `FunctionAdapter`.
+/// Java interface then uses the same shared class, without `FunctionAdapter`, as it does inside an
+/// `inline` function in every mode.
 pub(super) fn realize(
     ir: &mut IrFile,
     facade: &str,
@@ -45,6 +46,7 @@ pub(super) fn realize(
 ) -> SamWrapperRealizations {
     let mut realizations = SamWrapperRealizations::default();
     let owners = expression_functions(ir);
+    let scopes = conversion_scopes(ir, &owners);
     let mut sites = ir
         .exprs
         .iter()
@@ -59,16 +61,15 @@ pub(super) fn realize(
             else {
                 return None;
             };
-            if !wraps(target, class_java_sam) {
+            let node = ExprId::try_from(node).expect("IR expression index exceeds ExprId");
+            let inline_scope = scopes.get(&node).copied();
+            if !wraps(target, class_java_sam, inline_scope.is_some()) {
                 return None;
             }
             let [value] = captures.as_slice() else {
                 panic!("a checked function-value SAM conversion captures exactly its value")
             };
-            let node = ExprId::try_from(node).expect("IR expression index exceeds ExprId");
-            let public_inline = owners
-                .get(&node)
-                .is_some_and(|function| ir.inline_fns.contains(function));
+            let public_inline = inline_scope == Some(InlineScope::Published);
             let source_line = ir.expr_source_lines.get(&node).copied().unwrap_or(0);
             Some((
                 node,
@@ -125,6 +126,8 @@ pub(super) fn realize(
         }
         // kotlinc gives the construction no line of its own: the line starts at the wrapped value.
         ir.expr_source_lines.remove(&node);
+        ir.mark_positionless(node);
+        ir.mark_positionless(construction);
     }
     realizations
 }
@@ -160,15 +163,97 @@ fn conversion_is_cast_operand(ir: &IrFile, node: ExprId) -> bool {
 
 /// Whether `target` converts an existing function value into the file's shared wrapper.
 ///
-/// A Kotlin fun interface always does. A Java interface does only under
-/// `-Xsam-conversions=class`. Representation details such as suspend, context parameters, bridge
-/// results, arity, or enclosing inline declarations do not select a different realization.
-fn wraps(target: &IrSamTarget, class_java_sam: bool) -> bool {
-    target.wraps_function_value && (target.kotlin_interface || class_java_sam)
+/// A Kotlin fun interface always does. A Java interface does under `-Xsam-conversions=class`, and
+/// inside an `inline` function whatever the mode: kotlinc never writes an `invokedynamic` there, so
+/// a caller in another module copies the class rather than relinking a call site. Representation
+/// details such as suspend, context parameters, bridge results, or arity do not select a different
+/// realization.
+fn wraps(target: &IrSamTarget, class_java_sam: bool, in_inline_function: bool) -> bool {
+    target.wraps_function_value && (target.kotlin_interface || class_java_sam || in_inline_function)
+}
+
+/// The `inline` function a conversion is written in, by whether its callers outside the file may
+/// inline it. A non-private one publishes the wrapper as `$sam$i$`, a public class; a private one
+/// keeps the file's ordinary `$sam$` wrapper.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InlineScope {
+    Published,
+    Private,
+}
+
+/// The inline scope of each function-value conversion written in an `inline` function. A caller
+/// in this file that inlines the function copies the conversion; the copy constructs the
+/// declaration's wrapper, as kotlinc's copy of the declaration's bytecode does.
+fn conversion_scopes(ir: &IrFile, owners: &HashMap<ExprId, FunId>) -> HashMap<ExprId, InlineScope> {
+    let lambda_classes = lambda_class_scopes(ir);
+    let conversions = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(node, expression)| match expression {
+            IrExpr::Lambda {
+                impl_fn,
+                sam: Some(_),
+                ..
+            } => Some((
+                ExprId::try_from(node).expect("IR expression index exceeds ExprId"),
+                super::lambda_classes::specialization_source(ir, *impl_fn),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let declared = conversions
+        .iter()
+        .filter_map(|&(node, implementation)| {
+            let function = *owners.get(&node)?;
+            Some((implementation, inline_scope(ir, &lambda_classes, function)?))
+        })
+        .collect::<HashMap<_, _>>();
+    conversions
+        .into_iter()
+        .filter_map(|(node, implementation)| Some((node, *declared.get(&implementation)?)))
+        .collect()
+}
+
+/// The inline scope of each realized lambda class's `invoke`: a lambda written in an inline
+/// function is a class of its own, and a conversion in its body is still that function's.
+fn lambda_class_scopes(ir: &IrFile) -> HashMap<FunId, InlineScope> {
+    ir.classes
+        .iter()
+        .filter_map(|class| class.lambda.as_ref())
+        .filter(|lambda| lambda.public_inline)
+        .map(|lambda| {
+            let scope = if lambda.public_inline_abi {
+                InlineScope::Published
+            } else {
+                InlineScope::Private
+            };
+            (lambda.invoke, scope)
+        })
+        .collect()
+}
+
+fn inline_scope(
+    ir: &IrFile,
+    lambda_classes: &HashMap<FunId, InlineScope>,
+    function: FunId,
+) -> Option<InlineScope> {
+    // Another file's inline function, retained here only to be inlined, declares its own wrapper.
+    if ir.foreign_inline_templates.contains(&function) {
+        return None;
+    }
+    if ir.inline_fns.contains(&function) {
+        return Some(if ir.method_visibility(function).is_private() {
+            InlineScope::Private
+        } else {
+            InlineScope::Published
+        });
+    }
+    lambda_classes.get(&function).copied()
 }
 
 /// The exact function whose body each reachable expression belongs to. This identity selects the
-/// public inline-wrapper ABI; it never decides whether the conversion is realized.
+/// inline-wrapper realization and ABI.
 ///
 /// A lambda's `inline_body` is outside the enclosing function's value namespace, but a function
 /// value converted there is still that function's conversion.
