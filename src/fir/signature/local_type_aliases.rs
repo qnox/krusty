@@ -123,9 +123,7 @@ impl SignatureGraph {
             target.in_projection() || written.in_projection(),
             target.out_projection() || written.out_projection(),
         );
-        let mut spellings = HashMap::default();
-        spellings.insert(target.span, written.clone());
-        let syntax = self.add_type_syntax_with_source_spellings(&target, &spellings);
+        let syntax = self.add_type_syntax_with_source_spelling(&target, written);
         let formals = formals
             .iter()
             .map(|formal| self.intern_name(formal))

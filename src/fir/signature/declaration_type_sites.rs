@@ -114,16 +114,13 @@ impl SignatureGraph {
             .transient_written_type_ref(id, &self.type_names)
     }
 
-    pub(crate) fn add_type_syntax_with_source_spellings(
+    pub(super) fn add_type_syntax_with_source_spelling(
         &mut self,
         ty: &crate::ast::TypeRef,
-        spellings: &HashMap<crate::diag::Span, crate::ast::TypeRef>,
+        written: &crate::ast::TypeRef,
     ) -> HeaderTypeId {
-        let first = self.type_syntax.type_count();
-        let syntax = self.type_syntax.add_type(ty, &mut self.type_names);
         self.type_syntax
-            .capture_source_spellings(first, spellings, &mut self.type_names);
-        syntax
+            .add_type_with_source_spelling(ty, written, &mut self.type_names)
     }
 
     pub(crate) fn written_type_node(

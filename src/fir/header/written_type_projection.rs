@@ -3,6 +3,24 @@
 use super::*;
 
 impl HeaderSyntaxArena {
+    /// Add a graph-owned semantic template together with its complete written tree.
+    ///
+    /// Unlike [`HeaderSyntaxArena::capture_source_spellings`], this relationship is already
+    /// structural: it must not rediscover descendants by source span. Function-type children may
+    /// share their enclosing type's span, and treating that equality as an alias-expansion
+    /// sidecar would attach the root below itself indefinitely.
+    pub(in crate::fir) fn add_type_with_source_spelling(
+        &mut self,
+        expanded: &TypeRef,
+        written: &TypeRef,
+        names: &mut LookupNames,
+    ) -> HeaderTypeId {
+        let expanded = self.add_type(expanded, names);
+        let written = self.add_type(written, names);
+        self.source_spellings.insert(expanded, written);
+        expanded
+    }
+
     fn transient_type_ref_selected(
         &self,
         id: HeaderTypeId,
@@ -189,5 +207,57 @@ impl HeaderSyntaxArena {
         let mut ids = Vec::new();
         visit(self, root, classifier_segment, &mut ids)?;
         Some(ids)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf(name: &str, span: crate::diag::Span) -> TypeRef {
+        TypeRef {
+            name: name.to_owned(),
+            flags: TrFlags::default(),
+            arg: None,
+            targs: Vec::new(),
+            span,
+            fun_params: Vec::new(),
+            fun_context_count: 0,
+            qualifier_arguments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_explicit_written_function_tree_does_not_rediscover_its_root_by_span() {
+        let shared = crate::diag::Span::new(7, 13);
+        let result = crate::diag::Span::new(20, 24);
+        let function = |receiver| TypeRef {
+            name: "<fun>".to_owned(),
+            flags: TrFlags::default().with_fun_has_receiver(true),
+            arg: Some(Box::new(leaf("Unit", result))),
+            targs: Vec::new(),
+            span: shared,
+            fun_params: vec![receiver],
+            fun_context_count: 0,
+            qualifier_arguments: Vec::new(),
+        };
+        let expanded = function(leaf("\0formal", shared));
+        let written = function(leaf("String", shared));
+        let mut arena = HeaderSyntaxArena::default();
+        let mut names = LookupNames::default();
+
+        let root = arena.add_type_with_source_spelling(&expanded, &written, &mut names);
+        let projected = arena
+            .transient_written_type_ref(root, &names)
+            .expect("the explicit written tree must remain finite and materializable");
+
+        assert!(projected.fun_has_receiver());
+        assert_eq!(projected.fun_params.len(), 1);
+        assert_eq!(projected.fun_params[0].name, "String");
+        assert_eq!(projected.fun_params[0].span, shared);
+        assert_eq!(
+            projected.arg.as_deref().map(|result| result.name.as_str()),
+            Some("Unit")
+        );
     }
 }
