@@ -75,7 +75,7 @@ impl ResolverInputs<'_> {
             .0
         {
             crate::symbol_resolver::CandidateSelectionWithTies::Selected(path) => {
-                Some(path.classifier)
+                Some(path.selected.classifier)
             }
             crate::symbol_resolver::CandidateSelectionWithTies::None
             | crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(_) => None,

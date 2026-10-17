@@ -10,6 +10,7 @@ use crate::ir::{
 use crate::types::{Ty, TypeName};
 
 use super::{
+    body_local_ownership::{semantic_owner, SemanticOwner},
     constructors::classifier_type_parameter_ordinal,
     generics::{attach_accessor_type_parameters, declaration_type_parameters},
     lower_body_with_context, FirFileLoweringFailure, LocalCallableLoweringContext,
@@ -127,6 +128,10 @@ pub(super) fn predeclare_properties(
             // may also still be waiting for their selected Pass-2 group to publish.
             continue;
         };
+        let enclosing = match semantic_owner(index, declaration) {
+            SemanticOwner::Complete(enclosing) => enclosing,
+            SemanticOwner::Deferred => continue,
+        };
         let property = index
             .property_for_declaration(declaration)
             .and_then(|property| index.property(property));
@@ -154,7 +159,7 @@ pub(super) fn predeclare_properties(
         let class = entry_class
             .map(Ok)
             .or_else(|| {
-                index.enclosing_classifier(declaration).map(|classifier| {
+                enclosing.map(|classifier| {
                     ir.checked_classifier_classes
                         .get(&classifier.declaration)
                         .copied()

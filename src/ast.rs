@@ -23,7 +23,7 @@ mod external_modifier_targets;
 mod operators;
 mod property_initializers;
 mod type_refs;
-pub use type_refs::TrFlags;
+pub use type_refs::{QualifierSegmentArguments, TrFlags, TypeRef};
 mod use_site_annotations;
 pub use binary_reference_tokens::BinaryReferenceTokens;
 pub(crate) use call_shape::explicit_call_receiver;
@@ -555,27 +555,6 @@ pub struct ForRange {
     pub kind: RangeKind,
     /// The `..`, `..<`, `until` or `downTo` token.
     pub operator_span: Span,
-}
-
-#[derive(Clone, Debug)]
-pub struct TypeRef {
-    pub name: String,
-    /// Nullability, function-type shape, and use-site projection flags.
-    pub flags: TrFlags,
-    /// The return type of function syntax. Classifier type arguments, including `Array<T>`, live in
-    /// `targs`; keeping one generic classifier in a second representation loses projections and makes
-    /// every type decoder grow an Array-only branch.
-    pub arg: Option<Box<TypeRef>>,
-    /// All generic type arguments on a class type (`Map<K, V>` → `[K, V]`). Empty for non-generic
-    /// types. JVM-erased in descriptors but kept so the front end recovers member/element types.
-    pub targs: Vec<TypeRef>,
-    pub span: Span,
-    /// For function types `(A, B) -> R`: the parameter types. Empty for non-function types and
-    /// zero-argument function types. `arg` holds the return type; see
-    /// [`TypeRef::is_function_type_syntax`] for the structural discriminator.
-    pub fun_params: Vec<TypeRef>,
-    /// Leading physical parameters that bind as context receivers in a lambda.
-    pub fun_context_count: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -1792,6 +1771,10 @@ pub struct File {
     /// whether the access is a deprecated or invalid singleton value access.
     pub standalone_type_argument_qualifiers: crate::fx_hash::HashSet<u32>,
     pub anonymous_object_classes: crate::fx_hash::HashMap<ExprId, DeclId>,
+    /// The `<…>` lists written on an annotation name's segments before the last one
+    /// (`@part1<Int>.part2.Anno`), keyed by the annotation reference's start.
+    pub annotation_qualifier_arguments:
+        crate::fx_hash::HashMap<u32, Vec<QualifierSegmentArguments>>,
     /// Anonymous class declaration → exact lexically enclosing source function.
     pub anonymous_object_enclosing_functions:
         crate::fx_hash::HashMap<DeclId, AnonymousEnclosingFunction>,
@@ -2112,6 +2095,7 @@ impl File {
         self.trailing_call_close_paren_ends = Default::default();
         self.infix_calls = Default::default();
         self.call_type_args = Default::default();
+        self.annotation_qualifier_arguments = Default::default();
         self.standalone_type_argument_qualifiers = Default::default();
         self.anonymous_object_classes = Default::default();
         self.anonymous_object_enclosing_functions = Default::default();

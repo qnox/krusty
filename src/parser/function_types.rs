@@ -88,6 +88,7 @@ impl Parser<'_> {
             span,
             fun_params,
             fun_context_count,
+            qualifier_arguments: Vec::new(),
         }
     }
 
@@ -103,6 +104,7 @@ impl Parser<'_> {
             span,
             fun_params: Vec::new(),
             fun_context_count: 0,
+            qualifier_arguments: Vec::new(),
         }
     }
 }

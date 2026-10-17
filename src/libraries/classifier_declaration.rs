@@ -11,7 +11,8 @@ pub struct AliasExpansion {
     /// The alias's target classifier. A template applies only when the spelling that named it
     /// actually resolved to this classifier.
     pub target: TypeName,
-    /// The alias's own type-parameter names, in declaration order: the substitution domain.
+    /// The alias's semantic type-parameter identities, in declaration order: the substitution
+    /// domain. Source spellings remain declaration metadata and need not equal these identities.
     pub formals: Vec<String>,
     /// The target applied to its arguments, with alias parameters represented as `Ty::TyParam`.
     pub expansion: Ty,

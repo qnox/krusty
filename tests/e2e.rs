@@ -1649,8 +1649,6 @@ mod nothing_type_argument_signature_e2e;
 mod nullable_double_type_param_equality_e2e;
 #[path = "nullable_uint_property_e2e.rs"]
 mod nullable_uint_property_e2e;
-#[path = "object_qualifier_type_arguments_e2e.rs"]
-mod object_qualifier_type_arguments_e2e;
 #[path = "only_input_integer_literal_e2e.rs"]
 mod only_input_integer_literal_e2e;
 #[path = "only_input_type_producer_e2e.rs"]
@@ -1727,6 +1725,8 @@ mod suspend_value_class_results_e2e;
 mod suspending_concat_operands_e2e;
 #[path = "type_parameter_nullability_annotations_e2e.rs"]
 mod type_parameter_nullability_annotations_e2e;
+#[path = "e2e/type_resolution.rs"]
+mod type_resolution;
 #[path = "unit_expression_body_return_line_e2e.rs"]
 mod unit_expression_body_return_line_e2e;
 #[path = "unsigned_operations_e2e.rs"]

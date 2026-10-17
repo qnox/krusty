@@ -155,7 +155,14 @@ pub(crate) fn package_property(
 pub(crate) fn package_alias(alias: &crate::ir::IrTypeAlias) -> TypeAliasMeta {
     TypeAliasMeta {
         name: alias.name.clone(),
-        formals: alias.formals.clone(),
+        formals: alias
+            .formals
+            .iter()
+            .map(|formal| crate::metadata::builder::TypeAliasFormalMeta {
+                source_name: formal.source_name.clone(),
+                semantic_name: formal.semantic_name.clone(),
+            })
+            .collect(),
         expansion: alias.expansion,
         visibility: alias.visibility,
         expansion_spelling: alias.expansion_spelling.clone(),

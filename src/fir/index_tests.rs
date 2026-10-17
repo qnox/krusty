@@ -1,7 +1,8 @@
-use crate::diag::DiagSink;
+use crate::diag::{DiagSink, Span};
 use crate::features::LangFeatures;
 use crate::libraries::EmptySymbolSource;
 use crate::source::SourceInput;
+use crate::types::Visibility;
 
 use super::*;
 
@@ -1080,4 +1081,66 @@ fn value_class_override_publishes_the_generic_interface_edge() {
     ));
     assert!(edge.overridden_is_interface);
     assert_eq!(edge.overridden_owner.segment_ref(), "Comparable");
+}
+
+/// Checked local signatures are published per body group, and each group asked the WHOLE
+/// declaration inventory which of its entries are local classes — linear in the module, once per
+/// body: quadratic. The index lists local-class declarations itself, in declaration-id order.
+#[test]
+fn local_class_declarations_are_listed_by_the_index() {
+    let anchor = |source, lo, kind| DeclarationAnchor {
+        source,
+        range: Span::new(lo, lo + 1),
+        owner: None,
+        kind,
+        sibling: 0,
+    };
+    let source = SourceFileId::from_raw(0);
+    let mut declarations = DeclarationIds::default();
+    let function = declarations.intern(anchor(source, 0, DeclarationKind::Function));
+    let first_local = declarations.intern(DeclarationAnchor {
+        source,
+        range: Span::new(1, 2),
+        owner: Some(function),
+        kind: DeclarationKind::Classifier,
+        sibling: 0,
+    });
+    let second_local = declarations.intern(DeclarationAnchor {
+        source,
+        range: Span::new(3, 4),
+        owner: Some(function),
+        kind: DeclarationKind::Classifier,
+        sibling: 1,
+    });
+    let header = |kind, owner, local| ResolvedDeclarationHeader {
+        kind,
+        owner,
+        name: None,
+        visibility: Visibility::Public,
+        flags: DeclarationFlags::default().with(DeclarationFlags::LOCAL_CLASS, local),
+        initialization_order: None,
+    };
+    let mut index = ResolvedModuleIndex::default();
+    index.publish_declarations(declarations);
+    assert_eq!(index.local_class_declarations(), &[]);
+    // Out of id order: the list is by identity, not by publication.
+    index.publish_declaration_header(
+        second_local,
+        header(DeclarationKind::Classifier, Some(function), true),
+        Some("Second"),
+    );
+    index.publish_declaration_header(
+        function,
+        header(DeclarationKind::Function, None, false),
+        Some("f"),
+    );
+    index.publish_declaration_header(
+        first_local,
+        header(DeclarationKind::Classifier, Some(function), true),
+        Some("First"),
+    );
+    assert_eq!(
+        index.local_class_declarations(),
+        &[first_local, second_local]
+    );
 }

@@ -198,7 +198,7 @@ pub(super) fn symbolic(
     index: &crate::fir::ResolvedModuleIndex,
     declaration: crate::fir::DeclarationId,
     declared_names: &[String],
-    declared_bounds: &[(String, TypeRef)],
+    declared_bounds: &[(String, crate::fir::HeaderTypeId, TypeRef)],
     reuse_callable_contract: bool,
     semantics: &super::ProductionSignatureSemantics<'_>,
     source: crate::fir::SourceFileId,
@@ -213,9 +213,13 @@ pub(super) fn symbolic(
         owner: declaration,
         source,
     };
+    let semantic_bounds = declared_bounds
+        .iter()
+        .map(|(owner, _, bound)| (owner.clone(), bound.clone()))
+        .collect::<Vec<_>>();
     let provisional = super::super::TParams::symbolic_from_decl_enclosing(
         declared_names,
-        declared_bounds,
+        &semantic_bounds,
         &|name| semantics.qualified_type_classifier(scope, name),
         &|name| {
             // This declaration's own parameter shadows an enclosing parameter with the same name.
@@ -236,8 +240,9 @@ pub(super) fn symbolic(
     // ordinary header path, retain every diagnostic, and keep the authoritative callable shape.
     if reuse_callable_contract {
         let mut first_failure = None;
-        for (_, bound) in declared_bounds {
-            if let Err(diagnostic) = semantics.resolve_callable_header_bound(scope, bound) {
+        for (_, syntax, bound) in declared_bounds {
+            if let Err(diagnostic) = semantics.resolve_callable_header_bound(scope, *syntax, bound)
+            {
                 first_failure.get_or_insert(diagnostic);
             }
         }
@@ -247,8 +252,8 @@ pub(super) fn symbolic(
         with_classifier_bound_scope(semantics, scope, &provisional, declared_names, |lexical| {
             let mut first_failure = None;
             let mut resolved = Vec::with_capacity(declared_bounds.len());
-            for (owner, bound) in declared_bounds {
-                match semantics.resolve_classifier_header_bound(scope, lexical, bound) {
+            for (owner, syntax, bound) in declared_bounds {
+                match semantics.resolve_classifier_header_bound(scope, lexical, *syntax, bound) {
                     Ok(bound) => resolved.push((owner.clone(), bound)),
                     Err(diagnostic) => {
                         first_failure.get_or_insert(diagnostic);

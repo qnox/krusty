@@ -17,7 +17,9 @@ use super::{ResolvedInterfaceDelegation, ResolvedParameterIdentity};
 mod arena_ranges;
 mod call_arguments;
 mod call_result_constraints;
+mod declaration_type_sites;
 mod expressions;
+mod local_type_aliases;
 mod postponed_argument_transaction;
 mod resolved_types;
 mod selections;
@@ -27,7 +29,13 @@ pub use call_arguments::{ResolvedSigCallArgument, SigCallArgument, SigCallArgume
 pub use call_result_constraints::SignatureCallResultConstraint;
 pub use classifier_headers::ResolvedClassifierHeader;
 pub(crate) use classifier_headers::{superclass_slot, DeclaredSuperclass};
+use declaration_type_sites::DeclarationTypeSites;
+pub use declaration_type_sites::{ExplicitClassifierParents, ExplicitSignatureTypes};
 pub use expressions::*;
+pub(crate) use local_type_aliases::{
+    LocalTypeAliasTemplateId, LocalTypeTemplateFlags, LocalTypeTemplateNode,
+    LocalTypeTemplateNodeId, LocalTypeTemplateTarget, WrittenTypeApplication,
+};
 pub use postponed_argument_transaction::PostponedArgumentTransaction;
 pub use resolved_types::*;
 pub use selections::*;
@@ -102,29 +110,6 @@ pub struct LocalSignatureEffect {
     pub determines_result: bool,
 }
 
-/// Compact explicit type expressions captured while a body-local declaration's lexical aliases
-/// are in scope. The expressions are resolved during Pass 1 and the whole record is destroyed with
-/// the signature graph; only the resulting stable declaration signature is published.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ExplicitSignatureTypes {
-    pub parameters: OperandRange,
-    pub result: Option<SigExprId>,
-    pub receiver: Option<SigExprId>,
-    /// An explicitly declared backing-field type is a property-header fact, distinct from the
-    /// property's public result type. Body-local declarations keep it as a compact expression so
-    /// lexical aliases can be resolved before the signature graph is destroyed.
-    pub storage: Option<SigExprId>,
-}
-
-/// Classifier parent types captured while a body-local alias scope is active. Like explicit member
-/// types, these expressions are temporary Pass-1 constraints; only their resolved semantic types
-/// may be published into the stable classifier header.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ExplicitClassifierParents {
-    pub superclass: Option<SigExprId>,
-    pub supertypes: OperandRange,
-}
-
 /// All temporary state for signature inference. Dropping this value drops the entire constraint
 /// graph in bulk before checked FIR streaming begins.
 #[derive(Default)]
@@ -143,6 +128,10 @@ pub struct SignatureGraph {
     delegate_sites: Vec<SignatureDelegateSite>,
     type_syntax: HeaderSyntaxArena,
     type_names: LookupNames,
+    declaration_type_sites: DeclarationTypeSites,
+    written_type_applications: HashMap<SigExprId, WrittenTypeApplication>,
+    local_type_alias_templates: Vec<local_type_aliases::LocalTypeAliasTemplate>,
+    local_type_template_nodes: Vec<LocalTypeTemplateNode>,
     constraints: Vec<SignatureConstraint>,
     constraint_by_declaration: HashMap<DeclarationId, usize>,
     local_effects: HashMap<DeclarationId, LocalSignatureEffect>,
@@ -151,14 +140,6 @@ pub struct SignatureGraph {
 }
 
 impl SignatureGraph {
-    pub fn add_type_syntax(&mut self, ty: &crate::ast::TypeRef) -> HeaderTypeId {
-        self.type_syntax.add_type(ty, &mut self.type_names)
-    }
-
-    pub fn transient_type_ref(&self, id: HeaderTypeId) -> Option<crate::ast::TypeRef> {
-        self.type_syntax.transient_type_ref(id, &self.type_names)
-    }
-
     pub fn add_expr(&mut self, expression: SigExpr) -> SigExprId {
         let id = SigExprId::from_raw(next_id(self.nodes.len(), "signature expressions"));
         self.nodes.push(expression);
@@ -408,6 +389,7 @@ impl SignatureGraph {
         declaration: DeclarationId,
         parameters: impl IntoIterator<Item = SigExprId>,
         result: Option<SigExprId>,
+        getter_result: Option<SigExprId>,
         receiver: Option<SigExprId>,
         storage: Option<SigExprId>,
     ) {
@@ -417,6 +399,7 @@ impl SignatureGraph {
             .or_insert(ExplicitSignatureTypes {
                 parameters,
                 result,
+                getter_result,
                 receiver,
                 storage,
             });
@@ -480,6 +463,8 @@ impl SignatureGraph {
             + self.qualified_call_coordinates.len() * std::mem::size_of::<QualifiedCallCoordinate>()
             + self.delegate_sites.len() * std::mem::size_of::<SignatureDelegateSite>()
             + self.type_syntax.storage_payload_bytes()
+            + self.declaration_type_sites.storage_payload_bytes()
+            + self.written_type_application_payload_bytes()
             + self.type_names.storage_payload_bytes()
             + self.constraints.len() * std::mem::size_of::<SignatureConstraint>()
             + self.local_effects.len()
@@ -644,6 +629,16 @@ pub trait SignatureSemantics: PostponedArgumentTransaction {
         origin: OriginId,
         syntax: HeaderTypeId,
         graph: &SignatureGraph,
+    ) -> Result<ResolvedTy, DiagnosticId>;
+
+    /// Resolve a graph-owned written type application. The semantic adapter first binds the
+    /// declaration-site target, then asks the graph evaluator for exactly the argument nodes that
+    /// belong to that target. Package-owned argument subtrees are deliberately not evaluated.
+    fn resolve_written_type_application(
+        &self,
+        expression: SigExprId,
+        graph: &SignatureGraph,
+        evaluate_argument: &mut dyn FnMut(SigExprId) -> Result<ResolvedTy, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     fn resolve_contextual_type(
