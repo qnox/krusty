@@ -64,7 +64,7 @@ pub(super) fn walk_qualifier<S: SymbolSource + ?Sized>(
 /// Walk the same committed namespace path while retaining the stable identity of the final
 /// classifier declaration selected from a provider record. A typealias record normalizes its
 /// classifier facet to the target, so callers that need the alias template must carry both facts.
-fn walk_qualifier_with_declaration_identity<S: SymbolSource + ?Sized>(
+pub(super) fn walk_qualifier_with_declaration_identity<S: SymbolSource + ?Sized>(
     source: &S,
     mut prefix: ResolvedQualifier,
     segments: &[(Option<ExprId>, String)],
