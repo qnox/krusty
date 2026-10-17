@@ -1622,8 +1622,10 @@ pub(crate) fn apply_only_input_type_bindings(
             }
             let declared = ty_subst_keep_unbound(declared, bindings);
             let actual = argument.ty();
+            // An integer literal is an input of a nullable solution too: `assertEquals(2001,
+            // jobId)` with `jobId: Long?` solves `T := Long?`, and the literal becomes a `Long`.
             actual.mentions_error()
-                || argument.adapts_integer_literal_to(declared)
+                || argument.adapts_integer_literal_to(declared.non_null())
                 || argument.binds_unconstrained_result_to(source, declared)
                 || resolution_subtype(source, actual, declared)
         })
@@ -1898,6 +1900,30 @@ pub(crate) fn infer_generic_return_bindings_from_symbols(
     let mut projected = generic_sig.clone();
     projected.ret = declared;
     infer_generic_return_bindings_impl(Some(source), &projected, expected, admits)
+}
+
+/// Bindings for a nested producer whose result cannot reach `lower`, the type an outer call
+/// variable already has from another argument's lower-bound evidence.
+///
+/// Kotlin keeps both as lower bounds of the outer variable and fixes it to their common supertype
+/// (`eq(mutable, emptyList())` gives `List<String>`), so the producer is typed against `lower`'s
+/// supertype of its own result classifier: `MutableList<String>` is read as `List<String>`.
+pub(crate) fn infer_generic_return_bindings_from_lower_face(
+    source: &dyn SymbolSource,
+    generic_sig: &GenericSig,
+    lower: Ty,
+    admits: impl FnMut(Ty, Ty) -> bool,
+) -> Option<GSigBinds> {
+    let Ty::Obj(owner, _) = generic_sig.ret.non_null() else {
+        return None;
+    };
+    let face = supertype_with_classifier(source, lower.non_null(), owner)?;
+    let face = if lower.is_nullable() {
+        Ty::nullable(face)
+    } else {
+        face
+    };
+    infer_generic_return_bindings_from_symbols(source, generic_sig, face, admits)
 }
 
 /// The denotable face of a platform lower bound that `actual` inhabits.

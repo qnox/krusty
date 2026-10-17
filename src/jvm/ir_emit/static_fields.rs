@@ -133,9 +133,8 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
         // A reference-typed facade static carries kotlinc's nullability annotation like any other
         // backing field, except a `lateinit` one, which holds null until assigned.
-        let nullability = field_nullability_kind(s.ty);
         let field_ann = (!s.is_lateinit)
-            .then(|| super::nullability_annotation(nullability))
+            .then(|| super::declared_static_annotation(s))
             .flatten();
         // A `const val` initialized by a compile-time literal carries a `ConstantValue` attribute (the
         // JVM initializes the field; its `<clinit>` store is omitted below) — byte-identical to kotlinc.
@@ -362,7 +361,9 @@ pub(super) fn emit_default_static_accessor(
                 nullability: acc_ann,
                 annotations: declared.map(|declared| &declared.setter),
             },
-            param_assertions && nullability == 1,
+            // The guard checks the stored value: a non-null `N` over a `String?` carrier admits
+            // null there, so kotlinc emits none.
+            param_assertions && nullability == 1 && field_nullability_kind(s.ty) == 1,
         );
         return;
     }
@@ -607,15 +608,9 @@ pub(super) fn declare(
         let acc = if synthetic { acc | 0x1000 } else { acc };
         // Reference-typed statics, including private hoisted fields, carry nullability annotations,
         // except a `lateinit` one, which holds null until assigned.
-        let ann =
-            (!synthetic && !s.is_lateinit && (desc.starts_with('L') || desc.starts_with('[')))
-                .then(|| {
-                    if s.ty.is_nullable() {
-                        "Lorg/jetbrains/annotations/Nullable;"
-                    } else {
-                        "Lorg/jetbrains/annotations/NotNull;"
-                    }
-                });
+        let ann = (!synthetic && !s.is_lateinit)
+            .then(|| super::declared_static_annotation(s))
+            .flatten();
         let signature = property_jvm_signatures(signature_formatter, &s.ty, None)
             .field
             .filter(|_| !s.property_delegate);
@@ -717,7 +712,7 @@ pub(super) fn emit_enum_static_fields(
         // `Lazy<KSerializer<Object>>`), and a reference-typed one carries kotlinc's nullability
         // annotation — the same treatment the class and facade field tables give their statics.
         let signatures = property_jvm_signatures(signature_formatter, &s.ty, None);
-        let ann = nullability_annotation(field_nullability_kind(s.ty)).filter(|_| !s.is_lateinit);
+        let ann = super::declared_static_annotation(s).filter(|_| !s.is_lateinit);
         // A folded `const val` is its `ConstantValue`; `<clinit>` does not store it.
         let constant = (s.init)
             .filter(|_| s.is_const && !s.is_var && !ir.is_jvm_companion_hoisted_static(index))
