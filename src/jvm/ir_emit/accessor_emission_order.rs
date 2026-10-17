@@ -18,7 +18,7 @@ pub(super) fn emit(
     env: &EmitEnv<'_>,
     writer: &mut ClassWriter,
 ) {
-    constructor_accessors::emit_accessors(ir, class, fq_name, writer);
+    constructor_accessors::emit_sealed_accessors(ir, class, fq_name, writer);
     let marker_accessor = class.has_primary_ctor
         && marker_accessor_emitted_last(ir, class)
         && has_ctor_marker_accessor(ir, class);

@@ -57,6 +57,13 @@ impl IrFile {
             .contains(&crate::types::type_name(internal))
     }
 
+    /// [`Self::has_value_param_ctor`] for a class identity.
+    pub fn has_value_param_ctor_of(&self, owner: crate::types::TypeName) -> bool {
+        self.value_class_constructor_facts
+            .primary_owners
+            .contains(&owner)
+    }
+
     pub(crate) fn mark_value_class_parameter_construction(&mut self, call: ExprId) {
         self.value_class_constructor_facts
             .parameter_constructions
