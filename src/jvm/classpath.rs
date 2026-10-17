@@ -13,6 +13,7 @@
 mod builtin_inventory;
 mod builtin_signatures;
 use builtin_members::BuiltinPackageFunction;
+mod archive_entries;
 mod builtins_selection;
 mod builtins_validation;
 mod call_metadata;
@@ -23,6 +24,7 @@ pub mod content_snapshot;
 mod ct_sym_index;
 mod external_identities;
 mod inner_class_scopes;
+mod jar_package_census;
 mod jimage_catalog;
 mod jimage_locations;
 use builtin_signatures::{
@@ -1604,33 +1606,12 @@ impl Classpath {
     pub(super) fn validate_lazy_class_loads(
         &self,
     ) -> Result<(), crate::libraries::PlatformInitializationError> {
-        let failure = self.class_load_error.borrow();
-        let (internal, error) = match failure.as_ref() {
-            None => return Ok(()),
-            Some(ClassMetadataLoadError::Class(internal, error)) => (internal, error),
-            Some(ClassMetadataLoadError::EntryName { archive, error }) => {
-                return Err(crate::libraries::PlatformInitializationError {
-                    message: format!(
-                        "cannot read classpath entry {}: undecodable entry name: {error}",
-                        archive.display()
-                    ),
-                });
-            }
-        };
-        let detail = match error {
-            ReadError::BadKotlinMetadata(error) => {
-                format!("invalid Kotlin metadata: {error:?}")
-            }
-            ReadError::NotAClass => "entry is not a JVM class".to_string(),
-            ReadError::Truncated => "truncated JVM class".to_string(),
-            ReadError::BadConstant(tag) => format!("invalid constant-pool tag {tag}"),
-        };
-        Err(crate::libraries::PlatformInitializationError {
-            message: format!(
-                "cannot load classpath declaration {}: {detail}",
-                internal.render()
-            ),
-        })
+        match self.class_load_error.borrow().as_ref() {
+            None => Ok(()),
+            Some(failure) => Err(crate::libraries::PlatformInitializationError {
+                message: failure.diagnostic(),
+            }),
+        }
     }
 
     /// Common declaration metadata distributed beside the selected Kotlin stdlib. The JVM stdlib
@@ -2963,7 +2944,9 @@ impl Classpath {
     }
 
     fn ct_sym_bytes(&self, path: &Path, release: u8, internal: &str) -> Option<Vec<u8>> {
-        let index = cached_ct_sym_index(path, release)?;
+        let index = cached_ct_sym_index(path, release)
+            .map_err(|failure| self.record_metadata_load_error(failure))
+            .ok()??;
         let name = index.names.get(internal)?;
         let entry = index.by_name.get(&name)?;
         self.jar_entry(path, entry)
@@ -4297,7 +4280,7 @@ fn record_pkg_entry_name(name: &str, jp: &mut JarPackages) {
 fn build_jar_packages(entry: &Entry) -> JarPackages {
     let mut jp = JarPackages::default();
     match entry {
-        Entry::Jar(j) => jp.complete = build_jar_packages_jar(j, &mut jp),
+        Entry::Jar(j) => jp.complete = jar_package_census::catalog_jar(j, &mut jp),
         Entry::Dir(d) => jp.complete = build_jar_packages_dir(d, d, &mut jp),
         Entry::Jimage(p) => {
             let Some(idx) = cached_jimage_index(p) else {
@@ -4306,7 +4289,8 @@ fn build_jar_packages(entry: &Entry) -> JarPackages {
             jp = idx.package_catalog();
         }
         Entry::CtSym { path, release } => {
-            let Some(index) = cached_ct_sym_index(path, *release) else {
+            // A failed index leaves the catalog incomplete; class lookup records the failure.
+            let Ok(Some(index)) = cached_ct_sym_index(path, *release) else {
                 return jp;
             };
             for &internal in index.by_name.keys() {
@@ -4325,48 +4309,6 @@ fn build_jar_packages(entry: &Entry) -> JarPackages {
         }
     }
     jp
-}
-
-fn build_jar_packages_jar(jar: &Path, jp: &mut JarPackages) -> bool {
-    let f = match File::open(jar) {
-        Ok(file) => file,
-        // A missing entry is empty until its snapshot changes.
-        Err(error) => return error.kind() == std::io::ErrorKind::NotFound,
-    };
-    let Ok(mut archive) = zip::ZipArchive::new(f) else {
-        return false;
-    };
-    // Name pass over the central directory — no decompression. Defer reading `kotlin_module` bytes.
-    let mut module_indices = Vec::new();
-    let mut complete = true;
-    for i in 0..archive.len() {
-        let Some(Ok(name)) = archive.name_for_index(i) else {
-            complete = false;
-            continue;
-        };
-        if name.starts_with("META-INF/") && name.ends_with(".kotlin_module") {
-            module_indices.push(i);
-        } else {
-            record_pkg_entry_name(&name, jp);
-        }
-    }
-    for i in module_indices {
-        let Ok(mut e) = archive.by_index(i) else {
-            complete = false;
-            continue;
-        };
-        let mut buf = Vec::new();
-        if e.read_to_end(&mut buf).is_ok() {
-            let Ok(name) = e.name() else {
-                complete = false;
-                continue;
-            };
-            module_optional_annotations::record_kotlin_module(&name, &buf, jp);
-        } else {
-            complete = false;
-        }
-    }
-    complete
 }
 
 fn build_jar_packages_dir(root: &Path, dir: &Path, jp: &mut JarPackages) -> bool {
@@ -5108,7 +5050,10 @@ mod fq_tests {
         assert!(!java8.class_exists("future/OnlyNine"));
         assert!(!java8.class_exists("future/OnlyEleven"));
 
-        let java9 = cached_ct_sym_index(&symbols, 9).expect("Java 9 symbol view");
+        let java9 = cached_ct_sym_index(&symbols, 9)
+            .ok()
+            .flatten()
+            .expect("Java 9 symbol view");
         assert!(java9.names.get("transient/Body").is_some());
         assert!(java9.names.get("future/OnlyNine").is_some());
         assert!(java9.names.get("future/OnlyEleven").is_none());

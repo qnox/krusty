@@ -4,6 +4,7 @@
 //! publish a successful result atomically without confusing an invalid declaration with an absent
 //! alias or extension.
 
+use super::archive_entries::ArchiveEntries;
 use super::{
     descriptor_parts, enter_directory, push_id_dedup, Entry, EntryExt, JarPackages, TypeIndex,
 };
@@ -12,7 +13,6 @@ use crate::jvm::classreader::{parse_class, ClassInfo, ReadError};
 use crate::name_tree::{NameId, NameTree};
 use crate::types::{type_name, TypeName};
 use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Why an entry's declarations could not be indexed or loaded.
@@ -27,20 +27,50 @@ pub(super) enum ClassMetadataLoadError {
     },
 }
 
-/// The name of archive entry `entry_id`. A name that does not decode fails the entry's build: the
-/// entry cannot be classified, so skipping it would publish an index without its declarations.
-fn archive_entry_name<'a>(
-    archive: &'a zip::ZipArchive<File>,
-    jar: &Path,
+impl ClassMetadataLoadError {
+    /// The terminal frontend diagnostic for this failure.
+    pub(super) fn diagnostic(&self) -> String {
+        match self {
+            ClassMetadataLoadError::Class(internal, error) => {
+                let detail = match error {
+                    ReadError::BadKotlinMetadata(error) => {
+                        format!("invalid Kotlin metadata: {error:?}")
+                    }
+                    ReadError::NotAClass => "entry is not a JVM class".to_string(),
+                    ReadError::Truncated => "truncated JVM class".to_string(),
+                    ReadError::BadConstant(tag) => format!("invalid constant-pool tag {tag}"),
+                };
+                format!(
+                    "cannot load classpath declaration {}: {detail}",
+                    internal.render()
+                )
+            }
+            ClassMetadataLoadError::EntryName { archive, error } => format!(
+                "cannot read classpath entry {}: undecodable entry name: {error}",
+                archive.display()
+            ),
+        }
+    }
+}
+
+/// The name of entry `entry_id` of the archive at `path`. A name that does not decode fails the
+/// whole build: the entry cannot be classified, so skipping it would publish an index without its
+/// declarations.
+pub(super) fn archive_entry_name<'a>(
+    archive: &'a impl ArchiveEntries,
+    path: &Path,
     entry_id: usize,
-) -> Result<Option<std::borrow::Cow<'a, str>>, ClassMetadataLoadError> {
+) -> Result<std::borrow::Cow<'a, str>, ClassMetadataLoadError> {
     archive
-        .name_for_index(entry_id)
-        .transpose()
+        .entry_name(entry_id)
         .map_err(|error| ClassMetadataLoadError::EntryName {
-            archive: jar.to_path_buf(),
+            archive: path.to_path_buf(),
             error,
         })
+}
+
+fn open_jar(jar: &Path) -> Option<zip::ZipArchive<File>> {
+    zip::ZipArchive::new(File::open(jar).ok()?).ok()
 }
 
 fn parse_metadata_class(
@@ -192,33 +222,21 @@ fn collect_dir_visited(
     Ok(())
 }
 
-fn collect_jar(
+fn collect_archive(
+    archive: &mut impl ArchiveEntries,
     jar: &Path,
     packages: &JarPackages,
     names: &mut NameTree,
     all: &mut HashMap<NameId, ClassLite>,
 ) -> Result<(), ClassMetadataLoadError> {
-    let Ok(file) = File::open(jar) else {
-        return Ok(());
-    };
-    let Ok(mut archive) = zip::ZipArchive::new(file) else {
-        return Ok(());
-    };
-    for entry_id in 0..archive.len() {
-        let name = archive_entry_name(&archive, jar, entry_id)?;
-        let internal = name
-            .as_deref()
-            .and_then(class_internal_from_entry)
+    for entry_id in 0..archive.entry_count() {
+        let internal = class_internal_from_entry(&archive_entry_name(archive, jar, entry_id)?)
             .filter(|internal| ext_scan_wanted(internal, packages))
             .map(str::to_owned);
         let Some(internal) = internal else {
             continue;
         };
-        let Ok(mut entry) = archive.by_index(entry_id) else {
-            continue;
-        };
-        let mut bytes = Vec::new();
-        if entry.read_to_end(&mut bytes).is_ok() {
+        if let Some(bytes) = archive.entry_bytes(entry_id) {
             collect_class_bytes(&bytes, &internal, names, all)?;
         }
     }
@@ -235,9 +253,19 @@ pub(super) fn build_entry_ext(
     let mut all: HashMap<NameId, ClassLite> = HashMap::default();
     match entry {
         Entry::Dir(directory) => collect_dir(directory, &mut names, &mut all)?,
-        Entry::Jar(jar) => collect_jar(jar, packages, &mut names, &mut all)?,
+        Entry::Jar(jar) => {
+            if let Some(mut archive) = open_jar(jar) {
+                collect_archive(&mut archive, jar, packages, &mut names, &mut all)?;
+            }
+        }
         Entry::Jimage(_) | Entry::CtSym { .. } => {}
     }
+    Ok(extensions_of(&names, &all))
+}
+
+/// Index the collected classes' static methods by name and receiver, following facade superclass
+/// chains.
+fn extensions_of(names: &NameTree, all: &HashMap<NameId, ClassLite>) -> EntryExt {
     let mut extensions = EntryExt::default();
     for class in all.values() {
         extensions
@@ -245,7 +273,7 @@ pub(super) fn build_entry_ext(
             .extend(class.toplevel_names.iter().cloned());
         extensions.ext_names.extend(class.ext_names.iter().cloned());
     }
-    for (&root, root_class) in &all {
+    for (&root, root_class) in all {
         let mut root_id = None;
         let mut current = Some(root);
         let mut visited = HashSet::default();
@@ -264,8 +292,8 @@ pub(super) fn build_entry_ext(
                 else {
                     continue;
                 };
-                let owner = *root_id
-                    .get_or_insert_with(|| extensions.owner_names.insert_from(&names, root));
+                let owner =
+                    *root_id.get_or_insert_with(|| extensions.owner_names.insert_from(names, root));
                 push_id_dedup(&mut extensions.by_name, method_name, owner);
                 if let Some(receiver) = first_parameter {
                     extensions
@@ -278,7 +306,7 @@ pub(super) fn build_entry_ext(
             current = class.super_class;
         }
     }
-    Ok(extensions)
+    extensions
 }
 
 /// `Xxx.class` entry name (jar/jimage path) → internal name, or `None` if not an indexable class.
@@ -339,7 +367,11 @@ pub(super) fn build_entry_types(
     let mut index = TypeIndex::default();
     match entry {
         Entry::Dir(directory) => scan_types_dir(directory, &mut index)?,
-        Entry::Jar(jar) => scan_types_jar(jar, packages, &mut index)?,
+        Entry::Jar(jar) => {
+            if let Some(mut archive) = open_jar(jar) {
+                scan_types_archive(&mut archive, jar, packages, &mut index)?;
+            }
+        }
         Entry::Jimage(_) | Entry::CtSym { .. } => {}
     }
     Ok(index)
@@ -364,8 +396,11 @@ pub(super) fn build_entry_package_types(
             }
         }
         Entry::Jar(jar) => {
-            // Archive entry names are an external classfile format and therefore require text.
-            scan_types_jar_package(jar, packages, &package.render(), &mut index)?
+            if let Some(mut archive) = open_jar(jar) {
+                // Archive entry names are an external classfile format and therefore require text.
+                let package = package.render();
+                scan_types_archive_package(&mut archive, jar, packages, &package, &mut index)?;
+            }
         }
         Entry::Jimage(_) | Entry::CtSym { .. } => {}
     }
@@ -416,69 +451,45 @@ fn scan_types_dir_rooted(
     Ok(())
 }
 
-fn scan_types_jar(
+fn scan_types_archive(
+    archive: &mut impl ArchiveEntries,
     jar: &Path,
     packages: &JarPackages,
     index: &mut TypeIndex,
 ) -> Result<(), ClassMetadataLoadError> {
-    let Ok(file) = File::open(jar) else {
-        return Ok(());
-    };
-    let Ok(mut archive) = zip::ZipArchive::new(file) else {
-        return Ok(());
-    };
-    for entry_id in 0..archive.len() {
-        let name = archive_entry_name(&archive, jar, entry_id)?;
-        let internal = name
-            .as_deref()
-            .and_then(class_internal_from_entry)
-            .filter(|internal| type_alias_scan_wanted(internal, packages))
-            .map(str::to_owned);
-        let Some(internal) = internal else {
-            continue;
-        };
-        let Ok(mut entry) = archive.by_index(entry_id) else {
-            continue;
-        };
-        let mut bytes = Vec::new();
-        if entry.read_to_end(&mut bytes).is_ok() {
-            parse_aliases_from_bytes(&bytes, &internal, index)?;
-        }
-    }
-    Ok(())
+    scan_archive_aliases(archive, jar, index, |internal| {
+        type_alias_scan_wanted(internal, packages)
+    })
 }
 
-fn scan_types_jar_package(
+fn scan_types_archive_package(
+    archive: &mut impl ArchiveEntries,
     jar: &Path,
     packages: &JarPackages,
     package: &str,
     index: &mut TypeIndex,
 ) -> Result<(), ClassMetadataLoadError> {
-    let Ok(file) = File::open(jar) else {
-        return Ok(());
-    };
-    let Ok(mut archive) = zip::ZipArchive::new(file) else {
-        return Ok(());
-    };
-    for entry_id in 0..archive.len() {
-        let name = archive_entry_name(&archive, jar, entry_id)?;
-        let internal = name
-            .as_deref()
-            .and_then(class_internal_from_entry)
-            .filter(|internal| {
-                packages.declares_facade(package, internal)
-                    || (internal.rsplit_once('/').map_or("", |(parent, _)| parent) == package
-                        && is_type_aliases_kt(internal))
-            })
+    scan_archive_aliases(archive, jar, index, |internal| {
+        packages.declares_facade(package, internal)
+            || (internal.rsplit_once('/').map_or("", |(parent, _)| parent) == package
+                && is_type_aliases_kt(internal))
+    })
+}
+
+fn scan_archive_aliases(
+    archive: &mut impl ArchiveEntries,
+    jar: &Path,
+    index: &mut TypeIndex,
+    wanted: impl Fn(&str) -> bool,
+) -> Result<(), ClassMetadataLoadError> {
+    for entry_id in 0..archive.entry_count() {
+        let internal = class_internal_from_entry(&archive_entry_name(archive, jar, entry_id)?)
+            .filter(|internal| wanted(internal))
             .map(str::to_owned);
         let Some(internal) = internal else {
             continue;
         };
-        let Ok(mut entry) = archive.by_index(entry_id) else {
-            continue;
-        };
-        let mut bytes = Vec::new();
-        if entry.read_to_end(&mut bytes).is_ok() {
+        if let Some(bytes) = archive.entry_bytes(entry_id) {
             parse_aliases_from_bytes(&bytes, &internal, index)?;
         }
     }
@@ -487,6 +498,8 @@ fn scan_types_jar_package(
 
 #[cfg(test)]
 mod tests {
+    use super::super::archive_entries::test_archives::{archive, UndecodableName};
+    use super::super::{EntryCache, EntryKey};
     use super::*;
 
     #[test]
@@ -529,5 +542,109 @@ mod tests {
         crate::types::insert_type_name_in(&with_owner, nested);
         assert!(with_owner.get("krusty/index/Outer").is_some());
         assert!(with_owner.len() > copied.len());
+    }
+
+    fn undecodable_after_a_facade() -> UndecodableName<impl ArchiveEntries> {
+        UndecodableName {
+            inner: archive(&[("p/AKt.class", b""), ("p/BKt.class", b"")]),
+            index: 1,
+        }
+    }
+
+    fn assert_undecodable_name(failure: ClassMetadataLoadError) {
+        assert_eq!(
+            failure.diagnostic(),
+            "cannot read classpath entry /undecodable/lib.jar: undecodable entry name: \
+             i/o error: undecodable entry name"
+        );
+    }
+
+    fn undecodable_key() -> EntryKey {
+        EntryKey {
+            path: PathBuf::from("/undecodable/lib.jar"),
+            stamp: None,
+            jdk_release: None,
+        }
+    }
+
+    #[test]
+    fn an_undecodable_name_after_a_facade_publishes_no_extension_index() {
+        let jar = Path::new("/undecodable/lib.jar");
+        let cache = EntryCache::<EntryExt>::new();
+        let built = cache.get_or_try_build(&undecodable_key(), || {
+            let mut names = NameTree::default();
+            let mut all = HashMap::default();
+            let packages = JarPackages::default();
+            let mut archive = undecodable_after_a_facade();
+            collect_archive(&mut archive, jar, &packages, &mut names, &mut all)?;
+            Ok(extensions_of(&names, &all))
+        });
+
+        let Err(failure) = built else {
+            panic!("a partial extension index was published");
+        };
+        assert_undecodable_name(failure);
+        assert!(cache.map.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_undecodable_name_after_a_facade_publishes_no_type_alias_index() {
+        let jar = Path::new("/undecodable/lib.jar");
+        let cache = EntryCache::<TypeIndex>::new();
+        let built = cache.get_or_try_build(&undecodable_key(), || {
+            let mut index = TypeIndex::default();
+            let packages = JarPackages::default();
+            scan_types_archive(
+                &mut undecodable_after_a_facade(),
+                jar,
+                &packages,
+                &mut index,
+            )?;
+            Ok(index)
+        });
+
+        let Err(failure) = built else {
+            panic!("a partial type-alias index was published");
+        };
+        assert_undecodable_name(failure);
+        assert!(cache.map.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_undecodable_name_after_a_facade_fails_the_package_type_alias_scan() {
+        let jar = Path::new("/undecodable/lib.jar");
+        let mut index = TypeIndex::default();
+        let packages = JarPackages::default();
+        let scanned = scan_types_archive_package(
+            &mut undecodable_after_a_facade(),
+            jar,
+            &packages,
+            "p",
+            &mut index,
+        );
+
+        let Err(failure) = scanned else {
+            panic!("a partial package type-alias index was returned");
+        };
+        assert_undecodable_name(failure);
+    }
+
+    #[test]
+    fn a_jar_classpath_reports_a_recorded_entry_name_failure_as_terminal() {
+        let classpath = super::super::Classpath::new(vec![PathBuf::from("/undecodable/lib.jar")]);
+        assert!(classpath.validate_lazy_class_loads().is_ok());
+        let archive = undecodable_after_a_facade();
+        let failure = archive_entry_name(&archive, Path::new("/undecodable/lib.jar"), 1)
+            .expect_err("entry 1 does not decode");
+        classpath.record_metadata_load_error(failure);
+
+        let error = classpath
+            .validate_lazy_class_loads()
+            .expect_err("the failure is terminal");
+        assert_eq!(
+            error.message,
+            "cannot read classpath entry /undecodable/lib.jar: undecodable entry name: \
+             i/o error: undecodable entry name"
+        );
     }
 }

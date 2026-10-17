@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::name_tree::{NameId, NameTree};
 
+use super::archive_entries::ArchiveEntries;
+use super::metadata_indexes::{archive_entry_name, ClassMetadataLoadError};
 use super::{entry_stamp, EntryKey};
 
 /// Semantic internal name → physical zip entry name. A single signature entry may serve several
@@ -31,33 +33,64 @@ fn global_cache() -> &'static Mutex<HashMap<EntryKey, Arc<CtSymIndex>>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::default()))
 }
 
-pub(super) fn cached_ct_sym_index(path: &Path, release: u8) -> Option<Arc<CtSymIndex>> {
+/// The release view of the `ct.sym` at `path`, or `None` when it has none. A failure is returned
+/// rather than cached or presented as a JDK without those classes.
+pub(super) fn cached_ct_sym_index(
+    path: &Path,
+    release: u8,
+) -> Result<Option<Arc<CtSymIndex>>, ClassMetadataLoadError> {
     let key = EntryKey {
         path: path.to_path_buf(),
         stamp: entry_stamp(path),
         jdk_release: Some(release),
     };
+    cache_index(key, || build_ct_sym_index(path, release))
+}
+
+fn cache_index(
+    key: EntryKey,
+    build: impl FnOnce() -> Result<Option<CtSymIndex>, ClassMetadataLoadError>,
+) -> Result<Option<Arc<CtSymIndex>>, ClassMetadataLoadError> {
     let mut cache = global_cache().lock().unwrap();
     if let Some(index) = cache.get(&key) {
-        return Some(index.clone());
+        return Ok(Some(index.clone()));
     }
-    let index = Arc::new(build_ct_sym_index(path, release)?);
+    let Some(index) = build()? else {
+        return Ok(None);
+    };
+    let index = Arc::new(index);
     cache.insert(key, index.clone());
-    Some(index)
+    Ok(Some(index))
+}
+
+fn build_ct_sym_index(
+    path: &Path,
+    release: u8,
+) -> Result<Option<CtSymIndex>, ClassMetadataLoadError> {
+    let Some(release) = release_symbol(release) else {
+        return Ok(None);
+    };
+    let Some(mut archive) = File::open(path)
+        .ok()
+        .and_then(|file| zip::ZipArchive::new(file).ok())
+    else {
+        return Ok(None);
+    };
+    index_archive(&mut archive, path, release)
 }
 
 /// Build one release's public-class index. Entries are classfiles stored with a `.sig` suffix under
 /// `<release-set>/<module>/<internal>.sig`; the release-set contains every release for which those
-/// exact bytes apply.
-fn build_ct_sym_index(path: &Path, release: u8) -> Option<CtSymIndex> {
-    let release = release_symbol(release)?;
-    let file = File::open(path).ok()?;
-    let archive = zip::ZipArchive::new(file).ok()?;
+/// exact bytes apply. A name that does not decode fails the build: the entry cannot be classified,
+/// so the view would lack its class.
+fn index_archive(
+    archive: &mut impl ArchiveEntries,
+    path: &Path,
+    release: u8,
+) -> Result<Option<CtSymIndex>, ClassMetadataLoadError> {
     let mut index = CtSymIndex::default();
-    for ordinal in 0..archive.len() {
-        // A name that does not decode cannot be classified, so no index is built rather than one
-        // missing that class.
-        let name = archive.name_for_index(ordinal)?.ok()?;
+    for ordinal in 0..archive.entry_count() {
+        let name = archive_entry_name(archive, path, ordinal)?;
         // A central-directory name with no module segment is not a class (`L/`,
         // `L/system-modules`). Skip it. Returning from the loop on that name discarded every
         // class already recorded, so the selected JDK release view was empty.
@@ -82,7 +115,7 @@ fn build_ct_sym_index(path: &Path, release: u8) -> Option<CtSymIndex> {
             .entry(internal)
             .or_insert_with(|| name.into_owned());
     }
-    (!index.by_name.is_empty()).then_some(index)
+    Ok((!index.by_name.is_empty()).then_some(index))
 }
 
 #[cfg(test)]
@@ -97,7 +130,10 @@ mod tests {
         if symbols.file_name().is_none_or(|name| name != "ct.sym") {
             return;
         }
-        let index = build_ct_sym_index(&symbols, 8).expect("Java 8 ct.sym index");
+        let index = build_ct_sym_index(&symbols, 8)
+            .ok()
+            .flatten()
+            .expect("Java 8 ct.sym index");
         assert!(
             index.names.get("java/util/ArrayList").is_some(),
             "Java 8 ct.sym view indexed {} classes but not java.util.ArrayList",
@@ -108,5 +144,36 @@ mod tests {
             "Java 8 ct.sym view collapsed to {} classes",
             index.by_name.len()
         );
+    }
+
+    #[test]
+    fn an_undecodable_name_after_a_class_fails_the_release_view_without_caching_it() {
+        use super::super::archive_entries::test_archives::{archive, UndecodableName};
+        let path = Path::new("/undecodable/lib/ct.sym");
+        let key = EntryKey {
+            path: path.to_path_buf(),
+            stamp: None,
+            jdk_release: Some(8),
+        };
+        let built = cache_index(key.clone(), || {
+            let mut symbols = UndecodableName {
+                inner: archive(&[
+                    ("8/java.base/java/lang/Object.sig", b""),
+                    ("8/java.base/java/lang/String.sig", b""),
+                ]),
+                index: 1,
+            };
+            index_archive(&mut symbols, path, b'8')
+        });
+
+        let Err(failure) = built else {
+            panic!("a partial ct.sym view was published: {built:?}");
+        };
+        assert_eq!(
+            failure.diagnostic(),
+            "cannot read classpath entry /undecodable/lib/ct.sym: undecodable entry name: \
+             i/o error: undecodable entry name"
+        );
+        assert!(!global_cache().lock().unwrap().contains_key(&key));
     }
 }
