@@ -852,21 +852,125 @@ impl Checker<'_> {
         Ok(bindings)
     }
 
-    /// Lambda call-shape facts for a receiver-less top-level call from the first `overloads` member
-    /// that takes it, aligned to the PARTIAL argument list (a generic HOF binds lambda parameter
-    /// types from the already-typed non-lambda args).
-    pub(super) fn top_level_lambda_shape(
+    /// The lambda call shape of a receiver-less call: a top-level overload's, else, for a semantic
+    /// `Type(args) { … }` factory, the companion's `operator fun invoke`, whose (suspend) receiver
+    /// function type shapes the lambda the same way; without it the block types receiver-less and
+    /// every member inside is unresolved. A lambda that declares no parameter types takes its
+    /// inputs from the call's candidate; when applicable top-level candidates expect different
+    /// inputs for it, kotlinc cannot analyze the lambda before choosing, and the call is ambiguous
+    /// between those candidates (`Err`).
+    pub(super) fn receiverless_lambda_shape(
         &self,
         lexical_scope: &CheckerScope<'_>,
         overloads: &[crate::libraries::FunctionInfo],
+        name: &str,
         call: UntypedLambdaCall<'_>,
-    ) -> Option<crate::symbol_resolver::LambdaCallShape> {
-        overloads
+    ) -> Result<Option<crate::symbol_resolver::LambdaCallShape>, Vec<crate::libraries::FunctionInfo>>
+    {
+        let shaped = overloads
             .iter()
             .filter(|overload| overload.kind == crate::libraries::FnKind::TopLevel)
-            .find_map(|overload| {
+            .filter_map(|overload| {
                 self.top_level_overload_lambda_shape(lexical_scope, overload, call)
+                    .map(|shape| (overload, shape))
             })
+            .collect::<Vec<_>>();
+        let Some((_, first)) = shaped.first() else {
+            return Ok(self.companion_invoke_lambda_shape(
+                lexical_scope,
+                name,
+                (call.args, call.partial),
+                (call.arg_names, call.trailing_lambda),
+                call.type_args,
+                CallResultConstraint::direct(call.expected),
+            ));
+        };
+        if shaped
+            .iter()
+            .any(|(_, other)| self.untyped_lambda_inputs_differ(call.args, first, other))
+        {
+            return Err(shaped
+                .into_iter()
+                .map(|(overload, _)| overload.clone())
+                .collect());
+        }
+        Ok(shaped.into_iter().next().map(|(_, shape)| shape))
+    }
+
+    /// Report a call whose untyped lambda the applicable `candidates` would shape differently:
+    /// kotlinc's overload ambiguity, and the lambda's own diagnostics as no candidate shapes it.
+    pub(super) fn reject_ambiguous_lambda_call(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        name: &str,
+        candidates: &[crate::libraries::FunctionInfo],
+    ) -> Ty {
+        self.report_callable_ambiguity(call, name, candidates);
+        if let Expr::Call { args, .. } = self.file.expr(call) {
+            let args = args.clone();
+            self.report_unshaped_lambda_diagnostics(scope, &args);
+        }
+        self.set(call, Ty::Error)
+    }
+
+    /// Whether `left` and `right` give a lambda argument of `args` that declares no parameter
+    /// types incomparable inputs: the same receiver and parameter count, and at some parameter two
+    /// concrete types neither of which is a subtype of the other (`(Int) -> Unit` against
+    /// `(String) -> Unit`). Neither candidate is then more specific for that lambda.
+    fn untyped_lambda_inputs_differ(
+        &self,
+        args: &[ExprId],
+        left: &crate::symbol_resolver::LambdaCallShape,
+        right: &crate::symbol_resolver::LambdaCallShape,
+    ) -> bool {
+        let parameters = |shape: &crate::symbol_resolver::LambdaCallShape, index: usize| {
+            shape
+                .param_types
+                .as_ref()
+                .and_then(|types| types.get(index))
+                .cloned()
+        };
+        let receiver = |shape: &crate::symbol_resolver::LambdaCallShape, index: usize| {
+            shape
+                .receivers
+                .as_ref()
+                .and_then(|receivers| receivers.get(index))
+                .copied()
+                .flatten()
+        };
+        let subtype = |sub: Ty, sup: Ty| {
+            crate::assignable::is_subtype(&crate::assignable::TyCtx::new(), self, sub, sup)
+        };
+        args.iter().enumerate().any(|(index, &argument)| {
+            let Expr::Lambda { .. } = self.file.expr(argument) else {
+                return false;
+            };
+            let declares_types = self
+                .file
+                .lambda_param_types
+                .get(&argument.0)
+                .is_some_and(|types| types.iter().any(Option::is_some));
+            let (Some(left_parameters), Some(right_parameters)) =
+                (parameters(left, index), parameters(right, index))
+            else {
+                return false;
+            };
+            !declares_types
+                && receiver(left, index) == receiver(right, index)
+                && left_parameters.len() == right_parameters.len()
+                && left_parameters
+                    .iter()
+                    .zip(&right_parameters)
+                    .any(|(&left, &right)| {
+                        !left.mentions_ty_param()
+                            && !right.mentions_ty_param()
+                            && left != Ty::Error
+                            && right != Ty::Error
+                            && !subtype(left, right)
+                            && !subtype(right, left)
+                    })
+        })
     }
 
     /// The lambda call shape one receiver-less overload gives a call whose lambdas are untyped, or

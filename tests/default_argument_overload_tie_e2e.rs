@@ -27,3 +27,32 @@ fun box(): String {
         "DefaultArgumentOverloadTie",
     );
 }
+
+/// A family the selector cannot decide keeps the lambda unshaped. The direct `(Int) -> Unit`
+/// overload selects on its own, but the defaulted-slot family's `(String) -> Unit` and
+/// `(Boolean) -> Unit` overloads tie, so the call is ambiguous rather than committed to `Int`.
+#[test]
+fn an_undecided_family_keeps_the_call_ambiguous() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "fun pick(block: (Int) -> Unit) = \"int\"\n\
+             fun pick(n: Int = 0, block: (String) -> Unit) = \"string\"\n\
+             fun pick(m: Long = 0, block: (Boolean) -> Unit) = \"boolean\"\n\
+             fun shaped(): String = pick { it + 1 }\n",
+        )],
+        &[],
+    );
+}
+
+/// A lambda whose explicit parameter type rules the other families out selects its own.
+#[test]
+fn an_explicit_parameter_type_selects_its_family() {
+    common::expect_box_same_as_kotlinc(
+        "fun pick(block: (Int) -> Unit) = \"int\"\n\
+         fun pick(n: Int = 0, block: (String) -> Unit) = \"string\"\n\
+         fun pick(m: Long = 0, block: (Boolean) -> Unit) = \"boolean\"\n\
+         fun box(): String = if (pick { x: String -> x.length } == \"string\") \"OK\" else \"fail\"\n",
+        "UndecidedOverloadFamily",
+    );
+}
