@@ -3095,6 +3095,8 @@ mod value_class_receiver_inline_only_e2e;
 
 #[path = "field_store_lines_e2e.rs"]
 mod field_store_lines_e2e;
+#[path = "uninferred_constructor_type_parameter_e2e.rs"]
+mod uninferred_constructor_type_parameter_e2e;
 #[path = "written_default_accessor_e2e.rs"]
 mod written_default_accessor_e2e;
 

@@ -221,6 +221,12 @@ impl Checker<'_> {
         if let Some(signature) = self.unbound_call_result_signature(expression) {
             return Some(signature.clone());
         }
+        self.unbound_constructor_result(expression)
+            .filter(|result| result.open)
+            .map(|result| result.signature)
+    }
+
+    fn unbound_constructor_result(&self, expression: ExprId) -> Option<UnboundConstructorResult> {
         if !self.resolved_constructors.contains_key(&expression) {
             return None;
         }
@@ -241,88 +247,11 @@ impl Checker<'_> {
                 .chain(&declared_formals)
                 .any(|formal| ty_mentions_param(shape, std::slice::from_ref(formal)))
         };
-        let has_input_evidence = match self.resolved_constructors.get(&expression)? {
-            ResolvedConstructor::Source {
-                params,
-                argument_slots,
-                ..
-            } => argument_slots.iter().any(|&slot| {
-                params
-                    .get(slot)
-                    .copied()
-                    .is_some_and(shape_mentions_result_formal)
-            }),
-            ResolvedConstructor::Plain { member, args, .. } => {
-                member.generic_sig.as_ref().is_some_and(|generic| {
-                    generic
-                        .params
-                        .iter()
-                        .take(args.len())
-                        .copied()
-                        .any(shape_mentions_result_formal)
-                })
-            }
-            ResolvedConstructor::PlainSlots { member, slots, .. } => {
-                member.generic_sig.as_ref().is_some_and(|generic| {
-                    slots.iter().enumerate().any(|(parameter, argument)| {
-                        argument.is_some()
-                            && generic
-                                .params
-                                .get(parameter)
-                                .copied()
-                                .is_some_and(shape_mentions_result_formal)
-                    })
-                })
-            }
-            ResolvedConstructor::Synthetic { ctor, args, .. } => ctor
-                .declaration
-                .generic_sig
-                .as_ref()
-                .is_some_and(|generic| {
-                    generic
-                        .params
-                        .iter()
-                        .take(args.len())
-                        .copied()
-                        .any(shape_mentions_result_formal)
-                }),
-        };
-        fn is_declaration_fallback(symbolic: Ty, actual: Ty, formals: &[String]) -> bool {
-            match (symbolic, actual) {
-                (Ty::TyParam(formal, bound), actual)
-                    if formals.iter().any(|declared| declared == formal) =>
-                {
-                    // An alias formal (`E` of `typealias HashSet<E> = java.util.HashSet<E>`) is
-                    // bounded by `Any?`; the Java target completes the same position from its own
-                    // flexible bound `Any!`. Both are the declaration fallback.
-                    actual == *bound
-                        || matches!(actual, Ty::PlatformNullable(inner) if Ty::nullable(*inner) == *bound)
-                }
-                (Ty::Obj(symbolic_name, symbolic_args), Ty::Obj(actual_name, actual_args)) => {
-                    symbolic_name == actual_name
-                        && (actual_args.is_empty()
-                            && symbolic_args.iter().any(|&argument| {
-                                formals.iter().any(|formal| {
-                                    ty_mentions_param(argument, std::slice::from_ref(formal))
-                                })
-                            })
-                            || symbolic_args.len() == actual_args.len()
-                                && symbolic_args.iter().zip(actual_args.iter()).all(
-                                    |(&symbolic, &actual)| {
-                                        is_declaration_fallback(symbolic, actual, formals)
-                                    },
-                                ))
-                }
-                (Ty::Nullable(symbolic), Ty::Nullable(actual))
-                | (Ty::PlatformNullable(symbolic), Ty::PlatformNullable(actual))
-                | (Ty::InProjection(symbolic), Ty::InProjection(actual))
-                | (Ty::OutProjection(symbolic), Ty::OutProjection(actual))
-                | (Ty::StarProjection(symbolic), Ty::StarProjection(actual)) => {
-                    is_declaration_fallback(*symbolic, *actual, formals)
-                }
-                _ => symbolic == actual,
-            }
-        }
+        let argument_shapes = self.constructor_argument_shapes(expression)?;
+        let has_input_evidence = argument_shapes
+            .iter()
+            .copied()
+            .any(shape_mentions_result_formal);
         let declaration_fallback = !has_input_evidence
             && is_declaration_fallback(signature.ret, actual, &signature.formals);
         crate::trace_compiler!(
@@ -330,9 +259,175 @@ impl Checker<'_> {
             "unbound constructor expression={expression:?} actual={actual:?} input_evidence={has_input_evidence} declaration_fallback={declaration_fallback} signature={:?}",
             (&signature.formals, signature.ret),
         );
-        (actual == Ty::Error
-            || ty_mentions_param(actual, &signature.formals)
-            || declaration_fallback)
-            .then_some(signature)
+        Some(UnboundConstructorResult {
+            open: actual == Ty::Error
+                || ty_mentions_param(actual, &signature.formals)
+                || declaration_fallback,
+            signature,
+            actual,
+            argument_shapes,
+        })
+    }
+
+    /// The selected constructor's parameter shapes that received an argument at this call.
+    fn constructor_argument_shapes(&self, expression: ExprId) -> Option<Vec<Ty>> {
+        let generic_params = |generic: Option<&GenericSig>, count: usize| {
+            generic.map_or_else(Vec::new, |generic| {
+                generic.params.iter().take(count).copied().collect()
+            })
+        };
+        Some(match self.resolved_constructors.get(&expression)? {
+            ResolvedConstructor::Source {
+                params,
+                argument_slots,
+                ..
+            } => argument_slots
+                .iter()
+                .filter_map(|&slot| params.get(slot).copied())
+                .collect(),
+            ResolvedConstructor::Plain { member, args, .. } => {
+                generic_params(member.generic_sig.as_ref(), args.len())
+            }
+            ResolvedConstructor::PlainSlots { member, slots, .. } => member
+                .generic_sig
+                .as_ref()
+                .map_or_else(Vec::new, |generic| {
+                    slots
+                        .iter()
+                        .zip(generic.params.iter())
+                        .filter(|(argument, _)| argument.is_some())
+                        .map(|(_, &parameter)| parameter)
+                        .collect()
+                }),
+            ResolvedConstructor::Synthetic { ctor, args, .. } => {
+                generic_params(ctor.declaration.generic_sig.as_ref(), args.len())
+            }
+        })
+    }
+
+    /// Report a completed constructor call whose class type parameter nothing constrained: no
+    /// argument, written type argument, expected type, or enclosing call. Its result is only the
+    /// declaration fallback, and kotlinc reports `cannot infer type for type parameter` for
+    /// `C(1)` with `class C<T : Comparable<T>>(val n: Int)`. A self type (`SELF : Builder<SELF>`
+    /// in `Builder`) whose bound names no other formal is the one such parameter Kotlin completes,
+    /// to its starred bound; `SELF : MB<T, SELF>` is still reported.
+    ///
+    /// Like the generic-call report, this runs only at a completion root (an untyped declaration
+    /// initializer or a statement), after any enclosing call has had the chance to complete it.
+    pub(super) fn report_uninferred_constructor_type_parameter(&mut self, call: ExprId) -> bool {
+        if self
+            .file
+            .call_type_args
+            .get(&call.0)
+            .is_some_and(|arguments| !arguments.is_empty())
+        {
+            return false;
+        }
+        let Some(UnboundConstructorResult {
+            signature,
+            actual,
+            argument_shapes,
+            ..
+        }) = self.unbound_constructor_result(call)
+        else {
+            return false;
+        };
+        let (Ty::Obj(owner, template), Ty::Obj(applied, arguments)) =
+            (signature.ret.non_null(), actual.non_null())
+        else {
+            return false;
+        };
+        if owner != applied || template.len() != arguments.len() {
+            return false;
+        }
+        let Some(formal) = signature
+            .formals
+            .iter()
+            .zip(signature.formal_bounds.iter())
+            .find(|(formal, bounds)| {
+                let formal = std::slice::from_ref(*formal);
+                let positions = template
+                    .iter()
+                    .zip(arguments.iter())
+                    .filter(|(symbolic, _)| ty_mentions_param(**symbolic, formal))
+                    .collect::<Vec<_>>();
+                !positions.is_empty()
+                    && positions.iter().all(|(symbolic, argument)| {
+                        is_declaration_fallback(**symbolic, **argument, formal)
+                    })
+                    && !self.lexically_fixed_at_call(call, &formal[0])
+                    && !argument_shapes
+                        .iter()
+                        .any(|shape| ty_mentions_param(*shape, formal))
+                    && !bounds.first().is_some_and(|bound| {
+                        bound.non_null().obj_internal() == Some(owner)
+                            && ty_mentions_param(*bound, formal)
+                            && !signature.formals.iter().any(|other| {
+                                other != &formal[0]
+                                    && ty_mentions_param(*bound, std::slice::from_ref(other))
+                            })
+                    })
+            })
+            .map(|(formal, _)| formal)
+        else {
+            return false;
+        };
+        let message = format!(
+            "cannot infer type for type parameter '{}'. Specify it explicitly.",
+            crate::types::type_parameter_source_name(formal)
+        );
+        self.diags.error(self.call_callee_name_span(call), message);
+        true
+    }
+}
+
+/// A checked constructor call's classifier-owned result template and whether its current result
+/// is still open to an enclosing constraint.
+struct UnboundConstructorResult {
+    signature: GenericSig,
+    /// The checked result of the call.
+    actual: Ty,
+    /// The selected constructor's parameter shapes that received an argument.
+    argument_shapes: Vec<Ty>,
+    /// The result is open: unsolved, still naming a formal, or only the declaration fallback.
+    open: bool,
+}
+
+/// Whether `actual` is `symbolic` with every one of `formals` completed only to its declared
+/// bound, the fallback a constructor result takes when nothing constrains it.
+fn is_declaration_fallback(symbolic: Ty, actual: Ty, formals: &[String]) -> bool {
+    match (symbolic, actual) {
+        (Ty::TyParam(formal, bound), actual)
+            if formals.iter().any(|declared| declared == formal) =>
+        {
+            // An alias formal (`E` of `typealias HashSet<E> = java.util.HashSet<E>`) is
+            // bounded by `Any?`; the Java target completes the same position from its own
+            // flexible bound `Any!`. Both are the declaration fallback.
+            actual == *bound
+                || matches!(actual, Ty::PlatformNullable(inner) if Ty::nullable(*inner) == *bound)
+        }
+        (Ty::Obj(symbolic_name, symbolic_args), Ty::Obj(actual_name, actual_args)) => {
+            symbolic_name == actual_name
+                && (actual_args.is_empty()
+                    && symbolic_args.iter().any(|&argument| {
+                        formals
+                            .iter()
+                            .any(|formal| ty_mentions_param(argument, std::slice::from_ref(formal)))
+                    })
+                    || symbolic_args.len() == actual_args.len()
+                        && symbolic_args.iter().zip(actual_args.iter()).all(
+                            |(&symbolic, &actual)| {
+                                is_declaration_fallback(symbolic, actual, formals)
+                            },
+                        ))
+        }
+        (Ty::Nullable(symbolic), Ty::Nullable(actual))
+        | (Ty::PlatformNullable(symbolic), Ty::PlatformNullable(actual))
+        | (Ty::InProjection(symbolic), Ty::InProjection(actual))
+        | (Ty::OutProjection(symbolic), Ty::OutProjection(actual))
+        | (Ty::StarProjection(symbolic), Ty::StarProjection(actual)) => {
+            is_declaration_fallback(*symbolic, *actual, formals)
+        }
+        _ => symbolic == actual,
     }
 }

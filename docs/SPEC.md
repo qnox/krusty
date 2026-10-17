@@ -9550,6 +9550,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   use-site projection is reported on that keyword, for that application only:
   `conflicting projection in type alias expansion in intermediate type 'Box<CONFLICTING-PROJECTION String>?'`.
   Tests: `tests/typealias_projection_e2e.rs`. Corpus: `reflection/typeOf/typeAliasedType.kt`.
+- **A constructor type parameter that nothing constrains cannot be inferred.** `C(1)` for
+  `class C<T : Comparable<T>>(val n: Int)`, `D(2)` for `class D<T>(val n: Int)`, and the `B` of
+  `P(3)` for `class P<A, B>(val a: A)` have no argument, written type argument, expected type or
+  enclosing call that fixes the parameter. kotlinc reports `cannot infer type for type parameter`
+  at the callee, as it does for `val x = make()` with `fun <T> make(): List<T>`. krusty completed
+  the parameter to its declared bound and accepted the call. It now reports the same diagnostic at
+  the same completion roots the generic-call report uses (an untyped declaration initializer or a
+  statement), so an enclosing call such as `use(C(7))` still completes the result first. A self
+  type (`T : KB<T>` in `KB`) is exempt: Kotlin completes it to its starred bound. A recursive bound
+  that also names another formal (`SELF : MB<T, SELF>`) is not, and `MB("v")` is reported. Owner:
+  `src/resolve/call_result_templates.rs`. Test: `tests/uninferred_constructor_type_parameter_e2e.rs`.
 - **Omitted typealias arguments on a constructor call are inferred, not written.** `LinkedHashMap(a)`
   calls the stdlib's `typealias LinkedHashMap<K, V> = java.util.LinkedHashMap<K, V>` without type
   arguments, so the alias's `K`/`V` are type variables of the call, decided by the value arguments and

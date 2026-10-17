@@ -37635,7 +37635,7 @@ impl<'a> Checker<'a> {
         call: ExprId,
     ) -> bool {
         let Some(signature) = self.unbound_call_result_signature(call).cloned() else {
-            return false;
+            return self.report_uninferred_constructor_type_parameter(call);
         };
         let actual = self.expr_types[call.0 as usize];
         let resolved = self.resolved_call_type_args.get(&call);
