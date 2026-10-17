@@ -1207,6 +1207,8 @@ mod inline_lambda_suspend_member_e2e;
 mod inline_lambda_unintercepted_probe_e2e;
 #[path = "inline_lambda_value_argument_e2e.rs"]
 mod inline_lambda_value_argument_e2e;
+#[path = "inline_lambda_value_class_result_e2e.rs"]
+mod inline_lambda_value_class_result_e2e;
 #[path = "inline_lambda_value_return_e2e.rs"]
 mod inline_lambda_value_return_e2e;
 #[path = "inline_object_regeneration_e2e.rs"]

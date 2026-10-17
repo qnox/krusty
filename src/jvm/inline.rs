@@ -852,10 +852,13 @@ pub struct LambdaSplice {
 /// One built body of a lambda argument, as the splice puts it in place of a `FunctionN.invoke`.
 pub struct LambdaBody {
     /// The body's own debug locals as `(start, slot, name, descriptor)`, with `start` an offset into
-    /// `body` as built. Each runs to the end of the body, which is the only thing its scope can mean
-    /// once the body is code inside another method. The splice relocates them, because only it knows
+    /// `body` as built. Each runs to `locals_end`, which is the only thing its scope can mean once
+    /// the body is code inside another method. The splice relocates them, because only it knows
     /// where the body landed and which of its instructions it cancelled away.
     pub locals: Vec<(u16, u16, String, String)>,
+    /// The offset into `body` as built where those locals end: the body's own code, before the
+    /// coercion of its result to the replaced `invoke`'s `Object`.
+    pub locals_end: u16,
     /// The body's own line marks as `(offset into `body`, line)`. These are the CALLER's lines — an
     /// inlined lambda is the caller's source wherever it ends up running.
     pub lines: Vec<(u16, u16)>,
@@ -2091,8 +2094,8 @@ pub(super) fn splice_unified(
     }
     // The lambda bodies' own locals, relocated the same way. They come FIRST in the table: the
     // reference compiler describes the innermost inlining before the one that contains it. Each runs
-    // from where its store completed to the end of the body it belongs to, which is where the
-    // enclosing code resumes.
+    // from where its store completed to the end of the body's own code, before the coercion of its
+    // result to the replaced `invoke`'s `Object`.
     let mut lambda_locals = Vec::new();
     for (occurrence, &site) in lambda_sites.iter().enumerate() {
         let lambda = site_bodies[occurrence];
@@ -2106,7 +2109,8 @@ pub(super) fn splice_unified(
         let Some(spliced_len) = built.checked_sub(prefix + suffix) else {
             continue;
         };
-        let end = body_start + spliced_len;
+        let end =
+            body_start + spliced_len.min(usize::from(lambda.locals_end).saturating_sub(prefix));
         // Reversed: the reference compiler lists the body's own marker before the parameters it
         // opened, and a multi-parameter lambda's parameters in descending slot — which is the
         // reverse of the order they are stored in, top of stack being the last parameter.
