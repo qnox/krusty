@@ -10354,6 +10354,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/serialization_type_parameter_elements_e2e.rs` (same-file and sibling-file runtime,
   plus `childSerializers`/`deserialize`/`typeParametersSerializers`, `serialize`, `write$Self` and
   child-cache factory bodies, cross-checked against the reference compiler).
+- **A concrete generic element is cached; a generic class's descriptor and accessor follow
+  kotlinc.** `val g: G<Int>` over a same-file generic `@Serializable class G<T>` is serialized by
+  `new G.$serializer(IntSerializer.INSTANCE)`, a constructed serializer, so the holder caches it in
+  `$childSerializers` like a collection's. The generic class's `$cachedDescriptor` is `@JvmField`
+  ahead of `@NotNull`, and `<clinit>` builds it after the companion's own properties, opening on the
+  companion's first line and returning on its last (a generated companion takes the class's span).
+  The companion's `serializer(typeSerial0, …)` declares unbounded type parameters whatever the
+  class's bounds; its metadata records no upper bound. Tests:
+  `tests/generic_serializable_class_e2e.rs`.
 - **A generic `$serializer` has two constructors.** The private no-argument primary constructor
   builds the descriptor as one initializer spanning the class declaration: it closes on the
   declaration's last line and returns on its first. The public constructor, a declared
