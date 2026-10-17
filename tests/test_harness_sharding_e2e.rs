@@ -1202,7 +1202,7 @@ fn phase_timing_records_start_duration_and_summary() {
     let output = Command::new("bash")
         .args([
             "-c",
-            "source \"$1\"; phase_log_prefix=coverage; PHASE_TIMING_LOG=\"$2\"; phase_begin provision; phase_end provision; phase_begin build-cli; phase_end build-cli; phase_report",
+            "unset SECONDS; readonly SECONDS=0; source \"$1\"; phase_log_prefix=coverage; PHASE_TIMING_LOG=\"$2\"; phase_begin provision; phase_end provision; phase_begin build-cli; phase_end build-cli; phase_report",
             "phase-timing-test",
         ])
         .arg(&helper)
