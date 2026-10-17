@@ -3758,9 +3758,13 @@ pub(crate) fn lower_value_classes(
             if sam_declares_vc_return(ir, &orig_rets, *impl_fn, &callable_under) {
                 continue;
             }
-            if let Some(body) = ir.functions.get(*impl_fn as usize).and_then(|f| f.body) {
-                lambda_impls.push((*impl_fn, body));
-            }
+            // A common-IR expansion of an external inline call takes a source lambda's body as
+            // its own value and drops the implementation's body: that value is the call's result,
+            // not an `invoke` result, so it keeps the representation the call's type gives it.
+            let Some(body) = ir.functions.get(*impl_fn as usize).and_then(|f| f.body) else {
+                continue;
+            };
+            lambda_impls.push((*impl_fn, body));
             if let Some(b) = inline_body {
                 inline_bodies.push(*b);
             }
