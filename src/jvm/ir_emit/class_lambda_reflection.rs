@@ -57,10 +57,17 @@ pub(super) fn reflect_source(
         .collect::<Vec<_>>();
     let local_classifiers = crate::metadata::local_classifiers::names(ir);
     let enum_entry_bodies = crate::metadata::local_classifiers::enum_entry_bodies(ir);
-    let physical = super::super::metadata_method_signatures::lambda_invoke_descriptor(
-        receiver,
-        values,
-        signature.ret,
+    // Realization has fixed the exact typed `invoke` declaration. Its result may be the boxed
+    // generic override used by a numbered FunctionN or the scalar implementation reached through
+    // FunctionN's packed-array bridge; metadata must describe that declaration, not rebuild a
+    // second physical shape from the source function type.
+    let implementation = ir
+        .functions
+        .get(impl_fn as usize)
+        .ok_or("a source class lambda has no realized invoke declaration")?;
+    let physical = super::method_descriptor(
+        &super::jvm_function_params(ir, impl_fn),
+        super::jvm_declared_ty(&implementation.ret),
     );
     let record_descriptor = super::super::metadata_method_signatures::requires_function_signature(
         receiver,
@@ -167,11 +174,11 @@ fn approximate_type_parameters(ty: Ty, names: &[&str]) -> Ty {
 
 /// Metadata names of the lambda's value parameters, in order. `None` when the implementation has
 /// no parameter identities at all.
-fn value_parameter_names<'a>(
-    ir: &'a IrFile,
+fn value_parameter_names(
+    ir: &IrFile,
     impl_fn: u32,
     value_count: usize,
-) -> Result<Option<Vec<&'a str>>, String> {
+) -> Result<Option<Vec<&str>>, String> {
     let Some(identities) = ir.function_parameter_identities(impl_fn) else {
         return Ok(None);
     };

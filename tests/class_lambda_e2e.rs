@@ -687,6 +687,9 @@ fn assert_class_mode_identical_to_kotlinc(source: &str) {
     let stdlib = common::stdlib_jar();
     let krusty = std::process::Command::new(common::krusty_binary())
         .args(["-d", krusty_output.to_str().expect("UTF-8 output")])
+        // This isolated byte fixture supplies its complete stdlib classpath and uses no
+        // reflection. Do not make its local run depend on a kotlin-reflect distribution jar.
+        .arg("-no-reflect")
         .args(["-Xlambdas=class"])
         .args(["-classpath", stdlib.to_str().expect("UTF-8 stdlib")])
         .arg(&source_path)

@@ -98,7 +98,7 @@ pub(super) fn number(
             (step.kind == crate::lifting_provenance::LiftingCallableKind::Lambda && !site.lifted)
                 .then_some((
                     (sequence.clone(), step.position),
-                    (function, "invokeSuspend"),
+                    (function, "invokeSuspend".to_string()),
                 ))
         })
         .collect::<HashMap<_, _>>();
@@ -107,7 +107,10 @@ pub(super) fn number(
         let scope = lambda.lifting_scope.as_ref()?;
         Some((
             (scope.sequence.clone(), scope.position),
-            (lambda.invoke, "invoke"),
+            (
+                lambda.invoke,
+                segment_spelling(&ir.functions[lambda.invoke as usize].name),
+            ),
         ))
     }));
     let inline_delegate_sites = ir
@@ -180,8 +183,8 @@ pub(super) fn number(
                 .enumerate()
                 .rev()
                 .find_map(|(index, step)| {
-                    let &(lambda, method) = class_scopes.get(&(sequence.clone(), step.position))?;
-                    Some((index, lambda, method))
+                    let (lambda, method) = class_scopes.get(&(sequence.clone(), step.position))?;
+                    Some((index, *lambda, method.as_str()))
                 })
         });
         let (mut name, start) = match (lambda_class, helper_access.lambda_path_start(function)) {

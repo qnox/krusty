@@ -429,6 +429,7 @@ pub(super) fn emitted_roots(ir: &IrFile, every_emitted_root: bool) -> Vec<ExprId
         }
     }
     if every_emitted_root {
+        roots.extend(ir.class_ctor_default_roots());
         for class in &ir.classes {
             roots.extend(class.init_body);
             roots.extend(class.super_arg_prelude.iter().copied());
@@ -1081,7 +1082,15 @@ fn realize_class(
             }
         }
         _ => match signature.ret {
-            ret if is_primitive(ret) => Ty::nullable(ret),
+            // A numbered FunctionN class has a typed override whose generic result is boxed. Past
+            // the numbered interfaces, the specialized method is not that interface slot: it
+            // keeps the body's scalar result and the separately emitted packed-array bridge owns
+            // boxing it into Object.
+            ret if is_primitive(ret)
+                && !crate::jvm::names::uses_function_n(signature.params.len()) =>
+            {
+                Ty::nullable(ret)
+            }
             ret => ret,
         },
     };
