@@ -2386,15 +2386,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             let candidates = resolver.accessible_top_level_candidates(spelling);
             let argument_names = arguments
                 .iter()
-                .map(|argument| match argument {
-                    crate::fir::SigCallArgumentProbe::Typed(argument) => {
-                        argument.name.map(str::to_owned)
-                    }
-                    crate::fir::SigCallArgumentProbe::PostponedLambda { name, .. }
-                    | crate::fir::SigCallArgumentProbe::PostponedCallableReference {
-                        name, ..
-                    } => name.map(str::to_owned),
-                })
+                .map(|argument| argument.name().map(str::to_owned))
                 .collect::<Vec<_>>();
             let candidates = Self::structurally_applicable_call_candidates(
                 candidates,

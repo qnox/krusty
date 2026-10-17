@@ -3105,6 +3105,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the parameter at that slot (and it mentions no open formal), that parameter is the argument's
   expectation and the call is re-evaluated under it before selection. Test:
   `streaming_signature_tests::a_member_call_hands_its_parameter_to_a_nested_generic_call_in_pass_one`.
+- **Only a candidate that can take a postponed lambda shapes it in the signature pass.** An
+  inferred declaration type (`fun run() = lib.launch { ... }`, `val engine = Engine { ... }`) is
+  computed before bodies, so a postponed lambda takes its parameter shape from the call's
+  candidates. A package-qualified call kept an overload that needs one more argument
+  (`launch(timeoutMillis: Long, body)`), so the family stayed ambiguous; the unqualified path
+  already dropped structurally inapplicable overloads. A constructor whose parameter cannot take a
+  lambda (`Engine(config: Config)`) claimed `Engine { ... }` ahead of the companion `invoke` the
+  call selects. Both declined and reported `module signatures were not finalized`. The qualified
+  path now applies the same structural filter, and a constructor is skipped when a postponed
+  argument maps to a parameter that admits no function value (not a function type, SAM interface,
+  type variable, or supertype of function types). A lambda literal declares only value parameters,
+  so `{ name -> ... }` fits `Scope.(String) -> Unit` by its one value parameter; comparing it with
+  the receiver-inclusive arity made the companion `invoke` inapplicable too. Test:
+  `signature_postponed_candidates_e2e::postponed_lambdas_are_shaped_by_the_candidates_that_take_them`.
 - **A postponed lambda body is checked under the expected return type.** Signature inference
   materializes `{ HashMap() }` / `{ mutableMapOf() }` / `{ if (c) ArrayList() else ArrayList() }`
   only after the surrounding call has a function type for that argument (`() -> T` on

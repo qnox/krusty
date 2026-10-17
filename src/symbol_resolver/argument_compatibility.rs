@@ -141,3 +141,18 @@ pub(crate) fn resolution_subtype(source: &dyn SymbolSource, sub: Ty, sup: Ty) ->
         sup,
     )
 }
+
+impl super::SymbolResolver<'_> {
+    /// Whether a function value (a lambda or callable reference whose shape is not known yet) can
+    /// be passed for `parameter`: a function type, a SAM interface, an open type variable, or a
+    /// supertype of every function type such as `Any`.
+    pub(crate) fn admits_function_value(&self, parameter: Ty) -> bool {
+        self.functional_expectation(parameter).is_some()
+            || matches!(parameter.non_null(), Ty::TyParam(..))
+            || resolution_subtype(
+                &self.src,
+                Ty::fun_with_shape(Vec::new(), Ty::Unit, 0, false, false),
+                parameter,
+            )
+    }
+}
