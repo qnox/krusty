@@ -58,7 +58,7 @@ fn build_ct_sym_index(path: &Path, release: u8) -> Option<CtSymIndex> {
         // A central-directory name with no module segment is not a class (`L/`,
         // `L/system-modules`). Skip it. Returning from the loop on that name discarded every
         // class already recorded, so the selected JDK release view was empty.
-        let Some(Ok(name)) = archive.name_for_index(ordinal) else {
+        let Some(name) = archive.name_for_index(ordinal) else {
             continue;
         };
         let mut segments = name.splitn(3, '/');
@@ -80,7 +80,7 @@ fn build_ct_sym_index(path: &Path, release: u8) -> Option<CtSymIndex> {
         index
             .by_name
             .entry(internal)
-            .or_insert_with(|| name.into_owned());
+            .or_insert_with(|| name.to_owned());
     }
     (!index.by_name.is_empty()).then_some(index)
 }

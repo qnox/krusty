@@ -40,8 +40,7 @@ fn jar_entries(jar: &Path) -> Vec<String> {
                 .by_index(index)
                 .expect("jar entry")
                 .name()
-                .expect("jar entry name")
-                .into_owned()
+                .to_string()
         })
         .collect()
 }

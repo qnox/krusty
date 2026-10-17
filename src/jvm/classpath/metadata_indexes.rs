@@ -177,9 +177,8 @@ fn collect_jar(
         return Ok(());
     };
     for entry_id in 0..archive.len() {
-        let name = archive.name_for_index(entry_id).and_then(Result::ok);
-        let internal = name
-            .as_deref()
+        let internal = archive
+            .name_for_index(entry_id)
             .and_then(class_internal_from_entry)
             .filter(|internal| ext_scan_wanted(internal, packages))
             .map(str::to_owned);
@@ -400,9 +399,8 @@ fn scan_types_jar(
         return Ok(());
     };
     for entry_id in 0..archive.len() {
-        let name = archive.name_for_index(entry_id).and_then(Result::ok);
-        let internal = name
-            .as_deref()
+        let internal = archive
+            .name_for_index(entry_id)
             .and_then(class_internal_from_entry)
             .filter(|internal| type_alias_scan_wanted(internal, packages))
             .map(str::to_owned);
@@ -433,9 +431,8 @@ fn scan_types_jar_package(
         return Ok(());
     };
     for entry_id in 0..archive.len() {
-        let name = archive.name_for_index(entry_id).and_then(Result::ok);
-        let internal = name
-            .as_deref()
+        let internal = archive
+            .name_for_index(entry_id)
             .and_then(class_internal_from_entry)
             .filter(|internal| {
                 packages.declares_facade(package, internal)

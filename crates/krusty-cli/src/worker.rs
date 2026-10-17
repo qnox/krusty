@@ -17,7 +17,6 @@
 //! `--resources` groups (`strip_prefix:add_prefix:file`) are copied into the output jar after the
 //! classes, under the same entry names the module jar uses.
 
-use std::borrow::Cow;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
@@ -639,9 +638,8 @@ pub fn package_resources(jar: &std::path::Path, groups: &[ResourceGroup]) -> Res
             .map_err(|error| format!("cannot read {}: {error}", jar.display()))?;
         archive
             .file_names()
-            .map(|name| name.map(Cow::into_owned))
-            .collect::<Result<BTreeSet<_>, _>>()
-            .map_err(|error| format!("cannot read {}: {error}", jar.display()))?
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>()
     };
     let mut seen = existing;
     for (name, _) in &planned {

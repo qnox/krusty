@@ -453,10 +453,7 @@ pub fn audit_jar(path: &std::path::Path) -> Result<Vec<(String, ClassAudit)>, St
     let mut out = Vec::new();
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
-        let name = entry
-            .name()
-            .map_err(|error| error.to_string())?
-            .into_owned();
+        let name = entry.name().to_string();
         // Multi-release variants are compiled separately; the base entry is the one audited.
         if !name.ends_with(".class") || name.starts_with("META-INF/") {
             continue;

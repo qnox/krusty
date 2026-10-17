@@ -11,7 +11,7 @@ repository = "https://github.com/qnox/krusty"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 krusty = { path = "../.." }
-zip = { version = "9", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 # The compiler allocates and frees many short-lived vectors and strings; under glibc's allocator a
 # quarter of a large module's compile ran in malloc and free. mimalloc took a 100-package,
 # four-module build from 31.7 s to 26.4 s for about 35 MB more peak memory, with identical output.
