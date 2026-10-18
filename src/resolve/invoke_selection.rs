@@ -868,7 +868,7 @@ impl Checker<'_> {
             .classifier(candidate.owner)
             .is_some_and(|classifier| classifier.is_interface());
         let dispatch_receiver = self.implicit_receiver_selection(candidate.dispatch_receiver);
-        let target = candidate.resolved_call(dispatch_receiver, receiver_ty, interface);
+        let target = candidate.resolved_call(dispatch_receiver, interface);
         self.resolved_calls.insert(call, target.clone());
         self.mark_extension_receiver_used(call, candidate.dispatch_receiver);
         let params = candidate

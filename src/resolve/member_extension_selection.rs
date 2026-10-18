@@ -399,7 +399,6 @@ impl MemberExtensionFunctionCandidate {
     pub(super) fn resolved_call(
         &self,
         dispatch_receiver: ImplicitReceiverSelection,
-        extension_receiver: Ty,
         interface: bool,
     ) -> ResolvedCall {
         ResolvedCall::MemberExtension {
@@ -408,7 +407,11 @@ impl MemberExtensionFunctionCandidate {
             external_default_provider: self.external_default_provider,
             owner: self.owner,
             dispatch_receiver,
-            extension_receiver,
+            // The receiver occupies a declaration parameter slot at the FIR/backend boundary.
+            // Retain the selected declaration type, after generic instantiation, rather than the
+            // source expression's possibly narrower type. The expression remains the receiver
+            // operand; this fact is its checked parameter contract.
+            extension_receiver: self.extension_receiver,
             physical_receiver: self.physical_receiver,
             // Selection and diagnostics used the Kotlin source name. Only the finalized emit target
             // receives this provider-owned spelling, so a mangled dependency method cannot leak back
@@ -547,7 +550,7 @@ impl Checker<'_> {
             .is_some_and(|shape| shape.is_interface());
         let dispatch_receiver = self.implicit_receiver_selection(candidate.dispatch_receiver);
         let result = self.commit_member_extension_type_arguments(expression, &[], &mut candidate);
-        let call = candidate.resolved_call(dispatch_receiver, extension_receiver, interface);
+        let call = candidate.resolved_call(dispatch_receiver, interface);
         self.mark_extension_receiver_used(expression, candidate.dispatch_receiver);
         Ok(Some((result, call)))
     }
