@@ -961,6 +961,9 @@ fn stdlib_built_in_calls_have_the_signed_operands() {
                     ("isNaN", Some(operand))
                 }
                 super::super::ir_builtins::BuiltinOperator::Not => ("not", Some(Ty::Boolean)),
+                super::super::ir_builtins::BuiltinOperator::NumericConversion { from, .. } => {
+                    ("numeric conversion", Some(from))
+                }
                 super::super::ir_builtins::BuiltinOperator::Equals => ("EQEQ", None),
                 super::super::ir_builtins::BuiltinOperator::Identical => ("EQEQEQ", None),
             };
@@ -977,6 +980,7 @@ fn stdlib_built_in_calls_have_the_signed_operands() {
         "ieee754equals",
         "isNaN",
         "not",
+        "numeric conversion",
         "EQEQ",
         "EQEQEQ",
     ] {

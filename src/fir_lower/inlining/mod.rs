@@ -1771,10 +1771,6 @@ fn specialize_checked_argument(argument: &mut IrCheckedArgument, bindings: &Hash
 
 fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, Ty>) {
     match operation {
-        IrIntrinsic::ReinterpretBits { from, to } => {
-            specialize_ty(from, bindings);
-            specialize_ty(to, bindings);
-        }
         IrIntrinsic::PrimitiveCompare { operand, .. }
         | IrIntrinsic::UnsignedCompare { operand }
         | IrIntrinsic::UnsignedToString { source: operand }
