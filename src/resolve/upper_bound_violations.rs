@@ -52,14 +52,26 @@ pub(crate) fn check_finalized_top_level_type_alias_bounds(
                 .source_order(*declaration)
                 .expect("an inventoried top-level type alias has source order")
         });
-        assert_eq!(
-            declarations.len(),
-            file.type_alias_decls.len(),
-            "top-level type-alias syntax must pair with the stable declaration inventory"
-        );
         if declarations.is_empty() {
             continue;
         }
+
+        // Earlier declaration validation may reject one alias while retaining its parser syntax
+        // for the diagnostic ledger. Join each surviving stable identity to the exact declaration
+        // range that created it; source order orders the stable side, but never substitutes for
+        // identity by zipping two lists whose rejected members differ.
+        let declarations = declarations
+            .into_iter()
+            .filter_map(|declaration| {
+                let range = index
+                    .declaration_range(declaration)
+                    .expect("top-level type-alias bounds run while source coordinates are live");
+                file.type_alias_decls
+                    .iter()
+                    .find(|syntax| syntax.span == range)
+                    .map(|syntax| (syntax, declaration))
+            })
+            .collect::<Vec<_>>();
 
         diags.set_file(file_index as u32);
         let mut checker = super::make_checker_with_index(
@@ -73,7 +85,7 @@ pub(crate) fn check_finalized_top_level_type_alias_bounds(
             diags,
         );
         checker.push_file_policies(index.file_lexical_policies(source));
-        for (syntax, declaration) in file.type_alias_decls.iter().zip(declarations) {
+        for (syntax, declaration) in declarations {
             let header = index
                 .type_alias_header(declaration)
                 .expect("an inventoried top-level type alias has a finalized header");

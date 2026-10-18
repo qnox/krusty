@@ -1131,8 +1131,19 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         // Signature-native type resolution: a type reference in a compact header is a type
         // parameter of the owning declaration chain, a scoped alias/classifier, or a leaf shape.
         // None of those needs a body checker, and Pass 1 has no body to check.
-        let ty =
+        let mut ty =
             self.resolve_signature_type_reference_at(scope, scope, &reference, true, Some(site))?;
+        // A compact written application evaluates every source argument as its own graph
+        // expression. Recursive ordinary lookup applies a child's use-site projection from its
+        // parent, but this standalone root has no parent left to do that. Retain the projection on
+        // the evaluated argument before it is substituted into the selected classifier template.
+        // Stars are graph-owned `Known` expressions and never enter this path.
+        if reference.in_projection() {
+            ty = Ty::in_projection(ty);
+        } else if reference.out_projection() {
+            ty = Ty::out_projection(ty);
+        }
+        self.record_type_spelling_projection(Some(site), ty);
         self.publish_shared_type_spelling_sites(graph.declaration_type_syntaxes(syntax));
         crate::fir::ResolvedTy::new(ty).map_err(|_| Self::failure())
     }

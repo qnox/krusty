@@ -1854,6 +1854,7 @@ impl ProductionSignatureSemantics<'_> {
                     },
                 )
             },
+            &|_, _| Vec::new(),
             extension_receiver,
             name,
             crate::symbol_resolver::PropertyAccess::Read,

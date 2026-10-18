@@ -127,6 +127,69 @@ pub(super) struct MemberExtensionProperty {
     pub(super) setter: Option<crate::libraries::LibraryCallable>,
 }
 
+impl super::Checker<'_> {
+    /// Select a member-extension property from one combined provider/active declaration family
+    /// using this lexical scope's receiver tower and context-argument policy.
+    pub(super) fn member_extension_property(
+        &self,
+        scope: &super::CheckerScope<'_>,
+        extension_receiver: Ty,
+        name: &str,
+    ) -> Result<Option<MemberExtensionProperty>, ()> {
+        self.member_extension_property_for_access(
+            scope,
+            extension_receiver,
+            name,
+            crate::symbol_resolver::PropertyAccess::Read,
+        )
+    }
+
+    pub(super) fn member_extension_property_for_write(
+        &self,
+        scope: &super::CheckerScope<'_>,
+        extension_receiver: Ty,
+        name: &str,
+    ) -> Result<Option<MemberExtensionProperty>, ()> {
+        self.member_extension_property_for_access(
+            scope,
+            extension_receiver,
+            name,
+            crate::symbol_resolver::PropertyAccess::Write,
+        )
+    }
+
+    fn member_extension_property_for_access(
+        &self,
+        scope: &super::CheckerScope<'_>,
+        extension_receiver: Ty,
+        name: &str,
+        access: crate::symbol_resolver::PropertyAccess,
+    ) -> Result<Option<MemberExtensionProperty>, ()> {
+        select(
+            &self.fed_source(),
+            self,
+            &member_extension_selection::ordinary_dispatch_first(
+                scope,
+                self.implicit_receivers(scope),
+            ),
+            &|parameters| {
+                self.select_context_arguments_with_types(scope, parameters)
+                    .ok()
+            },
+            &|owner, name| {
+                self.checked_local_member_extension_properties
+                    .get(&owner)
+                    .and_then(|properties| properties.get(name))
+                    .cloned()
+                    .unwrap_or_default()
+            },
+            extension_receiver,
+            name,
+            access,
+        )
+    }
+}
+
 /// Select a member-extension property against an explicit receiver tower. The tower and the
 /// context-argument resolver are the only things a scope supplies here, so both are parameters:
 /// the checker passes its scope's, while signature evaluation passes the declaration's.
@@ -135,6 +198,7 @@ pub(super) fn select(
     oracle: &dyn crate::assignable::TypeOracle,
     implicit_receivers: &[ImplicitReceiver],
     context_arguments: &dyn Fn(&[Ty]) -> Option<Vec<(ResolvedContextArgument, Ty)>>,
+    active_declarations: &dyn Fn(TypeName, &str) -> Vec<MemberExtPropSig>,
     extension_receiver: Ty,
     name: &str,
     access: crate::symbol_resolver::PropertyAccess,
@@ -148,7 +212,14 @@ pub(super) fn select(
         for (owner, owner_ty, dispatch_depth) in
             applied_symbol_hierarchy(source, dispatch_receiver.ty)
         {
-            let mut declarations = Vec::new();
+            // The immutable provider and the active body-local overlay expose the same normalized
+            // declaration shape. Candidate union happens before applicability and specificity, so
+            // active declarations never take a separate origin-specific selection path.
+            let mut declarations = active_declarations(owner, name);
+            declarations.retain(|property| match access {
+                crate::symbol_resolver::PropertyAccess::Read => true,
+                crate::symbol_resolver::PropertyAccess::Write => property.is_var,
+            });
             if let Some(classifier) = source.classifier(owner) {
                 declarations.extend(
                     classifier
