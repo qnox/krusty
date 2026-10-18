@@ -514,10 +514,11 @@ impl Checker<'_> {
             let postponed_solution = postponed_solutions.get(formal).copied();
             if let Some(solution) = postponed_solution {
                 // A symbolic type by itself is not evidence of an open result: captured classifier
-                // parameters and enclosing declaration parameters are stable solutions too. The
-                // retained selected-call signature supplies the ownership fact, while the lexical
-                // scope excludes an enclosing declaration's fixed parameter.
-                if self.lambda_arguments_have_open_result(arguments, solution)
+                // parameters and enclosing declaration parameters are stable solutions too. Read
+                // the exact per-argument result constraint instead: it records which selected
+                // lambda contributed which nested call-owned identity to this formal. A merged
+                // solution can lose that provenance after another bound is joined.
+                if self.lambda_arguments_have_open_result(arguments, formal, constraints)
                     && !Self::type_is_lexically_fixed(scope, solution)
                 {
                     state.open_result_dependencies.push(formal.clone());
@@ -633,11 +634,35 @@ impl Checker<'_> {
         state
     }
 
-    fn lambda_arguments_have_open_result(&self, arguments: &[ExprId], solution: Ty) -> bool {
+    fn lambda_arguments_have_open_result(
+        &self,
+        arguments: &[ExprId],
+        formal: &str,
+        constraints: &PostponedCallConstraints,
+    ) -> bool {
         arguments.iter().copied().any(|argument| {
             let Expr::Lambda { body, .. } = self.file.expr(argument) else {
                 return false;
             };
+            let constrained_types = constraints
+                .function_result_lower
+                .get(&argument)
+                .and_then(|lower| lower.get(formal))
+                .copied()
+                .into_iter()
+                .chain(
+                    constraints
+                        .function_result_upper
+                        .get(&argument)
+                        .and_then(|upper| upper.get(formal))
+                        .into_iter()
+                        .flatten()
+                        .copied(),
+                )
+                .collect::<Vec<_>>();
+            if constrained_types.is_empty() {
+                return false;
+            }
             let direct = super::conditional_branch::branch_value_expression(self.file, *body);
             std::iter::once(direct)
                 .chain(
@@ -654,7 +679,9 @@ impl Checker<'_> {
                     self.unbound_call_result_signature(call)
                         .is_some_and(|signature| {
                             signature.formals.iter().any(|formal| {
-                                ty_mentions_param(solution, std::slice::from_ref(formal))
+                                constrained_types.iter().any(|constrained| {
+                                    ty_mentions_param(*constrained, std::slice::from_ref(formal))
+                                })
                             })
                         })
                 })

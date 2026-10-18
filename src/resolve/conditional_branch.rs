@@ -224,6 +224,10 @@ pub(super) fn branch_value_expression(file: &File, expression: ExprId) -> ExprId
     }
 }
 
+fn unique_formal(mut formals: Vec<&String>) -> Option<&String> {
+    (formals.len() == 1).then(|| formals.pop().expect("one formal"))
+}
+
 impl Checker<'_> {
     /// Which expression owns completion of a conditional's still-open branch calls.
     ///
@@ -403,7 +407,7 @@ impl Checker<'_> {
             return;
         }
         let branch = branch_value_expression(self.file, branch);
-        let Some(signature) = self.unbound_call_result_signature(branch).cloned() else {
+        let Some(signature) = self.conditional_call_result_signature(branch).cloned() else {
             self.report_uninferred_constructor_type_parameter(branch);
             return;
         };
@@ -411,11 +415,61 @@ impl Checker<'_> {
         if Self::type_is_lexically_fixed(scope, actual) {
             return;
         }
-        let Some(formal) = signature
-            .formals
-            .iter()
-            .find(|formal| crate::types::ty_mentions_param(actual, std::slice::from_ref(formal)))
-        else {
+        let result_formal = |formal: &&String| {
+            crate::types::ty_mentions_param(signature.ret, std::slice::from_ref(*formal))
+        };
+        let direct = unique_formal(
+            signature
+                .formals
+                .iter()
+                .filter(result_formal)
+                .filter(|formal| {
+                    crate::types::ty_mentions_param(actual, std::slice::from_ref(formal))
+                })
+                .collect(),
+        );
+        // Rechecking one open branch against another can replace this call's variable with the
+        // sibling declaration's variable. Recover the exact result coordinate from the retained
+        // declaration shape: `Pair<String, sibling.B>` constrains only this call's second formal.
+        // A multi-formal relation that still leaves more than one coordinate open is ambiguous and
+        // deliberately reports nothing here instead of naming the first declaration formal.
+        let attributed = direct.or_else(|| {
+            let source = self.fed_source();
+            let constraints =
+                crate::symbol_resolver::collect_assignability_constraints_from_symbols(
+                    &source,
+                    signature.ret,
+                    actual,
+                );
+            unique_formal(
+                signature
+                    .formals
+                    .iter()
+                    .filter(result_formal)
+                    .filter(|formal| {
+                        constraints
+                            .lower
+                            .get(*formal)
+                            .copied()
+                            .into_iter()
+                            .chain(
+                                constraints
+                                    .upper
+                                    .get(*formal)
+                                    .into_iter()
+                                    .flatten()
+                                    .copied(),
+                            )
+                            .any(|bound| {
+                                bound != Ty::Error
+                                    && !bound.mentions_pending()
+                                    && !Self::type_is_lexically_fixed(scope, bound)
+                            })
+                    })
+                    .collect(),
+            )
+        });
+        let Some(formal) = attributed else {
             return;
         };
         self.diags.error(

@@ -348,3 +348,21 @@ fn stable_symbolic_lambda_results_are_inference_evidence() {
         );
     }
 }
+
+/// Sibling rebinding may replace only one coordinate of a multi-formal result with the sibling
+/// declaration's still-open identity. The diagnostic belongs to that exact coordinate: declaration
+/// order must not turn the remaining `B` obligation into an error naming `A`.
+#[test]
+fn multi_formal_branch_completion_reports_the_open_result_coordinate() {
+    let result = common::compiler_diagnostics(
+        &[(
+            "Use.kt",
+            "class Duo<A, B>\n\
+             fun <A, B> empty(): Duo<A, B> = error(\"unused\")\n\
+             fun <B> fixedFirst(): Duo<String, B> = error(\"unused\")\n\
+             fun use(flag: Boolean) = if (flag) empty() else fixedFirst()\n",
+        )],
+        &[],
+    );
+    common::expect_identical_rejection(&result, "multi-formal conditional result completion");
+}
