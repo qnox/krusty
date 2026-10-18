@@ -653,6 +653,10 @@ struct Parser<'a> {
     /// Saved/restored at every nested block boundary so syntax context, not a lambda-only special
     /// case, owns the decision.
     block_trailing_is_value: bool,
+    /// Set by `parse_branch` for the bare body of an `if`/`when` branch, which is an expression
+    /// position: the statement it parses keeps an inc/dec as its value instead of re-routing it to
+    /// the statement path. Taken when that statement starts, so nested statements never see it.
+    bare_branch_value: bool,
     /// Span of a `value` modifier consumed by the most recent declaration prefix. Class registration
     /// takes it before the class body is parsed, so a nested `value class` cannot overwrite it.
     value_modifier_span: Option<Span>,
@@ -803,6 +807,7 @@ impl<'a> Parser<'a> {
             when_guards: features.has("WhenGuards"),
             no_trailing_lambda: false,
             block_trailing_is_value: false,
+            bare_branch_value: false,
             value_modifier_span: None,
             external_modifier_spans: Vec::new(),
             lexical_type_parameters: LexicalTypeParameters::default(),
@@ -4282,6 +4287,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_stmt_inner(&mut self) -> StmtId {
+        let bare_branch_value = std::mem::take(&mut self.bare_branch_value);
         // Labels may prefix declarations as well as loops/lambdas. Keep the declaration as its real
         // statement node and retain the label in the file's sparse source metadata.
         if self.at(TokenKind::Ident)
@@ -4542,17 +4548,20 @@ impl<'a> Parser<'a> {
                 // `Expr::IncDec`, while member/index parsing already built its single-evaluation
                 // result block. In statement position re-route the name to `Stmt::IncDec` and prune
                 // only the unused result of an access block. Immediately before a closing brace of a
-                // VALUE-CONSUMING block, keep the expression value. The enclosing parser context
-                // marks lambda/if/when/try value blocks; function/accessor/init/constructor/loop/
-                // finally blocks stay on this statement path. This avoids both a lambda-only fork and
-                // accidentally treating a Unit function's trailing implicit property increment as a
-                // local-variable expression.
+                // VALUE-CONSUMING block, or as the bare body of an `if`/`when` branch, keep the
+                // expression value. The enclosing parser context marks lambda/if/when/try value
+                // blocks; function/accessor/init/constructor/loop/finally blocks stay on this
+                // statement path. This avoids both a lambda-only fork and accidentally treating a
+                // Unit function's trailing implicit property increment as a local-variable
+                // expression.
                 // Peek WITHOUT consuming: only a `}` (after newlines) makes this the body's last
                 // statement — consuming the newlines here would shift the statement's spans.
                 let after_nl = (self.i..self.t.len())
                     .find(|&i| self.t[i].kind != TokenKind::Newline)
                     .map(|i| self.t[i].kind);
-                if after_nl != Some(TokenKind::RBrace) || !self.block_trailing_is_value {
+                let keeps_value = bare_branch_value
+                    || (after_nl == Some(TokenKind::RBrace) && self.block_trailing_is_value);
+                if !keeps_value {
                     if let Expr::IncDec {
                         target,
                         dec,

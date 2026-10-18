@@ -122,6 +122,47 @@ object O {
     }
 }
 
+/// A bare `if`/`when` branch body is an expression position, so an update there is the branch's
+/// value even when the whole conditional is discarded: kotlinc materializes the old (postfix) or new
+/// (prefix) value in each branch and pops it after the join. A loop body stays a statement.
+#[test]
+fn a_bare_branch_update_is_the_branch_value() {
+    let source = "\
+fun lg(): Long = 1L
+
+class H { var p = 0L }
+
+fun branches(k: Int, o: H): Long {
+    var c = 0L
+    if (k > 1) c++ else c--
+    if (k > 2) ++c else lg()
+    when (k) { 1 -> c++; else -> --c }
+    if (k > 3) c++
+    if (k > 4) o.p++ else o.p--
+    while (c < k) c++
+    val v = if (k > 5) c++ else 7L
+    return c + v
+}
+
+fun captured(k: Int): Int {
+    var c = 0
+    val f = { c-- }
+    f()
+    if (k > 1) c++ else c--
+    when (k) { 1 -> ++c; else -> c++ }
+    return c
+}
+";
+    common::byte_diff_against_kotlinc_cp(
+        "BranchIncrements",
+        source,
+        "BranchIncrementsKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("the reference kotlinc is provisioned")
+    .unwrap_or_else(|why| panic!("{why}"));
+}
+
 #[test]
 fn a_lambda_updates_its_captured_cell_on_jvm_and_native() {
     // This capture shape is target E2E coverage rather than shared conformance: Wasm does not yet
