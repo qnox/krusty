@@ -5321,9 +5321,12 @@ regress.
     for every inline callee: 26 more box files are byte-identical on 2.4.20 (3,706 to 3,732), none
     regresses. ✓ Reified callees (their markers repointed from `IrFile::reified_call_subst`) and
     same-file non-public callees, with try/catch ordering around a `finally`, `Unit` call results
-    and compacted body slots placed as kotlinc's inliner places them: 3,740, none regresses.
+    and compacted body slots placed as kotlinc's inliner places them, and a method's inlined lines
+    copied into the class map in their unoptimized order: on the master this branch rebased onto,
+    34 more box files are byte-identical (3,714 to 3,748), none regresses.
     ☐ `$default` calls, class members, non-public callees of another file, reified callees that
-    create arrays of a reified type parameter (`NEW_ARRAY` markers), suspend callers and callees,
+    create arrays of a reified type parameter (`NEW_ARRAY` markers), callees that read a local
+    delegated property (its accessor belongs to the callee's class), suspend callers and callees,
     `crossinline` parameters, literals with non-local jumps, and calls in lambdas, local functions,
     initializers and accessors.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
