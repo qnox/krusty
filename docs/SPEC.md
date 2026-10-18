@@ -2013,6 +2013,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   storage and type: `value_position_postfix_updates_from_the_saved_old_value_like_kotlinc`).
   Tests: `tests/increment_statement_e2e.rs`, the shared
   `multimoduleLocalIncrementShapes` JVM/Native/Wasm case, and the checked-FIR increment tests.
+- **A bare `if`/`when` branch body is an expression position.** `if (b) c++ else c--` keeps each
+  update as its branch value even when the conditional itself is discarded, so the conditional is
+  typed by its branches and kotlinc's materialize-then-pop shape follows; only a braced block's
+  non-trailing statements and loop bodies take the statement path. Test:
+  `a_bare_branch_update_is_the_branch_value` in `tests/increment_statement_e2e.rs`.
 - **`&&`/`||` are laid out as short-circuit jumps**, as kotlinc lays out `ANDAND`/`OROR`. In a
   condition each operand branches on its own: `if (a && b)` is `jumpIfFalse(a, else);
   jumpIfFalse(b, else)`, `if (a || b)` is `jumpIfTrue(a, then); jumpIfFalse(b, else)`, and `!`
