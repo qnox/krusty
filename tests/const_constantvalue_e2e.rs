@@ -161,7 +161,13 @@ fn an_integer_literal_declared_long_is_stored_as_a_long_constant() {
     let constants = |ci: &krusty::jvm::classreader::ClassInfo| {
         ci.fields
             .iter()
-            .map(|field| (field.name.clone(), field.descriptor.clone(), field.const_value.clone()))
+            .map(|field| {
+                (
+                    field.name.clone(),
+                    field.descriptor.clone(),
+                    field.const_value.clone(),
+                )
+            })
             .collect::<Vec<_>>()
     };
     let reference = reference_facade(SRC, "long_constants");
