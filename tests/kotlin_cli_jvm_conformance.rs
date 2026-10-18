@@ -694,8 +694,8 @@ fn reference_fingerprint(
 
 /// Everything a reference case reads besides its own arguments, identified once per process: the
 /// CLI corpus and the checkout's third-party jars it names, the kotlinc distribution and the JDK
-/// it runs on (by content), and each JDK the corpus names (by identity), with the paths that
-/// appear in the output.
+/// it runs on (by content), and each JDK the corpus names (by its `release` file), with the paths
+/// that appear in the output.
 fn reference_environment(toolchain: &Toolchain) -> &'static str {
     static ENVIRONMENT: OnceLock<String> = OnceLock::new();
     ENVIRONMENT.get_or_init(|| {
@@ -720,9 +720,12 @@ fn reference_environment(toolchain: &Toolchain) -> &'static str {
             format!("java:{}", java_home.display()),
             format!("jvm:{}", toolchain.jvm_version.as_deref().unwrap_or("")),
         ];
+        // JDK 8 has no modules image, so a corpus JDK is identified by its `release` file, which
+        // [`jdk_release`] already required, and by its home, which names the exact update.
         for (release, home) in &toolchain.jdks {
-            let identity = common::producing_jdk::jdk_identity(home)
-                .unwrap_or_else(|error| panic!("identify JDK {release}: {error}"));
+            let release_file = home.join("release");
+            let identity = std::fs::read(&release_file)
+                .unwrap_or_else(|error| panic!("read {}: {error}", release_file.display()));
             rows.push(format!(
                 "jdk{release}:{}:{}",
                 home.display(),
