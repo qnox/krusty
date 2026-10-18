@@ -48,6 +48,9 @@ pub(super) struct LocalDeclarations {
     independent_capture_holders: Rc<HashMap<String, HashSet<String>>>,
     /// The table orders the file's writers computed, shared by all of them.
     orders: Rc<TableOrders>,
+    /// This writer's rows whose qualified names tie, by group: kotlinc lists them in the order
+    /// its pool met their classes, which is known only once the pool is laid out.
+    tied: Vec<Vec<String>>,
 }
 
 /// Table orders already computed for one file's writers.
@@ -457,33 +460,97 @@ impl ClassWriter {
                     (key, rank, spec)
                 })
                 .collect();
-            self.inner_class_candidates = declaration_order(rows, &local.declaring)
-                .into_iter()
-                .map(|(_, _, spec)| spec)
-                .collect();
-            if !tied {
-                let index: HashMap<&str, usize> = candidates
-                    .iter()
-                    .enumerate()
-                    .map(|(row, spec)| (spec.inner.as_str(), row))
-                    .collect();
-                let order = self
-                    .inner_class_candidates
-                    .iter()
-                    .map(|spec| index[spec.inner.as_str()])
-                    .collect::<Vec<_>>();
-                // A table order is reusable only when each row names a class of its own.
-                if index.len() == order.len() {
-                    let identity = (0..order.len()).collect();
-                    drop(index);
-                    local.orders.remember(candidates, local, order);
-                    local
-                        .orders
-                        .remember(self.inner_class_candidates.clone(), local, identity);
+            let ordered = declaration_order(rows, &local.declaring);
+            if tied {
+                let groups = tied_groups(&ordered, &local.declaring);
+                self.inner_class_candidates =
+                    ordered.into_iter().map(|(_, _, spec)| spec).collect();
+                if let InnerClassTable::Referenced(local) = &mut self.inner_class_table {
+                    local.tied = groups;
                 }
+                return;
+            }
+            self.inner_class_candidates = ordered.into_iter().map(|(_, _, spec)| spec).collect();
+            let index: HashMap<&str, usize> = candidates
+                .iter()
+                .enumerate()
+                .map(|(row, spec)| (spec.inner.as_str(), row))
+                .collect();
+            let order = self
+                .inner_class_candidates
+                .iter()
+                .map(|spec| index[spec.inner.as_str()])
+                .collect::<Vec<_>>();
+            // A table order is reusable only when each row names a class of its own.
+            if index.len() == order.len() {
+                let identity = (0..order.len()).collect();
+                drop(index);
+                local.orders.remember(candidates, local, order);
+                local
+                    .orders
+                    .remember(self.inner_class_candidates.clone(), local, identity);
             }
         }
     }
+}
+
+impl ClassWriter {
+    /// The pool indices of the classes of each group of tied rows (see [`LocalDeclarations`]).
+    pub(super) fn tied_inner_rows(&self) -> Vec<Vec<u16>> {
+        let InnerClassTable::Referenced(local) = &self.inner_class_table else {
+            return Vec::new();
+        };
+        local
+            .tied
+            .iter()
+            .map(|group| {
+                group
+                    .iter()
+                    .filter_map(|inner| self.cp.lookup_class(inner))
+                    .collect()
+            })
+            .collect()
+    }
+}
+
+/// The rows of `ordered` sharing a qualified name with another, by name, leaving out each row
+/// declared in or declaring another row's class: the declaring class stays first.
+fn tied_groups(
+    ordered: &[(String, usize, InnerClassSpec)],
+    declaring: &HashMap<String, String>,
+) -> Vec<Vec<String>> {
+    let rows: HashSet<&str> = ordered
+        .iter()
+        .map(|(_, _, spec)| spec.inner.as_str())
+        .collect();
+    let mut related = HashSet::default();
+    for (_, _, spec) in ordered {
+        let mut current = declaring.get(&spec.inner).map(String::as_str);
+        let mut seen = HashSet::default();
+        while let Some(parent) = current.filter(|parent| seen.insert(*parent)) {
+            if rows.contains(parent) {
+                related.insert(spec.inner.as_str());
+                related.insert(parent);
+                break;
+            }
+            current = declaring.get(parent).map(String::as_str);
+        }
+    }
+    let mut groups: Vec<(&str, Vec<String>)> = Vec::new();
+    for (key, _, spec) in ordered {
+        if related.contains(spec.inner.as_str()) {
+            continue;
+        }
+        match groups.iter_mut().find(|(group, _)| *group == key.as_str()) {
+            Some((_, group)) => group.push(spec.inner.clone()),
+            None => groups.push((key, vec![spec.inner.clone()])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(_, group)| group)
+        .filter(|group| group.len() > 1)
+        .collect()
 }
 
 /// Sort by kotlinc's qualified-name/pool order while keeping an exact declaring class before every
