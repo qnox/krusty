@@ -48,6 +48,29 @@ pub(crate) fn dependency_callable_type_parameter(
     semantic
 }
 
+/// A type parameter owned by one property declaration in an external provider instance.
+///
+/// A property's getter and setter are distinct callable realizations, but the generic receiver and
+/// result belong to the one source property. Keeping a separate key space lets both accessors carry
+/// the property's identity without conflating the property with either physical method.
+pub(crate) fn dependency_property_type_parameter(
+    provider: u64,
+    declaration: u32,
+    ordinal: usize,
+    source: &str,
+) -> &'static str {
+    let semantic = intern(&format!(
+        "\0dependency-property-tp:{provider}:{declaration}:{ordinal}"
+    ));
+    let source = intern(type_parameter_source_name(source));
+    TYPE_PARAMETER_SOURCES
+        .get_or_init(|| Mutex::new(HashMap::default()))
+        .lock()
+        .unwrap()
+        .insert(semantic, source);
+    semantic
+}
+
 /// Intern one declaration-owned type-parameter identity and retain its source spelling separately.
 /// The semantic key is opaque: callers compare it only by identity and never parse declaration
 /// coordinates or spelling out of it.

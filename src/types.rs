@@ -48,8 +48,9 @@ use std::fmt;
 use std::sync::OnceLock;
 pub(crate) use type_parameter_identity::{
     call_site_type_variable, constructor_type_parameter, declaration_type_parameter,
-    dependency_callable_type_parameter, generated_function_type_parameter, metadata_type_parameter,
-    postponed_call_type_variable, type_parameter_source_name,
+    dependency_callable_type_parameter, dependency_property_type_parameter,
+    generated_function_type_parameter, metadata_type_parameter, postponed_call_type_variable,
+    type_parameter_source_name,
 };
 
 /// Compile-time policy for Kotlin's `assert` operation. Every backend must guard, retain, or elide

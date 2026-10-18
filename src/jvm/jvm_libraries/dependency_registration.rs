@@ -33,12 +33,34 @@ impl JvmLibraries {
         signature.normalize_call_sig_from(&prior_signature, &mut member.call_sig);
     }
 
+    fn retain_normalized_constructor_generic_signature(
+        member: &mut LibraryMember,
+        callable: &LibraryCallable,
+    ) {
+        let Some(signature) = callable.generic_sig.as_deref() else {
+            return;
+        };
+        let prior_signature = member
+            .generic_sig
+            .clone()
+            .expect("a normalized generic constructor retains its declaration signature");
+        member.params = callable.params.clone();
+        member.ret = signature.ret;
+        member.generic_sig = Some(signature.clone());
+        signature.normalize_call_sig_from(&prior_signature, &mut member.call_sig);
+    }
+
     pub(super) fn register_external_constructor(
         &self,
         owner: TypeName,
         member: &mut LibraryMember,
     ) {
-        let callable = LibraryCallable::constructor(owner, member);
+        let mut callable = LibraryCallable::constructor(owner, member);
+        callable.generic_sig = member.generic_sig.clone().map(Box::new);
+        callable.declared_params = member
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.parameters_with_receiver(member.context_count));
         let declaration_owner = Some(SemanticCallableOwner::Classifier(owner));
         let identity = member
             .external_identity
@@ -58,7 +80,11 @@ impl JvmLibraries {
                     declaration_owner,
                 )
             });
+        callable.external_identity = Some(identity);
+        self.cp
+            .normalize_external_callable_generic_signature(identity, &mut callable);
         member.external_identity = Some(identity);
+        Self::retain_normalized_constructor_generic_signature(member, &callable);
     }
 
     pub(super) fn register_external_callable(
@@ -239,6 +265,8 @@ impl JvmLibraries {
             setter,
             property.compile_time_constant.clone(),
         );
+        self.cp
+            .normalize_external_property_generic_signature(identity, property);
         property.getter.external_property_identity = Some(identity);
         if let Some(setter) = &mut property.setter {
             setter.external_property_identity = Some(identity);

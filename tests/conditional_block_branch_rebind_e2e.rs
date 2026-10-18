@@ -72,6 +72,14 @@ class Selector {\n\
   fun <A, R> choose(first: () -> A, second: () -> Cell<R>): Cell<R> = error(\"unused\")\n\
 }\n";
 
+const SAME_SPELLED_GENERIC_DECLARATIONS: &str = "package identities\n\
+class Left<T>(val value: T)\n\
+class Right<T>(val value: T)\n\
+val <T> Left<T>.echo: T get() = value\n\
+var <T> Right<T>.echo: T\n\
+  get() = value\n\
+  set(ignored) {}\n";
+
 /// Control: expression branches already rebound, and must keep doing so.
 #[test]
 fn expression_branches_rebind_against_their_sibling() {
@@ -265,6 +273,42 @@ fn reversed_named_lambdas_preserve_the_selected_parameters_open_result() {
         &classpath,
     );
     common::expect_identical_rejection(&result, "reversed named selected lambda parameters");
+}
+
+#[test]
+fn same_spelled_dependency_properties_and_constructors_keep_declaration_identity() {
+    let Some(library) = common::kotlinc_library(SAME_SPELLED_GENERIC_DECLARATIONS) else {
+        eprintln!("skipping: kotlinc unavailable");
+        return;
+    };
+    let classpath = [library, common::stdlib_jar(), common::jdk_modules()];
+    let result = common::compiler_diagnostics(
+        &[(
+            "Use.kt",
+            "import identities.Left\n\
+             import identities.Right\n\
+             import identities.echo\n\
+             fun use(left: Left<String>, right: Right<Int>): String {\n\
+             \x20 val fromLeft: String = left.echo\n\
+             \x20 val fromRight: Int = right.echo\n\
+             \x20 right.echo = fromRight\n\
+             \x20 val builtLeft: Left<String> = Left(fromLeft)\n\
+             \x20 val builtRight: Right<Int> = Right(fromRight)\n\
+             \x20 return builtLeft.value + builtRight.value\n\
+             }\n",
+        )],
+        &classpath,
+    );
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (0, ""),
+        "kotlinc rejected the same-spelled declaration fixture"
+    );
+    assert_eq!(
+        (result.krusty_code, result.krusty_stderr.as_str()),
+        (0, ""),
+        "krusty conflated same-spelled property or constructor formals"
+    );
 }
 
 #[test]
