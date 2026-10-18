@@ -2517,6 +2517,9 @@ pub struct IrFile {
     /// identity is still on the catch. Try emission reads it for `reifiedOperationMarker` mode 7
     /// and does not recover the spelling from the identity.
     pub(crate) reified_catch_markers: crate::fx_hash::HashMap<ExprId, Vec<Option<String>>>,
+    /// `NewArray`/`Vararg` `ExprId` → the `NEW_ARRAY` marker argument (`[T`, `T?`) of an array a
+    /// reified declaration creates of its own parameter, written before its `anewarray`.
+    pub(crate) reified_array_markers: crate::fx_hash::HashMap<ExprId, String>,
     /// Call `ExprId` → every checked type argument of a classpath inline declaration, under the
     /// dependency metadata's formal name. JVM anonymous-object regeneration specializes generic
     /// class signatures with this full map; runtime reified operations use the narrower map above.

@@ -5323,10 +5323,10 @@ regress.
     same-file non-public callees, with try/catch ordering around a `finally`, `Unit` call results
     and compacted body slots placed as kotlinc's inliner places them, and a method's inlined lines
     copied into the class map in their unoptimized order: on the master this branch rebased onto,
-    34 more box files are byte-identical (3,714 to 3,748), none regresses.
-    ☐ `$default` calls, class members, non-public callees of another file, reified callees that
-    create arrays of a reified type parameter (`NEW_ARRAY` markers), callees that read a local
-    delegated property (its accessor belongs to the callee's class), suspend callers and callees,
+    35 more box files are byte-identical (3,714 to 3,749), none regresses.
+    ✓ `NEW_ARRAY` markers on arrays of a reified parameter, and local delegated properties read
+    through the declaring class's accessor.
+    ☐ `$default` calls, class members, non-public callees of another file, suspend callers and callees,
     `crossinline` parameters, literals with non-local jumps, and calls in lambdas, local functions,
     initializers and accessors.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs

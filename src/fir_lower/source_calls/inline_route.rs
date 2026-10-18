@@ -65,13 +65,6 @@ pub(in super::super) enum ExpansionReason {
     /// read from a table of the callee's own class (the JVM's `$WhenMappings`), numbered as that
     /// class's emission claims them, which a body compiled for the call site cannot reproduce.
     EnumSwitchInBody,
-    /// The callee's body creates an array whose element type is one of its reified type
-    /// parameters, which its compiled body would have to mark for the inliner.
-    ReifiedArrayInBody,
-    /// The callee's body reads a local delegated property. Its accessor and its
-    /// `$$delegatedProperties` entry belong to the callee's own class, which a body compiled for
-    /// the call site cannot reach.
-    LocalDelegateInBody,
 }
 
 impl BodyLowering<'_> {
@@ -172,7 +165,7 @@ impl BodyLowering<'_> {
         else {
             return Some(ExpansionReason::NoTemplate);
         };
-        self.template_exclusion(function, body)
+        self.template_exclusion(body)
     }
 
     /// What about the body being lowered keeps its same-module inline calls expanded in IR.
@@ -198,20 +191,7 @@ impl BodyLowering<'_> {
     }
 
     /// What in the callee's IR template keeps a call to it expanded in IR.
-    fn template_exclusion(&self, function: FunId, body: ExprId) -> Option<ExpansionReason> {
-        let reified = self
-            .ir
-            .signatures
-            .get(&function)
-            .map(|signature| {
-                signature
-                    .type_params
-                    .iter()
-                    .filter(|formal| formal.reified)
-                    .map(|formal| formal.semantic_name.as_str())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+    fn template_exclusion(&self, body: ExprId) -> Option<ExpansionReason> {
         let mut pending = vec![body];
         let mut seen = std::collections::HashSet::new();
         while let Some(expression) = pending.pop() {
@@ -238,14 +218,6 @@ impl BodyLowering<'_> {
                         .is_some_and(|class| class.is_local_class || class.is_anonymous_object) =>
                 {
                     return Some(ExpansionReason::LocalClassInBody);
-                }
-                IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. }
-                    if mentions_reified(*array_type, &reified) =>
-                {
-                    return Some(ExpansionReason::ReifiedArrayInBody);
-                }
-                IrExpr::LocalDelegateAccess(_) => {
-                    return Some(ExpansionReason::LocalDelegateInBody);
                 }
                 _ => {}
             }
@@ -297,17 +269,6 @@ impl BodyLowering<'_> {
             return false;
         };
         leaves_non_locally(self.ir, *body, &mut Vec::new())
-    }
-}
-
-/// Whether `ty` mentions a type parameter whose identity is in `reified`.
-fn mentions_reified(ty: Ty, reified: &[&str]) -> bool {
-    match ty.non_null() {
-        Ty::TyParam(name, _) => reified.contains(&name),
-        other => other
-            .type_args()
-            .iter()
-            .any(|&argument| mentions_reified(argument, reified)),
     }
 }
 

@@ -467,10 +467,11 @@ pub(super) fn body_has_reified_markers(ir: &IrFile, expression: crate::ir::ExprI
     if matches!(
         ir.expr(expression),
         IrExpr::ReifiedClassMarker { .. } | IrExpr::ReifiedTypeOp { .. }
-    ) || ir
-        .reified_catch_markers
-        .get(&expression)
-        .is_some_and(|markers| markers.iter().any(Option::is_some))
+    ) || ir.reified_array_markers.contains_key(&expression)
+        || ir
+            .reified_catch_markers
+            .get(&expression)
+            .is_some_and(|markers| markers.iter().any(Option::is_some))
     {
         return true;
     }

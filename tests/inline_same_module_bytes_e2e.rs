@@ -430,6 +430,36 @@ fn a_callee_creating_a_reified_array_runs() {
     );
 }
 
+// kotlinc marks each array a reified body creates of its parameter with `reifiedOperationMarker(0,
+// …)` before the `anewarray`, naming nested arrays with a `[` per level and a nullable element with
+// `?`; the inliner repoints it at the call-site class.
+const REIFIED_ARRAY_LIBRARY: &str = r#"inline fun <reified T> two(a: T, b: T): Array<T> = arrayOf(a, b)
+
+inline fun <reified T> nulls(n: Int): Array<T?> = arrayOfNulls<T>(n)
+
+inline fun <reified T> filled(n: Int, x: T): Array<T> = Array<T>(n) { x }
+
+inline fun <reified T> rows(x: T): Array<Array<T>> = arrayOf(arrayOf(x), arrayOf(x, x))
+"#;
+
+const REIFIED_ARRAY_MAIN: &str = r#"fun box(): String {
+    val pair: Array<String> = two("O", "K")
+    val empty: Array<String?> = nulls(2)
+    val filled: Array<CharSequence> = filled(2, "K")
+    val square: Array<Array<String>> = rows("O")
+    if (empty.size != 2 || filled[1] != "K") return "fail"
+    return square[1][1] + pair[1]
+}
+"#;
+
+#[test]
+fn a_callee_creating_reified_arrays_is_inlined_from_the_compiled_body() {
+    assert_like_kotlinc(&[
+        ("lib.kt", REIFIED_ARRAY_LIBRARY),
+        ("main.kt", REIFIED_ARRAY_MAIN),
+    ]);
+}
+
 // A same-file callee is compiled into the caller's own class, so a private one is inlined from
 // its compiled body as a public one is.
 const PRIVATE_CALLEE: &str = r#"private val suffix = "K"

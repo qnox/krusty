@@ -54,6 +54,39 @@ fn parameter(ty: Ty, parameters: &HashMap<String, ReifiedParameter>) -> Option<&
     parameters.get(identity)
 }
 
+/// kotlinc's `extractReificationArgument` for the element type of an array a reified body creates:
+/// the reified parameter the element type reaches through nested arrays, with the marker argument
+/// that names it (`[` per array level, the source spelling, `?` when the element is marked
+/// nullable). `None` when the element is no reified parameter of this file, or reaches one only
+/// through another classifier or a star projection.
+fn new_array_reification(
+    array_type: Ty,
+    parameters: &HashMap<String, ReifiedParameter>,
+) -> Option<(String, String)> {
+    let projected = |ty: Ty| match ty {
+        Ty::OutProjection(inner) | Ty::InProjection(inner) => Some(*inner),
+        Ty::StarProjection(_) => None,
+        element => Some(element),
+    };
+    let element = projected(array_type.non_null().array_elem()?)?;
+    let nullable = element.is_nullable();
+    let mut depth = 0;
+    let mut current = element;
+    while current.non_null().is_reference_array() {
+        depth += 1;
+        current = projected(current.non_null().array_elem()?)?;
+    }
+    let Ty::TyParam(identity, _) = current.non_null() else {
+        return None;
+    };
+    let parameter = parameters.get(identity)?;
+    let suffix = if nullable { "?" } else { "" };
+    Some((
+        identity.to_owned(),
+        format!("{}{}{suffix}", "[".repeat(depth), parameter.source_name),
+    ))
+}
+
 /// The splice operands for the checked reified substitutions attached to one call. Common IR
 /// retains semantic [`Ty`] values; the conversion to physical classifier names belongs here at the
 /// backend boundary. A `Unit` value uses its stored classifier form, just like every other value
@@ -344,6 +377,13 @@ fn realize_expression_dag(
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
         used_parameters.extend(marker_identities[expression as usize].iter().cloned());
+        if let IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } =
+            ir.expr(expression)
+        {
+            if let Some((_, marker)) = new_array_reification(*array_type, parameters) {
+                ir.reified_array_markers.insert(expression, marker);
+            }
+        }
         let replacement = match ir.expr(expression).clone() {
             IrExpr::KClassLiteral {
                 classifier: Some(classifier),
@@ -455,6 +495,11 @@ fn expression_reified_parameters(
                 collect_type_reified_parameters(catch.ty, parameters, &mut found);
             }
         }
+        IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => {
+            found.extend(
+                new_array_reification(*array_type, parameters).map(|(identity, _)| identity),
+            );
+        }
         IrExpr::Call {
             callee:
                 crate::ir::Callee::Intrinsic {
@@ -548,6 +593,7 @@ pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMe
     // An object declared in a reified body executes the marker too: inlining regenerates its class.
     let parameters = collect_reified_parameters(ir);
     let functions = reified_marker_functions(ir, lambdas);
+    ir.reified_array_markers.clear();
     let marker_identities = (0..ir.exprs.len() as ExprId)
         .map(|expression| expression_reified_parameters(ir, expression, &parameters))
         .collect::<Vec<_>>();

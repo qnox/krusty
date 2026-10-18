@@ -1856,7 +1856,14 @@ impl super::Emitter<'_> {
                 array_type,
                 elements,
                 spreads,
-            } => vararg::emit(self, array_type, elements, spreads, code),
+            } => {
+                let marker = self.ir.reified_array_markers.get(&e).cloned();
+                let array = vararg::NewArray {
+                    ty: array_type,
+                    reified_marker: marker.as_deref(),
+                };
+                vararg::emit(self, array, elements, spreads, code);
+            }
             IrExpr::NewArray { array_type, size } => {
                 let et = array_jvm_element(array_type);
                 self.emit_value(*size, code);
@@ -1865,10 +1872,8 @@ impl super::Emitter<'_> {
                 } else {
                     // Peel a nullable element's `?`: `Array<Int?>` = `Integer[]`, so the `anewarray` class
                     // is `java/lang/Integer` (the `?` only tells `Array.get`/`.set` to keep it boxed).
-                    let ci = self
-                        .cw
-                        .class_ref(&crate::jvm::names::anewarray_element_class(et));
-                    code.anewarray(ci);
+                    let marker = self.ir.reified_array_markers.get(&e).cloned();
+                    vararg::emit_reference_new_array(self, et, marker.as_deref(), code);
                 }
             }
             IrExpr::Try {

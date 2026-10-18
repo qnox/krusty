@@ -5157,21 +5157,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter's call-site value by the parameter's source name (`IrFile::reified_call_subst`), so the
   inliner repoints the marked instructions exactly as it does for a library callee. A scalar the body
   casts to a reified `T` (a smart-cast `-value as T`) is boxed before the marker, as kotlinc's
-  `AS` operand is an object. A callee that creates an array of a reified type parameter stays
-  expanded in IR (`ReifiedArrayInBody`): its body would need the `NEW_ARRAY` marker kotlinc places
-  before the `anewarray`. A non-public callee is inlined from its compiled body when it is declared
-  in the caller's own file (its body is compiled into the same class); one declared in another file
-  stays expanded (`NonPublicCallee`), since its body may reach that file's private declarations.
-  A callee that reads a local delegated property stays expanded too (`LocalDelegateInBody`): the
-  property's accessor and its `$$delegatedProperties` entry belong to the callee's own class, which a
-  body compiled for the call site cannot reach. A compiled body's lines are numbered against the
+  `AS` operand is an object. An array a reified body creates of its parameter (`arrayOf`,
+  `arrayOfNulls`, `Array(n) { … }`, a vararg) carries kotlinc's `NEW_ARRAY` marker, mode 0, before
+  its `anewarray` (`ExpressionCodegen.newArrayInstruction`), in the declaration's own method as in
+  the body compiled for a call; its argument is kotlinc's `ReificationArgument.asString`: a `[` per
+  nested array level, the parameter's source name, and `?` for a marked-nullable element
+  (`IrFile::reified_array_markers`). The inliner makes `[T` the array class of the call-site class.
+  A non-public callee is inlined from its compiled body when it is declared in the caller's own
+  file (its body is compiled into the same class); one declared in another file stays expanded
+  (`NonPublicCallee`), since its body may reach that file's private declarations. A local
+  delegated property read in a compiled callee calls the accessor its declaring class exports
+  (`access$<function>$lambda-N`), as kotlinc's compiled body does: the template of a call inlined
+  from its compiled body counts as emitted code when local-delegate accesses are realized, even
+  when it is another file's or inline-only. A compiled body's lines are numbered against the
   caller's own method map, and the class map takes them in the order the method's unoptimized table
   lists them, as kotlinc's `SourceMapCopyingMethodVisitor` reads the method ahead of its
   optimization passes: a callee line that dead-code removal later drops (a `throw` branch a reified
   check makes unreachable) still widens the call's range in the class map.
-  Tests: `tests/inline_same_module_bytes_e2e.rs` (reified `is`, `as T` and a boxed `as T`, and a private
-  same-file callee against kotlinc's bytes; a reified-array callee runs),
-  `tests/reified_local_delegate_e2e.rs` (a reified callee with a local delegate), and
+  Tests: `tests/inline_same_module_bytes_e2e.rs` (reified `is`, `as T` and a boxed `as T`, reified
+  arrays including `[T` and `T?`, and a private same-file callee against kotlinc's bytes; a jagged
+  reified-array callee runs), `tests/reified_local_delegate_e2e.rs` (a reified callee with a local
+  delegate, across files and in an object), and
   `source_map::tests::the_copier_reads_lines_the_optimizer_dropped`.
 
 - **`inline fun` (same-module, user-defined):** expanded at each call site by the IR lowerer
