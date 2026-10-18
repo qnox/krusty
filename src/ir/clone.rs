@@ -402,6 +402,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(value_class_suspend_calls);
     copy_map!(intrinsic_suspension_points);
     copy_map!(erased_value_constructions);
+    if ir.has_value_class_parameter_construction(source) {
+        ir.mark_value_class_parameter_construction(target);
+    }
     if let Some(provenance) = ir.debug_local_provenance(source) {
         ir.set_debug_local_provenance(target, provenance);
     }
