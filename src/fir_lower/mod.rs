@@ -850,7 +850,17 @@ impl<'a> BodyLowering<'a> {
                     kind: crate::fir::SyntheticOriginKind::GeneratedControlFlow,
                 });
         }
-        self.ir.fir_origins.insert(root, IrNodeOrigin::Fir(cause));
+        // A statement whose root is an expression that ends an inlined call (`d.code;`) keeps that
+        // provenance: the JVM still forgets the caller's line after the discarded root.
+        if !matches!(
+            self.ir.fir_origins.get(&root),
+            Some(IrNodeOrigin::Synthetic {
+                kind: crate::fir::SyntheticOriginKind::InlinedCall,
+                ..
+            })
+        ) {
+            self.ir.fir_origins.insert(root, IrNodeOrigin::Fir(cause));
+        }
     }
 }
 

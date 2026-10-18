@@ -1,7 +1,8 @@
 //! `Char.code` is an inline property getter that kotlinc inlines, so its value ends an inlined call
 //! (`markLineNumberAfterInlineIfNeeded`): the caller's line is forgotten after it and written again
 //! at the next instruction that marks one, such as the `iadd` that consumes it. A constant
-//! receiver folds and a non-inline conversion (`toInt()`) does not end an inlined call.
+//! receiver folds and a non-inline conversion (`toInt()`) does not end an inlined call. A discarded
+//! `d.code;` statement ends one too, so a call after it on the same line marks that line again.
 use super::common;
 
 #[test]
@@ -39,6 +40,22 @@ fun templates(d: Char, k: Int): String {
     val s = \"x${d.code}y\"
     val q = 'a'.code
     return s + q + (if (k > 0) d.code else k)
+}
+
+fun nextChar(): Char = 'a'
+fun sink() {}
+
+fun discardedCall() {
+    nextChar().code; sink()
+}
+
+fun discardedRead(d: Char) {
+    d.code; sink()
+}
+
+fun discardedLine(d: Char) {
+    d.code
+    sink()
 }
 
 fun captured(): Int {
