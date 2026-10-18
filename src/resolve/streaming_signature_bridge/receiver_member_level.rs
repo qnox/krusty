@@ -231,9 +231,15 @@ impl ProductionSignatureSemantics<'_> {
             &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
         ]);
         let classifier = source.classifier(owner).ok_or_else(Self::failure)?;
+        let argument_kinds = argument_types
+            .iter()
+            .copied()
+            .map(crate::symbol_resolver::CallArgKind::Typed)
+            .collect::<Vec<_>>();
         let selected = crate::symbol_resolver::selected_constructor::capture(
             selected.clone(),
             classifier.as_ref(),
+            &argument_kinds,
         );
         self.constructor_result(
             scope,

@@ -942,7 +942,7 @@ impl<'a> SymbolResolver<'a> {
                 &constructor.call_sig,
             )),
         );
-        selected.map(|declaration| selected_constructor::capture(declaration, &classifier))
+        selected.map(|declaration| selected_constructor::capture(declaration, &classifier, args))
     }
 
     pub(crate) fn classifier_in_scope(&self, name: &str) -> CandidateSelection<TypeName> {
@@ -3398,11 +3398,11 @@ pub(crate) fn select_constructor_call_from_type(
     if omitted || (declaration.descriptor.is_empty() && declaration.default_realization.is_some()) {
         declaration.default_realization.as_ref()?;
         return Some(SelectedConstructorCall::Platform(Box::new(
-            selected_constructor::capture(declaration, classifier),
+            selected_constructor::capture(declaration, classifier, args),
         )));
     }
     Some(SelectedConstructorCall::Direct(Box::new(
-        selected_constructor::capture(declaration, classifier),
+        selected_constructor::capture(declaration, classifier, args),
     )))
 }
 
@@ -5472,8 +5472,21 @@ mod tests {
     }
 
     impl SymbolSource for ConstructorIdentitySource {
-        fn classifier(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
-            (internal == self.owner).then(|| self.classifier.clone())
+        fn symbols(
+            &self,
+            namespace: SymbolNamespace,
+            name: &str,
+        ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
+            let identity = namespace
+                .existing_classifier(name)
+                .filter(|identity| *identity == self.owner);
+            std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                classifier_name: identity,
+                classifier_declaration: identity
+                    .map(crate::libraries::ClassifierDeclaration::Ordinary),
+                classifier: identity.map(|_| self.classifier.clone()),
+                ..Default::default()
+            })
         }
     }
 
@@ -5669,6 +5682,7 @@ mod tests {
             vec!["A".to_string(), "B".to_string()],
             vec![vec![any], vec![any]],
         );
+        classifier.own_type_parameter_count = 2;
         let owner = type_name("demo/Pair");
 
         assert_eq!(
