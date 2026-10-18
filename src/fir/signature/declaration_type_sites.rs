@@ -56,21 +56,6 @@ impl DeclarationTypeSites {
         }
     }
 
-    pub(super) fn declaration_syntax_for_type(&self, syntax: HeaderTypeId) -> Option<HeaderTypeId> {
-        self.by_graph_type
-            .get(&syntax)
-            .and_then(|sites| sites.first().copied())
-    }
-
-    pub(super) fn declaration_syntax_for_expression(
-        &self,
-        expression: SigExprId,
-    ) -> Option<HeaderTypeId> {
-        self.by_expression
-            .get(&expression)
-            .and_then(|sites| sites.first().copied())
-    }
-
     pub(super) fn declaration_syntaxes_for_expression(
         &self,
         expression: SigExprId,
@@ -140,6 +125,10 @@ impl SignatureGraph {
         self.type_syntax.written_type_node(id)
     }
 
+    pub(crate) fn written_type_id(&self, id: HeaderTypeId) -> HeaderTypeId {
+        self.type_syntax.written_type_id(id)
+    }
+
     pub(crate) fn expression_type_syntax(&self, expression: SigExprId) -> Option<HeaderTypeId> {
         match self.expr(expression)? {
             SigExpr::Type { syntax, .. } | SigExpr::ContextualType { syntax, .. } => Some(syntax),
@@ -161,19 +150,6 @@ impl SignatureGraph {
             expression,
             declaration_syntax,
         );
-    }
-
-    pub(crate) fn declaration_type_syntax(&self, syntax: HeaderTypeId) -> Option<HeaderTypeId> {
-        self.declaration_type_sites
-            .declaration_syntax_for_type(syntax)
-    }
-
-    pub(crate) fn declaration_expression_syntax(
-        &self,
-        expression: SigExprId,
-    ) -> Option<HeaderTypeId> {
-        self.declaration_type_sites
-            .declaration_syntax_for_expression(expression)
     }
 
     pub(crate) fn declaration_expression_syntaxes(&self, expression: SigExprId) -> &[HeaderTypeId] {

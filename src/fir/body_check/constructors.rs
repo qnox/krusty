@@ -1114,46 +1114,14 @@ fn add_constructor_delegation(
             &resolved.context_args,
             arguments,
         )?;
-        let outer_receiver = match &resolved.target {
-            ResolvedCtorDelegationTarget::Super {
-                implicit_outer: Some(outer),
-                ..
-            } => {
-                if let Some(declaration) = checker.index.classifier_declaration(*outer) {
-                    let ty = checker.resolved_type(span, Ty::obj_name(*outer))?;
-                    checker.materialize_classifier_dispatch_receiver(
-                        declaration,
-                        ty,
-                        origin,
-                        Some(span),
-                        false,
-                    )?
-                } else {
-                    // Dependency classifiers have a resolved TypeName identity but no declaration
-                    // in this module's stable index. Candidate selection already recorded their
-                    // exact outer receiver; materialize that decision without reopening lookup.
-                    resolved
-                        .outer_receiver
-                        .as_ref()
-                        .map(|selected| {
-                            checker.materialize_implicit_receiver(origin, Some(span), selected)
-                        })
-                        .transpose()?
-                        .flatten()
-                }
-            }
-            ResolvedCtorDelegationTarget::ThisPrimary { .. }
-            | ResolvedCtorDelegationTarget::ThisSecondary { .. }
-            | ResolvedCtorDelegationTarget::Super {
-                implicit_outer: None,
-                ..
-            } => resolved
-                .outer_receiver
-                .as_ref()
-                .map(|selected| checker.materialize_implicit_receiver(origin, Some(span), selected))
-                .transpose()?
-                .flatten(),
-        };
+        let outer_receiver = resolved
+            .outer_receiver
+            .as_ref()
+            .map(|selected| {
+                checker.materialize_constructor_prefix_receiver(origin, Some(span), selected)
+            })
+            .transpose()?
+            .flatten();
         Ok::<_, BodyCheckFailure>((arguments, outer_receiver))
     })();
     checker.constructor_prefix_capture_access = previous_capture_access;

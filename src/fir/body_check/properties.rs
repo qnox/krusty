@@ -786,6 +786,44 @@ impl BodyFirChecker<'_> {
         }))
     }
 
+    /// Materialize the resolver-selected enclosing instance used by a constructor delegation.
+    ///
+    /// A module classifier selection already carries its stable declaration identity. Constructor
+    /// prefixes must consume that identity exactly: the current instance does not exist yet, and a
+    /// numeric receiver coordinate must not be allowed to reinterpret the selected classifier when
+    /// its exact capture or enclosing path is unavailable. Dependency classifiers have no module
+    /// declaration identity and retain the ordinary coordinate-only materialization path.
+    pub(super) fn materialize_constructor_prefix_receiver(
+        &mut self,
+        cause: OriginId,
+        span: Option<Span>,
+        selected: &crate::resolve::ImplicitReceiverSelection,
+    ) -> Result<Option<FirReceiver>, BodyCheckFailure> {
+        if !self.constructor_prefix_capture_access {
+            return Err(self.failure(span, BodyCheckFailureKind::MissingStableCallTarget));
+        }
+        let Some(owner) = selected.classifier else {
+            return self.materialize_implicit_receiver(cause, span, selected);
+        };
+        let origin = self
+            .origins
+            .synthetic(cause, SyntheticOriginKind::ImplicitReceiver);
+        let selected_ty = ResolvedTy::new(selected.ty)
+            .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))?;
+        if !selected.current {
+            if let Some(receiver) = self.local_class_enclosing_receiver(origin, selected)? {
+                return Ok(Some(receiver));
+            }
+        }
+        self.materialize_classifier_dispatch_receiver(
+            owner,
+            selected_ty,
+            origin,
+            span,
+            selected.current,
+        )
+    }
+
     fn class_context_storage(
         &self,
         selected: &crate::resolve::ImplicitReceiverSelection,

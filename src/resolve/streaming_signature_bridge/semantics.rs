@@ -1122,13 +1122,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         graph: &crate::fir::SignatureGraph,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let reference = graph.transient_type_ref(syntax).ok_or_else(Self::failure)?;
-        let site = SelectedTypeSite {
-            syntax: graph.declaration_type_syntax(syntax),
-            application: None,
-            local_template: None,
-            abbreviation_origin: Some(origin),
-            project_children: true,
-        };
+        let site = SelectedTypeSite::graph(graph.written_type_id(syntax), origin);
         // Signature-native type resolution: a type reference in a compact header is a type
         // parameter of the owning declaration chain, a scoped alias/classifier, or a leaf shape.
         // None of those needs a body checker, and Pass 1 has no body to check.
@@ -1145,7 +1139,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             ty = Ty::out_projection(ty);
         }
         self.record_type_spelling_projection(Some(site), ty);
-        self.publish_shared_type_spelling_sites(graph.declaration_type_syntaxes(syntax));
+        if !self.project_graph_type_spelling_sites(graph, syntax, ty) {
+            return Err(Self::failure());
+        }
         crate::fir::ResolvedTy::new(ty).map_err(|_| Self::failure())
     }
 

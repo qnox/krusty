@@ -1,5 +1,8 @@
 //! Incremental common-IR ownership for declarations inside executable local classifiers.
 
+#[cfg(test)]
+mod tests;
+
 use crate::fir::{DeclarationId, ResolvedClassifierHeader, ResolvedModuleIndex};
 
 /// Whether the nearest stable classifier owner has reached the semantic index.
@@ -26,9 +29,13 @@ pub(super) fn semantic_owner(
         let Some(nearest) = nearest else {
             return SemanticOwner::Complete(None);
         };
-        let complete = index.body_local_owner_complete(nearest)
-            && index.body_local_owner_semantically_complete(nearest);
-        return match (complete, index.classifier_header(nearest)) {
+        // Completion is a monotonic publication fact. The publisher validates the complete source
+        // declaration group before setting it; re-scanning the mutable index here could make an
+        // already-realized owner appear deferred again when a generated child is added later.
+        return match (
+            index.body_local_owner_complete(nearest),
+            index.classifier_header(nearest),
+        ) {
             (true, Some(owner)) => SemanticOwner::Complete(Some(owner)),
             (false, _) | (true, None) => SemanticOwner::Deferred,
         };
