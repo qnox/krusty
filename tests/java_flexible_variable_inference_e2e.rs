@@ -4,6 +4,38 @@
 
 use super::common;
 use super::diagnostics_parity_support::errors;
+use std::path::Path;
+
+fn java_arrays_classpath() -> std::path::PathBuf {
+    common::javac_compile(
+        &[(
+            "JavaArrays.java".to_string(),
+            "public final class JavaArrays {\n\
+             \x20 public static <T> T[] copy(T[] values) { return values.clone(); }\n\
+             }\n"
+            .to_string(),
+        )],
+        &[],
+    )
+    .expect("javac compiles the generic Java array producer")
+    .0
+}
+
+fn expect_box_with_java_arrays(source: &str, stem: &str, dependency: &Path) {
+    let classpath = [dependency.to_path_buf()];
+    let reference = common::kotlinc_box_result_with_classpath(source, &classpath);
+    assert_eq!(reference, "OK", "{stem}: kotlinc fixture must succeed");
+    assert_eq!(
+        common::expect_box_run(
+            source,
+            stem,
+            &[dependency.to_path_buf(), common::stdlib_jar()],
+            Some(common::jdk_modules().as_path()),
+        ),
+        reference,
+        "{stem}: krusty and kotlinc box results differ",
+    );
+}
 
 #[test]
 fn nullable_argument_to_a_flexible_variable_is_rejected_like_kotlinc() {
@@ -41,42 +73,32 @@ fn nullable_argument_to_a_flexible_variable_is_rejected_like_kotlinc() {
 
 #[test]
 fn flexible_array_element_reaches_an_expected_non_null_list_like_kotlinc() {
-    common::expect_box_same_as_kotlinc(
-        "import java.util.ArrayList\n\
-         import java.util.Arrays\n\
+    let dependency = java_arrays_classpath();
+    expect_box_with_java_arrays(
+        "import java.util.Arrays\n\
          \n\
-         fun copy(list: ArrayList<String>, n: Int): List<String> =\n\
-         \x20   Arrays.asList(*list.toArray(arrayOfNulls<String>(n)))\n\
+         fun copy(): List<String> =\n\
+         \x20   Arrays.asList(*JavaArrays.copy(arrayOf(\"O\", \"K\")))\n\
          \n\
-         fun box(): String {\n\
-         \x20   val source = ArrayList<String>()\n\
-         \x20   source.add(\"O\")\n\
-         \x20   source.add(\"K\")\n\
-         \x20   val copied = copy(source, 2)\n\
-         \x20   return copied[0] + copied[1]\n\
-         }\n",
+         fun box(): String = copy()[0] + copy()[1]\n",
         "FlexibleArrayElement",
+        &dependency,
     );
 }
 
 #[test]
 fn named_argument_preserves_a_nested_flexible_array_element_like_kotlinc() {
-    common::expect_box_same_as_kotlinc(
-        "import java.util.ArrayList\n\
-         import java.util.Arrays\n\
+    let dependency = java_arrays_classpath();
+    expect_box_with_java_arrays(
+        "import java.util.Arrays\n\
          \n\
          fun <T> forward(value: List<T>): List<T> = value\n\
-         fun copy(list: ArrayList<String>, n: Int): List<String> =\n\
-         \x20   forward(value = Arrays.asList(*list.toArray(arrayOfNulls<String>(n))))\n\
+         fun copy(): List<String> =\n\
+         \x20   forward(value = Arrays.asList(*JavaArrays.copy(arrayOf(\"O\", \"K\"))))\n\
          \n\
-         fun box(): String {\n\
-         \x20   val source = ArrayList<String>()\n\
-         \x20   source.add(\"O\")\n\
-         \x20   source.add(\"K\")\n\
-         \x20   val copied = copy(source, 2)\n\
-         \x20   return copied[0] + copied[1]\n\
-         }\n",
+         fun box(): String = copy()[0] + copy()[1]\n",
         "NamedFlexibleArrayElement",
+        &dependency,
     );
 }
 
