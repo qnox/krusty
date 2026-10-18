@@ -50,12 +50,29 @@ impl ClassWriter {
         (!map.is_empty()).then_some(map)
     }
 
+    /// The lines of each method that has a map of its own, in the order its table lists them
+    /// before the bytecode rewrites run: the order kotlinc's copier reads them in.
+    pub(super) fn written_method_lines(&self) -> Vec<Option<Vec<u16>>> {
+        self.methods
+            .iter()
+            .map(|method| {
+                method
+                    .source_map
+                    .as_ref()
+                    .map(|_| method.lnt.iter().map(|&(_, line)| line).collect())
+            })
+            .collect()
+    }
+
     /// Renumber every method's inlined lines into the class map, in the order the class lists the
-    /// methods, once their bodies are final (`SourceMapCopyingMethodVisitor`).
-    pub(super) fn copy_method_source_maps(&mut self) {
-        for method in &mut self.methods {
+    /// methods, once their bodies are final (`SourceMapCopyingMethodVisitor`). `written` is what
+    /// [`ClassWriter::written_method_lines`] returned before the rewrites.
+    pub(super) fn copy_method_source_maps(&mut self, written: &[Option<Vec<u16>>]) {
+        for (method, written) in self.methods.iter_mut().zip(written) {
             if let Some(map) = method.source_map.take() {
-                self.source_map.copy_method_lines(&map, &mut method.lnt);
+                let written = written.as_deref().unwrap_or_default();
+                self.source_map
+                    .copy_method_lines(&map, written, &mut method.lnt);
             }
         }
     }

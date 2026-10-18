@@ -5162,8 +5162,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   before the `anewarray`. A non-public callee is inlined from its compiled body when it is declared
   in the caller's own file (its body is compiled into the same class); one declared in another file
   stays expanded (`NonPublicCallee`), since its body may reach that file's private declarations.
+  A callee that reads a local delegated property stays expanded too (`LocalDelegateInBody`): the
+  property's accessor and its `$$delegatedProperties` entry belong to the callee's own class, which a
+  body compiled for the call site cannot reach. A compiled body's lines are numbered against the
+  caller's own method map, and the class map takes them in the order the method's unoptimized table
+  lists them, as kotlinc's `SourceMapCopyingMethodVisitor` reads the method ahead of its
+  optimization passes: a callee line that dead-code removal later drops (a `throw` branch a reified
+  check makes unreachable) still widens the call's range in the class map.
   Tests: `tests/inline_same_module_bytes_e2e.rs` (reified `is`, `as T` and a boxed `as T`, and a private
-  same-file callee against kotlinc's bytes; a reified-array callee runs).
+  same-file callee against kotlinc's bytes; a reified-array callee runs),
+  `tests/reified_local_delegate_e2e.rs` (a reified callee with a local delegate), and
+  `source_map::tests::the_copier_reads_lines_the_optimizer_dropped`.
 
 - **`inline fun` (same-module, user-defined):** expanded at each call site by the IR lowerer
   (`Lower::lower_inline_fn_call`), matching kotlinc's effect — value parameters bind to once-evaluated

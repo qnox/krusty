@@ -1279,8 +1279,9 @@ impl ClassWriter {
     }
 
     fn write(mut self) -> Vec<u8> {
+        let written = self.written_method_lines();
         let relaid = self.rewrite_methods();
-        self.copy_method_source_maps();
+        self.copy_method_source_maps(&written);
         // Every body is final now: write the frames it implies.
         self.compute_stack_maps();
         // A class without `@Metadata` realizes its deferred fields first: fields precede attributes.
