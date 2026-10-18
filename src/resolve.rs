@@ -22648,7 +22648,7 @@ impl<'a> Checker<'a> {
                         if let Some(local) = scoped.filter(|binding| {
                             matches!(binding.origin, ReceiverFnValueOrigin::Local)
                         }) {
-                            self.update_enhanced_local(&local, (!compound).then_some(value));
+                            self.update_enhanced_local(&local);
                             self.record_flexible_local_assignment(&local);
                         }
                         let narrowing = self.assignment_narrowing(&name, lty, vt, target_span);

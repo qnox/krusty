@@ -407,14 +407,19 @@ impl FlexibleValue {
         if matches!(declared, Ty::TyParam(_, bound) if matches!(*bound, Ty::PlatformNullable(_))) {
             let upper =
                 (!selected.is_nullable()).then(|| upper_bound(selected.platform_lower_bound()));
+            // A Java type-parameter occurrence is flexible as a whole, but its selected lower face
+            // still owns a usable class/function shape. Keep that shape so a later member selection
+            // can project the occurrence through its receiver (for example `List<T!>.get()` where
+            // `T` was inferred as a function type) without reopening the Java declaration.
+            let shape = FlexibleValue::rigid_shape(selected).shape;
             return FlexibleValue {
                 source: Some(selected),
                 publication: upper.map(|_| FlexiblePublication {
                     lower: selected.platform_lower_bound(),
-                    shape: FlexibleShape::None,
+                    shape: shape.clone(),
                 }),
                 upper,
-                shape: FlexibleShape::None,
+                shape,
             };
         }
 
@@ -986,9 +991,6 @@ impl Checker<'_> {
         let fact = FlexibleValue::selected(declared, selected, &|lower| {
             self.flexible_upper_bound(lower)
         });
-        let Some(signature) = signature else {
-            return fact;
-        };
         let mut bindings = HashMap::default();
         match target.dispatch {
             Some(super::selected_result_publication::DispatchBinding::Explicit(owner)) => {
@@ -1011,6 +1013,9 @@ impl Checker<'_> {
             }
             None => {}
         }
+        let Some(signature) = signature else {
+            return fact.substitute(declared, &|formal| bindings.get(formal).cloned());
+        };
         if self
             .flexible_values
             .explicit_type_arguments
@@ -1289,6 +1294,30 @@ mod tests {
         assert_eq!(spelling.flexible_upper_bound, Some(selected.non_null()));
         assert_eq!(spelling.args.len(), 1);
         assert_eq!(spelling.args[0].flexible_upper_bound, Some(Ty::String));
+    }
+
+    #[test]
+    fn selected_java_variable_shape_survives_a_member_result_substitution() {
+        let producer_variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
+        let function = Ty::fun(vec![Ty::String], Ty::String);
+        let producer = FlexibleValue::selected(
+            declared_list(producer_variable),
+            declared_list(function),
+            &|lower| lower,
+        );
+        let FlexibleShape::Obj(_, arguments) = producer.shape else {
+            panic!("selected Java list must retain its argument shape");
+        };
+        let element = arguments[0].clone();
+        let member_variable = Ty::ty_param("E", Ty::obj("kotlin/Any"));
+        let result = FlexibleValue::default().substitute(member_variable, &|formal| {
+            (formal == "E").then(|| element.clone())
+        });
+        let mut spelling = Spelled::default();
+        result.apply(function, &mut spelling);
+
+        assert!(matches!(result.shape, FlexibleShape::Fun { .. }));
+        assert_eq!(spelling.flexible_upper_bound, Some(function));
     }
 
     #[test]

@@ -178,7 +178,7 @@ fn reassigned_mutable_local_forwards_common_enhanced_java_arguments_like_kotlinc
 }
 
 #[test]
-fn reassigned_mutable_local_drops_unshared_enhanced_java_arguments_like_kotlinc() {
+fn reassigned_mutable_local_retains_the_inferred_declarations_enhancement_like_kotlinc() {
     common::assert_classes_identical_to_kotlinc_jdk(
         "PublishedClearedEnhancedMutableLocal",
         "fun forwarded(map: java.util.HashMap<String, Int>) = run {\n\
@@ -187,6 +187,19 @@ fn reassigned_mutable_local_drops_unshared_enhanced_java_arguments_like_kotlinc(
          \x20   value\n\
          }\n",
         &["PublishedClearedEnhancedMutableLocalKt"],
+    );
+}
+
+#[test]
+fn compound_write_retains_the_inferred_declarations_enhancement_like_kotlinc() {
+    common::assert_classes_identical_to_kotlinc_jdk(
+        "PublishedCompoundEnhancedMutableLocal",
+        "fun compounded(map: java.util.HashMap<String, Int>) = run {\n\
+         \x20   var value = map.keys\n\
+         \x20   value += \"x\"\n\
+         \x20   value\n\
+         }\n",
+        &["PublishedCompoundEnhancedMutableLocalKt"],
     );
 }
 

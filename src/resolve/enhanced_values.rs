@@ -90,42 +90,21 @@ impl Checker<'_> {
         );
     }
 
-    /// Meet a mutable local's declaration marks with those of its replacement value. The ordinary
-    /// data-flow engine owns whether the write executes and the current flow type; this sidecar
-    /// retains only the enhancement positions shared by every live value stored in the inferred
-    /// declaration. A differently typed subtype is aligned through its checked supertype view; a
-    /// compound write has no checked replacement value of the local's type and conservatively
-    /// invalidates the sidecar fact.
-    pub(super) fn update_enhanced_local(&mut self, local: &Local, value: Option<ExprId>) {
-        let assigned = value
-            .and_then(|value| {
-                let actual = self.expr_types[value.0 as usize];
-                let marks = self.value_enhancement(value);
-                if actual == local.declared_ty {
-                    return Some(marks.declared());
-                }
-                let declared = local.declared_ty.non_null();
-                let owner = declared.kotlin_class_internal()?;
-                let (view, marks) = self.supertype_view(actual, &marks, owner)?;
-                (view == declared).then(|| marks.declared())
-            })
-            .unwrap_or_default();
-        let retained = matches!(local.origin, ReceiverFnValueOrigin::Local)
-            .then(|| self.enhanced_locals.declarations.get(&local.flow_identity))
-            .flatten()
-            .filter(|fact| {
-                local.is_var
-                    && local.write_ty == Some(local.declared_ty)
-                    && fact.declared == local.declared_ty
-            })
-            .map(|fact| fact.value.meet(&assigned));
-        if let Some(marks) = retained.filter(|marks| !marks.is_none()) {
-            self.enhanced_locals
+    /// Retain the enhancement attributes of a mutable local's inferred declaration across writes.
+    /// They belong to the type fixed by the initializer, not to each value later stored in it. That
+    /// remains true for a compound write: it may replace or mutate the value, but cannot redeclare
+    /// the local. The ordinary data-flow engine owns the current value and its narrowing; this
+    /// sidecar only rejects a stale flow identity or a write through a different storage type.
+    pub(super) fn update_enhanced_local(&mut self, local: &Local) {
+        let valid = matches!(local.origin, ReceiverFnValueOrigin::Local)
+            && local.is_var
+            && local.write_ty == Some(local.declared_ty)
+            && self
+                .enhanced_locals
                 .declarations
-                .get_mut(&local.flow_identity)
-                .expect("retained enhancement declaration")
-                .value = marks;
-        } else {
+                .get(&local.flow_identity)
+                .is_some_and(|fact| fact.declared == local.declared_ty);
+        if !valid {
             self.enhanced_locals
                 .declarations
                 .remove(&local.flow_identity);
