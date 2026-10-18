@@ -25,9 +25,17 @@ use crate::types::{Ty, TypeName};
 pub(super) struct EnhancedLocals {
     /// The marks of each local declared with a type inferred from a marked value, by its flow
     /// identity.
-    declarations: HashMap<u32, TypeEnhancement>,
+    declarations: HashMap<u32, EnhancedLocalDeclaration>,
     /// The marks of each read of such a local.
     reads: HashMap<ExprId, TypeEnhancement>,
+}
+
+#[derive(Clone)]
+struct EnhancedLocalDeclaration {
+    /// The semantic storage type this publication fact describes. Mutable-local assignments may
+    /// change the value's marks, but they cannot change this inferred declaration type.
+    declared: Ty,
+    value: TypeEnhancement,
 }
 
 impl Checker<'_> {
@@ -37,24 +45,29 @@ impl Checker<'_> {
         &mut self,
         flow_identity: u32,
         initializer: ExprId,
-        mutable: bool,
+        declared: Ty,
     ) {
-        if mutable {
-            self.enhanced_locals.declarations.remove(&flow_identity);
-            return;
-        }
         let marks = self.value_enhancement(initializer).declared();
         if marks.is_none() {
             self.enhanced_locals.declarations.remove(&flow_identity);
             return;
         }
-        self.enhanced_locals
-            .declarations
-            .insert(flow_identity, marks);
+        self.enhanced_locals.declarations.insert(
+            flow_identity,
+            EnhancedLocalDeclaration {
+                declared,
+                value: marks,
+            },
+        );
     }
 
     /// Record the marks the loop variable takes from the elements of `iterable`.
-    pub(super) fn record_enhanced_loop_variable(&mut self, flow_identity: u32, iterable: ExprId) {
+    pub(super) fn record_enhanced_loop_variable(
+        &mut self,
+        flow_identity: u32,
+        iterable: ExprId,
+        declared: Ty,
+    ) {
         let Some(protocol) = self.iterator_protocols.get(&iterable) else {
             self.enhanced_locals.declarations.remove(&flow_identity);
             return;
@@ -64,22 +77,61 @@ impl Checker<'_> {
             self.enhanced_locals.declarations.remove(&flow_identity);
             return;
         }
-        self.enhanced_locals
-            .declarations
-            .insert(flow_identity, marks);
+        self.enhanced_locals.declarations.insert(
+            flow_identity,
+            EnhancedLocalDeclaration {
+                declared,
+                value: marks,
+            },
+        );
+    }
+
+    /// Meet a mutable local's declaration marks with those of its replacement value. The ordinary
+    /// data-flow engine owns whether the write executes and the current flow type; this sidecar
+    /// retains only the enhancement positions shared by every live value stored in the inferred
+    /// declaration. A differently typed subtype cannot align its argument positions with the
+    /// declaration without a checked supertype projection, and a compound write has no checked
+    /// replacement value of the local's type; both conservatively invalidate the sidecar fact.
+    pub(super) fn update_enhanced_local(&mut self, local: &Local, value: Option<ExprId>) {
+        let assigned = value
+            .filter(|value| self.expr_types[value.0 as usize] == local.declared_ty)
+            .map(|value| self.value_enhancement(value).declared())
+            .unwrap_or_default();
+        let retained = matches!(local.origin, ReceiverFnValueOrigin::Local)
+            .then(|| self.enhanced_locals.declarations.get(&local.flow_identity))
+            .flatten()
+            .filter(|fact| {
+                local.is_var
+                    && local.write_ty == Some(local.declared_ty)
+                    && fact.declared == local.declared_ty
+            })
+            .map(|fact| fact.value.meet(&assigned));
+        if let Some(marks) = retained.filter(|marks| !marks.is_none()) {
+            self.enhanced_locals
+                .declarations
+                .get_mut(&local.flow_identity)
+                .expect("retained enhancement declaration")
+                .value = marks;
+        } else {
+            self.enhanced_locals
+                .declarations
+                .remove(&local.flow_identity);
+        }
     }
 
     /// Record that `read` reads `local` at its declared type.
     pub(super) fn record_enhanced_local_read(&mut self, read: ExprId, local: &Local) {
-        if !matches!(local.origin, ReceiverFnValueOrigin::Local)
-            || local.is_var
-            || local.ty != local.declared_ty
-        {
+        if !matches!(local.origin, ReceiverFnValueOrigin::Local) || local.ty != local.declared_ty {
             self.enhanced_locals.reads.remove(&read);
             return;
         }
-        if let Some(marks) = self.enhanced_locals.declarations.get(&local.flow_identity) {
-            self.enhanced_locals.reads.insert(read, marks.clone());
+        if let Some(fact) = self
+            .enhanced_locals
+            .declarations
+            .get(&local.flow_identity)
+            .filter(|fact| fact.declared == local.declared_ty)
+        {
+            self.enhanced_locals.reads.insert(read, fact.value.clone());
         } else {
             self.enhanced_locals.reads.remove(&read);
         }

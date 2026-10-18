@@ -154,13 +154,38 @@ impl Spelled {
 
     /// Mark the positions `enhancement` lays out as `EnhancedNullability` occurrences.
     pub(crate) fn mark_enhanced(&mut self, enhancement: &crate::libraries::TypeEnhancement) {
-        self.enhanced_nullability |= enhancement.head();
+        if enhancement.head() {
+            // Java enhancement fixes this occurrence to its non-null face. A previously recorded
+            // unqualified Java interval describes the same provider occurrence before enhancement;
+            // retaining both would publish an impossible `@EnhancedNullability` platform type.
+            self.enhanced_nullability = true;
+            self.flexible_upper_bound = None;
+        }
         let arguments = enhancement.arguments();
         if self.args.len() < arguments.len() {
             self.args.resize_with(arguments.len(), Spelled::default);
         }
         for (spelling, argument) in self.args.iter_mut().zip(arguments) {
             spelling.mark_enhanced(argument);
+        }
+    }
+
+    /// Merge checker-owned publication attributes into an existing declaration spelling.
+    ///
+    /// Aliases, type-use annotations, parameter names, and definitely-non-null spelling belong to
+    /// the written declaration. Flexible upper faces and Java enhancement marks belong to the
+    /// checked inferred value. Joining the sidecars occurrence by occurrence preserves both
+    /// owners; replacing the declaration spelling wholesale would erase an explicit typealias.
+    pub(crate) fn merge_inferred_publication(&mut self, inferred: &Spelled) {
+        if let Some(upper) = inferred.flexible_upper_bound {
+            self.flexible_upper_bound = Some(upper);
+        }
+        self.enhanced_nullability |= inferred.enhanced_nullability;
+        if self.args.len() < inferred.args.len() {
+            self.args.resize_with(inferred.args.len(), Spelled::default);
+        }
+        for (declared, inferred) in self.args.iter_mut().zip(&inferred.args) {
+            declared.merge_inferred_publication(inferred);
         }
     }
 
@@ -569,6 +594,32 @@ mod tests {
         spelled.record_flexible_upper_bounds(ty, &|lower| lower);
 
         assert!(spelled.is_none());
+    }
+
+    #[test]
+    fn inferred_publication_merges_without_erasing_declared_aliases() {
+        let alias = crate::types::type_name("sample/Strings");
+        let nested_alias = crate::types::type_name("sample/Element");
+        let mut declared = Spelled {
+            alias: Some(alias),
+            args: vec![Spelled::of_alias(nested_alias)],
+            ..Spelled::default()
+        };
+        let inferred = Spelled {
+            flexible_upper_bound: Some(Ty::obj("kotlin/collections/List")),
+            args: vec![Spelled {
+                enhanced_nullability: true,
+                ..Spelled::default()
+            }],
+            ..Spelled::default()
+        };
+
+        declared.merge_inferred_publication(&inferred);
+
+        assert_eq!(declared.alias, Some(alias));
+        assert_eq!(declared.flexible_upper_bound, inferred.flexible_upper_bound);
+        assert_eq!(declared.arg(0).alias, Some(nested_alias));
+        assert!(declared.arg(0).enhanced_nullability);
     }
 
     #[test]

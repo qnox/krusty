@@ -19,7 +19,6 @@ pub(super) enum DispatchBinding {
 /// Declaration-owned result facts normalized from every [`ResolvedCall`] variant once.
 pub(super) struct SelectedResultTarget<'a> {
     pub(super) signature: Option<&'a GenericSig>,
-    pub(super) selected: Ty,
     pub(super) declared: Ty,
     pub(super) dispatch: Option<DispatchBinding>,
     pub(super) receiver_parameter: bool,
@@ -66,7 +65,6 @@ impl ResolvedCall {
                 );
                 SelectedResultTarget {
                     signature,
-                    selected: selected.ret,
                     declared,
                     dispatch: declaring_owner
                         .or(selected.member.owner)
@@ -88,7 +86,6 @@ impl ResolvedCall {
                 );
                 SelectedResultTarget {
                     signature,
-                    selected: member.ret,
                     declared,
                     dispatch: declaring_owner.map(DispatchBinding::Explicit),
                     receiver_parameter: false,
@@ -108,7 +105,6 @@ impl ResolvedCall {
                 );
                 SelectedResultTarget {
                     signature,
-                    selected: selected.callable.ret,
                     declared,
                     dispatch: declaring_owner.map(DispatchBinding::Explicit),
                     receiver_parameter: false,
@@ -128,7 +124,6 @@ impl ResolvedCall {
                 );
                 SelectedResultTarget {
                     signature,
-                    selected: selected.callable.ret,
                     declared,
                     dispatch: declaring_owner.map(DispatchBinding::Explicit),
                     receiver_parameter: true,
@@ -139,7 +134,6 @@ impl ResolvedCall {
                 let signature = selected.sig.generic_sig.as_ref();
                 SelectedResultTarget {
                     signature,
-                    selected: selected.sig.ret,
                     declared: signature.map_or(selected.sig.ret, |signature| signature.ret),
                     dispatch: None,
                     receiver_parameter: signature
@@ -158,7 +152,6 @@ impl ResolvedCall {
                 let signature = generic_sig.as_deref();
                 SelectedResultTarget {
                     signature,
-                    selected: *ret,
                     declared: declared_ret
                         .or_else(|| signature.map(|signature| signature.ret))
                         .unwrap_or(*ret),

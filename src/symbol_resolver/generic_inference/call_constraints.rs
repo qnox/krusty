@@ -72,6 +72,13 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
     vararg_index: Option<usize>,
 ) -> InferredCallBindings {
     let mut constraints = CallInferenceConstraints::default();
+    // A nullable value at a Java `T!` parameter fixes `T` only when no other argument supplies a
+    // declaration-shaped constraint for that same formal. With `write(Slot<Boolean>, null)`, the
+    // invariant `Slot<T>` owns the selected binding and the root flexible slot merely admits null;
+    // with `singletonList(nullable)`, the flexible slot is the sole evidence and still fixes `T`
+    // to the nullable type. Defer those root-only constraints until all structural inputs exist.
+    let mut deferred_flexible_roots = Vec::new();
+    let mut invariantly_fixed = crate::fx_hash::HashSet::default();
     if let (Some(shape), Some(actual)) = (generic_sig.receiver, actual_receiver) {
         collect_call_inference_constraints(
             source,
@@ -109,16 +116,42 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
                 );
             }
         }
-        let flexible_variable = flexible_variable_argument(shape, actual);
-        if let Some((Ty::TyParam(formal, _), _)) = flexible_variable {
-            constraints
-                .nullable_flexible_roots
-                .insert(formal.to_string());
+        if let Some((variable @ Ty::TyParam(_, _), actual)) =
+            flexible_variable_argument(shape, actual)
+        {
+            deferred_flexible_roots.push((argument, variable, actual));
+            continue;
         }
-        let (shape, actual) = flexible_variable.unwrap_or((shape, actual));
         collect_call_inference_constraints(
             source,
             shape,
+            actual,
+            ConstraintPosition::Lower,
+            ConstraintOrigin::Argument(argument),
+            &mut constraints,
+        );
+        for formal in &generic_sig.formals {
+            if constraints.lower.contains_key(formal)
+                && formal_variance_in_type(source, shape, formal)
+                    == Some(crate::types::TypeVariance::Invariant)
+            {
+                invariantly_fixed.insert(formal.clone());
+            }
+        }
+    }
+    for (argument, variable, actual) in deferred_flexible_roots {
+        let Ty::TyParam(formal, _) = variable else {
+            unreachable!("deferred flexible root is a declaration variable")
+        };
+        if invariantly_fixed.contains(formal) {
+            continue;
+        }
+        constraints
+            .nullable_flexible_roots
+            .insert(formal.to_string());
+        collect_call_inference_constraints(
+            source,
+            variable,
             actual,
             ConstraintPosition::Lower,
             ConstraintOrigin::Argument(argument),

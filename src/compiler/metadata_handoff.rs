@@ -27,7 +27,7 @@ fn published_declaration_spellings(
     }
     let mut spellings = declared.cloned().unwrap_or_default();
     if let Some(inferred) = inferred {
-        spellings.ret = inferred.clone();
+        spellings.ret.merge_inferred_publication(inferred);
     }
     Some(spellings)
 }

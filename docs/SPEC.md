@@ -2793,9 +2793,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `@kotlin.jvm.internal.EnhancedNullability` on each marked position of a declaration's inferred
   type. The checker records the selected value's normalized marks against the stable declaration
   identity, and metadata handoff applies them to the declaration spelling. An inferred property's
-  initializer is also guarded like an inferred local's. A declared result type has no inferred
-  marks. Test:
-  `java_platform_type_publication_e2e::inferred_enhanced_java_results_publish_enhanced_nullability_like_kotlinc`.
+  initializer is also guarded like an inferred local's. For an inferred mutable local, a
+  reassignment retains only the enhancement positions shared by the initial value and every
+  replacement value. A declared result type has no inferred marks. Tests:
+  `java_platform_type_publication_e2e::inferred_enhanced_java_results_publish_enhanced_nullability_like_kotlinc`,
+  `java_platform_type_publication_e2e::untouched_mutable_local_forwards_enhanced_java_arguments_like_kotlinc`,
+  `java_platform_type_publication_e2e::reassigned_mutable_local_forwards_common_enhanced_java_arguments_like_kotlinc`,
+  `java_platform_type_publication_e2e::reassigned_mutable_local_drops_unshared_enhanced_java_arguments_like_kotlinc`.
 - **A PLATFORM value narrowed to a declared non-null type is guarded where it enters.** A Java value
   arrives as `T!` (`Ty::PlatformNullable`), usable as both `T` and `T?`. Where the source commits it to
   a declared non-null type, kotlinc emits `dup` + `ldc "<expression>"` +

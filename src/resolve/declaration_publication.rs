@@ -557,6 +557,10 @@ impl FlexibleValue {
 #[derive(Default)]
 pub(super) struct FlexibleValues {
     expressions: HashMap<ExprId, FlexibleValue>,
+    /// Declaration-owned publication evidence retained for source reads in the same compilation.
+    /// The stable declaration identity, not a property spelling, joins the producing body to a
+    /// later selected read.
+    declaration_results: HashMap<DeclarationId, FlexibleValue>,
     /// Value-flow facts staged by the expression checker that owns the relevant branch/operand
     /// decision. The final expression recorder consumes this checked handoff without reading AST.
     staged: HashMap<ExprId, FlexibleValue>,
@@ -969,7 +973,11 @@ impl Checker<'_> {
     ) -> FlexibleValue {
         let target = call.selected_result_target();
         let signature = target.signature;
-        let selected = target.selected;
+        // The committed call target owns the declaration shape, while the checked expression slot
+        // owns its fully specialized result. A member target may still retain the provider's erased
+        // or pre-contextual result (`T`/`Any`) after call inference selected a nested function or
+        // generic class result; publication must pair the declaration with that checked value.
+        let selected = self.expr_types[expression.0 as usize];
         let declared = target.declared;
         let fact = FlexibleValue::selected(declared, selected, &|lower| {
             self.flexible_upper_bound(lower)
@@ -1063,9 +1071,15 @@ impl Checker<'_> {
         let signature = property.publication_signature.as_ref();
         let declared = signature.ret;
         let selected = property.ty;
-        let fact = FlexibleValue::selected(declared, selected, &|lower| {
+        let mut fact = FlexibleValue::selected(declared, selected, &|lower| {
             self.flexible_upper_bound(lower)
         });
+        if let Some(declaration_fact) = property
+            .stable_declaration
+            .and_then(|declaration| self.flexible_values.declaration_results.get(&declaration))
+        {
+            fact = fact.overlay(declaration_fact);
+        }
         let mut bindings = HashMap::default();
         let dispatch_ty = property.dispatch_receiver.ty;
         let dispatch_fact =
@@ -1207,6 +1221,15 @@ impl Checker<'_> {
         }
         let mut result = Spelled::default();
         let fact = self.flexible_value(value);
+        if fact.is_none() {
+            self.flexible_values
+                .declaration_results
+                .remove(&declaration);
+        } else {
+            self.flexible_values
+                .declaration_results
+                .insert(declaration, fact.clone());
+        }
         result.record_flexible_upper_bounds(ty, &|lower| self.flexible_upper_bound(lower));
         fact.apply_to_inferred_declaration(ty, &mut result);
         result.mark_enhanced(&self.value_enhancement(value).declared());

@@ -2553,8 +2553,7 @@ impl<'a> SymbolResolver<'a> {
             .generic_sig
             .as_ref()
             .map(|gsig| {
-                vararg_elem =
-                    instantiate_vararg_element(&self.src, gsig, params, &arg_tys, bindings);
+                vararg_elem = instantiate_vararg_element(&self.src, gsig, params, args, bindings);
                 instantiate_signature_result(
                     &self.src,
                     gsig,

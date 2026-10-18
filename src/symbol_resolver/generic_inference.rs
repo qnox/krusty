@@ -954,7 +954,10 @@ pub(crate) fn merge_call_argument_bindings(
                     receiver
                 }
             }
-            _ => merge_inferred_ty(bindings.get(&formal).copied(), actual),
+            _ => bindings.get(&formal).copied().map_or_else(
+                || merge_inferred_ty(None, actual),
+                |current| merge_inferred_ty_from_symbols(Some(source), current, actual),
+            ),
         };
         bindings.insert(formal, merged);
     }

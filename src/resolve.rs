@@ -22267,7 +22267,7 @@ impl<'a> Checker<'a> {
             self.local_initialization.declare_deferred(s, flow_identity);
         }
         if declared.is_none() {
-            self.record_enhanced_local(flow_identity, init, is_var);
+            self.record_enhanced_local(flow_identity, init, bound_ty);
             self.record_flexible_local(flow_identity, init, bound_ty);
         }
         if let Some(origin) = safe_call_origin {
@@ -22623,13 +22623,13 @@ impl<'a> Checker<'a> {
                         self.value_diagnostic_span(value, vt),
                         "assignment",
                     );
-                    // A live write replaces the prior flow fact with the assigned exact subtype,
-                    // or clears it when the value is as wide as storage / unstable. An unreachable
-                    // write is erased and cannot replace the fact a running `finally` reads.
+                    // A live write replaces the prior flow fact or clears it when storage-wide or
+                    // unstable; an unreachable write cannot replace what a running `finally` reads.
                     if is_var && self.unreachable_statement_depth == 0 {
                         if let Some(local) = scoped.filter(|binding| {
                             matches!(binding.origin, ReceiverFnValueOrigin::Local)
                         }) {
+                            self.update_enhanced_local(&local, (!compound).then_some(value));
                             self.record_flexible_local_assignment(&local);
                         }
                         let narrowing = self.assignment_narrowing(&name, lty, vt, target_span);
@@ -65674,26 +65674,15 @@ impl<'a> Checker<'a> {
                     });
                     continue;
                 }
-                let mut bindings = constraints.bindings.clone();
                 let tightest_upper = constraints.tightest_upper_bindings(&source);
-                for formal in &constraints.upper_only {
-                    let binding = tightest_upper.get(formal).copied().unwrap_or(Ty::Nothing);
-                    bindings.entry(formal.clone()).or_insert(binding);
-                }
-                // A class variable occurring only contravariantly in constructor parameters has
-                // only an upper constraint, so argument-only inference materializes it as bottom.
-                // The constructed value can provide the opposing constraint through any applied
-                // supertype (`C<X> : Continuation<X>` expected as `Continuation<T>`). Combine that
-                // result constraint before specializing the selected constructor. It may replace an
-                // upper-only bottom exactly when it satisfies every recorded upper; an ordinary
-                // concrete argument solution remains authoritative.
-                crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
+                let mut bindings = constructor_commitment::initial_provider_bindings(
                     &source,
                     internal,
-                    classifier.type_params(),
-                    classifier.type_param_bounds(),
+                    classifier,
                     expected_classifier,
-                    &mut bindings,
+                    &constraints.bindings,
+                    &constraints.upper_only,
+                    &tightest_upper,
                 );
                 if let Some(expected) = expected_classifier {
                     if let Some(expected_bindings) =
@@ -65704,6 +65693,19 @@ impl<'a> Checker<'a> {
                             |actual, bound| self.receiver_is_assignable(actual, bound),
                         )
                     {
+                        self.retain_expected_flexible_constructor_bindings(
+                            constructor_commitment::ExpectedConstructorBindingInputs {
+                                source: &source,
+                                signature,
+                                expected,
+                                expected_bindings: &expected_bindings,
+                                nullable_flexible_roots: &constraints.nullable_flexible_roots,
+                                explicit_type_arguments,
+                                actuals: &actuals,
+                                vararg_index: call_sig.vararg_index,
+                            },
+                            &mut bindings,
+                        );
                         // A caller-owned lexical variable cannot ordinarily be constructed from
                         // its upper bound. Integer constants are the exception when contextual
                         // literal typing can publish that exact symbolic type (`T : Int`, then
