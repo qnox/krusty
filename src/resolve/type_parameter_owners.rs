@@ -177,6 +177,16 @@ pub(super) fn mentioned_type_parameters(ty: Ty, mentioned: &mut Vec<&'static str
     }
 }
 
+fn nullable_type_parameter(ty: Ty) -> Option<&'static str> {
+    let Ty::Nullable(inner) = ty else {
+        return None;
+    };
+    let Ty::TyParam(parameter, _) = *inner else {
+        return None;
+    };
+    Some(parameter)
+}
+
 /// The owner wording of a classifier's own formals from its provider-normalized declaration,
 /// whichever module or library declares it: `class B<T : Number>`, `interface I<in T>`.
 pub(super) fn classifier_type_parameter_owner(

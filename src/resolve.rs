@@ -53134,7 +53134,7 @@ impl<'a> Checker<'a> {
                     }
                     return;
                 }
-                if self.report_open_sam_lambda_result_mismatch(scope, argument, function, sam) {
+                if self.report_open_sam_lambda_result_mismatch(scope, argument, function, &sam) {
                     return;
                 }
             } else if conversion_matches
