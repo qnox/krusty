@@ -106,7 +106,7 @@ impl Checker<'_> {
             actuals,
             vararg_index,
         } = inputs;
-        for formal in crate::symbol_resolver::invariant_expected_result_formals(
+        for formal in crate::symbol_resolver::expected_result_equality_formals(
             source,
             signature,
             expected,

@@ -39374,10 +39374,11 @@ impl<'a> Checker<'a> {
                         |actual, bound| self.receiver_is_assignable(actual, bound),
                     );
                     // A nested generic call may already have a concrete probe type even though the
-                    // selected outer parameter can type it again from an invariant result equality.
-                    // Commit that equality only when every conflicting value argument supports the
-                    // contextual result, and never over fixed receiver/context evidence.
-                    let fixed = crate::symbol_resolver::invariant_expected_result_formals(
+                    // selected outer parameter can type it again from a result equality (an
+                    // invariant occurrence or a nested provider-flexible occurrence). Commit that
+                    // equality only when every conflicting value argument supports the contextual
+                    // result, and never over fixed receiver/context evidence.
+                    let fixed = crate::symbol_resolver::expected_result_equality_formals(
                         &source,
                         &result_signature,
                         expected,
@@ -56286,7 +56287,7 @@ impl<'a> Checker<'a> {
                         |actual, bound| self.receiver_is_assignable(actual, bound),
                     )
                     .map(|expected_bindings| {
-                        crate::symbol_resolver::invariant_expected_result_formals(
+                        crate::symbol_resolver::expected_result_equality_formals(
                             &source,
                             signature
                                 .generic_sig
@@ -65620,7 +65621,7 @@ impl<'a> Checker<'a> {
                         // `IntBox(-1)` in an `IntBox<T>` position). Prove the complete parameter
                         // substitution before committing this equality; an ordinary `Int` value
                         // still cannot masquerade as an arbitrary lexical `T`.
-                        let invariant = crate::symbol_resolver::invariant_expected_result_formals(
+                        let invariant = crate::symbol_resolver::expected_result_equality_formals(
                             &source,
                             signature,
                             expected,

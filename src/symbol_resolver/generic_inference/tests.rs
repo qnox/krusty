@@ -411,7 +411,7 @@ fn callable_reference_expectation_keeps_invariant_expected_result_equalities() {
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
     let bindings = GSigBinds::from_iter([("R".to_string(), Ty::String)]);
-    let fixed = invariant_expected_result_formals(
+    let fixed = expected_result_equality_formals(
         &crate::libraries::EmptySymbolSource,
         &signature,
         Ty::fun(vec![Ty::String], Ty::String),
@@ -427,6 +427,72 @@ fn callable_reference_expectation_keeps_invariant_expected_result_equalities() {
         &fixed,
     );
     assert_eq!(expected.get("R"), Some(&Ty::String));
+}
+
+#[test]
+fn nested_flexible_result_occurrence_is_an_expected_equality() {
+    let any = Ty::platform_nullable(Ty::obj("kotlin/Any"));
+    let variable = Ty::ty_param("T", any);
+    let signature = GenericSig {
+        formals: vec!["T".to_string()],
+        formal_bounds: vec![vec![any]],
+        receiver: None,
+        params: vec![Ty::platform_nullable(variable)],
+        ret: Ty::fun(Vec::new(), Ty::platform_nullable(variable)),
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let expected = Ty::fun(Vec::new(), Ty::String);
+    let expected_bindings = GSigBinds::from_iter([("T".to_string(), Ty::String)]);
+
+    assert_eq!(
+        formal_variance_in_type(&crate::libraries::EmptySymbolSource, signature.ret, "T"),
+        Some(crate::types::TypeVariance::Out),
+        "the flexible occurrence, not invariant variance, owns this equality"
+    );
+    assert_eq!(
+        expected_result_equality_formals(
+            &crate::libraries::EmptySymbolSource,
+            &signature,
+            expected,
+            &expected_bindings,
+        ),
+        crate::fx_hash::HashSet::from_iter(["T".to_string()])
+    );
+}
+
+#[test]
+fn root_flexible_result_occurrence_is_not_an_expected_equality() {
+    let any = Ty::platform_nullable(Ty::obj("kotlin/Any"));
+    let variable = Ty::ty_param("T", any);
+    let signature = GenericSig {
+        formals: vec!["T".to_string()],
+        formal_bounds: vec![vec![any]],
+        receiver: None,
+        params: vec![Ty::platform_nullable(variable)],
+        ret: Ty::platform_nullable(variable),
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let expected_bindings = GSigBinds::from_iter([("T".to_string(), Ty::String)]);
+    let nullable = Ty::nullable(Ty::String);
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [(0, nullable, false)],
+        None,
+    );
+
+    assert_eq!(inferred.bindings.get("T"), Some(&nullable));
+    assert_eq!(
+        inferred.nullable_flexible_roots,
+        crate::fx_hash::HashSet::from_iter(["T".to_string()])
+    );
+    assert!(expected_result_equality_formals(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        Ty::String,
+        &expected_bindings,
+    )
+    .is_empty());
 }
 
 #[test]
@@ -457,7 +523,7 @@ fn projected_expected_result_does_not_widen_an_argument_binding() {
     );
 
     assert_eq!(bindings.get("X"), Some(&any));
-    assert!(invariant_expected_result_formals(
+    assert!(expected_result_equality_formals(
         &crate::libraries::EmptySymbolSource,
         &signature,
         expected,
