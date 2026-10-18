@@ -241,11 +241,7 @@ mod tests {
 
     #[test]
     fn reified_warning_names_are_available_in_each_supported_release() {
-        for release in [
-            KotlinVersion::V2_4_0,
-            KotlinVersion::V2_4_10,
-            KotlinVersion::V2_4_20,
-        ] {
+        for release in KotlinVersion::supported() {
             for (name, diagnostic) in [
                 (
                     "TYPE_INTERSECTION_AS_REIFIED_WARNING",
