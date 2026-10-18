@@ -61020,11 +61020,12 @@ impl<'a> Checker<'a> {
                 .copied()
                 .map(crate::symbol_resolver::CallArgKind::Typed)
                 .collect::<Vec<_>>();
-            let direct = crate::symbol_resolver::select_constructor_declaration_from_type(
+            let direct = crate::symbol_resolver::select_constructor_declaration_from_type_with_type_arguments(
                 self.libraries,
                 &source,
                 &classifier,
                 &arguments,
+                target.type_args(),
             );
             let direct = direct.and_then(|constructor| {
                 let plan = self.callable_ref_parameter_plan(
@@ -61040,12 +61041,20 @@ impl<'a> Checker<'a> {
                     .constructors
                     .iter()
                     .filter_map(|constructor| {
+                        let mut constructor = constructor.clone();
+                        constructor.params =
+                            self.resolver().specialized_constructor_parameter_types(
+                                internal,
+                                &constructor,
+                                &arguments,
+                                target.type_args(),
+                            );
                         let plan = self.callable_ref_parameter_plan(
                             &constructor.params,
                             &constructor.call_sig,
                             parameters,
                         )?;
-                        Some((constructor.clone(), plan))
+                        Some((constructor, plan))
                     })
                     .collect::<Vec<_>>();
                 let specificity = candidates
@@ -61093,8 +61102,18 @@ impl<'a> Checker<'a> {
             }
             selected
         } else {
-            let mut constructors = classifier.constructors.iter();
-            let selected = constructors.next().cloned();
+            let resolver = self.resolver();
+            let mut constructors = classifier.constructors.iter().map(|constructor| {
+                let mut constructor = constructor.clone();
+                constructor.params = resolver.specialized_constructor_parameter_types(
+                    internal,
+                    &constructor,
+                    &[],
+                    target.type_args(),
+                );
+                constructor
+            });
+            let selected = constructors.next();
             selected.and_then(|selected| {
                 constructors
                     .all(|constructor| constructor.params == selected.params)

@@ -74,14 +74,18 @@ fn generic_dependency_constructor_reference_keeps_its_selected_parameter_applica
     let jdk = std::path::PathBuf::from(format!("{jh}/lib/modules"));
     let Some(libout) = common::compile_lib(
         "generic_ctor_cfr",
-        "package lib\nclass Box<T>(val value: T)\n",
+        "package lib\n\
+         class Box<T>(val value: T)\n\
+         typealias StringBox = Box<String>\n",
     ) else {
         return;
     };
     let cp = vec![libout.clone(), sl.clone()];
     let main = "import lib.Box\n\
+        import lib.StringBox\n\
         val make: (String) -> Box<String> = ::Box\n\
-        fun box(): String = make(\"OK\").value\n";
+        val makeAlias: (String) -> StringBox = ::StringBox\n\
+        fun box(): String = make(\"O\").value + makeAlias(\"K\").value\n";
     let classes = common::compile_in_process(main, "Main", &cp, Some(&jdk))
         .expect("krusty failed to compile a generic dependency constructor reference");
     match common::run_box(&classes, "MainKt", &[libout, sl]) {
