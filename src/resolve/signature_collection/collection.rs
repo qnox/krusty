@@ -2432,6 +2432,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                             )
                                         },
                                     ),
+                                    deprecated_hidden: false,
+                                    accessor_availability: Default::default(),
                                     stable_declaration: property_header.declaration,
                                     source_member: compact_headers.is_none().then_some(
                                         crate::libraries::SourceMember::ClassProperty {

@@ -35,6 +35,12 @@ pub struct MemberExtPropSig {
     /// property like any other, so it publishes its annotations into `ResolvedModuleIndex` through
     /// the same stable declaration; it must not be the one property shape that drops them.
     pub(super) annotations: Vec<TypeName>,
+    /// Provider-normalized declaration availability. `HIDDEN` keeps the binary declaration but
+    /// removes it from source lookup; selectors must not reopen annotation syntax by origin.
+    pub(super) deprecated_hidden: bool,
+    /// Independent source availability of the getter and setter after accessor annotations have
+    /// been folded. Setter presence remains represented by `is_var`.
+    pub(super) accessor_availability: crate::libraries::PropertyAccessorAvailability,
     pub(super) stable_declaration: Option<crate::fir::DeclarationId>,
     pub(super) source_member: Option<crate::libraries::SourceMember>,
     pub(super) getter: Option<crate::libraries::LibraryCallable>,
@@ -42,6 +48,14 @@ pub struct MemberExtPropSig {
 }
 
 impl MemberExtPropSig {
+    fn readable(&self) -> bool {
+        !self.deprecated_hidden && self.accessor_availability.getter
+    }
+
+    fn write_selectable(&self) -> bool {
+        !self.deprecated_hidden && (!self.is_var || self.accessor_availability.setter)
+    }
+
     /// The declared extension receiver (`Int` in `val Int.x: T`).
     pub(crate) fn receiver_ty(&self) -> Ty {
         self.receiver
@@ -104,6 +118,14 @@ impl MemberExtPropSig {
 
     pub(crate) fn setter_visibility(&self) -> Option<Visibility> {
         self.setter_visibility
+    }
+
+    pub(crate) fn deprecated_hidden(&self) -> bool {
+        self.deprecated_hidden
+    }
+
+    pub(crate) fn accessor_availability(&self) -> crate::libraries::PropertyAccessorAvailability {
+        self.accessor_availability
     }
 }
 
@@ -217,8 +239,8 @@ pub(super) fn select(
             // active declarations never take a separate origin-specific selection path.
             let mut declarations = active_declarations(owner, name);
             declarations.retain(|property| match access {
-                crate::symbol_resolver::PropertyAccess::Read => true,
-                crate::symbol_resolver::PropertyAccess::Write => property.is_var,
+                crate::symbol_resolver::PropertyAccess::Read => property.readable(),
+                crate::symbol_resolver::PropertyAccess::Write => property.write_selectable(),
             });
             if let Some(classifier) = source.classifier(owner) {
                 declarations.extend(
@@ -284,6 +306,8 @@ pub(super) fn select(
                                 // is transient and never publishes a declaration's annotations —
                                 // `ClassSig::member_ext_props` does — so nothing reads these.
                                 annotations: Vec::new(),
+                                deprecated_hidden: property.deprecated_hidden,
+                                accessor_availability: property.accessor_availability,
                                 stable_declaration: property.stable_declaration,
                                 source_member: property.source_member,
                                 getter: Some(property.getter.clone()),
