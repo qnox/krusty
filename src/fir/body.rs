@@ -1838,6 +1838,8 @@ pub struct FirBody {
     postfix_updates: HashSet<FirExprId>,
     /// This callable's own lifting site, for a lambda or local function body.
     lifting_site: Option<FirLiftingSite>,
+    /// A local function's declaration span, for a target diagnostic about its realization.
+    declaration_span: Option<crate::diag::Span>,
     /// Target-realized callables declared in this body that have no common FIR body: the accessors
     /// of a local delegated property.
     bodiless_lifting_sites: Vec<FirLiftingSite>,
@@ -1904,6 +1906,7 @@ impl FirBody {
             constant_reads: HashSet::default(),
             postfix_updates: HashSet::default(),
             lifting_site: None,
+            declaration_span: None,
             bodiless_lifting_sites: Vec::new(),
             local_delegate_plans: Vec::new(),
             interface_delegate_calls: Vec::new(),

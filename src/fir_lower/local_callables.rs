@@ -969,6 +969,9 @@ impl BodyLowering<'_> {
                 .lifted_functions
                 .insert(function, (sequence, site.clone()));
         }
+        if let Some(span) = body.declaration_span() {
+            self.ir.local_function_spans.insert(function, span);
+        }
         let owner = if let Some(owner) = body.lexical_class_owner() {
             let class = self
                 .ir
