@@ -912,6 +912,21 @@ impl BodyLowering<'_> {
         Ok(captures)
     }
 
+    /// Whether `body` belongs to an inline function another file declares, lowered here only as
+    /// a template to splice.
+    fn owned_by_foreign_inline_template(&self, body: &FirBody) -> bool {
+        let declaration = crate::fir::DeclarationId::from_raw(body.owner().raw());
+        self.index
+            .callable_for_declaration(declaration)
+            .and_then(|callable| {
+                self.ir
+                    .checked_callable_functions
+                    .get(&callable.id)
+                    .copied()
+            })
+            .is_some_and(|function| self.ir.foreign_inline_templates.contains(&function))
+    }
+
     fn predeclare_local_function(
         &mut self,
         body: &FirBody,
@@ -969,6 +984,14 @@ impl BodyLowering<'_> {
                 .lifted_functions
                 .insert(function, (sequence, site.clone()));
         }
+        // A foreign inline template's local functions are declared in another file; that file
+        // reports their clashes.
+        if let Some(span) = body
+            .declaration_span()
+            .filter(|_| !self.owned_by_foreign_inline_template(body))
+        {
+            self.ir.local_function_spans.insert(function, span);
+        }
         let owner = if let Some(owner) = body.lexical_class_owner() {
             let class = self
                 .ir
@@ -983,18 +1006,7 @@ impl BodyLowering<'_> {
                 self.ir.class_static_local_functions.insert(function, owner);
                 Some(owner)
             } else {
-                let declaration = crate::fir::DeclarationId::from_raw(body.owner().raw());
-                let foreign_inline_template = self
-                    .index
-                    .callable_for_declaration(declaration)
-                    .and_then(|callable| {
-                        self.ir
-                            .checked_callable_functions
-                            .get(&callable.id)
-                            .copied()
-                    })
-                    .is_some_and(|function| self.ir.foreign_inline_templates.contains(&function));
-                if !foreign_inline_template {
+                if !self.owned_by_foreign_inline_template(body) {
                     return Err(FirLoweringFailure::MissingLocalClass(owner));
                 }
                 // The lexical class belongs to a different source file and is intentionally not

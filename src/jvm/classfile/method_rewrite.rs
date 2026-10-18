@@ -31,6 +31,24 @@ use crate::jvm::inline::Insn;
 use crate::jvm::method_node::{ConstantSink, LabelId, MethodNode};
 use finished_node::FinishedNode;
 
+/// Which body the optimizer passes run over.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum BodyStage {
+    /// The body as codegen emitted it.
+    Emitted,
+    /// The coroutine transformer's state machine.
+    Transformed,
+    /// A body kept for an inlining caller, suspension markers and all.
+    KeptForInlining,
+}
+
+impl CodeBuilder {
+    /// Keep this body as written for an inlining caller: kotlinc writes it unoptimized.
+    pub(crate) fn keep_for_inlining(&mut self) {
+        self.kept_for_inlining = true;
+    }
+}
+
 /// What a method keeps so it can be rewritten when its class is written: its builder, for the
 /// labels its branches name.
 #[derive(Clone)]
@@ -372,7 +390,12 @@ impl ClassWriter {
             );
             return None;
         }
-        self.optimized(method, identity, node, implicit_return, false, pool)
+        let stage = if source.builder.kept_for_inlining {
+            BodyStage::KeptForInlining
+        } else {
+            BodyStage::Emitted
+        };
+        self.optimized(method, identity, node, implicit_return, stage, pool)
     }
 
     /// kotlinc's optimizer passes (see [`pipeline`]) over `node`, the body `method` currently holds
@@ -388,7 +411,7 @@ impl ClassWriter {
         source: MethodIdentity<'_>,
         mut node: MethodNode,
         implicit_return: Option<LabelId>,
-        post_coroutine: bool,
+        stage: BodyStage,
         pool: &mut PoolLookup<'_>,
     ) -> Option<Rewritten> {
         // Entry state: `this` (instance methods) and the parameters, one entry per slot.
@@ -412,7 +435,8 @@ impl ClassWriter {
             owner: &self.internal_name,
             value_classes: &*self.value_classes,
             parameter_slots: u16::try_from(entry.len()).ok()?,
-            post_coroutine,
+            post_coroutine: stage == BodyStage::Transformed,
+            kept_for_inlining: stage == BodyStage::KeptForInlining,
         };
         let removed_locals = match pipeline::optimize(&mut node, &context) {
             Outcome::Changed { removed_locals } => removed_locals,

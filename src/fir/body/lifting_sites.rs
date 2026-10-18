@@ -52,6 +52,16 @@ impl super::FirBody {
         self.lifting_site.as_ref()
     }
 
+    /// Record a local function's declaration span. A target reports a clash between the methods
+    /// two local functions realize at their declarations, which only the checker can locate.
+    pub(crate) fn set_declaration_span(&mut self, span: crate::diag::Span) {
+        self.declaration_span = Some(span);
+    }
+
+    pub(crate) fn declaration_span(&self) -> Option<crate::diag::Span> {
+        self.declaration_span
+    }
+
     pub fn add_bodiless_lifting_site(&mut self, site: FirLiftingSite) {
         self.bodiless_lifting_sites.push(site);
     }

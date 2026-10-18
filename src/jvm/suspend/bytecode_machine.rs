@@ -74,7 +74,7 @@ pub(super) fn route(
     };
     let function = &ir.functions[fid as usize];
     let name = function.name.clone();
-    let declared_params = function.params.clone();
+    let declared_params = super::physical_parameters(ir, fid, &function.params);
     let unit_return = route.context.orig_rets[fid as usize] == Ty::Unit;
 
     let fake_continuations = unintercepted_continuation_reads(ir, body);
@@ -121,6 +121,17 @@ pub(super) fn route(
     let class_owner = semantic_owner.or(static_owner);
     let owner = class_owner.map_or_else(|| route.facade.to_string(), |owner| owner.render());
     let continuation_class = name_continuation(ir, fid, &owner, class_owner, route.facade);
+    let machine = |suspensions| TransformedMachine {
+        continuation_class: continuation_class.clone(),
+        suspensions,
+        lambda: None,
+        fake_continuations: fake_continuations.clone(),
+    };
+    // A function only ever inlined is never called: no continuation class re-enters it.
+    if crate::jvm::suspend_inline_functions::keeps_marked_body(ir, fid) {
+        route.machines.record_transformed(fid, machine(suspensions));
+        return Routed::Taken;
+    }
     build_continuation_class(
         ir,
         &continuation_class,
@@ -131,18 +142,19 @@ pub(super) fn route(
         static_owner,
         &declared_params,
     );
+    // The continuation belongs to the method that carries the machine, `$completion` included: an
+    // overridable member's is the `$suspendImpl` its body moves to, which takes the receiver first.
     let function = &ir.functions[fid as usize];
-    // The continuation belongs to the method that carries the machine: an overridable member's is
-    // the `$suspendImpl` its body moves to, which takes the receiver first.
+    let cps_params = super::physical_parameters(ir, fid, &function.params);
     let (method, method_params) =
         match receiver.filter(|_| crate::jvm::suspend_impls::moves_to_suspend_impl(ir, fid)) {
             Some(owner) => (
                 crate::jvm::suspend_impls::suspend_impl_name(&name),
                 std::iter::once(Ty::obj_name(owner))
-                    .chain(function.params.iter().copied())
+                    .chain(cps_params)
                     .collect(),
             ),
-            None => (name, function.params.clone()),
+            None => (name, cps_params),
         };
     // The arrays the transformer computes replace these when the continuation class is written.
     route.outputs.continuation_metadata.insert(
@@ -160,15 +172,7 @@ pub(super) fn route(
             ..ContinuationMetadata::default()
         },
     );
-    route.machines.record_transformed(
-        fid,
-        TransformedMachine {
-            continuation_class,
-            suspensions,
-            lambda: None,
-            fake_continuations,
-        },
-    );
+    route.machines.record_transformed(fid, machine(suspensions));
     Routed::Taken
 }
 
@@ -283,7 +287,7 @@ pub(super) fn eligible_points(
     // `@DebugMetadata`. A named function with no suspension point has none of them, as kotlinc's
     // transformer returns before building them; a suspend lambda's `invokeSuspend` always has its
     // machine.
-    let machine_declines: [(&dyn Fn() -> bool, &str); 5] = [
+    let machine_declines: [(&dyn Fn() -> bool, &str); 4] = [
         (
             &|| !route.context.null_out_dead_spills,
             "no spill clean-up in the runtime",
@@ -291,10 +295,6 @@ pub(super) fn eligible_points(
         (
             &|| subject == Subject::NamedFunction && !(top_level || class_member),
             "not top-level or a class member",
-        ),
-        (
-            &|| subject == Subject::NamedFunction && ir.method_visibility(fid).is_private(),
-            "private",
         ),
         (
             &|| !ir.fn_decl_lines.contains_key(&fid),
@@ -305,8 +305,11 @@ pub(super) fn eligible_points(
             "an interface body",
         ),
     ];
+    // A function only ever inlined keeps its marked body and gets no machine at all.
+    let machineless =
+        points.is_empty() || crate::jvm::suspend_inline_functions::keeps_marked_body(ir, fid);
     let machine_declines: &[(&dyn Fn() -> bool, &str)] =
-        if points.is_empty() && subject == Subject::NamedFunction {
+        if machineless && subject == Subject::NamedFunction {
             &[]
         } else {
             &machine_declines

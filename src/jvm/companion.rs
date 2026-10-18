@@ -8,7 +8,6 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrFunction, IrStatic};
-use crate::jvm::names::{property_getter_name, property_setter_name};
 use crate::types::{Ty, Visibility};
 
 #[derive(Clone)]
@@ -422,6 +421,16 @@ pub(super) fn lower_companion_properties(
                 crate::ir::IrStaticAccessor::Default
             },
         };
+        // The companion keeps the property's accessors, so the names realized for them carry over.
+        let declaration = &ir.classes[candidate.companion as usize].properties[candidate.property];
+        let (getter_jvm_name, setter_jvm_name) = if candidate.delegate_storage {
+            (None, None)
+        } else {
+            (
+                declaration.getter_jvm_name.clone(),
+                declaration.setter_jvm_name.clone(),
+            )
+        };
         ir.statics.push(IrStatic {
             name: candidate.name.clone(),
             ty: candidate.ty,
@@ -431,8 +440,8 @@ pub(super) fn lower_companion_properties(
             is_lateinit: candidate.is_lateinit,
             owner: Some(ir.classes[candidate.outer as usize].fq_name),
             visibility: candidate.visibility,
-            getter_jvm_name: None,
-            setter_jvm_name: None,
+            getter_jvm_name,
+            setter_jvm_name,
             erased_declared_ty: None,
             accessors,
             line: candidate.decl_line,
@@ -594,9 +603,20 @@ pub(super) fn lower_companion_properties(
         // directly from the outer class and through `access$…$cp` from everywhere else.
         // A declared accessor stays. Only the side the source omitted is synthesized, so a
         // custom setter still gets the default getter over the hoisted field.
+        // The synthesized accessors are the property's default accessors: they take the names
+        // realized for them and the annotations written on them.
+        let realized = &ir.statics[static_index as usize];
+        let getter_name = realized.default_getter_jvm_name();
+        let setter_name = realized.default_setter_jvm_name();
+        let accessor_annotations = if candidate.delegate_storage {
+            Default::default()
+        } else {
+            ir.classes[candidate.companion as usize].properties[candidate.property]
+                .accessor_annotations
+                .clone()
+        };
         let accessors = (!candidate.is_jvm_field && !candidate.is_private).then(|| {
             let getter = candidate.declared_getter.is_none().then(|| {
-                let getter_name = property_getter_name(&candidate.name);
                 let read = ir.add_expr(IrExpr::GetStatic(static_index));
                 let returned = ir.add_expr(IrExpr::Return(Some(read)));
                 let getter_body = ir.add_expr(IrExpr::Block {
@@ -613,6 +633,10 @@ pub(super) fn lower_companion_properties(
                     param_checks: vec![],
                 });
                 ir.fn_source_names.insert(getter, getter_name);
+                if accessor_annotations.getter.declares_annotations() {
+                    ir.function_annotations
+                        .insert(getter, accessor_annotations.getter.clone());
+                }
                 ir.fn_params
                     .insert(getter, crate::ir::FnParamInfo::identities(Vec::new()));
                 ir.fn_source_order.insert(getter, candidate.source_order);
@@ -653,7 +677,7 @@ pub(super) fn lower_companion_properties(
                     value: None,
                 });
                 let setter = ir.add_fun(IrFunction {
-                    name: property_setter_name(&candidate.name),
+                    name: setter_name.clone(),
                     params: vec![candidate.ty],
                     ret: Ty::Unit,
                     body: Some(body),
@@ -668,8 +692,11 @@ pub(super) fn lower_companion_properties(
                         && !candidate.ty.is_ty_param())
                     .then_some(crate::ir::IrParameterCheck::NonNull)],
                 });
-                ir.fn_source_names
-                    .insert(setter, property_setter_name(&candidate.name));
+                ir.fn_source_names.insert(setter, setter_name.clone());
+                if accessor_annotations.setter.declares_annotations() {
+                    ir.function_annotations
+                        .insert(setter, accessor_annotations.setter.clone());
+                }
                 ir.fn_params.insert(
                     setter,
                     crate::ir::FnParamInfo::identities(vec![

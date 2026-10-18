@@ -116,6 +116,28 @@ fn reference_version() -> String {
     crate::kotlin_version::target().to_string()
 }
 
+/// The `<version>.txt` outcome lists in one directory, as seen by the reference version this
+/// process reproduces. A release with no list of its own reads the newest recorded list below it.
+pub struct ReleaseList {
+    /// The reference version's own list, which recording writes.
+    pub own: PathBuf,
+    /// The list the reference version reads: its own, or the one it inherits.
+    pub read: PathBuf,
+    /// The list it would inherit without one of its own.
+    pub inherited: Option<PathBuf>,
+}
+
+pub fn release_list(directory: &Path) -> ReleaseList {
+    let version = crate::kotlin_version::target();
+    let path_of = |release| directory.join(format!("{release}.txt"));
+    let own = path_of(version);
+    ReleaseList {
+        read: crate::kotlin_version::recorded_file(version, path_of).unwrap_or_else(|| own.clone()),
+        inherited: crate::kotlin_version::inherited_file(version, path_of),
+        own,
+    }
+}
+
 fn find_ancestor(start: &Path, mut matches: impl FnMut(&Path) -> bool) -> Option<PathBuf> {
     start
         .ancestors()

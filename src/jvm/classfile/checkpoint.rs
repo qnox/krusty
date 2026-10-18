@@ -12,6 +12,7 @@ pub struct ClassCheckpoint {
     bootstrap_methods: usize,
     inner_class_candidates: usize,
     source_map: SourceMap,
+    method_source_map: SourceMap,
 }
 
 impl ConstPool {
@@ -38,6 +39,7 @@ impl ClassWriter {
             bootstrap_methods: self.bootstrap_methods.len(),
             inner_class_candidates: self.inner_class_candidates.len(),
             source_map: self.source_map.clone(),
+            method_source_map: self.method_source_map.clone(),
         }
     }
 
@@ -48,6 +50,7 @@ impl ClassWriter {
     /// ranges must not become visible until the lambda is actually inserted into the body.
     pub(crate) fn restore_source_map(&mut self, checkpoint: &ClassCheckpoint) {
         self.source_map = checkpoint.source_map.clone();
+        self.method_source_map = checkpoint.method_source_map.clone();
     }
 
     /// Forget what code compiled since `checkpoint` left in the class: its constants, source-map
@@ -65,6 +68,7 @@ impl ClassWriter {
         self.inner_class_candidates
             .truncate(checkpoint.inner_class_candidates);
         self.source_map = checkpoint.source_map;
+        self.method_source_map = checkpoint.method_source_map;
         true
     }
 
