@@ -96,6 +96,10 @@ var prop = 3
 @Target(AnnotationTarget.EXPRESSION)
 @Retention(AnnotationRetention.SOURCE)
 annotation class Ann
+
+class Gen<T>
+typealias Alias = Cls
+typealias GAlias<T> = Gen<T>
 ";
 
 const PARENTHESES: &str = "\
@@ -290,6 +294,103 @@ fn a_type_argument_segment_cannot_name_the_last_package() {
         &[
             ("Declarations.kt", DECLARATIONS),
             ("Use.kt", TYPE_ARGUMENTS_ON_FINAL_PACKAGES),
+        ],
+        &[FEATURE],
+        &errors,
+        &[],
+    );
+}
+
+/// A typealias constructor reached through a package qualifier. kotlinc prints no warnings beside
+/// errors, so the forms that are errors before the feature have their own source.
+const ALIAS_PARENTHESES: &str = "\
+import part1.part2.Ann
+
+fun use() {
+    val a = (part1).part2.Alias()
+    val b = (part1.part2).Alias()
+    val c = (@Ann part1).part2.Alias()
+    val d = (part1).part2.GAlias<Int>()
+    val e = (part1).part2.Alias::class
+    val f = part1.part2.Alias()
+}
+";
+
+#[test]
+fn parenthesized_package_qualifiers_of_alias_constructors_are_deprecated() {
+    let warnings = if release_has_feature() {
+        [
+            "Use.kt:4:13",
+            "Use.kt:5:13",
+            "Use.kt:6:13",
+            "Use.kt:7:13",
+            "Use.kt:8:13",
+        ]
+        .map(|location| warning(location, PARENTHESIZED))
+        .to_vec()
+    } else {
+        Vec::new()
+    };
+    assert_matches_kotlinc(
+        &[
+            ("Declarations.kt", DECLARATIONS),
+            ("Use.kt", ALIAS_PARENTHESES),
+        ],
+        &[],
+        &[],
+        &warnings,
+    );
+}
+
+/// The alias is applied only after the qualifier resolved, so an annotated segment keeps its
+/// unresolved-reference error.
+#[test]
+fn an_alias_constructor_needs_a_resolved_package_qualifier() {
+    if !release_has_feature() {
+        return;
+    }
+    let parenthesized = |location| error(location, PARENTHESIZED);
+    let errors = vec![
+        parenthesized("Use.kt:4:13"),
+        parenthesized("Use.kt:5:13"),
+        unresolved("Use.kt:6:19", "part1"),
+        parenthesized("Use.kt:7:13"),
+        parenthesized("Use.kt:8:13"),
+    ];
+    assert_matches_kotlinc(
+        &[
+            ("Declarations.kt", DECLARATIONS),
+            ("Use.kt", ALIAS_PARENTHESES),
+        ],
+        &[FEATURE],
+        &errors,
+        &[],
+    );
+}
+
+const ALIAS_TYPE_ARGUMENTS: &str = "\
+fun use() {
+    val a = part1<Int>.part2.Alias()
+    val b = part1.part2<Int>.Alias()
+    val c = part1<Int>.part2.GAlias<String>()
+    val d = part1.part2.GAlias<String>()
+}
+";
+
+#[test]
+fn a_type_argument_segment_cannot_name_an_alias_constructor_package() {
+    if !release_has_feature() {
+        return;
+    }
+    let errors = vec![
+        unresolved("Use.kt:2:13", "part1"),
+        unresolved("Use.kt:3:19", "part2"),
+        unresolved("Use.kt:4:13", "part1"),
+    ];
+    assert_matches_kotlinc(
+        &[
+            ("Declarations.kt", DECLARATIONS),
+            ("Use.kt", ALIAS_TYPE_ARGUMENTS),
         ],
         &[FEATURE],
         &errors,

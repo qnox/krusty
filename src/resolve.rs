@@ -16272,28 +16272,27 @@ impl<'a> Checker<'a> {
                 // alias through the same semantic expansion used by type syntax, then feed its final
                 // classifier into the ordinary constructor selector. This is especially important
                 // for local classes: their runtime-hoisted identity cannot be reconstructed by
-                // appending the source alias spelling (`Local.Alias`).
-                let qualified_alias_target =
-                    if !matches!(&receiver_qualifier, Ok(ResolvedQualifier::Value)) {
-                        let mut segments = Vec::new();
-                        qualifier_expression_segments(self.file, callee, &mut segments)
-                            .ok()
-                            .and_then(|()| {
-                                let qualified_name = segments
-                                    .iter()
-                                    .map(|(_, segment)| segment.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(".");
-                                self.scoped_source_alias_call_ty(
-                                    scope,
-                                    call,
-                                    &qualified_name,
-                                    expected,
-                                )
-                            })
-                    } else {
-                        None
-                    };
+                // appending the source alias spelling (`Local.Alias`). Only a receiver that the
+                // qualifier walk resolved to a package or classifier can own the alias: a receiver
+                // segment that cannot name a package keeps its unresolved-reference error.
+                let qualified_alias_target = if matches!(
+                    &receiver_qualifier,
+                    Ok(ResolvedQualifier::Package(_) | ResolvedQualifier::Classifier(_))
+                ) {
+                    let mut segments = Vec::new();
+                    qualifier_expression_segments(self.file, callee, &mut segments)
+                        .ok()
+                        .and_then(|()| {
+                            let qualified_name = segments
+                                .iter()
+                                .map(|(_, segment)| segment.as_str())
+                                .collect::<Vec<_>>()
+                                .join(".");
+                            self.scoped_source_alias_call_ty(scope, call, &qualified_name, expected)
+                        })
+                } else {
+                    None
+                };
                 if qualified_alias_target == Some(Ty::Error) {
                     return Ty::Error;
                 }
