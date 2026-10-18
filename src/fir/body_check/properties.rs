@@ -810,18 +810,38 @@ impl BodyFirChecker<'_> {
             .synthetic(cause, SyntheticOriginKind::ImplicitReceiver);
         let selected_ty = ResolvedTy::new(selected.ty)
             .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))?;
-        if !selected.current {
-            if let Some(receiver) = self.local_class_enclosing_receiver(origin, selected)? {
-                return Ok(Some(receiver));
-            }
+        // `current` describes the receiver at the construction site. Inside an anonymous/local
+        // classifier's constructor that same value is a captured prefix parameter, so consult the
+        // declaration-owned capture ledger before interpreting the construction-site flag in this
+        // rebuilt body.
+        if let Some(receiver) = self.local_class_enclosing_receiver(origin, selected)? {
+            return Ok(Some(receiver));
         }
-        self.materialize_classifier_dispatch_receiver(
+        if let Some(receiver) = self.materialize_classifier_dispatch_receiver(
             owner,
             selected_ty,
             origin,
             span,
             selected.current,
-        )
+        )? {
+            return Ok(Some(receiver));
+        }
+        // An ordinary `inner` classifier owns no capture field for its enclosing instance. Its
+        // selected classifier identity is nevertheless enough to validate the exact declaration
+        // path from the class being constructed; publish that stable path rather than falling
+        // back to the receiver-tower coordinate.
+        let Some(path) = self.enclosing_receiver_path(selected) else {
+            return Ok(None);
+        };
+        let value = self.body.add_expr(FirExpr {
+            origin,
+            ty: selected_ty,
+            kind: FirExprKind::EnclosingReceiver { path },
+        });
+        Ok(Some(FirReceiver {
+            value,
+            conversion: None,
+        }))
     }
 
     fn class_context_storage(
