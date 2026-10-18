@@ -11,8 +11,10 @@ import org.gradle.api.GradleException
 /** A kotlinc argument's canonical name, and whether a bare occurrence consumes the next token. */
 private class KotlincArgument(val name: String, val takesValue: Boolean)
 
-private fun readKotlincArguments(table: String): Map<String, KotlincArgument> {
-    val resource = "/krusty/kotlinc-arguments/$table.tsv"
+private fun argumentTable(release: String): String = "/krusty/kotlinc-arguments/$release.tsv"
+
+private fun readKotlincArguments(release: String): Map<String, KotlincArgument> {
+    val resource = argumentTable(release)
     val text = KrustyKotlinPlugin::class.java.getResource(resource)?.readText()
         ?: throw GradleException("the krusty plugin is missing its kotlinc argument table $resource")
     val arguments = HashMap<String, KotlincArgument>()
@@ -29,17 +31,17 @@ private fun readKotlincArguments(table: String): Map<String, KotlincArgument> {
 
 /**
  * Every spelling (name, short name, deprecated name) that the selected kotlinc release declares,
- * read from the same release table the compiler vendors. 2.4.10 has the same measured argument
- * surface as 2.4.0, so both versions deliberately share that immutable table.
+ * read from the same release table the compiler vendors. A release whose argument surface equals
+ * its predecessor's has no table of its own and reads the predecessor's.
  */
 private val kotlincArgumentsByVersion: Map<String, Map<String, KotlincArgument>> by lazy {
-    val v2_4_0 = readKotlincArguments("2.4.0")
-    mapOf(
-        "2.4.0" to v2_4_0,
-        "2.4.10" to v2_4_0,
-        "2.4.20" to readKotlincArguments("2.4.20"),
-        "2.4.21" to readKotlincArguments("2.4.21"),
-    )
+    val tables = HashMap<String, Map<String, KotlincArgument>>()
+    supportedKotlinVersions.mapNotNull { version ->
+        val release = recordedRelease(version) {
+            KrustyKotlinPlugin::class.java.getResource(argumentTable(it)) != null
+        } ?: return@mapNotNull null
+        version to tables.getOrPut(release) { readKotlincArguments(release) }
+    }.toMap()
 }
 
 /** The structured input that owns each argument the plugin derives, by canonical name. */

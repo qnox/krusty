@@ -75,6 +75,7 @@ impl BodyFirChecker<'_> {
         if let Some(site) = self.file.local_function_lifting_sites.get(&statement) {
             body.set_lifting_site(crate::fir::FirLiftingSite::from_source(site, true));
         }
+        body.set_declaration_span(function.span);
         let context_count = info.sig.context_count.min(info.sig.params.len());
         if let Some(vararg) = info.sig.vararg_index {
             body.set_vararg_parameter(crate::fir::FirVarargParameter {

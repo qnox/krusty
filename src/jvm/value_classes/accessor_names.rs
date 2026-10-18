@@ -23,16 +23,46 @@ pub(super) fn retire_replaced_accessor_call(ir: &mut IrFile, call: ExprId) {
     ir.synthesized_accessor_calls.remove(&call);
 }
 
+/// A backed property whose accessors the compiler writes, with any `@JvmName` written on them.
+struct DefaultAccessors {
+    index: usize,
+    name: String,
+    ty: Ty,
+    written_getter: Option<String>,
+    written_setter: Option<String>,
+}
+
 pub(super) fn stamp_synthesized(ir: &mut IrFile, under: &Under) {
     for class_index in 0..ir.classes.len() {
-        let properties: Vec<(usize, String, Ty)> = ir.classes[class_index]
+        let properties: Vec<DefaultAccessors> = ir.classes[class_index]
             .properties
             .iter()
             .enumerate()
             .filter(|(_, property)| property.getter.is_none() && property.backing_field.is_some())
-            .map(|(index, property)| (index, property.name.clone(), property.ty))
+            .map(|(index, property)| {
+                let written = |annotations| {
+                    crate::jvm::module_calls::applied_jvm_name(Some(annotations))
+                        .ok()
+                        .flatten()
+                        .map(str::to_owned)
+                };
+                DefaultAccessors {
+                    index,
+                    name: property.name.clone(),
+                    ty: property.ty,
+                    written_getter: written(&property.accessor_annotations.getter),
+                    written_setter: written(&property.accessor_annotations.setter),
+                }
+            })
             .collect();
-        for (index, name, ty) in properties {
+        for DefaultAccessors {
+            index,
+            name,
+            ty,
+            written_getter,
+            written_setter,
+        } in properties
+        {
             let declared_value_class = ty
                 .non_null()
                 .obj_internal()
@@ -43,17 +73,20 @@ pub(super) fn stamp_synthesized(ir: &mut IrFile, under: &Under) {
             if !declared_value_class {
                 continue;
             }
-            let plain_getter = property_getter_name(&name);
-            let getter = vc_mangle(&plain_getter, &[], &ty, under, false, false);
-            let plain_setter = property_setter_name(&name);
-            let setter = vc_mangle(
-                &plain_setter,
-                std::slice::from_ref(&ty),
-                &Ty::Unit,
-                under,
-                false,
-                false,
-            );
+            // A written `@JvmName` is the accessor's whole JVM name: kotlinc does not mangle it.
+            let getter = written_getter.unwrap_or_else(|| {
+                vc_mangle(&property_getter_name(&name), &[], &ty, under, false, false)
+            });
+            let setter = written_setter.unwrap_or_else(|| {
+                vc_mangle(
+                    &property_setter_name(&name),
+                    std::slice::from_ref(&ty),
+                    &Ty::Unit,
+                    under,
+                    false,
+                    false,
+                )
+            });
             rename_bound_calls(ir, class_index as u32, index as u32, &getter);
             retarget_property_bridges(ir, class_index, index as u32, &getter, &setter);
             let property = &mut ir.classes[class_index].properties[index];
