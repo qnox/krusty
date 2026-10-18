@@ -24,6 +24,9 @@ use crate::spelling::Spelled;
 use crate::symbol_source::SymbolSource as _;
 use crate::types::{Ty, TypeName};
 
+#[cfg(test)]
+mod tests;
+
 /// Check finalized top-level type-alias targets while their source syntax is still live. Stable
 /// declaration identity owns the semantic expansion; the parallel syntax supplies only spans.
 pub(crate) fn check_finalized_top_level_type_alias_bounds(
@@ -57,19 +60,25 @@ pub(crate) fn check_finalized_top_level_type_alias_bounds(
         }
 
         // Earlier declaration validation may reject one alias while retaining its parser syntax
-        // for the diagnostic ledger. Join each surviving stable identity to the exact declaration
-        // range that created it; source order orders the stable side, but never substitutes for
-        // identity by zipping two lists whose rejected members differ.
+        // for the diagnostic ledger. The declaration anchor's sibling is the stable inventory edge
+        // to that syntax; source order only orders the stable side and never substitutes for
+        // identity by zipping lists whose rejected members differ.
         let declarations = declarations
             .into_iter()
-            .filter_map(|declaration| {
-                let range = index
-                    .declaration_range(declaration)
-                    .expect("top-level type-alias bounds run while source coordinates are live");
-                file.type_alias_decls
-                    .iter()
-                    .find(|syntax| syntax.span == range)
-                    .map(|syntax| (syntax, declaration))
+            .map(|declaration| {
+                let anchor = index
+                    .declaration_anchor(declaration)
+                    .expect("an inventoried top-level type alias has an anchor");
+                assert_eq!(anchor.source, source);
+                assert_eq!(anchor.owner, None);
+                assert_eq!(anchor.kind, crate::fir::DeclarationKind::TypeAlias);
+                let sibling = usize::try_from(anchor.sibling)
+                    .expect("a type-alias sibling fits the active parser arena");
+                let syntax = file
+                    .type_alias_decls
+                    .get(sibling)
+                    .expect("a stable type-alias sibling names its exact parser declaration");
+                (syntax, declaration)
             })
             .collect::<Vec<_>>();
 

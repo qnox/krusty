@@ -48597,6 +48597,19 @@ impl<'a> Checker<'a> {
                                 .into_boxed_slice()
                         }
                     });
+                // Active member/property overlays traverse this map, so the exact direct-supertype
+                // relation must be visible regardless of whether the local classifier header was
+                // finalized in Pass 1 or completed here in Pass 2.
+                if let Some(owner) = current_owner.filter(|owner| {
+                    checked.iter().all(|supertype| {
+                        crate::fir::ResolvedTy::new(*supertype).is_ok()
+                            && supertype.kotlin_class_internal().is_some()
+                            && supertype.kotlin_class_internal() != Some(*owner)
+                    })
+                }) {
+                    self.resolved_body_local_supertypes
+                        .insert(owner, checked.clone());
+                }
                 if let Some(declaration) = current_owner.and_then(|owner| {
                     self.resolved_index
                         .and_then(|index| index.classifier_declaration(owner))
@@ -49780,9 +49793,6 @@ impl<'a> Checker<'a> {
                             })
                             .collect();
                         (primary, source_primary, secondary)
-                    }
-                    None if parameter_defaults::is_expect_constructor_provider(self.file, d) => {
-                        self.declared_default_provider_constructor_shapes(scope, cl)
                     }
                     None if self.signature_defaults_only => {
                         self.declared_default_provider_constructor_shapes(scope, cl)

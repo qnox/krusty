@@ -253,8 +253,8 @@ package contextual.parts
 
 class Marker
 class Value
+context(marker: contextual.parts.Marker)
 fun build() {
-    context(marker: contextual.parts.Marker)
     class Local(value: contextual<Any>.parts.Value)
 }
 ",
