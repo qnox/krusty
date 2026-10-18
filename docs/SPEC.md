@@ -11967,7 +11967,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   class as `<caller>$inlined$sam$…`, once per calling class and shared by every such call in it. The
   copy replays the original with only its own name remapped: its `@Metadata`, its `EnclosingMethod`
   (the original's file class, with no method), its source file and member order stay, and it has no
-  source map because the wrapper has no line numbers. Test:
+  source map because the wrapper has no line numbers. Its class-file version is the newer of the
+  original's and the caller's, as for a regenerated object. Test:
   `tests/inline_sam_wrapper_copy_e2e.rs`. Corpus:
   `inlineClasses/funInterface/mangledSamWrappers`, `mangledSamWrappersGeneric`,
   `callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction`,
