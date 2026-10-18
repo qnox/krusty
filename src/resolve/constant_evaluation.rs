@@ -347,7 +347,12 @@ fn retype_constant(mut constant: LibraryConst, ty: Ty) -> Option<LibraryConst> {
 }
 
 fn evaluate_unary(operation: UnOp, operand: LibraryConst, ty: Ty) -> Option<LibraryConst> {
-    let value = match (operation, operand.value) {
+    // An integer operand takes a Long result type through the operator, as in `-(60 + 1)`.
+    let operand_value = match (operand.value, ty.non_null()) {
+        (LibConst::Int(value), Ty::Long) => LibConst::Long(i64::from(value)),
+        (value, _) => value,
+    };
+    let value = match (operation, operand_value) {
         (
             UnOp::Plus,
             value @ (LibConst::Int(_)
@@ -644,6 +649,22 @@ mod tests {
             })
         };
         assert_eq!(values, vec![long(60), long(-60)]);
+    }
+
+    #[test]
+    fn a_unary_operator_widens_an_integer_operand_to_a_long_result() {
+        let int = |value| LibraryConst {
+            ty: Ty::Int,
+            value: LibConst::Int(value),
+        };
+        let long = |value| {
+            Some(LibraryConst {
+                ty: Ty::Long,
+                value: LibConst::Long(value),
+            })
+        };
+        assert_eq!(evaluate_unary(UnOp::Neg, int(61), Ty::Long), long(-61));
+        assert_eq!(evaluate_unary(UnOp::Plus, int(6), Ty::Long), long(6));
     }
 
     #[test]
