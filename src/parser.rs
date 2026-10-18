@@ -4401,6 +4401,8 @@ impl<'a> Parser<'a> {
                 }
                 self.skip_newlines();
             }
+            // The annotated statement is the one a bare branch body holds.
+            self.bare_branch_value = bare_branch_value;
             let statement = self.parse_stmt();
             if !annotations.is_empty() {
                 self.file

@@ -135,6 +135,7 @@ class H { var p = 0L }
 fun branches(k: Int, o: H): Long {
     var c = 0L
     if (k > 1) c++ else c--
+    if (k > 1) @Suppress(\"x\") c++ else c--
     if (k > 2) ++c else lg()
     when (k) { 1 -> c++; else -> --c }
     if (k > 3) c++
