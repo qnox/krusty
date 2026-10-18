@@ -88,6 +88,8 @@ mod suspend_member_call_points_e2e;
 mod suspend_normalization_e2e;
 #[path = "../suspend_operator_convention_cross_file_e2e.rs"]
 mod suspend_operator_convention_cross_file_e2e;
+#[path = "../suspend_private_function_e2e.rs"]
+mod suspend_private_function_e2e;
 #[path = "../suspend_prologue_cast_e2e.rs"]
 mod suspend_prologue_cast_e2e;
 #[path = "../suspend_receiver_lambda_e2e.rs"]
