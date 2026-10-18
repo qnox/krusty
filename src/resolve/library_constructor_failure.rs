@@ -57,7 +57,8 @@ impl LibraryConstructorFailure {
 
 impl Checker<'_> {
     /// The bound and argument of the first of a constructor's explicit type arguments `explicit`
-    /// outside its bound, when every one of the classifier's `formals` is given explicitly.
+    /// outside its bound. `formals` is the constructor signature's classifier-formal prefix, not
+    /// the classifier declaration's independently owned identities.
     pub(super) fn explicit_constructor_bound_violation(
         &self,
         formals: &[String],

@@ -104,6 +104,7 @@ mod context_sensitive_resolution;
 mod control_flow_join;
 pub(crate) mod declaration_index;
 pub(crate) mod delegated_properties;
+mod library_constructor_type_parameters;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod contract_declarations;
 mod contract_effects;
@@ -65457,10 +65458,15 @@ impl<'a> Checker<'a> {
                 .as_ref()
                 .filter(|signature| signature.params.len() == parameter_count)
             {
+                let constructor_type_parameters =
+                    library_constructor_type_parameters::LibraryConstructorTypeParameters::new(
+                        classifier.type_params(),
+                        signature,
+                    );
                 // Explicit type arguments are fixed before any argument is inferred: one outside
                 // its bound rejects the constructor whatever its arguments are (`Box<String>("")`).
                 if let Some(failure) = self.explicit_constructor_bound_violation(
-                    classifier.type_params(),
+                    constructor_type_parameters.signature_formals(),
                     signature,
                     &explicit_type_arguments,
                 ) {
@@ -65654,8 +65660,8 @@ impl<'a> Checker<'a> {
                 crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
                     &source,
                     internal,
-                    classifier.type_params(),
-                    classifier.type_param_bounds(),
+                    constructor_type_parameters.signature_formals(),
+                    constructor_type_parameters.signature_bounds(),
                     expected_classifier,
                     &mut bindings,
                 );
@@ -65759,39 +65765,8 @@ impl<'a> Checker<'a> {
                 // Without independent evidence, a constructor variable that supplies context to a
                 // postponed producer completes from its declared upper bound. Substitute preceding
                 // solutions so dependent bounds (`U : Base<T>`) retain their semantic application.
-                for (index, formal) in classifier.type_params().iter().enumerate() {
-                    if !enclosing_context_formals.contains(formal)
-                        || bindings
-                            .get(formal)
-                            .is_some_and(|binding| *binding != Ty::Error)
-                    {
-                        continue;
-                    }
-                    let known = classifier
-                        .type_params()
-                        .iter()
-                        .take(index)
-                        .filter_map(|known_formal| {
-                            bindings
-                                .get(known_formal)
-                                .copied()
-                                .filter(|binding| *binding != Ty::Error)
-                                .map(|binding| (known_formal.clone(), binding))
-                        })
-                        .collect::<HashMap<_, _>>();
-                    if let Some(bound) = classifier
-                        .type_param_bounds()
-                        .get(index)
-                        .and_then(|bounds| bounds.first())
-                        .copied()
-                        .filter(|bound| *bound != Ty::Error)
-                    {
-                        bindings.insert(
-                            formal.clone(),
-                            crate::symbol_resolver::ty_subst_keep_unbound(bound, &known),
-                        );
-                    }
-                }
+                constructor_type_parameters
+                    .complete_enclosing_context(&enclosing_context_formals, &mut bindings);
                 crate::trace_compiler!(
                     "expected_call",
                     "provider constructor={} expected={expected_classifier:?} generic_params={:?} actuals={actuals:?} upper_only={:?} upper_bounds={:?} bindings={bindings:?}",
@@ -65802,19 +65777,11 @@ impl<'a> Checker<'a> {
                 );
                 // Constructor type arguments belong to the classifier. They are fixed before
                 // ordinary argument constraints participate (`Foo<String>(42.0)` cannot infer the
-                // primary constructor's `T` as `Double`). Kotlin constructors introduce no
-                // independent function type parameters, so the classifier's declaration-order
-                // formal prefix is the exact binding target. An underscore remains unbound and is
-                // completed by the argument/expected-type constraints above.
-                for (formal, explicit) in classifier
-                    .type_params
-                    .iter()
-                    .zip(explicit_type_arguments.iter().copied())
-                {
-                    if !explicit.mentions_error() && !explicit.mentions_pending() {
-                        bindings.insert(formal.clone(), explicit);
-                    }
-                }
+                // classifier's `T` as `Double`). The classifier's declaration-order prefix is the
+                // exact binding target; any constructor-only suffix stays inferred solely inside
+                // the signature. An underscore remains unbound and is completed by the
+                // argument/expected-type constraints above.
+                constructor_type_parameters.bind_explicit(&explicit_type_arguments, &mut bindings);
                 // Expected-result inference runs after argument inference and may replace a class
                 // binding (`C<T : Bound>` expected as `I<Unrelated>` through `C<T> : I<T>`).
                 // Revalidate the completed classifier bindings here; validating only the earlier
@@ -65834,12 +65801,7 @@ impl<'a> Checker<'a> {
                     continue;
                 }
                 let result_arguments =
-                    crate::symbol_resolver::completed_constructor_result_arguments(
-                        internal,
-                        classifier.type_params(),
-                        classifier.type_param_bounds(),
-                        &bindings,
-                    );
+                    constructor_type_parameters.completed_result_arguments(internal, &bindings);
                 member.ret = Ty::obj_args_name(internal, &result_arguments);
                 member.params = signature
                     .params
@@ -65848,7 +65810,7 @@ impl<'a> Checker<'a> {
                         crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &bindings)
                     })
                     .collect();
-                inferred = Some(bindings);
+                inferred = Some(constructor_type_parameters.classifier_bindings(&bindings));
             }
             member.call_sig = call_sig;
             candidates.push(CtorDelegationCandidate {

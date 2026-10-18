@@ -61,6 +61,35 @@ fn classpath_value_class_constructed_by_name() {
 }
 
 #[test]
+fn classpath_dnn_value_constructor_infers_its_classifier_parameter() {
+    let library = r#"
+        package ids
+
+        @JvmInline
+        value class Present<T>(val value: T & Any)
+    "#;
+    let main = r#"
+        import ids.Present
+
+        fun <T> retain(value: T & Any): Present<T> = Present(value)
+
+        fun box(): String {
+            val inferred = Present("O")
+            val explicit = Present<String?>("K")
+            return inferred.value + explicit.value + retain("!").value
+        }
+    "#;
+
+    let Some(out) =
+        common::expect_box_run_against("dnn_value_constructor_inference", library, main)
+    else {
+        eprintln!("skipping: kotlinc/JVM toolchain unavailable");
+        return;
+    };
+    assert_eq!(out.trim(), "OK!", "box() returned {out:?}");
+}
+
+#[test]
 fn krusty_value_class_member_surface_round_trips_across_modules() {
     let library = r#"
         @JvmInline
