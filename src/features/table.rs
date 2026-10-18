@@ -133,10 +133,17 @@ impl LanguageFeature {
     }
 
     pub(super) fn deprecation_warning_format(&self) -> DeprecationWarningFormat {
+        DeprecationWarningFormat {
+            suffix: self.deprecation_warning_suffix(),
+        }
+    }
+
+    /// The release-selected suffix of kotlinc's `toDeprecationWarningMessage`. Keeping this
+    /// separate lets a later checker attach the policy to a message containing resolved types
+    /// without looking the language feature up again.
+    pub fn deprecation_warning_suffix(&self) -> String {
         let mut suffix = match self.since_version {
-            Some(since) => {
-                format!("This will become an error in language version {since}.")
-            }
+            Some(since) => format!("This will become an error in language version {since}."),
             None => "This will become an error in a future release.".to_string(),
         };
         if let Some(issue) = &self.issue {
@@ -144,7 +151,7 @@ impl LanguageFeature {
                 " See https://youtrack.jetbrains.com/issue/{issue}."
             ));
         }
-        DeprecationWarningFormat { suffix }
+        suffix
     }
 
     /// kotlinc's `forcesPreReleaseBinariesIfEnabled`: enabling a feature that no stable language

@@ -1072,8 +1072,7 @@ impl BodyFirChecker<'_> {
         }
         let substitutions = self
             .info
-            .resolved_call_type_args
-            .get(&expression)
+            .resolved_call_type_arguments(expression)
             .into_iter()
             .flatten()
             .enumerate()
@@ -1367,8 +1366,7 @@ impl BodyFirChecker<'_> {
                 .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))
         };
         self.info
-            .resolved_call_type_args
-            .get(&expression)
+            .resolved_call_type_arguments(expression)
             .into_iter()
             .flatten()
             .enumerate()

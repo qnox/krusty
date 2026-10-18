@@ -637,7 +637,7 @@ impl Checker<'_> {
             result_constraint,
             vec![declaration],
         );
-        let selected = match selection {
+        let mut selected = match selection {
             Some(CallableCandidateSelection::Selected(selected)) => *selected,
             Some(CallableCandidateSelection::MissingContext(_)) | None => {
                 return InvokeResolution::Inapplicable(vec![diagnostic_declaration]);
@@ -646,16 +646,6 @@ impl Checker<'_> {
                 unreachable!("one planned invoke declaration cannot become ambiguous")
             }
         };
-        if let Some(signature) = selected.generic_sig.as_ref() {
-            let resolved = signature
-                .formals
-                .iter()
-                .map(|formal| selected.bindings.get(formal).copied())
-                .collect::<Vec<_>>();
-            if !resolved.is_empty() && resolved.iter().all(Option::is_some) {
-                self.resolved_call_type_args.insert(call, resolved);
-            }
-        }
         let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
         let Some(shape) = self.contextual_call_shape(
             scope,
@@ -703,7 +693,23 @@ impl Checker<'_> {
                 .insert(call, implicit_context_args.clone());
             self.mark_context_extension_receiver_used(scope, call, &implicit_context_args);
         }
-        let ret = selected.callable.ret;
+        let mut ret = selected.callable.ret;
+        if let Some(signature) = selected.generic_sig.clone() {
+            let selected_ret = selected.ret;
+            ret = self.commit_selected_call_intersections(
+                call,
+                &signature,
+                &explicit_type_args,
+                &shape.parameter_indices,
+                &shape.call_sig,
+                &mut selected.bindings,
+                &mut selected.intersection_bindings,
+                selected_ret,
+                ret,
+            );
+        } else {
+            self.clear_selected_generic_call(call);
+        }
         let target = if extension_receiver.is_none() {
             let member = selected.member_with_return(ret);
             let access_probe = crate::symbol_resolver::ResolvedMember {
@@ -794,7 +800,7 @@ impl Checker<'_> {
             );
             return InvokeResolution::Selected(Ty::Error);
         };
-        let candidate = member_extension_selection::candidate(&shape, instantiated);
+        let mut candidate = member_extension_selection::candidate(&shape, instantiated);
         let mut final_mapping = vec![None; args.len()];
         for &(parameter, source) in &candidate.argument_parameters {
             let Some(slot) = final_mapping.get_mut(source) else {
@@ -855,6 +861,8 @@ impl Checker<'_> {
         ) {
             return InvokeResolution::Selected(Ty::Error);
         }
+        let ret =
+            self.commit_member_extension_type_arguments(call, &explicit_type_args, &mut candidate);
         let interface = self
             .resolver()
             .classifier(candidate.owner)
@@ -868,7 +876,6 @@ impl Checker<'_> {
             .get(candidate.context_args.len()..)
             .unwrap_or_default()
             .to_vec();
-        let ret = candidate.ret;
         self.expr_lowers.insert(
             call,
             ExprLowering::Invoke {
@@ -1109,23 +1116,13 @@ impl Checker<'_> {
                 if let Some(CallableCandidateSelection::Ambiguous(candidates)) = &member_selection {
                     return InvokeResolution::Ambiguous(candidates.clone());
                 }
-                if let Some(selected) =
+                if let Some(mut selected) =
                     member_selection.and_then(CallableCandidateSelection::available)
                 {
                     // Generic invoke selection owns the same substitution handoff as every other
                     // generic call. Checked FIR needs these bindings both to specialize the stable
                     // target signature and to prevent a callee-owned `T` from leaking into a
                     // non-generic caller (`invoke<T>(() -> T)` with a `Nothing` lambda).
-                    if let Some(signature) = selected.generic_sig.as_ref() {
-                        let resolved = signature
-                            .formals
-                            .iter()
-                            .map(|formal| selected.bindings.get(formal).copied())
-                            .collect::<Vec<_>>();
-                        if !resolved.is_empty() && resolved.iter().all(Option::is_some) {
-                            self.resolved_call_type_args.insert(call, resolved);
-                        }
-                    }
                     let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
                     let Some(shape) = self.contextual_call_shape(
                         scope,
@@ -1160,7 +1157,23 @@ impl Checker<'_> {
                         self.context_args.insert(call, context_sources.clone());
                         self.mark_context_extension_receiver_used(scope, call, &context_sources);
                     }
-                    let ret = selected.callable.ret;
+                    let mut ret = selected.callable.ret;
+                    if let Some(signature) = selected.generic_sig.clone() {
+                        let selected_ret = selected.ret;
+                        ret = self.commit_selected_call_intersections(
+                            call,
+                            &signature,
+                            &explicit_type_args,
+                            &shape.parameter_indices,
+                            &shape.call_sig,
+                            &mut selected.bindings,
+                            &mut selected.intersection_bindings,
+                            selected_ret,
+                            ret,
+                        );
+                    } else {
+                        self.clear_selected_generic_call(call);
+                    }
                     let origin = selected.callable.origin.clone();
                     let physical_params = selected.callable.physical_params.clone();
                     let member = selected.member_with_return(ret);

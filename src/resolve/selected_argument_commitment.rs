@@ -303,9 +303,9 @@ impl Checker<'_> {
                 .iter()
                 .map(|formal| bindings.get(formal).copied())
                 .collect::<Vec<_>>();
-            if !resolved.is_empty() && resolved.iter().all(Option::is_some) {
-                self.resolved_call_type_args.insert(expression, resolved);
-            }
+            self.replace_selected_generic_call(expression, signature, &selected.call_sig, resolved);
+        } else {
+            self.clear_selected_generic_call(expression);
         }
         self.commit_selected_argument_slots(expression, slots, defaults)
     }

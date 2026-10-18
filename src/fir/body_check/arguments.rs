@@ -152,8 +152,7 @@ impl BodyFirChecker<'_> {
         let mut substitutions = HashMap::default();
         for (ordinal, value) in self
             .info
-            .resolved_call_type_args
-            .get(&expression)
+            .resolved_call_type_arguments(expression)
             .into_iter()
             .flatten()
             .enumerate()

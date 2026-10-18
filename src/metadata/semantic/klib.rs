@@ -749,6 +749,92 @@ impl SemanticTables<'_> {
         }
     }
 
+    fn type_occurrence_spelling(
+        &self,
+        body: &[u8],
+        depth: u32,
+        context: &str,
+    ) -> Result<crate::spelling::Spelled, PackageFragmentDecodeError> {
+        if depth > 16 {
+            return Err(semantic_error(format!(
+                "cyclic or excessively nested type in {context}"
+            )));
+        }
+        let node = parse_type_node(body)
+            .ok_or_else(|| semantic_error(format!("invalid semantic type in {context}")))?;
+        let mut args = Vec::with_capacity(node.arguments.len());
+        for argument in node.arguments {
+            let spelling = match argument {
+                ParsedTypeArgument::Inline(body, _) => {
+                    self.type_occurrence_spelling(body, depth + 1, context)?
+                }
+                ParsedTypeArgument::Table(id, _) => {
+                    let id = usize::try_from(id).map_err(|_| {
+                        semantic_error(format!("{context} type id exceeds host range"))
+                    })?;
+                    let body = self.types.get(id).ok_or_else(|| {
+                        semantic_error(format!("{context} references absent type {id}"))
+                    })?;
+                    self.type_occurrence_spelling(body, depth + 1, context)?
+                }
+                ParsedTypeArgument::Star => Default::default(),
+            };
+            args.push(spelling);
+        }
+        let outer = match (node.outer_type, node.outer_type_id) {
+            (Some(body), None) => Some(self.type_occurrence_spelling(body, depth + 1, context)?),
+            (None, Some(id)) => {
+                let id = usize::try_from(id).map_err(|_| {
+                    semantic_error(format!("{context} outer type id exceeds host range"))
+                })?;
+                let body = self.types.get(id).ok_or_else(|| {
+                    semantic_error(format!("{context} references absent outer type {id}"))
+                })?;
+                Some(self.type_occurrence_spelling(body, depth + 1, context)?)
+            }
+            (None, None) => None,
+            (Some(_), Some(_)) => {
+                return Err(semantic_error(format!(
+                    "{context} has conflicting inline and table outer types"
+                )))
+            }
+        };
+        if let Some(outer) = outer {
+            // KLIB semantic types flatten an inner classifier's enclosing arguments after its own
+            // arguments. Keep the sidecar path parallel to that exact normalized shape.
+            args.extend(outer.args);
+        }
+        Ok(crate::spelling::Spelled {
+            definitely_non_null: node.definitely_non_null,
+            use_site_definitely_non_null: node.definitely_non_null,
+            args,
+            ..Default::default()
+        })
+    }
+
+    fn type_occurrence_spelling_ref(
+        &self,
+        inline: Option<&[u8]>,
+        table_id: Option<u64>,
+        context: &str,
+    ) -> Result<crate::spelling::Spelled, PackageFragmentDecodeError> {
+        match (inline, table_id) {
+            (Some(body), None) => self.type_occurrence_spelling(body, 0, context),
+            (None, Some(id)) => {
+                let id = usize::try_from(id)
+                    .map_err(|_| semantic_error(format!("{context} type id exceeds host range")))?;
+                let body = self.types.get(id).ok_or_else(|| {
+                    semantic_error(format!("{context} references absent type {id}"))
+                })?;
+                self.type_occurrence_spelling(body, 0, context)
+            }
+            (None, None) => Err(semantic_error(format!("{context} has no type"))),
+            (Some(_), Some(_)) => Err(semantic_error(format!(
+                "{context} has conflicting inline and table type forms"
+            ))),
+        }
+    }
+
     fn type_parameters(
         &self,
         bodies: &[&[u8]],
@@ -1700,10 +1786,16 @@ fn semantic_type_alias(
         &type_parameters,
         "type-alias expanded type",
     )?;
+    let expansion_spelling = tables.type_occurrence_spelling_ref(
+        expanded_body,
+        expanded_id,
+        "type-alias expanded type",
+    )?;
     Ok(metadata::KotlinTypeAlias {
         name,
         formals,
         expansion,
+        expansion_spelling,
         visibility: metadata::declaration_visibility(flags),
     })
 }
@@ -2253,6 +2345,12 @@ mod tests {
         package
     }
 
+    fn package_with_type_alias(alias: &[u8]) -> Vec<u8> {
+        let mut package = Vec::new();
+        bytes_field(&mut package, 5, alias);
+        package
+    }
+
     fn exact_error(bytes: &[u8]) -> (usize, String) {
         let error = parse_package_fragment_checked(bytes)
             .err()
@@ -2275,6 +2373,35 @@ mod tests {
         assert_eq!(package.functions.len(), 1);
         assert_eq!(package.functions[0].ret.internal(), Some("kotlin/String"));
         assert!(package.functions[0].ret.nullable());
+    }
+
+    #[test]
+    fn type_alias_expansion_retains_definitely_non_null_argument_path() {
+        let strings = ["Alias", "T", "kotlin", "Array"];
+        let qnames = [qname(2, None, 1), qname(3, Some(0), 0)];
+        let mut parameter = Vec::new();
+        int_field(&mut parameter, 1, 0);
+        int_field(&mut parameter, 2, 1);
+        let mut dnn_parameter = Vec::new();
+        int_field(&mut dnn_parameter, 1, 2);
+        int_field(&mut dnn_parameter, 7, 0);
+        let mut argument = Vec::new();
+        bytes_field(&mut argument, 2, &dnn_parameter);
+        let mut expansion = class_type(1);
+        bytes_field(&mut expansion, 2, &argument);
+        let mut alias = Vec::new();
+        int_field(&mut alias, 2, 0);
+        bytes_field(&mut alias, 3, &parameter);
+        bytes_field(&mut alias, 4, &expansion);
+        bytes_field(&mut alias, 6, &expansion);
+        let bytes = fragment(&strings, &qnames, &package_with_type_alias(&alias));
+
+        let package = parse_package_fragment_checked(&bytes).expect("valid DNN alias expansion");
+        assert_eq!(package.type_aliases.len(), 1);
+        let spelling = &package.type_aliases[0].expansion_spelling;
+        assert!(!spelling.definitely_non_null);
+        assert_eq!(spelling.args.len(), 1);
+        assert!(spelling.args[0].definitely_non_null);
     }
 
     #[test]

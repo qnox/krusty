@@ -131,6 +131,7 @@ fn a_friend_top_level_alias_is_not_hidden_by_an_equal_nonfriend_identity() {
         name: "Alias".to_owned(),
         formals: Vec::new(),
         expansion: class(expansion, false),
+        expansion_spelling: Default::default(),
         visibility: Visibility::Internal,
     };
     let package = segments(&["shared"]);

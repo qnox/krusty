@@ -43,7 +43,6 @@ fn declared_type_alias_with_identity(
             .map(|parameter| parameter.name.clone())
             .collect(),
         expansion,
-        // KLIB's common semantic decoder does not yet retain type-use spelling annotations.
-        expansion_spelling: Default::default(),
+        expansion_spelling: alias.expansion_spelling.clone(),
     })
 }

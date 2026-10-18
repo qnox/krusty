@@ -56,15 +56,18 @@ impl Checker<'_> {
                     _ => lt,
                 };
                 self.record_flexible_alias(e, lhs, true);
+                self.publish_conditional_intersection(e, [(lhs, result)], result);
                 result
             } else if lt == Ty::Null || matches!(lt0, Ty::Nullable(inner) if *inner == Ty::Nothing)
             {
                 self.record_flexible_alias(e, rhs, false);
+                self.publish_conditional_intersection(e, [(rhs, rt)], rt);
                 rt
             } else {
                 let joined =
                     conditional_branch::join_types(self, scope, conditional_expected, lt, rt, e);
                 self.record_flexible_join(e, [lhs, rhs], joined, true);
+                self.publish_conditional_intersection(e, [(lhs, lt), (rhs, rt)], joined);
                 joined
             }
         };

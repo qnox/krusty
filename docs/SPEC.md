@@ -13847,6 +13847,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
       solving follows the same rule for an implicitly typed property
       (`TrFlags::CLASS_LITERAL_LHS`).
       (`tests/class_literal_type_arguments_e2e.rs`.)
+  - Reified type arguments (`FirReifiedChecker`), with `ProhibitIntersectionReifiedTypeParameter`,
+    `ReportReificationProblemsInDnnAndFlexible` and `NullableNothingInReifiedPosition`. A type
+    argument for a `reified` type parameter, or for the `T` of `kotlin.Array`'s constructor and of
+    the compiler's `arrayOf`/`emptyArray`/`arrayOfNulls`, is reported at its explicit type argument,
+    else at the callee name, when it is: a non-reified type parameter `T` or `T?` ("cannot use 'T'
+    as reified type parameter. Use a class instead.", or "…, since the array type parameter is not
+    reified." inside an array); `Nothing`, or `Nothing?` without `NullableNothingInReifiedPosition`;
+    a definitely-non-nullable type written explicitly (also when nested in `Array<…>`), reported
+    before the problem of the type it wraps; or an inferred intersection, a `deprecationError`
+    (KTLC-13). An `Array<…>` argument (nullable too, after type-alias expansion) is checked only
+    through its invariant element types; a projected element is skipped. A type parameter or an
+    intersection reached only through a definitely-non-nullable or flexible type
+    (`ra(x)` with `x: T & Any`, `ra(Objects.requireNonNull(x))`) is the KTLC-399 warning ("…Use a
+    class instead. This will become an error in language version 2.6.") until
+    `ReportReificationProblemsInDnnAndFlexible`, which `-progressive` turns on in 2.4.20, makes it
+    the ordinary error; the warning always uses the plain wording, even inside an array. kotlinc's
+    CLI prints no warning for a file with errors, so each warning shape is compared alone.
+    (`tests/reified_type_arguments_e2e.rs`.)
   - `ErrorAboutDataClassCopyVisibilityChange`: a `data class` whose primary constructor is not
     public is reported at the constructor's visibility modifier unless it is annotated
     `@ConsistentCopyVisibility` or `@ExposedCopyVisibility`, and a call or callable reference to its
