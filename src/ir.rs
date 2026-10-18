@@ -1698,6 +1698,8 @@ pub struct IrFile {
     /// kotlinc's lifted name of each function in [`Self::lifted_functions`] whose enclosing
     /// callables are all lifted, once a target has numbered the sequences.
     pub(crate) lifted_names: crate::fx_hash::HashMap<FunId, String>,
+    /// The declaration span of each function lowered from a source local function.
+    pub(crate) local_function_spans: crate::fx_hash::HashMap<FunId, crate::diag::Span>,
     /// The class name a target chose for each source callable reference and lambda, by
     /// expression id.
     pub(crate) callable_reference_names: crate::fx_hash::HashMap<u32, TypeName>,
