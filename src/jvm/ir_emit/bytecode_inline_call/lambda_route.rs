@@ -152,8 +152,14 @@ impl Emitter<'_> {
                 lambda_bindings.insert(operand, lambdas.len());
                 lambdas.push(lambda);
             }
-            let parameters =
-                self.call_parameters(&supplies, &physical, args, &lambda_bindings, captured);
+            let parameters = self.call_parameters(
+                &supplies,
+                &physical,
+                args,
+                &lambda_bindings,
+                captured,
+                &lambdas,
+            );
             let probe = inliner::inline(
                 &callee,
                 &parameters,
