@@ -64,8 +64,7 @@ pub(super) fn without_package_arguments(
         .iter()
         .filter(|list| list.segment >= classifier_segment)
         .cloned()
-        .collect::<Vec<_>>()
-        .into_boxed_slice();
+        .collect();
     Some(reference)
 }
 

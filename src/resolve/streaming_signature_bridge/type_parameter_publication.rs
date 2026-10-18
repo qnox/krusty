@@ -423,6 +423,162 @@ pub(super) fn publish(
         .map(drop)
 }
 
+/// Publish every source declaration's generic contract after nominal classifier headers exist.
+/// Body-local internal declines transfer the whole contract to Pass 2; recorded source diagnostics
+/// remain ordinary publication failures and continue to the next declaration.
+pub(super) fn publish_source_declarations(
+    headers: &crate::fir::StreamedHeaderModule,
+    index: &mut crate::fir::ResolvedModuleIndex,
+    semantics: &super::ProductionSignatureSemantics<'_>,
+    solver_diagnostics: usize,
+    deferred_candidates: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    deferred_headers: &mut crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    failed: &mut Vec<crate::fir::DeclarationId>,
+    diagnostics: &mut crate::diag::DiagSink,
+) {
+    'declarations: for stub in &headers.stubs {
+        if deferred_headers.contains(&stub.id)
+            && stub.kind != crate::fir::DeclarationKind::Classifier
+        {
+            continue;
+        }
+        let Some(declaration) = headers.syntax.declaration(stub.id) else {
+            continue;
+        };
+        let (type_parameters, bounds, declaration_start) = match declaration.kind {
+            crate::fir::HeaderDeclarationKind::Callable {
+                type_parameters,
+                bounds,
+                signature_start,
+                ..
+            } => (type_parameters, Some(bounds), signature_start),
+            crate::fir::HeaderDeclarationKind::Property {
+                type_parameters,
+                bounds,
+                ..
+            }
+            | crate::fir::HeaderDeclarationKind::Classifier {
+                type_parameters,
+                bounds,
+                ..
+            } => (type_parameters, Some(bounds), stub.range.lo),
+            crate::fir::HeaderDeclarationKind::TypeAlias {
+                type_parameters, ..
+            } => (type_parameters, None, stub.range.lo),
+            crate::fir::HeaderDeclarationKind::Constructor { .. } => continue,
+        };
+        let packed = headers.syntax.type_parameters(type_parameters);
+        if packed.is_empty() {
+            continue;
+        }
+        let declared_names = packed
+            .iter()
+            .map(|parameter| headers.lookup_names.get(parameter.name).map(str::to_owned))
+            .collect::<Option<Vec<_>>>();
+        let Some(declared_names) = declared_names else {
+            crate::trace_compiler!(
+                "fir",
+                "signature finalization declined {:?}: type parameter name is not interned",
+                stub.id,
+            );
+            super::publication_continuation::retain_or_report(
+                diagnostics,
+                &semantics.diagnostics.borrow()[solver_diagnostics..],
+                stub.id,
+                None,
+                deferred_candidates,
+                deferred_headers,
+                failed,
+            );
+            continue 'declarations;
+        };
+        let declared_bounds = bounds
+            .map(|bounds| headers.syntax.bounds(bounds))
+            .unwrap_or_default()
+            .iter()
+            .map(|bound| {
+                Some((
+                    headers.lookup_names.get(bound.parameter)?.to_owned(),
+                    bound.ty,
+                    headers
+                        .syntax
+                        .transient_written_type_ref(bound.ty, &headers.lookup_names)?,
+                ))
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(declared_bounds) = declared_bounds else {
+            crate::trace_compiler!(
+                "fir",
+                "signature finalization declined {:?}: type parameter bound is not interned",
+                stub.id,
+            );
+            super::publication_continuation::retain_or_report(
+                diagnostics,
+                &semantics.diagnostics.borrow()[solver_diagnostics..],
+                stub.id,
+                None,
+                deferred_candidates,
+                deferred_headers,
+                failed,
+            );
+            continue 'declarations;
+        };
+        let stable_generic = matches!(
+            declaration.kind,
+            crate::fir::HeaderDeclarationKind::Callable { .. }
+        )
+        .then(|| semantics.callable_signature(stub.id))
+        .flatten()
+        .and_then(|signature| signature.generic_sig.as_ref());
+        let symbolic = match symbolic(
+            index,
+            stub.id,
+            &declared_names,
+            &declared_bounds,
+            stable_generic.is_some(),
+            semantics,
+            stub.source,
+            declaration_start,
+        ) {
+            Ok(symbolic) => symbolic,
+            Err(diagnostic) => {
+                super::publication_continuation::retain_or_report(
+                    diagnostics,
+                    &semantics.diagnostics.borrow()[solver_diagnostics..],
+                    stub.id,
+                    Some(diagnostic),
+                    deferred_candidates,
+                    deferred_headers,
+                    failed,
+                );
+                continue 'declarations;
+            }
+        };
+        if publish(
+            index,
+            stub.id,
+            packed,
+            &declared_names,
+            &declared_bounds,
+            &symbolic,
+            stable_generic,
+            semantics.table,
+        )
+        .is_err()
+        {
+            super::publication_continuation::retain_or_report(
+                diagnostics,
+                &semantics.diagnostics.borrow()[solver_diagnostics..],
+                stub.id,
+                None,
+                deferred_candidates,
+                deferred_headers,
+                failed,
+            );
+        }
+    }
+}
+
 fn mentions_external_formal(ty: Ty, own_formals: &[String]) -> bool {
     match ty {
         // The occurrence identity is the declaration relation. Its inline bound is descriptive

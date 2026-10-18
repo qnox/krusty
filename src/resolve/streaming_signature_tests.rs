@@ -7,6 +7,43 @@ use crate::types::Ty;
 mod local_classifier_identity;
 mod qualified_signatures;
 
+pub(super) fn assert_finalized_carry_spellings(
+    headers: &crate::fir::StreamedHeaderModule,
+    symbols: &mut super::SymbolTable,
+    constraints: crate::fir::SignatureConstraintExtractor,
+    diagnostics: &mut DiagSink,
+) {
+    let streamed = super::streaming_signature_bridge::finalized_streamed_signature_index(
+        headers,
+        symbols,
+        constraints,
+        Vec::new(),
+        diagnostics,
+    );
+    assert!(streamed.failures.is_empty(), "{:?}", streamed.failures);
+    let carry = headers
+        .stubs
+        .iter()
+        .find(|stub| {
+            stub.kind == crate::fir::DeclarationKind::Function
+                && stub
+                    .lookup_name
+                    .and_then(|name| headers.lookup_names.get(name))
+                    == Some("carry")
+        })
+        .expect("stable carry declaration")
+        .id;
+    let spellings = symbols
+        .stable_declared_spellings
+        .get(&carry)
+        .expect("compact carry metadata spellings");
+    assert_eq!(spellings.ret.alias, Some(crate::types::type_name("Cargo")));
+    assert_eq!(
+        spellings.params[0].alias,
+        Some(crate::types::type_name("Cargo"))
+    );
+}
+
 fn stable_declaration_at(
     analysis: &crate::frontend::SourceSetAnalysis,
     span: crate::diag::Span,
@@ -4125,6 +4162,77 @@ fn explicit_type_arguments_specialize_a_projected_sam_lambda_in_pass_one() {
         .and_then(|declaration| index.signature(declaration))
         .expect("ordered signature");
     assert_eq!(ordered.result.get(), Ty::Int);
+
+    let compare_with = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .find(|declaration| index.declaration_name(*declaration) == Some("compareWith"))
+        .and_then(|declaration| index.signature(declaration))
+        .expect("compareWith signature");
+    let compare_with_parameters = compare_with
+        .parameters
+        .iter()
+        .map(|parameter| parameter.get())
+        .collect::<Vec<_>>();
+    let [comparator, first, second] = compare_with_parameters.as_slice() else {
+        panic!("compareWith retains its generic parameter structure: {compare_with:?}")
+    };
+    let Ty::Obj(comparator, arguments) = *comparator else {
+        panic!("compareWith retains Comparator as its first parameter: {comparator:?}")
+    };
+    assert!(comparator.matches("Comparator"));
+    let [Ty::InProjection(projected)] = arguments else {
+        panic!("Comparator retains its written `in T` argument: {arguments:?}")
+    };
+    let Ty::TyParam(projected, _) = **projected else {
+        panic!("Comparator projection retains T: {projected:?}")
+    };
+    assert_eq!(first.ty_param_name(), Some(projected));
+    assert_eq!(second.ty_param_name(), Some(projected));
+}
+
+#[test]
+fn invalid_undemanded_local_bound_keeps_its_exact_publication_diagnostic() {
+    let source = r#"fun build() {
+    class Local {
+        fun <T : DefinitelyAbsentLocalBound> take(value: T): T = value
+    }
+}
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("InvalidLocalBound")];
+    let mut diagnostics = DiagSink::new();
+    let _ = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    let start = u32::try_from(
+        source
+            .find("DefinitelyAbsentLocalBound")
+            .expect("bound spelling"),
+    )
+    .expect("test source offset fits u32");
+    assert_eq!(
+        diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| {
+                (
+                    diagnostic.file,
+                    diagnostic.span,
+                    diagnostic.severity,
+                    diagnostic.msg.as_str(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        [(
+            0,
+            crate::diag::Span::new(start, start + 26),
+            crate::diag::Severity::Error,
+            "unresolved reference 'DefinitelyAbsentLocalBound'.",
+        )]
+    );
 }
 
 #[test]

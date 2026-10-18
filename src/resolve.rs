@@ -167,7 +167,7 @@ mod loop_flow;
 mod member_extension_properties;
 mod member_extension_selection;
 pub use member_extension_properties::MemberExtPropSig;
-use member_extension_properties::{select as member_extension_property, MemberExtensionProperty};
+use member_extension_properties::MemberExtensionProperty;
 mod member_overload_clash;
 mod missing_dependency_supertypes;
 mod named_class_constructors;
@@ -23827,7 +23827,13 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let mut file = parse_file(source, &mut diagnostics);
         let mut builder = crate::fir::HeaderInventoryBuilder::default();
-        builder.add_source(0, &input, Some(&file));
+        let (source_id, stubs, _) = builder
+            .add_source(0, &input, Some(&file))
+            .expect("valid Kotlin source must produce compact headers");
+        let mut signature_constraints = crate::fir::SignatureConstraintExtractor::default();
+        signature_constraints.extract_file(&file, source_id, &stubs, |span| {
+            builder.source_origin(source_id, span)
+        });
         let headers = builder.finish();
 
         // Deliberately corrupt the transient declaration header after compact extraction. This is
@@ -23921,7 +23927,7 @@ mod tests {
         class.type_aliases.clear();
 
         let files = [file];
-        let symbols = collect_signatures_with_cp_headers(
+        let mut symbols = collect_signatures_with_cp_headers(
             &files,
             &headers,
             Box::new(crate::libraries::EmptySymbolSource),
@@ -23937,24 +23943,6 @@ mod tests {
         let carry = &symbols.funs["carry"][0];
         assert_eq!(carry.params, [Ty::String]);
         assert_eq!(carry.ret, Ty::String);
-        let carry_declaration = headers
-            .stubs
-            .iter()
-            .find(|stub| {
-                stub.kind == crate::fir::DeclarationKind::Function
-                    && stub
-                        .lookup_name
-                        .and_then(|name| headers.lookup_names.get(name))
-                        == Some("carry")
-            })
-            .expect("stable carry declaration")
-            .id;
-        let carry_spellings = symbols
-            .stable_declared_spellings
-            .get(&carry_declaration)
-            .expect("compact carry metadata spellings");
-        assert_eq!(carry_spellings.ret.alias, Some(type_name("Cargo")));
-        assert_eq!(carry_spellings.params[0].alias, Some(type_name("Cargo")));
         let count = &symbols.source_props[&(0, count_declaration.0)];
         assert_eq!(count.ty, Ty::Long);
         assert!(!count.is_var);
@@ -24039,6 +24027,13 @@ mod tests {
         assert_eq!(extension.receiver, Ty::String);
         assert_eq!(extension.ret, Ty::Char);
         assert_eq!(class.secondary_ctors, [vec![Ty::Boolean]]);
+
+        streaming_signature_tests::assert_finalized_carry_spellings(
+            &headers,
+            &mut symbols,
+            signature_constraints,
+            &mut diagnostics,
+        );
     }
 
     #[test]
@@ -32958,6 +32953,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         inferred_stable_declaration_rets: HashMap::default(),
         inferred_member_ext_fun_rets: HashMap::default(),
         checked_local_properties: HashMap::default(),
+        checked_local_member_extension_properties: HashMap::default(),
         checked_local_methods: HashMap::default(),
         checked_operator_equals_relations: HashMap::default(),
         body_local_default_providers: HashMap::default(),
@@ -34442,6 +34438,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         inferred_stable_declaration_rets,
         inferred_member_ext_fun_rets,
         checked_local_properties: _,
+        checked_local_member_extension_properties: _,
         checked_local_methods: _,
         body_local_default_providers: _,
         resolved_body_local_supertypes,
@@ -35569,6 +35566,11 @@ struct Checker<'a> {
     /// unit consult this semantic overlay. It is dropped with the checker and never becomes a third
     /// pass, retained AST coordinate, or lowering fallback.
     checked_local_properties: HashMap<(TypeName, String), CheckedLocalProperty>,
+    /// Member-extension property headers declared by classifiers in the active bounded body. They
+    /// join provider declarations before ordinary applicability/specificity and disappear with the
+    /// checker; the immutable index is completed only after the body check succeeds.
+    checked_local_member_extension_properties:
+        HashMap<TypeName, HashMap<String, Vec<member_extension_properties::MemberExtPropSig>>>,
     /// Callable headers declared by classifiers inside the active bounded body. A member whose
     /// expression result is inferred cannot enter the immutable Pass-1 module index until that
     /// result exists; this Pass-2-only overlay publishes its exact header and stable identity so
@@ -36875,60 +36877,6 @@ impl<'a> Checker<'a> {
                 Ty::Error
             }
         }
-    }
-
-    /// The checker's own member-extension property selection: its scope's receiver tower and its
-    /// scope-driven context-argument selector.
-    fn member_extension_property(
-        &self,
-        scope: &CheckerScope<'_>,
-        extension_receiver: Ty,
-        name: &str,
-    ) -> Result<Option<MemberExtensionProperty>, ()> {
-        self.member_extension_property_for_access(
-            scope,
-            extension_receiver,
-            name,
-            crate::symbol_resolver::PropertyAccess::Read,
-        )
-    }
-
-    fn member_extension_property_for_write(
-        &self,
-        scope: &CheckerScope<'_>,
-        extension_receiver: Ty,
-        name: &str,
-    ) -> Result<Option<MemberExtensionProperty>, ()> {
-        self.member_extension_property_for_access(
-            scope,
-            extension_receiver,
-            name,
-            crate::symbol_resolver::PropertyAccess::Write,
-        )
-    }
-
-    fn member_extension_property_for_access(
-        &self,
-        scope: &CheckerScope<'_>,
-        extension_receiver: Ty,
-        name: &str,
-        access: crate::symbol_resolver::PropertyAccess,
-    ) -> Result<Option<MemberExtensionProperty>, ()> {
-        member_extension_property(
-            &self.fed_source(),
-            self,
-            &member_extension_selection::ordinary_dispatch_first(
-                scope,
-                self.implicit_receivers(scope),
-            ),
-            &|parameters| {
-                self.select_context_arguments_with_types(scope, parameters)
-                    .ok()
-            },
-            extension_receiver,
-            name,
-            access,
-        )
     }
 
     fn callable_ref_is_compatible(
@@ -48735,6 +48683,20 @@ impl<'a> Checker<'a> {
                                         && candidate.ty == Ty::Error)
                             }
                         };
+                    let mut absent = !props.iter().any(inference_property);
+                    if absent
+                        && self.register_deferred_explicit_body_property(
+                            property_scope,
+                            current_owner,
+                            property,
+                            source_member,
+                            stable_declaration,
+                            cl.is_interface(),
+                            &mut props,
+                        )
+                    {
+                        absent = false;
+                    }
                     // Publish explicit/finalized headers into the same bounded body-local overlay
                     // before deciding whether an initializer must be forced.
                     if let Some(checked) = props.iter().find(|candidate| {
@@ -48756,7 +48718,6 @@ impl<'a> Checker<'a> {
                     let has_unresolved = props.iter().any(|candidate| {
                         candidate.ty == Ty::Error && inference_property(candidate)
                     });
-                    let absent = !props.iter().any(inference_property);
                     if !has_unresolved && !(absent && property.declared_ty().is_none()) {
                         continue;
                     }
@@ -49816,6 +49777,9 @@ impl<'a> Checker<'a> {
                             })
                             .collect();
                         (primary, source_primary, secondary)
+                    }
+                    None if parameter_defaults::is_expect_constructor_provider(self.file, d) => {
+                        self.declared_default_provider_constructor_shapes(scope, cl)
                     }
                     None if self.signature_defaults_only => {
                         self.declared_default_provider_constructor_shapes(scope, cl)
@@ -57038,7 +57002,7 @@ impl<'a> Checker<'a> {
             let mut probe = leaf.clone();
             probe.arg = None;
             probe.targs.clear();
-            probe.fun_params.clear();
+            probe.fun_params = Box::new([]);
             probe.fun_context_count = 0;
             if leaf.name != "Array" && self.type_ref_ty_silent(scope, &probe) == Ty::Error {
                 write!(
@@ -57096,7 +57060,7 @@ impl<'a> Checker<'a> {
             let mut probe = leaf.clone();
             probe.arg = None;
             probe.targs.clear();
-            probe.fun_params.clear();
+            probe.fun_params = Box::new([]);
             probe.fun_context_count = 0;
             if leaf.name != "Array" && self.type_ref_ty_silent(scope, &probe) == Ty::Error {
                 write!(

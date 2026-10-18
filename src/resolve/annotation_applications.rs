@@ -364,13 +364,13 @@ impl Checker<'_> {
                 arg: None,
                 targs: Vec::new(),
                 span: annotation.span,
-                fun_params: Vec::new(),
+                fun_params: Box::new([]),
                 fun_context_count: 0,
                 qualifier_arguments: self
                     .file
                     .annotation_qualifier_arguments
                     .get(&annotation.span.lo)
-                    .map(|arguments| arguments.clone().into_boxed_slice())
+                    .map(|arguments| arguments.clone().into())
                     .unwrap_or_default(),
             };
             self.type_ref_ty_reported(scope, &reference)
