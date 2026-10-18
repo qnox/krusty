@@ -904,15 +904,13 @@ impl<'a> SymbolResolver<'a> {
                 );
             }
             let arguments = classifier
-                .type_parameters
-                .type_params
+                .own_type_params()
                 .iter()
                 .enumerate()
                 .map(|(index, formal)| {
                     bindings.get(formal).copied().unwrap_or_else(|| {
                         classifier
-                            .type_parameters
-                            .type_param_bounds
+                            .own_type_param_bounds()
                             .get(index)
                             .and_then(|bounds| bounds.first())
                             .copied()
