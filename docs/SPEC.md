@@ -1287,7 +1287,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   divergences that remain, all with kotlinc's runtime behaviour: a lambda that captures `this`
   in an object's static member captures `INSTANCE`; an inline lambda spliced into a static member
   emits its `getstatic INSTANCE; pop` early; a same-file `@JvmStatic inline` call stores the
-  singleton in a receiver local.
+  singleton in a receiver local. A `@JvmStatic suspend inline` object member keeps both its
+  state machine and its private `$$forInline` copy static, and its continuation re-enters it
+  with `invokestatic` and captures no `this$0`. The frontend checks where the annotation may
+  stand, reading the resolved identity and reporting at the annotation as kotlinc does. A
+  function outside a named object or a companion is rejected with "only members in named objects
+  and companion objects can be annotated with '@JvmStatic'.". That covers top-level, local,
+  ordinary-class, interface, anonymous-object and enum-entry-body functions. A non-public member
+  of an interface's companion is rejected with "only public members in interface companion
+  objects can be annotated with '@JvmStatic'.". An `override` in a named object is rejected with
+  "override member cannot be '@JvmStatic' in an object."; an `override` in a companion is
+  allowed. The backend never sees an invalid placement.
   Tests: `tests/jvm_static_functions_e2e.rs` (class-by-class comparison with kotlinc, plus
   run and reflection checks).
 - **`@Metadata` writer — the CLASS round-trip (a `@Metadata` on every emitted class, not just the

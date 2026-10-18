@@ -112,6 +112,25 @@ fun box(): String {\n\
     return if (sum == 25) \"OK\" else \"fail $sum\"\n\
 }\n";
 
+/// A named object's `@JvmStatic suspend inline` member: kotlinc writes the static state machine
+/// and the static `$$forInline` copy an inlining caller splices.
+const SUSPEND_INLINE: &str = "import kotlin.coroutines.*\n\
+\n\
+suspend fun pause(): Int = suspendCoroutine { it.resume(1) }\n\
+\n\
+object Runner {\n\
+    val base = 4\n\
+    @JvmStatic suspend inline fun twice(x: Int): Int = pause() + pause() + x + base\n\
+}\n";
+
+const SUSPEND_INLINE_CALLER: &str = "import kotlin.coroutines.*\n\
+\n\
+fun box(): String {\n\
+    var r = 0\n\
+    suspend { r = Runner.twice(2) }.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+    return if (r == 8) \"OK\" else \"fail $r\"\n\
+}\n";
+
 /// Java reflection sees what a Java caller or a test framework sees: real statics, and the
 /// companion bridge's copied annotations.
 const REFLECTED: &str = "import java.lang.reflect.Modifier\n\
@@ -197,6 +216,81 @@ fn a_companion_bridge_clashing_with_an_outer_member_is_reported_like_kotlinc() {
              \x20   fun f() {}\n\
              \x20   fun g(y: String): Int = 2\n\
              }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_suspend_inline_object_static_keeps_both_static_methods_like_kotlinc() {
+    let classes = common::classes_against_kotlinc_module(&[("Runner.kt", SUSPEND_INLINE)]);
+    // The object holds both static methods. Its continuation class `Runner$twice$1` is left out:
+    // krusty writes no `SourceDebugExtension` for any suspend inline member's continuation, with or
+    // without `@JvmStatic`.
+    for class in ["Runner", "RunnerKt"] {
+        assert_eq!(
+            classes.class_listing(class).1,
+            classes.class_listing(class).0,
+            "{class} matches kotlinc"
+        );
+        assert_eq!(
+            classes.krusty.get(class),
+            classes.reference.get(class),
+            "{class} bytes"
+        );
+    }
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            ("Runner.kt", SUSPEND_INLINE),
+            ("Main.kt", SUSPEND_INLINE_CALLER),
+        ],
+        "suspend inline jvm static",
+    );
+}
+
+/// `@JvmStatic` outside a named object or companion, a non-public interface companion member,
+/// and an override in an object are frontend errors, reported at the annotation.
+#[test]
+fn misplaced_jvm_static_functions_are_rejected_like_kotlinc() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "@JvmStatic fun top() {}\n\
+             \n\
+             class Plain {\n\
+             \x20   @JvmStatic fun member() {}\n\
+             \x20   inner class In { @JvmStatic fun deep() {} }\n\
+             \x20   class Nest { @JvmStatic fun n() {} }\n\
+             }\n\
+             \n\
+             interface Face {\n\
+             \x20   @JvmStatic fun f() {}\n\
+             \x20   companion object {\n\
+             \x20       @JvmStatic fun ok() {}\n\
+             \x20       @JvmStatic internal fun i() {}\n\
+             \x20       @JvmStatic private fun hidden() {}\n\
+             \x20   }\n\
+             }\n\
+             \n\
+             abstract class Base { abstract fun a() }\n\
+             \n\
+             object Obj : Base() {\n\
+             \x20   @JvmStatic override fun a() {}\n\
+             \x20   class C { @JvmStatic fun y() {} }\n\
+             }\n\
+             \n\
+             class Host {\n\
+             \x20   companion object : Base() {\n\
+             \x20       @JvmStatic override fun a() {}\n\
+             \x20   }\n\
+             }\n\
+             \n\
+             fun local() {\n\
+             \x20   @JvmStatic fun inner() {}\n\
+             \x20   val o = object { @JvmStatic fun anon() {} }\n\
+             }\n\
+             \n\
+             enum class E { A { @JvmStatic fun z() {} }; @JvmStatic fun e() {} }\n",
         )],
         &[],
     );

@@ -27,7 +27,7 @@ fn declares_jvm_static(annotations: Option<&crate::ir::DeclarationAnnotations>) 
 }
 
 /// The named object that declares `function` when the JVM realizes it as a static of that object.
-pub(super) fn singleton_static_owner(ir: &IrFile, function: u32) -> Option<TypeName> {
+pub(in crate::jvm) fn singleton_static_owner(ir: &IrFile, function: u32) -> Option<TypeName> {
     let declaration = ir.functions.get(function as usize)?;
     if declaration.is_static {
         return None;
