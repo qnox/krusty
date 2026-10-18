@@ -255,6 +255,23 @@ impl Checker<'_> {
         parameter: &crate::ast::PropParam,
         owner_is_annotation: bool,
     ) {
+        self.check_selected_constructor_parameter_annotations(
+            scope,
+            parameter,
+            owner_is_annotation,
+            &|_| true,
+        );
+    }
+
+    /// [`Self::check_constructor_parameter_annotations`] for only the applications `include`
+    /// selects.
+    pub(super) fn check_selected_constructor_parameter_annotations(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        parameter: &crate::ast::PropParam,
+        owner_is_annotation: bool,
+        include: &dyn Fn(&AnnotationRef) -> bool,
+    ) {
         let policy_depth = self.push_declaration_policies(
             scope,
             &parameter.annotations,
@@ -262,6 +279,9 @@ impl Checker<'_> {
         );
         for (annotation, arguments) in parameter.annotations.iter().zip(&parameter.annotation_args)
         {
+            if !include(annotation) {
+                continue;
+            }
             let host = if parameter.is_property {
                 AnnotationApplicationHost::Property {
                     declaration_target: "value parameter",

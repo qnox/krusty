@@ -840,10 +840,14 @@ fn is_class_member(owner: Option<TypeName>, placement: IrStaticPlacement) -> boo
 pub(super) fn module_callable_is_mangled(callable: &crate::ir::IrModuleCallable) -> bool {
     is_class_member(callable.owner, callable.placement)
         && callable.visibility == Visibility::Internal
-        && !callable.annotations.iter().any(|annotation| {
-            annotation.identity == crate::types::wk::published_api()
-                || annotation.identity.matches("kotlin/jvm/JvmName")
-        })
+        && !callable
+            .annotations
+            .iter()
+            .any(|annotation| annotation.identity == crate::types::wk::published_api())
+        && matches!(
+            crate::jvm::module_calls::header_jvm_name(&callable.annotations),
+            Ok(None)
+        )
 }
 
 pub(super) fn module_getter_is_mangled(property: &crate::ir::IrModuleProperty) -> bool {
@@ -853,7 +857,10 @@ pub(super) fn module_getter_is_mangled(property: &crate::ir::IrModuleProperty) -
             .annotations
             .iter()
             .any(|annotation| *annotation == crate::types::wk::published_api())
-        && !names_accessor(&property.getter_annotations)
+        && matches!(
+            crate::jvm::module_calls::module_property_written_accessor_name(property, false),
+            Ok(None)
+        )
 }
 
 pub(super) fn module_setter_is_mangled(property: &crate::ir::IrModuleProperty) -> bool {
@@ -864,14 +871,10 @@ pub(super) fn module_setter_is_mangled(property: &crate::ir::IrModuleProperty) -
             .annotations
             .iter()
             .any(|annotation| *annotation == crate::types::wk::published_api())
-        && !names_accessor(&property.setter_annotations)
-}
-
-/// A written `@JvmName` replaces an accessor's whole JVM name, module suffix included.
-fn names_accessor(annotations: &[crate::ir::IrHeaderAnnotation]) -> bool {
-    annotations
-        .iter()
-        .any(|annotation| annotation.identity.matches("kotlin/jvm/JvmName"))
+        && matches!(
+            crate::jvm::module_calls::module_property_written_accessor_name(property, true),
+            Ok(None)
+        )
 }
 
 /// Append `$<module>` to a name the value-class pass may already have mangled, keeping a

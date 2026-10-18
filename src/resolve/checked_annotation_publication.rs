@@ -615,6 +615,18 @@ impl Checker<'_> {
             .is_some()
     }
 
+    /// The source spans of the applications among `annotations` that Pass 1 bound.
+    fn bound_annotation_spans(
+        &self,
+        annotations: &[crate::ast::AnnotationRef],
+    ) -> crate::fx_hash::HashSet<crate::diag::Span> {
+        annotations
+            .iter()
+            .filter(|annotation| self.has_bound_annotation(annotation))
+            .map(|annotation| annotation.span)
+            .collect()
+    }
+
     /// Fold a classifier's own annotations and those of the members it declares, for the
     /// declaration-annotation fragment. Member annotations are declaration facts for later
     /// candidate collection and use-site checks; their declarations' body units check them again,
@@ -649,17 +661,16 @@ impl Checker<'_> {
                 },
             );
         }
-        for parameter in &class.props {
-            if parameter.is_property
-                && parameter
-                    .annotations
-                    .iter()
-                    .any(|annotation| self.has_bound_annotation(annotation))
-            {
-                self.check_constructor_parameter_annotations(
+        // A constructor `val`/`var` is a property: fold exactly its Pass-1-bound applications, as
+        // a body property's, so publication never binds a name Pass 1 left unbound.
+        for parameter in class.props.iter().filter(|parameter| parameter.is_property) {
+            let bound = self.bound_annotation_spans(&parameter.annotations);
+            if !bound.is_empty() {
+                self.check_selected_constructor_parameter_annotations(
                     scope,
                     parameter,
                     class.is_annotation(),
+                    &|annotation| bound.contains(&annotation.span),
                 );
             }
         }
@@ -721,12 +732,7 @@ impl Checker<'_> {
         property: &PropDecl,
         owner: super::annotation_applications::PropertyAnnotationOwner,
     ) {
-        let bound = property
-            .annotations
-            .iter()
-            .filter(|annotation| self.has_bound_annotation(annotation))
-            .map(|annotation| annotation.span)
-            .collect::<crate::fx_hash::HashSet<_>>();
+        let bound = self.bound_annotation_spans(&property.annotations);
         let policy_depth =
             self.check_property_annotation_applications(scope, property, owner, &|annotation| {
                 bound.contains(&annotation.span)

@@ -164,3 +164,28 @@ fn a_sibling_file_calls_a_member_through_its_written_jvm_name() {
         ),
     ]);
 }
+
+/// A constructor property whose annotation list mixes a bound `@get:JvmName` with an
+/// unresolvable annotation: publication folds only the bound one, so the module reports exactly
+/// kotlinc's single unresolved reference, once.
+#[test]
+fn a_constructor_property_with_an_unresolved_annotation_reports_it_once() {
+    let result = common::compiler_diagnostics(
+        &[
+            (
+                "Pair.kt",
+                "package named\n\
+                 \n\
+                 class Pair(@get:JvmName(\"readFirst\") @Missing val first: Int)\n",
+            ),
+            (
+                "Use.kt",
+                "package named\n\
+                 \n\
+                 fun use(pair: Pair): Int = pair.first\n",
+            ),
+        ],
+        &[],
+    );
+    common::expect_identical_rejection(&result, "mixed_constructor_property_annotations");
+}

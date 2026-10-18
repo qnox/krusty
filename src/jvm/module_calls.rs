@@ -130,10 +130,13 @@ fn owner_is_singleton(property: &IrModuleProperty) -> bool {
     property.owner_kind == Some(IrClassifierKind::Object)
 }
 
-fn header_jvm_name(annotations: &[crate::ir::IrHeaderAnnotation]) -> Result<Option<&str>, ()> {
+/// The JVM name a `@JvmName` among `annotations` writes: its constant string argument.
+pub(super) fn header_jvm_name(
+    annotations: &[crate::ir::IrHeaderAnnotation],
+) -> Result<Option<&str>, ()> {
     let Some(annotation) = annotations
         .iter()
-        .find(|annotation| annotation.identity.matches("kotlin/jvm/JvmName"))
+        .find(|annotation| annotation.identity == crate::types::wk::jvm_name())
     else {
         return Ok(None);
     };
@@ -152,7 +155,7 @@ pub(super) fn applied_jvm_name(
     let Some(annotation) = annotations.and_then(|annotations| {
         annotations
             .applications()
-            .find(|annotation| annotation.internal.matches("kotlin/jvm/JvmName"))
+            .find(|annotation| annotation.internal == crate::types::wk::jvm_name())
     }) else {
         return Ok(None);
     };

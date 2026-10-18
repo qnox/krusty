@@ -3037,75 +3037,8 @@ impl HeaderInventoryBuilder {
             &file.alias_spellings,
             &mut self.lookup_names,
         );
-        for &declaration in &file.decls {
-            let Some(&stable) = stable_by_transient.get(&declaration) else {
-                continue;
-            };
-            match file.decl(declaration) {
-                Decl::Fun(function) => {
-                    self.annotation_strings.add(
-                        stable,
-                        file,
-                        &function.annotations,
-                        &function.annotation_args,
-                    );
-                }
-                Decl::Class(class) => {
-                    self.annotation_strings.add(
-                        stable,
-                        file,
-                        &class.annotations,
-                        &class.annotation_args,
-                    );
-                    // A member's annotation arguments are read by other files exactly like a
-                    // top-level declaration's: its stable identity is the anchor the inventory
-                    // interned for it.
-                    let member = |range, kind, sibling: usize| DeclarationAnchor {
-                        source,
-                        range,
-                        owner: Some(stable),
-                        kind,
-                        sibling: u32::try_from(sibling).expect("too many class members"),
-                    };
-                    for (sibling, method) in class.methods.iter().enumerate() {
-                        if let Some(declaration) = self.declarations.get(member(
-                            method.span,
-                            DeclarationKind::Function,
-                            sibling,
-                        )) {
-                            self.annotation_strings.add(
-                                declaration,
-                                file,
-                                &method.annotations,
-                                &method.annotation_args,
-                            );
-                        }
-                    }
-                    for (sibling, property) in class.body_props.iter().enumerate() {
-                        if let Some(declaration) = self.declarations.get(member(
-                            property.span,
-                            DeclarationKind::Property,
-                            sibling,
-                        )) {
-                            self.annotation_strings.add(
-                                declaration,
-                                file,
-                                &property.annotations,
-                                &property.annotation_args,
-                            );
-                        }
-                    }
-                }
-                Decl::Property(property) => {
-                    self.annotation_strings.add(
-                        stable,
-                        file,
-                        &property.annotations,
-                        &property.annotation_args,
-                    );
-                }
-            }
-        }
+        self.annotation_strings
+            .add_file(file, source, &stable_by_transient, &self.declarations);
         self.stubs.extend(stubs.iter().copied());
         self.inventory.extend(stubs.iter().map(|stub| stub.id));
         (stubs, stable_by_transient)
