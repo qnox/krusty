@@ -17,6 +17,8 @@ use crate::provision::HostRuntime;
 const SOURCE: &str = include_str!("../adapter/Host.kt");
 const SOURCE_NAME: &str = "Host.kt";
 const JAR: &str = "krusty-plugin-host.jar";
+/// The jar's SHA-256, recorded when it is built and checked before it is reused.
+const DIGEST: &str = "krusty-plugin-host.jar.sha256";
 pub(crate) const MAIN_CLASS: &str = "krusty.pluginhost.HostKt";
 
 /// Compiler APIs the adapter opts in to. A marker a release does not have only draws a warning.
@@ -25,8 +27,13 @@ const OPT_INS: [&str; 2] = [
     "org.jetbrains.kotlin.config.CompilerConfiguration.Internals",
 ];
 
-/// The adapter jar for `runtime`, compiled first when the cache has none for this source and Kotlin
-/// version. Compiling is announced on `report`; reusing the cached jar is silent.
+/// The adapter jar for `runtime`, compiled first when the cache has none for this source and the
+/// runtime's exact compiler classpath. Compiling is announced on `report`; reusing the cached jar is
+/// silent.
+///
+/// The cache key is the source and [`HostRuntime::compiler_identity`], the pins the classpath was
+/// verified against, so a corrected pin for the same Kotlin version builds afresh. A cached jar is
+/// reused only when it still has the digest recorded when it was built.
 pub(crate) fn jar(
     runtime: &HostRuntime,
     env: &Environment,
@@ -35,13 +42,13 @@ pub(crate) fn jar(
     let dir = env.cache_dir.join("adapter").join(format!(
         "{}-{}",
         runtime.kotlin_version,
-        source_digest()
+        build_key(runtime)
     ));
     let jar = dir.join(JAR);
-    if jar.is_file() {
+    if is_intact(&dir) {
         return Ok(jar);
     }
-    // A directory without the jar is a broken earlier build, which a rename would not replace.
+    // Anything else there is a broken or altered earlier build, which a rename would not replace.
     install::remove_entry(&dir).map_err(|error| HostError::io(&dir, error))?;
     let parent = dir
         .parent()
@@ -58,8 +65,7 @@ pub(crate) fn jar(
         install::remove(&staged);
     }
     built?;
-    install::publish(&staged, &dir, |dir| dir.join(JAR).is_file())
-        .map_err(|error| HostError::io(&dir, error))?;
+    install::publish(&staged, &dir, is_intact).map_err(|error| HostError::io(&dir, error))?;
     Ok(jar)
 }
 
@@ -91,8 +97,11 @@ fn compile(runtime: &HostRuntime, dir: &Path) -> Result<(), HostError> {
         .map_err(|error| HostError::Build {
             detail: format!("could not run {}: {error}", runtime.java.display()),
         })?;
-    if output.status.success() && dir.join(JAR).is_file() {
-        return Ok(());
+    if output.status.success() {
+        if let Ok(digest) = file_digest(&dir.join(JAR)) {
+            let stamp = dir.join(DIGEST);
+            return std::fs::write(&stamp, digest).map_err(|error| HostError::io(&stamp, error));
+        }
     }
     let mut detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -107,11 +116,31 @@ fn compile(runtime: &HostRuntime, dir: &Path) -> Result<(), HostError> {
     })
 }
 
-/// Names the adapter build in the cache, so an edited adapter is compiled afresh.
-fn source_digest() -> String {
-    Sha256::digest(SOURCE.as_bytes())
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+/// Names the adapter build in the cache: the adapter source and the classpath identity it is
+/// compiled against, so a change to either compiles afresh.
+fn build_key(runtime: &HostRuntime) -> String {
+    let mut digest = Sha256::new();
+    digest.update(SOURCE.as_bytes());
+    digest.update([0]);
+    digest.update(runtime.compiler_identity.as_bytes());
+    hex(&digest.finalize()[..8])
+}
+
+/// Whether `dir` holds a built adapter whose jar still has the digest recorded at build time.
+fn is_intact(dir: &Path) -> bool {
+    match (
+        std::fs::read_to_string(dir.join(DIGEST)),
+        file_digest(&dir.join(JAR)),
+    ) {
+        (Ok(recorded), Ok(actual)) => recorded == actual,
+        _ => false,
+    }
+}
+
+fn file_digest(path: &Path) -> std::io::Result<String> {
+    Ok(hex(&Sha256::digest(std::fs::read(path)?)))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

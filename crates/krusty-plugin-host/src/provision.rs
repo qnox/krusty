@@ -33,6 +33,9 @@ pub struct HostRuntime {
     pub java_home: PathBuf,
     /// `kotlin-compiler-embeddable` first, then its runtime dependencies.
     pub compiler_classpath: Vec<PathBuf>,
+    /// [`ArtifactPin::identity`] of the pins the classpath was verified against, which names what is
+    /// built against it, such as the host's adapter.
+    pub compiler_identity: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -171,6 +174,7 @@ pub fn provision(
         java: jdk.java,
         java_home: jdk.home,
         compiler_classpath: classpath,
+        compiler_identity: ArtifactPin::identity(classpath_pins),
     })
 }
 

@@ -204,6 +204,9 @@ fn downloads_what_is_missing_says_why_and_reuses_it_silently() {
         java: java_home.join("bin/java"),
         java_home,
         compiler_classpath: fixture.cached_jars(),
+        compiler_identity: ArtifactPin::identity(
+            fixture.pins.compiler_classpath("2.4.20").unwrap(),
+        ),
     };
     assert_eq!(result, Ok(expected.clone()));
     let archive_size = fixture.repository.files[JDK_URL].len();

@@ -271,7 +271,9 @@ downloads off and fails with everything that is missing.
 `Host::start` runs `java` on the provisioned classpath with krusty's adapter in front of it. The
 adapter is Kotlin source (`crates/krusty-plugin-host/adapter/Host.kt`) that the provisioned
 `kotlin-compiler-embeddable` compiles once into the cache, so it always links against the exact
-compiler it runs on; the first build prints that it is compiling it. The host greets krusty with the
+compiler it runs on; the first build prints that it is compiling it. The cache key is the source and
+the pinned identity of the compiler classpath, so a corrected pin builds afresh, and a cached jar is
+run only while it has the digest recorded when it was built. The host greets krusty with the
 compiler's `KotlinCompilerVersion`, and a host whose compiler is not the build's exact Kotlin version
 is refused.
 

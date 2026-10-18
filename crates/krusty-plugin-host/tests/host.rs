@@ -1,7 +1,7 @@
 //! The real host: kotlin-compiler-embeddable 2.4.20 from Maven Central in a JVM, loading the real
 //! power-assert plugin jar. Ignored by default because it downloads; CI runs it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use krusty_plugin_host::{
@@ -33,30 +33,66 @@ fn runtime() -> (HostRuntime, Environment) {
         .clone()
 }
 
+/// The power-assert jar, fetched at most once per test process and published by an atomic rename,
+/// so neither a parallel test nor another test process ever sees it half written.
 fn power_assert() -> String {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("plugin-host");
-    let jar = dir.join(POWER_ASSERT);
-    let digest = |jar: &PathBuf| {
-        std::fs::read(jar)
-            .map(|bytes| {
-                Sha256::digest(bytes)
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>()
-            })
-            .unwrap_or_default()
-    };
-    if digest(&jar) != POWER_ASSERT_SHA256 {
-        std::fs::create_dir_all(&dir).unwrap();
-        let url = format!(
-            "https://repo1.maven.org/maven2/org/jetbrains/kotlin/\
-             kotlin-power-assert-compiler-plugin-embeddable/2.4.20/{POWER_ASSERT}"
-        );
-        Curl.fetch(&url, &jar).unwrap();
-        assert_eq!(digest(&jar), POWER_ASSERT_SHA256);
-    }
-    jar.to_string_lossy().into_owned()
+    static JAR: OnceLock<String> = OnceLock::new();
+    JAR.get_or_init(|| {
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("plugin-host");
+        let jar = dir.join(POWER_ASSERT);
+        if digest(&jar) != POWER_ASSERT_SHA256 {
+            std::fs::create_dir_all(&dir).unwrap();
+            let staged = dir.join(format!("{POWER_ASSERT}.partial-{}", std::process::id()));
+            let url = format!(
+                "https://repo1.maven.org/maven2/org/jetbrains/kotlin/\
+                 kotlin-power-assert-compiler-plugin-embeddable/2.4.20/{POWER_ASSERT}"
+            );
+            Curl.fetch(&url, &staged).unwrap();
+            assert_eq!(digest(&staged), POWER_ASSERT_SHA256);
+            std::fs::rename(&staged, &jar).unwrap();
+        }
+        jar.to_string_lossy().into_owned()
+    })
+    .clone()
 }
+
+fn digest(path: &Path) -> String {
+    std::fs::read(path)
+        .map(|bytes| {
+            Sha256::digest(bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A cache of its own under the test target directory, removed when dropped.
+struct ScratchCache(PathBuf);
+
+impl ScratchCache {
+    fn new(name: &str) -> Self {
+        ScratchCache(
+            PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+                .join(format!("plugin-host-{name}-{}", std::process::id())),
+        )
+    }
+}
+
+impl Drop for ScratchCache {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn started(runtime: &HostRuntime, env: &Environment) -> (Result<(), HostError>, String) {
+    let mut report = Vec::new();
+    let result = Host::start(runtime, env, &mut report).map(drop);
+    (result, String::from_utf8(report).unwrap())
+}
+
+const COMPILING: &str =
+    "info: compiling krusty's plugin host for kotlinc 2.4.20, once; later builds reuse it\n";
 
 fn start(runtime: &HostRuntime, env: &Environment) -> Host {
     Host::start(runtime, env, &mut std::io::stderr()).unwrap_or_else(|error| panic!("{error}"))
@@ -130,20 +166,69 @@ fn a_classpath_entry_that_declares_no_registrar_loads_no_plugin() {
 #[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
 fn the_adapter_is_compiled_once_and_then_reused_silently() {
     let (runtime, mut env) = runtime();
-    let cache = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("plugin-host-adapter-{}", std::process::id()));
-    env.cache_dir = cache.clone();
-    let mut report = Vec::new();
-    let first = Host::start(&runtime, &env, &mut report).map(drop);
-    let mut again = Vec::new();
-    let second = Host::start(&runtime, &env, &mut again).map(drop);
-    let _ = std::fs::remove_dir_all(&cache);
-    assert_eq!((first, second), (Ok(()), Ok(())));
-    assert_eq!(
-        String::from_utf8(report).unwrap(),
-        "info: compiling krusty's plugin host for kotlinc 2.4.20, once; later builds reuse it\n"
-    );
-    assert_eq!(String::from_utf8(again).unwrap(), "");
+    let cache = ScratchCache::new("adapter");
+    env.cache_dir = cache.0.clone();
+    assert_eq!(started(&runtime, &env), (Ok(()), COMPILING.to_string()));
+    assert_eq!(started(&runtime, &env), (Ok(()), String::new()));
+}
+
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn an_adapter_built_against_other_pins_for_the_same_kotlin_version_is_not_reused() {
+    let (runtime, mut env) = runtime();
+    let cache = ScratchCache::new("repinned");
+    env.cache_dir = cache.0.clone();
+    assert_eq!(started(&runtime, &env), (Ok(()), COMPILING.to_string()));
+    // The same Kotlin version and jars, but a corrected pin: what was built against the old
+    // identity does not stand for the new one.
+    let mut repinned = runtime.clone();
+    repinned.compiler_identity = "0".repeat(64);
+    assert_eq!(started(&repinned, &env), (Ok(()), COMPILING.to_string()));
+    assert_eq!(started(&repinned, &env), (Ok(()), String::new()));
+    let builds = std::fs::read_dir(cache.0.join("adapter")).unwrap().count();
+    assert_eq!(builds, 2);
+}
+
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn an_altered_adapter_jar_is_rebuilt_rather_than_run() {
+    let (runtime, mut env) = runtime();
+    let cache = ScratchCache::new("altered");
+    env.cache_dir = cache.0.clone();
+    assert_eq!(started(&runtime, &env), (Ok(()), COMPILING.to_string()));
+    let build = std::fs::read_dir(cache.0.join("adapter"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::write(
+        build.join("krusty-plugin-host.jar"),
+        b"not the jar that was built",
+    )
+    .unwrap();
+    assert_eq!(started(&runtime, &env), (Ok(()), COMPILING.to_string()));
+    assert_eq!(started(&runtime, &env), (Ok(()), String::new()));
+}
+
+#[test]
+#[ignore = "downloads power-assert"]
+fn parallel_tests_share_one_fetch_of_the_plugin_jar() {
+    let jars: Vec<String> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..4).map(|_| scope.spawn(power_assert)).collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect()
+    });
+    assert!(jars.iter().all(|jar| *jar == jars[0]), "{jars:?}");
+    assert_eq!(digest(Path::new(&jars[0])), POWER_ASSERT_SHA256);
+    let leftovers: Vec<_> = std::fs::read_dir(Path::new(&jars[0]).parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().contains(".partial-"))
+        .collect();
+    assert_eq!(leftovers, Vec::<std::ffi::OsString>::new());
 }
 
 #[test]
@@ -153,11 +238,9 @@ fn a_host_on_another_kotlin_version_than_the_build_is_refused() {
     // The 2.4.20 classpath, presented as if the build were 2.4.21. Its adapter goes to a cache of
     // its own, so no later build finds it under 2.4.21.
     runtime.kotlin_version = "2.4.21".into();
-    let cache = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("plugin-host-mislabeled-{}", std::process::id()));
-    env.cache_dir = cache.clone();
+    let cache = ScratchCache::new("mislabeled");
+    env.cache_dir = cache.0.clone();
     let error = Host::start(&runtime, &env, &mut Vec::new()).err();
-    let _ = std::fs::remove_dir_all(&cache);
     assert_eq!(
         error,
         Some(HostError::KotlinVersion {
