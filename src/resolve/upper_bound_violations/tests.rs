@@ -1,7 +1,7 @@
 use crate::diag::{DiagSink, Severity, Span};
 use crate::features::LangFeatures;
+use crate::libraries::EmptySymbolSource;
 use crate::source::SourceInput;
-use crate::symbol_source::EmptySymbolSource;
 
 #[test]
 fn rejected_alias_keeps_later_bound_diagnostic_in_source_order() {
