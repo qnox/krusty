@@ -1,8 +1,8 @@
-//! Writing a KLIB container: the manifest, the module header and the `linkdata` fragments.
+//! Writing a KLIB container: the manifest, module header, `linkdata`, and optional components.
 //!
 //! The counterpart of the reader in [`super`]. Each fragment arrives as the `PackageFragment` bytes
-//! the metadata encoder produced ([`crate::metadata::klib_fragment`]); this module only lays them out
-//! the way the reference compiler does, and writes the two module-level files beside them.
+//! the metadata encoder produced ([`crate::metadata::klib_fragment`]); this module lays them out the
+//! way the reference compiler does and admits standard optional files such as prepared inline IR.
 //!
 //! The layout, relative to the library root:
 //!
@@ -76,8 +76,8 @@ impl KlibStamp {
     }
 }
 
-/// A metadata KLIB under construction: the `linkdata` declarations of a module and no serialized
-/// IR, laid out as `kotlinc-native -p library -Xmetadata-klib` lays one out.
+/// A KLIB under construction. Its baseline is the `linkdata` layout produced by
+/// `kotlinc-native -p library -Xmetadata-klib`; callers may add standard optional components.
 pub struct KlibWriter {
     manifest: BTreeMap<String, String>,
     module_name: String,

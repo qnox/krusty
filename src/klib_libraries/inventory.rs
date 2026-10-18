@@ -428,6 +428,93 @@ impl PackageInventory {
         }
     }
 
+    /// Attach structural inline plans only where metadata and the exact module-qualified body
+    /// agree that the referenced formal is reified. The provider performs this join once; call
+    /// checking and lowering never search declarations by spelling.
+    pub(super) fn attach_inline_body_plans(&mut self, bodies: &super::KlibDeclarationBodies) {
+        let mut attach = |function: &mut SignedFunction| {
+            if !function.declaration.is_inline {
+                return;
+            }
+            let (Some(module), true) = (
+                function.module.as_ref(),
+                function.declaration.has_reified_type_params,
+            ) else {
+                return;
+            };
+            let identity = crate::libraries::KlibDependencyCallable {
+                module: module.clone(),
+                declaration: crate::libraries::KlibDeclarationSignature::Public(
+                    function.signature.clone(),
+                ),
+            };
+            let Some(
+                plan @ crate::libraries::InlineBodyPlan::ReifiedTypeTest { type_parameter, .. },
+            ) = bodies.reified_type_test_inline_plan(&identity)
+            else {
+                return;
+            };
+            if !function
+                .declaration
+                .formals
+                .get(type_parameter as usize)
+                .is_some_and(|parameter| parameter.reified)
+            {
+                return;
+            }
+            let crate::libraries::InlineBodyPlan::ReifiedTypeTest {
+                defaults: body_defaults,
+                ..
+            } = &plan
+            else {
+                unreachable!()
+            };
+            let mut declared_default_count = 0usize;
+            for (parameter, &declares_default) in
+                function.declaration.param_defaults.iter().enumerate()
+            {
+                if !declares_default {
+                    continue;
+                }
+                declared_default_count += 1;
+                if parameter < function.declaration.context_count {
+                    // Context defaults are not in the regular-parameter default table.
+                    return;
+                }
+                let body_parameter = parameter
+                    + usize::from(
+                        function.declaration.receiver.is_some()
+                            && parameter >= function.declaration.context_count,
+                    );
+                if !body_defaults.iter().any(|default| {
+                    default.parameter == body_parameter
+                        && default.value == crate::libraries::DefaultValue::Null
+                }) {
+                    // Prepared IR owns defaults only inside this exact template. It may never
+                    // borrow a missing/general default from ordinary IR or metadata alone.
+                    return;
+                }
+            }
+            if body_defaults.len() != declared_default_count {
+                // A prepared body default not declared in metadata is equally inconsistent.
+                return;
+            }
+            function.inline_body_plan = Some(Box::new(plan));
+        };
+        self.functions.values_mut().flatten().for_each(&mut attach);
+        self.companion_functions
+            .values_mut()
+            .flatten()
+            .for_each(|extension| attach(&mut extension.signed));
+        for classifier in self.classifiers.values_mut() {
+            classifier.functions.iter_mut().for_each(&mut attach);
+            classifier
+                .associated_functions
+                .iter_mut()
+                .for_each(&mut attach);
+        }
+    }
+
     fn declare_package(&mut self, segments: &[String]) -> TypeName {
         segments.iter().fold(TypeName::ROOT, |parent, segment| {
             let package = type_name_child(parent, segment);

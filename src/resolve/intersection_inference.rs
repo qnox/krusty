@@ -50,6 +50,19 @@ impl SelectedGenericCall {
         &self.arguments
     }
 
+    /// Substitutions are a checked-FIR handoff only after every declaration slot is solved.
+    ///
+    /// The checker retains partial facts so reified validation can inspect the exact selected
+    /// parameter ordinals, but publishing a `None` slot would promise FIR a substitution that has
+    /// no materializable type. Calls still being completed therefore expose no substitution list,
+    /// matching the commitment boundary used before the facts were grouped in this record.
+    fn committed_arguments(&self) -> Option<&[Option<Ty>]> {
+        self.arguments
+            .iter()
+            .all(Option::is_some)
+            .then_some(&self.arguments)
+    }
+
     pub(super) fn additional_bounds(&self, ordinal: usize) -> &[Ty] {
         self.additional_bounds
             .get(ordinal)
@@ -82,7 +95,7 @@ impl TypeInfo {
     pub fn resolved_call_type_arguments(&self, expression: ExprId) -> Option<&[Option<Ty>]> {
         self.selected_generic_calls
             .get(&expression)
-            .map(SelectedGenericCall::arguments)
+            .and_then(SelectedGenericCall::committed_arguments)
     }
 
     pub(crate) fn resolved_call_type_argument_bounds(
@@ -699,5 +712,21 @@ mod tests {
             vec![Ty::obj("sample/Primary"), retained_bound]
         );
         assert!(retained.through_flexible);
+    }
+
+    #[test]
+    fn only_complete_type_arguments_cross_the_checked_fir_boundary() {
+        let partial = SelectedGenericCall {
+            arguments: vec![Some(Ty::String), None],
+            ..Default::default()
+        };
+        assert_eq!(partial.arguments(), &[Some(Ty::String), None]);
+        assert_eq!(partial.committed_arguments(), None);
+
+        let complete = SelectedGenericCall {
+            arguments: vec![Some(Ty::String), Some(Ty::Int)],
+            ..Default::default()
+        };
+        assert_eq!(complete.committed_arguments(), Some(complete.arguments()));
     }
 }

@@ -15,7 +15,7 @@ use crate::klib::KlibManifest;
 use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrBody, KlibIrExprKind, KlibIrFunction, KlibIrMember, KlibIrStatement,
-    KlibIrType,
+    KlibIrType, KlibIrTypeOperator,
 };
 use crate::metadata::klib_ir::{KlibIrModuleTrees, KlibIrSignature, KlibIrSymbolKind};
 use crate::types::{type_name_child, TypeName};
@@ -311,6 +311,91 @@ impl KlibDeclarationBodies {
             .owners
             .get(&(identity.module.clone(), signature.clone()))?;
         self.libraries[library].function(&signature)
+    }
+
+    /// Normalize the exact inline body `return value is T` (or `!is`) into a call-site plan.
+    /// Every join is by serialized symbol identity. Any extra statement, conversion, nullable
+    /// wrapper, or different return target leaves the declaration without this narrow plan.
+    pub(crate) fn reified_type_test_inline_plan(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Option<crate::libraries::InlineBodyPlan> {
+        let (arena, function) = self.function(identity)?;
+        let KlibIrBody::Block(statements) = function.body.as_ref()? else {
+            return None;
+        };
+        let [KlibIrStatement::Expression(returned)] = statements.as_slice() else {
+            return None;
+        };
+        let KlibIrExprKind::Return { target, value } = &arena.expr(*returned).kind else {
+            return None;
+        };
+        if target != &function.base.symbol {
+            return None;
+        }
+        let KlibIrExprKind::TypeOperator {
+            operator,
+            operand,
+            argument,
+        } = &arena.expr(*value).kind
+        else {
+            return None;
+        };
+        let negated = match operator {
+            KlibIrTypeOperator::InstanceOf => false,
+            KlibIrTypeOperator::NotInstanceOf => true,
+            _ => return None,
+        };
+        let KlibIrType::Simple {
+            classifier,
+            nullability: crate::metadata::klib_ir::tree::KlibIrNullability::NotSpecified,
+            arguments,
+            abbreviation: None,
+            ..
+        } = arena.ty(*operand)
+        else {
+            return None;
+        };
+        if !arguments.is_empty() {
+            return None;
+        }
+        let type_parameter = function
+            .type_parameters
+            .iter()
+            .position(|parameter| parameter.base.symbol == *classifier)?;
+        let KlibIrExprKind::GetValue { symbol, .. } = &arena.expr(*argument).kind else {
+            return None;
+        };
+        let parameters = function
+            .context_parameters
+            .iter()
+            .chain(function.extension_receiver.iter())
+            .chain(&function.regular_parameters);
+        let value_parameter = parameters
+            .clone()
+            .position(|parameter| parameter.base.symbol == *symbol)?;
+        let mut defaults = Vec::new();
+        for (parameter, declaration) in parameters.enumerate() {
+            let Some(value) = declaration.default_value else {
+                continue;
+            };
+            if !matches!(
+                arena.expr(value).kind,
+                KlibIrExprKind::Const(crate::metadata::klib_ir::KlibIrConstant::Null)
+            ) {
+                return None;
+            }
+            defaults.push(crate::libraries::InlineBodyDefault {
+                parameter,
+                value: crate::libraries::DefaultValue::Null,
+            });
+        }
+        Some(crate::libraries::InlineBodyPlan::ReifiedTypeTest {
+            value: crate::libraries::InlineBodyValue::Parameter(value_parameter),
+            type_parameter: u32::try_from(type_parameter).ok()?,
+            negated,
+            defaults,
+        })
     }
 
     /// Whether the exact serialized declaration intentionally carries an executable body.
@@ -612,8 +697,9 @@ mod tests {
     };
     use crate::metadata::klib_ir::tree::{
         KlibIrArguments, KlibIrDeclarationBase, KlibIrMemberAccess, KlibIrNullability,
+        KlibIrParameter, KlibIrTypeParameter,
     };
-    use crate::metadata::klib_ir::KlibIrSymbol;
+    use crate::metadata::klib_ir::{KlibIrDeclarationTree, KlibIrSymbol};
     use crate::metadata::semantic::KotlinType;
 
     fn class_symbol(package: &str, name: &str) -> KlibIrSymbol {
@@ -711,6 +797,178 @@ mod tests {
                 KlibIrStatement::Expression(initialize),
             ])),
         }
+    }
+
+    fn reified_type_test_bodies(
+        operator: KlibIrTypeOperator,
+        nullability: KlibIrNullability,
+        extension_receiver: bool,
+    ) -> (KlibDeclarationBodies, KlibDependencyCallable) {
+        let package = ["fixture".to_owned()];
+        let signature = callable_signature(
+            DeclarationContainer {
+                package: &package,
+                classes: &[],
+                native_interop_library: false,
+            },
+            &CallableShape::<KotlinType> {
+                name: "check",
+                contexts: Vec::new(),
+                receiver: None,
+                params: Vec::new(),
+                vararg: None,
+                type_parameters: Vec::new(),
+                expect: false,
+                placement: Placement::Ordinary,
+            },
+        )
+        .expect("the fixture function is signable");
+        let function_symbol = KlibIrSymbol {
+            kind: KlibIrSymbolKind::Function,
+            signature: KlibIrSignature::Public(signature.clone()),
+        };
+        let type_parameter_symbol = KlibIrSymbol {
+            kind: KlibIrSymbolKind::TypeParameter,
+            signature: KlibIrSignature::FileLocal { file: 0, slot: 1 },
+        };
+        let value_symbol = KlibIrSymbol {
+            kind: KlibIrSymbolKind::ValueParameter,
+            signature: KlibIrSignature::FileLocal { file: 0, slot: 2 },
+        };
+        let mut arena = KlibIrArena::default();
+        let error = arena.push_type(KlibIrType::Error {
+            annotations: Vec::new(),
+        });
+        let target = arena.push_type(KlibIrType::Simple {
+            classifier: type_parameter_symbol.clone(),
+            nullability,
+            arguments: Vec::new(),
+            annotations: Vec::new(),
+            abbreviation: None,
+        });
+        let read = arena.push_expr(
+            Some(error),
+            KlibIrExprKind::GetValue {
+                symbol: value_symbol.clone(),
+                origin: None,
+            },
+        );
+        let test = arena.push_expr(
+            Some(error),
+            KlibIrExprKind::TypeOperator {
+                operator,
+                operand: target,
+                argument: read,
+            },
+        );
+        let returned = arena.push_expr(
+            Some(error),
+            KlibIrExprKind::Return {
+                target: function_symbol.clone(),
+                value: test,
+            },
+        );
+        let base = |symbol| KlibIrDeclarationBase {
+            symbol,
+            origin: "DEFINED".to_owned(),
+            flags: 0,
+            annotations: Vec::new(),
+        };
+        let function = arena.push_function(KlibIrFunction {
+            base: base(function_symbol),
+            name: "check".to_owned(),
+            constructor: false,
+            type_parameters: vec![KlibIrTypeParameter {
+                base: base(type_parameter_symbol),
+                name: "T".to_owned(),
+                supertypes: Vec::new(),
+            }],
+            dispatch_receiver: None,
+            context_parameters: Vec::new(),
+            extension_receiver: extension_receiver.then(|| KlibIrParameter {
+                base: base(value_symbol),
+                name: "value".to_owned(),
+                ty: error,
+                vararg_element_type: None,
+                default_value: None,
+            }),
+            regular_parameters: (!extension_receiver)
+                .then(|| KlibIrParameter {
+                    base: base(value_symbol),
+                    name: "value".to_owned(),
+                    ty: error,
+                    vararg_element_type: None,
+                    default_value: None,
+                })
+                .into_iter()
+                .collect(),
+            return_type: error,
+            overridden: Vec::new(),
+            companion_extension_class: None,
+            prepared_inline_file: Some(0),
+            body: Some(KlibIrBody::Block(vec![KlibIrStatement::Expression(
+                returned,
+            )])),
+        });
+        let trees = KlibIrModuleTrees::from_trees(vec![KlibIrDeclarationTree {
+            arena,
+            declaration: KlibIrMember::Function(function),
+        }])
+        .expect("the fixture tree has one public function");
+        let identity = KlibDependencyCallable {
+            module: "fixture-module".to_owned(),
+            declaration: KlibDeclarationSignature::Public(signature),
+        };
+        let bodies = KlibDeclarationBodies::from_libraries(vec![(identity.module.clone(), trees)])
+            .expect("the fixture has one module");
+        (bodies, identity)
+    }
+
+    #[test]
+    fn exact_reified_type_test_body_publishes_symbol_ordinals() {
+        let (bodies, identity) = reified_type_test_bodies(
+            KlibIrTypeOperator::NotInstanceOf,
+            KlibIrNullability::NotSpecified,
+            false,
+        );
+        let Some(crate::libraries::InlineBodyPlan::ReifiedTypeTest {
+            value,
+            type_parameter,
+            negated,
+            defaults,
+        }) = bodies.reified_type_test_inline_plan(&identity)
+        else {
+            panic!("the exact body must publish a plan")
+        };
+        assert_eq!(value, crate::libraries::InlineBodyValue::Parameter(0));
+        assert_eq!(type_parameter, 0);
+        assert!(negated);
+        assert!(defaults.is_empty());
+    }
+
+    #[test]
+    fn extension_receiver_is_published_as_a_plan_value() {
+        let (bodies, identity) = reified_type_test_bodies(
+            KlibIrTypeOperator::InstanceOf,
+            KlibIrNullability::NotSpecified,
+            true,
+        );
+        let Some(crate::libraries::InlineBodyPlan::ReifiedTypeTest { value, .. }) =
+            bodies.reified_type_test_inline_plan(&identity)
+        else {
+            panic!("the extension body must publish a plan")
+        };
+        assert_eq!(value, crate::libraries::InlineBodyValue::Parameter(0));
+    }
+
+    #[test]
+    fn nullable_type_parameter_operand_is_not_the_exact_supported_template() {
+        let (bodies, identity) = reified_type_test_bodies(
+            KlibIrTypeOperator::InstanceOf,
+            KlibIrNullability::MarkedNullable,
+            false,
+        );
+        assert!(bodies.reified_type_test_inline_plan(&identity).is_none());
     }
 
     #[test]

@@ -27,13 +27,14 @@ use super::tree::{
     KlibIrVarargElement, KlibIrVariable, KlibIrVariableId, KlibIrVariance,
 };
 use super::wire::{
-    declaration_index, entries, message, packed_field, packed_values, read_per_file_table,
-    unique_bytes, unique_varint, WireField,
+    current_operation, declaration_index, entries, int32, lattice, message, packed_field,
+    packed_values, read_declaration_tree_tables, unique_bytes, unique_varint, WireField,
 };
 use super::{decode_literal, file_strings, KlibIrDecodeError};
 
 const BODIES: &str = "bodies.knb";
 const DECLARATIONS: &str = "irDeclarations.knd";
+const FILE_ENTRIES: &str = "fileEntries.knf";
 const TYPES: &str = "types.knt";
 
 /// Deepest expression or type nesting a body may have. Real bodies stay far below it; the bound
@@ -137,33 +138,37 @@ pub fn read_declaration_trees(
     read_declaration_trees_where(archive, |_| true)
 }
 
+/// Decode Kotlin 2.4's standard prepared-inline-function component.
+pub fn read_inlinable_declaration_trees(
+    archive: &KlibArchive,
+) -> Result<KlibIrModuleTrees, KlibIrDecodeError> {
+    read_declaration_trees_from(archive, true, |_| true)
+}
+
 /// Decode the top-level declaration trees whose own identity `keep` accepts. A declaration that is
 /// left out costs only reading its identity; its members and bodies are never decoded.
 pub fn read_declaration_trees_where(
     archive: &KlibArchive,
     mut keep: impl FnMut(&KlibIrSignature) -> bool,
 ) -> Result<KlibIrModuleTrees, KlibIrDecodeError> {
-    let files = read_per_file_table(archive, "files.knf")?;
-    let strings = read_per_file_table(archive, "strings.knt")?;
-    let signatures = read_per_file_table(archive, "signatures.knt")?;
-    let declarations = read_per_file_table(archive, "irDeclarations.knd")?;
-    let bodies = read_per_file_table(archive, "bodies.knb")?;
-    let types = read_per_file_table(archive, "types.knt")?;
+    read_declaration_trees_from(archive, false, &mut keep)
+}
+
+fn read_declaration_trees_from(
+    archive: &KlibArchive,
+    inlinable: bool,
+    mut keep: impl FnMut(&KlibIrSignature) -> bool,
+) -> Result<KlibIrModuleTrees, KlibIrDecodeError> {
+    let super::wire::DeclarationTreeTables {
+        files,
+        strings,
+        signatures,
+        declarations,
+        bodies,
+        types,
+        file_entries,
+    } = read_declaration_tree_tables(archive, inlinable)?;
     let expected = files.len();
-    let counts = [
-        strings.len(),
-        signatures.len(),
-        declarations.len(),
-        bodies.len(),
-        types.len(),
-    ];
-    if counts.iter().any(|count| *count != expected) {
-        return Err(KlibIrDecodeError::malformed(
-            "default/ir",
-            0,
-            format!("per-file table counts disagree: files={expected}, others={counts:?}"),
-        ));
-    }
 
     let mut module = KlibIrModuleTrees::default();
     for index in 0..expected {
@@ -178,6 +183,10 @@ pub fn read_declaration_trees_where(
             ),
             types: entries(&types[index], TYPES)?,
             bodies: entries(&bodies[index], BODIES)?,
+            file_entries: file_entries
+                .as_ref()
+                .map(|tables| entries(&tables[index], FILE_ENTRIES).map(|entries| entries.len()))
+                .transpose()?,
         };
         let declarations = declaration_index(&declarations[index])?;
         for id in packed_field(&files[index], "files.knf", 1, "declaration ids")? {
@@ -227,6 +236,8 @@ struct FileTables<'a> {
     signatures: SignatureTable<'a>,
     types: Vec<&'a [u8]>,
     bodies: Vec<&'a [u8]>,
+    /// Present only for Kotlin's prepared-inline component.
+    file_entries: Option<usize>,
 }
 
 /// One decoded protobuf message and where it sits, for exact error offsets.
@@ -318,34 +329,6 @@ impl<'a> Msg<'a> {
         }
         Ok(found)
     }
-}
-
-/// A protobuf `int32` read through a varint: negative values arrive sign-extended to 64 bits.
-fn int32(value: u64) -> i32 {
-    value as i64 as i32
-}
-
-/// `BinaryLattice`: two ints interleaved bit by bit, the first in the even bits.
-fn lattice(code: u64) -> (u64, u64) {
-    fn deinterleave(mut x: u64) -> u64 {
-        x &= 0x5555_5555_5555_5555;
-        x = (x ^ (x >> 1)) & 0x3333_3333_3333_3333;
-        x = (x ^ (x >> 2)) & 0x0f0f_0f0f_0f0f_0f0f;
-        x = (x ^ (x >> 4)) & 0x00ff_00ff_00ff_00ff;
-        x = (x ^ (x >> 8)) & 0x0000_ffff_0000_ffff;
-        (x ^ (x >> 16)) & 0x0000_0000_ffff_ffff
-    }
-    (deinterleave(code), deinterleave(code >> 1))
-}
-
-/// The pre-2.4 `IrOperationPre_2_4_0` alternative's number in today's `IrExpression` oneof.
-fn current_operation(legacy: u64) -> Option<u64> {
-    const CURRENT: [u64; 39] = [
-        10, 22, 8, 19, 21, 5, 23, 26, 25, 27, 39, 18, 20, 15, 17, 6, 28, 40, 12, 16, 7, 29, 30, 31,
-        14, 32, 13, 24, 33, 34, 35, 9, 36, 37, 38, 11, 43, 41, 42,
-    ];
-    let index = usize::try_from(legacy.checked_sub(1)?).ok()?;
-    CURRENT.get(index).copied()
 }
 
 /// Decodes one top-level declaration into a fresh arena.
@@ -1274,6 +1257,16 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
                 .varint(3, "prepared inline file entry")?
                 .map(|id| u32::try_from(id).map_err(|_| msg.error("file entry id exceeds u32")))
                 .transpose()?;
+            if let (Some(file), Some(count)) = (file, self.file.file_entries) {
+                if file as usize >= count {
+                    return Err(msg.error(format!(
+                        "prepared inline file entry {file} is absent from {FILE_ENTRIES}"
+                    )));
+                }
+            }
+            if self.file.file_entries.is_some() && file.is_none() {
+                return Err(msg.error("prepared inline function has no file entry"));
+            }
             (overridden, file)
         };
         let id =
@@ -1598,6 +1591,7 @@ mod tests {
             signatures: SignatureTable::new(3, &signatures, &strings),
             types: Vec::new(),
             bodies: Vec::new(),
+            file_entries: None,
         };
         let mut decoder = TreeDecoder::new(&mut file);
         let id = decoder
@@ -1684,6 +1678,7 @@ mod tests {
             signatures: SignatureTable::new(0, &signatures, &strings),
             types: Vec::new(),
             bodies: Vec::new(),
+            file_entries: None,
         };
         let error = TreeDecoder::new(&mut file)
             .expression(&Msg::parse(&expression, 0, BODIES).unwrap())
@@ -1729,6 +1724,7 @@ mod tests {
             signatures: SignatureTable::new(0, &signatures, &strings),
             types: deep.iter().map(Vec::as_slice).collect(),
             bodies: Vec::new(),
+            file_entries: None,
         };
         let mut decoder = TreeDecoder::new(&mut file);
         let error = decoder.ty(0).unwrap_err();
@@ -1795,6 +1791,7 @@ mod tests {
             signatures: SignatureTable::new(0, &signatures, &strings),
             types: types.iter().map(Vec::as_slice).collect(),
             bodies: Vec::new(),
+            file_entries: None,
         };
         let mut decoder = TreeDecoder::new(&mut file);
         let member = decoder
@@ -1917,6 +1914,7 @@ mod tests {
             signatures: SignatureTable::new(0, &signatures, &strings),
             types: types.iter().map(Vec::as_slice).collect(),
             bodies: Vec::new(),
+            file_entries: None,
         };
         TreeDecoder::new(&mut file)
             .member(&Msg::parse(declaration, 0, DECLARATIONS).unwrap())

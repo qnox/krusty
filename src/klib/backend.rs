@@ -3,8 +3,9 @@
 //! A KLIB is what a non-JVM dependency is distributed as, and what a dependent compilation reads its
 //! declarations from. This backend writes one `PackageFragment` per checked file, from the same
 //! declaration records the JVM `@Metadata` is built from, and lays the fragments out as a library
-//! ([`super::write`]). It runs before any target lowering: a library records Kotlin declarations,
-//! not a target's realization of them.
+//! ([`super::write`]). Supported inline templates additionally use Kotlin 2.4's standard prepared
+//! inline-function IR component. Both run before target lowering: a library records checked Kotlin
+//! declarations and target-neutral inline bodies, not a target's realization of them.
 
 use crate::backend::{
     Artifact, Backend, CheckedIrFile, DependencyExportSignatures, DependencyMetadata,
@@ -195,18 +196,39 @@ impl KlibBackend {
             self.annotations_in_metadata,
             &inner_classifier,
         );
-        let Some(exports) = package_exports(ir, file.module_name, &segments, &fragment, diags)
+        let Some(package_exports) =
+            package_exports(ir, file.module_name, &segments, &fragment, diags)
         else {
             return DependencyExportSignatures::default();
         };
+        state.inline_functions.extend(super::inline_ir::collect(
+            ir,
+            &format!("{simple_stem}.kt"),
+            &package_exports.declarations,
+        ));
         state.fragments.push((package, fragment));
-        exports
+        package_exports.executables
     }
 
     fn finish(&self, state: KlibModule, module_name: &str) -> Vec<Artifact> {
         let mut writer = KlibWriter::new(module_name, self.stamp, self.platform);
         for (package, fragment) in state.fragments {
             writer.add_fragment(&package, fragment);
+        }
+        let inline_ir = super::inline_ir::artifacts(&state.inline_functions);
+        if !inline_ir.is_empty() {
+            // The serialized types use Kotlin built-ins. This is the standard module edge a full
+            // KLIB records; metadata-only libraries did not previously need one.
+            writer.set_property(
+                "depends",
+                match self.platform {
+                    KlibPlatform::Native => "stdlib",
+                    KlibPlatform::WasmJs | KlibPlatform::WasmWasi => "kotlin",
+                },
+            );
+        }
+        for (path, bytes) in inline_ir {
+            writer.add_file(&path, bytes);
         }
         writer.entries()
     }
@@ -217,6 +239,7 @@ impl KlibBackend {
 #[derive(Default)]
 pub struct KlibModule {
     fragments: Vec<(String, Vec<u8>)>,
+    inline_functions: Vec<super::inline_ir::PreparedFunction>,
 }
 
 impl Backend for KlibBackend {
@@ -267,13 +290,18 @@ impl DependencyMetadata for KlibBackend {
 /// Decode the bytes the dependency will actually read, then sign those declarations through the
 /// same identity algorithm as `KlibLibraries`. Declaration order joins the decoded metadata back
 /// to the stable common-IR callable ids that produced it; no spelling participates in the join.
+struct PackageExports {
+    executables: DependencyExportSignatures,
+    declarations: super::inline_ir::DeclarationSignatures,
+}
+
 fn package_exports(
     ir: &IrFile,
     module_name: &str,
     package: &[&str],
     fragment: &[u8],
     diags: &mut DiagSink,
-) -> Option<DependencyExportSignatures> {
+) -> Option<PackageExports> {
     let decoded = match parse_package_fragment_checked(fragment) {
         Ok(decoded) => decoded,
         Err(error) => {
@@ -303,6 +331,7 @@ fn package_exports(
         native_interop_library: false,
     };
     let mut exports = DependencyExportSignatures::default();
+    let mut declarations = super::inline_ir::DeclarationSignatures::default();
     for (source, declaration) in ir.package_functions.iter().zip(&decoded.functions) {
         if source.visibility == crate::types::Visibility::Private {
             continue;
@@ -317,6 +346,7 @@ fn package_exports(
                 return None;
             }
         };
+        declarations.record(source.function, signature.clone(), None);
         // Metadata retains inline templates and bodyless declarations because a dependent
         // frontend needs their semantic declarations (and, for an inline function, its KLIB
         // body). The target registry is narrower: it may publish only code this source unit
@@ -381,16 +411,24 @@ fn package_exports(
             }
         }
     }
-    if let Err(error) =
-        record_class_function_exports(ir, module_name, &package, &decoded, &mut exports)
-    {
+    if let Err(error) = record_class_function_exports(
+        ir,
+        module_name,
+        &package,
+        &decoded,
+        &mut exports,
+        &mut declarations,
+    ) {
         diags.error(
             crate::diag::Span::new(0, 0),
             format!("internal error: cannot sign generated KLIB class function: {error}"),
         );
         return None;
     }
-    Some(exports)
+    Some(PackageExports {
+        executables: exports,
+        declarations,
+    })
 }
 
 /// Record the target bodies behind the exact member-function identities this fragment publishes.
@@ -404,6 +442,7 @@ fn record_class_function_exports(
     package: &[String],
     decoded: &crate::metadata::semantic::KotlinPackage,
     exports: &mut DependencyExportSignatures,
+    declarations: &mut super::inline_ir::DeclarationSignatures,
 ) -> Result<(), String> {
     let source_classes = library_classes(ir);
     if source_classes.len() != decoded.class_order.len() {
@@ -451,19 +490,11 @@ fn record_class_function_exports(
                         declaration.name
                     )
                 })?;
-            if !crate::backend::has_standalone_dependency_code(ir, function) {
-                continue;
-            }
             let signature = package_function_signature(container, declaration)
                 .map_err(|error| format!("{name}.{}: {error}", declaration.name))?;
-            exports.record_callable(
-                function,
-                crate::libraries::KlibDependencyCallable {
-                    module: module_name.to_owned(),
-                    declaration: crate::libraries::KlibDeclarationSignature::Public(signature),
-                },
-            );
-            if !declaration.is_static {
+            let receiver = if declaration.is_static {
+                None
+            } else {
                 let receiver = ir.functions[function as usize]
                     .dispatch_receiver
                     .ok_or_else(|| {
@@ -472,7 +503,26 @@ fn record_class_function_exports(
                             declaration.name
                         )
                     })?;
-                exports.record_member_receiver(function, crate::types::Ty::Obj(receiver, &[]));
+                Some(crate::types::Ty::Obj(receiver, &[]))
+            };
+            // The current prepared writer can serialize a non-generic dispatch classifier exactly.
+            // A generic owner also needs its class parameters remapped into the synthetic prepared
+            // root; do not publish a raw receiver that would erase that declaration contract.
+            if source.type_params.is_empty() && source.captured_type_params.is_empty() {
+                declarations.record(function, signature.clone(), receiver);
+            }
+            if !crate::backend::has_standalone_dependency_code(ir, function) {
+                continue;
+            }
+            exports.record_callable(
+                function,
+                crate::libraries::KlibDependencyCallable {
+                    module: module_name.to_owned(),
+                    declaration: crate::libraries::KlibDeclarationSignature::Public(signature),
+                },
+            );
+            if let Some(receiver) = receiver {
+                exports.record_member_receiver(function, receiver);
             }
         }
     }

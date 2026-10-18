@@ -383,6 +383,7 @@ impl BodyLowering<'_> {
             // operands cannot be materialized, propagate failure to `checked_call` as an unsupported
             // external call; never retry the same source as an ordinary dependency invocation.
             let expanded = self.external_inline_call(ExternalInlineCallRequest {
+                target,
                 plan,
                 receiver_ty,
                 parameter_types: &parameter_types,
@@ -390,6 +391,8 @@ impl BodyLowering<'_> {
                 dispatch_receiver,
                 extension_receiver,
                 arguments,
+                substitutions,
+                extension_receiver_parameter,
                 source_line,
             })?;
             self.ir.inline_regions.insert(expanded);

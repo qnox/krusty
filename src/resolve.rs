@@ -63108,7 +63108,8 @@ impl<'a> Checker<'a> {
                             )
                         })
                     }
-                    crate::libraries::InlineBodyPlan::InvokeLambda { .. } => Some(()),
+                    crate::libraries::InlineBodyPlan::ReifiedTypeTest { .. }
+                    | crate::libraries::InlineBodyPlan::InvokeLambda { .. } => Some(()),
                 };
                 if publishable.is_none() {
                     self.diags.error(

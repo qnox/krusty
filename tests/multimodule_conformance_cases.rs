@@ -156,20 +156,29 @@ pub const MEMBER_EXTENSION_RECEIVERS: Case = Case {
 /// source spelling or an origin-specific lowering path—to publish the runtime type identity.
 pub const REIFIED_CALLABLE_ORIGINS: Case = Case {
     stem: "multimoduleReifiedCallableOrigins",
-    source: "// MODULE: lib\n\
+    source: "// LANGUAGE: +ContextParameters\n\
+             // MODULE: lib\n\
              inline fun <reified T> top(value: T, probe: Any): Boolean = probe is T\n\
-             inline fun <reified T> T.topExtension(probe: Any): Boolean = probe is T\n\
+             inline fun <reified T> Any?.topExtension(): Boolean = this is T\n\
+             context(marker: String)\n\
+             inline fun <reified T> contextual(probe: Any): Boolean = probe is T\n\
+             inline fun <reified T> defaulted(probe: Any? = null): Boolean = probe is T\n\
              class Host {\n\
              \x20   inline fun <reified T> member(value: T, probe: Any): Boolean = probe is T\n\
-             \x20   inline fun <reified T> T.memberExtension(probe: Any): Boolean = probe is T\n\
+             \x20   inline fun <reified T> Any?.memberExtension(): Boolean = this is T\n\
              }\n\
              // MODULE: main(lib)\n\
              fun box(): String {\n\
              \x20   val host = Host()\n\
              \x20   if (!top(\"top\", \"probe\")) return \"top\"\n\
-             \x20   if (!\"extension\".topExtension(\"probe\")) return \"extension\"\n\
+             \x20   if (!top(probe = \"named probe\", value = \"named\")) return \"named\"\n\
+             \x20   if (!\"extension\".topExtension<String>()) return \"extension\"\n\
+             \x20   with(\"context\") {\n\
+             \x20       if (!contextual<String>(\"probe\")) return \"context\"\n\
+             \x20   }\n\
+             \x20   if (defaulted<String>()) return \"default\"\n\
              \x20   if (!host.member(\"member\", \"probe\")) return \"member\"\n\
-             \x20   if (!host.run { \"member extension\".memberExtension(\"probe\") }) return \"member extension\"\n\
+             \x20   if (!host.run { \"member extension\".memberExtension<String>() }) return \"member extension\"\n\
              \x20   return \"OK\"\n\
              }\n",
 };
