@@ -98,3 +98,80 @@ fn a_suspending_lambda_of_an_inline_suspend_dependency_call_matches_kotlinc() {
         );
     }
 }
+
+const NOINLINE_LIB: &str = "package lib\n\
+import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
+var pending: Continuation<String>? = null\n\
+class Builder { var token = \"\" }\n\
+class Client {\n\
+    \x20   suspend fun exec(b: Builder): String =\n\
+    \x20       suspendCoroutineUninterceptedOrReturn<String> { c -> pending = c; COROUTINE_SUSPENDED } + b.token\n\
+}\n\
+suspend inline fun Client.later(x: () -> String, noinline block: suspend () -> String): String =\n\
+    \x20   exec(Builder().apply { token = x() }) + block()\n";
+
+const NOINLINE_MAIN: &str = "import lib.*\n\
+import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
+var saved: Continuation<String>? = null\n\
+suspend fun tok(): String = suspendCoroutineUninterceptedOrReturn { c -> saved = c; COROUTINE_SUSPENDED }\n\
+class Late(val c: Client) {\n\
+    \x20   suspend fun go(id: String): String = c.later({ id }) { tok() + id }\n\
+}\n\
+fun drive(block: suspend () -> String): String {\n\
+    \x20   var r = \"none\"\n\
+    \x20   block.startCoroutine(Continuation(EmptyCoroutineContext) { r = it.getOrThrow() })\n\
+    \x20   while (r == \"none\") {\n\
+    \x20       val s = saved\n\
+    \x20       val p = pending\n\
+    \x20       if (s != null) { saved = null; s.resume(\"t\") }\n\
+    \x20       else if (p != null) { pending = null; p.resume(\"p\") }\n\
+    \x20       else return \"stuck\"\n\
+    \x20   }\n\
+    \x20   return r\n\
+}\n\
+fun box(): String {\n\
+    \x20   val late = drive { Late(Client()).go(\"x\") }\n\
+    \x20   return if (late == \"pxtx\") \"OK\" else \"noinline: $late\"\n\
+}\n";
+
+/// A `noinline` suspending literal of the same call is an ordinary function object: its suspension
+/// is its own method's, not a point of the caller, and its `invoke` is written.
+#[test]
+fn a_noinline_suspending_lambda_of_an_inline_suspend_dependency_call_keeps_its_own_machine() {
+    assert_eq!(
+        common::expect_box_run_against(
+            "inline_suspend_noinline_lambda",
+            NOINLINE_LIB,
+            NOINLINE_MAIN
+        )
+        .as_deref(),
+        Some("OK")
+    );
+}
+
+/// The caller's continuation and the `noinline` literal's class are the reference compiler's.
+#[test]
+fn a_noinline_suspending_lambda_of_an_inline_suspend_dependency_call_matches_kotlinc() {
+    let library = common::compile_lib("inline_suspend_noinline_lambda", NOINLINE_LIB)
+        .expect("krusty builds the library");
+    let classpath = [library, common::stdlib_jar()];
+    for class in ["Late$go$1", "Late$go$3"] {
+        let compared = common::compare_with_kotlinc_plugin(
+            "Main",
+            NOINLINE_MAIN,
+            class,
+            &classpath,
+            "25",
+            &[],
+        )
+        .expect("reference kotlinc and javap must be available");
+        assert!(
+            compared.krusty_bytes == compared.reference_bytes,
+            "{class} differs\n--- kotlinc ---\n{}\n--- krusty ---\n{}",
+            compared.reference,
+            compared.krusty
+        );
+    }
+}

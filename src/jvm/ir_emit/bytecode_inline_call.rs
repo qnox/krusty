@@ -1095,7 +1095,7 @@ impl Emitter<'_> {
     }
 
     /// Whether argument `index` of `call_expression` is a literal lambda the inline body's invokes
-    /// expand: one passed to an inline parameter ([`super::inline_parameters`]). A literal for a
+    /// expand: one passed to an inline parameter ([`crate::jvm::inline_parameters`]). A literal for a
     /// `noinline` or non-function parameter is an ordinary argument, the function object the body
     /// receives. An error is a literal the call published no parameter facts for.
     pub(super) fn is_inlined_literal(
@@ -1111,7 +1111,11 @@ impl Emitter<'_> {
         index
             .checked_sub(leading_non_argument_operands)
             .and_then(|parameter| {
-                super::inline_parameters::is_inline_parameter(self.ir, call_expression, parameter)
+                crate::jvm::inline_parameters::is_inline_parameter(
+                    self.ir,
+                    call_expression,
+                    parameter,
+                )
             })
             .ok_or("a lambda argument has no published parameter modifier and declared type")
     }
