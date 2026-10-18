@@ -93,13 +93,22 @@ impl Checker<'_> {
     /// Meet a mutable local's declaration marks with those of its replacement value. The ordinary
     /// data-flow engine owns whether the write executes and the current flow type; this sidecar
     /// retains only the enhancement positions shared by every live value stored in the inferred
-    /// declaration. A differently typed subtype cannot align its argument positions with the
-    /// declaration without a checked supertype projection, and a compound write has no checked
-    /// replacement value of the local's type; both conservatively invalidate the sidecar fact.
+    /// declaration. A differently typed subtype is aligned through its checked supertype view; a
+    /// compound write has no checked replacement value of the local's type and conservatively
+    /// invalidates the sidecar fact.
     pub(super) fn update_enhanced_local(&mut self, local: &Local, value: Option<ExprId>) {
         let assigned = value
-            .filter(|value| self.expr_types[value.0 as usize] == local.declared_ty)
-            .map(|value| self.value_enhancement(value).declared())
+            .and_then(|value| {
+                let actual = self.expr_types[value.0 as usize];
+                let marks = self.value_enhancement(value);
+                if actual == local.declared_ty {
+                    return Some(marks.declared());
+                }
+                let declared = local.declared_ty.non_null();
+                let owner = declared.kotlin_class_internal()?;
+                let (view, marks) = self.supertype_view(actual, &marks, owner)?;
+                (view == declared).then(|| marks.declared())
+            })
             .unwrap_or_default();
         let retained = matches!(local.origin, ReceiverFnValueOrigin::Local)
             .then(|| self.enhanced_locals.declarations.get(&local.flow_identity))
