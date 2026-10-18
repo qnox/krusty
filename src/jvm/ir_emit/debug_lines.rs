@@ -198,15 +198,21 @@ impl Emitter<'_> {
         }
         // An `@InlineOnly` expansion's lambda marker separates the call's line from a lambda body
         // starting on that same line with the target's synthetic inline line (kotlinc's
-        // `mapSyntheticLineNumber(1)`, recorded as `fake.kt`).
+        // `mapSyntheticLineNumber(1)`, recorded as `fake.kt`). Inside a copied inline body it is
+        // the outermost call's, as every other line of the copy is.
         if self.ir.inline_synthetic_lines.contains(&expression) {
             let claimable = u16::try_from(self.ir.source_line_count)
                 .unwrap_or(u16::MAX)
                 .max(1);
+            let call_site = self
+                .ir
+                .inline_copy_provenance(expression)
+                .and_then(|provenance| provenance.iter().rev().find_map(|frame| frame.call_line))
+                .map(|line| u16::try_from(line).unwrap_or(u16::MAX));
             if let Some(synthetic) = self
                 .cw
                 .source_map_for_inlining(claimable)
-                .and_then(|map| map.map_synthetic_line(1))
+                .and_then(|map| map.map_synthetic_line(1, call_site))
             {
                 return u32::from(synthetic);
             }

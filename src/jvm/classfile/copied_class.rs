@@ -135,6 +135,7 @@ impl ClassWriter {
             stackmap: None,
             signature,
             lnt: Vec::new(),
+            source_map: None,
             lvt: Vec::new(),
             visible_anns,
             invisible_anns,
