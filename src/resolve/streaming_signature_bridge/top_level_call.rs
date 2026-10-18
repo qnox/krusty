@@ -27,6 +27,102 @@ pub(super) enum SelectedTopLevelCall {
 
 pub(super) type SelectedAlias = Option<Box<crate::libraries::AliasExpansion>>;
 
+impl super::ProductionSignatureSemantics<'_> {
+    pub(super) fn constructor_argument_mapping(
+        candidate: &crate::libraries::LibraryMember,
+        source_indices: &[usize],
+        names: &[Option<String>],
+        trailing_lambda: bool,
+    ) -> Option<(Vec<Option<usize>>, Vec<usize>)> {
+        let slots = crate::libraries::map_call_args(
+            source_indices,
+            Some(names),
+            &candidate.call_sig.param_names,
+            candidate.params.len(),
+            candidate.call_sig.required,
+            &candidate.call_sig.param_defaults,
+            candidate.call_sig.vararg_index,
+            trailing_lambda,
+        )
+        .ok()?;
+        let parameter_by_argument = source_indices
+            .iter()
+            .map(|source| {
+                slots
+                    .iter()
+                    .position(|slot| slot == &Some(*source))
+                    .or(candidate.call_sig.vararg_index)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some((slots, parameter_by_argument))
+    }
+
+    /// Select a constructor from source-ordered positional arguments, then retain the argument map
+    /// of that exact declaration. Named/default/trailing calls first use their common unambiguous
+    /// mapping; positional vararg overloads remain candidate-specific until overload selection.
+    pub(super) fn selected_constructor_arguments(
+        resolver: &crate::symbol_resolver::SymbolResolver<'_>,
+        classifier: crate::types::TypeName,
+        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+        trailing_lambda: bool,
+        type_arguments: &[crate::types::Ty],
+    ) -> Option<(
+        crate::symbol_resolver::SelectedConstructorDeclaration,
+        MappedConstructorArguments,
+    )> {
+        let positional =
+            !trailing_lambda && arguments.iter().all(|argument| argument.name.is_none());
+        let selection_arguments = if positional {
+            MappedConstructorArguments::mapped(
+                arguments.iter().map(Self::call_argument_kind).collect(),
+                arguments.iter().map(|argument| argument.ty.get()).collect(),
+                (0..arguments.len())
+                    .map(|parameter| {
+                        Some(
+                            u32::try_from(parameter)
+                                .expect("a constructor parameter ordinal must fit u32"),
+                        )
+                    })
+                    .collect(),
+            )
+        } else {
+            Self::mapped_constructor_arguments(resolver, classifier, arguments, trailing_lambda)?
+        };
+        let selected = resolver.select_constructor_declaration_with_type_arguments(
+            classifier,
+            &selection_arguments.kinds,
+            type_arguments,
+        )?;
+        let source_indices = (0..arguments.len()).collect::<Vec<_>>();
+        let names = arguments
+            .iter()
+            .map(|argument| argument.name.map(str::to_owned))
+            .collect::<Vec<_>>();
+        let (_, parameter_by_argument) = Self::constructor_argument_mapping(
+            &selected.declaration,
+            &source_indices,
+            &names,
+            trailing_lambda,
+        )?;
+        let parameter_by_argument = parameter_by_argument
+            .into_iter()
+            .map(|parameter| {
+                Some(
+                    u32::try_from(parameter).expect("a constructor parameter ordinal must fit u32"),
+                )
+            })
+            .collect();
+        Some((
+            selected,
+            MappedConstructorArguments::mapped(
+                selection_arguments.kinds,
+                selection_arguments.types,
+                parameter_by_argument,
+            ),
+        ))
+    }
+}
+
 /// Constructor arguments in the exact parameter order supplied to overload selection, together
 /// with the source-slot mapping that produced that order. Publication consumes this retained map;
 /// it never reruns argument mapping against the selected declaration.

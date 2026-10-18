@@ -1194,27 +1194,12 @@ impl ProductionSignatureSemantics<'_> {
             .constructors
             .iter()
             .filter_map(|candidate| {
-                let slots = crate::libraries::map_call_args(
+                Self::constructor_argument_mapping(
+                    candidate,
                     &source_indices,
-                    Some(&names),
-                    &candidate.call_sig.param_names,
-                    candidate.params.len(),
-                    candidate.call_sig.required,
-                    &candidate.call_sig.param_defaults,
-                    candidate.call_sig.vararg_index,
+                    &names,
                     trailing_lambda,
                 )
-                .ok()?;
-                let parameter_by_argument = source_indices
-                    .iter()
-                    .map(|source| {
-                        slots
-                            .iter()
-                            .position(|slot| slot == &Some(*source))
-                            .or(candidate.call_sig.vararg_index)
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                Some((slots, parameter_by_argument))
             })
             .collect::<Vec<_>>();
         mappings.sort_unstable();

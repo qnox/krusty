@@ -19657,7 +19657,7 @@ impl<'a> Checker<'a> {
                                         inferred.lower,
                                         inferred.upper,
                                     );
-                                    self.merge_postponed_lambda(
+                                    self.merge_postponed_function_argument(
                                         a,
                                         checked,
                                         &mut postponed_constraints,
@@ -20030,7 +20030,7 @@ impl<'a> Checker<'a> {
                                     inferred.lower,
                                     inferred.upper,
                                 );
-                                let checked = self.merge_postponed_lambda(
+                                let checked = self.merge_postponed_function_argument(
                                     a,
                                     checked,
                                     &mut postponed_constraints,
@@ -20143,32 +20143,60 @@ impl<'a> Checker<'a> {
                         let expected_callable = expected_parameter
                             .and_then(|parameter| self.functional_parameter_shape(parameter));
                         if matches!(self.file.expr(a), Expr::CallableRef { .. }) {
-                            if let Some(Ty::Fun(_)) = expected_callable {
-                                let postponed_reference =
-                                    sig.generic_sig.as_ref().is_some_and(|generic| {
-                                        generic.formals.iter().any(|formal| {
-                                            !known_generic_bindings.contains_key(formal)
-                                                && ty_mentions_param(
-                                                    expected_callable
-                                                        .expect("callable expectation"),
-                                                    std::slice::from_ref(formal),
-                                                )
-                                        })
-                                    });
+                            if let Some(expected_callable @ Ty::Fun(_)) = expected_callable {
+                                let postponed_formals = sig
+                                    .generic_sig
+                                    .as_ref()
+                                    .map(|generic| {
+                                        generic
+                                            .formals
+                                            .iter()
+                                            .filter(|formal| {
+                                                !known_generic_bindings.contains_key(*formal)
+                                            })
+                                            .cloned()
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default();
+                                let (instantiated_expectation, collect_postponed) =
+                                    PostponedCallConstraints::enter_for_type(
+                                        &mut self.postponed_call_constraints,
+                                        self.compilation_id,
+                                        self.file_index,
+                                        call,
+                                        &postponed_formals,
+                                        expected_callable,
+                                    );
                                 let diagnostic_mark =
-                                    postponed_reference.then_some(self.diags.diags.len());
-                                let checked = self.expr_expected(
-                                    scope,
-                                    a,
-                                    expected_callable.expect("callable expectation"),
-                                );
+                                    collect_postponed.then_some(self.diags.diags.len());
+                                let checked =
+                                    self.expr_expected(scope, a, instantiated_expectation);
                                 if let Some(mark) = diagnostic_mark {
                                     self.postponed_diagnostics
                                         .capture_since(a, self.diags, mark);
                                 }
-                                let semantic_checked = self
+                                let mut semantic_checked = self
                                     .expression_function_type(scope, a, checked)
                                     .unwrap_or(checked);
+                                if collect_postponed {
+                                    let frame = self
+                                        .postponed_call_constraints
+                                        .pop()
+                                        .expect("postponed callable-reference binding frame");
+                                    semantic_checked = self.merge_postponed_function_argument(
+                                        a,
+                                        semantic_checked,
+                                        &mut postponed_constraints,
+                                        frame,
+                                    );
+                                    postponed_constraints.constrain_callable_reference(
+                                        &self.fed_source(),
+                                        a,
+                                        &postponed_formals,
+                                        expected_callable,
+                                        semantic_checked,
+                                    );
+                                }
                                 if let Some(generic) = sig.generic_sig.as_ref() {
                                     if let Some(&declared_parameter) = generic.params.get(pi) {
                                         let argument = CallArgKind::CallableReference {
@@ -20352,7 +20380,7 @@ impl<'a> Checker<'a> {
                                     inferred.lower,
                                     inferred.upper,
                                 );
-                                self.merge_postponed_lambda(
+                                self.merge_postponed_function_argument(
                                     a,
                                     checked,
                                     &mut postponed_constraints,
@@ -61019,11 +61047,18 @@ impl<'a> Checker<'a> {
             Some(Ty::Fun(function)) => Some(function),
             _ => None,
         };
+        let mut postponed_outer = false;
         let expected_constructor_params = expected_function.and_then(|function| {
             let source_parameters = if outer.is_some() && !outer_is_bound {
                 let (&actual_outer, rest) = function.params.split_first()?;
-                self.receiver_is_assignable(actual_outer, outer?)
-                    .then_some(rest)?
+                let natural_outer = outer?;
+                if !self.receiver_is_assignable(actual_outer, natural_outer) {
+                    if !self.postponed_assignability_trial(natural_outer, actual_outer) {
+                        return None;
+                    }
+                    postponed_outer = true;
+                }
+                rest
             } else {
                 &function.params[..]
             };
@@ -61199,6 +61234,7 @@ impl<'a> Checker<'a> {
                 self.expr_types.get(receiver.0 as usize).copied()
             }
             ConstructorReferenceOuter::Implicit(receiver) => Some(receiver.ty),
+            ConstructorReferenceOuter::Unbound if postponed_outer => outer,
             ConstructorReferenceOuter::Unbound => expected_function
                 .and_then(|function| outer.and_then(|_| function.params.first().copied()))
                 .or(outer),
@@ -61222,7 +61258,22 @@ impl<'a> Checker<'a> {
             result
         };
         let signature = match expected_function {
-            Some(expected) => Ty::fun(expected.params.clone(), result),
+            Some(expected) => {
+                let mut parameters = expected.params.clone();
+                if postponed_outer {
+                    if let (Some(parameter), Some(natural_outer)) = (parameters.first_mut(), outer)
+                    {
+                        *parameter = natural_outer;
+                    }
+                }
+                Ty::fun_with_shape(
+                    parameters,
+                    result,
+                    expected.context_count,
+                    expected.has_receiver,
+                    expected.suspend,
+                )
+            }
             None => {
                 let mut parameters = if outer_is_bound {
                     Vec::new()

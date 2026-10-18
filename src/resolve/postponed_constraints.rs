@@ -628,10 +628,11 @@ impl Checker<'_> {
         prior_solutions
     }
 
-    /// Close one lambda's call-owned inference namespace. Its collected constraints and its checked
-    /// function type cross the call boundary together; allowing only the constraints through would
-    /// leave the argument carrying temporary identities into final overload selection.
-    pub(super) fn merge_postponed_lambda(
+    /// Close one function argument's call-owned inference namespace. Its collected constraints and
+    /// its checked function type cross the call boundary together; allowing only the constraints
+    /// through would leave the argument carrying temporary identities into final overload
+    /// selection.
+    pub(super) fn merge_postponed_function_argument(
         &mut self,
         expression: ExprId,
         checked: Ty,
@@ -714,6 +715,37 @@ impl Checker<'_> {
         self.postponed_call_constraints
             .iter()
             .any(|constraints| constraints.mentions_formal(ty))
+    }
+
+    /// Test one symbolic assignability relation against cloned postponed-call frames. Selection
+    /// may use the answer, but only the ordinary argument-commit path may publish the constraints.
+    pub(super) fn postponed_assignability_trial(&self, expected: Ty, actual: Ty) -> bool {
+        if !(self.postponed_call_mentions(expected) || self.postponed_call_mentions(actual))
+            || !self.postponed_argument_constraint_is_satisfiable(expected, actual)
+        {
+            return false;
+        }
+        let source = self.fed_source();
+        let inferred = crate::symbol_resolver::collect_assignability_constraints_from_symbols(
+            &source, expected, actual,
+        );
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
+        let mut shadowed = crate::fx_hash::HashSet::default();
+        for constraints in self.postponed_call_constraints.iter().rev() {
+            let mut trial = constraints.clone();
+            trial.constrain_assignable(&source, expected, actual, &inferred, &shadowed);
+            for formal in &trial.formals {
+                if !shadowed.contains(formal) {
+                    if let Some(solution) = self.postponed_solution(&trial, formal) {
+                        bindings.insert(formal.clone(), solution);
+                    }
+                }
+            }
+            shadowed.extend(constraints.formals.iter().cloned());
+        }
+        let expected = crate::symbol_resolver::ty_subst_keep_unbound(expected, &bindings);
+        let actual = crate::symbol_resolver::ty_subst_keep_unbound(actual, &bindings);
+        self.receiver_is_assignable(actual, expected)
     }
 
     /// Defer an unresolved member on a still-symbolic postponed lambda input. The call solution

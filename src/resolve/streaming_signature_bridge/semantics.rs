@@ -1474,19 +1474,14 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 }
                 if let Some((declaration, selected_argument_types)) = self
                     .with_resolver(scope, |resolver| {
-                        let arguments = Self::mapped_constructor_arguments(
+                        Self::selected_constructor_arguments(
                             resolver,
                             internal,
                             arguments,
                             trailing_lambda,
-                        )?;
-                        resolver
-                            .select_constructor_declaration_with_type_arguments(
-                                internal,
-                                &arguments.kinds,
-                                &resolved_type_arguments,
-                            )
-                            .map(|declaration| (declaration, arguments.types))
+                            &resolved_type_arguments,
+                        )
+                        .map(|(declaration, arguments)| (declaration, arguments.types))
                     })
                     .ok()
                 {
@@ -1885,19 +1880,14 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             if self.classifier_source_spelling(classifier) == spelling {
                 if let Some((declaration, selected_argument_types)) = self
                     .with_resolver(scope, |resolver| {
-                        let arguments = Self::mapped_constructor_arguments(
+                        Self::selected_constructor_arguments(
                             resolver,
                             classifier,
                             arguments,
                             trailing_lambda,
-                        )?;
-                        resolver
-                            .select_constructor_declaration_with_type_arguments(
-                                classifier,
-                                &arguments.kinds,
-                                &resolved_type_arguments,
-                            )
-                            .map(|declaration| (declaration, arguments.types))
+                            &resolved_type_arguments,
+                        )
+                        .map(|(declaration, arguments)| (declaration, arguments.types))
                     })
                     .ok()
                 {
@@ -2107,17 +2097,14 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     argument_types.clone(),
                 ));
             }
-            let constructor_arguments = Self::mapped_constructor_arguments(
+            let selected_constructor = Self::selected_constructor_arguments(
                 resolver,
                 internal,
                 arguments,
                 trailing_lambda,
-            )?;
-            if let Some(declaration) = resolver.select_constructor_declaration_with_type_arguments(
-                internal,
-                &constructor_arguments.kinds,
                 &resolved_type_arguments,
-            ) {
+            );
+            if let Some((declaration, constructor_arguments)) = selected_constructor {
                 let parameter_by_argument = constructor_arguments.parameter_by_argument();
                 return Some((
                     SelectedTopLevelCall::Constructor {
