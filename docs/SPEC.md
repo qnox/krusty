@@ -13887,6 +13887,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
       types as `Cls` and `part1<Int>.part2.part3.Outer<String>.Inner` keeps its captured
       `String`. A declaration type finalized in Pass 1 is checked where its occurrence is
       published. (`tests/package_qualifier_type_arguments_e2e.rs`.)
+  - `ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier` (KTLC-396, 2.4.20 onward): a
+    package qualifier in expression position (`src/resolve/package_qualifier_forms.rs`). A type
+    reference is unaffected; its package-segment arguments stay with `ForbidUselessTypeArgumentsIn25`.
+    - With the feature, a segment written with annotations or explicit type arguments
+      (`(@Ann pkg).f()`, `pkg<Int>.sub.Obj.x`) cannot name a package (kotlinc's
+      `canBePackagePartOfQualifier`): the left-to-right qualifier walk fails there and reports
+      "unresolved reference '<segment>'." at that segment's name. A segment naming a classifier is
+      unaffected.
+    - Parentheses leave no AST node; the parser keeps each wrapped expression's outermost
+      parentheses (`File::parenthesized_expression_spans`). The outermost parenthesized prefix of
+      an accessed qualifier that binds a package (`(pkg).f()`, `((pkg).sub).Obj.x`,
+      `((pkg).sub.Cls).f()` at `(pkg)`, `(pkg).sub.p = v`) is reported once at those parentheses:
+      "wrapping package qualifiers in parentheses is not allowed.", an error with the feature and a
+      deprecation warning (`PARENTHESIZED_PACKAGE_QUALIFIER_WARNING`) without it.
+    - Without the feature, a type-argument list on a package segment that a later package segment
+      follows, in a qualifier that then reaches a classifier (`pkg<Int>.sub.Obj.x`), is the
+      deprecation warning "type arguments are not allowed for packages."
+      (`TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING`), once at the leftmost list. A
+      parenthesized package prefix is reported instead of it. A list on the last package segment,
+      or on a qualifier that ends in a package or a value, is kotlinc's
+      `TYPE_ARGUMENTS_FOR_OUTER_CLASS_WHEN_NESTED_REFERENCED` / `TYPE_ARGUMENTS_NOT_ALLOWED` error,
+      and none of these deprecations; krusty does not report those errors yet.
+    - A release without the feature (2.4.0, 2.4.10) reports none of these.
+    (`tests/package_qualifier_forms_e2e.rs`.)
   - `ErrorAboutDataClassCopyVisibilityChange`: a `data class` whose primary constructor is not
     public is reported at the constructor's visibility modifier unless it is annotated
     `@ConsistentCopyVisibility` or `@ExposedCopyVisibility`, and a call or callable reference to its

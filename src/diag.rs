@@ -33,7 +33,9 @@ pub enum CompilerWarningName {
     Deprecation,
     ExplicitTypeArgumentsInPropertyAccess,
     InapplicableOperatorModifier,
+    ParenthesizedPackageQualifier,
     TypeArgumentsNotAllowed,
+    TypeArgumentsNotAllowedInPackageQualifier,
     WrongNumberOfTypeArgumentsInGetClass,
     ValueClassCannotBeRecursiveViaTypeParameters,
 }
@@ -51,7 +53,11 @@ impl CompilerWarningName {
                 "EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING"
             }
             Self::InapplicableOperatorModifier => "INAPPLICABLE_OPERATOR_MODIFIER_WARNING",
+            Self::ParenthesizedPackageQualifier => "PARENTHESIZED_PACKAGE_QUALIFIER_WARNING",
             Self::TypeArgumentsNotAllowed => "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING",
+            Self::TypeArgumentsNotAllowedInPackageQualifier => {
+                "TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING"
+            }
             Self::WrongNumberOfTypeArgumentsInGetClass => {
                 "WRONG_NUMBER_OF_TYPE_ARGUMENTS_IN_GET_CLASS_WARNING"
             }
@@ -73,7 +79,11 @@ impl CompilerWarningName {
                 Self::ExplicitTypeArgumentsInPropertyAccess
             }
             "INAPPLICABLE_OPERATOR_MODIFIER_WARNING" => Self::InapplicableOperatorModifier,
+            "PARENTHESIZED_PACKAGE_QUALIFIER_WARNING" => Self::ParenthesizedPackageQualifier,
             "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING" => Self::TypeArgumentsNotAllowed,
+            "TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING" => {
+                Self::TypeArgumentsNotAllowedInPackageQualifier
+            }
             "WRONG_NUMBER_OF_TYPE_ARGUMENTS_IN_GET_CLASS_WARNING" => {
                 Self::WrongNumberOfTypeArgumentsInGetClass
             }
@@ -98,7 +108,9 @@ mod warning_name_tests {
             CompilerWarningName::Deprecation,
             CompilerWarningName::ExplicitTypeArgumentsInPropertyAccess,
             CompilerWarningName::InapplicableOperatorModifier,
+            CompilerWarningName::ParenthesizedPackageQualifier,
             CompilerWarningName::TypeArgumentsNotAllowed,
+            CompilerWarningName::TypeArgumentsNotAllowedInPackageQualifier,
             CompilerWarningName::WrongNumberOfTypeArgumentsInGetClass,
             CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
         ];

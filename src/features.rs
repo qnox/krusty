@@ -146,6 +146,7 @@ const MODELED_FEATURES: &[&str] = &[
     "ErrorAboutDataClassCopyVisibilityChange",
     "ExplicitBackingFields",
     "ExplicitContextArguments",
+    "ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier",
     "ForbidArrayOfNothingInLhsOfClassLiteral",
     "ForbidExternalEnumEntriesAndPrimaryConstructorProperties",
     "ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects",

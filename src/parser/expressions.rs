@@ -1333,10 +1333,15 @@ impl Parser<'_> {
                 let e = self.parse_expr();
                 self.skip_newlines();
                 self.expect(TokenKind::RParen, "')'");
+                let close = self.t[self.i.saturating_sub(1)].span;
                 // Parentheses end a safe selector. The index becomes an ordinary subscript of the
                 // nullable safe call, so a later update selects the nullable operator.
                 let e = self.reopen_parenthesized_safe_index(e);
                 self.parenthesized_expressions.insert(e.0);
+                // An enclosing pair is recorded after this one and replaces it.
+                self.file
+                    .parenthesized_expression_spans
+                    .insert(e.0, Span::new(span.lo, close.hi.max(span.hi)));
                 e
             }
             TokenKind::KwIf => self.parse_if(),

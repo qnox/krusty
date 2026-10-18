@@ -49,6 +49,16 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.forbid_useless_type_arguments = features.has("ForbidUselessTypeArgumentsIn25");
     file.useless_type_arguments_warning_format =
         features.deprecation_warning_format("ForbidUselessTypeArgumentsIn25");
+    file.forbid_package_qualifier_forms =
+        features.has("ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier");
+    file.parenthesized_package_qualifier_warning = features.deprecation_warning_message(
+        "ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier",
+        crate::resolve::package_qualifier_forms::PARENTHESIZED,
+    );
+    file.package_qualifier_type_arguments_warning = features.deprecation_warning_message(
+        "ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier",
+        crate::resolve::package_qualifier_forms::TYPE_ARGUMENTS,
+    );
     file.type_arguments_not_allowed_warning = features.deprecation_warning_message(
         "ForbidUselessTypeArgumentsIn25",
         "type arguments are not allowed when static member is accessed.",
@@ -112,6 +122,22 @@ mod tests {
         );
 
         assert_eq!(old.value_class_recursion_via_type_parameters_warning, None);
+        assert_eq!(old.parenthesized_package_qualifier_warning, None);
+        assert_eq!(patch.package_qualifier_type_arguments_warning, None);
+        assert_eq!(
+            current.parenthesized_package_qualifier_warning.as_deref(),
+            Some(
+                "wrapping package qualifiers in parentheses is not allowed. This will become an \
+                 error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-396."
+            )
+        );
+        assert_eq!(
+            current.package_qualifier_type_arguments_warning.as_deref(),
+            Some(
+                "type arguments are not allowed for packages. This will become an error in \
+                 language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-396."
+            )
+        );
         assert_eq!(old.inapplicable_operator_modifier_warning, None);
         assert_eq!(
             old.data_class_copy_visibility_change_warning.as_deref(),

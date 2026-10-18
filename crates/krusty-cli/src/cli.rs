@@ -1593,6 +1593,14 @@ mod tests {
                 "INAPPLICABLE_OPERATOR_MODIFIER_WARNING",
                 krusty::diag::CompilerWarningName::InapplicableOperatorModifier,
             ),
+            (
+                "PARENTHESIZED_PACKAGE_QUALIFIER_WARNING",
+                krusty::diag::CompilerWarningName::ParenthesizedPackageQualifier,
+            ),
+            (
+                "TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING",
+                krusty::diag::CompilerWarningName::TypeArgumentsNotAllowedInPackageQualifier,
+            ),
         ];
         for &(name, _) in NAMES {
             for release in ["2.4.0", "2.4.10"] {

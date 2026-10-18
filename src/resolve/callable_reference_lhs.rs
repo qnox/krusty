@@ -132,7 +132,11 @@ impl Checker<'_> {
                 });
             }
             InheritedNestedClassifier::NotFound => {
-                if self.fed_source().package_exists(TypeName::ROOT, root_name) {
+                if !package_qualifier_forms::segment_cannot_name_a_package(
+                    self.file,
+                    *root_expression,
+                ) && self.fed_source().package_exists(TypeName::ROOT, root_name)
+                {
                     ResolvedQualifier::Package(crate::types::type_name_child(
                         TypeName::ROOT,
                         root_name,
@@ -185,7 +189,11 @@ impl Checker<'_> {
                                 name: segment.clone(),
                             })?;
                         (ResolvedQualifier::Classifier(classifier), alias)
-                    } else if source.package_exists(package, segment) {
+                    } else if !package_qualifier_forms::segment_cannot_name_a_package(
+                        self.file,
+                        *segment_expression,
+                    ) && source.package_exists(package, segment)
+                    {
                         (
                             ResolvedQualifier::Package(crate::types::type_name_child(
                                 package, segment,
