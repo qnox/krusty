@@ -181,6 +181,9 @@ pub struct KotlinFunction {
     pub formals: Vec<KotlinTypeParameter>,
     pub param_names: Vec<String>,
     pub param_defaults: Vec<bool>,
+    /// The exact `crossinline`/`noinline` modifier of each leading context and regular value
+    /// parameter. An extension receiver is not a value parameter and has no entry here.
+    pub inline_modifiers: Vec<crate::types::InlineParameterModifier>,
     pub vararg: Option<usize>,
     pub visibility: Visibility,
     /// Always [`KotlinModality::Final`] for a top-level function.

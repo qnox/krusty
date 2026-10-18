@@ -966,6 +966,7 @@ struct SemanticValueParameter {
     ty: metadata::KotlinType,
     name: String,
     has_default: bool,
+    inline_modifier: crate::types::InlineParameterModifier,
     is_vararg: bool,
 }
 
@@ -1005,10 +1006,12 @@ fn semantic_value_parameter(
             "value-parameter equality bound",
         )?;
     }
+    let declared = crate::metadata::DeclaredValueParameter::of_flags(parameter.flags);
     Ok(SemanticValueParameter {
         ty,
         name,
-        has_default: parameter.flags & (1 << 1) != 0,
+        has_default: declared.declares_default,
+        inline_modifier: declared.inline_modifier,
         is_vararg: parameter.vararg_elem_body.is_some() || parameter.vararg_elem_id.is_some(),
     })
 }
@@ -1277,6 +1280,7 @@ fn semantic_function(
     let mut top_params = Vec::new();
     let mut param_names = Vec::new();
     let mut param_defaults = Vec::new();
+    let mut inline_modifiers = Vec::new();
     let mut vararg = None;
     let mut context_receivers = Vec::new();
     for body in &function.context_receiver_bodies {
@@ -1304,6 +1308,7 @@ fn semantic_function(
                     ty,
                     String::new(),
                     false,
+                    crate::types::InlineParameterModifier::None,
                     crate::types::ContextParameterKind::LegacyReceiver,
                 )
             })
@@ -1317,7 +1322,13 @@ fn semantic_function(
             .into_iter()
             .map(|parameter| {
                 let kind = context_parameter_kind(&parameter.name);
-                (parameter.ty, parameter.name, parameter.has_default, kind)
+                (
+                    parameter.ty,
+                    parameter.name,
+                    parameter.has_default,
+                    parameter.inline_modifier,
+                    kind,
+                )
             })
             .collect()
     } else {
@@ -1327,16 +1338,17 @@ fn semantic_function(
     };
     let context_types = contexts
         .iter()
-        .map(|(ty, _, _, _)| ty.clone())
+        .map(|(ty, _, _, _, _)| ty.clone())
         .collect::<Vec<_>>();
     let context_kinds = contexts
         .iter()
-        .map(|(_, _, _, kind)| *kind)
+        .map(|(_, _, _, _, kind)| *kind)
         .collect::<Vec<_>>();
-    for (ty, name, has_default, _) in contexts {
+    for (ty, name, has_default, inline_modifier, _) in contexts {
         top_params.push(ty);
         param_names.push(name);
         param_defaults.push(has_default);
+        inline_modifiers.push(inline_modifier);
     }
     let value_bodies = message_bodies(body, 6, "function declaration")?;
     if value_bodies.len() != function.value_params.len() {
@@ -1355,6 +1367,7 @@ fn semantic_function(
         top_params.push(parameter.ty);
         param_names.push(parameter.name);
         param_defaults.push(parameter.has_default);
+        inline_modifiers.push(parameter.inline_modifier);
     }
     let has_companion_receiver =
         function.companion_receiver_body.is_some() || function.companion_receiver_type_id.is_some();
@@ -1419,6 +1432,7 @@ fn semantic_function(
         formals,
         param_names,
         param_defaults,
+        inline_modifiers,
         vararg,
         visibility: function.visibility,
         modality: function.modality,
@@ -2351,6 +2365,16 @@ mod tests {
         package
     }
 
+    fn value_parameter(name: u64, ty: &[u8], flags: u64) -> Vec<u8> {
+        let mut parameter = Vec::new();
+        if flags != 0 {
+            int_field(&mut parameter, 1, flags);
+        }
+        int_field(&mut parameter, 2, name);
+        bytes_field(&mut parameter, 3, ty);
+        parameter
+    }
+
     fn exact_error(bytes: &[u8]) -> (usize, String) {
         let error = parse_package_fragment_checked(bytes)
             .err()
@@ -2373,6 +2397,32 @@ mod tests {
         assert_eq!(package.functions.len(), 1);
         assert_eq!(package.functions[0].ret.internal(), Some("kotlin/String"));
         assert!(package.functions[0].ret.nullable());
+    }
+
+    #[test]
+    fn context_and_value_parameter_inline_modifiers_are_retained_exactly() {
+        use crate::types::InlineParameterModifier::{Crossinline, Noinline, None};
+
+        let (strings, qnames) = kotlin_types(&["Unit"]);
+        let unit = class_type(1);
+        let mut function = function_with_return(Some(&unit), None);
+        // A defaulted crossinline context parameter, followed by plain and noinline values.
+        bytes_field(
+            &mut function,
+            13,
+            &value_parameter(1, &unit, (1 << 1) | (1 << 2)),
+        );
+        bytes_field(&mut function, 6, &value_parameter(1, &unit, 0));
+        bytes_field(&mut function, 6, &value_parameter(1, &unit, 1 << 3));
+        let bytes = fragment(&strings, &qnames, &package_with_function(&function, None));
+
+        let package = parse_package_fragment_checked(&bytes).expect("valid parameter modifiers");
+        let [function] = package.functions.as_slice() else {
+            panic!("one function is decoded")
+        };
+        assert_eq!(function.param_defaults, [true, false, false]);
+        assert_eq!(function.inline_modifiers, [Crossinline, None, Noinline]);
+        assert_eq!(function.context_count, 1);
     }
 
     #[test]

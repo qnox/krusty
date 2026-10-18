@@ -27,6 +27,7 @@ fn function(name: &str, receiver: Option<KotlinType>, params: Vec<KotlinType>) -
         receiver,
         param_names: vec!["value".to_owned(); params.len()],
         param_defaults: vec![false; params.len()],
+        inline_modifiers: vec![crate::types::InlineParameterModifier::None; params.len()],
         params,
         ret: class("kotlin/Unit", false),
         formals: Vec::new(),
@@ -410,6 +411,38 @@ fn a_top_level_function_publishes_its_return_value_status() {
     assert_eq!(
         answer.flags.return_value_status,
         Some(crate::types::ReturnValueStatus::MustUse)
+    );
+}
+
+#[test]
+fn a_klib_function_publishes_context_and_value_inline_modifiers() {
+    use crate::types::InlineParameterModifier::{Crossinline, Noinline, None};
+
+    let mut declaration = function(
+        "invoke",
+        None,
+        vec![
+            class("kotlin/Function0", false),
+            class("kotlin/Function0", false),
+            class("kotlin/Function0", false),
+        ],
+    );
+    declaration.is_inline = true;
+    declaration.context_count = 1;
+    declaration.context_kinds = vec![ContextParameterKind::Named];
+    declaration.inline_modifiers = vec![Crossinline, None, Noinline];
+    let libraries =
+        KlibLibraries::from_packages(vec![(segments(&["p"]), package_of(vec![declaration]))])
+            .expect("the function is signable");
+
+    let function = single_function(&libraries, "p", "invoke");
+    assert_eq!(
+        function.call_sig.inline_modifiers,
+        [Crossinline, None, Noinline]
+    );
+    assert_eq!(
+        function.callable.inline_modifiers.as_ref(),
+        [Crossinline, None, Noinline]
     );
 }
 

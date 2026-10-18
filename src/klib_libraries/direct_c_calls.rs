@@ -98,6 +98,7 @@ mod tests {
             formals: Vec::new(),
             param_names: vec!["value".to_owned()],
             param_defaults: vec![false],
+            inline_modifiers: vec![crate::types::InlineParameterModifier::None],
             vararg: None,
             visibility: Visibility::Public,
             modality: KotlinModality::Final,

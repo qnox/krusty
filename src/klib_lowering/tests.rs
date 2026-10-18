@@ -507,6 +507,7 @@ fn coerce_declaration() -> KotlinFunction {
         formals: Vec::new(),
         param_names: vec!["minimumValue".to_owned()],
         param_defaults: vec![false],
+        inline_modifiers: vec![crate::types::InlineParameterModifier::None],
         vararg: None,
         visibility: Visibility::Public,
         modality: crate::metadata::semantic::KotlinModality::Final,
