@@ -63730,7 +63730,8 @@ impl<'a> Checker<'a> {
                 scope,
                 call,
                 args,
-                &shape,
+                &shape.parameter_indices,
+                &shape.call_sig,
                 signature,
                 &visible_params,
             );

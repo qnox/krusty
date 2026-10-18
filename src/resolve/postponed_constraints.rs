@@ -550,7 +550,8 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         call: ExprId,
         arguments: &[ExprId],
-        shape: &ContextualCallShape,
+        declaration_parameter_by_visible: &[usize],
+        call_sig: &CallSig,
         generic: &crate::libraries::GenericSig,
         applied_parameters: &[Ty],
     ) {
@@ -560,7 +561,7 @@ impl Checker<'_> {
             applied_parameters.len(),
             argument_names,
             self.file.call_has_trailing_lambda.contains(&call.0),
-            &shape.call_sig,
+            call_sig,
         ) else {
             return;
         };
@@ -568,7 +569,7 @@ impl Checker<'_> {
             scope,
             arguments,
             &visible_parameter_by_argument,
-            &shape.parameter_indices,
+            declaration_parameter_by_visible,
             generic,
             applied_parameters,
         );
