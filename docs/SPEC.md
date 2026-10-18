@@ -1261,6 +1261,45 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   realization; kotlinc rejects those sources outright), instance (constructor-property) `@JvmField`,
   and `@JvmField` on a named `object`'s properties, which keeps the previous private-static +
   accessor realization.
+- **`@JvmStatic` on source functions.** Measured against kotlinc 2.4.20. The annotation is read
+  only from its resolved identity (`kotlin/jvm/JvmStatic`, retained in `function_annotations` or a
+  module callable's header annotations); the frontend records it and the JVM backend alone places
+  the method. A NAMED OBJECT member becomes `public static final` on the object (`private static
+  final` when private): the common IR keeps the receiver as value 0 and the emitter reads it as
+  `getstatic INSTANCE`, so a property read in the body is `getstatic INSTANCE; pop; getstatic
+  field`. Its `$default` stub is static with no receiver and `invokestatic`s the member. Calls are
+  `invokestatic`, both in-file and across sibling source files: an inert receiver (the singleton
+  read, a local) is dropped, and any other receiver is evaluated and popped, including on a
+  sibling-file call that leaves a default argument out and so `invokestatic`s the `$default`
+  stub. A private member
+  reached from a nested class goes through a receiverless `access$<name>`. A COMPANION member
+  stays an instance method of `C$Companion`, and its callers still go through the companion
+  instance. The outer class (`C`, or an interface, where the bridge is `public static` and not
+  final) gains a `static final` bridge, `getstatic Companion; <args>; invokevirtual`. The bridge
+  carries the member's generic signature, nullability, parameter annotations, and every
+  declaration annotation (`@JvmStatic` and user annotations such as a test framework's
+  `@BeforeAll`). It has no parameter checks, and its only line is the member's end line. It sits
+  after the declared members and before the `access$` accessors. A private companion member's
+  bridge is `private static final` and calls the companion's `access$<name>(C$Companion)`. A
+  bridge occupies the outer class's method namespace, so a bridge and an outer member with the
+  same JVM signature are a platform declaration clash. The clash is reported at both
+  declarations, which are listed in source order, as kotlinc lists them. Byte
+  divergences that remain, all with kotlinc's runtime behaviour: a lambda that captures `this`
+  in an object's static member captures `INSTANCE`; an inline lambda spliced into a static member
+  emits its `getstatic INSTANCE; pop` early; a same-file `@JvmStatic inline` call stores the
+  singleton in a receiver local. A `@JvmStatic suspend inline` object member keeps both its
+  state machine and its private `$$forInline` copy static, and its continuation re-enters it
+  with `invokestatic` and captures no `this$0`. The frontend checks where the annotation may
+  stand, reading the resolved identity and reporting at the annotation as kotlinc does. A
+  function outside a named object or a companion is rejected with "only members in named objects
+  and companion objects can be annotated with '@JvmStatic'.". That covers top-level, local,
+  ordinary-class, interface, anonymous-object and enum-entry-body functions. A non-public member
+  of an interface's companion is rejected with "only public members in interface companion
+  objects can be annotated with '@JvmStatic'.". An `override` in a named object is rejected with
+  "override member cannot be '@JvmStatic' in an object."; an `override` in a companion is
+  allowed. The backend never sees an invalid placement.
+  Tests: `tests/jvm_static_functions_e2e.rs` (class-by-class comparison with kotlinc, plus
+  run and reflection checks).
 - **`@Metadata` writer — the CLASS round-trip (a `@Metadata` on every emitted class, not just the
   facade).** A file facade's `@Metadata` describes that file's TOP-LEVEL declarations only, so krusty
   used to emit nothing at all for a CLASS — and a krusty-compiled class was therefore unreadable by

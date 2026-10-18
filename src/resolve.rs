@@ -107,6 +107,7 @@ pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod contract_declarations;
 mod contract_effects;
 mod declaration_rendering;
+mod declaration_rules;
 mod declaration_usage;
 mod dependency_platform;
 mod deprecation_phase;
@@ -275,7 +276,6 @@ mod streaming_signature_tests;
 mod super_calls;
 pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
-mod tailrec_declarations;
 mod type_join;
 mod type_parameter_owners;
 mod upper_bound_violations;
@@ -34316,7 +34316,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             continue;
         }
         match file.decl(d) {
-            Decl::Fun(f) => c.check_top_level_fun(scope, f, d),
+            Decl::Fun(f) => c.check_top_level_function(scope, f, d),
             Decl::Class(cl) => {
                 let policy_depth = c.push_classifier_owner_policies(scope, d);
                 c.check_class(scope, cl, d);
@@ -48620,7 +48620,7 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
-        tailrec_declarations::check_members(self.diags, cl);
+        self.check_member_declaration_rules(scope, cl, current_owner, is_anonymous_object);
         // `@JvmField` changes only a target backend's physical property realization, but its Kotlin
         // declaration restrictions are frontend semantics. Validate them from resolved annotation
         // identities and finalized declaration types; the JVM pass may then assume a valid shape.

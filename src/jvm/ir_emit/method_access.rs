@@ -8,7 +8,7 @@ use crate::jvm::classfile::{
 
 use super::{IrExpr, LambdaMode, LambdaModes};
 
-fn jvm_visibility(visibility: crate::types::Visibility) -> u16 {
+pub(super) fn jvm_visibility(visibility: crate::types::Visibility) -> u16 {
     match visibility {
         crate::types::Visibility::Private => ACC_PRIVATE,
         crate::types::Visibility::Protected => ACC_PROTECTED,

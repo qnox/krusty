@@ -62,7 +62,8 @@ pub(super) fn attach_declared_function_debug(
     let assertion_names = crate::jvm::parameter_names::function_assertions(ir, fid, &param_tys);
     let mut locals = Vec::new();
     let mut slot = 0u16;
-    if !function.is_static {
+    // A named object's `@JvmStatic` member is static on the JVM although its declaration is not.
+    if !function.is_static && super::jvm_static_members::singleton_static_owner(ir, fid).is_none() {
         locals.push(("this".to_string(), format!("L{owner};"), 0));
         slot = 1;
     }
