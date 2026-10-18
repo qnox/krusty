@@ -845,6 +845,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`jvm/ir_emit/bytecode_inline_call.rs`). Its slot follows the arguments before the lambda and
   precedes those after it (`jvm/inliner/parameters.rs`). A captured local of another type still takes the byte
   splice. Test: `tests/suspend_reified_inline_lambda_e2e.rs`.
+- **A discarded library suspension result is popped uncast.** A dependency's suspending member
+  returns the erased `Object` in its descriptor, so checked IR reads its declared result through an
+  implicit coercion. A statement call has no consumer for that coercion: the coroutine
+  transformer's resumption join pops the erased result, with no `checkcast` before it, as kotlinc
+  does (`jvm/ir_emit/discarding.rs`). Test: `tests/suspend_result_operands_e2e.rs`.
 - **An inline call's erased-bound result is cast to the member call's receiver class.** A library
   inline function returning a bounded type parameter leaves its bound on the stack (`T : Throwable`
   as `Throwable`); a member call on the result names the substituted class, so kotlinc casts to it
@@ -7589,6 +7594,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   read the singleton. An abstract member carries those declaration annotations on its JVM method, the
   same attribute a concrete member gets. Test:
   `tests/annotation_emission_e2e.rs::singleton_const_expressions_are_annotation_constants`.
+- **An integer constant stored by a `Long` `const val` is a `long` constant.** An integer literal and
+  integer arithmetic adapt to the declared `Long` (`const val TIMEOUT: Long = 60`, `= -60`,
+  `= 60 + 1`), and the payload is the widened value. kotlinc writes `ConstantValue: long 60l`, and so
+  does krusty. It used to write `int 60` on a `J` field, which the JVM rejects at class load
+  ("Inconsistent constant value type"), and to compute `60 + 1` in `<clinit>`. The folded payload's
+  type is the published expression's type, so no conversion is left around it. Checked against
+  kotlinc 2.4.20. Tests: `tests/const_constantvalue_e2e.rs::an_integer_literal_declared_long_is_stored_as_a_long_constant`
+  and `resolve::constant_evaluation::tests::an_integer_literal_declared_long_is_a_long_constant`.
 - **An interface companion's `const val` is stored on both the interface and the companion, except a
   private one.** A class companion moves every const onto the outer class and leaves the companion
   class with no const field. An interface cannot host a private field, so a `private const val` stays
