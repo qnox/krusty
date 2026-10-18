@@ -817,6 +817,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   block do not decline the transformer: the block is one point at its own line. Suspend lambdas
   that read their continuation still take the IR machine (`jvm/suspend/bytecode_machine.rs`,
   `jvm/ir_emit/transformed_suspensions.rs`). Tests: `tests/intrinsic_suspension_probes_e2e.rs`.
+- **A suspension in the lambda of a reified inline call is a point of kotlinc's transformer.**
+  Only the method inliner specializes a reified body, so it places the lambda
+  (`assertFailsWith<E> { fail() }`) and the transformer builds the machine over the inlined body.
+  The placed lambda takes the enclosing function's continuation as one more capture, named
+  `$completion`, and the suspension's markers are written where the lambda's call stands. A
+  suspension in any other spliced body still declines (`jvm/suspend/cps/inline_suspension.rs`,
+  `jvm/ir_emit/bytecode_inline_call/lambda_node.rs`). The machine opens on the declaration's own
+  line, which an expression body on a later line does not move. Tests:
+  `tests/suspend_reified_inline_lambda_e2e.rs`, `tests/suspend_result_operands_e2e.rs`.
+- **An inline call's erased-bound result is cast to the member call's receiver class.** A library
+  inline function returning a bounded type parameter leaves its bound on the stack (`T : Throwable`
+  as `Throwable`); a member call on the result names the substituted class, so kotlinc casts to it
+  first (`jvm/ir_emit/call_operands.rs`). Test: `tests/inline_erased_bound_receiver_e2e.rs`.
 - **A suspend function's result is annotated `@Nullable`.** Its CPS `Object` result is either
   the value or `COROUTINE_SUSPENDED`, so kotlinc annotates it `@Nullable` whatever the declared
   result: a non-null value class, a bare type parameter (otherwise unannotated), or an abstract
@@ -7299,6 +7312,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constants in instruction order: every entry the operands introduce comes first, then the recipe
   string, the `StringConcatFactory` bootstrap handle and the call site. Test:
   `tests/string_concat_pool_order_e2e.rs`.
+- **An `invokedynamic` template argument keeps the slot that produced it.** kotlinc's
+  `makeConcatWithConstants` recipe takes a suspension point's reference result as the `Object` the
+  call returned and a captured `var` as its `ObjectRef.element`, without narrowing either to the
+  declared type. The `StringBuilder` form instead casts both to the `append` overload of that type
+  (`jvm/ir_emit/string_concatenation.rs`). Test: `tests/suspend_result_operands_e2e.rs`.
 - **An annotation instance's implementation class is anonymous, synthetic and enclosed by its
   owner.** kotlinc generates `Owner$annotationImpl$Tag$0` for the class or file facade whose code
   first instantiates `Tag`, as a child of that owner. `InnerClasses` lists it with no outer class
@@ -10430,6 +10448,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/serialization_type_parameter_elements_e2e.rs` (same-file and sibling-file runtime,
   plus `childSerializers`/`deserialize`/`typeParametersSerializers`, `serialize`, `write$Self` and
   child-cache factory bodies, cross-checked against the reference compiler).
+- **`write$Self` opens on the class line at its first instruction.** Every statement of the
+  generated `write$Self` is the class's own declaration, so kotlinc gives each the class's start
+  line: the method opens on it at its first instruction, whether that is the child-serializer cache
+  read, an unconditional element or a default-value guard, and a guard's comparison returns to it.
+  Test: `tests/serialization_generated_debug_e2e.rs::write_self_opens_on_the_class_line_at_its_first_instruction`.
 - **A concrete generic element is cached; a generic class's descriptor and accessor follow
   kotlinc.** `val g: G<Int>` over a same-file generic `@Serializable class G<T>` is serialized by
   `new G.$serializer(IntSerializer.INSTANCE)`, a constructed serializer, so the holder caches it in
