@@ -734,6 +734,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Every release in the kotlin-versions manifest runs on the newest validated Gradle; the
+        # rows below add the older Gradle boundaries.
+        kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
+        gradle: [9.7.0]
+        ksp: [true]
         include:
           # KSP's Gradle plugin does not load on Gradle 7.6 (its build-script metadata is newer than
           # Gradle 7.6's embedded Kotlin compiler reads), so the KSP2 test runs on the other lanes.
@@ -741,12 +746,7 @@ jobs:
           - { kotlin: 2.4.0,  gradle: 9.5.0,  ksp: true }
           - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true }
           - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false }
-          - { kotlin: 2.4.20, gradle: 9.7.0,  ksp: true }
-          # `newest` is the newest release in the kotlin-versions manifest.
-          - { kotlin: newest, gradle: 9.7.0,  ksp: true }
     runs-on: ubuntu-latest
-    env:
-      KOTLIN_GRADLE_PLUGIN: ${{ matrix.kotlin == 'newest' && needs.build-tool-bins.outputs.max || matrix.kotlin }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -770,7 +770,7 @@ jobs:
           path: ${{ runner.temp }}/krusty-gradle-user-home/caches
           # Each matrix lane has a different Gradle/KGP/KSP dependency graph. The generated fixture
           # build scripts live in gradle.rs, while the tested plugin build lives under tools/.
-          key: gradle-integration-${{ runner.os }}-${{ runner.arch }}-${{ matrix.gradle }}-${{ env.KOTLIN_GRADLE_PLUGIN }}-${{ matrix.ksp }}-${{ hashFiles('Cargo.lock', 'crates/krusty-build/src/gradle.rs', 'tools/krusty-gradle/**') }}
+          key: gradle-integration-${{ runner.os }}-${{ runner.arch }}-${{ matrix.gradle }}-${{ matrix.kotlin }}-${{ matrix.ksp }}-${{ hashFiles('Cargo.lock', 'crates/krusty-build/src/gradle.rs', 'tools/krusty-gradle/**') }}
       - uses: actions/download-artifact@v8
         with:
           name: tool-bins
@@ -786,10 +786,10 @@ jobs:
           unzip -q "dist-gradle/krusty-gradle-plugin-$version.zip" -d dist-gradle/unpacked
           echo "KRUSTY_GRADLE_PLUGIN_VERSION=$version" >> "$GITHUB_ENV"
           echo "KRUSTY_GRADLE_PLUGIN_PROJECT=$PWD/dist-gradle/unpacked/krusty-gradle-plugin-$version" >> "$GITHUB_ENV"
-      - name: run Gradle ${{ matrix.gradle }} integration with Kotlin ${{ env.KOTLIN_GRADLE_PLUGIN }}
+      - name: run Gradle ${{ matrix.gradle }} integration with Kotlin ${{ matrix.kotlin }}
         env:
           KRUSTY_GRADLE_TEST_BIN: ${{ github.workspace }}/krusty
-          KRUSTY_GRADLE_KGP_VERSION: ${{ env.KOTLIN_GRADLE_PLUGIN }}
+          KRUSTY_GRADLE_KGP_VERSION: ${{ matrix.kotlin }}
           KRUSTY_GRADLE_VERSION: ${{ matrix.gradle }}
           # Keep Gradle's mutable Kotlin DSL workspace out of the checkout. A later archive of the
           # workspace must not retain a script directory without its metadata.bin.

@@ -295,7 +295,7 @@ mod tests {
     }
 
     /// The kotlin-versions manifest is the only list of supported releases: the plugin and its
-    /// packaging read it, and the CI lanes name either one of its releases or `newest`.
+    /// packaging read it, and CI runs a Gradle lane for each of its releases.
     #[test]
     fn supported_gradle_kotlin_versions_follow_the_repository_manifest() {
         let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -323,19 +323,25 @@ mod tests {
 
         let workflow = std::fs::read_to_string(repository.join(".github/workflows/ci.yml"))
             .expect("read CI workflow");
-        let lanes = workflow
+        let gradle_job = workflow
+            .split_once("\n  gradle:\n")
+            .expect("Gradle integration job")
+            .1
+            .split_once("\n    steps:\n")
+            .expect("Gradle integration steps")
+            .0;
+        assert!(
+            gradle_job.contains("kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}"),
+            "every supported release needs a Gradle lane:\n{gradle_job}"
+        );
+        let unsupported = gradle_job
             .lines()
             .filter_map(|line| line.split_once("{ kotlin:").map(|(_, row)| row))
             .filter_map(|row| row.split(',').next())
-            .map(|version| version.trim().trim_matches('\''))
+            .map(str::trim)
+            .filter(|version| !supported.contains(version))
             .collect::<Vec<_>>();
-        let unsupported = lanes
-            .iter()
-            .filter(|lane| **lane != "newest" && !supported.contains(lane))
-            .collect::<Vec<_>>();
-        assert_eq!(unsupported, Vec::<&&str>::new());
-        assert!(lanes.contains(&"newest"), "{lanes:?}");
-        assert!(lanes.contains(&supported[0]), "{lanes:?}");
+        assert_eq!(unsupported, Vec::<&str>::new());
     }
 
     /// The release Maven repository is exercised with the real krusty CLI. The proxy records each
