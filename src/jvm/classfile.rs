@@ -1283,8 +1283,7 @@ impl ClassWriter {
         self.copy_method_source_maps();
         // Every body is final now: write the frames it implies.
         self.compute_stack_maps();
-        // A class that never attached `@Metadata` still realizes its deferred fields first —
-        // kotlinc's field visit precedes every class-attribute window.
+        // A class without `@Metadata` realizes its deferred fields first: fields precede attributes.
         self.intern_late_fields();
         self.resolve_inner_classes();
         self.intern_enclosing_method_refs();
@@ -1870,6 +1869,7 @@ impl ClassWriter {
             &relaid,
             self.unnamed_entries(),
             self.enclosing_method.retained_header_entries(),
+            &self.tied_inner_rows(),
         )
     }
 }
