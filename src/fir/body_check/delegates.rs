@@ -657,6 +657,7 @@ impl BodyFirChecker<'_> {
                     context_binding: None,
                     singleton: Some(crate::resolve::SingletonValue {
                         classifier: *classifier,
+                        companion_owner: None,
                     }),
                 }
             }

@@ -2115,10 +2115,8 @@ mod child_serializer_lazy_factory_e2e;
 mod class_static_signature_e2e;
 #[path = "declaration_debug_lines_e2e.rs"]
 mod declaration_debug_lines_e2e;
-#[path = "deprecation_classpath_e2e.rs"]
-mod deprecation_classpath_e2e;
-#[path = "deprecation_usage_e2e.rs"]
-mod deprecation_usage_e2e;
+#[path = "e2e/deprecations.rs"]
+mod deprecations;
 #[path = "extension_receiver_specificity_e2e.rs"]
 mod extension_receiver_specificity_e2e;
 #[path = "generic_serializable_class_e2e.rs"]
