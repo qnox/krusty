@@ -191,6 +191,35 @@ fn reassigned_mutable_local_drops_unshared_enhanced_java_arguments_like_kotlinc(
 }
 
 #[test]
+fn mutable_local_run_results_are_accepted_like_kotlinc_at_source_level() {
+    common::expect_box_same_as_kotlinc(
+        "fun untouched(map: java.util.HashMap<String, Int>): Set<String> = run {\n\
+         \x20   var value = map.keys\n\
+         \x20   value\n\
+         }\n\
+         fun commonlyReassigned(map: java.util.HashMap<String, Int>): Set<String> = run {\n\
+         \x20   var value = map.keys\n\
+         \x20   value = java.util.HashMap<String, Int>().keys\n\
+         \x20   value\n\
+         }\n\
+         fun cleared(map: java.util.HashMap<String, Int>): Set<String> = run {\n\
+         \x20   var value = map.keys\n\
+         \x20   value = mutableSetOf<String>()\n\
+         \x20   value\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val map = java.util.HashMap<String, Int>()\n\
+         \x20   map[\"OK\"] = 1\n\
+         \x20   if (untouched(map).single() != \"OK\") return \"untouched\"\n\
+         \x20   if (commonlyReassigned(map).isNotEmpty()) return \"reassigned\"\n\
+         \x20   if (cleared(map).isNotEmpty()) return \"cleared\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "MutableLocalRunResults",
+    );
+}
+
+#[test]
 fn nested_java_generic_results_publish_platform_types_like_kotlinc() {
     common::assert_classes_identical_to_kotlinc_jdk(
         "PublishedNested",
