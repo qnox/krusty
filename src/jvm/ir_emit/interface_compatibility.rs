@@ -465,3 +465,52 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
         cw.set_method_nullability(member_name, &desc, ret_ann, &parameter_annotations);
     }
 }
+
+/// `@NotNull`/`@Nullable` for one semantic type in the `-jvm-default` compatibility surface, the
+/// same selection the implementing-class forwarders use: reference types only, and never a bare
+/// type variable (kotlinc leaves `T`-typed positions unannotated).
+fn jd_nullability_annotation(ty: &Ty) -> Option<&'static str> {
+    if matches!(ty.non_null(), Ty::TyParam(..)) || !ir_ty_to_jvm(ty).is_reference() {
+        None
+    } else if ty.is_nullable() {
+        Some("Lorg/jetbrains/annotations/Nullable;")
+    } else {
+        Some("Lorg/jetbrains/annotations/NotNull;")
+    }
+}
+
+/// A declared member's parameter types with the side-table declared nullability applied, so the
+/// compatibility surface annotates `x: T?` parameters `@Nullable` exactly as the abstract
+/// declaration path does.
+fn jd_declared_param_tys(ir: &IrFile, fid: u32) -> Vec<Ty> {
+    let f = &ir.functions[fid as usize];
+    let declared_nullable = ir.fn_param_declared_nullable.get(&fid);
+    f.params
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            if declared_nullable
+                .and_then(|v| v.get(i))
+                .copied()
+                .unwrap_or(false)
+            {
+                Ty::nullable(*t)
+            } else {
+                *t
+            }
+        })
+        .collect()
+}
+
+/// Where an `enable`-mode holder forward sends its call.
+enum JdHolderTarget<'a> {
+    /// The interface's own `access$<name>$jd` bridge (the member is a default method here).
+    AccessBridge,
+    /// The `$DefaultImpls` static holding the inherited body: a `disable`-compiled dependency's,
+    /// or under `disable` an ancestor's of this module. There is no default method to bridge to.
+    DependencyHolder {
+        declaring: crate::types::TypeName,
+        holder: crate::types::TypeName,
+        descriptor: &'a str,
+    },
+}

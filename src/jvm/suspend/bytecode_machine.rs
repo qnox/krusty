@@ -121,6 +121,17 @@ pub(super) fn route(
     let class_owner = semantic_owner.or(static_owner);
     let owner = class_owner.map_or_else(|| route.facade.to_string(), |owner| owner.render());
     let continuation_class = name_continuation(ir, fid, &owner, class_owner, route.facade);
+    let machine = |suspensions| TransformedMachine {
+        continuation_class: continuation_class.clone(),
+        suspensions,
+        lambda: None,
+        fake_continuations: fake_continuations.clone(),
+    };
+    // A function only ever inlined is never called: no continuation class re-enters it.
+    if crate::jvm::suspend_inline_functions::keeps_marked_body(ir, fid) {
+        route.machines.record_transformed(fid, machine(suspensions));
+        return Routed::Taken;
+    }
     build_continuation_class(
         ir,
         &continuation_class,
@@ -161,15 +172,7 @@ pub(super) fn route(
             ..ContinuationMetadata::default()
         },
     );
-    route.machines.record_transformed(
-        fid,
-        TransformedMachine {
-            continuation_class,
-            suspensions,
-            lambda: None,
-            fake_continuations,
-        },
-    );
+    route.machines.record_transformed(fid, machine(suspensions));
     Routed::Taken
 }
 
@@ -302,8 +305,11 @@ pub(super) fn eligible_points(
             "an interface body",
         ),
     ];
+    // A function only ever inlined keeps its marked body and gets no machine at all.
+    let machineless =
+        points.is_empty() || crate::jvm::suspend_inline_functions::keeps_marked_body(ir, fid);
     let machine_declines: &[(&dyn Fn() -> bool, &str)] =
-        if points.is_empty() && subject == Subject::NamedFunction {
+        if machineless && subject == Subject::NamedFunction {
             &[]
         } else {
             &machine_declines
