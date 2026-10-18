@@ -4971,8 +4971,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   to the invocation's line and a `nop`, which the nop cleanup keeps only when nothing else runs on
   that line. A function frame copied into another expansion does the same after its body: it marks
   the call's line, mapped through the enclosing copy, on a `nop` that stays only when the caller's
-  next instruction is on a different line (`tests/private_inline_property_access_e2e.rs`). Not yet matched: a multi-parameter lambda's arguments are stored in order rather than
-  evaluated first and stored in reverse, kotlinc spills the operand stack before a lambda body
+  next instruction is on a different line (`tests/private_inline_property_access_e2e.rs`). A
+  spliced lambda's operands are all evaluated before any is stored, then stored last first, each
+  into the next free slot, and their locals open together once the last store is done, listed in
+  parameter order. A suspend lambda's last operand is the caller's continuation: it is bound to a
+  `$completion` local of the lambda's own (`InlineLambdaContinuation`), read as kotlinc's fake
+  continuation, so the transformer puts the machine's continuation (or the function's own when it
+  has no suspension point) in its place and spills that local like any other. Not yet matched:
+  kotlinc spills the operand stack before a lambda body
   splices into an expression, the inline body's lines are not remapped through a source map, and a
   suspend function that the coroutine transformer does not route records no locals.   Tests:
   `tests/same_module_inline_frame_markers_e2e.rs` (instructions and local tables against kotlinc,

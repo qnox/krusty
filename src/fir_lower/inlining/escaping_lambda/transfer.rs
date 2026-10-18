@@ -1789,6 +1789,7 @@ fn remap_provenance(
             ),
         crate::ir::IrDebugLocalProvenance::InlineValue { .. }
         | crate::ir::IrDebugLocalProvenance::InlineLambdaParameter { .. }
+        | crate::ir::IrDebugLocalProvenance::InlineLambdaContinuation { .. }
         | crate::ir::IrDebugLocalProvenance::InlineCallableReferenceParameter { .. }
         | crate::ir::IrDebugLocalProvenance::FunctionFrameMarker => None,
     }
