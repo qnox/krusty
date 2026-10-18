@@ -1831,7 +1831,7 @@ impl ProductionSignatureSemantics<'_> {
         let receivers = [super::super::ImplicitReceiver::signature_receiver(
             dispatch_receiver,
         )];
-        let selected = super::super::member_extension_property(
+        let selected = super::super::member_extension_properties::select(
             &source,
             &oracle,
             &receivers,
