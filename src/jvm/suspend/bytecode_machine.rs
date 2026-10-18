@@ -131,18 +131,19 @@ pub(super) fn route(
         static_owner,
         &declared_params,
     );
+    // The continuation belongs to the method that carries the machine, `$completion` included: an
+    // overridable member's is the `$suspendImpl` its body moves to, which takes the receiver first.
     let function = &ir.functions[fid as usize];
-    // The continuation belongs to the method that carries the machine: an overridable member's is
-    // the `$suspendImpl` its body moves to, which takes the receiver first.
+    let cps_params = super::physical_parameters(ir, fid, &function.params);
     let (method, method_params) =
         match receiver.filter(|_| crate::jvm::suspend_impls::moves_to_suspend_impl(ir, fid)) {
             Some(owner) => (
                 crate::jvm::suspend_impls::suspend_impl_name(&name),
                 std::iter::once(Ty::obj_name(owner))
-                    .chain(declared_params)
+                    .chain(cps_params)
                     .collect(),
             ),
-            None => (name, declared_params),
+            None => (name, cps_params),
         };
     // The arrays the transformer computes replace these when the continuation class is written.
     route.outputs.continuation_metadata.insert(
