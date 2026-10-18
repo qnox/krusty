@@ -19,7 +19,7 @@ use super::function_lowering::{
 };
 use super::ir_builtins::IrBuiltinOperators;
 use crate::fir::ExternalCallableId;
-use crate::ir::{Callee, ExprId, FunId, IrFile, IrIntrinsic};
+use crate::ir::{Callee, ExprId, FunId, IrFile};
 use crate::klib_libraries::{
     KlibCalleeOrigin, KlibDeclarationBodies, KlibIntrinsicCallable, KlibIntrinsicFacts,
 };
@@ -470,20 +470,30 @@ impl<'s> Linker<'_, 's> {
             let selected = selected_callable_for_header(selected, None, arena, declaration)
                 .map_err(&callee_declined)?;
             self.cross_check_intrinsic(callee, selected, intrinsic)?;
-            // A target instruction stays an ordinary call of its declaration; only the target's
-            // emitter replaces it, through the provider fact frozen on the external handle.
-            if !matches!(
-                intrinsic.operation(),
-                crate::libraries::CompilerIntrinsic::ScalarInstruction(_)
-            ) {
-                return linked_intrinsic(intrinsic);
-            }
-            if !self.sources.externals.contains_key(&identity) {
+            // A target intrinsic stays an ordinary call of its declaration; only the target's
+            // emitter realizes it, through the provider fact frozen on the external handle. The
+            // authenticated record, not the serialized header, fixes the call's shape.
+            let Some(emitted) = self.sources.externals.get(&identity) else {
                 return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "an authenticated target instruction has no provider external handle"
-                        .to_owned(),
+                    "an authenticated target intrinsic has no provider external handle".to_owned(),
                 ));
-            }
+            };
+            return Ok(LinkedCallee {
+                callee: Callee::External {
+                    target: emitted.target(),
+                    default_provider: None,
+                    params: intrinsic.params().to_vec(),
+                    ret: intrinsic.ret(),
+                    substitutions: Vec::new(),
+                    defaults: Vec::new(),
+                    extension_receiver_parameter: None,
+                },
+                receiver: intrinsic.receiver(),
+                params: intrinsic.params().to_vec(),
+                ret: intrinsic.ret(),
+                context_count: 0,
+                singleton_dispatch: None,
+            });
         }
         if let Some(&emitted) = self.sources.externals.get(&identity) {
             let selected = selected_callable_for_header(
@@ -708,55 +718,6 @@ fn selected_callable_for_header<'callable>(
                 "a selected KLIB declaration has no checked call-edge variant".to_owned(),
             )
         })
-    })
-}
-
-fn linked_intrinsic(
-    intrinsic: &KlibIntrinsicCallable,
-) -> Result<LinkedCallee, KlibBodyDeclineReason> {
-    linked_intrinsic_parts(
-        intrinsic.operation(),
-        intrinsic.receiver(),
-        intrinsic.params(),
-        intrinsic.ret(),
-    )
-}
-
-fn linked_intrinsic_parts(
-    operation: crate::libraries::CompilerIntrinsic,
-    receiver: Option<crate::types::Ty>,
-    params: &[crate::types::Ty],
-    ret: crate::types::Ty,
-) -> Result<LinkedCallee, KlibBodyDeclineReason> {
-    Ok(LinkedCallee {
-        callee: Callee::Intrinsic {
-            operation: match operation {
-                crate::libraries::CompilerIntrinsic::ReinterpretBits => {
-                    let from = match (receiver, params) {
-                        (Some(receiver), []) => receiver,
-                        (None, [parameter]) => *parameter,
-                        _ => {
-                            return Err(KlibBodyDeclineReason::SignatureMismatch(
-                                "an intrinsic reinterpretation does not have exactly one receiver or parameter"
-                                    .to_owned(),
-                            ))
-                        }
-                    };
-                    IrIntrinsic::ReinterpretBits { from, to: ret }
-                }
-                _ => {
-                    return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                        "an authenticated KLIB intrinsic operation not lowered yet",
-                    ))
-                }
-            },
-            ret,
-        },
-        receiver,
-        params: params.to_vec(),
-        ret,
-        context_count: 0,
-        singleton_dispatch: None,
     })
 }
 

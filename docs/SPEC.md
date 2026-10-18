@@ -16736,8 +16736,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   through the exact provider handle, and Native's ordinary external-call boundary consumes the
   predicate fact plus the recorded extension-receiver coordinate. They therefore never become
   dependency-support exports with invented bodies, and no target recovers them from the callable or
-  runtime-entry spelling. Checked FIR/IR carries both reinterpretation endpoint types; Native and
-  Wasm alone choose their physical bitcast instruction. Tests:
+  runtime-entry spelling. A bit reinterpretation is linked the same way: checked FIR and common IR
+  keep its call an ordinary call of the authenticated declaration, shaped by the provider's record,
+  and only the Native and Wasm emitters replace it with their physical bitcast instruction. Tests:
   `metadata::semantic::klib::tests::function_annotations_keep_string_arguments_on_both_declaration_views`,
   `klib_libraries::target_intrinsics::tests::wasm_reinterpret_operations_require_authority_package_payload_and_signature`,
   `native_reinterpret_declarations_have_their_exact_receiver_or_parameter_shape`,

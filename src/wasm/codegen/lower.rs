@@ -23,6 +23,8 @@ mod intrinsic_operations;
 mod objects;
 mod scalar_instructions;
 
+pub(super) use scalar_instructions::is_scalar_operation;
+
 use crate::backend::{BackendCallableFact, CheckedBackendCallables, DependencyExportSignatures};
 use crate::ir::{
     module_override_callable, Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic,
@@ -874,8 +876,8 @@ impl<'a> Body<'a> {
                     },
                 dispatch_receiver,
                 args,
-            } if defaults.is_empty() && self.scalar_instruction_of(target).is_some() => {
-                self.scalar_instruction_call(target, dispatch_receiver, &params, ret, &args)?;
+            } if defaults.is_empty() && self.scalar_operation_of(target).is_some() => {
+                self.scalar_operation_call(target, dispatch_receiver, &params, ret, &args)?;
             }
             IrExpr::Call {
                 callee:

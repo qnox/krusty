@@ -237,10 +237,6 @@ pub enum FirCallArgument {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirIntrinsic {
-    ReinterpretBits {
-        from: ResolvedTy,
-        to: ResolvedTy,
-    },
     /// The exact `kotlin.assert` declaration selected by resolution. Its operands remain lazy until
     /// target realization: a disabled assertion evaluates neither the condition nor its message.
     Assert {

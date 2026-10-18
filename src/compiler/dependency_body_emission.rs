@@ -12,7 +12,7 @@ use crate::backend::{
 };
 use crate::diag::{DiagSink, Span};
 use crate::fx_hash::{HashMap, HashSet};
-use crate::ir::{Callee, IrExpr, IrIntrinsic};
+use crate::ir::{Callee, IrExpr};
 use crate::klib_lowering::{DependencyBodyUnit, EmittedDependencyCallable, KlibCalleeFacts};
 use crate::libraries::KlibDependencyCallable;
 use crate::resolve::PassTwoSymbols;
@@ -135,10 +135,10 @@ pub(super) fn emit_intrinsic_dependencies<B: Backend>(
     if unit.callable_functions().next().is_none() {
         return Vec::new();
     }
-    if !contains_reinterpret(unit.ir()) && !links_emitted_support(unit.ir(), &externals) {
+    if !links_emitted_support(unit.ir(), &externals) {
         diags.error(
             Span::new(0, 0),
-            "internal error: authenticated KLIB intrinsic roots lowered without an intrinsic or exact emitted-support edge",
+            "internal error: authenticated KLIB intrinsic roots lowered without an exact intrinsic or emitted-support edge",
         );
         return Vec::new();
     }
@@ -331,18 +331,13 @@ fn prepare_bodyless_externals(
             if externals.contains_key(&callee) {
                 continue;
             }
-            if let Some(intrinsic) = intrinsics.get(&callee) {
-                // A target instruction is called through its provider handle like a bodyless
-                // declaration; the target's emitter realizes that call as the instruction.
-                if matches!(
-                    intrinsic.operation(),
-                    crate::libraries::CompilerIntrinsic::ScalarInstruction(_)
-                ) {
-                    let Some(external) = provider_external(platform, &callee, diags) else {
-                        return false;
-                    };
-                    externals.insert(callee, external);
-                }
+            if intrinsics.get(&callee).is_some() {
+                // A target intrinsic is called through its provider handle like a bodyless
+                // declaration; the target's emitter realizes that call.
+                let Some(external) = provider_external(platform, &callee, diags) else {
+                    return false;
+                };
+                externals.insert(callee, external);
                 continue;
             }
             let Some(has_body) = bodies.function_has_body(&callee) else {
@@ -390,21 +385,6 @@ fn provider_external(
         return None;
     }
     Some(EmittedDependencyCallable::new(external, None, None))
-}
-
-fn contains_reinterpret(ir: &crate::ir::IrFile) -> bool {
-    ir.exprs.iter().any(|expression| {
-        matches!(
-            expression,
-            IrExpr::Call {
-                callee: Callee::Intrinsic {
-                    operation: IrIntrinsic::ReinterpretBits { .. },
-                    ..
-                },
-                ..
-            }
-        )
-    })
 }
 
 fn links_emitted_support(

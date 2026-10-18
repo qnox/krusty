@@ -1,10 +1,9 @@
 //! Checked FIR construction for provider-selected compiler intrinsics.
 
-use crate::fir::{FirBinaryOperation, FirIntrinsic, ResolvedTy};
+use crate::fir::{FirBinaryOperation, FirIntrinsic};
 use crate::libraries::CompilerIntrinsic;
 use crate::types::{AssertionMode, Ty};
 
-use super::BodyCheckFailureKind;
 
 pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinaryOperation> {
     Some(match intrinsic {
@@ -88,26 +87,14 @@ pub(super) fn binary_semantics(
 
 /// Construct the intrinsic operation carried by a selected top-level declaration.
 ///
-/// Selection and authentication have already happened at the provider boundary. This operation
-/// only validates the selected callable's FIR shape and publishes its semantic types.
+/// Selection and authentication have already happened at the provider boundary. A target-stdlib
+/// intrinsic is not one of these: its call stays an ordinary call the target emitter realizes.
 pub(super) fn selected_top_level(
     operation: Option<CompilerIntrinsic>,
-    parameters: &[Ty],
-    result: Ty,
     assertion_mode: AssertionMode,
     callee: &str,
-) -> Result<Option<FirIntrinsic>, BodyCheckFailureKind> {
-    let resolved = |ty| ResolvedTy::new(ty).map_err(BodyCheckFailureKind::UnpublishableType);
-    Ok(match operation {
-        Some(CompilerIntrinsic::ReinterpretBits) => {
-            let [from] = parameters else {
-                return Err(BodyCheckFailureKind::UnsupportedCallShape);
-            };
-            Some(FirIntrinsic::ReinterpretBits {
-                from: resolved(*from)?,
-                to: resolved(result)?,
-            })
-        }
+) -> Option<FirIntrinsic> {
+    match operation {
         Some(CompilerIntrinsic::Assert) => Some(FirIntrinsic::Assert {
             mode: assertion_mode,
         }),
@@ -117,5 +104,5 @@ pub(super) fn selected_top_level(
             })
         }
         _ => None,
-    })
+    }
 }

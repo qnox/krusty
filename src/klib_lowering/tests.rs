@@ -11,7 +11,7 @@ mod demo_package;
 use super::*;
 use crate::backend::{BackendCallableFact, CheckedBackendCallables};
 use crate::fir::SourceFileId;
-use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile, IrIntrinsic};
+use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};
 use crate::klib_libraries::{KlibDeclarationBodies, KlibLibraries};
 use crate::libraries::{
     ExternalCallableKind, FnKind, KlibBodyCompanionReceiver, KlibDeclarationSignature,
@@ -1533,6 +1533,68 @@ fn stdlib_coerce_in_declines_by_its_exception_construction() {
     assert!(unit.ir().exprs.is_empty());
 }
 
+/// The provider handles of the authenticated intrinsics `root`'s body reaches. An intrinsic stays
+/// an ordinary call of its declaration in the lowered unit; only the target emitter realizes it.
+fn intrinsic_externals(
+    libraries: &KlibLibraries,
+    root: &KlibDependencyCallable,
+) -> crate::fx_hash::HashMap<KlibDependencyCallable, super::EmittedDependencyCallable> {
+    let bodies = libraries.declaration_bodies();
+    let mut reached = vec![root.clone()];
+    let mut pending = vec![root.clone()];
+    while let Some(caller) = pending.pop() {
+        for callee in bodies.direct_callees(&caller) {
+            if !reached.contains(&callee) {
+                reached.push(callee.clone());
+                pending.push(callee);
+            }
+        }
+    }
+    reached
+        .into_iter()
+        .filter(|callee| libraries.intrinsic_facts().get(callee).is_some())
+        .map(|callee| {
+            let (external, _) =
+                <KlibLibraries as crate::symbol_source::SymbolSource>::external_callable_by_dependency(
+                    libraries, &callee,
+                )
+                .unwrap_or_else(|| panic!("the provider publishes intrinsic {callee:?}"));
+            (callee, super::EmittedDependencyCallable::new(external, None, None))
+        })
+        .collect()
+}
+
+/// Calls in `ir` of the one reinterpretation in `externals` from `operand` to `result`.
+fn reinterpret_calls(
+    libraries: &KlibLibraries,
+    externals: &crate::fx_hash::HashMap<KlibDependencyCallable, super::EmittedDependencyCallable>,
+    ir: &IrFile,
+    operand: Ty,
+    result: Ty,
+) -> usize {
+    let targets = externals
+        .iter()
+        .filter(|(callee, _)| {
+            libraries.intrinsic_facts().get(callee).is_some_and(|intrinsic| {
+                intrinsic.operation() == crate::libraries::CompilerIntrinsic::ReinterpretBits
+                    && intrinsic.ret() == result
+            })
+        })
+        .map(|(_, external)| external.target())
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 1, "one reinterpretation from {operand:?} to {result:?}");
+    ir.exprs
+        .iter()
+        .filter(|expression| {
+            matches!(
+                expression,
+                IrExpr::Call { callee: Callee::External { target, ret, .. }, .. }
+                    if *target == targets[0] && *ret == result
+            )
+        })
+        .count()
+}
+
 #[test]
 fn native_to_bits_erases_the_producer_inline_container_and_keeps_the_intrinsic() {
     let Some(root) = distribution_root() else {
@@ -1551,12 +1613,15 @@ fn native_to_bits_erases_the_producer_inline_container_and_keeps_the_intrinsic()
             ),
             "toBits on {operand:?} directly calls its authenticated reinterpret declaration"
         );
+        let callable = fact.klib_body_callable().expect("signed");
+        let externals = intrinsic_externals(&libraries, callable.identity());
         let mut unit = DependencyBodyUnit::default();
-        unit.lower_function_with_intrinsics(
-            fact.klib_body_callable().expect("signed"),
+        unit.lower_function_with_intrinsics_and_externals(
+            callable,
             bodies,
             &KlibCalleeFacts::default(),
             libraries.intrinsic_facts(),
+            &externals,
         )
         .unwrap_or_else(|decline| panic!("toBits on {operand:?}: {decline}"));
         validated(unit.ir());
@@ -1571,20 +1636,7 @@ fn native_to_bits_erases_the_producer_inline_container_and_keeps_the_intrinsic()
             "producer aliases are not source locals for toBits on {operand:?}"
         );
         assert_eq!(
-            unit.ir()
-                .exprs
-                .iter()
-                .filter(|expression| matches!(
-                    expression,
-                    IrExpr::Call {
-                        callee: Callee::Intrinsic {
-                            operation: IrIntrinsic::ReinterpretBits { from, to },
-                            ret,
-                        },
-                        ..
-                    } if *from == operand && *to == result && *ret == result
-                ))
-                .count(),
+            reinterpret_calls(&libraries, &externals, unit.ir(), operand, result),
             2,
             "the canonical-NaN and ordinary branches each reinterpret once"
         );
@@ -1672,31 +1724,21 @@ fn native_to_raw_bits_is_a_supported_root_and_lowers_its_authenticated_intrinsic
             ),
             "toRawBits on {operand:?} has the exact scalar reinterpret boundary"
         );
+        let callable = fact.klib_body_callable().expect("signed");
+        let externals = intrinsic_externals(&libraries, callable.identity());
         let mut unit = DependencyBodyUnit::default();
-        unit.lower_function_with_intrinsics(
-            fact.klib_body_callable().expect("signed"),
+        unit.lower_function_with_intrinsics_and_externals(
+            callable,
             bodies,
             &KlibCalleeFacts::default(),
             libraries.intrinsic_facts(),
+            &externals,
         )
         .unwrap_or_else(|decline| panic!("toRawBits on {operand:?}: {decline}"));
         validated(unit.ir());
         assert_eq!(unit.ir().functions.len(), 1, "toRawBits on {operand:?}");
         assert_eq!(
-            unit.ir()
-                .exprs
-                .iter()
-                .filter(|expression| matches!(
-                    expression,
-                    IrExpr::Call {
-                        callee: Callee::Intrinsic {
-                            operation: IrIntrinsic::ReinterpretBits { from, to },
-                            ret,
-                        },
-                        ..
-                    } if *from == operand && *to == result && *ret == result
-                ))
-                .count(),
+            reinterpret_calls(&libraries, &externals, unit.ir(), operand, result),
             1,
             "toRawBits on {operand:?} lowers exactly one reinterpret"
         );
@@ -1807,13 +1849,15 @@ fn wasm_numbers_bodies_link_their_internal_wasm_op_by_exact_intrinsic_identity()
             bodies.is_supported_intrinsic_root(callable.identity(), libraries.intrinsic_facts()),
             "{name} on {operand:?} is an authenticated Wasm intrinsic root"
         );
+        let externals = intrinsic_externals(&libraries, callable.identity());
         let mut unit = DependencyBodyUnit::default();
         let function = unit
-            .lower_function_with_intrinsics(
+            .lower_function_with_intrinsics_and_externals(
                 callable,
                 bodies,
                 &KlibCalleeFacts::default(),
                 libraries.intrinsic_facts(),
+                &externals,
             )
             .unwrap_or_else(|decline| panic!("{name} on {operand:?}: {decline}"));
         validated(unit.ir());
@@ -1842,23 +1886,7 @@ fn wasm_numbers_bodies_link_their_internal_wasm_op_by_exact_intrinsic_identity()
                 fact.source_receiver.expect("fromBits is an extension")
             );
         }
-        let calls = unit
-            .ir()
-            .exprs
-            .iter()
-            .filter(|expression| {
-                matches!(
-                    expression,
-                    IrExpr::Call {
-                        callee: Callee::Intrinsic {
-                            operation: IrIntrinsic::ReinterpretBits { from, to },
-                            ret,
-                        },
-                        ..
-                    } if *from == operand && *to == result && *ret == result
-                )
-            })
-            .count();
+        let calls = reinterpret_calls(&libraries, &externals, unit.ir(), operand, result);
         assert_eq!(calls, 1, "{name} on {operand:?}");
     }
 }
@@ -1889,32 +1917,21 @@ fn wasm_to_bits_closes_its_exact_semantic_wrapper_unit() {
             bodies.is_supported_intrinsic_root(callable.identity(), libraries.intrinsic_facts()),
             "toBits on {operand:?} is the one exact wrapper layer above the Wasm operation"
         );
+        let externals = intrinsic_externals(&libraries, callable.identity());
         let mut unit = DependencyBodyUnit::default();
         let function = unit
-            .lower_function_with_intrinsics(
+            .lower_function_with_intrinsics_and_externals(
                 callable,
                 bodies,
                 &KlibCalleeFacts::default(),
                 libraries.intrinsic_facts(),
+                &externals,
             )
             .unwrap_or_else(|decline| panic!("toBits on {operand:?}: {decline}"));
         validated(unit.ir());
         assert_eq!(unit.ir().functions[function as usize].ret, result);
         assert_eq!(
-            unit.ir()
-                .exprs
-                .iter()
-                .filter(|expression| matches!(
-                    expression,
-                    IrExpr::Call {
-                        callee: Callee::Intrinsic {
-                            operation: IrIntrinsic::ReinterpretBits { from, to },
-                            ret,
-                        },
-                        ..
-                    } if *from == operand && *to == result && *ret == result
-                ))
-                .count(),
+            reinterpret_calls(&libraries, &externals, unit.ir(), operand, result),
             1,
             "toBits on {operand:?} closes through exactly one authenticated reinterpret"
         );
@@ -1924,11 +1941,12 @@ fn wasm_to_bits_closes_its_exact_semantic_wrapper_unit() {
         let selected = KlibCalleeFacts::new([nan_callable]);
         let mut selected_unit = DependencyBodyUnit::default();
         selected_unit
-            .lower_function_with_intrinsics(
+            .lower_function_with_intrinsics_and_externals(
                 callable,
                 bodies,
                 &selected,
                 libraries.intrinsic_facts(),
+                &externals,
             )
             .unwrap_or_else(|decline| panic!("selected isNaN on {operand:?}: {decline}"));
         validated(selected_unit.ir());

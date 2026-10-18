@@ -2,29 +2,27 @@
 //!
 //! Checked FIR and common IR keep such a call as an ordinary call of the selected dependency
 //! declaration. Emission alone replaces it: the frozen callable fact carries the provider's
-//! authenticated instruction, and this module emits the operands and the opcode of their physical
-//! class (and, for a conversion, the result's) instead of a call.
+//! authenticated instruction or bit reinterpretation, and this module emits the operands and the
+//! opcode of their physical class (and, for a conversion, the result's) instead of a call.
 
 use super::*;
-use crate::libraries::{ScalarClass, ScalarComparison, ScalarInstruction};
+use crate::libraries::{CompilerIntrinsic, ScalarClass, ScalarComparison, ScalarInstruction};
 
 impl Body<'_> {
-    /// The scalar instruction the provider authenticated as `target`'s implementation.
-    pub(super) fn scalar_instruction_of(
+    /// The scalar operation the provider authenticated as `target`'s implementation.
+    pub(super) fn scalar_operation_of(
         &self,
         target: crate::fir::ExternalCallableId,
-    ) -> Option<ScalarInstruction> {
-        match self.callables.callable(target)?.compiler_intrinsic? {
-            crate::libraries::CompilerIntrinsic::ScalarInstruction(instruction) => {
-                Some(instruction)
-            }
-            _ => None,
-        }
+    ) -> Option<CompilerIntrinsic> {
+        self.callables
+            .callable(target)?
+            .compiler_intrinsic
+            .filter(|operation| is_scalar_operation(*operation))
     }
 
     /// Emit a call of `target`, a dependency declaration realized as one scalar instruction. An
     /// extension's receiver is the instruction's first operand, followed by the call's arguments.
-    pub(super) fn scalar_instruction_call(
+    pub(super) fn scalar_operation_call(
         &mut self,
         target: crate::fir::ExternalCallableId,
         receiver: Option<u32>,
@@ -32,16 +30,16 @@ impl Body<'_> {
         ret: Ty,
         args: &[u32],
     ) -> Result<(), Unsupported> {
-        let instruction = self
-            .scalar_instruction_of(target)
-            .ok_or_else(|| "a call of an unauthenticated scalar instruction".to_string())?;
+        let operation = self
+            .scalar_operation_of(target)
+            .ok_or_else(|| "a call of an unauthenticated scalar operation".to_string())?;
         let receiver_ty = match receiver {
             Some(_) => Some(
                 self.callables
                     .callable(target)
                     .and_then(|callable| callable.source_receiver)
                     .ok_or_else(|| {
-                        "a scalar instruction call whose receiver the declaration lacks".to_string()
+                        "a scalar operation call whose receiver the declaration lacks".to_string()
                     })?,
             ),
             None => None,
@@ -56,7 +54,7 @@ impl Body<'_> {
             .collect::<Vec<_>>();
         let malformed = || {
             format!(
-                "a call of the scalar instruction {instruction:?} with parameters {} and result {}",
+                "a call of the scalar operation {operation:?} with parameters {} and result {}",
                 params
                     .iter()
                     .map(|ty| describe(*ty))
@@ -68,13 +66,21 @@ impl Body<'_> {
         let Some(&operand) = params.first() else {
             return Err(malformed());
         };
-        if params.len() != instruction.arity()
+        let arity = match operation {
+            CompilerIntrinsic::ScalarInstruction(instruction) => instruction.arity(),
+            _ => 1,
+        };
+        if params.len() != arity
             || operands.len() != params.len()
             || params.iter().any(|ty| *ty != operand)
         {
             return Err(malformed());
         }
-        let opcode = opcode(instruction, operand, ret).ok_or_else(malformed)?;
+        let opcode = match operation {
+            CompilerIntrinsic::ScalarInstruction(instruction) => opcode(instruction, operand, ret),
+            _ => reinterpret_opcode(operand, ret).map(Opcode::Plain),
+        }
+        .ok_or_else(malformed)?;
         for value in operands {
             self.value(value, operand)?;
         }
@@ -84,6 +90,25 @@ impl Body<'_> {
         };
         Ok(())
     }
+}
+
+/// Whether the Wasm emitter realizes `operation` as one scalar instruction at its call.
+pub(in crate::wasm::codegen) fn is_scalar_operation(operation: CompilerIntrinsic) -> bool {
+    matches!(
+        operation,
+        CompilerIntrinsic::ScalarInstruction(_) | CompilerIntrinsic::ReinterpretBits
+    )
+}
+
+/// The `reinterpret` opcode between equal-width integral and floating scalars.
+fn reinterpret_opcode(from: Ty, to: Ty) -> Option<u8> {
+    Some(match (from, to) {
+        (Ty::Float, Ty::Int) => 0xbc,
+        (Ty::Double, Ty::Long) => 0xbd,
+        (Ty::Int, Ty::Float) => 0xbe,
+        (Ty::Long, Ty::Double) => 0xbf,
+        _ => return None,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -746,9 +746,6 @@ impl super::Emitter<'_> {
                     code.invokestatic(m, aw, physical_call_result_words(ret));
                 }
                 Callee::Intrinsic { operation, .. } => match operation {
-                    crate::ir::IrIntrinsic::ReinterpretBits { .. } => {
-                        unreachable!("target KLIB reinterpretation cannot reach the JVM backend")
-                    }
                     crate::ir::IrIntrinsic::Assert { mode } => {
                         self.emit_assertion(*mode, args, code)
                     }
