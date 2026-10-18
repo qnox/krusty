@@ -664,6 +664,10 @@ fn replay(files: &BTreeMap<String, Vec<u8>>, temp: &Path) -> Result<Observation,
     })
 }
 
+/// JVM options a launched kotlinc picks up from the environment it inherits.
+const INHERITED_JVM_OPTION_VARIABLES: [&str; 3] =
+    ["JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS"];
+
 /// A JDK's class library: the modules image, or JDK 8's `rt.jar`, which has none.
 fn jdk_class_library(home: &Path) -> Option<PathBuf> {
     ["lib/modules", "jre/lib/rt.jar"]
@@ -687,6 +691,15 @@ fn reference_fingerprint(
         reference_environment(toolchain).as_bytes().to_vec(),
         reference_jvm_options().into_bytes(),
     ];
+    // The JVM reads these from the inherited environment on top of `JAVA_OPTS`.
+    for variable in INHERITED_JVM_OPTION_VARIABLES {
+        parts.push(variable.as_bytes().to_vec());
+        parts.push(
+            std::env::var_os(variable)
+                .map(|value| value.as_encoded_bytes().to_vec())
+                .unwrap_or_default(),
+        );
+    }
     for group in &invocations.groups {
         parts.push((group.len() as u64).to_le_bytes().to_vec());
         parts.extend(
@@ -700,9 +713,9 @@ fn reference_fingerprint(
 }
 
 /// Everything a reference case reads besides its own arguments, identified once per process: the
-/// CLI corpus and the checkout's third-party jars it names, the kotlinc distribution and the JDK
-/// it runs on, and the class library of each JDK the corpus names, all by content, with the paths
-/// that appear in the output.
+/// CLI corpus and the checkout's third-party jars it names, the kotlinc distribution with its
+/// launchers, the JDK it runs on, and the class library of each JDK the corpus names, all by
+/// content, with the paths that appear in the output.
 fn reference_environment(toolchain: &Toolchain) -> &'static str {
     static ENVIRONMENT: OnceLock<String> = OnceLock::new();
     ENVIRONMENT.get_or_init(|| {
@@ -715,6 +728,12 @@ fn reference_environment(toolchain: &Toolchain) -> &'static str {
             .map(|path| toolchain.root.join(path))
             .filter(|path| path.is_dir())
             .collect();
+        // The distribution identity covers `lib`; the launcher scripts the cases run live in `bin`.
+        let home = toolchain
+            .home
+            .as_deref()
+            .expect("the reference compiler has a home");
+        inputs.push(home.join("bin"));
         inputs.extend(toolchain.jdks.iter().map(|(release, home)| {
             jdk_class_library(home).unwrap_or_else(|| {
                 panic!(

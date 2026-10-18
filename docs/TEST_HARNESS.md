@@ -343,13 +343,15 @@ job runs for every supported release, runs it explicitly under `KRUSTY_CLI_REFER
 
 What kotlinc prints for each case, its exit code, and the files a case with `.test` checks reads are
 recorded in the recorded-bytes archive (`KRUSTY_CLASS_DUMP_DIR`) that the byte-equality and
-diagnostics tests replay, under the same exact-version and master-publishes contract. Every run still
-normalizes the recorded output, compares it with the `.out` file and runs the checks, so the runner
-is tested on every pull request; kotlinc runs only for a case whose expanded arguments, CLI corpus,
-kotlinc distribution, JDK class libraries or JVM options changed. Only a passing observation is
+diagnostics tests replay, under the same exact-version and master-publishes contract. Every run
+still normalizes the recorded output, compares it with the `.out` file and runs the checks, so the
+runner is tested on every pull request; kotlinc runs only for a case whose expanded arguments, CLI
+corpus, kotlinc distribution and launchers, JDK class libraries, or JVM options (including inherited
+`JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS` and `JDK_JAVA_OPTIONS`) changed. Only a passing observation is
 recorded, so a transient kotlinc failure is retried rather than replayed; the few not-applicable
-cases, which are expected to fail, always run kotlinc. The script compiles a missing recording by default
-(`KRUSTY_CLASS_DUMP_COMPILE_MISSING=1`), since running kotlinc is the only way to observe it.
+cases, which are expected to fail, always run kotlinc. The script compiles a missing recording by
+default (`KRUSTY_CLASS_DUMP_COMPILE_MISSING=1`), since running kotlinc is the only way to observe
+it.
 
 The corpus names JDK 8, 11, 17 and 21 homes. A case whose JDK the machine lacks fails rather than
 being skipped, so the gate never tests fewer cases than it claims. JDKs are found under
