@@ -305,9 +305,15 @@ fn a_verified_jar_is_copied_from_the_gradle_cache_and_a_corrupt_one_is_ignored()
 #[test]
 fn a_broken_cache_entry_is_replaced_rather_than_kept() {
     let fixture = fixture("broken-cache");
-    let stale_jar = &fixture.cached_jars()[0];
-    std::fs::create_dir_all(stale_jar.parent().unwrap()).unwrap();
-    std::fs::write(stale_jar, b"truncated").unwrap();
+    let jars = fixture.cached_jars();
+    // One the right size with other bytes, one cut short.
+    for (jar, content) in [
+        (&jars[0], &b"compiler jaX"[..]),
+        (&jars[1], &b"runtime"[..]),
+    ] {
+        std::fs::create_dir_all(jar.parent().unwrap()).unwrap();
+        std::fs::write(jar, content).unwrap();
+    }
     // An interrupted unpack by an older krusty: the directory is there, the launcher is not.
     let stale_jdk = fixture
         .root
@@ -318,7 +324,9 @@ fn a_broken_cache_entry_is_replaced_rather_than_kept() {
     let (result, _) = fixture.run(17);
     let runtime = result.unwrap();
     assert_eq!(runtime.java, stale_jdk.join("bin/java"));
-    assert_eq!(std::fs::read(stale_jar).unwrap(), b"compiler jar");
+    assert_eq!(runtime.compiler_classpath, jars);
+    assert_eq!(std::fs::read(&jars[0]).unwrap(), b"compiler jar");
+    assert_eq!(std::fs::read(&jars[1]).unwrap(), b"runtime jar");
     assert_eq!(
         std::fs::read_to_string(stale_jdk.join("release")).unwrap(),
         "JAVA_VERSION=\"21.0.8\"\n"

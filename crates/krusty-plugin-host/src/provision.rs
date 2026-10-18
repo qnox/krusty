@@ -230,9 +230,7 @@ impl Session<'_> {
         }
         // A directory without the launcher is a broken earlier install; publishing beside it would
         // keep it, since a rename never replaces a non-empty directory.
-        if home_dir.exists() {
-            install::remove(&home_dir);
-        }
+        install::remove_entry(&home_dir).map_err(|error| io(&home_dir, error))?;
         if self.env.offline {
             self.missing.push(format!(
                 "a Java {needed} or newer JDK ({})",
@@ -271,7 +269,8 @@ impl Session<'_> {
                     detail: format!("the archive has no {}", pin.java.display()),
                 });
             }
-            install::publish(&staged, &home_dir).map_err(|error| io(&home_dir, error))
+            install::publish(&staged, &home_dir, |home| home.join(&pin.java).is_file())
+                .map_err(|error| io(&home_dir, error))
         });
         install::remove(&archive);
         unpacked?;
@@ -283,14 +282,13 @@ impl Session<'_> {
     /// when needed. `None` only when it is missing and downloads are off.
     fn artifact(&mut self, pin: &ArtifactPin) -> Result<Option<PathBuf>, ProvisionError> {
         let dest = artifacts::cached(self.env, pin);
-        // Only verified files are ever renamed into the cache.
-        match std::fs::metadata(&dest) {
-            Ok(meta) if meta.is_file() && meta.len() == pin.size => return Ok(Some(dest)),
-            // Anything else at `dest` is not the pinned jar, and a rename on Windows never
-            // replaces it.
-            Ok(_) => install::remove(&dest),
-            Err(_) => {}
+        let valid = |jar: &std::path::Path| install::verify(jar, &pin.sha256, pin.size).is_ok();
+        // The cache is checked like any other copy: the host runs these jars.
+        if valid(&dest) {
+            return Ok(Some(dest));
         }
+        // Anything else at `dest` is not the pinned jar, and a rename on Windows never replaces it.
+        install::remove_entry(&dest).map_err(|error| io(&dest, error))?;
         create_dir(dest.parent().expect("a cached jar is inside the cache"))?;
         for (copy, cache) in artifacts::installed_copies(self.env, pin) {
             let staged = install::staging_path(&dest);
@@ -306,7 +304,7 @@ impl Session<'_> {
                 pin.file_name(),
                 copy.display()
             ));
-            install::publish(&staged, &dest).map_err(|error| io(&dest, error))?;
+            install::publish(&staged, &dest, valid).map_err(|error| io(&dest, error))?;
             self.changed = true;
             return Ok(Some(dest));
         }
@@ -323,7 +321,7 @@ impl Session<'_> {
         ));
         let staged = install::staging_path(&dest);
         self.fetch_verified(&url, &staged, &pin.sha256, pin.size)?;
-        install::publish(&staged, &dest).map_err(|error| io(&dest, error))?;
+        install::publish(&staged, &dest, valid).map_err(|error| io(&dest, error))?;
         self.changed = true;
         Ok(Some(dest))
     }

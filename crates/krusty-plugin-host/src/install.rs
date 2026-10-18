@@ -59,29 +59,40 @@ pub(crate) fn staging_path(dest: &Path) -> PathBuf {
     dest.with_file_name(name)
 }
 
-/// Renames a staged file or directory to `dest`, where nothing invalid is left: callers remove a
-/// broken earlier entry first. When another process published `dest` meanwhile, its verified copy
-/// is kept and the staged one removed.
-pub(crate) fn publish(staged: &Path, dest: &Path) -> std::io::Result<()> {
+/// Renames a staged file or directory to `dest`. A rename fails when `dest` exists, which callers
+/// rule out by removing a broken earlier entry first, so a failure means another process published
+/// `dest` meanwhile. Its copy is kept, and the staged one removed, only when `valid` accepts it.
+pub(crate) fn publish(
+    staged: &Path,
+    dest: &Path,
+    valid: impl Fn(&Path) -> bool,
+) -> std::io::Result<()> {
     match std::fs::rename(staged, dest) {
         Ok(()) => Ok(()),
-        Err(_) if dest.exists() => {
-            remove(staged);
-            Ok(())
-        }
         Err(error) => {
             remove(staged);
-            Err(error)
+            if valid(dest) {
+                Ok(())
+            } else {
+                Err(error)
+            }
         }
     }
 }
 
+/// Removes a file or a directory tree. One that is already gone is not an error.
+pub(crate) fn remove_entry(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+    }
+}
+
+/// Removes this process's own staging leftovers, which nothing reads, so a failure is harmless.
 pub(crate) fn remove(path: &Path) {
-    let _ = if path.is_dir() {
-        std::fs::remove_dir_all(path)
-    } else {
-        std::fs::remove_file(path)
-    };
+    let _ = remove_entry(path);
 }
 
 /// Unpacks the JDK archive `name`, staged at `archive`, into the directory `into`, which it creates:

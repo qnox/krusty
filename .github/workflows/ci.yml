@@ -54,6 +54,9 @@ jobs:
           tool: just
       - name: lint
         run: just lint
+      # Outside the default members and the coverage packages, so no other job runs its tests.
+      - name: plugin host tests
+        run: cargo test -p krusty-plugin-host
 
   ci:
     runs-on: ubuntu-latest

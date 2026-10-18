@@ -146,15 +146,11 @@ mod tests {
     }
 
     #[test]
-    fn every_supported_kotlin_version_has_a_pinned_compiler_classpath() {
+    fn the_pinned_kotlin_versions_are_exactly_the_supported_ones() {
         let pins = Pins::builtin(&Platform::current());
-        let pinned = pins.kotlin_versions();
-        let unpinned: Vec<_> = supported_kotlin_versions()
-            .into_iter()
-            .filter(|version| !pinned.contains(version))
-            .collect();
-        assert_eq!(unpinned, Vec::<String>::new());
-        for version in pinned {
+        // Exactly: a pin left behind for a dropped release would keep that release hostable.
+        assert_eq!(pins.kotlin_versions(), supported_kotlin_versions());
+        for version in pins.kotlin_versions() {
             let classpath = pins.compiler_classpath(&version).unwrap();
             let compiler = &classpath[0];
             assert_eq!(
