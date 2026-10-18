@@ -720,10 +720,10 @@ pub(crate) fn callable_reference_expected_bindings(
 /// Type variables fixed by an expected-result equality.
 ///
 /// An invariant return constructor imposes the ordinary equality. A provider-flexible variable at
-/// a nested result position also takes the fixed expected face: `Box<T!>` expected as `Box<String>`
-/// fixes `T` to `String`, even when the enclosing position is covariant. A root `T!` is deliberately
-/// excluded; nullable value arguments own that root collapse and must remain rejected by a non-null
-/// expected result.
+/// a nested covariant result position also takes the fixed expected face: `Box<T!>` expected as
+/// `Box<String>` fixes `T` to `String`. A contravariant occurrence remains a lower bound, while a
+/// root `T!` is deliberately excluded; nullable value arguments own that root collapse and must
+/// remain rejected by a non-null expected result.
 pub(crate) fn expected_result_equality_formals(
     source: &dyn SymbolSource,
     signature: &GenericSig,
@@ -739,9 +739,13 @@ pub(crate) fn expected_result_equality_formals(
         .filter(|formal| {
             expected_bindings.get(*formal).is_some()
                 && formal_has_unprojected_expected_occurrence(declared, expected, formal)
-                && (formal_variance_in_type(source, declared, formal)
-                    == Some(crate::types::TypeVariance::Invariant)
-                    || formal_has_nested_flexible_expected_occurrence(declared, expected, formal))
+                && match formal_variance_in_type(source, declared, formal) {
+                    Some(crate::types::TypeVariance::Invariant) => true,
+                    Some(crate::types::TypeVariance::Out) => {
+                        formal_has_nested_flexible_expected_occurrence(declared, expected, formal)
+                    }
+                    Some(crate::types::TypeVariance::In) | None => false,
+                }
         })
         .cloned()
         .collect()

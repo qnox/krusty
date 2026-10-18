@@ -496,6 +496,34 @@ fn root_flexible_result_occurrence_is_not_an_expected_equality() {
 }
 
 #[test]
+fn contravariant_nested_flexible_occurrence_is_not_an_expected_equality() {
+    let any = Ty::platform_nullable(Ty::obj("kotlin/Any"));
+    let variable = Ty::ty_param("T", any);
+    let signature = GenericSig {
+        formals: vec!["T".to_string()],
+        formal_bounds: vec![vec![any]],
+        receiver: None,
+        params: vec![Ty::platform_nullable(variable)],
+        ret: Ty::fun(vec![Ty::platform_nullable(variable)], Ty::String),
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let expected = Ty::fun(vec![Ty::String], Ty::String);
+    let expected_bindings = GSigBinds::from_iter([("T".to_string(), Ty::String)]);
+
+    assert_eq!(
+        formal_variance_in_type(&crate::libraries::EmptySymbolSource, signature.ret, "T"),
+        Some(crate::types::TypeVariance::In)
+    );
+    assert!(expected_result_equality_formals(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        expected,
+        &expected_bindings,
+    )
+    .is_empty());
+}
+
+#[test]
 fn projected_expected_result_does_not_widen_an_argument_binding() {
     let any = Ty::obj("kotlin/Any");
     let nullable_any = Ty::nullable(any);

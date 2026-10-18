@@ -60,6 +60,27 @@ fn flexible_array_element_reaches_an_expected_non_null_list_like_kotlinc() {
 }
 
 #[test]
+fn named_argument_preserves_a_nested_flexible_array_element_like_kotlinc() {
+    common::expect_box_same_as_kotlinc(
+        "import java.util.ArrayList\n\
+         import java.util.Arrays\n\
+         \n\
+         fun <T> forward(value: List<T>): List<T> = value\n\
+         fun copy(list: ArrayList<String>, n: Int): List<String> =\n\
+         \x20   forward(value = Arrays.asList(*list.toArray(arrayOfNulls<String>(n))))\n\
+         \n\
+         fun box(): String {\n\
+         \x20   val source = ArrayList<String>()\n\
+         \x20   source.add(\"O\")\n\
+         \x20   source.add(\"K\")\n\
+         \x20   val copied = copy(source, 2)\n\
+         \x20   return copied[0] + copied[1]\n\
+         }\n",
+        "NamedFlexibleArrayElement",
+    );
+}
+
+#[test]
 fn nullable_argument_result_publishes_a_rigid_nullable_element_like_kotlinc() {
     common::assert_classes_identical_to_kotlinc_jdk(
         "NullableElement",
