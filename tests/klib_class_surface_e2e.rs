@@ -192,7 +192,7 @@ fn kotlinc_native_consumes_a_krusty_reified_inline_body() {
         &inputs,
         krusty::frontend::PlatformProvider::new(
             krusty::compilation_target::CompilationTarget::Native,
-            libraries.for_compilation(),
+            Box::new(libraries.for_compilation()),
         ),
         &krusty::features::LangFeatures::from_source(library_source),
         &mut diags,
@@ -312,7 +312,7 @@ fn krusty_consumes_a_kotlinc_native_reified_inline_body() {
         &[source],
         krusty::frontend::PlatformProvider::new(
             krusty::compilation_target::CompilationTarget::Native,
-            libraries.for_compilation(),
+            Box::new(libraries.for_compilation()),
         ),
         &krusty::features::LangFeatures::new(),
         &mut diags,
