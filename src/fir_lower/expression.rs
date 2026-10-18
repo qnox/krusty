@@ -62,6 +62,13 @@ impl BodyLowering<'_> {
         // kotlinc folds an intrinsic-const operation over constants before any other lowering, so
         // the whole operation becomes its value.
         let folded = self.constants.fold(self.body, expression_id);
+        // A conversion that realizes an inline call in place ends that inlined call.
+        let ends_inlined_call = folded.is_none()
+            && matches!(
+                expression.kind,
+                FirExprKind::ImplicitConversion { conversion, .. }
+                    if self.body.is_inlined_call_conversion(conversion.origin)
+            );
         // kotlinc then flattens nested concatenations into one, merging each run of constant
         // arguments into one `String` constant.
         let concatenation = folded
@@ -1438,6 +1445,15 @@ impl BodyLowering<'_> {
             }
         }
         self.record_expression_origins(first_generated, lowered, origin);
+        if ends_inlined_call {
+            self.ir.fir_origins.insert(
+                lowered,
+                crate::ir::IrNodeOrigin::Synthetic {
+                    cause: origin,
+                    kind: crate::fir::SyntheticOriginKind::InlinedCall,
+                },
+            );
+        }
         self.set_expression_state(expression_id, LoweringState::Lowered(lowered));
         Ok(lowered)
     }
