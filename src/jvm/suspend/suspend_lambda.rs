@@ -135,6 +135,7 @@ pub(super) fn route(
         0,
         route.outputs.intrinsic_probe_continuations,
     );
+    let fake_continuations = super::bytecode_machine::fake_continuation_reads(ir, body, false);
     let parameter_reads = read_parameters(ir, class, body, first_parameter, &captures, &parameters);
     for suspension in &suspensions {
         // The lambda is the continuation its suspension points pass on. A point inside a lambda the
@@ -255,7 +256,7 @@ pub(super) fn route(
         TransformedMachine {
             continuation_class: internal.render(),
             suspensions,
-            fake_continuations: Vec::new(),
+            fake_continuations,
             lambda: Some(SuspendLambdaMachine {
                 parameter_reads,
                 declared_spill_fields,

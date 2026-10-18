@@ -77,7 +77,7 @@ pub(super) fn route(
     let declared_params = super::physical_parameters(ir, fid, &function.params);
     let unit_return = route.context.orig_rets[fid as usize] == Ty::Unit;
 
-    let fake_continuations = unintercepted_continuation_reads(ir, body);
+    let fake_continuations = fake_continuation_reads(ir, body, true);
     let completion = adopt_cps_signature(ir, fid);
     shift_locals(ir, body, completion);
     // `coroutineContext` is the context of the continuation kotlinc's transformer puts in place
@@ -277,8 +277,8 @@ pub(super) fn eligible_points(
         ),
         (
             &|| match subject {
-                Subject::NamedFunction => reads_continuation_outside_unintercepted_blocks(ir, body),
-                Subject::SuspendLambda => reads_current_continuation(ir, body),
+                Subject::NamedFunction => reads_continuation_outside_fake_reads(ir, body, true),
+                Subject::SuspendLambda => reads_continuation_outside_fake_reads(ir, body, false),
             },
             "reads its own continuation",
         ),
@@ -350,10 +350,24 @@ pub(super) fn eligible_points(
     Some(points)
 }
 
-/// Whether the body reads its own continuation outside a `suspendCoroutineUninterceptedOrReturn`
-/// block, the one read the transformer takes.
-fn reads_continuation_outside_unintercepted_blocks(ir: &IrFile, expression: ExprId) -> bool {
-    if ir.is_unintercepted_suspension(expression) {
+/// Whether `declaration` binds an inline suspend lambda's continuation operand to its
+/// `$completion`. kotlinc's inliner finds the fake continuation there, and its transformer puts the
+/// real one in its place.
+fn binds_inline_continuation_operand(ir: &IrFile, declaration: ExprId) -> bool {
+    ir.invocation_operand_bindings.contains(&declaration)
+        && matches!(
+            ir.exprs[declaration as usize],
+            IrExpr::Variable { init: Some(init), .. }
+                if matches!(ir.exprs[init as usize], IrExpr::CurrentContinuation)
+        )
+}
+
+/// Whether the body reads its own continuation where kotlinc has no fake one in its place: outside
+/// a `suspendCoroutineUninterceptedOrReturn` block and an inline suspend lambda's operands.
+fn reads_continuation_outside_fake_reads(ir: &IrFile, expression: ExprId, blocks: bool) -> bool {
+    if blocks && ir.is_unintercepted_suspension(expression)
+        || binds_inline_continuation_operand(ir, expression)
+    {
         return false;
     }
     if let IrExpr::CurrentContinuation = ir.exprs[expression as usize] {
@@ -361,36 +375,40 @@ fn reads_continuation_outside_unintercepted_blocks(ir: &IrFile, expression: Expr
     }
     let mut found = false;
     for_each_child(&ir.exprs, expression, &mut |child| {
-        found = found || reads_continuation_outside_unintercepted_blocks(ir, child);
+        found = found || reads_continuation_outside_fake_reads(ir, child, blocks);
     });
     found
 }
 
-/// The continuation reads inside the body's `suspendCoroutineUninterceptedOrReturn` blocks.
-fn unintercepted_continuation_reads(ir: &IrFile, body: ExprId) -> Vec<ExprId> {
-    fn collect(ir: &IrFile, expression: ExprId, inside: bool, reads: &mut Vec<ExprId>) {
-        let inside = inside || ir.is_unintercepted_suspension(expression);
+/// The continuation reads kotlinc realizes through a fake continuation: those inside the body's
+/// `suspendCoroutineUninterceptedOrReturn` blocks (`blocks`) and its inline suspend lambdas'
+/// continuation operands.
+pub(super) fn fake_continuation_reads(ir: &IrFile, body: ExprId, blocks: bool) -> Vec<ExprId> {
+    fn collect(
+        ir: &IrFile,
+        expression: ExprId,
+        inside: bool,
+        blocks: bool,
+        reads: &mut Vec<ExprId>,
+    ) {
+        let inside = inside || blocks && ir.is_unintercepted_suspension(expression);
         if inside && matches!(ir.exprs[expression as usize], IrExpr::CurrentContinuation) {
             reads.push(expression);
         }
+        if binds_inline_continuation_operand(ir, expression) {
+            if let IrExpr::Variable {
+                init: Some(init), ..
+            } = ir.exprs[expression as usize]
+            {
+                reads.push(init);
+            }
+            return;
+        }
         for_each_child(&ir.exprs, expression, &mut |child| {
-            collect(ir, child, inside, reads)
+            collect(ir, child, inside, blocks, reads)
         });
     }
     let mut reads = Vec::new();
-    collect(ir, body, false, &mut reads);
+    collect(ir, body, false, blocks, &mut reads);
     reads
-}
-
-/// Whether the body reads its own continuation (`suspendCoroutineUninterceptedOrReturn`), which
-/// kotlinc's transformer realizes through a fake continuation marker.
-fn reads_current_continuation(ir: &IrFile, expression: ExprId) -> bool {
-    if let IrExpr::CurrentContinuation = ir.exprs[expression as usize] {
-        return true;
-    }
-    let mut found = false;
-    for_each_child(&ir.exprs, expression, &mut |child| {
-        found = found || reads_current_continuation(ir, child);
-    });
-    found
 }
