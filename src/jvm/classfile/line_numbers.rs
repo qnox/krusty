@@ -503,7 +503,7 @@ impl CodeBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{ACC_PUBLIC, ACC_STATIC, ClassWriter, CodeBuilder};
+    use super::super::{ClassWriter, CodeBuilder, ACC_PUBLIC, ACC_STATIC};
 
     /// One instruction, so the next mark lands at a different pc.
     fn advance(code: &mut CodeBuilder) {

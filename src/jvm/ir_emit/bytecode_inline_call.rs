@@ -24,7 +24,7 @@ use crate::jvm::bytecode_passes::coroutines::markers::{
 };
 use crate::jvm::inliner::{self, Binding, InlineError, Parameter, Parameters};
 use crate::jvm::method_node::{
-    Category, Insn, MethodNode, Node, encode_instruction, is_terminal, stack_shapes, word_delta,
+    encode_instruction, is_terminal, stack_shapes, word_delta, Category, Insn, MethodNode, Node,
 };
 use crate::jvm::source_map::SourceMap;
 use default_bridge::CalleeNodes;
@@ -1789,7 +1789,7 @@ fn var_words(op: u8) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jvm::classreader::{C, MethodCode};
+    use crate::jvm::classreader::{MethodCode, C};
 
     /// A static `()V` body over a pool that names `Intrinsics.reifiedOperationMarker(ILjava/lang/String;)V`
     /// at index 6 and the string `T` at index 8.
