@@ -219,6 +219,15 @@ fn kotlinc_native_consumes_a_krusty_reified_inline_body() {
             .collect::<Vec<_>>(),
         Vec::<&str>::new()
     );
+    for component in [
+        "default/ir/files.knf",
+        "default/ir_inlinable_functions/files.knf",
+    ] {
+        assert!(
+            entries.iter().any(|(path, _)| path == component),
+            "the supported reified inline body emits {component}"
+        );
+    }
 
     let work = common::scratch_dir()
         .expect("allocate the official KLIB consumer directory")

@@ -212,11 +212,11 @@ fn prepared_function(
         return None;
     }
     let inline_only = ir.inline_only_fns.contains(&function);
-    let annotated = ir
+    let declares_metadata_annotations = ir
         .function_annotations
         .get(&function)
         .is_some_and(|annotations| annotations.declares_metadata_annotations());
-    let exact_inline_only_annotation =
+    let retained_exact_inline_only =
         ir.function_annotations
             .get(&function)
             .is_some_and(|annotations| {
@@ -225,12 +225,14 @@ fn prepared_function(
                     if annotation.internal.matches("kotlin/internal/InlineOnly")
                         && annotation.values.is_empty())
             });
-    if (inline_only && !exact_inline_only_annotation) || (!inline_only && annotated) {
-        // Other declaration annotations need their complete checked constructor/value payload.
+    if declares_metadata_annotations && (!inline_only || !retained_exact_inline_only) {
+        // `inline_only_fns` is the checked resolved annotation fact. Annotation retention may omit
+        // its application, but any retained annotation still needs the exact constructor/value
+        // payload this narrow writer supports.
         return None;
     }
     let flags = crate::metadata::declaration_flags::function_flags(ir, function, declaration)
-        | u64::from(annotated);
+        | u64::from(inline_only);
     Some(PreparedFunction {
         signature: signature.clone(),
         name: ir.fn_source_names.get(&function)?.clone(),
