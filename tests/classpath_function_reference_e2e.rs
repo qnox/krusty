@@ -63,3 +63,63 @@ fn constructor_reference_wins_over_same_named_classpath_function() {
         None => eprintln!("skipping: box runner unavailable"),
     }
 }
+
+#[test]
+fn generic_dependency_constructor_reference_keeps_its_selected_parameter_application() {
+    let Some(jh) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        eprintln!("skipping: set JAVA_HOME");
+        return;
+    };
+    let sl = common::stdlib_jar();
+    let jdk = std::path::PathBuf::from(format!("{jh}/lib/modules"));
+    let Some(libout) = common::compile_lib(
+        "generic_ctor_cfr",
+        "package lib\nclass Box<T>(val value: T)\n",
+    ) else {
+        return;
+    };
+    let cp = vec![libout.clone(), sl.clone()];
+    let main = "import lib.Box\n\
+        val make: (String) -> Box<String> = ::Box\n\
+        fun box(): String = make(\"OK\").value\n";
+    let classes = common::compile_in_process(main, "Main", &cp, Some(&jdk))
+        .expect("krusty failed to compile a generic dependency constructor reference");
+    match common::run_box(&classes, "MainKt", &[libout, sl]) {
+        Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),
+        None => eprintln!("skipping: box runner unavailable"),
+    }
+}
+
+#[test]
+fn java_constructor_formal_shadowing_does_not_replace_the_classifier_result_formal() {
+    let Some(jh) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        eprintln!("skipping: set JAVA_HOME");
+        return;
+    };
+    let sl = common::stdlib_jar();
+    let jdk = std::path::PathBuf::from(format!("{jh}/lib/modules"));
+    let Some((libout, _)) = common::javac_compile(
+        &[(
+            "ShadowBox.java".to_string(),
+            "package lib;\n\
+             public final class ShadowBox<T> {\n\
+               public final T value;\n\
+               public <T> ShadowBox(String value, T ignored) { this.value = null; }\n\
+             }\n"
+            .to_string(),
+        )],
+        &[],
+    ) else {
+        return;
+    };
+    let cp = vec![libout.clone(), sl.clone()];
+    let main = "import lib.ShadowBox\n\
+        val make: (String, Int) -> ShadowBox<String> = ::ShadowBox\n\
+        fun box(): String { make(\"ignored\", 1); return \"OK\" }\n";
+    let classes = common::compile_in_process(main, "Main", &cp, Some(&jdk))
+        .expect("krusty failed to compile a shadowed generic Java constructor reference");
+    match common::run_box(&classes, "MainKt", &[libout, sl]) {
+        Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),
+        None => eprintln!("skipping: box runner unavailable"),
+    }
+}

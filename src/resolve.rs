@@ -61149,22 +61149,12 @@ impl<'a> Checker<'a> {
                 Ty::obj_args_name(internal, &arguments)
             })
         } else {
-            let class_bindings = classifier
-                .type_params
-                .iter()
-                .cloned()
-                .zip(target.type_args().iter().copied())
-                .collect::<crate::symbol_resolver::GSigBinds>();
-            let declared_parameters = selected
-                .generic_sig
-                .as_ref()
-                .map_or(selected.params.as_slice(), |signature| {
-                    signature.params.as_slice()
-                });
+            // Constructor selection already specialized these parameters in the callable-owned
+            // signature coordinate. Substituting classifier-owned keys into the raw signature is
+            // a no-op after dependency normalization and discards the selected application.
+            let declared_parameters = selected.params.as_slice();
             let mut alias_bindings = crate::symbol_resolver::GSigBinds::default();
             for (&declared, &actual) in declared_parameters.iter().zip(inference_parameters) {
-                let declared =
-                    crate::symbol_resolver::ty_subst_keep_unbound(declared, &class_bindings);
                 crate::symbol_resolver::unify_inferred_ty(declared, actual, &mut alias_bindings);
             }
             crate::symbol_resolver::ty_subst_keep_unbound(target, &alias_bindings)
