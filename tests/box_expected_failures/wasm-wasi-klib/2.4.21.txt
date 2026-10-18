@@ -1,6 +1,7 @@
 # Kotlin 2.4.21 codegen/box files expected to fail on wasm-wasi-klib, relative to
-# compiler/testData/codegen/box. Regenerate both exact inventories with
-# KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local wasm-wasi-klib run. The lists only shrink.
+# compiler/testData/codegen/box. Later releases with no file of their own read this one.
+# Regenerate both exact inventories with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local
+# wasm-wasi-klib run. The lists only shrink.
 annotations/annotationWithDefaultArgInDifferentModule.kt
 annotations/annotations0.kt
 annotations/deserializedLocalClassArgument.kt
@@ -568,7 +569,6 @@ callableReference/bound/receiverEvaluatedOnce.kt
 callableReference/bound/simpleFunction.kt
 callableReference/bound/simpleProperty.kt
 callableReference/bound/smartCastForExtensionReceiver.kt
-callableReference/bound/typeAliasObjectBoundReference.kt
 callableReference/bound/valueClassAndReferenceReceiverSharedClassSplit.kt
 callableReference/callableReferenceOfCompanionConst.kt
 callableReference/callableReferenceOfCompanionMethod.kt
@@ -960,17 +960,12 @@ closures/captureOuterProperty/kt4176.kt
 closures/captureOuterProperty/kt4656.kt
 closures/capturedLocalGenericFun.kt
 closures/capturedVarsOptimization/capturedInCrossinline.kt
-closures/capturedVarsOptimization/capturedInInlineOnlyAssign.kt
-closures/capturedVarsOptimization/capturedInInlineOnlyCAO.kt
-closures/capturedVarsOptimization/capturedInInlineOnlyIncrDecr.kt
-closures/capturedVarsOptimization/capturedInInlineOnlyIndexedCAO.kt
 closures/capturedVarsOptimization/capturedVarsOfSize2.kt
 closures/capturedVarsOptimization/closureBoxedVarOptimizations.kt
 closures/capturedVarsOptimization/kt17200.kt
 closures/capturedVarsOptimization/kt17588.kt
 closures/capturedVarsOptimization/kt44347.kt
 closures/capturedVarsOptimization/kt45446.kt
-closures/capturedVarsOptimization/sharedSlotsWithCapturedVars.kt
 closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
 closures/closureCapturingGenericParam.kt
@@ -1042,8 +1037,6 @@ companionBlocksAndExtensions/callableReferences_extensions.kt
 companionBlocksAndExtensions/companionBlock.kt
 companionBlocksAndExtensions/companionBlockImplicitInvoke.kt
 companionBlocksAndExtensions/companionExtensionImplicitInvoke.kt
-companionBlocksAndExtensions/companionExtensionsWithContext.kt
-companionBlocksAndExtensions/companionExtensionsWithSeveralContextParameters.kt
 companionBlocksAndExtensions/constProperties.kt
 companionBlocksAndExtensions/ebf.kt
 companionBlocksAndExtensions/inheritance.kt
@@ -1164,13 +1157,8 @@ constants/float.kt
 constants/foldingBinaryOpsUnsigned.kt
 constants/kt9532.kt
 constants/privateConst.kt
-contextParameters/ImplicitReceiverWithTheSameContextAndExtension.kt
 contextParameters/arrayAccessCompositveOperators.kt
 contextParameters/arrayAccessOperators.kt
-contextParameters/assignmentOfContextVar.kt
-contextParameters/choosingTheNearestContext.kt
-contextParameters/classCastException.kt
-contextParameters/classMemberAndTopLevelExtensionWithContext.kt
 contextParameters/classMemberAndTopLevelWithContext.kt
 contextParameters/companionObjectInContext.kt
 contextParameters/compoundAssignmentOperators.kt
@@ -1184,11 +1172,7 @@ contextParameters/contextualAnonymousFunction.kt
 contextParameters/contextualCallableReference.kt
 contextParameters/contextualFunctionConversion.kt
 contextParameters/contextualInlineCall.kt
-contextParameters/contextualLocalFunAndTopLevelFun.kt
-contextParameters/contextualLocalFunWithExtensiionReceiver.kt
 contextParameters/contextualLocalFunWithTypeParam.kt
-contextParameters/contextualLocalFunction.kt
-contextParameters/contextualLocalWithLocalExtensionAndValue.kt
 contextParameters/dispatchExtensionAndContextReceiverResolve.kt
 contextParameters/explicitPassing.kt
 contextParameters/functionalType.kt
@@ -1199,7 +1183,6 @@ contextParameters/inlineContextParameter.kt
 contextParameters/inlineContextualReceiverLambda.kt
 contextParameters/invokeMultipleContextParametersOfSameType.kt
 contextParameters/invokeOnTypeWithContext.kt
-contextParameters/kt51277.kt
 contextParameters/kt51284.kt
 contextParameters/kt51290.kt
 contextParameters/kt51475.kt
@@ -1208,11 +1191,9 @@ contextParameters/kt51951.kt
 contextParameters/kt52207.kt
 contextParameters/kt52213.kt
 contextParameters/kt52373.kt
-contextParameters/kt52459.kt
 contextParameters/kt52967.kt
 contextParameters/kt53551.kt
 contextParameters/kt58476.kt
-contextParameters/kt63430.kt
 contextParameters/kt65953.kt
 contextParameters/kt66368.kt
 contextParameters/kt74998.kt
@@ -1220,14 +1201,7 @@ contextParameters/propertyCompoundAssignment.kt
 contextParameters/receiversOrder.kt
 contextParameters/sameArgForContextAndExtension.kt
 contextParameters/sameExtensionContextAndDispatchReceiver.kt
-contextParameters/sameNameWithGlobalProperty.kt
-contextParameters/sameNameWithLocalArguments.kt
-contextParameters/sameNameWithLocalProperty.kt
-contextParameters/sameNameWithLocalValueParameter.kt
-contextParameters/sameNameWithMemberProperty.kt
 contextParameters/sameNameWithOuterContext.kt
-contextParameters/sameNameWithPropertyName.kt
-contextParameters/specificity.kt
 contextParameters/substitutedContextReceivers.kt
 contextParameters/suspendContextParemetersWithExtension.kt
 contextParameters/suspendContextualWithExtension.kt
@@ -1235,11 +1209,9 @@ contextParameters/typealiasOnTypeWithContext.kt
 contextParameters/unaryOperators.kt
 contextParameters/useFromAnotherModuleSuspending.kt
 contextParameters/useFromAnotherModuleWithDefaultParameterValues.kt
-contextParameters/withExtensionReceiverAndThis.kt
 contextParameters/withExtensionReceiverInSupertype.kt
 contracts/constructorArgument.kt
 contracts/contractForCast.kt
-contracts/contractOnContextParameter.kt
 contracts/destructuredVariable.kt
 contracts/exactlyOnceNotInline.kt
 contracts/exception.kt
@@ -1911,7 +1883,6 @@ coroutines/suspendInTheMiddleOfObjectConstruction.kt
 coroutines/suspendInTheMiddleOfObjectConstructionEvaluationOrder.kt
 coroutines/suspendInTheMiddleOfObjectConstructionWithJumpOut.kt
 coroutines/suspendInlineReference.kt
-coroutines/suspendLambdaInInterface.kt
 coroutines/suspendLambdaWithArgumentRearrangement.kt
 coroutines/suspendTwoProblematicExpressionsInOneCoroutine.kt
 coroutines/suspendWhileBreakContinueInsideElvis.kt
@@ -2539,7 +2510,6 @@ extensionFunctions/extensionFunctionAsAnExpressionWithNestedType.kt
 extensionFunctions/extensionFunctionAsAnonymous.kt
 extensionFunctions/extensionFunctionAsSupertype.kt
 extensionFunctions/extensionFunctionAsType.kt
-extensionFunctions/extensionFunctionClassLevelLocal.kt
 extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/extensionFunctionFakeOverride.kt
 extensionFunctions/extensionFunctionInDelegatedSam.kt
@@ -2552,10 +2522,8 @@ extensionFunctions/extensionFunctionWithExtensionAsAReceiver.kt
 extensionFunctions/extensionFunctionWithExtensionInSAMInterface.kt
 extensionFunctions/extensionFunctionWithInlineModifier.kt
 extensionFunctions/extensionFunctionWithNestedReceiver.kt
-extensionFunctions/extensionFunctionWithReceiverConflict.kt
 extensionFunctions/extensionMemberWithTypeParameter.kt
 extensionFunctions/extensionReceiverIsNotInlined.kt
-extensionFunctions/functionWithTheSameDispatchAndExtensionReceiver.kt
 extensionFunctions/kt1061.kt
 extensionFunctions/kt1249.kt
 extensionFunctions/kt1290.kt
@@ -2859,7 +2827,6 @@ functions/localFunctions/localExtensionOnNullableParameter.kt
 functions/localFunctions/localFunctionInConstructor.kt
 functions/localFunctions/localFunctionVsLocalVariable.kt
 functions/localFunctions/nameClashAcrossDifferentContainers.kt
-functions/localFunctions/overloadedLocalFunWithoutClosure.kt
 functions/localFunctions/overloadedLocalFunction.kt
 functions/localFunctions/overloadedLocalFunction1.kt
 functions/localFunctions/overloadedLocalFunction2.kt
@@ -2913,7 +2880,6 @@ increment/classVarargGetSet.kt
 increment/classVarargGetSetEvaluationOrder.kt
 increment/classWithGetSet.kt
 increment/genericClassWithGetSet.kt
-increment/memberExtOnLong.kt
 increment/mutableListElement.kt
 increment/nullable.kt
 increment/postfixIncrementDoubleSmartCast.kt
@@ -3241,7 +3207,6 @@ inline/innerOuterThis.kt
 inline/invokeOnField.kt
 inline/iteratorOnInlineFunctionResult.kt
 inline/kt26117.kt
-inline/kt26466.kt
 inline/kt26787.kt
 inline/kt66017.kt
 inline/kt66017_inlineFromTheSameModule.kt
@@ -4451,8 +4416,6 @@ multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
 multiplatform/k2/basic/accessToLocalClassFromBackend.kt
 multiplatform/k2/basic/anyMethodInExpect.kt
 multiplatform/k2/basic/contextInFakeOverride.kt
-multiplatform/k2/basic/contextOnExpect.kt
-multiplatform/k2/basic/contextOnExpectActual.kt
 multiplatform/k2/basic/correctParentForTypeParameter.kt
 multiplatform/k2/basic/delegatedByExpectExtensionProperty.kt
 multiplatform/k2/basic/enumEntryNameCall.kt
@@ -4708,7 +4671,6 @@ objects/kt2719.kt
 objects/kt32351.kt
 objects/kt32749.kt
 objects/kt3684.kt
-objects/kt45170.kt
 objects/kt46136.kt
 objects/kt52540.kt
 objects/kt535.kt
@@ -4732,7 +4694,6 @@ objects/selfReferenceToInterfaceCompanionObjectInAnonymousObjectInSuperConstruct
 objects/selfReferenceToInterfaceCompanionObjectInInlineLambdaInConstructorBody.kt
 objects/selfReferenceToInterfaceCompanionObjectInInlineLambdaInSuperConstructorCall.kt
 objects/selfReferenceToInterfaceCompanionObjectInLambdaInSuperConstructorCall.kt
-objects/selfReferenceToObjectInInlineLambdaInConstructorBody.kt
 objects/selfReferenceToObjectInInlineLambdaInSuperConstructorCall.kt
 objects/selfReferenceToObjectInLambdaInSuperConstructorCall.kt
 objects/substitutionFunctionFromSuper.kt
@@ -4927,9 +4888,7 @@ properties/complexPropertyInitializer.kt
 properties/const/constPropertyAccessor.kt
 properties/const/intermoduleInlineConst.kt
 properties/const/kt52970.kt
-properties/eagerInitializationGlobal1.kt
 properties/eagerInitializationGlobal2.kt
-properties/eagerInitializationGlobal3.kt
 properties/eagerInitializationGlobal4.kt
 properties/fieldInsideLambda.kt
 properties/generalAccess.kt
@@ -4986,7 +4945,6 @@ properties/lateinit/topLevel/uninitializedRead.kt
 properties/lazyInitialization.kt
 properties/lazyInitializationCyclicImports.kt
 properties/lazyInitializationMultiModule.kt
-properties/lazyInitializationOrder.kt
 properties/lazyInitializationSplitPerModule.kt
 properties/primitiveOverrideDefaultAccessor.kt
 properties/primitiveOverrideDelegateAccessor.kt
@@ -5877,7 +5835,6 @@ regressions/dontCaptureTypesWithTypeVariables.kt
 regressions/functionLiteralAsLastExpressionInBlock.kt
 regressions/generic.kt
 regressions/hashCodeNPE.kt
-regressions/intersectionOfEqualTypes.kt
 regressions/kt10143.kt
 regressions/kt10934.kt
 regressions/kt15196.kt
