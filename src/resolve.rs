@@ -65700,7 +65700,7 @@ impl<'a> Checker<'a> {
                                 expected,
                                 expected_bindings: &expected_bindings,
                                 nullable_flexible_roots: &constraints.nullable_flexible_roots,
-                                explicit_type_arguments,
+                                explicit_type_arguments: &explicit_type_arguments,
                                 actuals: &actuals,
                                 vararg_index: call_sig.vararg_index,
                             },
