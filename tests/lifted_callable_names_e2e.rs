@@ -312,14 +312,15 @@ fn each_local_class_numbers_its_own_lambdas_across_top_level_declarations() {
 }
 
 /// kotlinc spells every segment of a lifted name as a Java identifier: a backticked function's
-/// lambdas and a backticked local function replace each character that is not a letter or a digit
-/// with `_` (`my_test$lambda$0`, `outer$my_local`), while the declared function keeps its name.
+/// lambdas and a backticked local function replace each character that is not a Unicode letter or
+/// an ASCII digit with `_`, while the declared function keeps its name. The Arabic-Indic digit and
+/// Roman numeral distinguish kotlinc's predicate from Rust's broader `char::is_alphanumeric`.
 #[test]
 fn backticked_names_lift_with_identifier_characters() {
-    let source = "fun `my test-é9`(): Int {\n\
+    let source = "fun `my test-é9٢Ⅷ`(): Int {\n\
             \x20   val first = { 1 }\n\
-            \x20   fun `my local`() = 2\n\
-            \x20   return first() + `my local`()\n\
+            \x20   fun `my local٢Ⅷ`() = 2\n\
+            \x20   return first() + `my local٢Ⅷ`()\n\
             }\n\
             class Spec {\n\
             \x20   fun `reads a value`(): Int {\n\
@@ -344,4 +345,31 @@ fn backticked_names_lift_with_identifier_characters() {
             compared.krusty
         );
     }
+}
+
+/// Local-function numbering keys on the raw Kotlin name, before sanitizing the emitted segment.
+/// These distinct raw names therefore remain unnumbered even though both spell `my_local`; the
+/// later physical-signature collision handling must match kotlinc independently.
+#[test]
+fn raw_local_names_control_a_sanitized_spelling_collision() {
+    let source = "fun collision(): Int {\n\
+            \x20   fun `my local`() = 1\n\
+            \x20   fun `my-local`() = 2\n\
+            \x20   return `my local`() + `my-local`()\n\
+            }\n";
+    let compared = common::compare_with_kotlinc_plugin(
+        "SanitizedCollision",
+        source,
+        "SanitizedCollisionKt",
+        &[common::stdlib_jar()],
+        "1.8",
+        &[],
+    )
+    .expect("reference kotlinc and javap must be available");
+    assert!(
+        compared.krusty_bytes == compared.reference_bytes,
+        "sanitized collision differs\n--- kotlinc ---\n{}\n--- krusty ---\n{}",
+        compared.reference,
+        compared.krusty
+    );
 }

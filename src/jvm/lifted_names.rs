@@ -27,6 +27,7 @@
 //! block. The sequence is that name's, so `o(Tag)` numbers apart from an overload `o(Int)`.
 
 use crate::fx_hash::{HashMap, HashSet};
+use unicode_general_category::{get_general_category, GeneralCategory};
 
 use crate::ir::{IrEnclosure, IrFile, IrLiftingRoot, IrLiftingSequence};
 
@@ -431,13 +432,29 @@ fn generated_class_enclosure(ir: &IrFile, function: crate::ir::FunId) -> Option<
     }
 }
 
-/// kotlinc's `NameUtils.sanitizeAsJavaIdentifier`: every character that is not a letter or a digit
-/// becomes `_`, so a special or mangled name (`<init>`, `<get-x>`, `x$delegate`, `f-txdesME`) and a
-/// backticked one (`my test`) both name their lifted callables with identifier characters.
+/// kotlinc's `NameUtils.sanitizeAsJavaIdentifier`: every character that is not a Unicode letter or
+/// an ASCII digit becomes `_`, so a special or mangled name (`<init>`, `<get-x>`, `x$delegate`,
+/// `f-txdesME`) and a backticked one (`my test`) both name their lifted callables with identifier
+/// characters.
 fn segment_spelling(container: &str) -> String {
     container
         .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .map(|character| {
+            if character.is_ascii_digit()
+                || matches!(
+                    get_general_category(character),
+                    GeneralCategory::UppercaseLetter
+                        | GeneralCategory::LowercaseLetter
+                        | GeneralCategory::TitlecaseLetter
+                        | GeneralCategory::ModifierLetter
+                        | GeneralCategory::OtherLetter
+                )
+            {
+                character
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -480,5 +497,6 @@ mod tests {
         assert_eq!(segment_spelling("sus-47cE-Rs"), "sus_47cE_Rs");
         assert_eq!(segment_spelling("outer"), "outer");
         assert_eq!(segment_spelling("a b!c-é9_x"), "a_b_c_é9_x");
+        assert_eq!(segment_spelling("Kǅʰ中²Ⅷ٢"), "Kǅʰ中___");
     }
 }
