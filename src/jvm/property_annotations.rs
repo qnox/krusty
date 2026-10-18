@@ -84,7 +84,9 @@ pub fn synthesize_property_annotation_markers(ir: &mut IrFile) {
         .map(|property| (property.property, property.name.clone()))
         .collect::<Vec<_>>();
     for (property, name) in package_properties {
-        let marker_name = format!("{}$annotations", property_getter_name(&name));
+        let getter = written_package_getter_jvm_name(ir, property)
+            .unwrap_or_else(|| property_getter_name(&name));
+        let marker_name = format!("{getter}$annotations");
         let marker = synthesize_marker(ir, marker_name, Vec::new(), Vec::new());
         ir.mark_jvm_package_property_annotation_marker(property, marker);
     }
@@ -100,6 +102,30 @@ fn written_getter_jvm_name(ir: &IrFile, class_index: usize, source_order: u32) -
     let annotations = match property.getter {
         Some(getter) => ir.function_annotations.get(&getter),
         None => Some(&property.accessor_annotations.getter),
+    };
+    crate::jvm::module_calls::applied_jvm_name(annotations)
+        .ok()
+        .flatten()
+        .map(str::to_owned)
+}
+
+/// The `@JvmName` written on a top-level property's getter, which names its marker as it names
+/// the getter.
+fn written_package_getter_jvm_name(
+    ir: &IrFile,
+    property: crate::fir::PropertyId,
+) -> Option<String> {
+    let declared = match ir.local_property_layouts.get(&property)? {
+        crate::ir::IrLocalPropertyLayout::TopLevelStorage { getter, .. } => *getter,
+        crate::ir::IrLocalPropertyLayout::TopLevelAccessor { getter, .. } => Some(*getter),
+        _ => None,
+    };
+    let annotations = match declared {
+        Some(getter) => ir.function_annotations.get(&getter),
+        None => ir
+            .accessor_annotations
+            .get(&property)
+            .map(|annotations| &annotations.getter),
     };
     crate::jvm::module_calls::applied_jvm_name(annotations)
         .ok()
