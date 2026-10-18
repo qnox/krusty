@@ -1220,7 +1220,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   `getfield`/`putfield` on implicit `this`.
 - ✅ Emit (member properties): `bp_has_field` decides the backing field (default getter, or an
   initializer/`lateinit`); a custom getter/setter body is emitted as `getX`/`setX`, the matching
-  default accessor is suppressed, and `private set` emits a private default setter.
+  default accessor is suppressed, and `private set` emits no setter: same-class writes store the
+  field (see SPEC "private set").
 - ✅ TDD: `tests/prop_accessors_e2e.rs` (getter over `field`, setter mutating `field`, `private
   set`) on the JVM with `-Xverify:all`.
 - 🛡️ Never-miscompile guards for cases not yet emitted (→ reject/skip, not miscompile):

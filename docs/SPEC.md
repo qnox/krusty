@@ -7975,10 +7975,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the setter's return to the whole declaration's last line. An `internal set` on a public property
   is an internal member, so its setter carries the module suffix for both its declaring class and
   sibling-file call sites; a top-level `lateinit var` may use that bodyless visibility-only setter
-  without an initializer. Known gaps, independent of annotations: `@JvmName` renames a
-  declared accessor (and the package `JvmPropertySignature`
-  names the renamed method) but not a bodyless one; use-site targets (`@get:A`) are not part of this
-  path. Tests: `property_accessor_annotation_e2e`, `written_default_accessor_e2e`,
+  without an initializer. `@JvmName` on a bodyless accessor is covered by the accessor `@JvmName`
+  entry below. Tests: `property_accessor_annotation_e2e`, `written_default_accessor_e2e`,
   `expression_line_marks_e2e` (setter fall-through), `types::annotation_targets` unit tests.
 
   A retained `PROPERTY` annotation's synthetic `$annotations` method occupies the same physical JVM
@@ -17057,6 +17055,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `companion_e2e::companion_property_custom_accessors_run`,
   `companion_e2e::computed_companion_property_reads_outside_a_qualified_receiver`,
   `feature_coverage_q_e2e::value_class_companion_function`.
+
+- **`@JvmName` on a compiler-default accessor is that accessor's whole JVM name.** The name may be
+  written on a bodyless `get`/`set` or through `@get:JvmName`/`@set:JvmName`. The JVM backend
+  realizes it from the accessor's checked annotations before emission, for a member, an object, a
+  file-facade property and a companion property whose storage is hoisted onto the outer class. The
+  declaration, same-file calls, the property's `JvmPropertySignature` and its `$annotations` marker
+  all use it. An explicit `@JvmName` is not changed further: an internal member keeps it without the
+  `$<module>` suffix (a function, a declared accessor or a default one), and a value-class-typed
+  property keeps it without the value-class hash. A companion's synthesized default accessors also
+  carry the annotations written on them (`@get:Deprecated`). Known gaps: a call from another file
+  of the module still names a member's Kotlin accessor or function (the stable header records no
+  member annotation arguments), a `@JvmStatic` companion property has no outer static wrapper, and
+  a top-level `lateinit var`, which has no checked body, carries no accessor annotations. Tests:
+  `accessor_jvm_name_e2e`.
 
 - **`@JvmName` on a top-level function names the emitted method.** The annotation's constant
   string is the bytecode method name; call sites still resolve by the SOURCE name, and each emits
