@@ -4458,28 +4458,22 @@ pub(crate) fn finalized_streamed_signature_index(
         compact_classifier_cycle_edges(table, &classifier_types, &resolved_classifier_parents);
     failed.sort_by_key(|declaration| declaration.raw());
     failed.dedup();
-    for diagnostic in explicit_type_semantics
-        .diagnostics
-        .borrow()
-        .iter()
-        .filter(|diagnostic| diagnostic.unconditional)
-    {
-        diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
-    }
+    let explicit_diagnostics = explicit_type_semantics.diagnostics.borrow();
+    diagnostics::emit_unconditional(diags, &explicit_diagnostics);
     if !failed.is_empty() {
         crate::trace_compiler!(
             "fir",
             "signature finalization rejected declarations before solver: {failed:?}",
         );
-        for diagnostic in explicit_type_semantics
-            .diagnostics
-            .borrow()
-            .iter()
-            .filter(|diagnostic| !diagnostic.unconditional)
-        {
+        let failed_declarations = failed.iter().copied().collect::<HashSet<_>>();
+        for diagnostic in explicit_diagnostics.iter().filter(|diagnostic| {
+            !diagnostic.unconditional && failed_declarations.contains(&diagnostic.declaration)
+        }) {
             diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
         }
     }
+    let explicit_publication_diagnostics = explicit_diagnostics.len();
+    drop(explicit_diagnostics);
 
     let signature_origins = graph
         .constraints()
@@ -4588,25 +4582,35 @@ pub(crate) fn finalized_streamed_signature_index(
     }
     // Classifier publication resolves supertype headers after the solver's report; what it records
     // joins the same module report on every exit from publication.
+    // Publication appends diagnostics monotonically. Advance this cursor after every publication
+    // result so an unconditional finding is emitted once, and a conditional finding is considered
+    // only alongside the declaration whose publication just failed.
+    let mut publication_diagnostics = solver_diagnostics;
     macro_rules! emit_publication_diagnostics {
-        () => {
-            diagnostics::emit_unconditional(
-                diags,
-                &semantics.diagnostics.borrow()[solver_diagnostics..],
-            )
-        };
-        ($declaration:expr) => {
+        () => {{
+            let recorded = semantics.diagnostics.borrow();
+            diagnostics::emit_unconditional(diags, &recorded[publication_diagnostics..]);
+        }};
+        ($declaration:expr) => {{
+            let recorded = semantics.diagnostics.borrow();
             diagnostics::emit_publication_failure(
                 diags,
-                &semantics.diagnostics.borrow()[solver_diagnostics..],
+                &recorded[publication_diagnostics..],
                 $declaration,
-            )
-        };
+            );
+            publication_diagnostics = recorded.len();
+        }};
     }
     macro_rules! stop_with_failure {
         ($declaration:expr) => {{
             let declaration = $declaration;
-            emit_publication_diagnostics!(declaration);
+            let recorded = semantics.diagnostics.borrow();
+            diagnostics::emit_publication_failure(
+                diags,
+                &recorded[publication_diagnostics..],
+                declaration,
+            );
+            drop(recorded);
             failed.push(declaration);
             failed.sort_by_key(|declaration| declaration.raw());
             failed.dedup();
@@ -5029,22 +5033,24 @@ pub(crate) fn finalized_streamed_signature_index(
             }
         }
     }
-    for stub in headers
-        .stubs
+    let alias_failures =
+        type_alias_publication::publish_all(headers, &explicit_type_semantics, &mut index);
+    // Alias publication is batched: by the time `publish_all` returns, diagnostics for every
+    // rejected alias are already recorded. Select the whole failed set in one ordered pass;
+    // advancing a cursor once per alias would let the first failure consume later aliases'
+    // conditional findings. Unconditional findings also survive a completely successful batch.
+    let failed_aliases = alias_failures.iter().copied().collect::<HashSet<_>>();
+    let recorded = explicit_type_semantics.diagnostics.borrow();
+    for diagnostic in recorded[explicit_publication_diagnostics..]
         .iter()
-        .filter(|stub| stub.kind == DeclarationKind::TypeAlias)
+        .filter(|diagnostic| {
+            diagnostic.unconditional || failed_aliases.contains(&diagnostic.declaration)
+        })
     {
-        if type_alias_publication::publish_type_alias(
-            headers,
-            &explicit_type_semantics,
-            &mut index,
-            stub,
-        )
-        .is_err()
-        {
-            stop_with_failure!(stub.id);
-        }
+        diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
     }
+    drop(recorded);
+    failed.extend(alias_failures);
     // An applied nested/inner classifier carries both its own type arguments and any lexically
     // captured declaration arguments. Publish their stable semantic identities once so checked FIR
     // can attach substitutions without reconstructing ownership from source spelling or AST IDs.
@@ -5867,6 +5873,7 @@ pub(crate) fn finalized_streamed_signature_index(
             index.publish_annotation_policy(classifier, retention);
         }
     }
+    deferred_local_headers::publish_pass_one_owner_completions(headers, &mut index);
     // Every spelling fact below was selected by explicit compact resolution or by the solver.
     // Assemble the stable sidecars only after those operations and all header publication finish;
     // this phase performs no resolver call and no source-spelling lookup.

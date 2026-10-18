@@ -2,8 +2,9 @@
 //!
 //! This is a candidate set, not a completion decision. Pass 1 publishes representable function and
 //! constructor contracts. Body-local property/accessor surfaces are owner-completed even when
-//! explicitly typed, while unpublishable headers and the inseparable primary-vararg relation also
-//! transfer atomically to Pass 2.
+//! explicitly typed, while unpublishable headers transfer atomically to Pass 2. A constructor
+//! property's own declaration remains an independently publishable property fact even when its
+//! primary constructor must wait for the active body.
 
 use crate::fir::{
     DeclarationFlags, DeclarationId, DeclarationKind, HeaderDeclarationKind, SignatureGraph,
@@ -69,8 +70,8 @@ pub(super) fn declarations(
 ///
 /// `candidates` identifies headers whose semantic seed itself is unpublishable. Explicitly typed
 /// body-local properties/accessors do not belong to that set, but their lexical member surface is
-/// still completed only when the active owner is entered. Functions keep their representable
-/// Pass-1 contracts; constructor properties do too unless the primary-vararg relation is atomic.
+/// still completed only when the active owner is entered. Functions and constructor properties
+/// keep their representable Pass-1 contracts.
 pub(super) fn defers_owner_completed_signature(
     stub: &crate::fir::DeclarationStub,
     atomic_vararg_relation: bool,
@@ -79,8 +80,7 @@ pub(super) fn defers_owner_completed_signature(
     let body_local = stub.flags.has(DeclarationFlags::LOCAL_CLASS);
     match stub.kind {
         DeclarationKind::Property => {
-            body_local
-                && (!stub.flags.has(DeclarationFlags::PROPERTY_PARAMETER) || atomic_vararg_relation)
+            body_local && !stub.flags.has(DeclarationFlags::PROPERTY_PARAMETER)
         }
         DeclarationKind::Accessor => body_local,
         DeclarationKind::Constructor => candidates.contains(&stub.id) && atomic_vararg_relation,
@@ -164,4 +164,24 @@ pub(super) fn classifiers(
         .stubs
         .iter()
         .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
+}
+
+/// Close exact local declaration groups whose complete semantic surface was published in Pass 1.
+/// Such a classifier does not re-enter Pass 2 signature publication merely to acquire a lifecycle
+/// marker.
+pub(super) fn publish_pass_one_owner_completions(
+    headers: &crate::fir::StreamedHeaderModule,
+    index: &mut crate::fir::ResolvedModuleIndex,
+) {
+    let declarations = headers
+        .stubs
+        .iter()
+        .filter(|stub| {
+            stub.kind == DeclarationKind::Classifier
+                && stub.flags.has(DeclarationFlags::LOCAL_CLASS)
+                && index.body_local_owner_semantically_complete(stub.id)
+        })
+        .map(|stub| stub.id)
+        .collect::<Vec<_>>();
+    index.publish_body_local_owner_completions(declarations);
 }

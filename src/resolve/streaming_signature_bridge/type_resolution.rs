@@ -10,6 +10,9 @@ pub(super) struct SelectedTypeSite {
     /// Graph-local structural applications need the selected classifier boundary while the graph
     /// is alive. This id is never reinterpreted as a declaration-header syntax id.
     pub(super) application: Option<crate::fir::SigExprId>,
+    /// A declaration-owned statement-local alias RHS node. Unlike `syntax`, this identity lives
+    /// only with the compact graph and is consumed while the graph is still alive.
+    pub(super) local_template: Option<crate::fir::LocalTypeTemplateNodeId>,
     pub(super) abbreviation_origin: Option<crate::fir::OriginId>,
     /// Whether recursive resolution owns the written descendants. A structural graph application
     /// resolves its child expressions separately, so its target-template placeholders must not
@@ -85,6 +88,15 @@ impl ProductionSignatureSemantics<'_> {
             self.selected_types
                 .record_application(application, spelling);
         }
+        if let Some(node) = selected_site.and_then(|site| site.local_template) {
+            let mut spelling = self
+                .selected_types
+                .local_template_node(node)
+                .unwrap_or_default();
+            spelling.resolved = Some(resolved);
+            self.selected_types
+                .record_local_template_node(node, spelling);
+        }
         Some(resolved)
     }
 
@@ -98,6 +110,10 @@ impl ProductionSignatureSemantics<'_> {
         }
         if let Some(application) = site.and_then(|site| site.application) {
             self.selected_types.record_application(application, binding);
+        }
+        if let Some(node) = site.and_then(|site| site.local_template) {
+            self.selected_types
+                .record_local_template_node(node, binding);
         }
     }
 
@@ -119,6 +135,15 @@ impl ProductionSignatureSemantics<'_> {
             spelling.resolved = Some(resolved);
             self.selected_types
                 .record_application(application, spelling);
+        }
+        if let Some(node) = site.and_then(|site| site.local_template) {
+            let mut spelling = self
+                .selected_types
+                .local_template_node(node)
+                .unwrap_or_default();
+            spelling.resolved = Some(resolved);
+            self.selected_types
+                .record_local_template_node(node, spelling);
         }
     }
 
@@ -235,6 +260,7 @@ impl ProductionSignatureSemantics<'_> {
         Some(SelectedTypeSite {
             syntax: Some(syntax),
             application: None,
+            local_template: None,
             abbreviation_origin: None,
             project_children: true,
         })

@@ -71,6 +71,16 @@ impl DeclarationTypeSites {
             .and_then(|sites| sites.first().copied())
     }
 
+    pub(super) fn declaration_syntaxes_for_expression(
+        &self,
+        expression: SigExprId,
+    ) -> &[HeaderTypeId] {
+        self.by_expression
+            .get(&expression)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
     pub(super) fn declaration_syntaxes_for_type(&self, syntax: HeaderTypeId) -> &[HeaderTypeId] {
         self.by_graph_type
             .get(&syntax)
@@ -164,6 +174,11 @@ impl SignatureGraph {
     ) -> Option<HeaderTypeId> {
         self.declaration_type_sites
             .declaration_syntax_for_expression(expression)
+    }
+
+    pub(crate) fn declaration_expression_syntaxes(&self, expression: SigExprId) -> &[HeaderTypeId] {
+        self.declaration_type_sites
+            .declaration_syntaxes_for_expression(expression)
     }
 
     pub(crate) fn declaration_type_syntaxes(&self, syntax: HeaderTypeId) -> &[HeaderTypeId] {

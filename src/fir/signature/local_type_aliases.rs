@@ -40,6 +40,10 @@ pub(crate) enum LocalTypeTemplateTarget {
 
 #[derive(Clone, Debug)]
 pub(crate) struct LocalTypeTemplateNode {
+    /// Exact declaration-owned source occurrence. `target` may replace its children with graph
+    /// formals for semantic binding; this syntax retains annotations, parameter names and flags
+    /// for the spelling projection without reopening parser state.
+    pub(crate) source: HeaderTypeId,
     pub(crate) target: LocalTypeTemplateTarget,
     pub(crate) children: Box<[LocalTypeTemplateNodeId]>,
     pub(crate) flags: LocalTypeTemplateFlags,
@@ -49,6 +53,7 @@ pub(crate) struct LocalTypeTemplateNode {
 pub(crate) struct LocalTypeAliasTemplate {
     pub(crate) root: LocalTypeTemplateNodeId,
     pub(crate) formals: Box<[SigNameId]>,
+    pub(crate) scope: SignatureScopeId,
 }
 
 #[derive(Clone, Debug)]
@@ -225,6 +230,7 @@ impl SignatureGraph {
         &mut self,
         root: LocalTypeTemplateNodeId,
         formal_count: usize,
+        scope: SignatureScopeId,
     ) -> LocalTypeAliasTemplateId {
         let id = LocalTypeAliasTemplateId(next_id(
             self.local_type_alias_templates.len(),
@@ -235,7 +241,11 @@ impl SignatureGraph {
             .collect::<Vec<_>>()
             .into_boxed_slice();
         self.local_type_alias_templates
-            .push(LocalTypeAliasTemplate { root, formals });
+            .push(LocalTypeAliasTemplate {
+                root,
+                formals,
+                scope,
+            });
         id
     }
 

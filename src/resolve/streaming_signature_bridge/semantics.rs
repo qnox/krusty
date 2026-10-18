@@ -1125,6 +1125,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         let site = SelectedTypeSite {
             syntax: graph.declaration_type_syntax(syntax),
             application: None,
+            local_template: None,
             abbreviation_origin: Some(origin),
             project_children: true,
         };

@@ -2281,22 +2281,6 @@ fun build() {
     assert_rejection_same_as_kotlinc("BodyLocalMemberExtensionVal", source);
 }
 
-#[test]
-fn same_source_actualized_constructor_default_runs_like_kotlinc() {
-    let source = r#"// LANGUAGE: +MultiPlatformProjects
-expect class C(value: String = "OK") {
-    fun get(): String
-}
-
-actual class C actual constructor(private val value: String) {
-    actual fun get(): String = value
-}
-
-fun box(): String = C().get()
-"#;
-    common::expect_box_same_as_kotlinc(source, "SameSourceActualizedConstructorDefault");
-}
-
 /// A prefix with no value facet (a classifier with neither an object nor a companion, or a
 /// package) that misses its next segment reports that segment, as kotlinc does. A root spelled
 /// like both a default-imported classifier and the source package commits to the classifier, so

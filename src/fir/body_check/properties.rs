@@ -433,7 +433,7 @@ impl BodyFirChecker<'_> {
     /// `current_receiver` is the resolver's current-rung flag. An inherited member of the current
     /// instance may name a supertype, but a labeled enclosing `this` is a different value even when
     /// the current classifier extends that supertype.
-    fn materialize_classifier_dispatch_receiver(
+    pub(super) fn materialize_classifier_dispatch_receiver(
         &mut self,
         owner: DeclarationId,
         ty: ResolvedTy,

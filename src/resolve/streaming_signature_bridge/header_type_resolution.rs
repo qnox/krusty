@@ -9,6 +9,25 @@ use super::super::TParams;
 use super::*;
 
 impl ProductionSignatureSemantics<'_> {
+    /// Publish an evaluated graph expression to every declaration occurrence that owns it. A
+    /// constructor parameter and its property/classifier copies have distinct compact syntax ids,
+    /// while a graph `Known(TyParam)` leaf has no lookup callback that could publish any of them.
+    /// The graph-to-header bridge is the stable identity relation; retain an already-selected
+    /// alias/classifier boundary and add only this expression's semantic result.
+    fn record_declaration_expression_type(
+        &self,
+        graph: &crate::fir::SignatureGraph,
+        expression: crate::fir::SigExprId,
+        resolved: Ty,
+    ) {
+        for &syntax in graph.declaration_expression_syntaxes(expression) {
+            let syntax = self.headers.syntax.written_type_id(syntax);
+            let mut spelling = self.selected_types.spelling(syntax).unwrap_or_default();
+            spelling.resolved = Some(resolved);
+            self.selected_types.record_spelling(syntax, spelling);
+        }
+    }
+
     fn apply_local_template_flags(mut ty: Ty, flags: crate::fir::LocalTypeTemplateFlags) -> Ty {
         if flags.in_projection {
             ty = Ty::in_projection(ty);
@@ -28,15 +47,22 @@ impl ProductionSignatureSemantics<'_> {
     fn resolve_local_template_node(
         &self,
         graph: &crate::fir::SignatureGraph,
-        node: crate::fir::LocalTypeTemplateNodeId,
+        node_id: crate::fir::LocalTypeTemplateNodeId,
         alias_formals: &[String],
-    ) -> Option<Ty> {
-        let node = graph.local_type_template_node(node)?;
+        source_file: crate::fir::SourceFileId,
+    ) -> Option<(
+        Ty,
+        super::bound_local_alias_templates::LocalTypeSpellingProjection,
+    )> {
+        let node = graph.local_type_template_node(node_id)?.clone();
         let children = node
             .children
             .iter()
-            .map(|child| self.resolve_local_template_node(graph, *child, alias_formals))
+            .map(|child| {
+                self.resolve_local_template_node(graph, *child, alias_formals, source_file)
+            })
             .collect::<Option<Vec<_>>>()?;
+        let child_types = children.iter().map(|(ty, _)| *ty).collect::<Vec<_>>();
         let resolved = match &node.target {
             crate::fir::LocalTypeTemplateTarget::Formal(ordinal) => {
                 let formal = alias_formals.get(*ordinal as usize)?;
@@ -57,7 +83,7 @@ impl ProductionSignatureSemantics<'_> {
                     .map(|formal| graph.name(*formal).map(str::to_owned))
                     .collect::<Option<Vec<_>>>()?;
                 let mut parameters = TParams::default();
-                for (formal, child) in source_formals.iter().zip(children.iter().copied()) {
+                for (formal, child) in source_formals.iter().zip(child_types.iter().copied()) {
                     // Keep the template placeholder as the identity seen by type resolution.
                     // Binding it directly to `child` lets a nested parameter collapse to its
                     // `Nothing` bound before the declaration-owned substitution below can run.
@@ -66,13 +92,25 @@ impl ProductionSignatureSemantics<'_> {
                 let symbolic = self
                     .with_signature_type_scope(scope, |lexical| {
                         lexical.declare_tparams(&source_formals, &parameters, |_| false);
-                        self.signature_type_ref_at_with_site(scope, lexical, &target, false, None)
+                        self.signature_type_ref_at_with_site(
+                            scope,
+                            lexical,
+                            &target,
+                            false,
+                            Some(SelectedTypeSite {
+                                syntax: None,
+                                application: None,
+                                local_template: Some(node_id),
+                                abbreviation_origin: None,
+                                project_children: false,
+                            }),
+                        )
                     })
                     .ok()
                     .flatten()?;
                 let bindings = source_formals
                     .into_iter()
-                    .zip(children)
+                    .zip(child_types.iter().copied())
                     .collect::<crate::symbol_resolver::GSigBinds>();
                 crate::types::ty_subst_alias_expansion(symbolic, &bindings)
             }
@@ -90,17 +128,18 @@ impl ProductionSignatureSemantics<'_> {
                     .type_parameters
                     .type_params
                     .len();
-                if children.len() != own_arity || symbolic.type_args().len() < own_arity {
+                if child_types.len() != own_arity || symbolic.type_args().len() < own_arity {
                     return None;
                 }
-                let arguments = children
-                    .into_iter()
+                let arguments = child_types
+                    .iter()
+                    .copied()
                     .chain(symbolic.type_args()[own_arity..].iter().copied())
                     .collect::<Vec<_>>();
                 Ty::obj_args_name(symbolic.obj_internal()?, &arguments)
             }
             crate::fir::LocalTypeTemplateTarget::Alias(alias) => {
-                let symbolic = self.bind_local_alias_template(graph, *alias)?;
+                let bound = self.bind_local_alias_template(graph, *alias)?;
                 let definition = graph.local_type_alias_template(*alias)?;
                 let bindings = definition
                     .formals
@@ -108,19 +147,71 @@ impl ProductionSignatureSemantics<'_> {
                     .map(|formal| graph.name(*formal).map(str::to_owned))
                     .collect::<Option<Vec<_>>>()?
                     .into_iter()
-                    .zip(children)
+                    .zip(child_types.iter().copied())
                     .collect::<crate::symbol_resolver::GSigBinds>();
-                crate::types::ty_subst_alias_expansion(symbolic, &bindings)
+                crate::types::ty_subst_alias_expansion(bound.semantic, &bindings)
             }
         };
-        Some(Self::apply_local_template_flags(resolved, node.flags))
+        let resolved = Self::apply_local_template_flags(resolved, node.flags);
+        let source = graph.transient_type_ref(node.source)?;
+        let mut binding = self
+            .selected_types
+            .local_template_node(node_id)
+            .unwrap_or_default();
+        binding.resolved = Some(resolved);
+        self.selected_types
+            .record_local_template_node(node_id, binding);
+        let occurrence = super::bound_local_alias_templates::LocalTypeSpellingOccurrence {
+            source,
+            source_file,
+            binding,
+        };
+        let child_spellings = children
+            .into_iter()
+            .map(|(_, spelling)| spelling)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let spelling = match &node.target {
+            crate::fir::LocalTypeTemplateTarget::Formal(ordinal) => {
+                super::bound_local_alias_templates::LocalTypeSpellingProjection::Formal {
+                    ordinal: *ordinal,
+                    occurrence,
+                }
+            }
+            crate::fir::LocalTypeTemplateTarget::Alias(alias) => {
+                let bound = self.bind_local_alias_template(graph, *alias)?;
+                let definition = graph.local_type_alias_template(*alias)?;
+                let bindings = definition
+                    .formals
+                    .iter()
+                    .map(|formal| graph.name(*formal).map(str::to_owned))
+                    .collect::<Option<Vec<_>>>()?
+                    .into_iter()
+                    .zip(child_types.iter().copied())
+                    .collect::<crate::symbol_resolver::GSigBinds>();
+                let inner = bound.spelling.substitute(&child_spellings, &bindings)?;
+                super::bound_local_alias_templates::LocalTypeSpellingProjection::Overlay {
+                    occurrence,
+                    inner: Box::new(inner),
+                }
+            }
+            crate::fir::LocalTypeTemplateTarget::Star
+            | crate::fir::LocalTypeTemplateTarget::Syntax { .. }
+            | crate::fir::LocalTypeTemplateTarget::Classifier { .. } => {
+                super::bound_local_alias_templates::LocalTypeSpellingProjection::Structural {
+                    occurrence,
+                    children: child_spellings,
+                }
+            }
+        };
+        Some((resolved, spelling))
     }
 
     fn bind_local_alias_template(
         &self,
         graph: &crate::fir::SignatureGraph,
         alias: crate::fir::LocalTypeAliasTemplateId,
-    ) -> Option<Ty> {
+    ) -> Option<super::bound_local_alias_templates::BoundLocalAliasTemplate> {
         match self.bound_local_alias_templates.begin(alias) {
             super::bound_local_alias_templates::BindRequest::Bind => {}
             super::bound_local_alias_templates::BindRequest::Complete(result) => {
@@ -129,15 +220,19 @@ impl ProductionSignatureSemantics<'_> {
         }
         let result = (|| {
             let definition = graph.local_type_alias_template(alias)?;
+            let source_file = graph.scope(definition.scope)?.source;
             let formals = definition
                 .formals
                 .iter()
                 .map(|formal| graph.name(*formal).map(str::to_owned))
                 .collect::<Option<Vec<_>>>()?;
-            self.resolve_local_template_node(graph, definition.root, &formals)
+            let (semantic, spelling) =
+                self.resolve_local_template_node(graph, definition.root, &formals, source_file)?;
+            Some(super::bound_local_alias_templates::BoundLocalAliasTemplate { semantic, spelling })
         })()
         .ok_or(());
-        self.bound_local_alias_templates.finish(alias, result);
+        self.bound_local_alias_templates
+            .finish(alias, result.clone());
         result.ok()
     }
 
@@ -173,6 +268,7 @@ impl ProductionSignatureSemantics<'_> {
         let selected_site = SelectedTypeSite {
             syntax: declaration_syntax.map(|syntax| self.headers.syntax.written_type_id(syntax)),
             application: Some(expression),
+            local_template: None,
             abbreviation_origin: None,
             project_children: false,
         };
@@ -180,12 +276,17 @@ impl ProductionSignatureSemantics<'_> {
             let arguments = graph
                 .operands(application.arguments)
                 .iter()
-                .map(|argument| evaluate_argument(*argument).map(crate::fir::ResolvedTy::get))
+                .map(|argument| {
+                    evaluate_argument(*argument).map(|resolved| {
+                        self.record_declaration_expression_type(graph, *argument, resolved.get());
+                        resolved.get()
+                    })
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             let template = graph
                 .local_type_alias_template(alias)
                 .ok_or_else(Self::failure)?;
-            let bindings = template
+            let formals = template
                 .formals
                 .iter()
                 .map(|formal| {
@@ -194,16 +295,28 @@ impl ProductionSignatureSemantics<'_> {
                         .map(str::to_owned)
                         .ok_or_else(Self::failure)
                 })
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .zip(arguments)
+                .collect::<Result<Vec<_>, _>>()?;
+            let bindings = formals
+                .iter()
+                .cloned()
+                .zip(arguments.iter().copied())
                 .collect::<crate::symbol_resolver::GSigBinds>();
-            let symbolic = self
+            let bound = self
                 .bound_local_alias_templates
                 .bound(alias)
                 .ok_or_else(Self::failure)?
                 .map_err(|()| Self::failure())?;
-            let resolved = crate::types::ty_subst_alias_expansion(symbolic, &bindings);
+            for &syntax in graph.declaration_expression_syntaxes(expression) {
+                self.selected_types.record_local_alias_projection(
+                    self.headers.syntax.written_type_id(syntax),
+                    super::bound_local_alias_templates::AppliedLocalTypeSpellingProjection {
+                        root: bound.spelling.clone(),
+                        formals: formals.clone().into_boxed_slice(),
+                        arguments: arguments.clone().into_boxed_slice(),
+                    },
+                );
+            }
+            let resolved = crate::types::ty_subst_alias_expansion(bound.semantic, &bindings);
             Self::apply_local_template_flags(
                 resolved,
                 application
@@ -238,6 +351,7 @@ impl ProductionSignatureSemantics<'_> {
             let root_site = application.bind_root.then_some(SelectedTypeSite {
                 syntax: selected_site.syntax,
                 application: Some(expression),
+                local_template: None,
                 abbreviation_origin: Some(origin),
                 project_children: false,
             });
@@ -293,6 +407,7 @@ impl ProductionSignatureSemantics<'_> {
                 };
                 match evaluate_argument(argument) {
                     Ok(resolved) => {
+                        self.record_declaration_expression_type(graph, argument, resolved.get());
                         resolved_arguments.insert(index, resolved);
                     }
                     Err(diagnostic) => {
@@ -346,7 +461,7 @@ impl ProductionSignatureSemantics<'_> {
         expression: crate::fir::SigExprId,
     ) -> Option<Ty> {
         if graph.written_type_application(expression).is_some() {
-            return self
+            let resolved = self
                 .evaluate_written_type_application(graph, expression, &mut |argument| {
                     let ty = self
                         .resolve_compact_graph_type(graph, argument)
@@ -354,7 +469,15 @@ impl ProductionSignatureSemantics<'_> {
                     crate::fir::ResolvedTy::new(ty).map_err(|_| Self::failure())
                 })
                 .ok()
-                .map(crate::fir::ResolvedTy::get);
+                .map(crate::fir::ResolvedTy::get)?;
+            self.record_declaration_expression_type(graph, expression, resolved);
+            let sites = graph
+                .declaration_expression_syntaxes(expression)
+                .iter()
+                .map(|site| self.headers.syntax.written_type_id(*site))
+                .collect::<Vec<_>>();
+            self.publish_shared_type_spelling_sites(&sites);
+            return Some(resolved);
         }
         let resolved = match graph.expr(expression)? {
             crate::fir::SigExpr::Known(ty) => ty.get(),
@@ -387,12 +510,7 @@ impl ProductionSignatureSemantics<'_> {
         if resolved.mentions_error() || resolved.mentions_pending() {
             return None;
         }
-        if let Some(syntax) = graph.declaration_expression_syntax(expression) {
-            let syntax = self.headers.syntax.written_type_id(syntax);
-            let mut spelling = self.selected_types.spelling(syntax).unwrap_or_default();
-            spelling.resolved = Some(resolved);
-            self.selected_types.record_spelling(syntax, spelling);
-        }
+        self.record_declaration_expression_type(graph, expression, resolved);
         Some(resolved)
     }
 
@@ -416,6 +534,7 @@ impl ProductionSignatureSemantics<'_> {
                     Some(SelectedTypeSite {
                         syntax: Some(written_syntax),
                         application: None,
+                        local_template: None,
                         abbreviation_origin: None,
                         project_children: true,
                     }),
@@ -445,6 +564,7 @@ impl ProductionSignatureSemantics<'_> {
             Some(SelectedTypeSite {
                 syntax: Some(written_syntax),
                 application: None,
+                local_template: None,
                 abbreviation_origin: None,
                 project_children: true,
             }),
@@ -465,6 +585,7 @@ impl ProductionSignatureSemantics<'_> {
             Some(SelectedTypeSite {
                 syntax: Some(self.headers.syntax.written_type_id(syntax)),
                 application: None,
+                local_template: None,
                 abbreviation_origin: None,
                 project_children: true,
             }),
@@ -481,6 +602,7 @@ impl ProductionSignatureSemantics<'_> {
         let site = SelectedTypeSite {
             syntax: Some(self.headers.syntax.written_type_id(syntax)),
             application: None,
+            local_template: None,
             abbreviation_origin: None,
             project_children: true,
         };

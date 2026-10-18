@@ -41,7 +41,7 @@ impl Checker<'_> {
         };
         if property.receiver.is_some() {
             let (deprecated_hidden, accessor_availability) =
-                self.checked_property_availability(stable_declaration);
+                self.checked_property_availability(stable_declaration, Some(property));
             let header_scope = scope.child(ScopeKind::Function { receiver: None });
             let visible = header_scope.visible_tparams();
             let type_parameters = visible
@@ -278,7 +278,7 @@ impl Checker<'_> {
             return;
         }
         let (deprecated_hidden, accessor_availability) =
-            self.checked_property_availability(stable_declaration);
+            self.checked_property_availability(stable_declaration, None);
         self.checked_local_properties.insert(
             (owner, name.to_owned()),
             CheckedLocalProperty {
@@ -301,8 +301,9 @@ impl Checker<'_> {
     fn checked_property_availability(
         &self,
         stable_declaration: Option<crate::fir::DeclarationId>,
+        active_property: Option<&PropDecl>,
     ) -> (bool, crate::libraries::PropertyAccessorAvailability) {
-        let hidden = |declaration| {
+        let published_hidden = |declaration| {
             self.resolved_index.is_some_and(|index| {
                 index
                     .declaration_applied_annotations(declaration)
@@ -310,8 +311,15 @@ impl Checker<'_> {
                     .any(crate::types::ResolvedAnnotation::is_deprecated_hidden)
             })
         };
-        let deprecated_hidden = stable_declaration.is_some_and(hidden);
-        let accessor_available = |sibling| {
+        let active_hidden = |annotation: &crate::ast::AnnotationRef| {
+            self.applied_annotations
+                .get(&(annotation.span.lo, annotation.span.hi))
+                .is_some_and(|application| application.facts.deprecated_hidden)
+        };
+        let deprecated_hidden = stable_declaration.is_some_and(published_hidden)
+            || active_property
+                .is_some_and(|property| property.annotations.iter().any(active_hidden));
+        let accessor_available = |sibling, active: Option<&[crate::ast::AccessorAnnotation]>| {
             stable_declaration
                 .and_then(|declaration| {
                     self.resolved_index?.owned_declaration(
@@ -320,13 +328,26 @@ impl Checker<'_> {
                         sibling,
                     )
                 })
-                .is_none_or(|accessor| !hidden(accessor))
+                .is_none_or(|accessor| !published_hidden(accessor))
+                && active.is_none_or(|annotations| {
+                    !annotations
+                        .iter()
+                        .any(|entry| active_hidden(&entry.annotation))
+                })
         };
         (
             deprecated_hidden,
             crate::libraries::PropertyAccessorAvailability {
-                getter: accessor_available(0),
-                setter: accessor_available(1),
+                getter: accessor_available(
+                    0,
+                    active_property.map(|property| property.getter_annotations.as_slice()),
+                ),
+                setter: accessor_available(
+                    1,
+                    active_property
+                        .and_then(|property| property.setter.as_ref())
+                        .map(|setter| setter.annotations.as_slice()),
+                ),
             },
         )
     }

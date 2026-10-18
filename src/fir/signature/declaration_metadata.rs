@@ -106,8 +106,8 @@ impl ResolvedModuleIndex {
                 "body-local owner completion requires a stable local classifier"
             );
             assert!(
-                self.declaration_semantic_header_complete(declaration),
-                "body-local owner completion requires a complete semantic header"
+                self.body_local_owner_semantically_complete(declaration),
+                "body-local owner completion requires a complete semantic declaration group"
             );
             self.body_local_ownership.complete(declaration);
         }
@@ -116,6 +116,42 @@ impl ResolvedModuleIndex {
     /// Whether the active lexical group for this exact local classifier completed publication.
     pub(crate) fn body_local_owner_complete(&self, declaration: DeclarationId) -> bool {
         self.body_local_ownership.is_complete(declaration)
+    }
+
+    /// Whether a body-local classifier and every callable in its exact lexical member group have
+    /// complete semantic headers. Generated capture storage is published after checked capture
+    /// discovery and is not part of the source declaration group.
+    pub(crate) fn body_local_owner_semantically_complete(
+        &self,
+        declaration: DeclarationId,
+    ) -> bool {
+        self.declaration_header(declaration).is_some_and(|header| {
+            header.kind == DeclarationKind::Classifier
+                && header.flags.has(DeclarationFlags::LOCAL_CLASS)
+        }) && self.declaration_semantic_header_complete(declaration)
+            && self
+                .owned_declarations(declaration)
+                .iter()
+                .copied()
+                .filter(|candidate| {
+                    self.declaration_anchor(*candidate).is_some_and(|anchor| {
+                        matches!(
+                            anchor.kind,
+                            DeclarationKind::Function
+                                | DeclarationKind::Constructor
+                                | DeclarationKind::Property
+                                | DeclarationKind::Accessor
+                        )
+                    })
+                })
+                .filter(|candidate| !self.is_suppressed_generated_callable(*candidate))
+                .filter(|candidate| {
+                    !self.declaration_header(*candidate).is_some_and(|header| {
+                        header.flags.has(DeclarationFlags::COMPILER_GENERATED)
+                            && header.kind == DeclarationKind::Property
+                    })
+                })
+                .all(|candidate| self.declaration_semantic_header_complete(candidate))
     }
 
     /// Whether every stable semantic record required by a declaration header is published.
