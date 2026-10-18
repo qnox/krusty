@@ -1469,7 +1469,7 @@ pub fn facade_package_metadata_from_ir(
             // Which accessors the facade really declares, declared or compiler-default: a private
             // property with default accessors has none, and kotlinc's `JvmPropertySignature` then
             // names neither.
-            let (has_getter, has_setter, getter_function, setter_function) = match ir
+            let (has_getter, has_setter, getter_function, setter_function, storage) = match ir
                 .local_property_layouts
                 .get(&declaration.property)
             {
@@ -1483,15 +1483,16 @@ pub fn facade_package_metadata_from_ir(
                     setter.is_some() || ir.has_jvm_default_static_setter(*storage),
                     *getter,
                     *setter,
+                    Some(&ir.statics[*storage as usize]),
                 ),
                 Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
                     getter, setter, ..
-                }) => (true, setter.is_some(), Some(*getter), *setter),
+                }) => (true, setter.is_some(), Some(*getter), *setter, None),
                 Some(
                     crate::ir::IrLocalPropertyLayout::Member { .. }
                     | crate::ir::IrLocalPropertyLayout::MemberExtension { .. },
                 )
-                | None => (true, declaration.mutable, None, None),
+                | None => (true, declaration.mutable, None, None, None),
             };
             let companion = declaration.is_companion_extension();
             let field = property_field(ir, declaration);
@@ -1512,8 +1513,9 @@ pub fn facade_package_metadata_from_ir(
                 erased_value_class_descriptor(ir, declaration).unwrap_or(ty_descriptor);
             let getter = has_getter.then(|| {
                 (
-                    accessor_jvm_name(getter_function).unwrap_or_else(|| {
-                        crate::jvm::names::property_getter_name(&declaration.name)
+                    accessor_jvm_name(getter_function).unwrap_or_else(|| match storage {
+                        Some(storage) => storage.default_getter_jvm_name(),
+                        None => crate::jvm::names::property_getter_name(&declaration.name),
                     }),
                     format!("({descriptor_parameters}){value_descriptor}"),
                 )
@@ -1522,8 +1524,9 @@ pub fn facade_package_metadata_from_ir(
                 let mut parameters = descriptor_parameters;
                 parameters.push_str(&value_descriptor);
                 (
-                    accessor_jvm_name(setter_function).unwrap_or_else(|| {
-                        crate::jvm::names::property_setter_name(&declaration.name)
+                    accessor_jvm_name(setter_function).unwrap_or_else(|| match storage {
+                        Some(storage) => storage.default_setter_jvm_name(),
+                        None => crate::jvm::names::property_setter_name(&declaration.name),
                     }),
                     format!("({parameters})V"),
                 )
