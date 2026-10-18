@@ -44,8 +44,9 @@ fn declared_result(
         return (declared, Some(owner));
     }
     (
-        declared
-            .or_else(|| signature.map(|signature| signature.ret))
+        signature
+            .map(|signature| signature.ret)
+            .or(declared)
             .unwrap_or(selected),
         None,
     )
@@ -150,11 +151,15 @@ impl ResolvedCall {
                 ..
             } => {
                 let signature = generic_sig.as_deref();
+                let (declared, _) = declared_result(
+                    signature,
+                    *ret,
+                    *declared_ret,
+                    &crate::libraries::EnhancedResult::NONE,
+                );
                 SelectedResultTarget {
                     signature,
-                    declared: declared_ret
-                        .or_else(|| signature.map(|signature| signature.ret))
-                        .unwrap_or(*ret),
+                    declared,
                     dispatch: Some(DispatchBinding::Implicit {
                         owner: *owner,
                         actual: dispatch_receiver.ty,
@@ -249,6 +254,47 @@ pub(super) fn constrain_parameters<F: Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_generic_result_precedes_the_representation_result() {
+        let nested_flexible = Ty::obj_args(
+            "kotlin/collections/List",
+            &[Ty::platform_nullable(Ty::String)],
+        );
+        let signature = GenericSig {
+            formals: Vec::new(),
+            formal_bounds: Vec::new(),
+            receiver: None,
+            params: Vec::new(),
+            ret: nested_flexible,
+            return_policy: Default::default(),
+        };
+
+        assert_eq!(
+            declared_result(
+                Some(&signature),
+                Ty::obj("kotlin/Any"),
+                Some(Ty::obj_args("kotlin/collections/List", &[Ty::String],)),
+                &crate::libraries::EnhancedResult::NONE,
+            ),
+            (nested_flexible, None),
+        );
+
+        let owner = crate::types::type_name("sample/Carrier");
+        let enhanced_declared = Ty::obj_args("sample/Carrier", &[Ty::String]);
+        assert_eq!(
+            declared_result(
+                Some(&signature),
+                Ty::obj("kotlin/Any"),
+                Some(Ty::String),
+                &crate::libraries::EnhancedResult {
+                    marks: TypeEnhancement::NONE,
+                    declared: Some((owner, enhanced_declared)),
+                },
+            ),
+            (enhanced_declared, Some(owner)),
+        );
+    }
 
     #[test]
     fn star_projection_policy_controls_callable_formal_binding() {
