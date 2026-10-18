@@ -11950,10 +11950,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (T) -> Unit`) is `Function1` when passed to a suspend collector. A fun
   interface whose context parameters are published as ordinary named slots is still that
   interface. A conversion in
-  an inline function uses kotlinc's public `$sam$i$` class and constructor. The statement line
-  starts at the wrapped value rather than at `new`; bridge debug provenance comes from the first
-  exact conversion site. Tests: `tests/sam_wrapper_class_e2e.rs`
-  (`java_sam_class_mode_shares_one_wrapper`). Corpus:
+  a non-private inline function, or in a lambda written in one, uses kotlinc's public `$sam$i$`
+  class and constructor (a `public static final` `InnerClasses` row, and `xi` carrying the public
+  ABI flag and public visibility); a private inline function's conversion uses the ordinary
+  `$sam$` class. kotlinc writes no `invokedynamic` in an inline function, so a function value
+  converted to a Java interface there takes the same wrapper under every `-Xsam-conversions`
+  mode, and a same-module caller's inlined copy constructs the declaration file's wrapper. A copy
+  from another source file carries its exact inline-declaration identity to the JVM facade map; it
+  neither derives that facade from spelling nor declares another wrapper under the caller. The
+  construction has no position: the statement line starts at the wrapped value rather than at
+  `new`; bridge debug provenance comes from the first exact conversion site. Tests:
+  `tests/sam_wrapper_class_e2e.rs` (`java_sam_class_mode_shares_one_wrapper`,
+  `java_sam_in_an_inline_function_is_its_wrapper_class`,
+  `a_cross_file_inline_copy_constructs_the_declarations_sam_wrapper`). Corpus:
   `inlineClasses/funInterface/mangledSamWrappers`, `mangledSamWrappersGeneric`,
   `callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction`,
   `coroutines/suspendConversion/suspendConversionBetweenFunInterfaces`, and
@@ -18802,7 +18811,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A value-returning splice whose value is not a local read is the other closing `nop`: the lambda
   locals end first, and the `nop` returns to the inline body's line. A same-file expansion still
   writes `SourceDebugExtension` (one file, a second line range, and the debug stratum at the
-  call). Catch, finally, and declaration marks of the copy go through that map. After inlining,
+  call). Catch, finally, and declaration marks of the copy go through that map. A copied line
+  that a range of the same call already covers keeps that range's output line, as kotlinc's
+  copier returns a line it has visited; only an uncovered line stretches the frontier range, so a
+  private inline function's line after a nested published expansion maps to its own range. After inlining,
   the method's exception table is sorted by handler pc, then start pc; the standalone `use`
   method, which was not inlined, keeps emission order. That method's `try` is `Nothing`, not
   `Unit`. A non-`Unit` `try` enters a result temporary after its body once every local the body
@@ -18813,7 +18825,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that result. A `Unit` `try` does not enter one.
   Tests: `tests/inline_use_close_e2e.rs`, `tests/same_module_inline_frame_markers_e2e.rs`,
   `tests/inline_constructor_reference_e2e.rs`,
-  `jvm::source_map::tests::a_same_file_inline_still_writes_a_map`.
+  `jvm::source_map::tests::a_same_file_inline_still_writes_a_map`,
+  `jvm::source_map::tests::a_covered_line_keeps_its_range_over_the_frontier`,
+  `tests/sam_wrapper_class_e2e.rs` (`an_inline_copy_keeps_its_declarations_sam_wrapper_abi`).
 
 - **An inlined `return this` closes the spliced lambda before the load.** `also` and `apply`, and
   any spliced lambda whose value is a plain local read, leave that read as the block's value.
