@@ -23,10 +23,18 @@ pub(super) fn retire_replaced_accessor_call(ir: &mut IrFile, call: ExprId) {
     ir.synthesized_accessor_calls.remove(&call);
 }
 
+/// A backed property whose accessors the compiler writes, with any `@JvmName` written on them.
+struct DefaultAccessors {
+    index: usize,
+    name: String,
+    ty: Ty,
+    written_getter: Option<String>,
+    written_setter: Option<String>,
+}
+
 pub(super) fn stamp_synthesized(ir: &mut IrFile, under: &Under) {
     for class_index in 0..ir.classes.len() {
-        let properties: Vec<(usize, String, Ty, Option<String>, Option<String>)> = ir.classes
-            [class_index]
+        let properties: Vec<DefaultAccessors> = ir.classes[class_index]
             .properties
             .iter()
             .enumerate()
@@ -38,16 +46,23 @@ pub(super) fn stamp_synthesized(ir: &mut IrFile, under: &Under) {
                         .flatten()
                         .map(str::to_owned)
                 };
-                (
+                DefaultAccessors {
                     index,
-                    property.name.clone(),
-                    property.ty,
-                    written(&property.accessor_annotations.getter),
-                    written(&property.accessor_annotations.setter),
-                )
+                    name: property.name.clone(),
+                    ty: property.ty,
+                    written_getter: written(&property.accessor_annotations.getter),
+                    written_setter: written(&property.accessor_annotations.setter),
+                }
             })
             .collect();
-        for (index, name, ty, written_getter, written_setter) in properties {
+        for DefaultAccessors {
+            index,
+            name,
+            ty,
+            written_getter,
+            written_setter,
+        } in properties
+        {
             let declared_value_class = ty
                 .non_null()
                 .obj_internal()
