@@ -65,6 +65,50 @@ impl IntoIterator for SelectedArgumentCommitment {
 }
 
 impl Checker<'_> {
+    /// Capture the source facts of an already-selected argument mapping before a later contextual
+    /// check can replace an expression's committed type or intersection. Constructors use this
+    /// seam because their generic class inference and concrete-parameter recheck are separate.
+    pub(super) fn capture_prechecked_argument_bindings(
+        &self,
+        scope: &CheckerScope<'_>,
+        arguments: &[ExprId],
+        actuals: &[Ty],
+        parameters: &[usize],
+        vararg: Option<usize>,
+        argument_names: Option<&[Option<String>]>,
+    ) -> Vec<SelectedArgumentBinding> {
+        arguments
+            .iter()
+            .zip(parameters)
+            .enumerate()
+            .map(|(source, (&argument, &parameter))| {
+                let whole_array = vararg == Some(parameter)
+                    && (self.file.is_spread_arg(argument)
+                        || argument_names
+                            .and_then(|names| names.get(source))
+                            .is_some_and(Option::is_some));
+                let source_declared_type = self.local_variable_read(scope, argument);
+                let source_provenance = self.finalized_selected_argument_reified_provenance(
+                    scope,
+                    argument,
+                    source_declared_type.unwrap_or(actuals[source]),
+                );
+                let mut source_intersection = self.inferred_expression_intersection_fact(argument);
+                if let Some(intersection) = &mut source_intersection {
+                    intersection.through_flexible |= source_provenance.crossed_flexible_boundary();
+                }
+                SelectedArgumentBinding {
+                    argument,
+                    parameter,
+                    vararg_element: vararg == Some(parameter) && !whole_array,
+                    source_declared_type,
+                    source_provenance,
+                    source_intersection,
+                }
+            })
+            .collect()
+    }
+
     /// Commit an already-checked call whose semantic declaration is one vararg parameter. Compiler
     /// supplied array creators use this after checking their operands so their reified element
     /// diagnostics consume the same stable source facts as ordinary selected callables.

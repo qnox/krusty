@@ -15378,36 +15378,14 @@ impl<'a> Checker<'a> {
             ResolvedCtorDelegationTarget::Super { .. } => None,
         };
         let argument_names = self.file.call_arg_names.get(&call.0);
-        let argument_bindings = args
-            .iter()
-            .zip(&selected.argument_slots)
-            .enumerate()
-            .map(|(source, (&argument, &parameter))| {
-                let whole_array = selected.vararg == Some(parameter)
-                    && (self.file.is_spread_arg(argument)
-                        || argument_names
-                            .and_then(|names| names.get(source))
-                            .is_some_and(Option::is_some));
-                let source_declared_type = self.local_variable_read(scope, argument);
-                let source_provenance = self.finalized_selected_argument_reified_provenance(
-                    scope,
-                    argument,
-                    source_declared_type.unwrap_or(arg_tys[source]),
-                );
-                let mut source_intersection = self.inferred_expression_intersection_fact(argument);
-                if let Some(intersection) = &mut source_intersection {
-                    intersection.through_flexible |= source_provenance.crossed_flexible_boundary();
-                }
-                SelectedArgumentBinding {
-                    argument,
-                    parameter,
-                    vararg_element: selected.vararg == Some(parameter) && !whole_array,
-                    source_declared_type,
-                    source_provenance,
-                    source_intersection,
-                }
-            })
-            .collect::<Vec<_>>();
+        let argument_bindings = self.capture_prechecked_argument_bindings(
+            scope,
+            args,
+            arg_tys,
+            &selected.argument_slots,
+            selected.vararg,
+            argument_names.map(Vec::as_slice),
+        );
         let inferred = if parameter_shapes
             .as_ref()
             .is_some_and(|shapes| shapes.len() == declared_params.len())

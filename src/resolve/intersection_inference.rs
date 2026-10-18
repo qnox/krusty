@@ -117,11 +117,30 @@ impl ReifiedArgumentProvenance {
         self.through_flexible
     }
 
+    /// Facts shared by every occurrence contributing to one inferred type argument. A direct
+    /// occurrence must keep an indirect DNN/flexible occurrence from weakening the diagnostic;
+    /// nested generic shapes follow the same positional rule.
+    pub(super) fn meet(&self, other: &Self) -> Self {
+        let arguments = self
+            .arguments
+            .iter()
+            .zip(&other.arguments)
+            .map(|(left, right)| left.meet(right))
+            .collect();
+        Self {
+            through_definitely_non_null: self.through_definitely_non_null
+                && other.through_definitely_non_null,
+            through_flexible: self.through_flexible && other.through_flexible,
+            arguments,
+        }
+    }
+
     pub(super) fn argument(&self, ordinal: usize) -> Option<&Self> {
         self.arguments.get(ordinal)
     }
 }
 
+#[cfg(test)]
 fn reified_provenance_of_ty(ty: Ty) -> ReifiedArgumentProvenance {
     reified_provenance_of_ty_with_declaration(ty, &|_| None)
 }
@@ -326,24 +345,6 @@ impl Checker<'_> {
         signature: &crate::libraries::GenericSig,
         parameter_indices: &[usize],
     ) -> Vec<ReifiedArgumentProvenance> {
-        fn meet(
-            left: &ReifiedArgumentProvenance,
-            right: &ReifiedArgumentProvenance,
-        ) -> ReifiedArgumentProvenance {
-            let arguments = left
-                .arguments
-                .iter()
-                .zip(&right.arguments)
-                .map(|(left, right)| meet(left, right))
-                .collect();
-            ReifiedArgumentProvenance {
-                through_definitely_non_null: left.through_definitely_non_null
-                    && right.through_definitely_non_null,
-                through_flexible: left.through_flexible && right.through_flexible,
-                arguments,
-            }
-        }
-
         let mut facts: HashMap<String, Vec<ReifiedArgumentProvenance>> = HashMap::default();
         if let Some(arguments) = self.resolved_call_arg_slots.get(&call) {
             for binding in &arguments.argument_bindings {
@@ -377,7 +378,7 @@ impl Checker<'_> {
                 values
                     .iter()
                     .skip(1)
-                    .fold(values[0].clone(), |known, next| meet(&known, next))
+                    .fold(values[0].clone(), |known, next| known.meet(next))
             })
             .collect()
     }

@@ -344,6 +344,22 @@ fn selected_argument_commitment_keeps_source_dnn_and_finalized_flexible_provenan
 }
 
 #[test]
+fn array_element_provenance_meets_every_argument_independent_of_source_order() {
+    let source = with_prelude(
+        "fun <T> f(direct: T, indirect: T & Any) {\n\
+         \x20   arrayOf(indirect, direct)\n\
+         \x20   arrayOf(direct, indirect)\n\
+         }",
+    );
+    assert_matches_kotlinc(
+        &source,
+        &[],
+        &[&format!("4:5: {AS_REIFIED}"), &format!("5:5: {AS_REIFIED}")],
+        &[],
+    );
+}
+
+#[test]
 fn an_intersection_is_a_deprecation_warning_without_its_prohibition() {
     let message = format!(
         "{} This will become an error in language version 2.3. See \

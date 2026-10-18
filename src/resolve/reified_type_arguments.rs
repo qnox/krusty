@@ -115,8 +115,14 @@ impl Checker<'_> {
                 provenance: self
                     .resolved_call_arg_slots
                     .get(&expression)
-                    .and_then(|arguments| arguments.argument_bindings.first())
-                    .map(|argument| argument.source_provenance.clone())
+                    .and_then(|arguments| {
+                        let mut provenances = arguments
+                            .argument_bindings
+                            .iter()
+                            .map(|argument| &argument.source_provenance);
+                        let first = provenances.next()?.clone();
+                        Some(provenances.fold(first, |known, next| known.meet(next)))
+                    })
                     .unwrap_or_default(),
             }];
         }
