@@ -161,7 +161,11 @@ fn store(path: &Path, output: &Output) {
     }
     bytes.extend_from_slice(format!("{}\n", output.code).as_bytes());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    // Tests of one binary run in parallel and can record the same case at once: each writer needs
+    // a temporary of its own, or one rename moves the other's file away before it renames it.
+    static WRITES: AtomicUsize = AtomicUsize::new(0);
+    let write = WRITES.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_extension(format!("{}.{write}.tmp", std::process::id()));
     std::fs::write(&temporary, bytes).unwrap();
     std::fs::rename(&temporary, path).unwrap();
 }
