@@ -555,24 +555,20 @@ impl<'s> Linker<'_, 's> {
             .callee_origin(&self.active_module, &signature)
         {
             KlibCalleeOrigin::Exact(identity) => Ok(identity),
-            KlibCalleeOrigin::Ambiguous => {
-                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
-                    callee.clone(),
-                )))
-            }
+            KlibCalleeOrigin::Ambiguous => Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(
+                Box::new(callee.clone()),
+            )),
             KlibCalleeOrigin::Missing if callee.declaration().segments().len() > 1 => {
                 // A member no library serializes is, in a complete library set, a fake override:
                 // its real declaration is reached through serialized class declarations, which
                 // lowering does not follow yet.
-                return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                Err(KlibBodyDeclineReason::UnsupportedOperation(
                     "a call of a member no library serializes, such as a fake override",
-                ));
+                ))
             }
-            KlibCalleeOrigin::Missing => {
-                return Err(KlibBodyDeclineReason::UndeclaredCallee(Box::new(
-                    callee.clone(),
-                )))
-            }
+            KlibCalleeOrigin::Missing => Err(KlibBodyDeclineReason::UndeclaredCallee(Box::new(
+                callee.clone(),
+            ))),
         }
     }
 
