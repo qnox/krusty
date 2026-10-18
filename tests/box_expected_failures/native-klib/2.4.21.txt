@@ -285,6 +285,7 @@ casts/kt65197.kt
 casts/kt68509.kt
 casts/kt80795.kt
 casts/kt82732.kt
+casts/kt89267.kt
 casts/mutableCollections/asWithMutable.kt
 casts/mutableCollections/isWithMutable.kt
 casts/mutableCollections/reifiedAsWithMutable.kt

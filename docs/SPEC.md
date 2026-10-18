@@ -214,10 +214,18 @@ and repeated labels are numbered `$context-String$1` where earlier releases wrot
 `$context-String#1`. A `Unit` suspend function whose body is a tail call still forwards its
 continuation, but 2.4.20 returns the callee's result only when it is `COROUTINE_SUSPENDED` and
 `Unit.INSTANCE` otherwise, where earlier releases return the callee's result unchanged.
-kotlinc 2.4.21 is a patch release whose fixes are in the Wasm and JS backends, reflection and
-scripting. Its argument, language-feature and language-version tables equal 2.4.20's, so every rule
-keyed "since 2.4.20" applies to it unchanged; it is still its own manifest entry with its own
-vendored tables and outcome lists.
+kotlinc 2.4.21 is a patch release whose fixes are in the Wasm and JS backends, reflection,
+scripting and the serialization plugin. Its argument, language-feature and language-version tables
+equal 2.4.20's, so every rule keyed "since 2.4.20" applies to it unchanged; it is still its own
+manifest entry with its own vendored tables and outcome lists. Its serialization plugin copies a
+serializable class's type-parameter bounds onto the generated `$serializer` in IR (KT-89275): the
+classfile `Signature` declares `<T::Ljava/lang/CharSequence;>` where 2.4.20 declares
+`<T:Ljava/lang/Object;>`, and `deserialize` holds a type-parameter element in a local of the
+bound's erasure, casting each decoded value, where 2.4.20 holds it as `Object` and casts it at the
+deserialization constructor. The FIR declaration is unchanged, so `@Metadata` keeps the parameters
+unbounded on both. krusty keys this on the plugin jar's release (the target's when no jar names
+one) and records the lowered signature for the classfile beside the declared one metadata reads
+(`tests/generic_serializable_class_e2e.rs`).
 krusty reproduces ONE release per process, the *target*: `-Xkotlin-reference-version=<v>` selects
 it, else `KRUSTY_LANGUAGE_VERSION` (the variable the harness and `just test-all` export, already
 part of the build-cache key), else the newest manifest entry (`src/kotlin_version.rs`). The

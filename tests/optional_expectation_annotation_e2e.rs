@@ -203,6 +203,7 @@ fn an_optional_annotation_in_a_platform_source_is_rejected_like_kotlinc() {
         (KotlinVersion::V2_4_0, &[MESSAGE]),
         (KotlinVersion::V2_4_10, &[MESSAGE]),
         (KotlinVersion::V2_4_20, &[MESSAGE]),
+        (KotlinVersion::V2_4_21, &[MESSAGE]),
     ];
     let target = krusty::kotlin_version::target();
     let (_, ledger) = expected
@@ -243,6 +244,7 @@ fn an_optional_annotation_on_a_platform_accessor_is_rejected_like_kotlinc() {
         (KotlinVersion::V2_4_0, LEDGER),
         (KotlinVersion::V2_4_10, LEDGER),
         (KotlinVersion::V2_4_20, LEDGER),
+        (KotlinVersion::V2_4_21, LEDGER),
     ];
     let target = krusty::kotlin_version::target();
     let (_, ledger) = expected

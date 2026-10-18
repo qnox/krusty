@@ -777,6 +777,7 @@ casts/kt68509.kt
 casts/kt73931.kt
 casts/kt81257.kt
 casts/kt82732.kt
+casts/kt89267.kt
 casts/lambdaToUnitCast.kt
 casts/literalExpressionAsGenericArgument/binaryExpressionCast.kt
 casts/literalExpressionAsGenericArgument/labeledExpressionCast.kt

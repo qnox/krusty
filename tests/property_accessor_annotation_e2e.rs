@@ -542,6 +542,7 @@ fn an_annotation_on_a_wrong_accessor_target_is_rejected_like_kotlinc() {
         (KotlinVersion::V2_4_0, LEDGER),
         (KotlinVersion::V2_4_10, LEDGER),
         (KotlinVersion::V2_4_20, LEDGER),
+        (KotlinVersion::V2_4_21, LEDGER),
     ];
     let target = krusty::kotlin_version::target();
     let (_, ledger) = expected
@@ -893,6 +894,7 @@ fn an_imported_target_entry_is_checked_by_the_entry_it_selects_like_kotlinc() {
         (KotlinVersion::V2_4_0, LEDGER),
         (KotlinVersion::V2_4_10, LEDGER),
         (KotlinVersion::V2_4_20, LEDGER),
+        (KotlinVersion::V2_4_21, LEDGER),
     ];
     let target = krusty::kotlin_version::target();
     let (_, ledger) = expected
@@ -938,6 +940,7 @@ fn a_same_named_entry_of_another_enum_is_rejected_like_kotlinc() {
         (KotlinVersion::V2_4_0, LEDGER),
         (KotlinVersion::V2_4_10, LEDGER),
         (KotlinVersion::V2_4_20, LEDGER),
+        (KotlinVersion::V2_4_21, LEDGER),
     ];
     let target = krusty::kotlin_version::target();
     let (_, ledger) = expected
