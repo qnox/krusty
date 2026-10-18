@@ -901,7 +901,7 @@ mod tests {
             assert_eq!(
                 refusal,
                 Refusal::Unsupported(
-                    "krusty does not implement the language feature 'ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier' selected by '-progressive'".to_string()
+                    "krusty does not implement the language feature 'ReportReificationProblemsInDnnAndFlexible' selected by '-progressive'".to_string()
                 )
             );
         }
