@@ -12296,6 +12296,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A call whose checked declaration returns a non-null type (a member returning `Outer`) is boxed
   into a generic slot with a plain `box-impl`, without a null test. Tests:
   `tests/value_class_nested_sole_property_e2e.rs`.
+- **A joined value class entering a type-parameter slot is boxed after the join.** A safe call
+  `find()?.id` (`id: Wid`, `value class Wid(val value: String)`) or an `if` yielding `Wid`/`Wid?`
+  that is passed straight to `fun <T> same(actual: T, …)`, or is the receiver of a generic
+  extension, merges its branches on `Wid`'s carrier, so it is boxed once at the join, as kotlinc
+  does: `box-impl` for a non-null result, `dup; ifnull; box-impl` for a nullable one. That null
+  test is the conversion's own: unlike a chain of safe calls, it never shares the safe call's
+  null exit. An `if` without a checked merge type joins on the carrier when every branch yields
+  it or `null` and the carrier can hold `null`. Boxing each
+  branch instead was undone at the merge, which adapts every branch to the carrier, and the raw
+  `String` reached the `Object` slot, so `equals` against a `Wid` failed. A join realized on the box
+  (`Meter?` over `Int`) still boxes its branches. Widening a non-null value to a nullable type
+  (`Wid("w")` for `T` inferred as `Wid?`) keeps it non-null, so it takes a plain `box-impl`.
+  Tests: `tests/value_class_generic_argument_join_e2e.rs`.
 - **A suspend call to a value-class member keeps its suspend name.** A virtual call whose callee
   is a suspend function is named by the suspend mangling rule, so a class delegating
   `suspend fun tag(s: String): Tag` forwards to `tag-vneLvdU`, the name the interface declares,
