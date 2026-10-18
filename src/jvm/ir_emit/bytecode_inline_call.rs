@@ -1469,10 +1469,10 @@ impl Emitter<'_> {
                     if let Insn::Iinc { slot, .. } = insn {
                         top_local = top_local.max(slot + 1);
                     }
-                    // A suspension's `mark` in a placed lambda stays the stand-in instruction it
-                    // was read from, for the coroutine transformer, without interning
-                    // `InlineMarker`.
-                    if is_inline_marker(node, Some("mark")) {
+                    // In a method the coroutine transformer owns, a suspension's `mark` stays
+                    // the stand-in instruction it was read from, without interning
+                    // `InlineMarker`. Any other machine reads the marker call itself.
+                    if self.transformer_owns_method() && is_inline_marker(node, Some("mark")) {
                         code.suspend_marker_call();
                         continue;
                     }

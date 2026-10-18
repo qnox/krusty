@@ -49,6 +49,12 @@ pub(super) enum SuspensionResult {
 
 impl Emitter<'_> {
     /// The declared result of `e` when it is a suspension point the transformer takes.
+    /// Whether kotlinc's coroutine transformer builds this method's machine: its suspension
+    /// markers are then the transformer's stand-in instructions.
+    pub(super) fn transformer_owns_method(&self) -> bool {
+        !self.transformed_suspensions.results.is_empty()
+    }
+
     pub(super) fn transformed_result(&self, e: ExprId) -> Option<Ty> {
         self.transformed_suspensions.results.get(&e).copied()
     }
