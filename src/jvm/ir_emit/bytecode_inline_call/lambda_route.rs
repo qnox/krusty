@@ -92,7 +92,7 @@ impl Emitter<'_> {
             }
             lambda_arguments.push(argument);
         }
-        if let Some(shape) = inliner::unsupported_shape(&callee, &self.bodies) {
+        if let Some(shape) = inliner::unsupported_shape(&callee) {
             return splice(SpliceReason::CalleeShape(shape));
         }
         let supplies = self

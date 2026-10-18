@@ -601,7 +601,7 @@ impl Emitter<'_> {
                 return None;
             }
         };
-        if let Some(shape) = inliner::unsupported_shape(&callee, &self.bodies) {
+        if let Some(shape) = inliner::unsupported_shape(&callee) {
             crate::trace_compiler!("splice", "unified inliner declines {shape:?}");
             return None;
         }

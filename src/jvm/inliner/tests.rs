@@ -478,11 +478,11 @@ fn intrinsic_rewrites_require_the_exact_jvm_method_shape() {
     // The exact marker is not refused here: the anonymous class it guards is copied and the
     // marker is removed. A different descriptor or an interface call is not that marker.
     reified.nodes = vec![method("needClassReification", "()V", false)];
-    assert_eq!(unsupported_shape(&reified, &NoClasses), None);
+    assert_eq!(unsupported_shape(&reified), None);
     reified.nodes = vec![method("needClassReification", "(I)V", false)];
-    assert_eq!(unsupported_shape(&reified, &NoClasses), None);
+    assert_eq!(unsupported_shape(&reified), None);
     reified.nodes = vec![method("needClassReification", "()V", true)];
-    assert_eq!(unsupported_shape(&reified, &NoClasses), None);
+    assert_eq!(unsupported_shape(&reified), None);
 
     let mut null_check = MethodNode::new(ACC_STATIC, "n", "(Ljava/lang/Object;)V");
     null_check.nodes = vec![
