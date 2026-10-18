@@ -10079,6 +10079,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Lower::emit_new` supplies them ahead of the source arguments at every construction, so no
   argument-mapping arm can forget them. `ClassSig::ctor_params` stays the SOURCE signature and is
   indexed by source position — captures are not in it.
+  The captured values come in kotlinc's first-use order, not spelling order: the class's own
+  construction code (property initializers and `init` blocks in source order, then delegate values),
+  then its primary constructor (parameter defaults, then super-constructor arguments), then its
+  members in source order. Inside each of those, a body's own reads come before the closures nested
+  in it (lambdas, inline-call lambdas included, local functions, local and anonymous classes), and
+  those follow in source order. `class W { fun run() = d + b; val g get() = c + a }` takes
+  `($d, $b, $c, $a)`. Tests: `tests/local_class_capture_order_e2e.rs`.
   The enclosing INSTANCE is the second capture kind — the receiver itself rather than a binding in
   the chain — and is carried as ONE capture however many of its members are read, placed FIRST
   because lowering identifies it by position (field 0), which is what an outer member read and a

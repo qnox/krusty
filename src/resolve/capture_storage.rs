@@ -768,7 +768,12 @@ impl Checker<'_> {
                 receiver_role,
             });
         }
-        captured.sort();
+        // kotlinc's first-use order, not spelling order, fixes the constructor parameter list.
+        let order = capture_analysis::class_capture_order(self.file, cl);
+        captured.sort_by_cached_key(|name| {
+            let rank = order.iter().position(|used| used == name);
+            (rank.unwrap_or(usize::MAX), name.clone())
+        });
         for name in captured {
             let Some(local) = self.lookup(scope, &name) else {
                 result.unsupported.get_or_insert(name);
