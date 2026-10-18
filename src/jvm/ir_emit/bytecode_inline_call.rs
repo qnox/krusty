@@ -663,6 +663,7 @@ impl Emitter<'_> {
         let inlined = InlinedLambdas {
             lambdas: &lambdas,
             lines: SourceMap::default(),
+            captures: &[],
         };
         self.emit_inlined_call(&inlined_call, &callee, &parameters, inlined, base, code)
             .expect("the body was inlined before its arguments were evaluated");
@@ -704,6 +705,7 @@ impl Emitter<'_> {
             .ok_or("a function-typed argument has no published crossinline/noinline modifier")?;
         let mut lambdas = Vec::new();
         let mut captured = Vec::new();
+        let mut captures = Vec::new();
         let mut lambda_bindings = HashMap::default();
         let checkpoint = self.cw.checkpoint();
         for (index, &argument) in args.iter().enumerate() {
@@ -720,9 +722,10 @@ impl Emitter<'_> {
             for &(capture, ty) in &argument.captures {
                 captured.push(Parameter {
                     category: Category::of_descriptor(&type_descriptor(ty)),
-                    binding: self.caller_local_binding(capture, ty),
+                    binding: self.capture_binding(capture, ty),
                 });
             }
+            captures.extend_from_slice(&argument.captures);
             let mut lambda = argument.lambda;
             lambda.captured = start..captured.len();
             lambda_bindings.insert(index, lambdas.len());
@@ -773,6 +776,7 @@ impl Emitter<'_> {
         let inlined = InlinedLambdas {
             lambdas: &lambdas,
             lines: lambda_lines,
+            captures: &captures,
         };
         self.emit_inlined_call(&inlined_call, callee, &parameters, inlined, base, code)
             .map_err(|error| {
@@ -830,6 +834,7 @@ impl Emitter<'_> {
         let InlinedLambdas {
             lambdas,
             lines: lambda_lines,
+            captures,
         } = inlined_lambdas;
         let InlinedCall {
             call:
@@ -923,6 +928,27 @@ impl Emitter<'_> {
             debug_assert_eq!(entered.slot(), slot);
             store(physical[index], slot, code);
             leases.push(self.lease_frame_temporary(entered, physical[index]));
+        }
+        // kotlinc's `putClosureParametersOnStack`: a captured value that is not a caller local is
+        // evaluated into the temporary after the call's own arguments, without a line of its own.
+        for (&(capture, ty), temporary) in captures
+            .iter()
+            .zip(&temporaries[temporaries.len() - captures.len()..])
+        {
+            let Some(temporary) = *temporary else {
+                continue;
+            };
+            let slot = base + temporary;
+            self.frame.reserve_through(slot);
+            let operand_frame = self.frame.mark();
+            let lines = code.line_entry_count();
+            self.emit_value(capture, code);
+            code.withdraw_lines_since(lines);
+            self.frame.rewind_to(operand_frame);
+            let entered = self.frame.enter_temp(TempRole::InlineArgument, ty);
+            debug_assert_eq!(entered.slot(), slot);
+            store(ty, slot, code);
+            leases.push(self.lease_frame_temporary(entered, ty));
         }
 
         // Like any call, an inline call states its line once its arguments are evaluated; that line
@@ -1310,6 +1336,21 @@ impl Emitter<'_> {
 
     /// The caller local an argument is read from, coerced to the parameter's class as kotlinc's
     /// `StackValue.coerce` does between two reference types.
+    /// A lambda's captured value is read from the caller local it lives in, as kotlinc binds a
+    /// captured local; any other captured value is evaluated into a temporary of the inline frame.
+    fn capture_binding(&self, capture: u32, ty: Ty) -> Binding {
+        if self.captures_caller_local(capture) {
+            self.caller_local_binding(capture, ty)
+        } else {
+            Binding::Temporary
+        }
+    }
+
+    fn captures_caller_local(&self, capture: u32) -> bool {
+        self.reads_continuation_local(capture)
+            || matches!(self.ir.expr(capture), IrExpr::GetValue(value) if self.slots.contains_key(value))
+    }
+
     fn caller_local_binding(&self, argument: u32, parameter: Ty) -> Binding {
         if self.reads_continuation_local(argument) {
             let slot = self
@@ -1696,6 +1737,9 @@ pub(super) enum LambdaPlacement {
 struct InlinedLambdas<'a> {
     lambdas: &'a [inliner::Lambda],
     lines: SourceMap,
+    /// The values the lambdas captured, aligned with the call's captured parameters. One bound to
+    /// a temporary is evaluated into it once the arguments are stored.
+    captures: &'a [(u32, Ty)],
 }
 
 /// What writing the inlined node needs to know about the call's arguments.
