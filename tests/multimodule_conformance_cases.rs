@@ -153,7 +153,8 @@ pub const MEMBER_EXTENSION_RECEIVERS: Case = Case {
 
 /// Reified substitutions cross a real separately compiled KLIB for every callable origin. All
 /// arguments are inferred at the consumer call site, so success requires the selected call—not
-/// source spelling or an origin-specific lowering path—to publish the runtime type identity.
+/// source spelling or an origin-specific lowering path—to publish the runtime type identity. The
+/// library constructs its own class so cross-KLIB constructor emission remains a separate concern.
 pub const REIFIED_CALLABLE_ORIGINS: Case = Case {
     stem: "multimoduleReifiedCallableOrigins",
     source: "// LANGUAGE: +ContextParameters\n\
@@ -167,9 +168,10 @@ pub const REIFIED_CALLABLE_ORIGINS: Case = Case {
              \x20   inline fun <reified T> member(value: T, probe: Any): Boolean = probe is T\n\
              \x20   inline fun <reified T> Any?.memberExtension(): Boolean = this is T\n\
              }\n\
+             fun host(): Host = Host()\n\
              // MODULE: main(lib)\n\
              fun box(): String {\n\
-             \x20   val host = Host()\n\
+             \x20   val host = host()\n\
              \x20   if (!top(\"top\", \"probe\")) return \"top\"\n\
              \x20   if (!top(probe = \"named probe\", value = \"named\")) return \"named\"\n\
              \x20   if (!\"extension\".topExtension<String>()) return \"extension\"\n\
