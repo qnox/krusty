@@ -389,6 +389,10 @@ impl FlexibleValue {
             }
             // A nullable solution collapses both faces to one rigid type.
             (Ty::PlatformNullable(declared), Ty::Nullable(selected)) => (*declared, *selected),
+            (Ty::PlatformNullable(declared), selected @ (Ty::Obj(..) | Ty::Fun(_))) => {
+                head = Some(upper_bound(selected));
+                (*declared, selected)
+            }
             (Ty::PlatformNullable(declared), selected) => (*declared, selected),
             (Ty::Nullable(declared), Ty::Nullable(selected))
             | (Ty::DefinitelyNotNull(declared), Ty::DefinitelyNotNull(selected))
@@ -1300,6 +1304,31 @@ mod tests {
 
         assert_eq!(spelling.args.len(), 1);
         assert_eq!(spelling.args[0].flexible_upper_bound, None);
+    }
+
+    #[test]
+    fn rigid_selected_structures_keep_declared_java_intervals_at_each_depth() {
+        let declared_leaf = Ty::platform_nullable(Ty::obj("sample/Leaf"));
+        let selected_leaf = Ty::obj("sample/Leaf");
+        let declared = Ty::platform_nullable(Ty::obj_args("sample/Box", &[declared_leaf]));
+        let selected = Ty::obj_args("sample/Box", &[selected_leaf]);
+        let fact = FlexibleValue::selected(declared, selected, &Ty::nullable);
+        let mut spelling = Spelled::default();
+        fact.apply(selected, &mut spelling);
+
+        assert_eq!(
+            fact.inferred_declaration_ty(selected),
+            Ty::platform_nullable(selected)
+        );
+        assert_eq!(spelling.flexible_upper_bound, Some(Ty::nullable(selected)));
+        assert_eq!(spelling.args.len(), 1);
+        assert_eq!(
+            spelling.args[0].flexible_upper_bound,
+            Some(Ty::nullable(selected_leaf))
+        );
+
+        let nullable = Ty::nullable(selected_leaf);
+        assert!(FlexibleValue::selected(declared_leaf, nullable, &Ty::nullable).is_none());
     }
 
     #[test]
