@@ -184,13 +184,22 @@ fn read_declaration_trees_from(
     for index in 0..expected {
         let strings = file_strings(&strings[index])?;
         let signature_entries = entries(&signatures[index], "signatures.knt")?;
-        let mut file = FileTables {
-            strings: &strings,
-            signatures: SignatureTable::new(
+        let signatures = if inlinable {
+            SignatureTable::prepared_inline(
                 u32::try_from(index).expect("file count fits u32"),
                 &signature_entries,
                 &strings,
-            ),
+            )
+        } else {
+            SignatureTable::new(
+                u32::try_from(index).expect("file count fits u32"),
+                &signature_entries,
+                &strings,
+            )
+        };
+        let mut file = FileTables {
+            strings: &strings,
+            signatures,
             types: entries(&types[index], TYPES)?,
             bodies: entries(&bodies[index], BODIES)?,
             file_entries: file_entries
