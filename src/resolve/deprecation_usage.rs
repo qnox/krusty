@@ -518,7 +518,11 @@ pub(super) fn emit_deprecated_use(
             if let Some(format) = warning {
                 // This warning stands in for the future error and is not suppressible as a
                 // regular `DEPRECATION`/`DEPRECATION_ERROR` report in kotlinc.
-                diags.warning(span, format.message(&message));
+                diags.warning_named(
+                    span,
+                    crate::diag::CompilerWarningName::DeprecationErrorMigrationPeriodWarning,
+                    format.message(&message),
+                );
             } else if !suppresses("DEPRECATION_ERROR") {
                 diags.error(span, message);
             }

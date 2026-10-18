@@ -1587,6 +1587,10 @@ mod tests {
     fn warning_level_rejects_names_absent_from_the_selected_release() {
         const NAMES: &[(&str, krusty::diag::CompilerWarningName)] = &[
             (
+                "DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING",
+                krusty::diag::CompilerWarningName::DeprecationErrorMigrationPeriodWarning,
+            ),
+            (
                 "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING",
                 krusty::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
             ),

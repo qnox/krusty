@@ -101,7 +101,7 @@ fun use() = f()
 }
 
 #[test]
-fn source_import_deprecation_is_checked_after_annotations_are_published() {
+fn source_import_reports_published_outer_but_not_imported_classifier_deprecation() {
     if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
         return;
     }
@@ -109,7 +109,7 @@ fn source_import_deprecation_is_checked_after_annotations_are_published() {
         &[
             (
                 "Declaration.kt",
-                "package source\n@Deprecated(\"source outer\")\nclass Outer { class Imported }\n",
+                "package source\n@Deprecated(\"source outer\")\nclass Outer {\n    @Deprecated(\"source imported\")\n    class Imported\n}\n",
             ),
             ("Use.kt", "import source.Outer.Imported\n"),
         ],
@@ -151,6 +151,12 @@ fun use() {
 }
 "#;
 
+const MIGRATION_WARNINGS: &[&str] = &[
+    "Use.kt:1:8: 'class A : Any' is deprecated. dep a. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-397.",
+    "Use.kt:10:5: 'object O : Any' is deprecated. dep o. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-82456.",
+    "Use.kt:11:5: 'companion object Companion : Any' is deprecated. dep companion. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-408.",
+];
+
 #[test]
 fn migrating_positions_warn_with_exact_selected_identity_diagnostics() {
     if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
@@ -161,11 +167,80 @@ fn migrating_positions_warn_with_exact_selected_identity_diagnostics() {
         &[common::stdlib_jar(), dependency()],
         &[],
         &[],
-        &[
-            "Use.kt:1:8: 'class A : Any' is deprecated. dep a. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-397.",
-            "Use.kt:10:5: 'object O : Any' is deprecated. dep o. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-82456.",
-            "Use.kt:11:5: 'companion object Companion : Any' is deprecated. dep companion. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-408.",
-        ],
+        MIGRATION_WARNINGS,
+    );
+}
+
+/// Migration-period warnings retain kotlinc's diagnostic identity so their named CLI policy can
+/// override global warning policy without changing the source-level suppression contract.
+#[test]
+fn named_warning_policy_controls_deprecation_error_migration_period() {
+    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+        return;
+    }
+    struct Case {
+        arguments: &'static [&'static str],
+        errors: &'static [&'static str],
+        warnings: &'static [&'static str],
+    }
+    let cases = [
+        Case {
+            arguments: &["-Xwarning-level=DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING:disabled"],
+            errors: &[],
+            warnings: &[],
+        },
+        Case {
+            arguments: &["-Xwarning-level=DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING:error"],
+            errors: MIGRATION_WARNINGS,
+            warnings: &[],
+        },
+        Case {
+            arguments: &[
+                "-Werror",
+                "-Xwarning-level=DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING:warning",
+            ],
+            errors: &[],
+            warnings: MIGRATION_WARNINGS,
+        },
+        Case {
+            arguments: &[
+                "-nowarn",
+                "-Xwarning-level=DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING:warning",
+            ],
+            errors: &[],
+            warnings: MIGRATION_WARNINGS,
+        },
+    ];
+    let classpath = [common::stdlib_jar(), dependency()];
+    for case in cases {
+        assert_matches_kotlinc(
+            &[("Use.kt", MIGRATING_USES)],
+            &classpath,
+            case.arguments,
+            case.errors,
+            case.warnings,
+        );
+    }
+}
+
+#[test]
+fn deprecated_companion_selected_for_implicit_invoke_is_not_reported() {
+    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+        return;
+    }
+    let source = r#"interface Factory {
+    @Deprecated("deprecated companion", level = DeprecationLevel.ERROR)
+    companion object { operator fun invoke() = 1 }
+}
+
+fun use() = Factory()
+"#;
+    assert_matches_kotlinc(
+        &[("Use.kt", source)],
+        &[common::stdlib_jar()],
+        &[],
+        &[],
+        &[],
     );
 }
 
