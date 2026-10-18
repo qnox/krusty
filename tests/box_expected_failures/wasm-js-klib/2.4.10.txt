@@ -4514,7 +4514,6 @@ nonLocalReturns/suspendConversion.kt
 nothingValue/inNestedCall.kt
 nothingValue/nothingValueException.kt
 nothingValue/toStringOnNothing.kt
-nullCheckOptimization/isNullable.kt
 nullCheckOptimization/kt22410.kt
 nullCheckOptimization/kt49136a.kt
 nullCheckOptimization/primitiveCheckWithSideEffect.kt
