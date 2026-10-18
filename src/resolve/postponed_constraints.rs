@@ -70,7 +70,7 @@ impl PostponedCallConstraints {
         self.variables.instantiate_type(ty)
     }
 
-    fn declared_type(&self, ty: Ty) -> Ty {
+    pub(super) fn declared_type(&self, ty: Ty) -> Ty {
         self.variables.declared_type(ty)
     }
 
@@ -587,12 +587,22 @@ impl Checker<'_> {
                 } else {
                     self.postponed_diagnostics.discard(argument);
                     let diagnostic_mark = self.diags.diags.len();
+                    self.completed_failed_postponed_callable_rechecks
+                        .remove(&argument);
+                    let previous_recheck = self
+                        .active_postponed_callable_reference_recheck
+                        .replace(argument);
                     let nominal = self.expr_expected(site.scope, argument, expected);
+                    self.active_postponed_callable_reference_recheck = previous_recheck;
                     let checked = self
                         .expression_function_type(site.scope, argument, nominal)
                         .unwrap_or(nominal);
                     self.postponed_diagnostics
                         .capture_since(argument, self.diags, diagnostic_mark);
+                    if checked == Ty::Error {
+                        self.completed_failed_postponed_callable_rechecks
+                            .insert(argument);
+                    }
                     checked
                 };
                 if is_lambda
