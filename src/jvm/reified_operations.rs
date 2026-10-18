@@ -95,7 +95,13 @@ pub(super) fn splice_type_map(
                     rendered: render(ty.non_null()),
                 })
             })?;
-            Some((name.clone(), argument))
+            // Dependency providers normalize a declaration's formal to an opaque semantic
+            // identity. The dependency bytecode marker is an ABI string and still carries the
+            // source formal spelling, so format that identity exactly once at this JVM boundary.
+            Some((
+                crate::types::type_parameter_source_name(name).to_owned(),
+                argument,
+            ))
         })
         .collect()
 }
@@ -148,7 +154,11 @@ pub(super) fn splice_arguments(
     if let Some(substitutions) = ir.reified_call_subst.get(&expression) {
         let parameters = super::type_of::TypeParameters::new(ir, facade);
         for (name, ty) in substitutions {
-            for (argument, ty) in [(name.clone(), *ty), (format!("{name}?"), Ty::nullable(*ty))] {
+            let name = crate::types::type_parameter_source_name(name);
+            for (argument, ty) in [
+                (name.to_owned(), *ty),
+                (format!("{name}?"), Ty::nullable(*ty)),
+            ] {
                 let mut realization = Vec::new();
                 if super::type_of::generate(ty, &parameters, recursive_type_of, &mut realization)
                     .is_ok()
@@ -696,6 +706,30 @@ mod tests {
                 ),
             ])
         );
+    }
+
+    #[test]
+    fn splice_type_map_formats_a_dependency_formal_for_its_bytecode_marker() {
+        let identity = crate::types::dependency_callable_type_parameter(17, 23, 0, "T");
+        let expression = 7;
+        let mut ir = IrFile::default();
+        ir.reified_call_subst
+            .insert(expression, vec![(identity.to_owned(), Ty::String)]);
+
+        let arguments = splice_type_map(&ir, expression, &|_| String::new());
+        assert_eq!(
+            arguments,
+            HashMap::from_iter([(
+                "T".to_owned(),
+                ReifiedArgument::Class {
+                    internal: "java/lang/String".to_owned(),
+                    nullable: false,
+                    intrinsic: None,
+                    rendered: String::new(),
+                },
+            )])
+        );
+        assert!(!arguments.contains_key(identity));
     }
 
     #[test]
