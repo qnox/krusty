@@ -124,3 +124,56 @@ fun chained(s: String): String = inlinedId(s).idExtension()
 fn a_call_on_an_inlined_result_marks_its_line_again() {
     assert_like_kotlinc(&[("lib.kt", VALUE_CLASS_LIBRARY), ("main.kt", CHAINED_MAIN)]);
 }
+
+const ENUM_WHEN_LIBRARY: &str = r#"enum class Color { RED, GREEN, BLUE }
+
+inline fun describe(color: Color): String = when (color) {
+    Color.RED -> "r"
+    Color.GREEN -> "g"
+    Color.BLUE -> "b"
+}
+
+inline fun describeOrNone(color: Color?): String = when (color) {
+    Color.RED -> "r"
+    null -> "none"
+    else -> "other"
+}
+"#;
+
+const ENUM_WHEN_MAIN: &str = r#"fun box(): String {
+    val s = describe(Color.GREEN) + describe(Color.BLUE) + describeOrNone(null) +
+        describeOrNone(Color.RED) + describeOrNone(Color.GREEN)
+    return if (s == "gbnonerother") "OK" else s
+}
+"#;
+
+// A subject `when` over an enum reads the declaring class's `$WhenMappings` table, whose keys only
+// that class's emission assigns, so the call is expanded from the callee's IR template instead.
+#[test]
+fn a_cross_file_inline_call_with_an_enum_subject_when_runs() {
+    common::expect_box_ok_files_with_stdlib(
+        &[("lib.kt", ENUM_WHEN_LIBRARY), ("main.kt", ENUM_WHEN_MAIN)],
+        "EnumWhenCrossFile",
+    );
+}
+
+const ENUM_WHEN_SAME_FILE: &str = r#"enum class Shade { LIGHT, DARK }
+
+inline fun tone(shade: Shade): String = when (shade) {
+    Shade.LIGHT -> "l"
+    Shade.DARK -> "d"
+}
+
+fun box(): String {
+    val s = tone(Shade.DARK) + tone(Shade.LIGHT)
+    return if (s == "dl") "OK" else s
+}
+"#;
+
+#[test]
+fn a_same_file_inline_call_with_an_enum_subject_when_runs() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(ENUM_WHEN_SAME_FILE, "EnumWhenSameFile"),
+        "OK"
+    );
+}

@@ -57,6 +57,10 @@ pub(in super::super) enum ExpansionReason {
     LocalClassInBody,
     /// The callee's body expands another same-module inline call.
     NestedInlineExpansion,
+    /// The callee's body holds a subject `when` that switches on an enum's keys. The keys are
+    /// read from a table of the callee's own class (the JVM's `$WhenMappings`), numbered as that
+    /// class's emission claims them, which a body compiled for the call site cannot reproduce.
+    EnumSwitchInBody,
 }
 
 impl BodyLowering<'_> {
@@ -183,6 +187,9 @@ impl BodyLowering<'_> {
             }
             if self.ir.inline_regions.contains(&expression) {
                 return Some(ExpansionReason::NestedInlineExpansion);
+            }
+            if self.ir.enum_switch_when(expression).is_some() {
+                return Some(ExpansionReason::EnumSwitchInBody);
             }
             match self.ir.expr(expression) {
                 IrExpr::Lambda { .. } | IrExpr::CallableReference(_) => {

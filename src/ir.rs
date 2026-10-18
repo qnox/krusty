@@ -54,6 +54,8 @@ mod constants;
 mod constructors;
 mod default_arguments;
 pub(crate) use default_arguments::module_override_callable;
+mod enum_switch_whens;
+pub(crate) use enum_switch_whens::EnumSwitchWhen;
 mod enums;
 mod expression_provenance;
 mod field_flags;
