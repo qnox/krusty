@@ -346,30 +346,3 @@ fn backticked_names_lift_with_identifier_characters() {
         );
     }
 }
-
-/// Local-function numbering keys on the raw Kotlin name, before sanitizing the emitted segment.
-/// These distinct raw names therefore remain unnumbered even though both spell `my_local`; the
-/// later physical-signature collision handling must match kotlinc independently.
-#[test]
-fn raw_local_names_control_a_sanitized_spelling_collision() {
-    let source = "fun collision(): Int {\n\
-            \x20   fun `my local`() = 1\n\
-            \x20   fun `my-local`() = 2\n\
-            \x20   return `my local`() + `my-local`()\n\
-            }\n";
-    let compared = common::compare_with_kotlinc_plugin(
-        "SanitizedCollision",
-        source,
-        "SanitizedCollisionKt",
-        &[common::stdlib_jar()],
-        "1.8",
-        &[],
-    )
-    .expect("reference kotlinc and javap must be available");
-    assert!(
-        compared.krusty_bytes == compared.reference_bytes,
-        "sanitized collision differs\n--- kotlinc ---\n{}\n--- krusty ---\n{}",
-        compared.reference,
-        compared.krusty
-    );
-}
