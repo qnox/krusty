@@ -12100,8 +12100,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is
   `LInv<Ljava/util/List;>;`. `Nothing` for an `in` parameter is written `*`. A class whose
-  `Signature` would name no type argument or parameter carries none. Tests:
-  `tests/nothing_type_argument_signature_e2e.rs`.
+  `Signature` would name no type argument or parameter carries none. A suspend function's
+  continuation follows the same rule, `Continuation` being `in`: a `Nothing` result signs
+  `Lkotlin/coroutines/Continuation<*>;` (never `<-Lkotlin/Nothing;>`, which names a class no loader
+  resolves, so reflection over the method throws `TypeNotPresentException`), and a `Nothing?` result
+  leaves the continuation raw, so `suspend fun f(): Nothing?` has no `Signature` at all. A suspend
+  function type's own result is `Any?`, so `suspend () -> Nothing` keeps its generic `FunctionN`
+  (`Function1<-Continuation<*>;+Object>` in a parameter) where `() -> Nothing` is raw. Tests:
+  `tests/nothing_type_argument_signature_e2e.rs` and
+  `tests/suspend_continuation_signature_e2e.rs::a_nothing_result_is_a_star_continuation`.
 - **An inherited interface default keeps its value-class hash and carriers.** A class's or
   sub-interface's forwarder to an inherited default whose signature mentions a value class
   (`rep(n: Count)`) is named `rep-<hash>` and calls the member under that name, whether the member
