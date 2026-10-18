@@ -350,7 +350,7 @@ fn backticked_names_lift_with_identifier_characters() {
 /// Local-function numbering keys on the raw Kotlin name, before sanitizing the emitted segment.
 /// These distinct raw names therefore remain unnumbered even though both spell `my_local`, and
 /// kotlinc reports the methods they lift to as a platform declaration clash at each declaration:
-/// on a file facade, on a class, with a captured value, and after an annotation.
+/// on a file facade, on a class, with a captured parameter or local, and after an annotation.
 #[test]
 fn sanitized_local_function_names_clash_like_kotlinc() {
     let source = "fun collision(): Int {\n\
@@ -369,6 +369,12 @@ fn sanitized_local_function_names_clash_like_kotlinc() {
             \x20   @Suppress(\"UNUSED\") fun `p q`(x: Int) = x + y.length\n\
             \x20   fun `p-q`(x: Int) = x - y.length\n\
             \x20   return `p q`(1) + `p-q`(2)\n\
+            }\n\
+            fun capturedLocal(): Int {\n\
+            \x20   val v = 3\n\
+            \x20   fun `r s`(x: Int) = x + v\n\
+            \x20   fun `r-s`(x: Int) = x - v\n\
+            \x20   return `r s`(1) + `r-s`(2)\n\
             }\n";
     let result = common::compiler_diagnostics(
         &[("SanitizedCollision.kt", source)],

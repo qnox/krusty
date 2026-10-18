@@ -61,16 +61,12 @@ pub(super) fn report(
     Ok(clashes)
 }
 
-/// The lifted method as kotlinc renders it: its physical parameters, a captured value's named
-/// `$name`.
+/// The lifted method as kotlinc renders it: its physical parameters, spelled as their
+/// local-variable names (a captured parameter `$y`, a captured local `v`).
 fn render(ir: &IrFile, function: FunId, owner: &str) -> Result<String, UndeterminedDiagnosticType> {
     let declaration = &ir.functions[function as usize];
-    let names = ir
-        .function_parameter_identities(function)
-        .unwrap_or_default()
-        .iter()
-        .map(|identity| crate::jvm::parameter_names::local_variable(identity, &declaration.name))
-        .collect::<Option<Vec<_>>>()
+    let names = crate::jvm::parameter_names::function_locals(ir, function, &declaration.params)
+        .and_then(|names| names.into_iter().collect::<Option<Vec<_>>>())
         .ok_or(UndeterminedDiagnosticType::InvalidContextParameterCount)?;
     super::render_physical_function(declaration, names.iter().map(String::as_str), owner)
 }
