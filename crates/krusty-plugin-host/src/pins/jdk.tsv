@@ -1,0 +1,11 @@
+# The JDK a plugin host downloads when no installed one is usable: Eclipse Temurin 21.0.8+9, per
+# platform, with the SHA-256 and size Adoptium publishes for each archive
+# (api.adoptium.net/v3/assets/release_name/eclipse/jdk-21.0.8+9) and the path of `java` inside it.
+#
+# os       arch       url    sha256    size    java
+linux	x86_64	https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.8%2B9/OpenJDK21U-jdk_x64_linux_hotspot_21.0.8_9.tar.gz	f2dc5418092c43003db8f9005c4a286e1c0104fea96ccdd49e8ebd037cac9219	207098019	jdk-21.0.8+9/bin/java
+linux	aarch64	https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.8%2B9/OpenJDK21U-jdk_aarch64_linux_hotspot_21.0.8_9.tar.gz	e5c41a1ab0865ea5de9b4529bf8526005f1d4593090845387d14fe450ce39c33	205275133	jdk-21.0.8+9/bin/java
+macos	x86_64	https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.8%2B9/OpenJDK21U-jdk_x64_mac_hotspot_21.0.8_9.tar.gz	0ceaf7060b2c9dbbe8ecc4fb9351c6b4cf24e4350d58772c9656589933a4fdeb	194046408	jdk-21.0.8+9/Contents/Home/bin/java
+macos	aarch64	https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.8%2B9/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.8_9.tar.gz	59422c2292ae4e76b87e00d8808dbe49cffa39af731e08bb0292ddb0af4e0261	199817579	jdk-21.0.8+9/Contents/Home/bin/java
+windows	x86_64	https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.8%2B9/OpenJDK21U-jdk_x64_windows_hotspot_21.0.8_9.zip	5dbb74a4edda94c2aae97a1e30f448db0ad9023a9466fe31a8c68377d9dfbac4	204850009	jdk-21.0.8+9/bin/java.exe
+windows	aarch64	https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.8%2B9/OpenJDK21U-jdk_aarch64_windows_hotspot_21.0.8_9.zip	66617116409d3106eb5c8d230919773c01e09460562972633a09a89116c446e5	191992920	jdk-21.0.8+9/bin/java.exe

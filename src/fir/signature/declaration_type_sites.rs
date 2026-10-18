@@ -26,6 +26,7 @@ pub struct ExplicitClassifierParents {
 pub(super) struct DeclarationTypeSites {
     by_graph_type: HashMap<HeaderTypeId, Vec<HeaderTypeId>>,
     by_expression: HashMap<SigExprId, Vec<HeaderTypeId>>,
+    declaration_sites: HashSet<HeaderTypeId>,
 }
 
 impl DeclarationTypeSites {
@@ -40,6 +41,7 @@ impl DeclarationTypeSites {
         if !expression_sites.contains(&declaration_syntax) {
             expression_sites.push(declaration_syntax);
         }
+        self.declaration_sites.insert(declaration_syntax);
         match nodes.get(expression.raw() as usize).copied() {
             Some(SigExpr::Type { syntax, .. } | SigExpr::ContextualType { syntax, .. }) => {
                 if graph_syntax.written_type_id(syntax) == syntax {
@@ -73,6 +75,10 @@ impl DeclarationTypeSites {
             .unwrap_or(&[])
     }
 
+    pub(super) fn contains_declaration_site(&self, syntax: HeaderTypeId) -> bool {
+        self.declaration_sites.contains(&syntax)
+    }
+
     pub(super) fn storage_payload_bytes(&self) -> usize {
         self.by_graph_type
             .values()
@@ -89,6 +95,7 @@ impl DeclarationTypeSites {
                         + sites.len() * std::mem::size_of::<HeaderTypeId>()
                 })
                 .sum::<usize>()
+            + self.declaration_sites.len() * std::mem::size_of::<HeaderTypeId>()
     }
 }
 
@@ -160,5 +167,10 @@ impl SignatureGraph {
     pub(crate) fn declaration_type_syntaxes(&self, syntax: HeaderTypeId) -> &[HeaderTypeId] {
         self.declaration_type_sites
             .declaration_syntaxes_for_type(syntax)
+    }
+
+    pub(crate) fn declaration_type_site_is_bound(&self, syntax: HeaderTypeId) -> bool {
+        self.declaration_type_sites
+            .contains_declaration_site(syntax)
     }
 }

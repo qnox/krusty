@@ -38,6 +38,84 @@ fn pass_one_retains_checked_classifier_annotation_values_by_stable_identity() {
     );
 }
 
+#[test]
+fn pass_one_publishes_body_local_property_and_accessor_annotations_by_stable_identity() {
+    let source = r#"
+fun build() {
+    class Local {
+        @Deprecated("gone", level = DeprecationLevel.HIDDEN)
+        val whole: Int = 1
+
+        val read: Int
+            @Deprecated("gone", level = DeprecationLevel.HIDDEN)
+            get() = 1
+
+        var write: Int = 1
+            get() = field
+            @Deprecated("gone", level = DeprecationLevel.HIDDEN)
+            set(value) { field = value }
+    }
+}
+"#;
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+        crate::toolchain::jvm_classpath_jars_for(source),
+    ));
+    let mut diagnostics = DiagSink::new();
+    let analysis = analyze_source_set_with_features(
+        &[SourceInput::kotlin(source).with_file_stem("BodyLocalAnnotations")],
+        crate::frontend::PlatformProvider::jvm(Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        )),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let index = analysis.streamed.as_ref().expect("Pass 1").module.index();
+    let parser_local = analysis.files[0]
+        .local_class_enclosing_declarations
+        .keys()
+        .copied()
+        .find(|declaration| {
+            matches!(
+                analysis.files[0].decl(*declaration),
+                crate::ast::Decl::Class(class)
+                    if class.name.rsplit('.').next() == Some("Local")
+            )
+        })
+        .expect("parser local classifier");
+    let active = crate::fir::ActiveSourceDeclarations::bind_complete_source(
+        &analysis.files[0],
+        crate::fir::SourceFileId::from_raw(0),
+        index,
+    )
+    .expect("local declarations bind to their stable inventory");
+    let local = active
+        .canonical_classifier_declaration(parser_local, index)
+        .expect("stable local classifier");
+    let property = |sibling| {
+        index
+            .owned_declaration(local, crate::fir::DeclarationKind::Property, sibling)
+            .expect("stable local property")
+    };
+    let whole = property(0);
+    let read = property(1);
+    let write = property(2);
+    let read_getter = index
+        .owned_declaration(read, crate::fir::DeclarationKind::Accessor, 0)
+        .expect("stable read getter");
+    let write_setter = index
+        .owned_declaration(write, crate::fir::DeclarationKind::Accessor, 1)
+        .expect("stable write setter");
+    for declaration in [whole, read_getter, write_setter] {
+        let annotations = index.declaration_applied_annotations(declaration);
+        assert_eq!(annotations.len(), 1);
+        assert!(annotations[0].is_deprecated_hidden());
+    }
+    assert!(index.declaration_applied_annotations(read).is_empty());
+    assert!(index.declaration_applied_annotations(write).is_empty());
+}
+
 /// A source annotation class's `@Target` policy comes from its checked application. Entries of
 /// `kotlin.annotation.AnnotationTarget` selected through an import are the semantic policy; an
 /// entry of another enum leaves the class with NO semantic policy, only kotlinc's diagnostic

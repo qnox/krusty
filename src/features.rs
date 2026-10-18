@@ -577,7 +577,10 @@ mod tests {
             .deprecation_warning_message(FEATURE, MESSAGE),
             None
         );
-        for release in [KotlinVersion::V2_4_20, KotlinVersion::V2_4_21] {
+        for release in KotlinVersion::supported()
+            .into_iter()
+            .filter(|release| *release >= KotlinVersion::V2_4_20)
+        {
             assert_eq!(
                 LangFeatures::for_release(release, LanguageVersion::V2_4, LanguageVersion::V2_4)
                     .deprecation_warning_message(FEATURE, MESSAGE),

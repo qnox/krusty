@@ -128,62 +128,14 @@ impl Emitter<'_> {
         }
 
         let slot = if let Some(initializer) = initializer {
-            let source =
-                if emit_deferred_zero(self.ir, declaration, initializer, slot_ty, code, self.cw) {
-                    slot_ty
-                } else {
-                    // Only a source declaration runs kotlinc's `visitVariable` line restoration.
-                    // Call-operand holders and backend suspension temps are unnamed even when a
-                    // later migration changes which lowering pass creates them.
-                    if named {
-                        let previous = self.enter_declared_initializer(initializer);
-                        let declared_try = matches!(self.ir.expr(initializer), IrExpr::Try { .. })
-                            .then_some(initializer);
-                        let outer_try = std::mem::replace(&mut self.declared_try, declared_try);
-                        let source = self.emit_consumed_operand(initializer, code);
-                        self.declared_try = outer_try;
-                        self.leave_declared_initializer(previous);
-                        source
-                    } else if self.ir.destructuring_containers.contains(&declaration) {
-                        // kotlinc declares the `<destruct>` container as a variable, so a `try`
-                        // initializer's result reload returns to the declaration's line.
-                        let declared_try = matches!(self.ir.expr(initializer), IrExpr::Try { .. })
-                            .then_some(initializer);
-                        let outer_try = std::mem::replace(&mut self.declared_try, declared_try);
-                        let source = self.emit_consumed_operand(initializer, code);
-                        self.declared_try = outer_try;
-                        source
-                    } else {
-                        self.emit_consumed_operand(initializer, code)
-                    }
-                };
-            let semantic = self
-                .ir
-                .logical_types
-                .get(&initializer)
-                .copied()
-                .unwrap_or(source);
-            // An inlined body forgets the caller's line. kotlinc's `visitVariable` marks the
-            // declaration before it narrows the erased result, so the `checkcast` — not the store
-            // after it — starts that line (`val value = fetch(slot)`). An unsigned
-            // bitwise result still forgets after its carrier conversion, and the store is the mark
-            // that follows.
-            // A same-module inline call's operand is stored into its parameter slot as kotlinc's
-            // `genValueAndPut` does, with no line of the declaration's.
-            let marks_line = self.copied_operand_binding != Some(declaration);
-            let restore_inlined_line = marks_line
-                && code.line_forgotten()
-                && !self.completes_unsigned_bitwise_value(initializer);
-            if restore_inlined_line {
-                self.mark_declared_initializer_line(declaration, initializer, code);
-            }
-            self.adapt_physical_operand(source, semantic, Some(semantic_ty), slot_ty, code);
-            if self.completes_unsigned_bitwise_value(initializer) {
-                code.forget_line();
-            }
-            if marks_line && !restore_inlined_line {
-                self.mark_declared_initializer_line(declaration, initializer, code);
-            }
+            self.materialize_initializer(
+                declaration,
+                initializer,
+                named,
+                semantic_ty,
+                slot_ty,
+                code,
+            );
             let slot = entered
                 .unwrap_or_else(|| self.enter_unassigned_value(index, slot_ty, holds_operand));
             self.unassigned_values.remove(&index);
@@ -197,6 +149,141 @@ impl Emitter<'_> {
         self.slots.insert(index, (slot, slot_ty));
         // A `lateinit` declaration emits no store, but its lexical debug lifetime still starts here.
         self.open_declared_local(declaration, slot, slot_ty, code);
+    }
+
+    /// The holders of one inline lambda invocation's operands, which start `statements`; returns
+    /// how many it bound. kotlinc's inliner finds every operand on the stack at the `invoke` and
+    /// stores them last first, each into the next free slot, and the lambda's locals open once all
+    /// are stored. A holder that is not a plain stored value is bound on its own.
+    pub(super) fn emit_invocation_operand_bindings(
+        &mut self,
+        statements: &[ExprId],
+        code: &mut CodeBuilder,
+    ) -> usize {
+        let operands: Vec<(ExprId, u32, Ty, ExprId, bool)> = statements
+            .iter()
+            .map_while(|&declaration| {
+                if !self.ir.invocation_operand_bindings.contains(&declaration) {
+                    return None;
+                }
+                let IrExpr::Variable {
+                    index,
+                    ty,
+                    init: Some(initializer),
+                    named,
+                } = *self.ir.expr(declaration)
+                else {
+                    return None;
+                };
+                let plain = !self.slots.contains_key(&index)
+                    && !matches!(self.ir.expr(initializer), IrExpr::RefNew { .. })
+                    && self.stored_shared_cell(initializer).is_none();
+                plain.then_some((declaration, index, ty, initializer, named))
+            })
+            .collect();
+        // An operand that clears the stack (a `try`, a jump out of an enclosing loop, a suspension)
+        // cannot run above the operands before it; such an invocation binds each operand in turn.
+        let clears_prefix = operands
+            .iter()
+            .skip(1)
+            .any(|&(_, _, _, initializer, _)| self.spills_operand_prefix(initializer));
+        if operands.len() < 2 || clears_prefix {
+            return 0;
+        }
+        let mut stored = Vec::with_capacity(operands.len());
+        for &(declaration, index, semantic_ty, initializer, named) in &operands {
+            let slot_ty = slot_type(self.ir, declaration, semantic_ty);
+            self.materialize_initializer(
+                declaration,
+                initializer,
+                named,
+                semantic_ty,
+                slot_ty,
+                code,
+            );
+            stored.push((declaration, index, slot_ty));
+        }
+        for &(declaration, index, slot_ty) in stored.iter().rev() {
+            let slot = self.enter_unassigned_value(index, slot_ty, true);
+            self.unassigned_values.remove(&index);
+            store(slot_ty, slot, code);
+            self.mark_suspend_lambda_parameter_read(declaration, code);
+            self.slots.insert(index, (slot, slot_ty));
+        }
+        for &(declaration, index, slot_ty) in &stored {
+            let slot = self.slots[&index].0;
+            self.open_declared_local(declaration, slot, slot_ty, code);
+        }
+        operands.len()
+    }
+
+    /// Leave `declaration`'s `initializer` on the stack as the slot type `slot_ty`, with the
+    /// declaration's line marked as kotlinc's `visitVariable` marks it.
+    fn materialize_initializer(
+        &mut self,
+        declaration: ExprId,
+        initializer: ExprId,
+        named: bool,
+        semantic_ty: Ty,
+        slot_ty: Ty,
+        code: &mut CodeBuilder,
+    ) {
+        let source =
+            if emit_deferred_zero(self.ir, declaration, initializer, slot_ty, code, self.cw) {
+                slot_ty
+            } else {
+                // Only a source declaration runs kotlinc's `visitVariable` line restoration.
+                // Call-operand holders and backend suspension temps are unnamed even when a
+                // later migration changes which lowering pass creates them.
+                if named {
+                    let previous = self.enter_declared_initializer(initializer);
+                    let declared_try = matches!(self.ir.expr(initializer), IrExpr::Try { .. })
+                        .then_some(initializer);
+                    let outer_try = std::mem::replace(&mut self.declared_try, declared_try);
+                    let source = self.emit_consumed_operand(initializer, code);
+                    self.declared_try = outer_try;
+                    self.leave_declared_initializer(previous);
+                    source
+                } else if self.ir.destructuring_containers.contains(&declaration) {
+                    // kotlinc declares the `<destruct>` container as a variable, so a `try`
+                    // initializer's result reload returns to the declaration's line.
+                    let declared_try = matches!(self.ir.expr(initializer), IrExpr::Try { .. })
+                        .then_some(initializer);
+                    let outer_try = std::mem::replace(&mut self.declared_try, declared_try);
+                    let source = self.emit_consumed_operand(initializer, code);
+                    self.declared_try = outer_try;
+                    source
+                } else {
+                    self.emit_consumed_operand(initializer, code)
+                }
+            };
+        let semantic = self
+            .ir
+            .logical_types
+            .get(&initializer)
+            .copied()
+            .unwrap_or(source);
+        // An inlined body forgets the caller's line. kotlinc's `visitVariable` marks the
+        // declaration before it narrows the erased result, so the `checkcast` — not the store
+        // after it — starts that line (`val value = fetch(slot)`). An unsigned
+        // bitwise result still forgets after its carrier conversion, and the store is the mark
+        // that follows.
+        // A same-module inline call's operand is stored into its parameter slot as kotlinc's
+        // `genValueAndPut` does, with no line of the declaration's.
+        let marks_line = self.copied_operand_binding != Some(declaration);
+        let restore_inlined_line = marks_line
+            && code.line_forgotten()
+            && !self.completes_unsigned_bitwise_value(initializer);
+        if restore_inlined_line {
+            self.mark_declared_initializer_line(declaration, initializer, code);
+        }
+        self.adapt_physical_operand(source, semantic, Some(semantic_ty), slot_ty, code);
+        if self.completes_unsigned_bitwise_value(initializer) {
+            code.forget_line();
+        }
+        if marks_line && !restore_inlined_line {
+            self.mark_declared_initializer_line(declaration, initializer, code);
+        }
     }
 
     /// The declaration's line, after the initializer's own start when that start is a different

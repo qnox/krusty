@@ -646,6 +646,7 @@ impl<'a> Checker<'a> {
     /// `declaration`.
     pub(super) fn check_bodyless_member_bounds(
         &mut self,
+        scope: &CheckerScope<'_>,
         declaration: Option<crate::fir::DeclarationId>,
         receiver: Option<&TypeRef>,
         parameters: &[(&TypeRef, bool)],
@@ -655,7 +656,7 @@ impl<'a> Checker<'a> {
         let Some((declaration, index)) = declaration.zip(self.resolved_index) else {
             return false;
         };
-        let spellings = self.finalized_declaration_spellings(Some(declaration));
+        let spellings = self.finalized_declaration_spellings_for_binding(Some(declaration));
         let finalized_receiver = index
             .callable_for_declaration(declaration)
             .and_then(|callable| callable.shape.extension_receiver)
@@ -669,7 +670,15 @@ impl<'a> Checker<'a> {
             return false;
         }
         if let (Some(reference), Some(finalized)) = (receiver, finalized_receiver) {
-            self.record_finalized_declaration_type(reference, finalized.get(), &spellings.receiver);
+            self.record_or_bind_deferred_declaration_type(
+                scope,
+                declaration,
+                reference,
+                finalized.get(),
+                spellings
+                    .as_ref()
+                    .and_then(|spellings| spellings.receiver()),
+            );
         }
         let Some(signature) = index.signature(declaration) else {
             return false;
@@ -682,25 +691,35 @@ impl<'a> Checker<'a> {
             .zip(signature.parameters.iter())
             .enumerate()
         {
-            self.record_finalized_parameter_type(
+            self.record_or_bind_deferred_parameter_type(
+                scope,
+                declaration,
                 reference,
                 *is_vararg,
                 finalized.get(),
-                spellings.param(position),
+                spellings
+                    .as_ref()
+                    .and_then(|spellings| spellings.param(position)),
             );
         }
         if let Some(reference) = ret {
-            self.record_finalized_declaration_type(
+            self.record_or_bind_deferred_declaration_type(
+                scope,
+                declaration,
                 reference,
                 signature.result.get(),
-                &spellings.ret,
+                spellings.as_ref().and_then(|spellings| spellings.ret()),
             );
         }
         if let Some(reference) = getter_ret {
-            self.record_finalized_declaration_type(
+            self.record_or_bind_deferred_declaration_type(
+                scope,
+                declaration,
                 reference,
                 signature.result.get(),
-                &spellings.getter_ret,
+                spellings
+                    .as_ref()
+                    .and_then(|spellings| spellings.getter_ret()),
             );
         }
         true
@@ -768,6 +787,7 @@ impl<'a> Checker<'a> {
         if finalized_local_header {
             if let Some(declaration) = declaration {
                 if !self.record_finalized_type_parameter_bounds(
+                    &method_scope,
                     declaration,
                     &function.type_params,
                     &function.type_param_bounds,
@@ -797,6 +817,7 @@ impl<'a> Checker<'a> {
             .map(|parameter| (&parameter.ty, parameter.is_vararg))
             .collect::<Vec<_>>();
         if !self.check_bodyless_member_bounds(
+            &method_scope,
             declaration,
             function.receiver.as_ref(),
             &value_parameters,
@@ -878,6 +899,7 @@ impl<'a> Checker<'a> {
         if finalized_local_header {
             if let Some(declaration) = declaration {
                 if !self.record_finalized_type_parameter_bounds(
+                    &property_scope,
                     declaration,
                     &property.type_params,
                     &property.type_param_bounds,
@@ -931,6 +953,7 @@ impl<'a> Checker<'a> {
             .map(|parameter| (&parameter.ty, parameter.is_vararg))
             .collect::<Vec<_>>();
         if !self.check_bodyless_member_bounds(
+            &property_scope,
             declaration,
             property.receiver.as_ref(),
             &context_parameters,

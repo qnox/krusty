@@ -7,7 +7,7 @@
 use crate::fir::{
     DeclarationFlags, DeclarationId, DeclarationKind, HeaderDeclarationKind, SignatureGraph,
 };
-use crate::fx_hash::HashSet;
+use crate::fx_hash::{HashMap, HashSet};
 
 #[cfg(test)]
 mod tests;
@@ -64,6 +64,159 @@ pub(super) fn declarations(
         .collect()
 }
 
+/// Whether the declaration owns a written type occurrence that the active lexical checker must
+/// bind. A candidate without such an occurrence has an explicitly empty spelling record and may
+/// keep its pending-free semantic header in Pass 1.
+pub(super) fn owns_written_type_occurrence(
+    headers: &crate::fir::StreamedHeaderModule,
+    stub: &crate::fir::DeclarationStub,
+) -> bool {
+    let Some(declaration) = headers.syntax.declaration(stub.id) else {
+        return false;
+    };
+    match (stub.kind, declaration.kind) {
+        (
+            DeclarationKind::Function | DeclarationKind::Accessor,
+            HeaderDeclarationKind::Callable {
+                receiver,
+                parameters,
+                result,
+                bounds,
+                ..
+            },
+        ) => {
+            receiver.is_some()
+                || !headers.syntax.parameters(parameters).is_empty()
+                || matches!(result, crate::fir::HeaderResultType::Explicit(_))
+                || !headers.syntax.bounds(bounds).is_empty()
+        }
+        (
+            DeclarationKind::Property,
+            HeaderDeclarationKind::Property {
+                receiver,
+                context_parameters,
+                declared_type,
+                getter_type,
+                backing_field_type,
+                bounds,
+                ..
+            },
+        ) if !stub.flags.has(DeclarationFlags::PROPERTY_PARAMETER) => {
+            receiver.is_some()
+                || !headers.syntax.parameters(context_parameters).is_empty()
+                || declared_type.is_some()
+                || getter_type.is_some()
+                || backing_field_type.is_some()
+                || !headers.syntax.bounds(bounds).is_empty()
+        }
+        // Constructors and constructor properties can be required by calls in the same streamed
+        // body. Classifier parents have their own explicit graph, and type aliases are always
+        // module-signature work. Those mandatory Pass-1 headers use the explicit deferred-
+        // occurrence lifecycle when compact binding is unavailable.
+        _ => false,
+    }
+}
+
+/// Local declarations whose mandatory semantic header has no compact graph node owning one of
+/// its declaration-metadata type roles. This is decided before solving: absence from this set is
+/// never inferred later from a failed spelling projection.
+fn written_spelling_roles(
+    headers: &crate::fir::StreamedHeaderModule,
+    declaration: crate::fir::HeaderDeclaration,
+) -> Vec<crate::fir::HeaderTypeId> {
+    let mut roles = Vec::new();
+    match declaration.kind {
+        HeaderDeclarationKind::Callable {
+            receiver,
+            parameters,
+            result,
+            ..
+        } => {
+            roles.extend(receiver);
+            roles.extend(
+                headers
+                    .syntax
+                    .parameters(parameters)
+                    .iter()
+                    .map(|parameter| parameter.ty),
+            );
+            if let crate::fir::HeaderResultType::Explicit(result) = result {
+                roles.push(result);
+            }
+        }
+        HeaderDeclarationKind::Property {
+            receiver,
+            context_parameters,
+            declared_type,
+            getter_type,
+            ..
+        } => {
+            roles.extend(receiver);
+            roles.extend(
+                headers
+                    .syntax
+                    .parameters(context_parameters)
+                    .iter()
+                    .map(|parameter| parameter.ty),
+            );
+            roles.extend(declared_type);
+            roles.extend(getter_type);
+        }
+        HeaderDeclarationKind::Constructor { parameters, .. } => roles.extend(
+            headers
+                .syntax
+                .parameters(parameters)
+                .iter()
+                .map(|parameter| parameter.ty),
+        ),
+        HeaderDeclarationKind::Classifier { .. } | HeaderDeclarationKind::TypeAlias { .. } => {}
+    }
+    roles
+        .into_iter()
+        .map(|role| headers.syntax.written_type_id(role))
+        .collect()
+}
+
+fn spelling_roles_matching(
+    headers: &crate::fir::StreamedHeaderModule,
+    mut matches: impl FnMut(crate::fir::HeaderTypeId) -> bool,
+) -> HashMap<DeclarationId, HashSet<crate::fir::HeaderTypeId>> {
+    let mut selected = HashMap::default();
+    for stub in headers
+        .stubs
+        .iter()
+        .filter(|stub| stub.flags.has(DeclarationFlags::LOCAL_CLASS))
+    {
+        let Some(declaration) = headers.syntax.declaration(stub.id) else {
+            continue;
+        };
+        let roles = written_spelling_roles(headers, declaration)
+            .into_iter()
+            .filter(|role| matches(*role))
+            .collect::<HashSet<_>>();
+        if !roles.is_empty() {
+            selected.insert(stub.id, roles);
+        }
+    }
+    selected
+}
+
+pub(super) fn unowned_spelling_roles(
+    headers: &crate::fir::StreamedHeaderModule,
+    graph: &SignatureGraph,
+) -> HashMap<DeclarationId, HashSet<crate::fir::HeaderTypeId>> {
+    spelling_roles_matching(headers, |role| !graph.declaration_type_site_is_bound(role))
+}
+
+pub(super) fn unselected_spelling_roles(
+    headers: &crate::fir::StreamedHeaderModule,
+    selected: &super::selected_type_facts::SelectedTypeFacts,
+) -> HashMap<DeclarationId, HashSet<crate::fir::HeaderTypeId>> {
+    spelling_roles_matching(headers, |role| {
+        !selected.has_complete_declaration_spelling(&headers.syntax, role)
+    })
+}
+
 /// Whether this declaration belongs to the atomic primary-vararg constructor/property relation.
 ///
 /// A representable property contract is stable Pass-1 input even when its owner is body-local.
@@ -101,21 +254,6 @@ pub(super) fn may_defer_unpublishable_signature(
                 | DeclarationKind::Constructor
                 | DeclarationKind::Accessor
         )
-}
-
-/// A local declaration's compact semantic header may be complete while projection of one source
-/// occurrence still needs the active lexical scope. That spelling is published by the checked
-/// inline/default/body fragment. Non-local spelling failures remain Pass-1 failures.
-pub(super) fn retain_non_local_spelling_failures(
-    headers: &crate::fir::StreamedHeaderModule,
-    failures: &mut Vec<DeclarationId>,
-) {
-    failures.retain(|declaration| {
-        !headers
-            .stubs
-            .iter()
-            .any(|stub| stub.id == *declaration && stub.flags.has(DeclarationFlags::LOCAL_CLASS))
-    });
 }
 
 /// Remove the legacy symbol table's physical capture prefix from a local constructor seed. The

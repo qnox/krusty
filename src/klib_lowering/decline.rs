@@ -73,6 +73,16 @@ impl KlibBodyDecline {
     pub fn reason(&self) -> &KlibBodyDeclineReason {
         &self.reason
     }
+
+    /// Whether the body, or one it reaches, disagrees with its own selected declaration: an
+    /// internal inconsistency rather than a form lowering does not model yet.
+    pub fn is_internal_inconsistency(&self) -> bool {
+        match &self.reason {
+            KlibBodyDeclineReason::SignatureMismatch(_) => true,
+            KlibBodyDeclineReason::CalleeDeclined(callee) => callee.is_internal_inconsistency(),
+            _ => false,
+        }
+    }
 }
 
 /// The phrase names what is unsupported, for a backend's own wording: the Native backend reports

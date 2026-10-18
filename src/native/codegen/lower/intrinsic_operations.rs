@@ -12,37 +12,6 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
         match operation {
-            IrIntrinsic::ReinterpretBits { from, to } => {
-                let operand = match (receiver, args) {
-                    (Some(receiver), []) => receiver,
-                    (None, [argument]) => *argument,
-                    _ => return Err("a malformed scalar reinterpretation".into()),
-                };
-                if ret != to
-                    || !matches!(
-                        (from, to),
-                        (Ty::Float, Ty::Int)
-                            | (Ty::Double, Ty::Long)
-                            | (Ty::Int, Ty::Float)
-                            | (Ty::Long, Ty::Double)
-                    )
-                {
-                    return Err(declined!(
-                        "a scalar reinterpretation from `{from:?}` to `{to:?}` returning `{ret:?}`"
-                    ));
-                }
-                let Some(value) = self.coerce(operand, from)? else {
-                    return Err("a scalar reinterpretation of `Unit`".into());
-                };
-                if self.terminated {
-                    return Ok(None);
-                }
-                let clif = self
-                    .carrier(to)
-                    .clif()
-                    .expect("a validated reinterpretation target has a scalar carrier");
-                Ok(Some(self.bits_of(value, clif)))
-            }
             // `relational_operator` records that the call came from a `ComparisonCall`, which
             // lets a backend emit a branch instead of materializing the -1/0/1. This one answers
             // the same VALUE either way and leaves that to Cranelift, so the hint is ignored

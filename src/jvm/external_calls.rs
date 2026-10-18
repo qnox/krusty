@@ -865,6 +865,9 @@ pub(super) fn realize(
             Some(crate::libraries::CompilerIntrinsic::ReinterpretBits) => {
                 unreachable!("target KLIB reinterpretation cannot reach JVM call realization")
             }
+            Some(crate::libraries::CompilerIntrinsic::ScalarInstruction(_)) => {
+                unreachable!("a target KLIB scalar instruction cannot reach JVM call realization")
+            }
             Some(
                 crate::libraries::CompilerIntrinsic::ArraySize
                 | crate::libraries::CompilerIntrinsic::FloatingIsNaN { .. }

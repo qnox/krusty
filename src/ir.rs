@@ -48,10 +48,14 @@ mod cast_targets;
 mod catches;
 mod checked_types;
 mod companion_blocks;
+mod compiled_inline_calls;
+pub use compiled_inline_calls::SameModuleInlining;
 mod constants;
 mod constructors;
 mod default_arguments;
 pub(crate) use default_arguments::module_override_callable;
+mod enum_switch_whens;
+pub(crate) use enum_switch_whens::EnumSwitchWhen;
 mod enums;
 mod expression_provenance;
 mod field_flags;
@@ -1698,6 +1702,8 @@ pub struct IrFile {
     /// kotlinc's lifted name of each function in [`Self::lifted_functions`] whose enclosing
     /// callables are all lifted, once a target has numbered the sequences.
     pub(crate) lifted_names: crate::fx_hash::HashMap<FunId, String>,
+    /// The declaration span of each function lowered from a source local function.
+    pub(crate) local_function_spans: crate::fx_hash::HashMap<FunId, crate::diag::Span>,
     /// The class name a target chose for each source callable reference and lambda, by
     /// expression id.
     pub(crate) callable_reference_names: crate::fx_hash::HashMap<u32, TypeName>,
@@ -2018,6 +2024,10 @@ pub struct IrFile {
     /// need this provenance when statement emission differs from a safe call's literal-null arm;
     /// it must not recover that distinction from the lowered branch shape.
     pub elvis_safe_call_guards: crate::fx_hash::HashSet<ExprId>,
+    /// The subset of [`Self::null_guards`] the JVM value-class pass writes to box or unbox a
+    /// nullable value class (`dup; ifnull; box-impl`). It is laid out like a safe call but is a
+    /// conversion of one, so it never folds into a safe-call chain's shared null exit.
+    pub(crate) jvm_value_class_null_guards: crate::fx_hash::HashSet<ExprId>,
     /// Physical type before a semantic read coercion.
     pub physical_types: crate::fx_hash::HashMap<u32, Ty>,
     /// Values a JVM value-class underlying-property read leaves in an erased generic slot as an
@@ -2097,6 +2107,7 @@ pub struct IrFile {
     /// `import Tools.doubled` / `5.doubled` from the classpath.
     pub member_ext_props: crate::fx_hash::HashMap<TypeName, Vec<MemberExtProp>>,
     type_reflection: TypeReflectionFacts,
+    compiled_inline_calls: compiled_inline_calls::CompiledInlineCalls,
     /// Function ids declared `inline`. This is the declaration-semantic set used by metadata;
     /// visibility-specific inline handling remains in [`Self::public_inline_functions`].
     pub inline_fns: crate::fx_hash::HashSet<u32>,
@@ -2144,6 +2155,9 @@ pub struct IrFile {
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
     /// that role participates in its own frame or register allocation.
     pub call_operand_bindings: crate::fx_hash::HashSet<ExprId>,
+    /// The call-operand holders of one inline lambda invocation, consecutive in its block: the
+    /// invocation evaluates every operand before it binds any. A backend chooses the binding order.
+    pub(crate) invocation_operand_bindings: crate::fx_hash::HashSet<ExprId>,
     /// Unnamed `Variable` declarations holding a destructuring declaration's container. This is
     /// source-role provenance; a backend decides whether that role affects physical debug lines.
     pub(crate) destructuring_containers: crate::fx_hash::HashSet<ExprId>,

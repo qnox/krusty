@@ -218,12 +218,45 @@ fun make(): Any {
     );
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
 
-    let (_, local) = local_class(&analysis.files[0], "Local");
-    let method = local
+    let (parser_local, local) = local_class(&analysis.files[0], "Local");
+    let method_index = local
         .methods
         .iter()
-        .find(|method| method.name == "first")
+        .position(|method| method.name == "first")
         .expect("local generic method");
+    let method = &local.methods[method_index];
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("the selected local method must finalize")
+        .module
+        .index();
+    let active = crate::fir::ActiveSourceDeclarations::bind_complete_source(
+        &analysis.files[0],
+        crate::fir::SourceFileId::from_raw(0),
+        index,
+    )
+    .expect("local declarations bind to their stable inventory");
+    let stable_first = active
+        .source_member_declaration(
+            &analysis.files[0],
+            index,
+            crate::libraries::SourceMember::Class {
+                file: 0,
+                owner: parser_local.0,
+                method: u32::try_from(method_index).expect("local method index fits u32"),
+            },
+        )
+        .expect("stable local generic method");
+    assert!(
+        !index.declaration_semantic_header_complete(stable_first),
+        "an undemanded local method's semantic header and source occurrences belong to active Pass 2"
+    );
+    assert!(
+        index.declaration_spellings(stable_first).is_none(),
+        "the undemanded local method has not published source occurrences separately"
+    );
+
     let alias_bound = method
         .type_param_bounds
         .iter()
@@ -285,12 +318,38 @@ fun build(): Item {
     );
 
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let (parser_local, local) = local_class(&analysis.files[0], "Local");
+    let property_index = local
+        .body_props
+        .iter()
+        .position(|property| property.name == "value")
+        .expect("local value property");
     let streamed = analysis
         .streamed
         .take()
         .expect("the selected local property must finalize")
         .module;
     let (mut index, _, _, _) = streamed.into_parts();
+    let active = crate::fir::ActiveSourceDeclarations::bind_complete_source(
+        &analysis.files[0],
+        crate::fir::SourceFileId::from_raw(0),
+        &index,
+    )
+    .expect("local declarations bind to their stable inventory");
+    let value = active
+        .class_body_property_declaration(
+            parser_local,
+            u32::try_from(property_index).expect("local property index fits u32"),
+        )
+        .expect("stable local value declaration");
+    assert!(
+        !index.declaration_semantic_header_complete(value),
+        "an undemanded local property's semantic header and source occurrences belong to active Pass 2"
+    );
+    assert!(
+        index.declaration_spellings(value).is_none(),
+        "the undemanded local property has not published source occurrences separately"
+    );
     crate::resolve::publish_checked_local_signatures(
         &analysis.files[0],
         crate::fir::SourceFileId::from_raw(0),
@@ -301,16 +360,6 @@ fun build(): Item {
         &mut index,
     )
     .expect("local property spelling publication");
-    let value = index
-        .declarations_named("value")
-        .iter()
-        .copied()
-        .find(|declaration| {
-            index
-                .declaration_header(*declaration)
-                .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS))
-        })
-        .expect("stable local value declaration");
     let spellings = index
         .declaration_spellings(value)
         .expect("finalized local property spellings");

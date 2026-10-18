@@ -652,12 +652,12 @@ fn stdlib_calls_reach_header_declared_callees() {
             vec![
                 ("it declares a parameter default)", 19),
                 ("it uses a block of a compiler-introduced form)", 13),
-                ("it uses a call of a member function)", 39),
+                ("it uses a call of a member function)", 41),
                 ("it uses a call through a property accessor signature)", 12),
-                ("it uses a constant of another type than its value's)", 2),
+                ("it uses a constant of another type than its value's)", 4),
                 ("it uses a constructor call)", 2),
                 ("it uses a type with type arguments)", 6),
-                ("it uses an inline argument container of another shape)", 12),
+                ("it uses an inline argument container of another shape)", 14),
                 ("it uses an inlined function body of another shape)", 6),
                 ("its library serializes none)", 37),
             ]

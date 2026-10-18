@@ -108,6 +108,11 @@ impl Checker<'_> {
     ) -> usize {
         let policy_depth =
             self.push_declaration_policies(scope, &function.annotations, &function.annotation_args);
+        self.check_jvm_static_function(
+            scope,
+            function,
+            super::declaration_rules::JvmStaticHost::Elsewhere,
+        );
         for (annotation, arguments) in function.annotations.iter().zip(&function.annotation_args) {
             self.check_non_property_annotation_application(
                 scope, annotation, arguments, "function",

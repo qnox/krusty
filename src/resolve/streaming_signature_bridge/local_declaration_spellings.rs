@@ -127,6 +127,7 @@ pub(super) fn publish_checked_local_declaration_spellings(
     index: &mut ResolvedModuleIndex,
     declarations: &[DeclarationId],
     pass_one_finalized_headers: &crate::fx_hash::HashSet<DeclarationId>,
+    pass_one_deferred_spellings: &crate::fx_hash::HashSet<DeclarationId>,
 ) -> Vec<DeclarationId> {
     let mut failed = Vec::new();
     for &declaration in declarations {
@@ -148,8 +149,10 @@ pub(super) fn publish_checked_local_declaration_spellings(
                 index.owned_declaration(declaration, DeclarationKind::Constructor, 0);
             let deferred_primary = !class.props.is_empty()
                 && existing.params.is_empty()
-                && primary_constructor
-                    .is_some_and(|constructor| !pass_one_finalized_headers.contains(&constructor));
+                && primary_constructor.is_some_and(|constructor| {
+                    !pass_one_finalized_headers.contains(&constructor)
+                        || pass_one_deferred_spellings.contains(&constructor)
+                });
             if !deferred_primary {
                 failed.push(declaration);
                 continue;
@@ -198,6 +201,15 @@ pub(super) fn publish_checked_local_declaration_spellings(
             } else {
                 failed.push(declaration);
             }
+            continue;
+        }
+        if pass_one_finalized_headers.contains(&declaration)
+            && !pass_one_deferred_spellings.contains(&declaration)
+        {
+            // Absence is not an ownership marker. A complete Pass-1 semantic header may publish
+            // from active TypeInfo only when Pass 1 explicitly transferred its written
+            // occurrences; every other missing sidecar is a broken Pass-1 publication.
+            failed.push(declaration);
             continue;
         }
         let record = match anchor.kind {

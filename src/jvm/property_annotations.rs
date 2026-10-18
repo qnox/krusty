@@ -27,7 +27,8 @@ pub fn synthesize_property_annotation_markers(ir: &mut IrFile) {
             {
                 continue;
             }
-            let getter = property_getter_name(&property.property);
+            let getter = written_getter_jvm_name(ir, class_index, property.source_order)
+                .unwrap_or_else(|| property_getter_name(&property.property));
             let marker_name = format!("{getter}$annotations");
             let class_identity = ir.classes[class_index].fq_name_id();
             let (params, identities, after) =
@@ -83,10 +84,53 @@ pub fn synthesize_property_annotation_markers(ir: &mut IrFile) {
         .map(|property| (property.property, property.name.clone()))
         .collect::<Vec<_>>();
     for (property, name) in package_properties {
-        let marker_name = format!("{}$annotations", property_getter_name(&name));
+        let getter = written_package_getter_jvm_name(ir, property)
+            .unwrap_or_else(|| property_getter_name(&name));
+        let marker_name = format!("{getter}$annotations");
         let marker = synthesize_marker(ir, marker_name, Vec::new(), Vec::new());
         ir.mark_jvm_package_property_annotation_marker(property, marker);
     }
+}
+
+/// The `@JvmName` written on the getter of the property declared at `source_order`: the marker
+/// is named after the getter's JVM name, which that annotation replaces.
+fn written_getter_jvm_name(ir: &IrFile, class_index: usize, source_order: u32) -> Option<String> {
+    let property = ir.classes[class_index]
+        .properties
+        .iter()
+        .find(|property| property.source_order == source_order)?;
+    let annotations = match property.getter {
+        Some(getter) => ir.function_annotations.get(&getter),
+        None => Some(&property.accessor_annotations.getter),
+    };
+    crate::jvm::module_calls::applied_jvm_name(annotations)
+        .ok()
+        .flatten()
+        .map(str::to_owned)
+}
+
+/// The `@JvmName` written on a top-level property's getter, which names its marker as it names
+/// the getter.
+fn written_package_getter_jvm_name(
+    ir: &IrFile,
+    property: crate::fir::PropertyId,
+) -> Option<String> {
+    let declared = match ir.local_property_layouts.get(&property)? {
+        crate::ir::IrLocalPropertyLayout::TopLevelStorage { getter, .. } => *getter,
+        crate::ir::IrLocalPropertyLayout::TopLevelAccessor { getter, .. } => Some(*getter),
+        _ => None,
+    };
+    let annotations = match declared {
+        Some(getter) => ir.function_annotations.get(&getter),
+        None => ir
+            .accessor_annotations
+            .get(&property)
+            .map(|annotations| &annotations.getter),
+    };
+    crate::jvm::module_calls::applied_jvm_name(annotations)
+        .ok()
+        .flatten()
+        .map(str::to_owned)
 }
 
 fn synthesize_marker(

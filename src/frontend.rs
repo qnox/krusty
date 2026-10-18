@@ -1071,6 +1071,10 @@ where
         });
         let diagnostics_before = diags.diags.len();
         let mut file = parse_source_kind(source.text, source.kind, &features, diags);
+        let parser_error = source.kind != SourceKind::Java
+            && diags.diags[diagnostics_before..]
+                .iter()
+                .any(|diagnostic| diagnostic.severity == Severity::Error);
         file.is_common = source.is_common;
         if source.kind != SourceKind::Java {
             record_local_class_name_provenance(&mut file);
@@ -1123,7 +1127,7 @@ where
         let extracted = pass1_builder.add_source(
             index,
             source,
-            (index < inferred_count && !parse_error && source.kind != SourceKind::Java)
+            (index < inferred_count && !parser_error && source.kind != SourceKind::Java)
                 .then_some(&file),
         );
         if let Some((source, stubs, stable_by_transient)) = extracted {

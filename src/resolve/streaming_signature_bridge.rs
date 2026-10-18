@@ -3769,6 +3769,7 @@ pub(crate) fn finalized_streamed_signature_index(
     explicit_type_semantics.bind_local_alias_templates(&graph);
     let stable_members = stable_property_index::StableMemberIndex::build(table);
     let deferred_local_candidates = deferred_local_headers::declarations(headers, &graph);
+    let unowned_spelling_roles = deferred_local_headers::unowned_spelling_roles(headers, &graph);
     let mut deferred_local_headers = HashSet::default();
     for stub in &headers.stubs {
         if suppressed_generated_callables.contains(&stub.id) {
@@ -3806,6 +3807,15 @@ pub(crate) fn finalized_streamed_signature_index(
                 .flags
                 .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
         {
+            continue;
+        }
+        if deferred_local_candidates.contains(&stub.id)
+            && deferred_local_headers::owns_written_type_occurrence(headers, stub)
+        {
+            // No Pass-1 graph node owns these written occurrences. Keep the declaration atomic:
+            // active Pass 2 binds them once and publishes semantics and spellings together. This
+            // decision precedes every legacy signature/provider query below.
+            deferred_local_headers.insert(stub.id);
             continue;
         }
         let anchor = headers
@@ -5547,6 +5557,7 @@ pub(crate) fn finalized_streamed_signature_index(
     for stub in headers.stubs.iter().filter(|stub| {
         stub.kind == DeclarationKind::Function
             && stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
+            && !deferred_local_headers.contains(&stub.id)
     }) {
         if index.signature(stub.id).is_some() {
             continue;
@@ -5869,9 +5880,36 @@ pub(crate) fn finalized_streamed_signature_index(
     // Every spelling fact below was selected by explicit compact resolution or by the solver.
     // Assemble the stable sidecars only after those operations and all header publication finish;
     // this phase performs no resolver call and no source-spelling lookup.
-    let (declared_spellings, type_alias_spellings, mut spelling_failures) =
-        finalized_compact_declared_spellings(&semantics, &index, &deferred_local_headers);
-    deferred_local_headers::retain_non_local_spelling_failures(headers, &mut spelling_failures);
+    let mut deferred_spelling_roles = unowned_spelling_roles;
+    for (declaration, roles) in
+        deferred_local_headers::unselected_spelling_roles(headers, &semantics.selected_types)
+    {
+        deferred_spelling_roles
+            .entry(declaration)
+            .or_default()
+            .extend(roles);
+    }
+    for &declaration in &deferred_local_headers {
+        // An aggregate header may defer after all of its explicit graph roles were selected (for
+        // example, an inferred result remains unavailable). Preserve an empty role set so the
+        // spelling assembler emits Selected semantic+spelling facts for those graph-owned roles
+        // instead of a Complete record that assumes an aggregate signature exists.
+        deferred_spelling_roles.entry(declaration).or_default();
+    }
+    let (
+        declared_spellings,
+        deferred_declared_spellings,
+        type_alias_spellings,
+        mut spelling_failures,
+    ) = finalized_compact_declared_spellings(
+        &semantics,
+        &index,
+        &deferred_local_headers,
+        &deferred_spelling_roles,
+    );
+    for (declaration, spellings) in deferred_declared_spellings {
+        index.defer_declaration_spellings(declaration, spellings);
+    }
     for (declaration, spelling) in type_alias_spellings {
         index.publish_type_alias_spelling(declaration, spelling);
     }

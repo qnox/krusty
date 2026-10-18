@@ -84,6 +84,49 @@ fun box(): String {
 }
 "#;
 
+/// A spliced lambda's operands: every one is evaluated before any is stored, and then they are
+/// stored last first, each into the next free slot. A suspend lambda's last operand is the caller's
+/// continuation, which takes a `$completion` local of the lambda's own, also where a suspension in
+/// the body puts it in the continuation.
+const OPERANDS: &str = r#"
+import kotlin.coroutines.*
+
+object Completion : Continuation<Unit> {
+    override val context: CoroutineContext = EmptyCoroutineContext
+    override fun resumeWith(result: Result<Unit>) = result.getOrThrow()
+}
+
+inline fun pair(s: String, f: (String, Int) -> Int): Int = f(s + "x", s.length)
+
+private suspend inline fun <R> one(s: String, crossinline f: suspend (String) -> R): R = f(s + "x")
+
+private suspend inline fun <R> two(s: String, crossinline f: suspend (String, Int) -> R): R = f(s, s.length)
+
+private suspend inline fun <R> none(crossinline f: suspend () -> R): R = f()
+
+suspend fun echo(s: String): String = s
+
+fun paired(s: String): Int = pair(s) { x, n -> x.length + n }
+
+suspend fun single(s: String): String = one(s) { it + "y" }
+
+suspend fun double(s: String): String = two(s) { x, n -> x + n }
+
+suspend fun empty(s: String): String = none { s + "z" }
+
+suspend fun suspending(s: String, t: String): String = one(s) { echo(it + t) + t }
+
+fun box(): String {
+    if (paired("ab") != 5) return "FAIL paired: " + paired("ab")
+    var result = ""
+    val block: suspend () -> Unit = {
+        result = single("a") + double("b") + empty("c") + suspending("d", "e")
+    }
+    block.startCoroutine(Completion)
+    return if (result == "axyb1czdxee") "OK" else "FAIL operands: " + result
+}
+"#;
+
 #[test]
 fn same_module_inline_frames_run() {
     assert_eq!(
@@ -92,6 +135,44 @@ fn same_module_inline_frames_run() {
     );
     assert_eq!(
         common::expect_box_run_with_stdlib(SUSPENDING, "SuspendingFrames"),
+        "OK"
+    );
+    assert_eq!(
+        common::expect_box_run_with_stdlib(OPERANDS, "LambdaOperands"),
+        "OK"
+    );
+}
+
+/// A spliced lambda's later operand that clears the operand stack: a `try`, or a jump out of an
+/// enclosing loop. The operands before it cannot wait on the stack, so each is bound in turn.
+const STACK_CLEARING_OPERANDS: &str = r#"
+var cleaned = 0
+
+fun value(): String = "b"
+
+inline fun guarded(f: (String, String) -> String): String =
+    f("a", try { value() } finally { cleaned++ })
+
+inline fun firstOrSkip(xs: List<String?>, f: (String, String) -> String): String {
+    var out = ""
+    for (x in xs) {
+        out += f(out, x ?: continue)
+    }
+    return out
+}
+
+fun box(): String {
+    val joined = guarded { x, y -> x + y }
+    if (joined != "ab" || cleaned != 1) return "FAIL try: $joined $cleaned"
+    val skipped = firstOrSkip(listOf("c", null, "d")) { acc, x -> acc.length.toString() + x }
+    return if (skipped == "0c2d") "OK" else "FAIL continue: $skipped"
+}
+"#;
+
+#[test]
+fn a_spliced_lambdas_stack_clearing_operand_runs() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(STACK_CLEARING_OPERANDS, "StackClearingOperands"),
         "OK"
     );
 }
@@ -135,4 +216,25 @@ fn a_suspending_expansions_frames_are_the_reference_compilers() {
     )
     .expect("reference kotlinc is provisioned")
     .unwrap_or_else(|difference| panic!("{difference}"));
+}
+
+#[test]
+fn a_spliced_lambdas_operands_are_stored_as_the_reference_compiler_stores_them() {
+    for method in [
+        "public static final int paired(java.lang.String)",
+        "public static final java.lang.Object single(",
+        "public static final java.lang.Object double(",
+        "public static final java.lang.Object empty(",
+        "public static final java.lang.Object suspending(",
+    ] {
+        common::class_bytes_diff_against_kotlinc(
+            "LambdaOperands",
+            &[],
+            OPERANDS,
+            "LambdaOperandsKt",
+            method,
+        )
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|difference| panic!("{difference}"));
+    }
 }

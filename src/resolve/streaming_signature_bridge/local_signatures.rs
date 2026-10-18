@@ -705,6 +705,11 @@ fn publish_checked_local_signatures_selected(
         .copied()
         .filter(|declaration| index.declaration_semantic_header_complete(*declaration))
         .collect::<crate::fx_hash::HashSet<_>>();
+    let pass_one_deferred_spellings = local_declarations
+        .iter()
+        .copied()
+        .filter(|declaration| index.declaration_spellings_deferred(*declaration))
+        .collect::<crate::fx_hash::HashSet<_>>();
     if let Some(active) = active {
         failed.extend(
             super::local_declaration_spellings::publish_checked_local_declaration_spellings(
@@ -714,6 +719,7 @@ fn publish_checked_local_signatures_selected(
                 index,
                 &local_declarations,
                 &pass_one_finalized_headers,
+                &pass_one_deferred_spellings,
             ),
         );
     }

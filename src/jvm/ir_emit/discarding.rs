@@ -221,6 +221,8 @@ impl Emitter<'_> {
         let suspension = self.machine_before(expression, code);
         self.open_transformed_suspension(expression, code);
         self.emit_value_node(expression, node, code);
+        // A discarded root that ends an inlined call forgets the caller's line like a used one.
+        self.mark_after_inlined_call(expression, code);
         // `emit_value_node` normally consumes this marker at the invocation. Remove it defensively
         // for aliases whose emission bypasses the ordinary `InvokeFunction` result path.
         self.erased_invocations.remove(&expression);

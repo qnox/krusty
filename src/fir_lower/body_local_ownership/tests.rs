@@ -41,13 +41,20 @@ fn completed_local_owner_stays_complete_when_a_generated_child_is_added() {
         semantic_owner(&index, local),
         SemanticOwner::Complete(Some(_))
     ));
+    let active = crate::fir::ActiveSourceDeclarations::bind_complete_source(
+        &analysis.files[0],
+        source,
+        &index,
+    )
+    .expect("whole-file test syntax must bind to the finalized stable inventory");
+    let local_span = active
+        .span(&analysis.files[0], local)
+        .expect("local classifier source span");
 
     let generated = index.intern_checked_local_declaration(
         crate::fir::DeclarationAnchor {
             source,
-            range: index
-                .declaration_range(local)
-                .expect("local classifier source range"),
+            range: local_span,
             owner: Some(local),
             kind: crate::fir::DeclarationKind::Function,
             sibling: u32::MAX,

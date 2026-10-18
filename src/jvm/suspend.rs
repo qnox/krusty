@@ -29,7 +29,7 @@
 mod bytecode_machine;
 mod continuation_class;
 mod coroutine_context;
-use continuation_class::build_continuation_class;
+use continuation_class::{build_continuation_class, physical_parameters, suspend_parameter_ty};
 use coroutine_context::realize_coroutine_context;
 mod call_operand_realization;
 mod cps_bridges;
@@ -158,16 +158,6 @@ fn int_ty() -> Ty {
 }
 fn continuation_ty() -> Ty {
     Ty::obj(CONTINUATION)
-}
-
-/// Physical JVM type of one suspend declaration parameter. Shared mutable captures remain their
-/// source element type in common IR and carry a sparse marker; every coroutine layout consumer must
-/// apply that marker identically so pre-normalization scope snapshots and final spill fields agree.
-fn suspend_parameter_ty(ir: &IrFile, function: u32, parameter: usize, semantic: Ty) -> Ty {
-    ir.shared_capture_parameters
-        .get(&(function, parameter as u32))
-        .map(crate::jvm::shared_captures::holder_ty)
-        .unwrap_or(semantic)
 }
 
 /// Rewrite every `suspend fun` in `ir` to the JVM CPS ABI. `facade` is the file's facade class internal
@@ -1209,11 +1199,7 @@ fn build_state_machine(
     // `this_offset .. this_offset + real_params.len()`.
     let real_params: Vec<Ty> = {
         let p = &ir.functions[fid as usize].params;
-        p[..p.len().saturating_sub(1)]
-            .iter()
-            .enumerate()
-            .map(|(parameter, ty)| suspend_parameter_ty(ir, fid, parameter, *ty))
-            .collect()
+        physical_parameters(ir, fid, &p[..p.len().saturating_sub(1)])
     };
     let completion_idx = real_params.len() as u32 + this_offset;
     // Type of a value PARAMETER at value-index `idx` (not `this`, not the continuation). A param read
@@ -1648,7 +1634,7 @@ fn build_state_machine(
             enclosing_class: cont_owner.clone(),
             enclosing_method: fname.clone(),
             enclosing_descriptor: crate::jvm::method_descriptors::ir_method_desc(
-                &ir.functions[fid as usize].params,
+                &physical_parameters(ir, fid, &ir.functions[fid as usize].params),
                 &ir.functions[fid as usize].ret,
             ),
         };

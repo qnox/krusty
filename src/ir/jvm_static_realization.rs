@@ -107,16 +107,14 @@ impl IrFile {
         self.jvm_field_statics.contains(&index)
     }
 
-    /// Whether static `index` is published through a compiler-default `getX`. A `const val`
-    /// inlines, a `@JvmField` is its own surface, and a private property is reached only through
-    /// its field or `access$…$p` bridges, so none of those has default accessors; a declared getter
-    /// is an ordinary function.
-    /// The annotations on the accessors of the source property `index` stores.
+    /// The annotations on the accessors of the source property static `index` stores: a top-level
+    /// property, or a companion property hoisted onto its outer class.
     pub(crate) fn static_accessor_annotations(
         &self,
         index: u32,
     ) -> Option<&crate::ir::AccessorAnnotations> {
-        self.local_property_layouts
+        let top_level = self
+            .local_property_layouts
             .iter()
             .find_map(|(property, layout)| match layout {
                 crate::ir::IrLocalPropertyLayout::TopLevelStorage { storage, .. }
@@ -125,7 +123,25 @@ impl IrFile {
                     self.accessor_annotations.get(property)
                 }
                 _ => None,
-            })
+            });
+        let hoisted = || {
+            self.jvm_companion_property_statics
+                .iter()
+                .find(|(_, static_index)| **static_index == index)
+                .and_then(|((companion, property), _)| {
+                    let class = self
+                        .classes
+                        .iter()
+                        .find(|class| class.fq_name == *companion)?;
+                    Some(
+                        &class
+                            .properties
+                            .get(*property as usize)?
+                            .accessor_annotations,
+                    )
+                })
+        };
+        top_level.or_else(hoisted)
     }
 
     /// The resolved annotations of the source property static `index` stores: a top-level
@@ -159,6 +175,10 @@ impl IrFile {
         top_level.or_else(hoisted).unwrap_or_default()
     }
 
+    /// Whether static `index` is published through a compiler-default `getX`. A `const val`
+    /// inlines, a `@JvmField` is its own surface, and a private property is reached only through
+    /// its field or `access$…$p` bridges, so none of those has default accessors; a declared getter
+    /// is an ordinary function.
     pub(crate) fn has_jvm_default_static_getter(&self, index: u32) -> bool {
         self.publishes_jvm_default_static_accessors(index)
             && self.statics[index as usize].accessors.getter == IrStaticAccessor::Default

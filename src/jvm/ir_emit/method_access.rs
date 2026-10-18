@@ -8,7 +8,7 @@ use crate::jvm::classfile::{
 
 use super::{IrExpr, LambdaMode, LambdaModes};
 
-fn jvm_visibility(visibility: crate::types::Visibility) -> u16 {
+pub(super) fn jvm_visibility(visibility: crate::types::Visibility) -> u16 {
     match visibility {
         crate::types::Visibility::Private => ACC_PRIVATE,
         crate::types::Visibility::Protected => ACC_PROTECTED,
@@ -107,7 +107,7 @@ pub(super) fn declared_method_access(
 /// kotlinc's `isReifiable`: the function declares a `reified` type parameter. Its erased body only
 /// works once a call site substitutes the type, so kotlinc emits the method `ACC_SYNTHETIC` and
 /// annotates none of its nullability.
-pub(super) fn is_reifiable(ir: &IrFile, fid: u32) -> bool {
+pub(crate) fn is_reifiable(ir: &IrFile, fid: u32) -> bool {
     ir.signatures.get(&fid).is_some_and(|signature| {
         signature
             .type_params

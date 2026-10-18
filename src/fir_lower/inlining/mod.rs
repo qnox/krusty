@@ -1287,6 +1287,8 @@ impl BodyLowering<'_> {
             .get(&impl_fn)
             .and_then(|origin| origin.receiver_parameter);
         let mut declarations = Vec::new();
+        // The declarations holding the invocation's own operands, after the captures'.
+        let mut operand_declarations = None;
         let mut formal_slots = Vec::with_capacity(parameter_types.len());
         // A lambda's own VALUE parameters are locals of the splice and keep their source names, so a
         // suspension inside the body spills them under those names. Captures are not: they are the
@@ -1304,6 +1306,9 @@ impl BodyLowering<'_> {
             .zip(parameter_types)
             .enumerate()
         {
+            if parameter == capture_count {
+                operand_declarations = Some(declarations.len());
+            }
             let parameter = u32::try_from(parameter).ok()?;
             let slot = if receiver_parameter == Some(parameter) {
                 let slot = self.allocate_temporary();
@@ -1374,6 +1379,35 @@ impl BodyLowering<'_> {
                 }
             };
             formal_slots.push(slot);
+        }
+        let operand_declarations = operand_declarations.unwrap_or(declarations.len());
+        // A suspend lambda's `invoke` takes the caller's continuation as its last operand, and the
+        // splice binds it as it binds the others, to a continuation parameter of the lambda's own.
+        if !indexed_parameters
+            && matches!(binding, LambdaParameterBinding::Declared { .. })
+            && self.ir.suspend_funs.contains(&impl_fn)
+        {
+            let continuation = self.ir.add_expr(IrExpr::CurrentContinuation);
+            let ty = Ty::obj("kotlin/coroutines/Continuation");
+            self.ir.logical_types.insert(continuation, ty);
+            let slot = self.allocate_temporary();
+            let declaration = self.ir.add_expr(IrExpr::Variable {
+                index: slot,
+                ty,
+                init: Some(continuation),
+                named: true,
+            });
+            self.ir.call_operand_bindings.insert(declaration);
+            self.ir.set_debug_local_provenance(
+                declaration,
+                IrDebugLocalProvenance::InlineLambdaContinuation { depth: 0 },
+            );
+            declarations.push(declaration);
+        }
+        if matches!(binding, LambdaParameterBinding::Declared { .. }) {
+            self.ir
+                .invocation_operand_bindings
+                .extend(declarations[operand_declarations..].iter().copied());
         }
         // Once its parameters are bound, the body opens its own frame, named after the inline
         // callable it was passed to.
@@ -1771,10 +1805,6 @@ fn specialize_checked_argument(argument: &mut IrCheckedArgument, bindings: &Hash
 
 fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, Ty>) {
     match operation {
-        IrIntrinsic::ReinterpretBits { from, to } => {
-            specialize_ty(from, bindings);
-            specialize_ty(to, bindings);
-        }
         IrIntrinsic::PrimitiveCompare { operand, .. }
         | IrIntrinsic::UnsignedCompare { operand }
         | IrIntrinsic::UnsignedToString { source: operand }

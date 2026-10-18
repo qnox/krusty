@@ -1,6 +1,5 @@
 use crate::diag::{DiagSink, Severity, Span};
 use crate::features::LangFeatures;
-use crate::libraries::EmptySymbolSource;
 use crate::source::SourceInput;
 
 #[test]
@@ -11,10 +10,16 @@ typealias MissingVisibility = String
 public typealias InvalidBound = Bound<String>
 "#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("MixedAliasDiagnostics")];
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+        crate::toolchain::jvm_classpath_jars_for(source),
+    ));
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        crate::frontend::PlatformProvider::jvm(Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        )),
         &LangFeatures::from_source(source),
         &mut diagnostics,
     );

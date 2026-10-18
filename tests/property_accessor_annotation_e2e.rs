@@ -538,19 +538,9 @@ fn an_annotation_on_a_wrong_accessor_target_is_rejected_like_kotlinc() {
         "Wrong.kt:38:9: this annotation is not applicable to target 'value parameter'. \
          Applicable targets: getter",
     ];
-    let expected: &[(KotlinVersion, &[&str])] = &[
-        (KotlinVersion::V2_4_0, LEDGER),
-        (KotlinVersion::V2_4_10, LEDGER),
-        (KotlinVersion::V2_4_20, LEDGER),
-        (KotlinVersion::V2_4_21, LEDGER),
-    ];
-    let target = krusty::kotlin_version::target();
-    let (_, ledger) = expected
-        .iter()
-        .find(|(version, _)| *version == target)
-        .unwrap_or_else(|| panic!("no expected ledger for kotlinc {target}"));
+    let ledger: &[&str] = common::for_reference(&[(KotlinVersion::V2_4_0, LEDGER)]);
     let sources = [("Wrong.kt", WRONG_TARGETS)];
-    assert_eq!(common::reference_error_ledger(&sources, &[]), *ledger);
+    assert_eq!(common::reference_error_ledger(&sources, &[]), ledger);
     common::assert_errors_match_kotlinc(&sources, &[]);
 }
 
@@ -890,17 +880,7 @@ fn an_imported_target_entry_is_checked_by_the_entry_it_selects_like_kotlinc() {
         "Uses.kt:6:16: this annotation is not applicable to target 'getter'. Applicable targets: \
          setter",
     ];
-    let expected: &[(KotlinVersion, &[&str])] = &[
-        (KotlinVersion::V2_4_0, LEDGER),
-        (KotlinVersion::V2_4_10, LEDGER),
-        (KotlinVersion::V2_4_20, LEDGER),
-        (KotlinVersion::V2_4_21, LEDGER),
-    ];
-    let target = krusty::kotlin_version::target();
-    let (_, ledger) = expected
-        .iter()
-        .find(|(version, _)| *version == target)
-        .unwrap_or_else(|| panic!("no expected ledger for kotlinc {target}"));
+    let ledger: &[&str] = common::for_reference(&[(KotlinVersion::V2_4_0, LEDGER)]);
     let sources = [
         ("Targets.kt", IMPORTED_TARGETS),
         (
@@ -914,7 +894,7 @@ fn an_imported_target_entry_is_checked_by_the_entry_it_selects_like_kotlinc() {
              }\n",
         ),
     ];
-    assert_eq!(common::reference_error_ledger(&sources, &[]), *ledger);
+    assert_eq!(common::reference_error_ledger(&sources, &[]), ledger);
     common::assert_errors_match_kotlinc(&sources, &[]);
 }
 
@@ -936,17 +916,7 @@ fn a_same_named_entry_of_another_enum_is_rejected_like_kotlinc() {
         "Mismatch.kt:16:9: this annotation is not applicable to target 'getter'. Applicable \
          targets:",
     ];
-    let expected: &[(KotlinVersion, &[&str])] = &[
-        (KotlinVersion::V2_4_0, LEDGER),
-        (KotlinVersion::V2_4_10, LEDGER),
-        (KotlinVersion::V2_4_20, LEDGER),
-        (KotlinVersion::V2_4_21, LEDGER),
-    ];
-    let target = krusty::kotlin_version::target();
-    let (_, ledger) = expected
-        .iter()
-        .find(|(version, _)| *version == target)
-        .unwrap_or_else(|| panic!("no expected ledger for kotlinc {target}"));
+    let ledger: &[&str] = common::for_reference(&[(KotlinVersion::V2_4_0, LEDGER)]);
     let sources = [(
         "Mismatch.kt",
         "package accessors\n\
@@ -967,6 +937,6 @@ fn a_same_named_entry_of_another_enum_is_rejected_like_kotlinc() {
          \x20       @Nowhere get() = 1\n\
          }\n",
     )];
-    assert_eq!(common::reference_error_ledger(&sources, &[]), *ledger);
+    assert_eq!(common::reference_error_ledger(&sources, &[]), ledger);
     common::assert_errors_match_kotlinc(&sources, &[]);
 }

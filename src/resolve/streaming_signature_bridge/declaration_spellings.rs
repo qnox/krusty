@@ -381,13 +381,91 @@ fn bound_spellings(
         .collect()
 }
 
+fn partial_spelling(
+    headers: &StreamedHeaderModule,
+    semantics: &super::ProductionSignatureSemantics<'_>,
+    scope_owner: DeclarationId,
+    ty: HeaderTypeId,
+    scope: &TParams,
+    context: &SpellingContext,
+    deferred: &crate::fx_hash::HashSet<HeaderTypeId>,
+) -> Option<crate::spelling::DeferredSpellingRole> {
+    if deferred.contains(&headers.syntax.written_type_id(ty)) {
+        let written = headers
+            .syntax
+            .transient_written_type_ref(ty, &headers.lookup_names)?;
+        let annotations = context
+            .annotations
+            .get(&headers.declarations.anchor(scope_owner)?.source)?;
+        fn source_facts(
+            reference: &crate::ast::TypeRef,
+            annotations: &RecordedTypeAnnotations,
+        ) -> Spelled {
+            let args = if !reference.fun_params.is_empty() || reference.name == "<fun>" {
+                let mut args = reference
+                    .fun_params
+                    .iter()
+                    .map(|argument| source_facts(argument, annotations))
+                    .collect::<Vec<_>>();
+                if !reference.fun_suspend() {
+                    args.push(
+                        reference
+                            .arg
+                            .as_deref()
+                            .map(|result| source_facts(result, annotations))
+                            .unwrap_or_default(),
+                    );
+                }
+                args
+            } else {
+                reference
+                    .targs
+                    .iter()
+                    .map(|argument| source_facts(argument, annotations))
+                    .collect()
+            };
+            Spelled {
+                args,
+                annotations: annotations.at(reference.span.lo).to_vec(),
+                parameter_name: annotations
+                    .parameter_name_at(reference.span.lo)
+                    .map(Into::into),
+                ..Spelled::default()
+            }
+        }
+        return Some(crate::spelling::DeferredSpellingRole::Active(source_facts(
+            &written,
+            annotations,
+        )));
+    }
+    let semantic = semantics
+        .selected_types
+        .spelling(headers.syntax.written_type_id(ty))?
+        .resolved?;
+    spelling(headers, semantics, scope_owner, ty, scope, context).map(|spelling| {
+        crate::spelling::DeferredSpellingRole::Selected {
+            semantic: Some(semantic),
+            spelling,
+        }
+    })
+}
+
+fn selected_empty_spelling() -> crate::spelling::DeferredSpellingRole {
+    crate::spelling::DeferredSpellingRole::Selected {
+        semantic: None,
+        spelling: Spelled::default(),
+    }
+}
+
 /// Populate only stable declaration-keyed metadata sidecars from the compact Pass-1 inventory.
 pub(in crate::resolve) fn finalized_compact_declared_spellings(
     semantics: &super::ProductionSignatureSemantics<'_>,
     index: &crate::fir::ResolvedModuleIndex,
     deferred_headers: &crate::fx_hash::HashSet<DeclarationId>,
+    deferred_roles: &crate::fx_hash::HashMap<DeclarationId, crate::fx_hash::HashSet<HeaderTypeId>>,
 ) -> (
     Vec<(DeclarationId, DeclaredSpellings)>,
+    Vec<(DeclarationId, crate::spelling::DeferredDeclaredSpellings)>,
     Vec<(DeclarationId, Spelled)>,
     Vec<DeclarationId>,
 ) {
@@ -407,12 +485,157 @@ pub(in crate::resolve) fn finalized_compact_declared_spellings(
         annotations,
     };
     let mut records = Vec::new();
+    let mut deferred_records = Vec::new();
     let mut type_aliases = Vec::new();
     let mut failures = Vec::new();
     for stub in &headers.stubs {
         let Some(declaration) = headers.syntax.declaration(stub.id) else {
             continue;
         };
+        if let Some(deferred) = deferred_roles.get(&stub.id) {
+            let record = (|| -> Option<crate::spelling::DeferredDeclaredSpellings> {
+                match declaration.kind {
+                    HeaderDeclarationKind::Callable {
+                        receiver,
+                        parameters,
+                        result,
+                        type_parameters,
+                        bounds,
+                        ..
+                    } => {
+                        let (own, scope) = declaration_scope(headers, stub.id, type_parameters)
+                            .expect("compact callable scope must be materializable");
+                        Some(crate::spelling::DeferredDeclaredSpellings {
+                            ret: match result {
+                                crate::fir::HeaderResultType::Explicit(result) => partial_spelling(
+                                    headers, semantics, stub.id, result, &scope, &context, deferred,
+                                )?,
+                                crate::fir::HeaderResultType::ImplicitUnit
+                                | crate::fir::HeaderResultType::Inferred => {
+                                    selected_empty_spelling()
+                                }
+                            },
+                            getter_ret: selected_empty_spelling(),
+                            params: headers
+                                .syntax
+                                .parameters(parameters)
+                                .iter()
+                                .map(|parameter| {
+                                    partial_spelling(
+                                        headers,
+                                        semantics,
+                                        stub.id,
+                                        parameter.ty,
+                                        &scope,
+                                        &context,
+                                        deferred,
+                                    )
+                                })
+                                .collect::<Option<Vec<_>>>()?,
+                            receiver: match receiver {
+                                Some(receiver) => partial_spelling(
+                                    headers, semantics, stub.id, receiver, &scope, &context,
+                                    deferred,
+                                )?,
+                                None => selected_empty_spelling(),
+                            },
+                            type_param_bounds: bound_spellings(
+                                semantics, stub.id, bounds, &own, &scope, &context,
+                            )?,
+                        })
+                    }
+                    HeaderDeclarationKind::Property {
+                        receiver,
+                        declared_type,
+                        getter_type,
+                        type_parameters,
+                        bounds,
+                        context_parameters,
+                        ..
+                    } => {
+                        let (own, scope) = declaration_scope(headers, stub.id, type_parameters)
+                            .expect("compact property scope must be materializable");
+                        Some(crate::spelling::DeferredDeclaredSpellings {
+                            ret: match declared_type.or(getter_type) {
+                                Some(ty) => partial_spelling(
+                                    headers, semantics, stub.id, ty, &scope, &context, deferred,
+                                )?,
+                                None => selected_empty_spelling(),
+                            },
+                            getter_ret: match getter_type {
+                                Some(ty) => partial_spelling(
+                                    headers, semantics, stub.id, ty, &scope, &context, deferred,
+                                )?,
+                                None => selected_empty_spelling(),
+                            },
+                            params: headers
+                                .syntax
+                                .parameters(context_parameters)
+                                .iter()
+                                .map(|parameter| {
+                                    partial_spelling(
+                                        headers,
+                                        semantics,
+                                        stub.id,
+                                        parameter.ty,
+                                        &scope,
+                                        &context,
+                                        deferred,
+                                    )
+                                })
+                                .collect::<Option<Vec<_>>>()?,
+                            receiver: match receiver {
+                                Some(receiver) => partial_spelling(
+                                    headers, semantics, stub.id, receiver, &scope, &context,
+                                    deferred,
+                                )?,
+                                None => selected_empty_spelling(),
+                            },
+                            type_param_bounds: bound_spellings(
+                                semantics, stub.id, bounds, &own, &scope, &context,
+                            )?,
+                        })
+                    }
+                    HeaderDeclarationKind::Constructor { parameters, .. } => {
+                        let (_, scope) = declaration_scope(
+                            headers,
+                            stub.id,
+                            HeaderTypeParameterRange::default(),
+                        )
+                        .expect("compact constructor scope must be materializable");
+                        Some(crate::spelling::DeferredDeclaredSpellings {
+                            ret: selected_empty_spelling(),
+                            getter_ret: selected_empty_spelling(),
+                            params: headers
+                                .syntax
+                                .parameters(parameters)
+                                .iter()
+                                .map(|parameter| {
+                                    partial_spelling(
+                                        headers,
+                                        semantics,
+                                        stub.id,
+                                        parameter.ty,
+                                        &scope,
+                                        &context,
+                                        deferred,
+                                    )
+                                })
+                                .collect::<Option<Vec<_>>>()?,
+                            receiver: selected_empty_spelling(),
+                            type_param_bounds: Vec::new(),
+                        })
+                    }
+                    HeaderDeclarationKind::Classifier { .. }
+                    | HeaderDeclarationKind::TypeAlias { .. } => None,
+                }
+            })();
+            match record {
+                Some(record) => deferred_records.push((stub.id, record)),
+                None => failures.push(stub.id),
+            }
+            continue;
+        }
         let record = (|| -> Option<DeclaredSpellings> {
             match declaration.kind {
                 HeaderDeclarationKind::Callable {
@@ -537,8 +760,11 @@ pub(in crate::resolve) fn finalized_compact_declared_spellings(
                                     .is_some_and(|anchor| anchor.sibling == 0)
                         })
                         .map(|constructor| constructor.id);
-                    let primary_parameters_deferred = primary_constructor
-                        .is_some_and(|constructor| deferred_headers.contains(&constructor));
+                    let primary_parameters_deferred =
+                        primary_constructor.is_some_and(|constructor| {
+                            deferred_headers.contains(&constructor)
+                                || deferred_roles.contains_key(&constructor)
+                        });
                     Some(DeclaredSpellings {
                         params: if primary_parameters_deferred {
                             Vec::new()
@@ -639,7 +865,6 @@ pub(in crate::resolve) fn finalized_compact_declared_spellings(
             // A header still owned by Pass 2 delegates its source projection to the same active
             // lexical checker. Successful empty records for other local declarations remain
             // explicit because downstream spelling consumers must distinguish them from absence.
-            _ if deferred_headers.contains(&stub.id) => {}
             Some(record)
                 if !record.is_none()
                     || stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS) =>
@@ -650,5 +875,5 @@ pub(in crate::resolve) fn finalized_compact_declared_spellings(
             None => failures.push(stub.id),
         }
     }
-    (records, type_aliases, failures)
+    (records, deferred_records, type_aliases, failures)
 }

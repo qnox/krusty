@@ -110,6 +110,7 @@ pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod contract_declarations;
 mod contract_effects;
 mod declaration_rendering;
+mod declaration_rules;
 mod declaration_usage;
 mod dependency_platform;
 mod deprecation_phase;
@@ -287,7 +288,6 @@ mod streaming_signature_tests;
 mod super_calls;
 pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
-mod tailrec_declarations;
 mod type_join;
 mod type_parameter_owners;
 mod upper_bound_violations;
@@ -34079,18 +34079,24 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         {
             continue;
         }
-        // Local and anonymous classes are entered at their lexical declaration/construction site.
-        // Checking either here as well would reopen it without its enclosing values, receivers, or
-        // postponed inference frame.
-        if file.is_local_declaration(d) || c.anonymous_lexical_scope.belongs_to_anonymous_subtree(d)
-        {
-            continue;
-        }
         let declaration_span = match file.decl(d) {
             Decl::Fun(function) => function.span,
             Decl::Class(class) => class.span,
             Decl::Property(property) => property.span,
         };
+        // Local and anonymous classes are entered at their lexical declaration/construction site.
+        // Checking either here as well would reopen it without its enclosing values, receivers, or
+        // postponed inference frame. The declaration-annotation fragment is different: it selects
+        // an exact stable classifier whose already-bound annotations must be folded after Pass 1.
+        // Keep that exception fail-closed to the selected source identity.
+        let selected_annotation_root = fragment.is_declaration_annotations()
+            && matches!(file.decl(d), Decl::Class(_))
+            && selected_declarations.is_some_and(|selected| selected.contains(&declaration_span));
+        let body_local = file.is_local_declaration(d)
+            || c.anonymous_lexical_scope.belongs_to_anonymous_subtree(d);
+        if body_local && !selected_annotation_root {
+            continue;
+        }
         // Inline work selects the stable outer declaration root, while capture discovery selects
         // the exact nested classifier that owns the construction. During the scratch capture pass
         // those are the same bounded source region even when their declaration ranges differ.
@@ -34128,7 +34134,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             continue;
         }
         match file.decl(d) {
-            Decl::Fun(f) => c.check_top_level_fun(scope, f, d),
+            Decl::Fun(f) => c.check_top_level_function(scope, f, d),
             Decl::Class(cl) => {
                 let policy_depth = c.push_classifier_owner_policies(scope, d);
                 c.check_class(scope, cl, d);
@@ -45520,12 +45526,24 @@ impl<'a> Checker<'a> {
     /// exactly like [`Self::check_type_parameter_bound`]. A duplicate report for a name signature
     /// collection also diagnosed collapses in the sink (same file, span, and message).
     fn check_declaration_type(&mut self, scope: &CheckerScope<'_>, reference: &TypeRef) -> Ty {
+        self.check_declaration_type_with_source_facts(scope, reference, None)
+    }
+
+    fn check_declaration_type_with_source_facts(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        reference: &TypeRef,
+        checked_source_facts: Option<&crate::spelling::Spelled>,
+    ) -> Ty {
         let capture_spelling = self.resolved_index.is_some() && self.active_declarations.is_some();
+        let written_reference = checked_source_facts
+            .map(|_| type_spellings::written_type_ref(reference, &self.file.alias_spellings));
+        let binding_reference = written_reference.as_ref().unwrap_or(reference);
         if capture_spelling {
             debug_assert!(self.active_declaration_spelling_facts.is_none());
             self.active_declaration_spelling_facts = Some(HashMap::default());
         }
-        let declaration = self.type_ref_ty(scope, reference);
+        let declaration = self.type_ref_ty(scope, binding_reference);
         if capture_spelling {
             let facts = self
                 .active_declaration_spelling_facts
@@ -45535,14 +45553,26 @@ impl<'a> Checker<'a> {
             for (&occurrence, name) in &self.file.function_type_parameter_names {
                 annotations.record_parameter_name(occurrence, name);
             }
+            if checked_source_facts.is_some_and(|facts| {
+                !annotations.record_checked_source_facts(binding_reference, facts)
+            }) {
+                self.resolved_declaration_types
+                    .insert((reference.span.lo, reference.span.hi), Ty::Error);
+                return Ty::Error;
+            }
+            let already_written_aliases = HashMap::default();
             let source_spellings = crate::spelling::SourceSpellings {
-                aliases: &self.file.alias_spellings,
+                aliases: if checked_source_facts.is_some() {
+                    &already_written_aliases
+                } else {
+                    &self.file.alias_spellings
+                },
                 annotations: &annotations,
             };
             let tparams = scope.visible_tparams();
             let mut alias_expansion = |identity| self.source_alias_binding(identity);
             if let Some(spelling) = type_spellings::spelling_from_bound_facts(
-                reference,
+                binding_reference,
                 &tparams,
                 &facts,
                 &mut alias_expansion,
@@ -47393,7 +47423,7 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
-        tailrec_declarations::check_members(self.diags, cl);
+        self.check_member_declaration_rules(scope, cl, current_owner, is_anonymous_object);
         // `@JvmField` changes only a target backend's physical property realization, but its Kotlin
         // declaration restrictions are frontend semantics. Validate them from resolved annotation
         // identities and finalized declaration types; the JVM pass may then assume a valid shape.
@@ -48093,9 +48123,8 @@ impl<'a> Checker<'a> {
                     self.failed_local_declaration_bindings.insert(declaration);
                 }
             }
-            let constructor_spellings = self
-                .finalized_declaration_spellings(stable_primary_constructor)
-                .clone();
+            let constructor_spellings =
+                self.finalized_declaration_spellings_for_binding(stable_primary_constructor);
             let classifier_spellings = self
                 .finalized_declaration_spellings(stable_local_classifier)
                 .clone();
@@ -48140,9 +48169,8 @@ impl<'a> Checker<'a> {
                         declaration,
                         finalized,
                         semantic,
-                        self.finalized_declaration_spellings(Some(declaration))
-                            .ret
-                            .clone(),
+                        self.finalized_declaration_spellings_for_binding(Some(declaration))
+                            .and_then(|spellings| spellings.ret().map(|role| role.into_owned())),
                     ))
                 })
                 .collect::<Vec<_>>();
@@ -48177,16 +48205,10 @@ impl<'a> Checker<'a> {
                         .as_ref()
                         .and_then(|types| types.get(index))
                     {
-                        if let Some((
-                            property_declaration,
-                            true,
-                            property_semantic,
-                            property_spelled,
-                        )) = constructor_property_facts[index].as_ref()
+                        if let Some((property_declaration, true, property_semantic, _)) =
+                            constructor_property_facts[index].as_ref()
                         {
-                            if *property_semantic != Some(semantic)
-                                || property_spelled != constructor_spellings.param(index)
-                            {
+                            if *property_semantic != Some(semantic) {
                                 self.failed_local_declaration_bindings
                                     .insert(*property_declaration);
                                 if let Some(constructor) = stable_primary_constructor {
@@ -48195,27 +48217,84 @@ impl<'a> Checker<'a> {
                                 return Ty::Error;
                             }
                         }
-                        return self.record_finalized_parameter_type(
+                        let Some(constructor) = stable_primary_constructor else {
+                            return Ty::Error;
+                        };
+                        let checked = self.record_or_bind_deferred_parameter_type(
+                            &classifier_header_scope,
+                            constructor,
                             &property.ty,
                             property.is_vararg,
                             semantic,
-                            constructor_spellings.param(index),
+                            constructor_spellings
+                                .as_ref()
+                                .and_then(|spellings| spellings.param(index)),
                         );
+                        if checked == Ty::Error {
+                            return Ty::Error;
+                        }
+                        if let Some((
+                            property_declaration,
+                            true,
+                            _,
+                            Some(crate::spelling::DeferredSpellingRole::Selected {
+                                spelling: property_spelled,
+                                ..
+                            }),
+                        )) = constructor_property_facts[index].as_ref()
+                        {
+                            if self.checked_declaration_spelling(&property.ty)
+                                != Some(property_spelled)
+                            {
+                                self.failed_local_declaration_bindings
+                                    .insert(*property_declaration);
+                                self.failed_local_declaration_bindings.insert(constructor);
+                                return Ty::Error;
+                            }
+                        }
+                        return checked;
                     }
                     if finalized_primary_constructor_header {
                         return Ty::Error;
                     }
-                    if let Some((_, true, semantic, spelled)) =
+                    if let Some((declaration, true, semantic, spelled)) =
                         constructor_property_facts[index].as_ref()
                     {
                         return semantic.map_or(Ty::Error, |semantic| {
-                            self.record_finalized_parameter_type(
+                            self.record_or_bind_deferred_parameter_type(
+                                &classifier_header_scope,
+                                *declaration,
                                 &property.ty,
                                 property.is_vararg,
                                 semantic,
-                                spelled,
+                                spelled.as_ref().map(|role| role.as_binding()),
                             )
                         });
+                    }
+                    if deferred_primary_constructor_header {
+                        let Some(constructor) = stable_primary_constructor else {
+                            return Ty::Error;
+                        };
+                        return self.bind_active_deferred_parameter_type(
+                            &classifier_header_scope,
+                            constructor,
+                            &property.ty,
+                            property.is_vararg,
+                            constructor_spellings
+                                .as_ref()
+                                .and_then(|spellings| spellings.param(index)),
+                        );
+                    }
+                    if let Some((declaration, false, _, spelled)) =
+                        constructor_property_facts[index].as_ref()
+                    {
+                        return self.bind_active_deferred_parameter_type(
+                            &classifier_header_scope,
+                            *declaration,
+                            &property.ty,
+                            property.is_vararg,
+                            spelled.as_ref().map(|role| role.as_binding()),
+                        );
                     }
                     semantic_value_parameter_ty(
                         self.check_declaration_type(&classifier_header_scope, &property.ty),
@@ -48226,6 +48305,7 @@ impl<'a> Checker<'a> {
             if finalized_local_classifier_header {
                 if let Some(declaration) = stable_local_classifier {
                     if !self.record_finalized_type_parameter_bounds(
+                        &classifier_header_scope,
                         declaration,
                         &cl.type_params,
                         &cl.type_param_bounds,
@@ -49554,7 +49634,7 @@ impl<'a> Checker<'a> {
                                     stable.is_some() && !self.has_deferred_local_header(stable);
                                 if finalized {
                                     let spellings =
-                                        self.finalized_declaration_spellings(stable).clone();
+                                        self.finalized_declaration_spellings_for_binding(stable);
                                     let parameters = stable
                                         .zip(self.resolved_index)
                                         .and_then(|(declaration, index)| {
@@ -49571,17 +49651,28 @@ impl<'a> Checker<'a> {
                                         parameters.len()
                                             == context_parameters.len() + constructor.params.len()
                                     }) {
+                                        let Some(declaration) = stable else {
+                                            return vec![
+                                                Ty::Error;
+                                                context_parameters.len()
+                                                    + constructor.params.len()
+                                            ];
+                                        };
                                         for (index, (parameter, &semantic)) in constructor
                                             .params
                                             .iter()
                                             .zip(parameters.iter().skip(context_parameters.len()))
                                             .enumerate()
                                         {
-                                            self.record_finalized_parameter_type(
+                                            self.record_or_bind_deferred_parameter_type(
+                                                scope,
+                                                declaration,
                                                 &parameter.ty,
                                                 parameter.is_vararg,
                                                 semantic,
-                                                spellings.param(index),
+                                                spellings
+                                                    .as_ref()
+                                                    .and_then(|spellings| spellings.param(index)),
                                             );
                                         }
                                         return parameters;
@@ -49603,13 +49694,24 @@ impl<'a> Checker<'a> {
                                         context_parameters.len() + constructor.params.len()
                                     ];
                                 }
+                                let declaration = stable
+                                    .expect("a deferred local constructor retains its declaration");
+                                let spellings =
+                                    self.finalized_declaration_spellings_for_binding(stable);
                                 let mut parameters = context_parameters.clone();
-                                parameters.extend(constructor.params.iter().map(|parameter| {
-                                    semantic_value_parameter_ty(
-                                        self.check_declaration_type(scope, &parameter.ty),
-                                        parameter.is_vararg,
-                                    )
-                                }));
+                                parameters.extend(constructor.params.iter().enumerate().map(
+                                    |(index, parameter)| {
+                                        self.bind_active_deferred_parameter_type(
+                                            scope,
+                                            declaration,
+                                            &parameter.ty,
+                                            parameter.is_vararg,
+                                            spellings
+                                                .as_ref()
+                                                .and_then(|spellings| spellings.param(index)),
+                                        )
+                                    },
+                                ));
                                 parameters
                             })
                             .collect();
@@ -50355,6 +50457,7 @@ impl<'a> Checker<'a> {
                     if finalized_local_property_header {
                         if let Some(declaration) = stable_property {
                             if !self.record_finalized_type_parameter_bounds(
+                                scope,
                                 declaration,
                                 &bp.type_params,
                                 &bp.type_param_bounds,
@@ -50415,9 +50518,8 @@ impl<'a> Checker<'a> {
                                 .map(|parameter| parameter.get())
                                 .collect::<Vec<_>>()
                         });
-                    let property_spellings = self
-                        .finalized_declaration_spellings(stable_property)
-                        .clone();
+                    let property_spellings =
+                        self.finalized_declaration_spellings_for_binding(stable_property);
                     let finalized_property_shape_matches =
                         stable_property_shape.is_some_and(|shape| {
                             shape.context_parameter_count as usize == bp.context_params.len()
@@ -50435,10 +50537,16 @@ impl<'a> Checker<'a> {
                     let extension_receiver = bp.receiver.as_ref().map(|receiver| {
                         match stable_property_shape.and_then(|shape| shape.extension_receiver) {
                             Some(semantic) if finalized_local_property_header => self
-                                .record_finalized_declaration_type(
+                                .record_or_bind_deferred_declaration_type(
+                                    scope,
+                                    stable_property.expect(
+                                        "a finalized local property retains its declaration",
+                                    ),
                                     receiver,
                                     semantic.get(),
-                                    &property_spellings.receiver,
+                                    property_spellings
+                                        .as_ref()
+                                        .and_then(|spellings| spellings.receiver()),
                                 ),
                             None if finalized_local_property_header => Ty::Error,
                             _ => self.check_declaration_type(scope, receiver),
@@ -50447,10 +50555,16 @@ impl<'a> Checker<'a> {
                     let checked_property_annotation =
                         bp.ty.as_ref().map(|declared| match stable_result {
                             Some(semantic) if finalized_local_property_header => self
-                                .record_finalized_declaration_type(
+                                .record_or_bind_deferred_declaration_type(
+                                    scope,
+                                    stable_property.expect(
+                                        "a finalized local property retains its declaration",
+                                    ),
                                     declared,
                                     semantic,
-                                    &property_spellings.ret,
+                                    property_spellings
+                                        .as_ref()
+                                        .and_then(|spellings| spellings.ret()),
                                 ),
                             None if finalized_local_property_header => Ty::Error,
                             _ => self.check_declaration_type(scope, declared),
@@ -50458,10 +50572,16 @@ impl<'a> Checker<'a> {
                     let checked_getter_annotation =
                         bp.getter_ty.as_ref().map(|declared| match stable_result {
                             Some(semantic) if finalized_local_property_header => self
-                                .record_finalized_declaration_type(
+                                .record_or_bind_deferred_declaration_type(
+                                    scope,
+                                    stable_property.expect(
+                                        "a finalized local property retains its declaration",
+                                    ),
                                     declared,
                                     semantic,
-                                    &property_spellings.getter_ret,
+                                    property_spellings
+                                        .as_ref()
+                                        .and_then(|spellings| spellings.getter_ret()),
                                 ),
                             None if finalized_local_property_header => Ty::Error,
                             _ => self.check_declaration_type(scope, declared),
@@ -50495,11 +50615,17 @@ impl<'a> Checker<'a> {
                                 .and_then(|types| types.get(index))
                             {
                                 Some(&semantic) if finalized_local_property_header => self
-                                    .record_finalized_parameter_type(
+                                    .record_or_bind_deferred_parameter_type(
+                                        scope,
+                                        stable_property.expect(
+                                            "a finalized local property retains its declaration",
+                                        ),
                                         &parameter.ty,
                                         parameter.is_vararg,
                                         semantic,
-                                        property_spellings.param(index),
+                                        property_spellings
+                                            .as_ref()
+                                            .and_then(|spellings| spellings.param(index)),
                                     ),
                                 None if finalized_local_property_header => Ty::Error,
                                 _ => self.check_declaration_type(scope, &parameter.ty),
@@ -51072,479 +51198,6 @@ impl<'a> Checker<'a> {
         }
         self.active_lexical_policies
             .truncate(class_suppression_depth);
-    }
-
-    fn check_method(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        f: &FunDecl,
-        props: &[ScopedProperty],
-        source_member: Option<crate::libraries::SourceMember>,
-        stable_declaration: Option<crate::fir::DeclarationId>,
-    ) {
-        let public_api_inline = self.enter_public_api_inline(scope, f);
-        let selected_default_method = source_member
-            .is_some_and(|member| self.selected_signature_default_source_member(member));
-        let default_owned_method = self.signature_defaults_only
-            && source_member.is_some_and(|member| match member {
-                crate::libraries::SourceMember::Class { owner, .. }
-                | crate::libraries::SourceMember::ClassProperty { owner, .. }
-                | crate::libraries::SourceMember::EnumEntry { owner, .. } => self
-                    .checked_local_class_declarations
-                    .contains(&DeclId(owner)),
-            });
-        let stable_declaration = stable_declaration.or_else(|| {
-            source_member.and_then(|source| self.active_source_member_declaration(source))
-        });
-        let deferred_local_header = self.has_deferred_local_header(stable_declaration);
-        let finalized_local_header =
-            stable_declaration
-                .zip(self.resolved_index)
-                .is_some_and(|(declaration, index)| {
-                    index.declaration_header(declaration).is_some_and(|header| {
-                        header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
-                    }) && !deferred_local_header
-                });
-        let enclosing_return_frame = self.lambda_returns.enter_function(Some(f.name.clone()));
-        self.check_infix_declaration(f, true);
-        self.reset_body_mutations(
-            (!self.signature_defaults_only || default_owned_method)
-                .then(|| fun_body_expr(&f.body))
-                .flatten(),
-        );
-        // The method's own type parameters (and its `reified` marks) belong to a rung of its own:
-        // the caller's scope is the CLASS rung, shared with every sibling member.
-        let method_scope = scope.child(ScopeKind::Function { receiver: None });
-        let scope = &method_scope;
-        let visible_type_parameters = scope.visible_tparams();
-        let method_tparams = if finalized_local_header {
-            stable_declaration
-                .and_then(|declaration| {
-                    self.finalized_type_parameters(
-                        &visible_type_parameters,
-                        declaration,
-                        &f.type_params,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    if let Some(declaration) = stable_declaration {
-                        self.failed_local_declaration_bindings.insert(declaration);
-                    }
-                    visible_type_parameters.clone()
-                })
-        } else if deferred_local_header {
-            self.bind_deferred_type_parameters(
-                scope,
-                &f.type_params,
-                &f.type_param_bounds,
-                f.signature_span.lo,
-                true,
-            )
-        } else {
-            visible_type_parameters
-                .symbolic_extended_with(&f.type_params, &f.type_param_bounds, &|name| {
-                    self.select_classifier(scope, name).found()
-                })
-                .alpha_renamed_declaration(
-                    &f.type_params,
-                    self.compilation_id,
-                    self.file_index,
-                    f.signature_span.lo,
-                )
-        };
-        self.resolved_declaration_type_parameters.insert(
-            f.signature_span.lo,
-            f.type_params
-                .iter()
-                .map(|name| {
-                    method_tparams
-                        .bound(name)
-                        .ty_param_name()
-                        .unwrap_or(name)
-                        .to_string()
-                })
-                .collect(),
-        );
-        scope.declare_tparams(&f.type_params, &method_tparams, |name| {
-            f.reified_type_params.contains(name)
-        });
-        let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
-        let suppression_depth = self.check_function_annotation_applications(scope, f, "function");
-        if finalized_local_header {
-            if let Some(declaration) = stable_declaration {
-                if !self.record_finalized_type_parameter_bounds(
-                    declaration,
-                    &f.type_params,
-                    &f.type_param_bounds,
-                ) {
-                    self.failed_local_declaration_bindings.insert(declaration);
-                }
-            }
-        } else if !deferred_local_header {
-            self.check_callable_type_parameter_bounds(scope, &f.type_param_bounds);
-        }
-        let dispatch_this = scope.this_ty();
-        let dispatch_extension_receiver = self.this_extension_receiver;
-        let finalized_extension_receiver = (!deferred_local_header)
-            .then(|| {
-                stable_declaration.and_then(|declaration| {
-                    self.resolved_index?.callable_for_declaration(declaration)
-                })
-            })
-            .flatten()
-            .and_then(|callable| callable.shape.extension_receiver)
-            .map(crate::fir::ResolvedTy::get);
-        let finalized_callable_shape_matches = !finalized_local_header
-            || stable_declaration
-                .zip(self.resolved_index)
-                .is_some_and(|(declaration, index)| {
-                    index
-                        .signature(declaration)
-                        .is_some_and(|signature| signature.parameters.len() == f.params.len())
-                        && index
-                            .callable_for_declaration(declaration)
-                            .is_some_and(|callable| {
-                                callable.shape.context_parameter_count as usize == f.context_count
-                                    && callable.shape.extension_receiver.is_some()
-                                        == f.receiver.is_some()
-                            })
-                });
-        if !finalized_callable_shape_matches {
-            if let Some(declaration) = stable_declaration {
-                self.failed_local_declaration_bindings.insert(declaration);
-            }
-        }
-        let finalized_extension_receiver = finalized_callable_shape_matches
-            .then_some(finalized_extension_receiver)
-            .flatten();
-        let spellings = self.finalized_declaration_spellings(stable_declaration);
-        let extension_receiver = f.receiver.as_ref().map(|reference| {
-            if let Some(receiver) = finalized_extension_receiver {
-                self.record_finalized_declaration_type(reference, receiver, &spellings.receiver)
-            } else if deferred_local_header {
-                self.check_declaration_type(scope, reference)
-            } else if finalized_local_header {
-                Ty::Error
-            } else {
-                self.type_ref_ty(scope, reference)
-            }
-        });
-        if let Some(recv_ref) = &f.receiver {
-            let receiver = extension_receiver.expect("receiver was resolved");
-            self.this_labels.push((
-                f.name.clone(),
-                receiver,
-                false,
-                Some(ReceiverDeclarationRole::Extension(
-                    f.receiver.as_ref().expect("receiver was resolved").span,
-                )),
-            ));
-            let label_index = self.this_labels.len() - 1;
-            self.extension_receiver_labels
-                .push((label_index, recv_ref.span));
-            self.this_extension_receiver = Some(recv_ref.span);
-        }
-        let (finalized_result, finalized_parameters) = (!deferred_local_header
-            && finalized_callable_shape_matches)
-            .then(|| {
-                stable_declaration
-                    .and_then(|declaration| self.resolved_index?.signature(declaration))
-            })
-            .flatten()
-            .map(|signature| {
-                (
-                    Some(signature.result.get()),
-                    Some(
-                        signature
-                            .parameters
-                            .iter()
-                            .map(|parameter| parameter.get())
-                            .collect::<Vec<_>>(),
-                    ),
-                )
-            })
-            .unwrap_or((None, None));
-        let inherited_result = (f.ret.is_none() && f.is_override() && !finalized_local_header)
-            .then(|| {
-                let dispatch = dispatch_this?;
-                let parameters = f
-                    .params
-                    .iter()
-                    .map(|parameter| {
-                        semantic_value_parameter_ty(
-                            self.type_ref_ty_silent(scope, &parameter.ty),
-                            parameter.is_vararg,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let method_type_parameters = f
-                    .type_params
-                    .iter()
-                    .map(|name| method_tparams.bound(name))
-                    .collect::<Vec<_>>();
-                self.inherited_member_result(
-                    dispatch,
-                    extension_receiver,
-                    &f.name,
-                    &parameters,
-                    &method_type_parameters,
-                )
-            })
-            .flatten();
-        self.ret_ty = match (f.ret.as_ref(), finalized_result) {
-            (Some(reference), Some(result)) => {
-                // Pass 1 already selected every classifier and alias in a non-local declaration
-                // header. Pass 2 records that finalized semantic type against the fresh syntax
-                // occurrence; reparsing must not perform a second scope-tower selection that can
-                // drift after the temporary signature graph has been destroyed.
-                self.record_finalized_declaration_type(reference, result, &spellings.ret)
-            }
-            (Some(_), None) if finalized_local_header => Ty::Error,
-            (Some(reference), None) => self.check_declaration_type(scope, reference),
-            (None, _) => {
-                // Pass 2 checks against the exact result finalized in Pass 1. Never re-pair an
-                // overloaded member by name here: that can select a sibling overload, and member
-                // extensions also have a distinct receiver coordinate.
-                if let Some(result) = finalized_result {
-                    result
-                } else if let Some(result) = inherited_result {
-                    // For a method without an explicit return type (e.g. `override fun foo() =
-                    // "Z"`), use the inherited declaration when no Pass-1 signature exists (a
-                    // body-local classifier/member).
-                    result
-                } else {
-                    Ty::Unit
-                }
-            }
-        };
-        if !self.signature_defaults_only && f.ret.is_some() && self.ret_ty != Ty::Error {
-            if let Some(source_member) = source_member {
-                // A body-local member may explicitly return its enclosing local classifier
-                // (`inner class D { fun outer(): C = ... }`). Its pre-check module signature uses
-                // `Error` because `C` exists only on this Pass-2 lexical rung. Make the checked
-                // declaration result visible to later calls in the same active body, exactly like
-                // an inferred local-member result; no syntax or overlay survives this file.
-                self.record_checked_source_member_result(
-                    source_member,
-                    stable_declaration,
-                    self.ret_ty,
-                );
-            }
-        }
-        let body_class_declaration = self.body_class_declaration(source_member.as_ref());
-        let class_storage_captures = body_class_declaration
-            .map(|declaration| self.body_class_storage_captures(declaration))
-            .unwrap_or_default();
-        let infer_ret = (!self.signature_defaults_only || default_owned_method)
-            && f.ret.is_none()
-            && matches!(&f.body, FunBody::Expr(_))
-            // A source member published by Pass 1 is checked, never reinferred, during Pass 2.
-            // Body-local members intentionally have no finalized entry and retain lexical
-            // inference in this path.
-            && !self.has_finalized_signature(stable_declaration);
-        {
-            let parameter_types = match finalized_parameters
-                .as_deref()
-                .filter(|parameters| parameters.len() == f.params.len())
-            {
-                Some(parameters) => f
-                    .params
-                    .iter()
-                    .zip(parameters.iter().copied())
-                    .enumerate()
-                    .map(|(index, (parameter, semantic))| {
-                        self.record_finalized_parameter_type(
-                            &parameter.ty,
-                            parameter.is_vararg,
-                            semantic,
-                            spellings.param(index),
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-                None if finalized_local_header => vec![Ty::Error; f.params.len()],
-                None => f
-                    .params
-                    .iter()
-                    .map(|parameter| {
-                        semantic_value_parameter_ty(
-                            self.check_declaration_type(scope, &parameter.ty),
-                            parameter.is_vararg,
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-            };
-            let context_receivers = f
-                .params
-                .iter()
-                .zip(&parameter_types)
-                .take(f.context_count)
-                .map(|(parameter, ty)| lexical_context_receiver(self.file, parameter, *ty))
-                .collect::<Vec<_>>();
-            // Implicit-`this` scope: an extension member resolves `this` to its extension receiver,
-            // a plain member to the dispatch receiver.
-            // The class rung already carries the dispatch receiver. Repeating it on the method
-            // rung creates two semantic receiver coordinates for one runtime value and shifts
-            // every enclosing receiver depth. Only an extension receiver adds a new rung.
-            let members_scope = scope.declaration_function_child_with_context(
-                extension_receiver,
-                f.receiver
-                    .as_ref()
-                    .map(|receiver| lexical_receiver_declaration(self.file, receiver)),
-                &context_receivers,
-            );
-            let scope = &members_scope;
-            if f.receiver.is_none() {
-                for property in props {
-                    let lexical_value_shadows = body_class_declaration.is_some()
-                        && property.source_visible
-                        && self.lookup(scope, &property.name).is_some_and(|binding| {
-                            matches!(
-                                binding.origin,
-                                ReceiverFnValueOrigin::Local
-                                    | ReceiverFnValueOrigin::ClassStorage(_)
-                            )
-                        });
-                    if !lexical_value_shadows {
-                        self.declare_scoped_property(scope, property, true);
-                    }
-                }
-                // Synthetic capture fields are immutable storage properties, but a shared-cell
-                // capture exposes the mutability of its source local. Rebind those names after the
-                // ordinary property rung so reads/writes carry `ClassStorage` identity rather than
-                // being mistaken for source property access.
-                for (field, capture) in class_storage_captures.iter().enumerate() {
-                    if matches!(
-                        capture.source,
-                        AnonymousObjectCaptureSource::LexicalValue
-                            | AnonymousObjectCaptureSource::ClassStorage { .. }
-                    ) && capture.storage_ty.is_none()
-                    {
-                        self.declare_class_storage(
-                            scope,
-                            &capture.name,
-                            capture.ty,
-                            capture.shared_cell,
-                            field as u32,
-                            capture.shared_cell,
-                        );
-                    }
-                }
-            }
-            let defaults_scope = scope.parameter_child();
-            self.check_parameter_defaults(
-                &defaults_scope,
-                f.params
-                    .iter()
-                    .map(|parameter| (parameter.name.as_str(), parameter.default)),
-                &parameter_types,
-                ParameterDefaultFlow::Function,
-            );
-            let params_scope = scope.parameter_child();
-            let scope = &params_scope;
-            let inherited_equality_bound = (f.name == "equals")
-                .then(|| {
-                    dispatch_this.and_then(|receiver| self.equality_bound_for_receiver(receiver))
-                })
-                .flatten();
-            for (index, (parameter, &ty)) in f.params.iter().zip(&parameter_types).enumerate() {
-                self.declare_function_parameter(
-                    scope,
-                    parameter,
-                    ty,
-                    (index == 0).then_some(inherited_equality_bound).flatten(),
-                    index < f.context_count,
-                );
-            }
-            if !self.signature_defaults_only && !infer_ret && !matches!(f.body, FunBody::None) {
-                self.check_operator_declaration(
-                    f,
-                    self.ret_ty,
-                    operator_declarations::OperatorDeclarationSite::Member(stable_declaration),
-                );
-            }
-            if infer_ret {
-                if let FunBody::Expr(e) = &f.body {
-                    // A non-private inferred override whose result is an anonymous object exposes
-                    // the inherited callable's denotable result, never the synthetic implementation
-                    // classifier. The expression itself is still checked and retained with its exact
-                    // type, so its extra members remain available inside the expression.
-                    let exposed_override_result = (f.visibility != Visibility::Private
-                        && self.file.anonymous_object_classes.contains_key(e))
-                    .then_some(inherited_result)
-                    .flatten();
-                    let inferred = if let Some(expected) = exposed_override_result {
-                        let checked = self.expr_declared(scope, *e, expected);
-                        let actual = self
-                            .recorded_expression_type_for_expected(scope, *e, checked, expected);
-                        self.narrow_platform_value(expected, *e, PlatformNarrowing::Declaration);
-                        self.expect_assignable(expected, actual, self.span(*e), "function body");
-                        expected
-                    } else {
-                        self.expr(scope, *e)
-                    };
-                    self.finish_executable_root(*e);
-                    crate::trace_compiler!(
-                        "lower",
-                        "checked method inference name={} dispatch={dispatch_this:?} inferred={inferred:?} source={source_member:?}",
-                        f.name,
-                    );
-                    if inferred != Ty::Error {
-                        self.ret_ty = inferred;
-                        if let Some(Ty::Obj(internal, _)) = dispatch_this {
-                            let params: Vec<Ty> = f
-                                .params
-                                .iter()
-                                .map(|p| {
-                                    let ty = self.type_ref_ty(scope, &p.ty);
-                                    semantic_value_parameter_ty(ty, p.is_vararg)
-                                })
-                                .collect();
-                            if let Some(receiver) = f.receiver.as_ref() {
-                                let receiver = self.type_ref_ty(scope, receiver);
-                                self.inferred_member_ext_fun_rets
-                                    .insert((internal, f.name.clone(), receiver, params), inferred);
-                            } else {
-                                self.inferred_method_rets
-                                    .insert((internal, f.name.clone(), params), inferred);
-                            }
-                        }
-                        if let Some(source_member) = source_member {
-                            self.record_checked_source_member_result(
-                                source_member,
-                                stable_declaration,
-                                inferred,
-                            );
-                        }
-                    }
-                }
-            } else if self.signature_defaults_only {
-                // A selected method owns only its retained defaults. An enclosing method whose body
-                // introduces another selected local provider must be walked now to recreate that
-                // lexical scope; its ordinary FIR is still deferred to Pass 2.
-                if default_owned_method || !selected_default_method {
-                    self.check_fun_body(scope, f);
-                }
-            } else {
-                self.check_fun_body(scope, f);
-            }
-        }
-        if infer_ret {
-            self.check_operator_declaration(
-                f,
-                self.ret_ty,
-                operator_declarations::OperatorDeclarationSite::Member(stable_declaration),
-            );
-        }
-        self.report_inferred_nothing_return(f, self.ret_ty, f.is_override());
-        if f.receiver.is_some() {
-            self.extension_receiver_labels.pop();
-            self.this_labels.pop();
-        }
-        self.this_extension_receiver = dispatch_extension_receiver;
-        self.leave_public_api_inline(public_api_inline);
-        self.lambda_returns.leave_function(enclosing_return_frame);
-        self.retire_type_parameter_owners(&owned_type_parameters);
-        self.active_lexical_policies.truncate(suppression_depth);
     }
 
     /// A generic class-typed constructor parameter admits an argument whose owner is a subtype of

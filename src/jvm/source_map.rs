@@ -48,6 +48,10 @@ struct RangeMapping {
 }
 
 impl RangeMapping {
+    fn covers_dest(&self, line: u16) -> bool {
+        line >= self.dest && line - self.dest < self.range
+    }
+
     fn max_dest(&self) -> Option<u16> {
         self.dest.checked_add(self.range.checked_sub(1)?)
     }
@@ -149,10 +153,12 @@ impl SourceMap {
     }
 
     /// The output line of synthetic line `id` (`mapSyntheticLineNumber`): a line of kotlinc's fake
-    /// file, which no call expanded, so the debug stratum does not name it. An `@InlineOnly` call
-    /// marks one before a lambda that starts on the call's own line.
-    pub fn map_synthetic_line(&mut self, id: u16) -> Option<u16> {
-        self.map(FAKE_FILE_NAME, FAKE_PATH, id, None)
+    /// file. An `@InlineOnly` call marks one before a lambda that starts on the call's own line.
+    /// Written by the method's own code, no call expanded it and the debug stratum does not name
+    /// it; inside an inline body copied to a call at `call_site`, it is that call's like every
+    /// other line of the copy (`SourceMapCopier`).
+    pub fn map_synthetic_line(&mut self, id: u16, call_site: Option<u16>) -> Option<u16> {
+        self.map(FAKE_FILE_NAME, FAKE_PATH, id, call_site)
     }
 
     /// The output line for line `source` of file `name` at `path` as a copied class's own map
@@ -173,7 +179,7 @@ impl SourceMap {
         self.files.iter().find_map(|file| {
             file.ranges
                 .iter()
-                .find(|range| line >= range.dest && line - range.dest < range.range)
+                .find(|range| range.covers_dest(line))
                 .map(|range| {
                     (
                         file.name.as_str(),
@@ -183,6 +189,132 @@ impl SourceMap {
                     )
                 })
         })
+    }
+
+    /// A map for one method of this class, holding only the owning file's identity range
+    /// (`SourceMapper(sourceInfo)`, which kotlinc starts for every method it generates). `None`
+    /// while this map has not been started.
+    pub fn for_method(&self) -> Option<SourceMap> {
+        let owner = self.files.first()?;
+        Some(SourceMap::new(
+            &owner.name,
+            &owner.path,
+            owner.ranges.first()?.range,
+        ))
+    }
+
+    /// The JVM path the owning file is recorded under.
+    pub fn owner_path(&self) -> Option<&str> {
+        self.files.first().map(|owner| owner.path.as_str())
+    }
+
+    /// Rewrite the `LineNumberTable` lines of a method generated against its own map `method` into
+    /// this class map, in table order (`SourceMapCopyingMethodVisitor`).
+    ///
+    /// The copier remembers each line it has mapped and the range it read last; any other line is
+    /// looked up in `method`, and its source position is mapped anew with the call site of its
+    /// range. A line `method` does not cover keeps its number.
+    pub fn copy_method_lines(&mut self, method: &SourceMap, lines: &mut [(u16, u16)]) {
+        let mut visited = crate::fx_hash::HashMap::<u16, u16>::default();
+        let mut last: Option<(usize, usize)> = None;
+        for (_, line) in lines {
+            if let Some(&mapped) = visited.get(line) {
+                *line = mapped;
+                continue;
+            }
+            let covers =
+                |(file, range): (usize, usize)| method.files[file].ranges[range].covers_dest(*line);
+            let Some(found) = last
+                .filter(|&at| covers(at))
+                .or_else(|| method.find_range(*line))
+            else {
+                continue;
+            };
+            last = Some(found);
+            let file = &method.files[found.0];
+            let range = file.ranges[found.1];
+            let source = range.source + (*line - range.dest);
+            if let Some(mapped) = self.map_new_line(&file.name, &file.path, source, range.call_site)
+            {
+                visited.insert(*line, mapped);
+                *line = mapped;
+            }
+        }
+    }
+
+    /// The file and range covering output `line` (`SMAP.findRange`).
+    fn find_range(&self, line: u16) -> Option<(usize, usize)> {
+        self.files.iter().enumerate().find_map(|(file, mapping)| {
+            let range = mapping
+                .ranges
+                .iter()
+                .position(|range| range.covers_dest(line))?;
+            Some((file, range))
+        })
+    }
+
+    /// The output line of `source` in file `name` at `path` under `call_site`, by kotlinc's own
+    /// rule (`FileMapping.mapNewLineNumber`): only the file's last range, or else its first, may
+    /// take the line, when it came from the same call and covers it, or — when it holds the highest
+    /// output line handed out — lies within [`FRONTIER_SLACK`] past its end. Any other line opens a
+    /// new range at the next free output line.
+    fn map_new_line(
+        &mut self,
+        name: &str,
+        path: &str,
+        source: u16,
+        call_site: Option<u16>,
+    ) -> Option<u16> {
+        let global_max = self.max_used;
+        // Compute the fallible next output line before registering a file, so an exhausted line
+        // space leaves no empty file behind.
+        let next = global_max.checked_add(1);
+        let file = match self
+            .files
+            .iter()
+            .position(|known| known.name == name && known.path == path)
+        {
+            Some(file) => file,
+            None => {
+                next?;
+                self.files.push(FileMapping {
+                    name: name.to_string(),
+                    path: path.to_string(),
+                    ranges: Vec::new(),
+                });
+                self.files.len() - 1
+            }
+        };
+        let ranges = &mut self.files[file].ranges;
+        let reusable = |range: &RangeMapping| {
+            let slack = if range.covers_dest(global_max) {
+                FRONTIER_SLACK
+            } else {
+                0
+            };
+            range.call_site == call_site
+                && source >= range.source
+                && source - range.source < range.range.saturating_add(slack)
+        };
+        let at = match ranges.len().checked_sub(1) {
+            Some(last) if reusable(&ranges[last]) => last,
+            Some(_) if reusable(&ranges[0]) => 0,
+            _ => {
+                ranges.push(RangeMapping {
+                    source,
+                    dest: next?,
+                    range: 1,
+                    call_site,
+                });
+                ranges.len() - 1
+            }
+        };
+        let range = &mut ranges[at];
+        let offset = source - range.source;
+        let output = range.dest.checked_add(offset)?;
+        range.range = range.range.max(offset + 1);
+        self.max_used = self.max_used.max(output);
+        Some(output)
     }
 
     fn map(&mut self, name: &str, path: &str, source: u16, call_site: Option<u16>) -> Option<u16> {
@@ -588,8 +720,8 @@ mod tests {
     #[test]
     fn a_synthetic_line_maps_into_the_fake_file() {
         let mut map = SourceMap::new("t.kt", "TKt", 7);
-        assert_eq!(map.map_synthetic_line(1), Some(8));
-        assert_eq!(map.map_synthetic_line(1), Some(8));
+        assert_eq!(map.map_synthetic_line(1, None), Some(8));
+        assert_eq!(map.map_synthetic_line(1, None), Some(8));
         assert_eq!(
             map.render().expect("a map"),
             "SMAP\nt.kt\nKotlin\n*S Kotlin\n*F\n\
@@ -683,6 +815,56 @@ mod tests {
         assert_eq!(rendered.matches("+ 2 Lib.kt").count(), 1);
         assert!(rendered.contains("2#2,2:4\n2#2,2:6\n"), "{rendered}");
         assert!(rendered.contains("2#1:4,2\n3#1:6,2\n"), "{rendered}");
+    }
+
+    /// Two methods expanding the same body at different calls number it alike in their own maps;
+    /// copied into the class map in turn, the second takes the next free output lines, and a line
+    /// of the method's own source keeps its number.
+    #[test]
+    fn method_maps_are_copied_into_the_class_map_in_turn() {
+        let mut class = SourceMap::new("Main.kt", "MainKt", 15);
+        let mut lines = Vec::new();
+        let mut methods = Vec::new();
+        for call in [4, 5] {
+            let mut method = class.for_method().expect("a started class map");
+            let mapped = map_all(&mut method, "Lib.kt", "LibKt", &[7, 8, 9, 10], call);
+            assert_eq!(mapped, vec![16, 17, 18, 19]);
+            let mut table: Vec<(u16, u16)> = [call, 16, 17, 18, 19, 17, call]
+                .iter()
+                .enumerate()
+                .map(|(pc, &line)| (pc as u16, line))
+                .collect();
+            class.copy_method_lines(&method, &mut table);
+            lines.push(table.iter().map(|&(_, line)| line).collect::<Vec<_>>());
+            methods.push(method);
+        }
+        assert_eq!(lines[0], vec![4, 16, 17, 18, 19, 17, 4]);
+        assert_eq!(lines[1], vec![5, 20, 21, 22, 23, 21, 5]);
+        assert_eq!(
+            class.render().expect("a map"),
+            "SMAP\nMain.kt\nKotlin\n*S Kotlin\n*F\n\
+             + 1 Main.kt\nMainKt\n+ 2 Lib.kt\nLibKt\n\
+             *L\n1#1,15:1\n7#2,4:16\n7#2,4:20\n\
+             *S KotlinDebug\n*F\n+ 1 Main.kt\nMainKt\n*L\n4#1:16,4\n5#1:20,4\n*E\n"
+        );
+    }
+
+    /// The class map reuses only a file's last range, or else its first: a line a middle range
+    /// covers opens a new range, unlike a method map, which keeps any covering range.
+    #[test]
+    fn the_class_map_reuses_only_the_last_or_first_range() {
+        let mut class = SourceMap::new("Main.kt", "MainKt", 2);
+        let mut method = class.for_method().expect("a started class map");
+        assert_eq!(
+            map_all(&mut method, "Lib.kt", "LibKt", &[1, 20, 40], 1),
+            vec![3, 4, 5]
+        );
+        let mut first = vec![(0, 3), (1, 4), (2, 5)];
+        class.copy_method_lines(&method, &mut first);
+        assert_eq!(first, vec![(0, 3), (1, 4), (2, 5)]);
+        let mut second = vec![(0, 4)];
+        class.copy_method_lines(&method, &mut second);
+        assert_eq!(second, vec![(0, 6)]);
     }
 
     /// A dependency's own map sends a line above its source length back to the file it came from.

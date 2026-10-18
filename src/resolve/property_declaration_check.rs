@@ -44,13 +44,20 @@ impl Checker<'_> {
                     visible_type_parameters.clone()
                 })
         } else if deferred_local_header {
-            self.bind_deferred_type_parameters(
-                scope,
-                &p.type_params,
-                &p.type_param_bounds,
-                p.span.lo,
-                true,
-            )
+            stable_property
+                .and_then(|declaration| {
+                    self.finalized_type_parameters(
+                        &visible_type_parameters,
+                        declaration,
+                        &p.type_params,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    if let Some(declaration) = stable_property {
+                        self.failed_local_declaration_bindings.insert(declaration);
+                    }
+                    visible_type_parameters.clone()
+                })
         } else {
             TParams::symbolic_from_decl_with(&p.type_params, &p.type_param_bounds, &|name| {
                 self.select_classifier(scope, name).found()
@@ -67,9 +74,10 @@ impl Checker<'_> {
         });
         self.check_declaration_type_parameter_annotations(scope, p.span.lo);
         let owned_type_parameters = self.publish_property_type_parameter_owner(scope, p);
-        if finalized_local_header {
+        if finalized_local_header || deferred_local_header {
             if let Some(declaration) = stable_property {
                 if !self.record_finalized_type_parameter_bounds(
+                    scope,
                     declaration,
                     &p.type_params,
                     &p.type_param_bounds,
@@ -113,9 +121,7 @@ impl Checker<'_> {
                 self.failed_local_declaration_bindings.insert(declaration);
             }
         }
-        let property_spellings = self
-            .finalized_declaration_spellings(stable_property)
-            .clone();
+        let property_spellings = self.finalized_declaration_spellings_for_binding(stable_property);
         // For an extension property (`val Recv.name: T get() = …`), `this` inside the
         // accessors is the receiver — carried by this rung, which ends before the delegate
         // and the initializer (both evaluated receiver-less at file initialization).
@@ -124,9 +130,26 @@ impl Checker<'_> {
                 .as_ref()
                 .and_then(|(_, _, receiver)| *receiver)
             {
-                self.record_finalized_declaration_type(r, receiver, &property_spellings.receiver)
+                self.record_or_bind_deferred_declaration_type(
+                    scope,
+                    stable_property.expect("a finalized property retains its declaration"),
+                    r,
+                    receiver,
+                    property_spellings
+                        .as_ref()
+                        .and_then(|spellings| spellings.receiver()),
+                )
             } else if finalized_local_header {
                 Ty::Error
+            } else if deferred_local_header {
+                self.bind_active_deferred_declaration_type(
+                    scope,
+                    stable_property.expect("a deferred local property retains its declaration"),
+                    r,
+                    property_spellings
+                        .as_ref()
+                        .and_then(|spellings| spellings.receiver()),
+                )
             } else if p.is_companion_extension {
                 self.check_associated_companion_receiver_type(scope, r)
             } else {
@@ -151,16 +174,31 @@ impl Checker<'_> {
                     .as_ref()
                     .and_then(|(parameters, _, _)| parameters.get(index))
                     .map(|&semantic| {
-                        self.record_finalized_parameter_type(
+                        self.record_or_bind_deferred_parameter_type(
+                            scope,
+                            stable_property.expect("a finalized property retains its declaration"),
                             &parameter.ty,
                             false,
                             semantic,
-                            property_spellings.param(index),
+                            property_spellings
+                                .as_ref()
+                                .and_then(|spellings| spellings.param(index)),
                         )
                     })
                     .unwrap_or_else(|| {
                         if finalized_local_header {
                             Ty::Error
+                        } else if deferred_local_header {
+                            self.bind_active_deferred_parameter_type(
+                                scope,
+                                stable_property
+                                    .expect("a deferred local property retains its declaration"),
+                                &parameter.ty,
+                                false,
+                                property_spellings
+                                    .as_ref()
+                                    .and_then(|spellings| spellings.param(index)),
+                            )
                         } else {
                             self.check_declaration_type(scope, &parameter.ty)
                         }
@@ -222,24 +260,48 @@ impl Checker<'_> {
                 .as_ref()
                 .map(|(_, result, _)| *result);
             let property_annotation = p.ty.as_ref().map(|reference| match finalized_result {
-                Some(result) => self.record_finalized_declaration_type(
+                Some(result) => self.record_or_bind_deferred_declaration_type(
+                    scope,
+                    stable_property.expect("a finalized property retains its declaration"),
                     reference,
                     result,
-                    &property_spellings.ret,
+                    property_spellings
+                        .as_ref()
+                        .and_then(|spellings| spellings.ret()),
                 ),
                 None if finalized_local_header => Ty::Error,
+                None if deferred_local_header => self.bind_active_deferred_declaration_type(
+                    scope,
+                    stable_property.expect("a deferred local property retains its declaration"),
+                    reference,
+                    property_spellings
+                        .as_ref()
+                        .and_then(|spellings| spellings.ret()),
+                ),
                 None => self.check_declaration_type(scope, reference),
             });
             let getter_annotation = p
                 .getter_ty
                 .as_ref()
                 .map(|reference| match finalized_result {
-                    Some(result) => self.record_finalized_declaration_type(
+                    Some(result) => self.record_or_bind_deferred_declaration_type(
+                        scope,
+                        stable_property.expect("a finalized property retains its declaration"),
                         reference,
                         result,
-                        &property_spellings.getter_ret,
+                        property_spellings
+                            .as_ref()
+                            .and_then(|spellings| spellings.getter_ret()),
                     ),
                     None if finalized_local_header => Ty::Error,
+                    None if deferred_local_header => self.bind_active_deferred_declaration_type(
+                        scope,
+                        stable_property.expect("a deferred local property retains its declaration"),
+                        reference,
+                        property_spellings
+                            .as_ref()
+                            .and_then(|spellings| spellings.getter_ret()),
+                    ),
                     None => self.check_declaration_type(scope, reference),
                 });
             if let (Some(property), Some(getter)) = (property_annotation, getter_annotation) {

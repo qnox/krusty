@@ -639,6 +639,8 @@ mod data_class_metadata_wiring_e2e;
 mod data_class_nullable_value_class_e2e;
 #[path = "data_class_param_check_e2e.rs"]
 mod data_class_param_check_e2e;
+#[path = "data_class_sibling_interface_hash_e2e.rs"]
+mod data_class_sibling_interface_hash_e2e;
 #[path = "data_class_value_class_metadata_e2e.rs"]
 mod data_class_value_class_metadata_e2e;
 #[path = "data_copy_e2e.rs"]
@@ -1275,6 +1277,8 @@ mod jvm_default_mode_e2e;
 mod jvm_name_e2e;
 #[path = "jvm_name_toplevel_e2e.rs"]
 mod jvm_name_toplevel_e2e;
+#[path = "jvm_static_functions_e2e.rs"]
+mod jvm_static_functions_e2e;
 #[path = "kclass_type_e2e.rs"]
 mod kclass_type_e2e;
 #[path = "klib_class_surface_e2e.rs"]
@@ -1635,6 +1639,8 @@ mod value_class_dependency_bridge_e2e;
 mod value_class_equality_e2e;
 #[path = "value_class_equals_hash_e2e.rs"]
 mod value_class_equals_hash_e2e;
+#[path = "value_class_generic_argument_join_e2e.rs"]
+mod value_class_generic_argument_join_e2e;
 #[path = "value_class_generic_carrier_e2e.rs"]
 mod value_class_generic_carrier_e2e;
 #[path = "value_class_generic_slot_read_e2e.rs"]
@@ -2569,6 +2575,9 @@ mod toplevel_property_ref_e2e;
 
 #[path = "captured_unsigned_lines_e2e.rs"]
 mod captured_unsigned_lines_e2e;
+
+#[path = "char_code_inline_line_e2e.rs"]
+mod char_code_inline_line_e2e;
 #[path = "erased_parameter_boxing_e2e.rs"]
 mod erased_parameter_boxing_e2e;
 #[path = "function_type_parameter_name_e2e.rs"]
@@ -2857,6 +2866,8 @@ mod type_intrinsics_e2e;
 #[path = "value_class_receiver_inline_only_e2e.rs"]
 mod value_class_receiver_inline_only_e2e;
 
+#[path = "accessor_jvm_name_e2e.rs"]
+mod accessor_jvm_name_e2e;
 #[path = "field_store_lines_e2e.rs"]
 mod field_store_lines_e2e;
 #[path = "written_default_accessor_e2e.rs"]

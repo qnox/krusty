@@ -114,6 +114,26 @@ impl SelectedTypeFacts {
         self.shared.borrow().spellings.get(&syntax).copied()
     }
 
+    /// Whether compact resolution selected every node needed to publish one declaration-owned
+    /// written type. A graph edge records only potential ownership; an undemanded graph expression
+    /// never publishes these facts and therefore leaves the occurrence to active Pass 2.
+    pub(super) fn has_complete_declaration_spelling(
+        &self,
+        syntax: &crate::fir::HeaderSyntaxArena,
+        root: HeaderTypeId,
+    ) -> bool {
+        let Some(nodes) = syntax.resolved_written_spelling_preorder(root, &mut |node| {
+            self.spelling(node)
+                .map(|spelling| spelling.classifier_segment)
+        }) else {
+            return false;
+        };
+        nodes.into_iter().all(|node| {
+            self.spelling(node)
+                .is_some_and(|spelling| spelling.resolved.is_some())
+        })
+    }
+
     pub(super) fn record_application(
         &self,
         expression: SigExprId,

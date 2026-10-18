@@ -834,9 +834,6 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 }
             }
             Callee::Intrinsic { operation, .. } => match operation {
-                crate::ir::IrIntrinsic::ReinterpretBits { .. } => {
-                    unreachable!("target KLIB reinterpretation cannot reach the JS backend")
-                }
                 crate::ir::IrIntrinsic::Assert { mode } => {
                     if *mode == crate::types::AssertionMode::AlwaysDisabled {
                         "undefined".to_string()
