@@ -132,7 +132,7 @@ fn compile_callee(
         &mut cw,
     );
     let method = cw
-        .sole_emitted_method()
+        .sole_emitted_method_for_inlining()
         .ok_or("a compiled inline callee's body does not read back as one method")?;
     Ok(CompiledInlineCallee {
         owner,

@@ -5133,6 +5133,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc's bytes; a callee with a `try` beside stacked operands, non-local jumps and a bound
   value-class reference run).
 
+- **An inline call's body is placed as kotlinc's `MethodInliner` places it.** Four rules hold for
+  every inline callee, compiled in this module or read from a dependency. A `noinline` literal of a
+  call inlined from a compiled body is a value the body receives, so it keeps its own class
+  (`IrFile::compiled_inline_parameter`, which mirrors `InlineUtil.isInlineParameter` for those
+  calls). When the inlined body's own try/catch blocks include a `finally` (a block catching any
+  throwable), its blocks, the inlined lambdas' first, are rewritten as
+  `InternalFinallyBlockInliner.processInlineFunFinallyBlocks` does through
+  `substituteTryBlockNodes`: ordered by handler, then start, then end position, with empty ranges
+  dropped. A call whose value is `Unit` is `V` to kotlinc whatever its callee returns, so its erased
+  result is popped and `Unit.INSTANCE` read in its place; after an inlined body the pop
+  propagation removes that pop together with the body's own `Unit`. A compiled callee reaches the
+  inliner with no slot that neither an access nor a variable names (the result slot krusty reserves
+  for a diverging `try` is closed), as kotlinc's node never enters one; the inliner hands slots out
+  in the order the body names them, so a gap would place the catch parameter beside the lambda's
+  locals. Tests: `tests/inline_use_close_e2e.rs`, `tests/inline_scope_function_bytes_e2e.rs`,
+  `tests/try_debug_lines_e2e.rs` (`an_inlined_catch_parameter_is_named_at_its_expansion_depth`),
+  `tests/value_class_lambda_class_e2e.rs` (`a_noinline_argument_of_an_inline_call_is_its_own_class`).
+
 - **`inline fun` (same-module, user-defined):** expanded at each call site by the IR lowerer
   (`Lower::lower_inline_fn_call`), matching kotlinc's effect — value parameters bind to once-evaluated
   argument temps, and a lambda argument is inlined at the call sites of its function-typed parameter

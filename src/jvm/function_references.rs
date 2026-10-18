@@ -820,19 +820,8 @@ pub(super) fn realize(
             // A same-module call the backend inlines from its callee's compiled body carries its
             // declaration's parameter types and modifiers on the call.
             IrExpr::Call { args, .. } if ir.compiled_inline_call(call).is_some() => {
-                let declared = ir.call_declared_params.get(&call);
-                let modifiers = ir.call_inline_modifiers.get(&call);
                 let inline_parameters = (0..args.len())
-                    .map(|parameter| {
-                        matches!(
-                            declared.and_then(|declared| declared.get(parameter)),
-                            Some(Ty::Fun(_))
-                        ) && modifiers
-                            .and_then(|modifiers| modifiers.get(parameter))
-                            .is_some_and(|modifier| {
-                                *modifier != crate::types::InlineParameterModifier::Noinline
-                            })
-                    })
+                    .map(|parameter| ir.compiled_inline_parameter(call, parameter))
                     .collect::<Vec<_>>();
                 (inline_parameters, args)
             }

@@ -75,6 +75,27 @@ impl IrFile {
         self.compiled_inline_calls.calls.get(&call).copied()
     }
 
+    /// Whether operand `parameter` of `call`, inlined from a compiled body, is an inline parameter
+    /// (kotlinc's `InlineUtil.isInlineParameter`): its declared type is a function type and it did
+    /// not write `noinline`. Its literal is taken into the body's invokes; any other operand is a
+    /// value the body receives.
+    pub(crate) fn compiled_inline_parameter(&self, call: ExprId, parameter: usize) -> bool {
+        self.compiled_inline_call(call).is_some()
+            && matches!(
+                self.call_declared_params
+                    .get(&call)
+                    .and_then(|declared| declared.get(parameter)),
+                Some(crate::types::Ty::Fun(_))
+            )
+            && self
+                .call_inline_modifiers
+                .get(&call)
+                .and_then(|modifiers| modifiers.get(parameter))
+                .is_some_and(|&modifier| {
+                    modifier != crate::types::InlineParameterModifier::Noinline
+                })
+    }
+
     /// Every call of this file inlined from a compiled body, with the function it inlines.
     pub fn compiled_inline_calls(&self) -> impl Iterator<Item = (ExprId, FunId)> + '_ {
         self.compiled_inline_calls
