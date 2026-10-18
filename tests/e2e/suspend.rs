@@ -92,8 +92,12 @@ mod suspend_operator_convention_cross_file_e2e;
 mod suspend_prologue_cast_e2e;
 #[path = "../suspend_receiver_lambda_e2e.rs"]
 mod suspend_receiver_lambda_e2e;
+#[path = "../suspend_reified_inline_lambda_e2e.rs"]
+mod suspend_reified_inline_lambda_e2e;
 #[path = "../suspend_result_nullability_e2e.rs"]
 mod suspend_result_nullability_e2e;
+#[path = "../suspend_result_operands_e2e.rs"]
+mod suspend_result_operands_e2e;
 #[path = "../suspend_return_type_recovery_e2e.rs"]
 mod suspend_return_type_recovery_e2e;
 #[path = "../suspend_safe_call_receiver_e2e.rs"]

@@ -20,7 +20,7 @@ mod lambda_route;
 use lambda_node::callable_reference_template;
 mod regenerated_objects;
 use crate::jvm::bytecode_passes::coroutines::markers::{
-    is_after_inline_marker, is_before_inline_marker,
+    is_after_inline_marker, is_before_inline_marker, is_inline_marker,
 };
 use crate::jvm::inliner::{self, Binding, InlineError, Parameter, Parameters};
 use crate::jvm::method_node::{
@@ -1468,6 +1468,13 @@ impl Emitter<'_> {
                     duplicating = None;
                     if let Insn::Iinc { slot, .. } = insn {
                         top_local = top_local.max(slot + 1);
+                    }
+                    // In a method the coroutine transformer owns, a suspension's `mark` stays
+                    // the stand-in instruction it was read from, without interning
+                    // `InlineMarker`. Any other machine reads the marker call itself.
+                    if self.transformer_owns_method() && is_inline_marker(node, Some("mark")) {
+                        code.suspend_marker_call();
+                        continue;
                     }
                     self.write_inlined_instruction(insn, &labels, code);
                 }
