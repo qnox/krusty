@@ -90,7 +90,7 @@ Each step reports box passes, byte-identical files and divergent classes before 
 
 ### Step 2 as landed
 
-* `jvm::suspend::bytecode_machine` routes a top-level (static, non-private) suspend function to
+* `jvm::suspend::bytecode_machine` routes a top-level (static) suspend function to
   the transformer when every suspension point is a plain call, the emitter
   splices no classpath inline body into it (a same-file inline function the common IR already
   expanded is part of the body), it does not read its own continuation, and stdlib has
@@ -117,12 +117,17 @@ Each step reports box passes, byte-identical files and divergent classes before 
   fake one the transformer replaces, or `$completion` when there is no point) and is marked as an
   inlined call, so the line in effect is written again after it, as after kotlinc's inlined
   getter. The gates of the state machine itself (spill clean-up in the runtime, where the
-  continuation class goes, privacy, the declaration line and spliced inline lines its
+  continuation class goes, the declaration line and spliced inline lines its
   `@DebugMetadata` reads) apply only when there is a point, so a private, local or interface-default
   function, or one whose result comes from an inline call, is taken as well. Tested in
   `tests/suspend_function_boxing_e2e.rs`. A tail-call forward (`suspend fun f() = g(1)`) is taken
   before the IR path's own forward, so its operands box through the helpers as well, and the
   constants the transformer interns are laid out where kotlinc's writer interns them.
+* A private suspend function, a member or a top-level one, is taken like any other: its continuation
+  re-enters it through the owner's `access$<name>` bridge, as kotlinc's does. It used to keep the IR
+  machine, which gives each local index one type, so a loop variable reusing an inlined lambda's
+  local index was restored with that local's type and failed verification. Tested in
+  `tests/suspend_private_function_e2e.rs`.
 * The transformed method then goes through the same optimizer passes as every other method
   (`ClassWriter::optimized`: redundant null checks and casts, temporaries, dead code, `nop`
   removal, slot compaction), as kotlinc chains its `OptimizationMethodVisitor` after
