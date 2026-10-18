@@ -12,6 +12,27 @@ use crate::libraries::{
 use crate::types::{SemanticCallableOwner, TypeName};
 
 impl JvmLibraries {
+    pub(super) fn retain_normalized_member_generic_signature(
+        member: &mut LibraryMember,
+        callable: &LibraryCallable,
+    ) {
+        let Some(signature) = callable.generic_sig.as_deref() else {
+            return;
+        };
+        let prior_signature = member
+            .generic_sig
+            .clone()
+            .unwrap_or_else(|| signature.clone());
+        member.params = callable.params.clone();
+        member.ret = callable.ret;
+        member.declared_ret = callable.declared_ret;
+        member.overridden_results = callable.overridden_results.clone();
+        member.equality_bound = callable.equality_bound;
+        member.contract = callable.contract.clone();
+        member.generic_sig = Some(signature.clone());
+        signature.normalize_call_sig_from(&prior_signature, &mut member.call_sig);
+    }
+
     pub(super) fn register_external_constructor(
         &self,
         owner: TypeName,
@@ -75,6 +96,8 @@ impl JvmLibraries {
                 .is_some_and(|realization| realization.declaration_owner == declaration_owner)
             {
                 self.cp.enrich_external_callable(identity, callable);
+                self.cp
+                    .normalize_external_callable_generic_signature(identity, callable);
                 return;
             }
             // A partial provider view can carry an identity interned before its exact semantic
@@ -87,11 +110,12 @@ impl JvmLibraries {
             FnKind::Extension => super::super::classpath::ExternalCallableKind::Extension,
             FnKind::Member => super::super::classpath::ExternalCallableKind::Member,
         };
-        callable.external_identity = Some(self.cp.intern_external_callable(
-            callable,
-            kind,
-            declaration_owner,
-        ));
+        let identity = self
+            .cp
+            .intern_external_callable(callable, kind, declaration_owner);
+        callable.external_identity = Some(identity);
+        self.cp
+            .normalize_external_callable_generic_signature(identity, callable);
     }
 
     pub(super) fn register_external_inline_member(&self, member: &mut LibraryMember) {
@@ -123,6 +147,7 @@ impl JvmLibraries {
             Some(SemanticCallableOwner::Classifier(owner)),
         );
         member.external_identity = callable.external_identity;
+        Self::retain_normalized_member_generic_signature(member, &callable);
     }
 
     pub(super) fn register_external_property(
@@ -227,6 +252,9 @@ impl JvmLibraries {
     ) -> crate::libraries::Callables {
         let (mut functions, mut properties) = callables.into_parts();
         for function in &mut functions.overloads {
+            if function.callable.generic_sig.is_none() {
+                function.callable.generic_sig = function.generic_sig.clone().map(Box::new);
+            }
             function.callable.visibility = function.visibility;
             function.callable.inline_modifiers = function
                 .call_sig
@@ -255,6 +283,18 @@ impl JvmLibraries {
                 function.kind,
                 declaration_owner,
             );
+            let prior_signature = function.generic_sig.clone();
+            function.generic_sig = function.callable.generic_sig.as_deref().cloned();
+            if let Some(signature) = function.generic_sig.as_ref() {
+                let prior_signature = prior_signature.as_ref().unwrap_or(signature);
+                function.receiver = function.receiver.map(|receiver| {
+                    signature.normalize_declaration_type_from(prior_signature, receiver)
+                });
+                function.ret.class = function.ret.class.map(|result| {
+                    signature.normalize_declaration_type_from(prior_signature, result)
+                });
+                signature.normalize_call_sig_from(prior_signature, &mut function.call_sig);
+            }
             if let (Some(identity), Some(parameter_identities)) =
                 (function.callable.external_identity, parameter_identities)
             {

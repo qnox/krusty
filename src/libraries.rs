@@ -73,6 +73,7 @@ use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TypeName, TypeNa
 pub(crate) use array_factories::kotlin_array_factory_kind;
 pub use compiler_intrinsic::CompilerIntrinsic;
 pub(crate) use core_builtins::add_core_builtin_declarations;
+pub(crate) use generic_signature::normalize_contract_type_parameters;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};
 pub use inline_body::{
     InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyFrame, InlineBodyPlan,

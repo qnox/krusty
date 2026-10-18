@@ -63,58 +63,11 @@ impl TypeParameterIdentities {
         &self,
         contract: &std::sync::Arc<crate::contracts::Contract>,
     ) -> std::sync::Arc<crate::contracts::Contract> {
-        use crate::contracts::{Condition, ConditionType, Contract, Effect};
-
         let identities = self
             .by_source
             .iter()
             .map(|(source, identity)| (source.as_str(), *identity))
             .collect();
-        fn condition(original: &Condition, identities: &HashMap<&str, &'static str>) -> Condition {
-            match original {
-                Condition::IsType { param, ty, negated } => Condition::IsType {
-                    param: *param,
-                    ty: match ty {
-                        ConditionType::Metadata(ty) => {
-                            ConditionType::Metadata(crate::types::ty_rename_params(*ty, identities))
-                        }
-                        ConditionType::Source(source) => ConditionType::Source(source.clone()),
-                    },
-                    negated: *negated,
-                },
-                Condition::And(left, right) => Condition::And(
-                    Box::new(condition(left, identities)),
-                    Box::new(condition(right, identities)),
-                ),
-                Condition::Or(left, right) => Condition::Or(
-                    Box::new(condition(left, identities)),
-                    Box::new(condition(right, identities)),
-                ),
-                other => other.clone(),
-            }
-        }
-        std::sync::Arc::new(Contract {
-            effects: contract
-                .effects
-                .iter()
-                .map(|effect| match effect {
-                    Effect::ConditionalReturns {
-                        returns,
-                        conclusion,
-                    } => Effect::ConditionalReturns {
-                        returns: *returns,
-                        conclusion: condition(conclusion, &identities),
-                    },
-                    Effect::HoldsIn {
-                        condition: holds,
-                        lambda,
-                    } => Effect::HoldsIn {
-                        condition: condition(holds, &identities),
-                        lambda: *lambda,
-                    },
-                    other => other.clone(),
-                })
-                .collect(),
-        })
+        crate::libraries::normalize_contract_type_parameters(contract, &identities)
     }
 }

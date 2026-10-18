@@ -16026,7 +16026,7 @@ impl<'a> Checker<'a> {
         // check is a discarded probe, not a second overload result; rebuild the call's exclusive
         // semantic handoff from this check.
         self.resolved_calls.remove(&call);
-        self.unbound_value_lambda_call_formals.remove(&call);
+        self.value_lambda_formal_states.remove(&call);
         self.resolved_constructors.remove(&call);
         self.constructor_formal_evidence.remove(&call);
         self.record_call_site_lexical_formals(scope, call);
@@ -20626,7 +20626,7 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     .and_then(|signature| signature.generic_sig.as_ref())
                 {
-                    let unresolved = self.unresolved_value_lambda_formals(
+                    let state = self.classify_unresolved_value_lambda_formals(
                         scope,
                         args,
                         generic,
@@ -20634,9 +20634,8 @@ impl<'a> Checker<'a> {
                         &known_generic_bindings,
                         &postponed_constraints,
                     );
-                    if !unresolved.is_empty() {
-                        self.unbound_value_lambda_call_formals
-                            .insert(call, unresolved);
+                    if !state.is_empty() {
+                        self.value_lambda_formal_states.insert(call, state);
                     }
                 }
                 // Without an expectation this check is a probe: an enclosing call may still bind
@@ -33036,7 +33035,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         selected_function_value_conversions: HashMap::default(),
         narrowed_this_member: HashMap::default(),
         resolved_calls: HashMap::default(),
-        unbound_value_lambda_call_formals: HashMap::default(),
+        value_lambda_formal_states: HashMap::default(),
         postponed_diagnostics: PostponedDiagnostics::default(),
         eager_eliminated_members: HashMap::default(),
         implicit_receiver_selections: HashMap::default(),
@@ -35704,10 +35703,9 @@ struct Checker<'a> {
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
-    /// Unsolved callee-owned formals used as ordinary lambda inputs, or whose provisional lambda
-    /// result solution still depends on another call's open variable. Receiver-lambda builder
+    /// Ownership facts for callee-owned postponed value-lambda formals. Receiver-lambda builder
     /// inference has separate body-constraint semantics and is deliberately absent here.
-    unbound_value_lambda_call_formals: HashMap<ExprId, Vec<String>>,
+    value_lambda_formal_states: HashMap<ExprId, postponed_constraints::ValueLambdaFormalState>,
     /// Diagnostics produced while a lambda input still contains a callee-owned type parameter.
     /// They remain outside the shared sink until the surrounding statement either rechecks the
     /// expression with closed inputs or commits the open probe as its final verdict. A vector keeps
@@ -37661,7 +37659,7 @@ impl<'a> Checker<'a> {
             .filter(|formal| !lexical_formals.contains(formal))
             .cloned()
             .collect::<Vec<_>>();
-        let unbound_value_lambda_formals = self.unbound_value_lambda_call_formals.get(&call);
+        let value_lambda_formals = self.value_lambda_formal_states.get(&call);
         let call_arguments = match self.file.expr(call) {
             Expr::Call { args, .. } => args.as_slice(),
             _ => &[],
@@ -37685,8 +37683,10 @@ impl<'a> Checker<'a> {
             .find(|(index, formal)| {
                 (ty_mentions_param(actual, std::slice::from_ref(*formal))
                     || ty_mentions_param(signature.ret, std::slice::from_ref(*formal)))
-                    && (unbound_value_lambda_formals
-                        .is_some_and(|formals| formals.contains(formal))
+                    && (value_lambda_formals.is_some_and(|state| {
+                        state.has_unresolved_input(formal)
+                            || state.has_open_result_dependency(formal)
+                    })
                         || had_postponed_argument_diagnostic
                         || has_nested_diagnostic
                         || !signature
@@ -37695,8 +37695,8 @@ impl<'a> Checker<'a> {
                             .any(|parameter| {
                                 ty_mentions_param(*parameter, std::slice::from_ref(*formal))
                             }))
-                    && (unbound_value_lambda_formals
-                        .is_some_and(|formals| formals.contains(formal))
+                    && (value_lambda_formals
+                        .is_some_and(|state| state.has_open_result_dependency(formal))
                         || resolved
                             .and_then(|arguments| arguments.get(*index))
                             .copied()
@@ -63725,8 +63725,22 @@ impl<'a> Checker<'a> {
         }
         let declared_params =
             self.declared_member_params(&selected, &shape.parameter_indices, &visible_params);
-        let owned_type_parameters =
-            self.publish_selected_member_type_parameter_owner(call, &selected.member);
+        if let Some(signature) = selected.member.generic_sig.as_ref() {
+            self.record_open_selected_value_lambda_results(
+                scope,
+                call,
+                args,
+                &shape,
+                signature,
+                &visible_params,
+            );
+        }
+        let owned_type_parameters = self.publish_selected_member_type_parameter_owner(
+            call,
+            &selected.member,
+            &visible_params,
+            selected.ret,
+        );
         let arguments_valid = self.expect_selected_call_args(
             scope,
             CallArgs {

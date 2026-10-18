@@ -30,6 +30,79 @@ pub(super) struct ExternalCallableKey {
 }
 
 impl Classpath {
+    /// Scope a decoded callable signature's own formals to its selected dependency declaration.
+    ///
+    /// Both Java `Signature` attributes and Kotlin metadata are source-spelled while decoding. The
+    /// external callable registry is their first shared stable declaration boundary, so identity
+    /// assignment belongs here rather than in resolution. The stored realization and the provider
+    /// candidate receive the same normalized contract atomically.
+    pub(crate) fn normalize_external_callable_generic_signature(
+        &self,
+        identity: crate::fir::ExternalCallableId,
+        callable: &mut crate::libraries::LibraryCallable,
+    ) {
+        let Some(mut signature) = callable.generic_sig.take() else {
+            return;
+        };
+        let prior_signature = signature.clone();
+        signature.assign_declaration_formal_identities(|ordinal, source| {
+            crate::types::dependency_callable_type_parameter(
+                self.id,
+                identity.raw(),
+                ordinal,
+                source,
+            )
+        });
+        for parameter in &mut callable.params {
+            *parameter = signature.normalize_declaration_type_from(&prior_signature, *parameter);
+        }
+        callable.ret = signature.normalize_declaration_type_from(&prior_signature, callable.ret);
+        callable.source_receiver = callable
+            .source_receiver
+            .map(|receiver| signature.normalize_declaration_type_from(&prior_signature, receiver));
+        callable.declared_params = callable.declared_params.take().map(|parameters| {
+            parameters
+                .iter()
+                .copied()
+                .map(|parameter| {
+                    signature.normalize_declaration_type_from(&prior_signature, parameter)
+                })
+                .collect()
+        });
+        callable.declared_ret = callable
+            .declared_ret
+            .map(|result| signature.normalize_declaration_type_from(&prior_signature, result));
+        callable.overridden_results = callable
+            .overridden_results
+            .iter()
+            .copied()
+            .map(|result| signature.normalize_declaration_type_from(&prior_signature, result))
+            .collect();
+        callable.equality_bound = callable
+            .equality_bound
+            .map(|bound| signature.normalize_declaration_type_from(&prior_signature, bound));
+        callable.contract = callable
+            .contract
+            .as_ref()
+            .map(|contract| signature.normalize_contract_from(&prior_signature, contract));
+        callable.generic_sig = Some(signature);
+        if let Some(stored) = self
+            .external_callables
+            .borrow_mut()
+            .get_mut(identity.raw() as usize)
+        {
+            stored.callable.params = callable.params.clone();
+            stored.callable.ret = callable.ret;
+            stored.callable.source_receiver = callable.source_receiver;
+            stored.callable.declared_params = callable.declared_params.clone();
+            stored.callable.declared_ret = callable.declared_ret;
+            stored.callable.overridden_results = callable.overridden_results.clone();
+            stored.callable.equality_bound = callable.equality_bound;
+            stored.callable.contract = callable.contract.clone();
+            stored.callable.generic_sig = callable.generic_sig.clone();
+        }
+    }
+
     /// Intern one provider-normalized callable and return the stable identity passed through FIR.
     /// The key joins the exact physical realization with the semantic declaration owner; neither
     /// component is a source lookup key. One JVM method can realize distinct Kotlin declarations.

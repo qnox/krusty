@@ -55,7 +55,7 @@ impl Checker<'_> {
 
     /// Whether callee formal `formal` is lexically in scope at `call`, and therefore names the
     /// enclosing declaration's fixed type in that call's checked types.
-    fn lexically_fixed_at_call(&self, call: ExprId, formal: &str) -> bool {
+    pub(super) fn lexically_fixed_at_call(&self, call: ExprId, formal: &str) -> bool {
         self.call_site_lexical_formals
             .get(&call)
             .is_some_and(|lexical| lexical.iter().any(|identity| identity == formal))
@@ -176,13 +176,9 @@ impl Checker<'_> {
             .cloned()
             .collect::<Vec<_>>();
         let unresolved_lambda_result = self
-            .unbound_value_lambda_call_formals
+            .value_lambda_formal_states
             .get(&expression)
-            .is_some_and(|unbound| {
-                unbound
-                    .iter()
-                    .any(|formal| ty_mentions_param(signature.ret, std::slice::from_ref(formal)))
-            });
+            .is_some_and(|state| state.open_result_occurs_in(signature.ret));
         if self
             .resolved_call_type_args
             .get(&expression)

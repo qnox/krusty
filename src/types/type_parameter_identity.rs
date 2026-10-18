@@ -25,6 +25,29 @@ pub(crate) fn metadata_type_parameter(source: &str) -> &'static str {
     semantic
 }
 
+/// A type parameter owned by one declaration in an external provider instance.
+///
+/// External callable IDs are stable only within their provider, so `provider` remains part of the
+/// opaque key. The source spelling is retained separately for diagnostics and never participates in
+/// equality after this boundary.
+pub(crate) fn dependency_callable_type_parameter(
+    provider: u64,
+    declaration: u32,
+    ordinal: usize,
+    source: &str,
+) -> &'static str {
+    let semantic = intern(&format!(
+        "\0dependency-tp:{provider}:{declaration}:{ordinal}"
+    ));
+    let source = intern(type_parameter_source_name(source));
+    TYPE_PARAMETER_SOURCES
+        .get_or_init(|| Mutex::new(HashMap::default()))
+        .lock()
+        .unwrap()
+        .insert(semantic, source);
+    semantic
+}
+
 /// Intern one declaration-owned type-parameter identity and retain its source spelling separately.
 /// The semantic key is opaque: callers compare it only by identity and never parse declaration
 /// coordinates or spelling out of it.

@@ -25,7 +25,7 @@ const JAVA: &[(&str, &str)] = &[
         "package pub;\n\
          import java.util.function.Function;\n\
          public final class Mono<T> implements Pub<T> {\n\
-         \x20 public static <T> Mono<T> empty() { return new Mono<T>(); }\n\
+         \x20 public static <R> Mono<R> empty() { return new Mono<R>(); }\n\
          \x20 public static <T> Mono<T> just(T value) { return new Mono<T>(); }\n\
          \x20 public <R> Mono<R> flatMap(Function<? super T, ? extends Mono<? extends R>> f) {\n\
          \x20\x20 return new Mono<R>();\n\
@@ -61,6 +61,16 @@ fn assert_both_accept(user: &str, what: &str) {
 }
 
 const PRELUDE: &str = "import pub.Mono\nimport pub.Pub\nclass Auth(val n: String)\n";
+
+const NAMED_LAMBDA_LIBRARY: &str = "package dep\n\
+class Cell<T> {\n\
+  companion object {\n\
+    fun <T> empty(): Cell<T> = error(\"unused\")\n\
+  }\n\
+}\n\
+class Selector {\n\
+  fun <A, R> choose(first: () -> A, second: () -> Cell<R>): Cell<R> = error(\"unused\")\n\
+}\n";
 
 /// Control: expression branches already rebound, and must keep doing so.
 #[test]
@@ -198,9 +208,10 @@ fn an_incompatible_block_branch_is_still_rejected() {
 }
 
 /// Without an enclosing result expectation, the selected `flatMap` call still owns an open `R`.
-/// Its primary inference/return mismatch does not consume the independent open `T` selected for a
-/// terminal conditional branch. Every value-conditional form must retain the complete ordered
-/// diagnostic set, including the branch call's exact source location.
+/// Its primary inference/return mismatch does not consume the independent open `R` selected for a
+/// different declaration's terminal conditional branch. The deliberately same-spelled formals
+/// prove that declaration identity, not `R`, owns each diagnostic. Every value-conditional form
+/// must retain the complete ordered diagnostic set, including the branch call's exact location.
 #[test]
 fn open_selected_lambda_results_preserve_terminal_branch_diagnostics() {
     let java = JAVA
@@ -229,6 +240,31 @@ fn open_selected_lambda_results_preserve_terminal_branch_diagnostics() {
             &format!("open selected lambda {form} branch completion"),
         );
     }
+}
+
+/// The selected member retains declaration-ordered parameters, while source arguments retain
+/// source order. Open-result ownership must cross the exact argument -> visible parameter ->
+/// declaration parameter mapping rather than indexing either vector with the other's coordinate.
+#[test]
+fn reversed_named_lambdas_preserve_the_selected_parameters_open_result() {
+    let Some(library) = common::kotlinc_library(NAMED_LAMBDA_LIBRARY) else {
+        eprintln!("skipping: kotlinc unavailable");
+        return;
+    };
+    let classpath = [library, common::stdlib_jar(), common::jdk_modules()];
+    let result = common::compiler_diagnostics(
+        &[(
+            "Use.kt",
+            "import dep.Cell\n\
+             import dep.Selector\n\
+             fun use(selector: Selector) = selector.choose(\n\
+             \x20 second = { if (true) {} else Cell.empty() },\n\
+             \x20 first = { \"fixed\" }\n\
+             )\n",
+        )],
+        &classpath,
+    );
+    common::expect_identical_rejection(&result, "reversed named selected lambda parameters");
 }
 
 #[test]
