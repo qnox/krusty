@@ -967,6 +967,115 @@ mod tests {
         panic!("oversized test varint")
     }
 
+    fn table_entries(bytes: &[u8]) -> Vec<&[u8]> {
+        assert_eq!(u32::from_be_bytes(bytes[0..4].try_into().unwrap()), 1);
+        let size = u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        assert_eq!(bytes.len(), 8 + size);
+        let table = &bytes[8..];
+        let count = i32::from_be_bytes(table[0..4].try_into().unwrap())
+            .checked_neg()
+            .expect("entry-table count is negative") as usize;
+        let mut cursor = 4;
+        let lengths = (0..count)
+            .map(|_| take_varint(table, &mut cursor) as usize)
+            .collect::<Vec<_>>();
+        let entries = lengths
+            .into_iter()
+            .map(|length| {
+                let start = cursor;
+                cursor += length;
+                &table[start..cursor]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(cursor, table.len());
+        entries
+    }
+
+    fn exact_message_field(bytes: &[u8], field: u64) -> Option<&[u8]> {
+        if bytes.is_empty() {
+            return None;
+        }
+        let mut cursor = 0;
+        if take_varint(bytes, &mut cursor) != (field << 3) | 2 {
+            return None;
+        }
+        let length = take_varint(bytes, &mut cursor) as usize;
+        let end = cursor.checked_add(length)?;
+        (end == bytes.len()).then_some(&bytes[cursor..end])
+    }
+
+    fn exact_composite_signature(bytes: &[u8]) -> Option<(usize, usize)> {
+        let message = exact_message_field(bytes, 5)?;
+        let mut cursor = 0;
+        if take_varint(message, &mut cursor) != 1 << 3 {
+            return None;
+        }
+        let container = take_varint(message, &mut cursor) as usize;
+        if take_varint(message, &mut cursor) != 2 << 3 {
+            return None;
+        }
+        let inner = take_varint(message, &mut cursor) as usize;
+        (cursor == message.len()).then_some((container, inner))
+    }
+
+    fn is_exact_type_parameter_local(bytes: &[u8], strings: &[&[u8]]) -> bool {
+        let Some(message) = exact_message_field(bytes, 6) else {
+            return false;
+        };
+        let mut cursor = 0;
+        if take_varint(message, &mut cursor) != (1 << 3) | 2 {
+            return false;
+        }
+        let names_length = take_varint(message, &mut cursor) as usize;
+        let names_end = cursor + names_length;
+        let name = take_varint(message, &mut cursor) as usize;
+        if cursor != names_end || strings.get(name) != Some(&b"<TP>".as_slice()) {
+            return false;
+        }
+        if take_varint(message, &mut cursor) != 2 << 3 {
+            return false;
+        }
+        take_varint(message, &mut cursor) == 0 && cursor == message.len()
+    }
+
+    fn exact_owned_type_parameter_signature(
+        signatures: &[u8],
+        strings: &[u8],
+        prepared: bool,
+    ) -> (u32, Vec<u8>) {
+        let signatures = table_entries(signatures);
+        let strings = table_entries(strings);
+        let mut matches = signatures
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, signature)| {
+                let (owner, inner) = exact_composite_signature(signature)?;
+                is_exact_type_parameter_local(signatures.get(inner)?, &strings)
+                    .then_some((slot, owner))
+            });
+        let (slot, owner) = matches.next().expect("one owned <TP> signature");
+        assert!(matches.next().is_none(), "exactly one owned <TP> signature");
+
+        let public = if prepared {
+            let (file, public) = exact_composite_signature(signatures[owner])
+                .expect("prepared function is owned by its file");
+            assert_eq!(
+                exact_message_field(signatures[file], 7),
+                Some(&[][..]),
+                "prepared function owner is an exact FileSignature"
+            );
+            exact_message_field(signatures[public], 1)
+                .expect("prepared function has an exact PublicSignature")
+        } else {
+            exact_message_field(signatures[owner], 1)
+                .expect("ordinary function has an exact PublicSignature")
+        };
+        (
+            u32::try_from(slot).expect("signature slot fits u32"),
+            public.to_vec(),
+        )
+    }
+
     /// Root file-entry id from the single `IrFile` emitted by this writer.
     fn root_file_entry(bytes: &[u8]) -> u64 {
         assert_eq!(u32::from_be_bytes(bytes[0..4].try_into().unwrap()), 1);
@@ -1050,6 +1159,25 @@ mod tests {
             .expect("prepared component has a file-entry table");
         assert_ne!(file_entries, &per_file(entry_table(&[])));
 
+        let raw_entry = |name: &str| {
+            artifacts
+                .iter()
+                .find(|(entry, _)| entry == name)
+                .map(|(_, bytes)| bytes.as_slice())
+                .expect("component has requested raw entry")
+        };
+        let (ordinary_type_parameter_slot, ordinary_owner) = exact_owned_type_parameter_signature(
+            raw_entry("default/ir/signatures.knt"),
+            raw_entry("default/ir/strings.knt"),
+            false,
+        );
+        let (prepared_type_parameter_slot, prepared_owner) = exact_owned_type_parameter_signature(
+            raw_entry("default/ir_inlinable_functions/signatures.knt"),
+            raw_entry("default/ir_inlinable_functions/strings.knt"),
+            true,
+        );
+        assert_eq!(ordinary_owner, prepared_owner);
+
         let root = std::env::temp_dir().join(format!(
             "krusty-inline-ir-{}-{:?}",
             std::process::id(),
@@ -1073,6 +1201,16 @@ mod tests {
             .expect("the ordinary declaration keeps its exact public identity");
         assert_eq!(ordinary.base.flags, 1030);
         assert_eq!(ordinary.prepared_inline_file, None);
+        let [ordinary_type_parameter] = ordinary.type_parameters.as_slice() else {
+            panic!("fixture has one ordinary type parameter")
+        };
+        assert_eq!(
+            ordinary_type_parameter.base.symbol.signature,
+            KlibIrSignature::FileLocal {
+                file: 0,
+                slot: ordinary_type_parameter_slot,
+            }
+        );
         let trees = read_inlinable_declaration_trees(&archive).expect("decode prepared IR");
         let (arena, decoded) = trees
             .function(&KlibIrSignature::Public(signature))
@@ -1129,6 +1267,13 @@ mod tests {
         let [type_parameter] = decoded.type_parameters.as_slice() else {
             panic!("fixture has one type parameter")
         };
+        assert_eq!(
+            type_parameter.base.symbol.signature,
+            KlibIrSignature::FileLocal {
+                file: 0,
+                slot: prepared_type_parameter_slot,
+            }
+        );
         assert_eq!(classifier, &type_parameter.base.symbol);
         assert_eq!(*nullability, KlibIrNullability::NotSpecified);
         assert!(arguments.is_empty());
