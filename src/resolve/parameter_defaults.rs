@@ -8,18 +8,6 @@ use super::{Checker, CheckerScope, PlatformNarrowing};
 use crate::ast::ExprId;
 use crate::types::Ty;
 
-/// Whether an absent platform constructor is the normal actualization lifecycle for this exact
-/// parser declaration. The declaration identity is retained by the `expect` syntax; no classifier
-/// spelling or source-range recovery participates in the decision.
-pub(super) fn is_expect_constructor_provider(
-    file: &crate::ast::File,
-    declaration: crate::ast::DeclId,
-) -> bool {
-    file.expect_decls
-        .iter()
-        .any(|expectation| expectation.declaration == declaration)
-}
-
 #[derive(Clone, Copy)]
 pub(super) enum ParameterDefaultFlow {
     Function,

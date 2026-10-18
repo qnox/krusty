@@ -106,3 +106,20 @@ fun build() {
 "#;
     assert_eq!(checked_diagnostics(source), []);
 }
+
+#[test]
+fn finalized_local_subclass_inherits_pass_two_property_surface() {
+    let source = r#"fun box(): String {
+    val captured = "K"
+    open class Base(val first: String) {
+        constructor() : this("O")
+        val second: String
+            get() = captured
+    }
+    class Derived : Base()
+    val value = Derived()
+    return value.first + value.second
+}
+"#;
+    assert_eq!(checked_diagnostics(source), []);
+}

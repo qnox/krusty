@@ -4,7 +4,7 @@ use crate::libraries::EmptySymbolSource;
 use crate::source::SourceInput;
 
 #[test]
-fn local_classifier_publishes_header_and_generic_layout_atomically() {
+fn local_classifier_and_publishable_constructor_property_finalize_in_pass_one() {
     let source = r#"
 package sample
 
@@ -78,7 +78,11 @@ fun build() {
         Some(1)
     );
     assert!(index.classifier_header(local).is_some());
-    assert!(index.signature(property).is_none());
+    let pass_one_property = index
+        .signature(property)
+        .expect("representable constructor property is a Pass-1 contract")
+        .result
+        .get();
     let checked = analysis.types[0]
         .as_ref()
         .expect("Pass 2 checked local declarations");
@@ -96,7 +100,7 @@ fun build() {
                 .is_some(),
         ),
         (false, true, true),
-        "the deferred constructor property must retain one checked declaration occurrence"
+        "the published constructor property retains its checked declaration occurrence"
     );
 
     crate::resolve::publish_checked_local_signatures(
@@ -106,7 +110,7 @@ fun build() {
         checked,
         &mut index,
     )
-    .expect("deferred local headers publish atomically from checked facts");
+    .expect("remaining deferred local headers publish from checked facts");
 
     assert!(index.classifier_header(shadow).is_some());
     assert_eq!(index.classifier_own_type_parameter_count(shadow), Some(1));
@@ -134,6 +138,7 @@ fun build() {
             .expect("finalized Local property signature")
             .result
             .get(),
-        value
+        pass_one_property
     );
+    assert_eq!(pass_one_property, value);
 }

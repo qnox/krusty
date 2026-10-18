@@ -727,4 +727,75 @@ mod tests {
         );
         assert!(symbolic.extra_bounds_of("S").is_empty());
     }
+
+    #[test]
+    fn ordinary_generic_anonymous_and_local_overrides_publish_exact_pass_one_contracts() {
+        let source = r#"
+            abstract class Checker {
+                abstract fun <T> run(value: T): T
+                abstract fun <U> ping()
+            }
+
+            fun build() {
+                val anonymous = object : Checker() {
+                    override fun <T> run(value: T): T = value
+                    override fun <U> ping() {}
+                }
+                class Local : Checker() {
+                    override fun <T> run(value: T): T = value
+                    override fun <U> ping() {}
+                }
+            }
+        "#;
+        let inputs = [SourceInput::kotlin(source).with_file_stem("GenericLocalOverrides")];
+        let mut diagnostics = DiagSink::new();
+        let analysis = crate::frontend::analyze_source_set_with_features(
+            &inputs,
+            crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+        let index = analysis
+            .streamed
+            .as_ref()
+            .expect("ordinary generic local headers finalize in Pass 1")
+            .module
+            .index();
+        let runs = (0..index.declaration_count())
+            .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+            .filter(|declaration| index.declaration_name(*declaration) == Some("run"))
+            .collect::<Vec<_>>();
+        assert_eq!(runs.len(), 3, "base, anonymous, and named-local run");
+        for run in runs {
+            let formal = index.type_parameter(run, 0).expect("run<T> formal");
+            let semantic = index
+                .type_parameter_semantic_name(formal)
+                .expect("stable run<T> semantic identity");
+            let signature = index.signature(run).expect("Pass-1 run<T> signature");
+            let [value] = signature.parameters.as_ref() else {
+                panic!("run<T> has exactly one value parameter")
+            };
+            assert_eq!(value.get().ty_param_name(), Some(semantic));
+            assert_eq!(signature.result.get().ty_param_name(), Some(semantic));
+        }
+        let pings = (0..index.declaration_count())
+            .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+            .filter(|declaration| index.declaration_name(*declaration) == Some("ping"))
+            .collect::<Vec<_>>();
+        assert_eq!(pings.len(), 3, "base, anonymous, and named-local ping");
+        for ping in pings {
+            assert!(index.type_parameter(ping, 0).is_some(), "stable ping<U>");
+            let signature = index
+                .signature(ping)
+                .expect("implicit-Unit ping<U> publishes in Pass 1");
+            assert!(signature.parameters.is_empty());
+            assert_eq!(signature.result.get(), Ty::Unit);
+        }
+
+        let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+        assert!(census.failures.is_empty(), "{:?}", census.failures);
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    }
 }

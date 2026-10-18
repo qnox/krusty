@@ -3868,14 +3868,17 @@ pub(crate) fn finalized_streamed_signature_index(
             .expect("a compact stub must retain its stable anchor");
         let constructor_property_vararg =
             vararg_constructor_property::is_vararg(headers, stub, anchor);
-        let deferred_local_signature = deferred_local_headers::defers_complete_signature(
-            stub.id,
-            stub.kind,
+        let primary_constructor_owns_vararg_property =
             vararg_constructor_property::primary_constructor_owns_vararg_property(
                 headers, stub, anchor,
-            ),
-            &deferred_local_candidates,
-        );
+            );
+        let deferred_atomic_vararg_signature =
+            deferred_local_headers::defers_atomic_vararg_signature(
+                stub.id,
+                stub.kind,
+                constructor_property_vararg || primary_constructor_owns_vararg_property,
+                &deferred_local_candidates,
+            );
         let may_defer_unpublishable_signature =
             deferred_local_headers::may_defer_unpublishable_signature(
                 stub.id,
@@ -4354,9 +4357,9 @@ pub(crate) fn finalized_streamed_signature_index(
             };
             resolved_receivers.insert(stub.id, receiver);
         }
-        // Pass 1 has now resolved every compact type and retained its occurrence/spelling facts.
-        // The executable header itself remains atomic with its body-local classifier owner.
-        if deferred_local_signature {
+        // A primary vararg property and its constructor are one semantic relation. Neither half is
+        // independently publishable; Pass 2 completes both from the same checked declaration.
+        if deferred_atomic_vararg_signature {
             deferred_local_headers.insert(stub.id);
             continue;
         }

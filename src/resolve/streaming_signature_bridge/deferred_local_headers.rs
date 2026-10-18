@@ -1,9 +1,8 @@
 //! Stable declarations whose semantic header may require active Pass 2 body checking.
 //!
-//! This is the exact set of undemanded executable headers owned by Pass 2. Pass 1 still evaluates
-//! their compact type expressions so occurrence, spelling, and diagnostic facts survive, but it
-//! does not publish a deferred callable/property or atomic vararg-property constructor signature
-//! independently of the local owner.
+//! This is a candidate set, not a completion decision. Pass 1 publishes every executable header
+//! whose semantic shape is already representable. Only an unpublishable header, or the inseparable
+//! primary-vararg constructor/property relation, transfers atomically to Pass 2.
 
 use crate::fir::{
     DeclarationFlags, DeclarationId, DeclarationKind, HeaderDeclarationKind, SignatureGraph,
@@ -65,40 +64,30 @@ pub(super) fn declarations(
         .collect()
 }
 
-/// Pass ownership of a body-local executable header to the active Pass-2 checker only after Pass 1
-/// has evaluated its compact types. Classifier identity remains a Pass-1 fact; every undemanded
-/// callable/property candidate and a primary vararg-property constructor are published atomically
-/// with that owner in Pass 2.
-pub(super) fn defers_complete_signature(
+/// Whether this declaration belongs to the atomic primary-vararg constructor/property relation.
+/// Ordinary generic functions and properties remain Pass-1 contracts when their exact semantic
+/// shape is publishable; withholding those contracts would make override and member checking
+/// depend on whether a later body happens to demand them.
+pub(super) fn defers_atomic_vararg_signature(
     declaration: DeclarationId,
     kind: DeclarationKind,
-    constructor_property_vararg: bool,
+    atomic_vararg_relation: bool,
     candidates: &HashSet<DeclarationId>,
 ) -> bool {
     candidates.contains(&declaration)
-        && match kind {
-            DeclarationKind::Classifier => false,
-            // Ordinary constructor call targets must exist while Pass 2 enters the same local
-            // class. A primary vararg property is different: its source element spelling and its
-            // array-valued property are one atomic checked relation, completed together in Pass 2.
-            DeclarationKind::Constructor => constructor_property_vararg,
-            DeclarationKind::Function
-            | DeclarationKind::Property
-            | DeclarationKind::TypeAlias
-            | DeclarationKind::Accessor
-            | DeclarationKind::Initializer
-            | DeclarationKind::EnumEntry
-            | DeclarationKind::Script => true,
-        }
+        && atomic_vararg_relation
+        && matches!(
+            kind,
+            DeclarationKind::Constructor | DeclarationKind::Property
+        )
 }
 
 /// Whether an unpublishable executable seed may be completed by the active Pass-2 checker.
 ///
 /// Constructors are not unconditionally late: a representable constructor is required while the
-/// same local body resolves construction and super-construction calls. A candidate constructor
+/// same local body resolves construction and super-construction calls. A candidate executable
 /// whose semantic seed is still unresolved is different; publishing `Error` is impossible, so its
-/// exact active declaration completes the header in Pass 2. Functions and properties already have
-/// whole-header Pass-2 ownership and therefore satisfy both predicates.
+/// exact active declaration completes the header in Pass 2.
 pub(super) fn may_defer_unpublishable_signature(
     declaration: DeclarationId,
     kind: DeclarationKind,
