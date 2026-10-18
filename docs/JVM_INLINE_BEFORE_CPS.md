@@ -126,8 +126,10 @@ Each step reports box passes, byte-identical files and divergent classes before 
 * A private suspend function, a member or a top-level one, is taken like any other: its continuation
   re-enters it through the owner's `access$<name>` bridge, as kotlinc's does. It used to keep the IR
   machine, which gives each local index one type, so a loop variable reusing an inlined lambda's
-  local index was restored with that local's type and failed verification. Tested in
-  `tests/suspend_private_function_e2e.rs`.
+  local index was restored with that local's type and failed verification. A private `suspend
+  inline` function is the exception: every call inlines it, kotlinc never transforms its own method
+  (an `Int` argument boxes with `valueOf`, and no `access$` bridge reaches it), so it keeps the
+  route it had. Tested in `tests/suspend_private_function_e2e.rs`.
 * The transformed method then goes through the same optimizer passes as every other method
   (`ClassWriter::optimized`: redundant null checks and casts, temporaries, dead code, `nop`
   removal, slot compaction), as kotlinc chains its `OptimizationMethodVisitor` after
