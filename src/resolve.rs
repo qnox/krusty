@@ -38094,45 +38094,12 @@ impl<'a> Checker<'a> {
             expected_params,
             |actual, target| self.receiver_is_assignable(actual, target),
         )?;
-        let constraints = self
-            .active_callable_reference
-            .and_then(|expression| self.callable_reference_literal_constraints.get(&expression));
-        let soft_input_fits = |expected: Ty, target: Ty| {
-            // A postponed callable-reference check gives the enclosing declaration's type
-            // parameters call-owned identities. Literal applicability was recorded before that
-            // namespace was entered, so compare through the frame's declared identity instead of
-            // treating the call-owned identity as an unrelated formal.
-            let expected = self
-                .postponed_call_constraints
-                .iter()
-                .rev()
-                .find(|frame| frame.mentions_formal(expected))
-                .map_or(expected, |frame| frame.declared_type(expected));
-            let Ty::TyParam(formal, _) = expected.non_null() else {
-                return true;
-            };
-            // A generic referenced declaration can specialize its own input directly to the
-            // enclosing call's still-open formal. The literal constraint belongs to that same
-            // outer inference variable and therefore cannot reject the symbolic target now; the
-            // final call solution will choose its concrete literal type. Only a concrete target
-            // (for example `Byte` versus `String`) is useful overload evidence at this stage.
-            if target.mentions_ty_param() {
-                return true;
-            }
-            constraints
-                .and_then(|constraints| constraints.get(formal))
-                .is_none_or(|arguments| {
-                    arguments.iter().all(|argument| {
-                        self.receiver_is_assignable(argument.ty(), target)
-                            || argument.adapts_integer_literal_to(target)
-                    })
-                })
-        };
         for (target, argument) in plan.iter().enumerate() {
             let declared = *params.get(target)?;
             match argument {
                 AdaptedRefArgument::Value(value) => {
-                    if !soft_input_fits(*expected_params.get(*value)?, declared) {
+                    if !self.postponed_reference_input_fits(*expected_params.get(*value)?, declared)
+                    {
                         return None;
                     }
                 }
@@ -38146,9 +38113,9 @@ impl<'a> Checker<'a> {
                         declared.array_read_elem().unwrap_or(declared)
                     };
                     if values.iter().any(|value| {
-                        expected_params
-                            .get(*value)
-                            .is_none_or(|expected| !soft_input_fits(*expected, target))
+                        expected_params.get(*value).is_none_or(|expected| {
+                            !self.postponed_reference_input_fits(*expected, target)
+                        })
                     }) {
                         return None;
                     }
