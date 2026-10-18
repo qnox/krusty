@@ -17060,15 +17060,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   written on a bodyless `get`/`set` or through `@get:JvmName`/`@set:JvmName`. The JVM backend
   realizes it from the accessor's checked annotations before emission, for a member, an object, a
   file-facade property and a companion property whose storage is hoisted onto the outer class. The
-  declaration, same-file calls, the property's `JvmPropertySignature` and its `$annotations` marker
-  all use it. An explicit `@JvmName` is not changed further: an internal member keeps it without the
+  declaration, same-file calls, a callable reference (`C::p`, `::top`), the property's
+  `JvmPropertySignature` and its `$annotations` marker all use it. An explicit `@JvmName` is not changed further: an internal member keeps it without the
   `$<module>` suffix (a function, a declared accessor or a default one), and a value-class-typed
   property keeps it without the value-class hash. A companion's synthesized default accessors also
   carry the annotations written on them (`@get:Deprecated`). Known gaps: a call from another file
   of the module still names a member's Kotlin accessor or function (the stable header records no
   member annotation arguments), a `@JvmStatic` companion property has no outer static wrapper, and
-  a top-level `lateinit var`, which has no checked body, carries no accessor annotations. Tests:
-  `accessor_jvm_name_e2e`.
+  a top-level `lateinit var`, which has no checked body, carries no accessor annotations. A
+  top-level property's retained `PROPERTY`-targeted annotation gets no `$annotations` marker at all
+  (with or without `@JvmName`); only a suppressed SOURCE application's empty marker is emitted there.
+  Tests: `accessor_jvm_name_e2e`.
 
 - **`@JvmName` on a top-level function names the emitted method.** The annotation's constant
   string is the bytecode method name; call sites still resolve by the SOURCE name, and each emits

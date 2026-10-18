@@ -88,3 +88,36 @@ fn a_companion_default_accessor_keeps_its_written_annotations_and_jvm_name() {
          }\n",
     )]);
 }
+
+#[test]
+fn a_property_reference_reads_through_the_written_accessor_name() {
+    assert_module_matches_kotlinc(&[(
+        "References.kt",
+        "package named\n\
+         \n\
+         class Referenced {\n\
+         \x20   @get:JvmName(\"readP\") val p: Int = 1\n\
+         \x20   @set:JvmName(\"storeQ\") var q: Int = 2\n\
+         }\n\
+         \n\
+         @get:JvmName(\"readTop\") val top = 3\n\
+         \n\
+         fun use(referenced: Referenced): Int {\n\
+         \x20   val p = Referenced::p\n\
+         \x20   val q = referenced::q\n\
+         \x20   q.set(4)\n\
+         \x20   val t = ::top\n\
+         \x20   return p.get(referenced) + q.get() + t.get()\n\
+         }\n",
+    )]);
+}
+
+#[test]
+fn a_top_level_suppressed_source_marker_is_named_after_the_written_getter() {
+    assert_module_matches_kotlinc(&[(
+        "Markers.kt",
+        "package named\n\
+         \n\
+         @Suppress(\"VOLATILE_ON_VALUE\") @Volatile @get:JvmName(\"readTop\") val top = 3\n",
+    )]);
+}

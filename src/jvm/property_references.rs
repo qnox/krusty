@@ -92,6 +92,54 @@ fn declared_accessors(ir: &IrFile, target: PropertyId) -> DeclaredAccessors {
     }
 }
 
+/// The `@JvmName` written on each compiler-default accessor of a property this file declares.
+/// The selected spelling is the accessor convention, and a written name replaces it on the
+/// declaration, so the reference must call the written one. A source-written accessor is an
+/// ordinary function, renamed with its callers.
+fn written_default_accessor_names(
+    ir: &IrFile,
+    target: PropertyId,
+) -> Result<(Option<String>, Option<String>), ()> {
+    let (annotations, getter, setter) = match ir.local_property_layouts.get(&target) {
+        Some(IrLocalPropertyLayout::Member {
+            class,
+            property,
+            getter,
+            setter,
+            ..
+        }) => (
+            ir.classes
+                .get(*class as usize)
+                .and_then(|class| class.properties.get(*property as usize))
+                .map(|property| &property.accessor_annotations),
+            *getter,
+            *setter,
+        ),
+        Some(IrLocalPropertyLayout::TopLevelStorage { getter, setter, .. }) => {
+            (ir.accessor_annotations.get(&target), *getter, *setter)
+        }
+        Some(
+            IrLocalPropertyLayout::TopLevelAccessor { .. }
+            | IrLocalPropertyLayout::MemberExtension { .. },
+        )
+        | None => return Ok((None, None)),
+    };
+    let Some(annotations) = annotations else {
+        return Ok((None, None));
+    };
+    let written = |annotations, declared: Option<FunId>| {
+        Ok::<_, ()>(
+            super::module_calls::applied_jvm_name(Some(annotations))?
+                .filter(|_| declared.is_none())
+                .map(str::to_owned),
+        )
+    };
+    Ok((
+        written(&annotations.getter, getter)?,
+        written(&annotations.setter, setter)?,
+    ))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PropertyReferenceRealizationTarget {
     Module(PropertyId),
@@ -208,27 +256,34 @@ pub(super) fn realize(
                 setter_name,
                 reflection_owner,
                 ..
-            } => module_property(
-                ir.referenced_module_properties
-                    .get(&property)
-                    .ok_or(PropertyReferenceRealizationTarget::Module(property))?,
-                facades,
-                property,
-                mutable,
-                declared_accessors(ir, property),
-                (getter_name.as_ref(), setter_name.as_deref()),
-                ModulePropertySite {
-                    caller: reference_owner,
-                    dispatch: referenced_member_dispatch(
-                        ir,
-                        reflection_owner,
-                        ir.referenced_module_properties
-                            .get(&property)
-                            .and_then(|property| property.owner),
-                    )
-                    .map_err(|()| PropertyReferenceRealizationTarget::Module(property))?,
-                },
-            )?,
+            } => {
+                let (written_getter, written_setter) = written_default_accessor_names(ir, property)
+                    .map_err(|()| PropertyReferenceRealizationTarget::Module(property))?;
+                let getter_name = written_getter.unwrap_or_else(|| getter_name.as_ref().to_owned());
+                let setter_name =
+                    written_setter.or_else(|| setter_name.as_deref().map(str::to_owned));
+                module_property(
+                    ir.referenced_module_properties
+                        .get(&property)
+                        .ok_or(PropertyReferenceRealizationTarget::Module(property))?,
+                    facades,
+                    property,
+                    mutable,
+                    declared_accessors(ir, property),
+                    (&getter_name, setter_name.as_deref()),
+                    ModulePropertySite {
+                        caller: reference_owner,
+                        dispatch: referenced_member_dispatch(
+                            ir,
+                            reflection_owner,
+                            ir.referenced_module_properties
+                                .get(&property)
+                                .and_then(|property| property.owner),
+                        )
+                        .map_err(|()| PropertyReferenceRealizationTarget::Module(property))?,
+                    },
+                )?
+            }
             FirPropertyReferenceTarget::Classifier {
                 owner,
                 property,
