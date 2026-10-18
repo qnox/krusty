@@ -122,6 +122,7 @@ mod enum_entry_method_owner;
 mod explicit_backing_fields;
 mod explicit_property_write;
 mod explicit_receiver_levels;
+mod expression_qualifier_tree;
 mod expression_qualifiers;
 use explicit_receiver_levels::{FunctionValueLevel, FunctionValueRungs};
 mod expression_getter;
@@ -197,6 +198,7 @@ mod postponed_diagnostics;
 mod property_declaration_check;
 mod property_write_selection;
 mod qualified_call_shaping;
+mod qualifier_tree_type_arguments;
 mod qualifiers;
 mod receiver_capture_identity;
 use receiver_capture_identity::{LambdaReceiverSlot, ReceiverDeclarationRole, ReceiverLabel};
@@ -22671,7 +22673,7 @@ impl<'a> Checker<'a> {
         // package, so there is no value to evaluate: the write is the declaring facade's `setX`
         // accessor, selected in that package's scope alone (a fully-qualified reference names one
         // declaration, so this file's imports must neither shadow nor widen it).
-        self.check_package_receiver_forms(scope, receiver);
+        self.check_assignment_receiver_qualifier_tree(scope, receiver);
         let receiver_qualifier = self.qualifier(scope, QualifierInput::Expression(receiver));
         if let Ok(ResolvedQualifier::Classifier(owner)) = receiver_qualifier {
             // Associated properties precede the members of the companion-object value.
@@ -32917,7 +32919,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         unreachable_statement_depth: 0,
         discover_anonymous_captures: false,
         selected_qualifier_accesses: HashMap::default(),
-        reported_package_qualifier_forms: HashSet::default(),
+        selector_operands: None,
         discovers_captures_at_construction: false,
         finalized_anonymous_captures: crate::fx_hash::HashSet::default(),
         discovered_anonymous_captures: HashMap::default(),
@@ -35673,9 +35675,8 @@ struct Checker<'a> {
     /// checker-local because its sole consumer is a source diagnostic emitted before FIR handoff.
     selected_qualifier_accesses:
         HashMap<ExprId, static_access_type_arguments::SelectedQualifierAccess>,
-    /// Package qualifier segments already reported by `package_qualifier_forms`, since every
-    /// access through a shared prefix reaches the same segment.
-    reported_package_qualifier_forms: HashSet<ExprId>,
+    /// How each expression of this file is used by its parent selector, indexed on first need.
+    selector_operands: Option<expression_qualifier_tree::SelectorOperands>,
     /// This authoritative check finds each anonymous object's captures where the object is
     /// constructed: its body is checked once for the captures, then again with them.
     discovers_captures_at_construction: bool,
@@ -53896,7 +53897,7 @@ impl<'a> Checker<'a> {
         });
         self.check_expression_usage(scope, e);
         self.check_static_access_type_arguments(e);
-        self.check_package_qualifier_forms(scope, e);
+        self.check_expression_qualifier_tree(scope, e);
         self.check_expression_missing_supertypes(e);
         self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();

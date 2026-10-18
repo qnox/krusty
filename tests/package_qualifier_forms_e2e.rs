@@ -276,6 +276,180 @@ fun use() {
 }
 ";
 
+const OUTER_CLASS_TYPE_ARGUMENTS: &str =
+    "type arguments for outer class are redundant when nested class is referenced.";
+
+fn nested_via_instance(location: &str, classifier: &str) -> String {
+    format!("{location}: nested {classifier} accessed via instance reference.")
+}
+
+/// Before the feature, the qualifier a segment continues carries its predecessor's type
+/// arguments as an outer-class error, and a package receiver of an access that has type arguments
+/// of its own is rejected. kotlinc reports the standalone `part1<Int>.part2.Obj` twice: once on the
+/// `part2` qualifier and once on the `Obj` value that keeps it as its explicit parent.
+#[test]
+fn type_arguments_on_the_last_packages_are_errors() {
+    let errors = vec![
+        error("Use.kt:2:13", OUTER_CLASS_TYPE_ARGUMENTS),
+        error("Use.kt:3:13", OUTER_CLASS_TYPE_ARGUMENTS),
+        error("Use.kt:4:13", OUTER_CLASS_TYPE_ARGUMENTS),
+        error("Use.kt:5:13", TYPE_ARGUMENTS),
+        error("Use.kt:6:13", OUTER_CLASS_TYPE_ARGUMENTS),
+        error("Use.kt:7:13", OUTER_CLASS_TYPE_ARGUMENTS),
+        error("Use.kt:7:13", OUTER_CLASS_TYPE_ARGUMENTS),
+        error("Use.kt:8:13", OUTER_CLASS_TYPE_ARGUMENTS),
+    ];
+    assert_matches_kotlinc(
+        &[
+            ("Declarations.kt", DECLARATIONS),
+            ("Use.kt", TYPE_ARGUMENTS_ON_FINAL_PACKAGES),
+        ],
+        &[],
+        &errors,
+        &[],
+    );
+}
+
+const OUTER: &str = "\
+package part1.part2
+
+class Outer<T> {
+    class Nested {
+        object Deep { val y = 1 }
+        companion object
+    }
+    inner class Inner { fun g() = 1 }
+    object O { val z = 1 }
+    enum class En { A; companion object }
+    interface Face { companion object }
+    companion object
+}
+";
+
+/// The FIR qualifiers of package and classifier chains: a receiver segment continues its
+/// predecessor (an outer-class error when the predecessor has type arguments, which a nested
+/// classifier also inherits), a standalone classifier value keeps its predecessor and that
+/// predecessor's errors, and is a nested classifier accessed via an instance when the predecessor
+/// has type arguments. An `inner` class is exempt from the outer-class error.
+const TYPE_ARGUMENTS_ON_QUALIFIERS: &str = "\
+fun use() {
+    val a = part1<Int>.part2<String>.top()
+    val b = part1.part2<Int>.Obj
+    val c = part1<Int>.part2<String>.Obj.x
+    val d = part1.part2<Int>.Cls::class
+    val e = part1.part2<Int>.Cls.make()
+    val f = part1.part2<Int>.prop
+    part1<Int>.part2.prop = 4
+    part1.part2<Int>.prop = 5
+    val g = part1<Int>.part2.Alias()
+    val h = (part1.part2<Int>).top()
+    val i = part1<Int>.part2.Cls
+    val j = part1.part2<Int>.Cls
+    val k = part1<Int>.part2<String>.Obj
+    val l = part1.part2.Outer<Int>.O
+    val m = part1.part2<Int>.Obj::x
+    val n = part1.part2<Int>.Alias
+    val o = part1.part2<Int>.Cls.Companion
+    val p = part1.part2.Outer<Int>.Nested.Deep
+    val q = part1.part2.Outer<Int>.Nested
+    val r = part1.part2<Int>.Cls.Companion.make()
+    val s = part1.part2.Outer<Int>.En
+    val t = part1.part2.Outer<Int>.Face
+    val u = part1.part2<Int>.Outer.Companion
+    val v = part1.part2.Outer<Int>.Companion
+    val w = part1.part2.Outer<Int>.Inner::g
+    val y = (part1<Int>).part2.Obj
+}
+";
+
+#[test]
+fn type_arguments_on_qualifier_segments_are_errors() {
+    let outer = |location| error(location, OUTER_CLASS_TYPE_ARGUMENTS);
+    let packages = |location| error(location, TYPE_ARGUMENTS);
+    let errors = vec![
+        outer("Use.kt:2:13"),
+        packages("Use.kt:2:13"),
+        nested_via_instance("Use.kt:3:30", "class 'Obj'"),
+        outer("Use.kt:4:13"),
+        outer("Use.kt:5:13"),
+        outer("Use.kt:6:13"),
+        packages("Use.kt:7:13"),
+        outer("Use.kt:8:5"),
+        packages("Use.kt:9:5"),
+        outer("Use.kt:10:13"),
+        packages("Use.kt:11:14"),
+        outer("Use.kt:12:13"),
+        outer("Use.kt:12:13"),
+        nested_via_instance("Use.kt:13:30", "class 'Cls'"),
+        outer("Use.kt:14:13"),
+        outer("Use.kt:14:13"),
+        nested_via_instance("Use.kt:14:38", "class 'Obj'"),
+        nested_via_instance("Use.kt:15:36", "class 'O'"),
+        outer("Use.kt:16:13"),
+        nested_via_instance("Use.kt:17:30", "typealias 'Alias'"),
+        outer("Use.kt:18:13"),
+        outer("Use.kt:18:13"),
+        outer("Use.kt:19:13"),
+        outer("Use.kt:19:13"),
+        nested_via_instance("Use.kt:19:43", "class 'Deep'"),
+        nested_via_instance("Use.kt:20:36", "class 'Nested'"),
+        outer("Use.kt:21:13"),
+        nested_via_instance("Use.kt:22:36", "enum class 'En'"),
+        nested_via_instance("Use.kt:23:36", "interface 'Face'"),
+        outer("Use.kt:24:13"),
+        outer("Use.kt:24:13"),
+        nested_via_instance("Use.kt:25:36", "companion object 'Companion'"),
+        outer("Use.kt:27:13"),
+        outer("Use.kt:27:13"),
+    ];
+    assert_matches_kotlinc(
+        &[
+            ("Declarations.kt", DECLARATIONS),
+            ("Outer.kt", OUTER),
+            ("Use.kt", TYPE_ARGUMENTS_ON_QUALIFIERS),
+        ],
+        &[],
+        &errors,
+        &[],
+    );
+}
+
+/// A classifier value keeps its package qualifier, which is then checked for parentheses and
+/// type arguments like a receiver; a classifier continued from a package checks its receiver.
+const SELECTED_VALUE_FORMS: &str = "\
+fun use() {
+    val a = (part1).part2.Obj
+    val b = (part1<Int>).part2.Obj.x
+    val c = part1<Int>.part2.Obj.x
+    val d = (part1).part2.Cls.Companion
+    val e = part1<Int>.part2.Cls.Companion.make()
+}
+";
+
+#[test]
+fn package_qualifiers_of_selected_values_are_deprecated() {
+    let warnings = if release_has_feature() {
+        vec![
+            warning("Use.kt:2:13", PARENTHESIZED),
+            warning("Use.kt:3:13", PARENTHESIZED),
+            warning("Use.kt:4:18", TYPE_ARGUMENTS),
+            warning("Use.kt:5:13", PARENTHESIZED),
+            warning("Use.kt:6:18", TYPE_ARGUMENTS),
+        ]
+    } else {
+        Vec::new()
+    };
+    assert_matches_kotlinc(
+        &[
+            ("Declarations.kt", DECLARATIONS),
+            ("Use.kt", SELECTED_VALUE_FORMS),
+        ],
+        &[],
+        &[],
+        &warnings,
+    );
+}
+
 #[test]
 fn a_type_argument_segment_cannot_name_the_last_package() {
     if !release_has_feature() {

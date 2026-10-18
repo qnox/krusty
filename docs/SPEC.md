@@ -13907,22 +13907,57 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
       `canBePackagePartOfQualifier`): the left-to-right qualifier walk fails there and reports
       "unresolved reference '<segment>'." at that segment's name. A segment naming a classifier is
       unaffected.
+    - The qualifier checks run over the FIR resolved qualifiers of a chain
+      (`src/resolve/expression_qualifier_tree.rs`, from kotlinc's `QualifiedNameResolution.kt` and
+      `FirCallResolver.resolveVariableAccessAndSelectCandidateImpl`), built once at the expression
+      that consumes the chain: the call, property access, assignment, callable reference or class
+      literal whose explicit receiver it is, or the chain itself used as a value. Each segment that
+      binds a package or classifier is one qualifier. A segment used as a receiver continues its
+      predecessor: it carries an outer-class type-argument diagnostic when the predecessor has type
+      arguments; a classifier nested in a classifier also inherits them and keeps the predecessor as
+      its explicit parent; a segment continuing a package keeps only its own list and drops the
+      package (a classifier keeps it with the feature). A last segment naming a classifier with a
+      value (an object, or a class with a companion) that is not itself a receiver is selected as a
+      value: it keeps its predecessor and the predecessor's diagnostics and has only its own list.
+      Only the last qualifier and its explicit parents stay in the tree.
     - Parentheses leave no AST node; the parser keeps each wrapped expression's outermost
-      parentheses (`File::parenthesized_expression_spans`). The outermost parenthesized prefix of
-      an accessed qualifier that binds a package (`(pkg).f()`, `((pkg).sub).Obj.x`,
-      `((pkg).sub.Cls).f()` at `(pkg)`, `(pkg).sub.p = v`) is reported once at those parentheses:
-      "wrapping package qualifiers in parentheses is not allowed.", an error with the feature and a
-      deprecation warning (`PARENTHESIZED_PACKAGE_QUALIFIER_WARNING`) without it.
-    - Without the feature, a type-argument list on a package segment that a later package segment
-      follows, in a qualifier that then reaches a classifier (`pkg<Int>.sub.Obj.x`), is the
+      parentheses (`File::parenthesized_expression_spans`). A package qualifier in the tree that
+      its container selects through while wrapped in parentheses (`(pkg).f()`, `(pkg.sub).Obj.x`,
+      `(pkg).sub.p = v`) is reported at those parentheses, else at the first parentheses inside it
+      in source pre-order (`(pkg).sub.f()`, `((pkg).sub.Cls).f()` at `(pkg)`): "wrapping package
+      qualifiers in parentheses is not allowed.", an error with the feature and a deprecation
+      warning (`PARENTHESIZED_PACKAGE_QUALIFIER_WARNING`) without it.
+    - Without the feature, the same search also finds type-argument lists, reported as the
       deprecation warning "type arguments are not allowed for packages."
-      (`TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING`), once at the leftmost list. A
-      parenthesized package prefix is reported instead of it. A list on the last package segment,
-      or on a qualifier that ends in a package or a value, is kotlinc's
-      `TYPE_ARGUMENTS_FOR_OUTER_CLASS_WHEN_NESTED_REFERENCED` / `TYPE_ARGUMENTS_NOT_ALLOWED` error,
-      and none of these deprecations; krusty does not report those errors yet.
+      (`TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING`) at the first one
+      (`pkg<Int>.sub.Obj.x`, `pa<Int>.pb<String>.pc.Deep.x` at `<Int>`). A package qualifier with
+      type arguments or an outer-class diagnostic is skipped, and a classifier continued from a
+      package (no explicit parent) searches its receiver instead, unless it carries an outer-class
+      diagnostic.
     - A release without the feature (2.4.0, 2.4.10) reports none of these.
     (`tests/package_qualifier_forms_e2e.rs`.)
+  - Type arguments on the qualifiers of an expression chain, in every release
+    (`src/resolve/qualifier_tree_type_arguments.rs`, same tree):
+    - Each qualifier in the tree reports "type arguments for outer class are redundant when nested
+      class is referenced." once per outer-class diagnostic it carries
+      (`FirQualifierWithTypeArgumentsChecker`), except one naming an `inner` class:
+      `pkg<Int>.sub.f()` and `pkg.sub<Int>.Obj.x` once; `val o = pkg<Int>.sub.Obj` twice, on
+      `sub` and on the `Obj` value that keeps it; `pkg.Outer<Int>.Nested.Deep.y` twice, since
+      `Deep` inherits `Nested`'s arguments. `pkg<Int>.sub.Obj.x` drops `sub` and reports only the
+      deprecation above.
+    - A classifier selected as a value whose predecessor has type arguments is "nested <class |
+      object kind> '<name>' accessed via instance reference." at the segment name
+      (`val o = pkg.sub<Int>.Obj`, `pkg.Outer<Int>.O`), with kotlinc's `typealias`, `companion
+      object`, `interface`, `enum class` or `class` word.
+    - Without the feature, a qualified access whose explicit receiver is a package with its own
+      type arguments (`pkg.sub<Int>.f()`, `pkg.sub<Int>.p = v`, `(pkg.sub<Int>).f()` inside the
+      parentheses) reports "type arguments are not allowed for packages." on that receiver
+      (`FirTypeArgumentsNotAllowedExpressionChecker`); a class literal is not a qualified access.
+      With the feature no package carries type arguments.
+    - Not modelled yet: a classifier qualifier with inherited type arguments used as a value
+      receiver (`pkg.Outer<Int>.O.z` leaves `z` unresolved in kotlinc), a callable reference whose
+      package receiver has type arguments ("expression expected, but package name found."), and
+      the constructor-call deprecation for a qualifier with type arguments.
   - `ErrorAboutDataClassCopyVisibilityChange`: a `data class` whose primary constructor is not
     public is reported at the constructor's visibility modifier unless it is annotated
     `@ConsistentCopyVisibility` or `@ExposedCopyVisibility`, and a call or callable reference to its
