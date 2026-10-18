@@ -13,6 +13,7 @@ import java.io.File
 import java.io.PrintStream
 import java.net.URLClassLoader
 import java.util.ServiceLoader
+import kotlin.system.exitProcess
 
 /**
  * krusty's plugin host: runs kotlinc compiler-plugin jars on `kotlin-compiler-embeddable` for krusty.
@@ -30,7 +31,16 @@ private const val LOADED = 2
 private const val FAILED = 3
 private const val SHUTDOWN = 4
 
+/**
+ * Serves requests until krusty asks it to stop or closes stdin. Either way the JVM exits at once:
+ * a plugin may have started threads that would otherwise keep it alive.
+ */
 fun main() {
+    serve()
+    exitProcess(0)
+}
+
+private fun serve() {
     val frames = DataOutputStream(System.out.buffered())
     System.setOut(PrintStream(System.err, true))
     val input = DataInputStream(System.`in`.buffered())
