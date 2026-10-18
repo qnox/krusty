@@ -168,6 +168,7 @@ fn emit_analyzed_into<B: Backend>(
             .filter(|package| *package != crate::types::TypeName::ROOT)
             .map(|package| package.render().replace('/', "."));
         let mut ir = crate::ir::IrFile::with_package(package);
+        ir.set_same_module_inlining(backend.same_module_inlining());
         ir.recursive_type_of = source.recursive_type_of();
         ir.source_debug =
             crate::ir::SourceDebug::from_map(&source_map, source_id, &source_line_counts);

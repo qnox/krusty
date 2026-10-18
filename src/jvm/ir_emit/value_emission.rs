@@ -675,6 +675,9 @@ impl super::Emitter<'_> {
                     }
                 }
             }
+            IrExpr::Call { args, .. } if self.ir.compiled_inline_call(e).is_some() => {
+                self.inline_compiled_module_call(e, args, code);
+            }
             IrExpr::Call {
                 callee,
                 dispatch_receiver,

@@ -4986,6 +4986,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stays on file 1 and opens its range after that identity range. Tests:
   `tests/cross_file_inline_source_map_e2e.rs`.
 
+- **A plain same-module inline call is inlined from the callee's compiled body on the JVM.**
+  kotlinc compiles a same-module inline function to a method node (`IrSourceCompilerForInline`)
+  and hands it to the same `MethodInliner` a library callee goes through, so the inlined code keeps
+  the callee's erased types: a generic argument is boxed into an `Object` temporary and the erased
+  result is narrowed with a `checkcast` (and unboxed) after the body. A backend states before any
+  body is lowered whether it inlines from compiled bodies (`Backend::same_module_inlining`); the
+  JVM does, every other target expands the IR template. Common lowering then decides each call's
+  route once (`fir_lower/source_calls/inline_route.rs`): a call stays a call recorded for the
+  backend (`IrFile::compiled_inline_call`) only when the callee is a public top-level, non-suspend
+  function in this module (not a companion-block member, which its class compiles) with no function-typed parameter or receiver, no reified type parameter,
+  and a template without lambdas, callable references, local classes or nested expansions, called
+  with every argument from a named, non-suspend, non-inline function body (not a lambda, local
+  function, default argument, initializer or accessor). Every other call is expanded in IR for a
+  named reason. The JVM compiles each such callee once per emission pass, alone, into a writer of
+  its declaring class and source file, and the inliner reads that body as it reads a dependency's;
+  a body it cannot compile or inline fails the emission, never becoming a real call. The call
+  keeps its record when a value-class representation wrapper takes its place, and a call one of
+  whose operands is such a call marks its line again at its invoke, as kotlinc forgets the line
+  after an inlined body. Not yet matched: a call on an inlined result that a value-class wrapper
+  then unboxes keeps the line on the wrapper. Tests: `tests/inline_same_module_bytes_e2e.rs`
+  (same-file and cross-file calls, a value-class argument, and a call on an inlined result, against
+  kotlinc's bytes, and a run).
+
 - **`inline fun` (same-module, user-defined):** expanded at each call site by the IR lowerer
   (`Lower::lower_inline_fn_call`), matching kotlinc's effect — value parameters bind to once-evaluated
   argument temps, and a lambda argument is inlined at the call sites of its function-typed parameter

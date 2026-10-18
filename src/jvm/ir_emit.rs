@@ -338,6 +338,8 @@ pub(crate) struct EmitRun {
     /// a diagnostic. Broken common-IR ownership contracts are invariants and do not use this path.
     emit_bail: std::cell::Cell<bool>,
     emit_error: std::cell::RefCell<Option<String>>,
+    /// This pass's same-module inline functions, compiled before their callers.
+    compiled_inline_callees: bytecode_inline_call::CompiledInlineCallees,
     /// Lambda impl `FunId`s that got a REAL `invokedynamic` this pass. A lambda spliced by the inliner
     /// (a `require { … }` message, an inlined `flatMap { … }` body) never emits one, so its standalone
     /// `$lambda$N` method is dead — dropped on the re-emit (kotlinc emits neither it nor its facade).
@@ -1499,6 +1501,7 @@ fn emit_pass(
         &class_member_fids,
         &member_access_bridges.private_calls,
     );
+    bytecode_inline_call::compile_inline_callees(ir, facade, env, opts);
     let mut cw = new_writer(facade, "java/lang/Object", opts);
     // The facade constructs the file's local classes, and a class that references one as a class
     // constant must list it in `InnerClasses` — reflection cross-checks the two sides and throws

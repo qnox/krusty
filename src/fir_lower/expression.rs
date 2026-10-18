@@ -1419,6 +1419,14 @@ impl BodyLowering<'_> {
                     .entry(call)
                     .or_insert(debug.source);
             }
+            // So does a call one of whose operands is inlined from a compiled body: the inlined
+            // code ran under the callee's lines.
+            if let Some(call) = self.ir.call_after_compiled_inline_operand(lowered) {
+                self.ir
+                    .expr_source_lines
+                    .entry(call)
+                    .or_insert(debug.source);
+            }
             for raw in first_generated..self.ir.exprs.len() {
                 let raw = raw as u32;
                 if !self.ir.suspend_calls.contains_key(&raw) {

@@ -19,6 +19,7 @@ mod coroutine_markers;
 mod coroutine_transform;
 mod debug_metadata;
 mod descriptor_mentions;
+mod emitted_method_code;
 mod enclosing_method;
 mod exception_tables;
 mod field_annotations;
