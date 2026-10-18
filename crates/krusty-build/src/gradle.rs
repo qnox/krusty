@@ -294,15 +294,17 @@ mod tests {
         );
     }
 
+    /// The kotlin-versions manifest is the only list of supported releases: the plugin and its
+    /// packaging read it, and CI runs a Gradle lane for each of its releases.
     #[test]
     fn supported_gradle_kotlin_versions_follow_the_repository_manifest() {
         let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let manifest = std::fs::read_to_string(repository.join("kotlin-versions"))
             .expect("read kotlin-versions");
-        let expected = manifest
+        let supported = manifest
             .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| line.split('#').next().unwrap_or_default().trim())
+            .filter(|line| !line.is_empty())
             .map(|line| line.split_whitespace().next().expect("reference version"))
             .collect::<Vec<_>>();
 
@@ -310,49 +312,36 @@ mod tests {
             repository.join("tools/krusty-gradle/src/main/kotlin/krusty/KrustyKotlinPlugin.kt"),
         )
         .expect("read Gradle plugin");
-        let supported = plugin
+        let check = plugin
             .split_once("private fun supportedKotlinPluginVersion")
-            .expect("supported Kotlin plugin versions")
+            .expect("supported Kotlin plugin version check")
             .1
-            .split_once("else ->")
-            .expect("unsupported-version arm")
+            .split_once("\n    }\n")
+            .expect("end of the supported Kotlin plugin version check")
             .0;
-        let plugin_versions = quoted_release_versions(supported);
-        assert_eq!(plugin_versions, expected);
-
-        let packaging =
-            std::fs::read_to_string(repository.join("scripts/package-gradle-plugin.sh"))
-                .expect("read Gradle packaging script");
-        let documented_versions = packaging
-            .lines()
-            .find_map(|line| {
-                line.split_once("// supported: ")
-                    .map(|(_, versions)| versions)
-            })
-            .expect("packaged README supported versions")
-            .split(',')
-            .map(str::trim)
-            .collect::<Vec<_>>();
-        assert_eq!(documented_versions, expected);
-        let manifest_versions = packaging
-            .lines()
-            .find_map(|line| line.strip_prefix("kotlin-gradle-plugin="))
-            .expect("packaged manifest supported versions")
-            .split(',')
-            .collect::<Vec<_>>();
-        assert_eq!(manifest_versions, expected);
+        assert_eq!(quoted_release_versions(check), Vec::<&str>::new());
 
         let workflow = std::fs::read_to_string(repository.join(".github/workflows/ci.yml"))
             .expect("read CI workflow");
-        let mut matrix_versions = workflow
+        let gradle_job = workflow
+            .split_once("\n  gradle:\n")
+            .expect("Gradle integration job")
+            .1
+            .split_once("\n    steps:\n")
+            .expect("Gradle integration steps")
+            .0;
+        assert!(
+            gradle_job.contains("kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}"),
+            "every supported release needs a Gradle lane:\n{gradle_job}"
+        );
+        let unsupported = gradle_job
             .lines()
             .filter_map(|line| line.split_once("{ kotlin:").map(|(_, row)| row))
             .filter_map(|row| row.split(',').next())
-            .map(|version| version.trim().trim_matches('\''))
+            .map(str::trim)
+            .filter(|version| !supported.contains(version))
             .collect::<Vec<_>>();
-        matrix_versions.sort_unstable();
-        matrix_versions.dedup();
-        assert_eq!(matrix_versions, expected);
+        assert_eq!(unsupported, Vec::<&str>::new());
     }
 
     /// The release Maven repository is exercised with the real krusty CLI. The proxy records each
@@ -784,7 +773,9 @@ mod tests {
             release_boundary.is_err(),
             "release boundary probe succeeded"
         );
-        if matches!(kgp.as_str(), "2.4.20" | "2.4.21") {
+        let release = krusty::kotlin_version::KotlinVersion::parse(&kgp)
+            .unwrap_or_else(|| panic!("Kotlin Gradle plugin {kgp} is not a release version"));
+        if release >= krusty::kotlin_version::KotlinVersion::V2_4_20 {
             let invocation = single_invocation(&log);
             assert!(has_pair(
                 &invocation,
