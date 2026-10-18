@@ -874,6 +874,18 @@ mod tests {
             flags: 0,
             annotations: Vec::new(),
         };
+        let value_parameter = KlibIrParameter {
+            base: base(value_symbol),
+            name: "value".to_owned(),
+            ty: error,
+            vararg_element_type: None,
+            default_value: None,
+        };
+        let (extension_receiver, regular_parameters) = if extension_receiver {
+            (Some(value_parameter), Vec::new())
+        } else {
+            (None, vec![value_parameter])
+        };
         let function = arena.push_function(KlibIrFunction {
             base: base(function_symbol),
             name: "check".to_owned(),
@@ -885,23 +897,8 @@ mod tests {
             }],
             dispatch_receiver: None,
             context_parameters: Vec::new(),
-            extension_receiver: extension_receiver.then(|| KlibIrParameter {
-                base: base(value_symbol),
-                name: "value".to_owned(),
-                ty: error,
-                vararg_element_type: None,
-                default_value: None,
-            }),
-            regular_parameters: (!extension_receiver)
-                .then(|| KlibIrParameter {
-                    base: base(value_symbol),
-                    name: "value".to_owned(),
-                    ty: error,
-                    vararg_element_type: None,
-                    default_value: None,
-                })
-                .into_iter()
-                .collect(),
+            extension_receiver,
+            regular_parameters,
             return_type: error,
             overridden: Vec::new(),
             companion_extension_class: None,
