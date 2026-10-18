@@ -33023,6 +33023,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         delegate_getvalue_targets: HashMap::default(),
         delegate_setvalue_targets: HashMap::default(),
         delegate_provide_targets: HashMap::default(),
+        deprecation_use_sites: Default::default(),
         delegate_property_reference_type: None,
         super_ctor_params: HashMap::default(),
         context_args: HashMap::default(),
@@ -35736,6 +35737,7 @@ struct Checker<'a> {
     delegate_getvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
     delegate_setvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
     delegate_provide_targets: HashMap<ExprId, DelegateGetValueTarget>,
+    deprecation_use_sites: deprecation_usage::DeprecationUseSites,
     /// See [`TypeInfo::delegate_property_reference_type`].
     delegate_property_reference_type: Option<Ty>,
     /// Implicit context arguments per call (see [`TypeInfo::context_args`]).

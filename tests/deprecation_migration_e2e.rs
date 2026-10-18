@@ -6,6 +6,8 @@ use std::path::PathBuf;
 
 const DEPENDENCY: &str = r#"package lib
 
+import kotlin.reflect.KProperty
+
 @Deprecated("dep a", level = DeprecationLevel.ERROR)
 class A {
     @Deprecated("dep b")
@@ -18,7 +20,11 @@ class A {
 
 class P {
     @Deprecated("dep companion", level = DeprecationLevel.ERROR)
-    companion object { operator fun plusAssign(x: Int) {} }
+    companion object {
+        operator fun getValue(thisRef: Any?, property: KProperty<*>) = ""
+        operator fun plusAssign(x: Int) {}
+        fun baz(x: String): Int = 1
+    }
 }
 
 @Deprecated("warning a")
@@ -274,10 +280,39 @@ fn named_warning_policy_controls_deprecation_error_migration_period() {
 }
 
 #[test]
-fn deprecated_companion_selected_for_implicit_invoke_is_not_reported() {
-    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
-        return;
+fn implicit_invoke_reports_the_selected_owner_under_its_migration_policy() {
+    let source = r#"@Deprecated("deprecated owner", level = DeprecationLevel.ERROR)
+interface Factory {
+    companion object { operator fun invoke() = 1 }
+}
+
+fun use() = Factory()
+"#;
+    let warnings: &[&str] = if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+        &[]
+    } else {
+        &["Use.kt:6:13: 'interface Factory : Any' is deprecated. deprecated owner. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-82456."]
+    };
+    assert_matches_kotlinc(
+        &[("Use.kt", source)],
+        &[common::stdlib_jar()],
+        &[],
+        &[],
+        warnings,
+    );
+    if krusty::kotlin_version::target() >= KotlinVersion::V2_4_20 {
+        assert_matches_kotlinc(
+            &[("Use.kt", source)],
+            &[common::stdlib_jar()],
+            &[IMPLICIT_INVOKE],
+            &["Use.kt:6:13: 'interface Factory : Any' is deprecated. deprecated owner."],
+            &[],
+        );
     }
+}
+
+#[test]
+fn implicit_invoke_keeps_companion_deprecation_at_its_ordinary_level() {
     let source = r#"interface Factory {
     @Deprecated("deprecated companion", level = DeprecationLevel.ERROR)
     companion object { operator fun invoke() = 1 }
@@ -289,7 +324,66 @@ fun use() = Factory()
         &[("Use.kt", source)],
         &[common::stdlib_jar()],
         &[],
+        &["Use.kt:6:13: 'companion object Companion : Any' is deprecated. deprecated companion."],
         &[],
+    );
+}
+
+#[test]
+fn delegated_property_companion_positions_follow_the_migration_policy() {
+    let source = r#"import lib.P
+
+val topLevel by P
+
+fun use() {
+    val local by P
+    P += 1
+}
+"#;
+    let warnings: &[&str] = if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+        &[]
+    } else {
+        &[
+            "Use.kt:3:17: 'companion object Companion : Any' is deprecated. dep companion. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-408.",
+            "Use.kt:6:18: 'companion object Companion : Any' is deprecated. dep companion. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-408.",
+            "Use.kt:7:5: 'companion object Companion : Any' is deprecated. dep companion. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-408.",
+        ]
+    };
+    assert_matches_kotlinc(
+        &[("Use.kt", source)],
+        &[common::stdlib_jar(), dependency()],
+        &[],
+        &[],
+        warnings,
+    );
+    if krusty::kotlin_version::target() >= KotlinVersion::V2_4_20 {
+        assert_matches_kotlinc(
+            &[("Use.kt", source)],
+            &[common::stdlib_jar(), dependency()],
+            &[COMPANION],
+            &[
+                "Use.kt:3:17: 'companion object Companion : Any' is deprecated. dep companion.",
+                "Use.kt:6:18: 'companion object Companion : Any' is deprecated. dep companion.",
+                "Use.kt:7:5: 'companion object Companion : Any' is deprecated. dep companion.",
+            ],
+            &[],
+        );
+    }
+}
+
+#[test]
+fn callable_reference_qualifier_reports_the_selected_companion_ordinary_deprecation() {
+    let source = r#"import lib.P
+
+fun use() {
+    val reference: (String) -> Int = P::baz
+}
+"#;
+    assert_matches_kotlinc(
+        &[("Use.kt", source)],
+        &[common::stdlib_jar(), dependency()],
+        &[],
+        &["Use.kt:4:38: 'companion object Companion : Any' is deprecated. dep companion."],
         &[],
     );
 }

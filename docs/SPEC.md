@@ -14182,9 +14182,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   innermost first. Enclosing classifiers use
   `ReportDeprecationsOfOuterImportedClasses`. The checker also reports a deprecated object called
   through implicit `invoke` (`ReportDeprecationsOfClassifiersInImplicitInvokes`) and a deprecated
-  companion selected through its class as an augmented-assignment target
-  (`ReportDeprecatedCompanionInDelegation`). Both decisions consume the resolver's selected
-  singleton identity and provenance. The 2.4.0 and 2.4.10 references predate these checkers, so
+  companion selected through its class as a delegated-property expression or augmented-assignment
+  target (`ReportDeprecatedCompanionInDelegation`). A companion used as a callable-reference
+  qualifier keeps its ordinary deprecation level in the released 2.4 compilers. Every decision
+  consumes the resolver's selected singleton identity and provenance. The 2.4.0 and 2.4.10
+  references predate these migrating checkers, so
   neither a `WARNING` nor an `ERROR` deprecation reports in these positions. Starting in 2.4.20, a
   `WARNING` reports as an ordinary deprecation; while one of the migrations remains disabled, an
   `ERROR` warns with the selected reference release's future-error suffix and is not hidden by
