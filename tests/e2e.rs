@@ -1267,6 +1267,8 @@ java_static_modules::declare!();
 mod java_supertype_type_arguments_e2e;
 #[path = "java_type_use_nullability_e2e.rs"]
 mod java_type_use_nullability_e2e;
+#[path = "java_type_variable_bound_e2e.rs"]
+mod java_type_variable_bound_e2e;
 #[path = "jdk_release_e2e.rs"]
 mod jdk_release_e2e;
 #[path = "jimage_compressed_e2e.rs"]
