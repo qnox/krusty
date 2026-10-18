@@ -357,10 +357,20 @@ impl CodeBuilder {
     /// without one. A retained entry is kept, since it records an inline call site rather than a
     /// start.
     pub(crate) fn withdraw_lines_since(&mut self, count: usize) {
-        while self.line_marks.len() > count
-            && self.retained_line_mark != Some(self.line_marks.len() - 1)
-        {
-            self.line_marks.pop();
+        let retained = self.retained_line_mark.and_then(|index| {
+            (index >= count
+                && index + 1 == self.line_marks.len()
+                && self
+                    .line_marks
+                    .get(index)
+                    .is_some_and(|(pc, _)| usize::from(*pc) == self.bytes.len()))
+            .then(|| self.line_marks[index])
+        });
+        self.line_marks.truncate(count);
+        self.retained_line_mark = self.retained_line_mark.filter(|&index| index < count);
+        if let Some(retained) = retained {
+            self.line_marks.push(retained);
+            self.retained_line_mark = Some(self.line_marks.len() - 1);
         }
     }
 
@@ -610,6 +620,37 @@ mod tests {
             [(0, 3), (1, 5)],
             "the marks at the new offset are last-wins, not appended"
         );
+    }
+
+    /// A retained index remains recorded after its pc has passed, but no longer protects that
+    /// capture's line when all of the capture's marks are withdrawn.
+    #[test]
+    fn withdrawal_does_not_preserve_stale_retention() {
+        let mut code = CodeBuilder::new(0);
+        let before = code.line_entry_count();
+        code.mark_line_kept(3);
+        advance(&mut code);
+        code.mark_line(4);
+        code.withdraw_lines_since(before);
+        assert_eq!(code.line_marks(), []);
+    }
+
+    /// A live retained call-site entry survives withdrawal, but an earlier ordinary entry from
+    /// the same capture does not. Its shifted index still protects it from the next mark.
+    #[test]
+    fn withdrawal_keeps_only_a_live_retained_entry() {
+        let mut code = CodeBuilder::new(0);
+        code.mark_line(2);
+        advance(&mut code);
+        let before = code.line_entry_count();
+        code.mark_line(3);
+        advance(&mut code);
+        code.mark_line_kept(4);
+        code.withdraw_lines_since(before);
+        assert_eq!(code.line_marks(), [(0, 2), (2, 4)]);
+
+        code.mark_line(5);
+        assert_eq!(code.line_marks(), [(0, 2), (2, 4), (2, 5)]);
     }
 
     /// Dead code marks nothing, and so arms nothing: the statement it would mark is dropped.
