@@ -6,6 +6,11 @@ fn bind_expression(
     expression: crate::fir::SigExprId,
     declaration_syntax: crate::fir::HeaderTypeId,
 ) {
+    // Selected spelling facts belong to the written occurrence. The compact declaration arena
+    // may retain an expanded alias template at this role, but metadata later walks its written
+    // tree. Binding the graph expression to the expanded id leaves a valid semantic signature
+    // with no exact spelling record (for example, `Cargo` expanded to `String`).
+    let declaration_syntax = headers.syntax.written_type_id(declaration_syntax);
     graph.bind_declaration_type_syntax(expression, declaration_syntax);
     let Some(graph_syntax) = graph.expression_type_syntax(expression) else {
         return;

@@ -65,7 +65,7 @@ impl HeaderSyntaxArena {
                     )),
                     None => None,
                 };
-                (name, arg, targs, Vec::new(), 0)
+                (name, arg, targs, Vec::new().into_boxed_slice(), 0)
             }
             HeaderTypeKind::Function {
                 parameters,
@@ -82,7 +82,13 @@ impl HeaderSyntaxArena {
                     )),
                     None => None,
                 };
-                ("<fun>".into(), arg, Vec::new(), fun_params, context_count)
+                (
+                    "<fun>".into(),
+                    arg,
+                    Vec::new(),
+                    fun_params.into_boxed_slice(),
+                    context_count,
+                )
             }
         };
         Some(TypeRef {
@@ -221,9 +227,9 @@ mod tests {
             arg: None,
             targs: Vec::new(),
             span,
-            fun_params: Vec::new(),
+            fun_params: Box::new([]),
             fun_context_count: 0,
-            qualifier_arguments: Box::new([]),
+            qualifier_arguments: Default::default(),
         }
     }
 
@@ -237,9 +243,9 @@ mod tests {
             arg: Some(Box::new(leaf("Unit", result))),
             targs: Vec::new(),
             span: shared,
-            fun_params: vec![receiver],
+            fun_params: vec![receiver].into_boxed_slice(),
             fun_context_count: 0,
-            qualifier_arguments: Box::new([]),
+            qualifier_arguments: Default::default(),
         };
         let expanded = function(leaf("\0formal", shared));
         let written = function(leaf("String", shared));

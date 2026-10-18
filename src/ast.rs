@@ -23,7 +23,7 @@ mod external_modifier_targets;
 mod operators;
 mod property_initializers;
 mod type_refs;
-pub use type_refs::{QualifierSegmentArguments, TrFlags, TypeRef};
+pub use type_refs::{QualifierArgumentLists, QualifierSegmentArguments, TrFlags, TypeRef};
 mod use_site_annotations;
 pub use binary_reference_tokens::BinaryReferenceTokens;
 pub(crate) use call_shape::explicit_call_receiver;

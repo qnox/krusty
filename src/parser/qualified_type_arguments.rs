@@ -80,9 +80,9 @@ impl Parser<'_> {
                     arg: None,
                     targs: Vec::new(),
                     span,
-                    fun_params: Vec::new(),
+                    fun_params: Box::new([]),
                     fun_context_count: 0,
-                    qualifier_arguments: Box::new([]),
+                    qualifier_arguments: Default::default(),
                 });
             } else {
                 let mut argument = self.parse_type();

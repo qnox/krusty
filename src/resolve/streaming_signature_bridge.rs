@@ -3865,7 +3865,10 @@ pub(crate) fn finalized_streamed_signature_index(
             .declarations
             .anchor(stub.id)
             .expect("a compact stub must retain its stable anchor");
-        let deferred_local_candidate = deferred_local_candidates.contains(&stub.id);
+        if deferred_local_headers::owns_complete_header(stub, &deferred_local_candidates) {
+            deferred_local_headers.insert(stub.id);
+            continue;
+        }
         let signature = if stub.kind == DeclarationKind::Function
             && stub
                 .flags
@@ -3945,10 +3948,6 @@ pub(crate) fn finalized_streamed_signature_index(
             }
         };
         let Some((mut parameters, mut result, mut receiver)) = signature else {
-            if deferred_local_candidate {
-                deferred_local_headers.insert(stub.id);
-                continue;
-            }
             crate::trace_compiler!(
                 "fir",
                 "signature finalization declined {:?}: no signature for kind {:?}",
@@ -3966,22 +3965,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 &mut parameters,
             )
         {
-            if deferred_local_candidate {
-                deferred_local_headers.insert(stub.id);
-                continue;
-            }
             failed.push(stub.id);
-            continue;
-        }
-        if deferred_local_candidate
-            && parameters
-                .iter()
-                .copied()
-                .chain(std::iter::once(result))
-                .chain(receiver)
-                .any(|ty| crate::fir::ResolvedTy::new(ty).is_err())
-        {
-            deferred_local_headers.insert(stub.id);
             continue;
         }
         let constructor_property_vararg =

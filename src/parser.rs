@@ -137,9 +137,9 @@ fn simple_type_ref(name: &str, span: crate::diag::Span) -> TypeRef {
         arg: None,
         targs: Vec::new(),
         span,
-        fun_params: Vec::new(),
+        fun_params: Box::new([]),
         fun_context_count: 0,
-        qualifier_arguments: Box::new([]),
+        qualifier_arguments: Default::default(),
     }
 }
 
@@ -3269,7 +3269,7 @@ impl<'a> Parser<'a> {
                         // representation later; parsing must not erase the declared supertype.
                         ifaces.push(ft);
                     } else {
-                        let mut targs = ft.fun_params.clone();
+                        let mut targs = ft.fun_params.to_vec();
                         if let Some(ret) = ft.arg.as_deref() {
                             targs.push(ret.clone());
                         }
@@ -3287,7 +3287,7 @@ impl<'a> Parser<'a> {
                             span: sup_span,
                             fun_params: ft.fun_params.clone(),
                             fun_context_count: ft.fun_context_count,
-                            qualifier_arguments: Box::new([]),
+                            qualifier_arguments: Default::default(),
                         });
                     }
                     if let Some(delegation) = self.parse_interface_delegation(
@@ -3397,9 +3397,9 @@ impl<'a> Parser<'a> {
                         arg: None,
                         targs,
                         span: sup_span,
-                        fun_params: Vec::new(),
+                        fun_params: Box::new([]),
                         fun_context_count: 0,
-                        qualifier_arguments: Box::new([]),
+                        qualifier_arguments: Default::default(),
                     });
                     delegation_supertype = u32::try_from(ifaces.len() - 1).ok();
                 }
@@ -3958,9 +3958,9 @@ impl<'a> Parser<'a> {
                     arg: Some(Box::new(ret)),
                     targs: Vec::new(),
                     span,
-                    fun_params,
+                    fun_params: fun_params.into_boxed_slice(),
                     fun_context_count,
-                    qualifier_arguments: Box::new([]),
+                    qualifier_arguments: Default::default(),
                 }
             } else if let [_] = params.as_slice() {
                 // A PARENTHESIZED type used for grouping (no `->` follows the `)`), most commonly to make
@@ -4040,9 +4040,9 @@ impl<'a> Parser<'a> {
                 arg,
                 targs,
                 span,
-                fun_params: Vec::new(),
+                fun_params: Box::new([]),
                 fun_context_count: 0,
-                qualifier_arguments: qualifier_arguments.into_boxed_slice(),
+                qualifier_arguments: qualifier_arguments.into(),
             };
             // Receiver (extension) function type `Recv.() -> R` ≡ `Function1<Recv, R>`, and
             // `Recv.(A) -> R` ≡ `Function2<Recv, A, R>`. The receiver folds in as the first function
@@ -4149,9 +4149,9 @@ impl<'a> Parser<'a> {
                 arg: None,
                 targs: receiver_targs,
                 span: Span::new(receiver_start, receiver_hi),
-                fun_params: Vec::new(),
+                fun_params: Box::new([]),
                 fun_context_count: 0,
-                qualifier_arguments: Box::new([]),
+                qualifier_arguments: Default::default(),
             }),
             declaration_name,
         )

@@ -61,9 +61,9 @@ impl SignatureConstraintExtractor {
                     arg: None,
                     targs: Vec::new(),
                     span: child.span,
-                    fun_params: Vec::new(),
+                    fun_params: Box::new([]),
                     fun_context_count: 0,
-                    qualifier_arguments: Box::new([]),
+                    qualifier_arguments: Default::default(),
                 };
             };
         if ty.is_function_type_syntax() {
@@ -232,9 +232,9 @@ impl SignatureConstraintExtractor {
                             arg: None,
                             targs: Vec::new(),
                             span: child.span,
-                            fun_params: Vec::new(),
+                            fun_params: Box::new([]),
                             fun_context_count: 0,
-                            qualifier_arguments: Box::new([]),
+                            qualifier_arguments: Default::default(),
                         };
                         self.graph.intern_name(&formal)
                     })

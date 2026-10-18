@@ -52,9 +52,9 @@ impl Checker<'_> {
                 .map(|syntax| syntax.arguments.clone())
                 .unwrap_or_default(),
             span: self.file.expr_spans[expression.0 as usize],
-            fun_params: Vec::new(),
+            fun_params: Box::new([]),
             fun_context_count: 0,
-            qualifier_arguments: Box::new([]),
+            qualifier_arguments: Default::default(),
         };
         let ty = self.type_ref_ty(scope, &reference);
         if ty == Ty::Error {

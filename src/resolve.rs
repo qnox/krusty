@@ -57040,7 +57040,7 @@ impl<'a> Checker<'a> {
             let mut probe = leaf.clone();
             probe.arg = None;
             probe.targs.clear();
-            probe.fun_params.clear();
+            probe.fun_params = Box::new([]);
             probe.fun_context_count = 0;
             if leaf.name != "Array" && self.type_ref_ty_silent(scope, &probe) == Ty::Error {
                 write!(
@@ -57098,7 +57098,7 @@ impl<'a> Checker<'a> {
             let mut probe = leaf.clone();
             probe.arg = None;
             probe.targs.clear();
-            probe.fun_params.clear();
+            probe.fun_params = Box::new([]);
             probe.fun_context_count = 0;
             if leaf.name != "Array" && self.type_ref_ty_silent(scope, &probe) == Ty::Error {
                 write!(

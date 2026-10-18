@@ -62,6 +62,22 @@ pub(super) fn declarations(
         .collect()
 }
 
+/// Whether Pass 2 owns this declaration's whole semantic header.
+///
+/// Nominal classifier headers and constructors are the exceptions. Pass 1 publishes classifier
+/// identity, formals, and applied layout so the active body checker can enter the classifier with
+/// a stable owner. It also publishes constructors because local super-constructor and ordinary
+/// constructor calls must resolve while that same body check is producing the remaining headers.
+pub(super) fn owns_complete_header(
+    stub: &crate::fir::DeclarationStub,
+    candidates: &HashSet<DeclarationId>,
+) -> bool {
+    !matches!(
+        stub.kind,
+        crate::fir::DeclarationKind::Classifier | crate::fir::DeclarationKind::Constructor
+    ) && candidates.contains(&stub.id)
+}
+
 /// A local declaration's compact semantic header may be complete while projection of one source
 /// occurrence still needs the active lexical scope. That spelling is published by the checked
 /// inline/default/body fragment. Non-local spelling failures remain Pass-1 failures.

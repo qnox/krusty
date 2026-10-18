@@ -269,8 +269,7 @@ pub struct HeaderSyntaxArena {
     source_spellings: crate::fx_hash::HashMap<HeaderTypeId, HeaderTypeId>,
     /// The `<…>` lists a qualified classifier type wrote on its segments before the last one
     /// (`TypeRef::qualifier_arguments`), by compact type.
-    qualifier_arguments:
-        crate::fx_hash::HashMap<HeaderTypeId, Box<[crate::ast::QualifierSegmentArguments]>>,
+    qualifier_arguments: crate::fx_hash::HashMap<HeaderTypeId, crate::ast::QualifierArgumentLists>,
     classifier_types: Vec<HeaderClassifierType>,
     type_operands: Vec<HeaderTypeId>,
     path_segments: Vec<LookupNameId>,

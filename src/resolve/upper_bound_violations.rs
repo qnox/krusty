@@ -595,9 +595,9 @@ impl<'a> Checker<'a> {
                 arg: None,
                 targs: class.base_type_args.clone(),
                 span,
-                fun_params: Vec::new(),
+                fun_params: Box::new([]),
                 fun_context_count: 0,
-                qualifier_arguments: Box::new([]),
+                qualifier_arguments: Default::default(),
             };
             self.record_finalized_declaration_type(
                 &reference,

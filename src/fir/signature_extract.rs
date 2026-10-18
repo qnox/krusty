@@ -923,9 +923,9 @@ impl SignatureConstraintExtractor {
             arg: None,
             targs: class.base_type_args.clone(),
             span: class.base_class_span.unwrap_or(class.span),
-            fun_params: Vec::new(),
+            fun_params: Box::new([]),
             fun_context_count: 0,
-            qualifier_arguments: Box::new([]),
+            qualifier_arguments: Default::default(),
         });
         let superclass = superclass
             .as_ref()
@@ -1139,9 +1139,9 @@ impl SignatureConstraintExtractor {
                 // `Outer<A>.Inner<B>.Deep<C>`.
                 targs: segment_arguments.into_iter().rev().flatten().collect(),
                 span: file.expr_spans[literal.0 as usize],
-                fun_params: Vec::new(),
+                fun_params: Box::new([]),
                 fun_context_count: 0,
-                qualifier_arguments: Box::new([]),
+                qualifier_arguments: Default::default(),
             },
             root,
         ))
@@ -1366,9 +1366,9 @@ impl SignatureConstraintExtractor {
                         arg: None,
                         targs: classifier.base_type_args.clone(),
                         span: classifier.base_class_span.unwrap_or(classifier.span),
-                        fun_params: Vec::new(),
+                        fun_params: Box::new([]),
                         fun_context_count: 0,
-                        qualifier_arguments: Box::new([]),
+                        qualifier_arguments: Default::default(),
                     };
                     self.compact_type(&supertype, scope, origin)
                 } else if let [supertype] = classifier.supertypes.as_slice() {
