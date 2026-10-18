@@ -216,8 +216,7 @@ impl Checker<'_> {
         requirements: &mut Vec<OptInRequirement>,
     ) {
         for &argument in self
-            .resolved_call_type_args
-            .get(&call)
+            .selected_call_type_arguments(call)
             .into_iter()
             .flatten()
             .flatten()

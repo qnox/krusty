@@ -154,6 +154,78 @@ fn shape_errors(dnn_and_flexible: bool) -> Vec<String> {
     errors
 }
 
+const CONDITIONAL_SHAPES: &str = "\
+interface J1
+interface J2
+class CJ : J1, J2
+class DJ : J1, J2
+fun cif(b: Boolean) = ra(if (b) CJ() else DJ())
+fun cwhen(i: Int) = ra(when (i) { 0 -> CJ(); 1 -> DJ(); else -> CJ() })
+fun celvis(x: CJ?) = ra(x ?: DJ())
+fun ctry(b: Boolean) = ra(try { if (b) CJ() else throw IllegalStateException() } catch (_: IllegalStateException) { DJ() })
+fun cnested(a: Boolean, b: Boolean) = ra(if (a) if (b) CJ() else DJ() else CJ())
+";
+
+/// The broad overload probes the same callable-reference expression first as `(String) -> Any`,
+/// where the generic `pick(T): Any` is more specific by parameter type. The more-specific overload
+/// then rechecks that expression as `(String) -> String`; the generic result is inapplicable and the
+/// non-generic declaration wins. No generic/reified commitment from the discarded probe belongs to
+/// the final callable reference.
+const CONTEXTUAL_GENERIC_TO_NON_GENERIC_REFERENCE: &str = "\
+@kotlin.jvm.JvmName(\"genericPick\")
+inline fun <reified T : Any> pick(value: T): Any = value
+fun pick(value: Any): String = value.toString()
+fun use(block: (String) -> Any, marker: Any): Int = block(marker.toString()).hashCode()
+fun use(block: (String) -> String, marker: String): String = block(marker)
+fun selected(): String = use(::pick, \"OK\")
+";
+
+#[test]
+fn every_conditional_form_retains_exact_intersection_diagnostics() {
+    let diagnostic = intersection("'J1' & 'J2'");
+    assert_matches_kotlinc(
+        &with_prelude(CONDITIONAL_SHAPES),
+        &[],
+        &[
+            &format!("7:23: {diagnostic}"),
+            &format!("8:21: {diagnostic}"),
+            &format!("9:22: {diagnostic}"),
+            &format!("10:24: {diagnostic}"),
+            &format!("11:39: {diagnostic}"),
+        ],
+        &[],
+    );
+}
+
+#[test]
+fn a_contextual_non_generic_reference_replaces_the_generic_probe_commitment() {
+    assert_matches_kotlinc(CONTEXTUAL_GENERIC_TO_NON_GENERIC_REFERENCE, &[], &[], &[]);
+    let (diagnostics, selected_arguments) = common::inspect_checker_with_stdlib(
+        CONTEXTUAL_GENERIC_TO_NON_GENERIC_REFERENCE,
+        |file, info, _| {
+            file.expr_arena
+                .iter()
+                .enumerate()
+                .find_map(|(index, expression)| {
+                    matches!(
+                        expression,
+                        krusty::ast::Expr::CallableRef { name, .. } if name == "pick"
+                    )
+                    .then(|| {
+                        info.resolved_call_type_arguments(krusty::ast::ExprId(index as u32))
+                            .map(<[_]>::to_vec)
+                    })
+                })
+        },
+    );
+    assert_eq!(diagnostics, Vec::<String>::new());
+    assert_eq!(
+        selected_arguments,
+        Some(None),
+        "the selected non-generic ::pick must own no type-argument commitment"
+    );
+}
+
 #[test]
 fn reified_type_argument_shapes_match_kotlinc() {
     let errors = shape_errors(false);

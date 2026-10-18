@@ -72,6 +72,8 @@ mod receiver_tests;
 #[cfg(test)]
 mod reference_tests;
 mod references;
+#[cfg(test)]
+mod reified_call_tests;
 mod returns;
 mod safe_index;
 #[cfg(test)]

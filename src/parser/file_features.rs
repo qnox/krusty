@@ -69,7 +69,7 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     );
     file.report_type_variance_conflicts_in_dnn_and_flexible =
         features.has("ReportTypeVarianceConflictsInDnnAndFlexible");
-    file.reified_type_arguments = crate::ast::ReifiedTypeArgumentFeatures {
+    file.reified_type_arguments = crate::features::ReifiedTypeArgumentFeatures {
         report_in_dnn_and_flexible: features.has("ReportReificationProblemsInDnnAndFlexible"),
         report_in_dnn_and_flexible_warning_format: features
             .deprecation_warning_format("ReportReificationProblemsInDnnAndFlexible"),

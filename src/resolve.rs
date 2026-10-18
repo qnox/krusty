@@ -7506,14 +7506,10 @@ pub struct TypeInfo {
     /// delegation publication consumes this stable-identity map immediately; neither syntax nor a
     /// spelling-based lookup crosses into FIR or lowering.
     pub(crate) checked_local_supertypes: HashMap<crate::fir::DeclarationId, Box<[Ty]>>,
-    /// Call `ExprId` → resolved type arguments. These may come from explicit syntax or inference and
-    /// are positional over the callee's type parameters.
-    pub resolved_call_type_args: HashMap<ExprId, Vec<Option<Ty>>>,
-    /// Additional constituents for inferred flow-intersection type arguments, positional over the
-    /// callee's type parameters like [`Self::resolved_call_type_args`]. The ordinary type argument is
-    /// its primary/JVM-erasure constituent; this sidecar preserves the complete checked Kotlin type
-    /// for FIR and reified inline consumers.
-    pub resolved_call_type_argument_bounds: HashMap<ExprId, Vec<Vec<Ty>>>,
+    /// Complete generic facts selected for each call. Rechecks replace the record atomically so
+    /// substitutions, intersection bounds, and reified declaration identities cannot come from
+    /// different overload winners.
+    selected_generic_calls: HashMap<ExprId, intersection_inference::SelectedGenericCall>,
     /// Exact flow projection selected at a committed value boundary whose declared storage type
     /// does not satisfy the target. This includes call arguments, interface delegates, receivers,
     /// and ordinary stable-local smart casts. FIR publishes the selected target view as a checked
@@ -7819,8 +7815,6 @@ pub enum ResolvedCall {
         /// Exact declaration type-parameter ordinals carrying `reified`, retained independently of
         /// provider origin so checked FIR can classify runtime substitutions.
         reified_type_parameter_ordinals: Box<[u32]>,
-        /// The declaration's own type-parameter identities, by ordinal, for diagnostics.
-        type_parameters: Box<[String]>,
         suspend: bool,
         /// Provider-normalized generic declaration shape selected for this exact call. Publication
         /// uses the receiver/parameter/result identities from this record; it never reopens the
@@ -9345,11 +9339,9 @@ impl TypeInfo {
                 ResolvedCall::Extension(selected) => selected.callable.generic_sig.as_deref(),
                 ResolvedCall::MemberExtension { .. } | ResolvedCall::LocalFunction(_) => None,
             };
-            let Some((signature, arguments)) = signature.zip(
-                self.resolved_call_type_args
-                    .get(&expression)
-                    .map(Vec::as_slice),
-            ) else {
+            let Some((signature, arguments)) =
+                signature.zip(self.resolved_call_type_arguments(expression))
+            else {
                 return result;
             };
             let bindings = signature
@@ -10941,6 +10933,7 @@ fn instantiate_member_extension_with(
     full_call_sig.reified_type_parameter_ordinals =
         function.reified_type_parameter_ordinals.clone();
     let mut bindings = shape.class_bindings.clone();
+    let mut lower_inputs = HashMap::default();
     for (_, parameter) in &method_type_params {
         bindings.remove(*parameter);
     }
@@ -10960,6 +10953,12 @@ fn instantiate_member_extension_with(
     let declared_receiver = generic
         .and_then(|signature| signature.receiver)
         .unwrap_or(function.receiver_ty);
+    intersection_inference::record_direct_lower_input(
+        generic,
+        declared_receiver,
+        extension_receiver,
+        &mut lower_inputs,
+    );
     crate::symbol_resolver::unify_ty(declared_receiver, extension_receiver, &mut bindings);
     let declared_params = generic.map_or(function.signature.params.as_slice(), |signature| {
         signature.params.as_slice()
@@ -10988,6 +10987,12 @@ fn instantiate_member_extension_with(
     for (parameter, actual) in context_actual_types.iter().enumerate() {
         let Some(actual) = actual else { continue };
         let declared = declared_params[parameter];
+        intersection_inference::record_direct_lower_input(
+            generic,
+            declared,
+            *actual,
+            &mut lower_inputs,
+        );
         unify_member_extension_slot(declared, *actual, deferred_type_variables, &mut bindings);
     }
     // Use the common index mapper over the SOURCE-VISIBLE shape. Implicit context parameters are
@@ -11027,6 +11032,12 @@ fn instantiate_member_extension_with(
         } else {
             *actual
         };
+        intersection_inference::record_direct_lower_input(
+            generic,
+            declared,
+            actual,
+            &mut lower_inputs,
+        );
         unify_member_extension_slot(declared, actual, deferred_type_variables, &mut bindings);
     }
     if let Some(expected) = result_constraint.expected() {
@@ -11146,6 +11157,7 @@ fn instantiate_member_extension_with(
         argument_parameters,
         type_arguments,
         bindings,
+        lower_inputs,
         parameter_indices,
     })
 }
@@ -11299,7 +11311,7 @@ impl<'a> Checker<'a> {
         };
         match selected {
             MemberExtensionFunctionSelection::Selected(candidate) => {
-                let candidate = *candidate;
+                let mut candidate = *candidate;
                 for &(parameter, source) in &candidate.argument_parameters {
                     let (Some(&expected), Some(&actual)) =
                         (candidate.visible_params.get(parameter), arg_tys.get(source))
@@ -11348,19 +11360,18 @@ impl<'a> Checker<'a> {
                     .is_some_and(|shape| shape.is_interface());
                 let dispatch_receiver =
                     self.implicit_receiver_selection(candidate.dispatch_receiver);
-                if !candidate.type_arguments.is_empty()
-                    && candidate.type_arguments.iter().all(Option::is_some)
-                {
-                    self.resolved_call_type_args
-                        .insert(call, candidate.type_arguments.clone());
-                }
+                let result = self.commit_member_extension_type_arguments(
+                    call,
+                    &explicit_type_args,
+                    &mut candidate,
+                );
                 self.narrow_member_extension_receiver(call, &candidate);
                 self.resolved_calls.insert(
                     call,
                     candidate.resolved_call(dispatch_receiver, extension_receiver, interface),
                 );
                 self.mark_extension_receiver_used(call, candidate.dispatch_receiver);
-                Some(candidate.ret)
+                Some(result)
             }
             MemberExtensionFunctionSelection::None(rejections) => self
                 .report_single_mapped_candidate_type_errors(
@@ -15224,13 +15235,13 @@ impl<'a> Checker<'a> {
                 }
             }
         };
-        let ret = self.apply_postponed_call_bindings(ret);
+        let mut ret = self.apply_postponed_call_bindings(ret);
         // The selected member's own return may still be being determined — `fun chain() = helper()`
         // reads `helper` before it has a type. Ask the engine for that declaration, exactly as the
         // member READ path does. This sits on the one selection funnel rather than at each syntactic
         // position, so a qualified call, an unqualified call through the implicit receiver, and a
         // call inside another member's body all get the same answer.
-        let ret = match ret.mentions_pending() {
+        ret = match ret.mentions_pending() {
             true => self
                 .demand_member
                 .and_then(|demand| demand(rt, name, &[]))
@@ -15282,12 +15293,15 @@ impl<'a> Checker<'a> {
             );
         }
         let explicit_type_args = self.resolved_explicit_type_args(scope, call);
-        if !explicit_type_args.is_empty() {
-            self.resolved_call_type_args
-                .insert(call, explicit_type_args.into_iter().map(Some).collect());
-        } else if let Some(inferred) = inferred_member_type_args {
-            self.resolved_call_type_args.insert(call, inferred);
-        }
+        ret = self.commit_module_member_generic_call(
+            call,
+            fi.generic_sig.as_ref(),
+            inferred_member_type_args,
+            &explicit_type_args,
+            &logical_arg_tys,
+            &fi.call_sig,
+            ret,
+        );
         let mut resolved = crate::symbol_resolver::ResolvedMember::from_member(
             rt,
             fi,
@@ -15666,8 +15680,7 @@ impl<'a> Checker<'a> {
         // selected construction. Type substitutions and source-slot mapping belong to that target,
         // just like `resolved_calls`; retaining either from the discarded probe can attach a generic
         // argument to a non-generic companion `of` declaration in checked FIR.
-        self.resolved_call_type_args.remove(&call);
-        self.resolved_call_type_argument_bounds.remove(&call);
+        self.clear_selected_generic_call(call);
         self.resolved_call_arg_slots.remove(&call);
         let expected = expected
             .filter(|expected| *expected != Ty::Error)
@@ -15832,9 +15845,14 @@ impl<'a> Checker<'a> {
                         .iter()
                         .map(|formal| selected.bindings.get(formal).copied())
                         .collect::<Vec<_>>();
-                    if !resolved.is_empty() && resolved.iter().all(Option::is_some) {
-                        self.resolved_call_type_args.insert(call, resolved);
-                    }
+                    self.replace_selected_generic_call(
+                        call,
+                        signature,
+                        &selected.call_sig,
+                        resolved,
+                    );
+                } else {
+                    self.clear_selected_generic_call(call);
                 }
                 self.record_selected_sam_arguments(scope, args, &selected.applied_params());
                 let result = selected.callable.ret;
@@ -17700,12 +17718,6 @@ impl<'a> Checker<'a> {
                     "resolve",
                     "EXT-SECTION name={name} rt={rt:?} call_targs={call_targs:?}"
                 );
-                // Stash the RESOLVED explicit type arguments so the lowerer can specialize a `<reified T>`
-                // classpath extension's spliced body (imports/classpath types resolve here, not there).
-                if !call_targs.is_empty() {
-                    self.resolved_call_type_args
-                        .insert(call, call_targs.iter().copied().map(Some).collect());
-                }
                 // The local levels, then member extensions and function-valued properties of the
                 // implicit receivers, precede top-level and imported extensions.
                 if let Some(ret) = self.record_scope_level_receiver_call(
@@ -21080,9 +21092,15 @@ impl<'a> Checker<'a> {
                                     || self.libraries.inherits_classifier_callables(owner)
                             })
                     }) {
-                        if !type_args.is_empty() {
-                            self.resolved_call_type_args
-                                .insert(call, type_args.into_iter().map(Some).collect());
+                        if let Some(signature) = member.generic_sig.clone() {
+                            self.replace_selected_generic_call(
+                                call,
+                                &signature,
+                                &member.call_sig,
+                                type_args.into_iter().map(Some).collect(),
+                            );
+                        } else {
+                            self.clear_selected_generic_call(call);
                         }
                         let ret = member.ret;
                         self.resolved_calls
@@ -21408,9 +21426,15 @@ impl<'a> Checker<'a> {
                     if let Some(member) =
                         self.select_classifier_callable(owner, &declared, &arg_kinds, &type_args)
                     {
-                        if !type_args.is_empty() {
-                            self.resolved_call_type_args
-                                .insert(call, type_args.into_iter().map(Some).collect());
+                        if let Some(signature) = member.generic_sig.clone() {
+                            self.replace_selected_generic_call(
+                                call,
+                                &signature,
+                                &member.call_sig,
+                                type_args.into_iter().map(Some).collect(),
+                            );
+                        } else {
+                            self.clear_selected_generic_call(call);
                         }
                         let ret = member.ret;
                         self.resolved_calls
@@ -33020,11 +33044,8 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         property_decl_types: HashMap::default(),
         explicit_backing_field_types: HashMap::default(),
         contextual_constructor_signatures: HashMap::default(),
-        resolved_call_type_args: HashMap::default(),
-        resolved_call_type_argument_bounds: HashMap::default(),
+        selected_generic_calls: HashMap::default(),
         inferred_expression_intersections: HashMap::default(),
-        resolved_call_type_argument_intersections: HashMap::default(),
-        selected_call_reified_type_parameters: HashMap::default(),
         selected_value_smartcasts: HashMap::default(),
         selected_numeric_conversions: HashMap::default(),
         selected_function_value_conversions: HashMap::default(),
@@ -34494,8 +34515,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         local_decl_types,
         property_decl_types,
         explicit_backing_field_types,
-        resolved_call_type_args,
-        resolved_call_type_argument_bounds,
+        selected_generic_calls,
         selected_value_smartcasts,
         selected_numeric_conversions,
         selected_function_value_conversions,
@@ -34812,8 +34832,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         checked_declaration_results: inferred_stable_declaration_rets,
         inferred_declaration_publications,
         checked_local_supertypes,
-        resolved_call_type_args,
-        resolved_call_type_argument_bounds,
+        selected_generic_calls,
         selected_value_smartcasts,
         selected_numeric_conversions,
         selected_function_value_conversions,
@@ -35174,12 +35193,8 @@ pub(crate) struct MemberExtensionFunctionCandidate {
     physical_name: String,
     /// Solved method type arguments in formal order. `None` is an unsolved formal.
     type_arguments: Vec<Option<Ty>>,
-    type_parameters: Box<[String]>,
-    /// Provider-normalized declaration signature and its selected call-site solution. They remain
-    /// attached to the candidate until commitment so every callable origin publishes identical
-    /// type-argument and intersection facts.
-    generic_sig: Option<crate::libraries::GenericSig>,
     bindings: crate::symbol_resolver::GSigBinds,
+    lower_inputs: HashMap<String, Vec<Ty>>,
     intersection_bindings: HashMap<String, Vec<Ty>>,
     /// Maps the source-visible parameter order back to the normalized declaration parameters.
     parameter_indices: Vec<usize>,
@@ -35224,6 +35239,9 @@ struct InstantiatedMemberExtension {
     type_arguments: Vec<Option<Ty>>,
     /// Complete call-site solution retained until the selected candidate commits its arguments.
     bindings: crate::symbol_resolver::GSigBinds,
+    /// Declaration-owned lower constraints gathered from the receiver, contexts, and arguments.
+    /// The selected candidate normalizes them into intersection facts at commitment time.
+    lower_inputs: HashMap<String, Vec<Ty>>,
     /// Maps the source-visible parameter order back to the normalized declaration parameters.
     parameter_indices: Vec<usize>,
 }
@@ -35697,20 +35715,12 @@ struct Checker<'a> {
     /// the alias-owned `Y`, not reconstruct unrelated `Box` declaration variables. This map lives
     /// only for the active Pass-2 checker and is consumed before checked FIR is built.
     contextual_constructor_signatures: HashMap<ExprId, GenericSig>,
-    resolved_call_type_args: HashMap<ExprId, Vec<Option<Ty>>>,
-    resolved_call_type_argument_bounds: HashMap<ExprId, Vec<Vec<Ty>>>,
+    selected_generic_calls: HashMap<ExprId, intersection_inference::SelectedGenericCall>,
     /// Non-denotable most-specific common classifier views of a selected generic call result.
     /// This stays inside the active checker and is copied onto an inferred immutable local's
     /// lexical intersection narrowing; checked FIR later carries only the selected concrete view.
     inferred_expression_intersections:
         HashMap<ExprId, intersection_inference::InferredIntersection>,
-    /// Complete inferred intersection facts by selected call and formal ordinal. This is resolver
-    /// output: the reified checker consumes it without rebuilding constraints from source syntax.
-    resolved_call_type_argument_intersections:
-        HashMap<(ExprId, usize), intersection_inference::InferredIntersection>,
-    /// Reified formals of the normalized selected candidate, by call. Candidate commitment writes
-    /// this once so the post-check does not branch on callable origin or provider storage.
-    selected_call_reified_type_parameters: HashMap<ExprId, Vec<(usize, String)>>,
     selected_value_smartcasts: HashMap<ExprId, Ty>,
     selected_numeric_conversions: HashMap<ExprId, Ty>,
     selected_function_value_conversions: HashMap<ExprId, (Ty, Ty)>,
@@ -37222,10 +37232,10 @@ impl<'a> Checker<'a> {
         {
             return self.reject_member_extension_reference(expression, name);
         }
-        if !type_arguments.is_empty() {
-            self.resolved_call_type_args
-                .insert(expression, type_arguments.into_iter().map(Some).collect());
-        }
+        self.replace_call_type_arguments(
+            expression,
+            type_arguments.into_iter().map(Some).collect(),
+        );
         let unbound = matches!(binding, CallableReferenceBinding::Unbound);
         let mut semantic_params = function.semantic_params().into_owned();
         let context_count = function.context_count.min(semantic_params.len());
@@ -37638,7 +37648,7 @@ impl<'a> Checker<'a> {
             return false;
         };
         let actual = self.expr_types[call.0 as usize];
-        let resolved = self.resolved_call_type_args.get(&call);
+        let resolved = self.selected_call_type_arguments(call);
         let lexical_formals = scope.lexical_tparam_identities();
         // A formal lexically in scope here resolved to the enclosing declaration's own type is a
         // complete solution of this call's fresh variable, not an uninferred occurrence.
@@ -38627,12 +38637,10 @@ impl<'a> Checker<'a> {
             type_arguments,
             _,
         ) = &candidates[*selected_index];
-        if !type_arguments.is_empty() {
-            self.resolved_call_type_args.insert(
-                expression,
-                type_arguments.iter().copied().map(Some).collect(),
-            );
-        }
+        self.replace_call_type_arguments(
+            expression,
+            type_arguments.iter().copied().map(Some).collect(),
+        );
         if selected.callable.owner.matches("")
             && selected.source_key.is_none()
             && selected.stable_declaration.is_none()
@@ -40622,10 +40630,10 @@ impl<'a> Checker<'a> {
             return self.reject_member_extension_reference(expression, &member.name);
         }
         self.check_data_class_copy_usage(self.member_name_span(expression, &member.name), &member);
-        if !type_arguments.is_empty() {
-            self.resolved_call_type_args
-                .insert(expression, type_arguments.into_iter().map(Some).collect());
-        }
+        self.replace_call_type_arguments(
+            expression,
+            type_arguments.into_iter().map(Some).collect(),
+        );
         self.apply_checked_source_callable_result(receiver, &mut member);
         let unbound_receiver =
             matches!(binding, CallableReferenceBinding::Unbound).then_some(receiver);
@@ -42127,6 +42135,8 @@ impl<'a> Checker<'a> {
                 selected.ret,
                 ret,
             );
+        } else {
+            self.clear_selected_generic_call(call);
         }
         if let Some(signatures) = sam_signatures {
             let expected_types = self.sam_argument_expected_types(
@@ -52714,27 +52724,28 @@ impl<'a> Checker<'a> {
             })
             .collect::<crate::symbol_resolver::GSigBinds>();
         crate::symbol_resolver::unify_ty(signature.ret, completed, &mut completion_bindings);
-        let prior = self.resolved_call_type_args.get(&argument).cloned();
-        if self.expr_expected(scope, argument, completed) == Ty::Error {
+        let provisional_shape = self.selected_generic_call_shape(argument);
+        let rechecked = self.expr_expected(scope, argument, completed);
+        if rechecked == Ty::Error {
             return Some(Ty::Error);
         }
+        let Some(selected_shape) = self.selected_generic_call_shape(argument) else {
+            // A contextual pass may select a non-generic overload. Its selection path has already
+            // cleared the provisional generic commitment; do not republish any part of it here.
+            self.clear_selected_generic_call(argument);
+            return Some(self.set(argument, rechecked));
+        };
         if !completion_bindings.is_empty() {
-            let resolved = signature
-                .formals
-                .iter()
-                .enumerate()
-                .map(|(index, formal)| {
-                    completion_bindings
-                        .get(formal)
-                        .copied()
-                        .or_else(|| prior.as_ref()?.get(index).copied().flatten())
-                })
-                .collect::<Vec<_>>();
-            if resolved.iter().any(Option::is_some) {
-                self.resolved_call_type_args.insert(argument, resolved);
+            if let Some(provisional_shape) = provisional_shape.as_ref() {
+                self.replace_contextually_completed_generic_call(
+                    argument,
+                    provisional_shape,
+                    &selected_shape,
+                    &completion_bindings,
+                );
             }
         }
-        Some(self.set(argument, completed))
+        Some(self.set(argument, rechecked))
     }
 
     /// Whether a nested generic call's probe type is still an erased upper bound rather than the
@@ -57367,6 +57378,7 @@ impl<'a> Checker<'a> {
                 result,
                 false,
             );
+            self.publish_conditional_intersection(e, branch_types.iter().copied(), result);
             scope.restore_common_flow(&exit_flows);
             let normal_continuation = scope.flow_snapshot();
             all_exit_writes.extend(written);
@@ -58238,10 +58250,6 @@ impl<'a> Checker<'a> {
                         CallResultConstraint::safe_lifted(expected),
                     );
                     let arg_tys = checked_arg_tys.as_slice();
-                    if !type_args.is_empty() {
-                        self.resolved_call_type_args
-                            .insert(e, type_args.iter().copied().map(Some).collect());
-                    }
                     if recv == Ty::String {
                         match self.record_member_call_with_slots(
                             scope,
@@ -60713,8 +60721,14 @@ impl<'a> Checker<'a> {
                     result_ty,
                     false,
                 );
+                self.publish_conditional_intersection(
+                    e,
+                    arm_results.iter().map(|record| (record.body, record.ty)),
+                    result_ty,
+                );
             } else {
                 self.record_flexible_join(e, std::iter::empty(), result_ty, false);
+                self.inferred_expression_intersections.remove(&e);
             }
             result_ty
         };
@@ -61521,10 +61535,10 @@ impl<'a> Checker<'a> {
                         },
                     );
                     if let Some((plan, type_arguments, _)) = adaptation {
-                        if !type_arguments.is_empty() {
-                            self.resolved_call_type_args
-                                .insert(expression, type_arguments.into_iter().map(Some).collect());
-                        }
+                        self.replace_call_type_arguments(
+                            expression,
+                            type_arguments.into_iter().map(Some).collect(),
+                        );
                         let exact = Self::adapted_ref_plan_is_identity(&plan)
                             && expected_function.is_some_and(|expected| {
                                 expected.params == member.params
@@ -61572,6 +61586,7 @@ impl<'a> Checker<'a> {
                         );
                         return Some(signature);
                     }
+                    self.clear_selected_generic_call(expression);
                     let (binding, target) = match singleton_binding {
                         Some((receiver, singleton)) => (
                             CallableReferenceBinding::Singleton(singleton),
@@ -61883,6 +61898,10 @@ impl<'a> Checker<'a> {
         receiver: Option<ExprId>,
         name: String,
     ) -> Ty {
+        // Callable references are contextually revisited while surrounding overload candidates are
+        // compared. Start each pass transactionally: only the winner selected below may publish a
+        // generic commitment, and a non-generic winner must leave no provisional evidence behind.
+        self.clear_selected_generic_call(e);
         let t = {
             // A classifier receiver is unbound; a value receiver is bound and evaluated.
             if name == "class" {
@@ -62082,12 +62101,10 @@ impl<'a> Checker<'a> {
                             {
                                 let identity = Self::adapted_ref_plan_is_identity(&plan);
                                 if !identity {
-                                    if !type_arguments.is_empty() {
-                                        self.resolved_call_type_args.insert(
-                                            e,
-                                            type_arguments.into_iter().map(Some).collect(),
-                                        );
-                                    }
+                                    self.replace_call_type_arguments(
+                                        e,
+                                        type_arguments.into_iter().map(Some).collect(),
+                                    );
                                     self.expr_lowers.insert(
                                         e,
                                         ExprLowering::AdaptedCallableReference {
@@ -62107,6 +62124,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                         if let Some(member) = candidates.method {
+                            self.clear_selected_generic_call(e);
                             let params = member.params.clone();
                             let ret = member.ret;
                             self.expr_lowers.insert(
@@ -62902,27 +62920,6 @@ impl<'a> Checker<'a> {
                 local_method_dependencies::LocalMethodDemand::NotScheduled => {}
             }
         }
-        // Publish the selected extension's resolved type arguments — explicit first, then the
-        // selection's own bindings — for every generic call. These are part of the checked call,
-        // not merely an aid for reification: common lowering needs the exact same substitutions for
-        // specialized argument/result types and must never reconstruct inference from operands.
-        if let Some(signature) = selected.generic_sig.as_ref() {
-            let resolved = signature
-                .formals
-                .iter()
-                .enumerate()
-                .map(|(index, formal)| {
-                    type_args
-                        .get(index)
-                        .copied()
-                        .filter(|argument| *argument != Ty::Error)
-                        .or_else(|| selected.bindings.get(formal).copied())
-                })
-                .collect::<Vec<_>>();
-            if !resolved.is_empty() && resolved.iter().all(Option::is_some) {
-                self.resolved_call_type_args.insert(e, resolved);
-            }
-        }
         let argument_names = self.file.call_arg_names.get(&e.0).map(Vec::as_slice);
         let shape = self.contextual_call_shape(
             scope,
@@ -62945,6 +62942,24 @@ impl<'a> Checker<'a> {
             None,
         ) {
             return Some(Ty::Error);
+        }
+        if let Some(signature) = selected.generic_sig.clone() {
+            let return_info = selected.ret;
+            let selected_result = selected.callable.ret;
+            let result = self.commit_selected_call_intersections(
+                e,
+                &signature,
+                type_args,
+                &shape.parameter_indices,
+                &shape.call_sig,
+                &mut selected.bindings,
+                &mut selected.intersection_bindings,
+                return_info,
+                selected_result,
+            );
+            selected.info.callable.ret = result;
+        } else {
+            self.clear_selected_generic_call(e);
         }
         self.mark_selected_inline_lambdas(e, selected.flags.inline, &shape.call_sig);
         let context_args = shape.context_sources;
@@ -63702,9 +63717,7 @@ impl<'a> Checker<'a> {
         // selected, its result is a use of the current lower approximation (`set(Value()); get()`
         // reads as `Value`) and may safely drive later lookup. The final solved lambda is rechecked,
         // so this provisional result never escapes into checked FIR.
-        let ret = self.apply_postponed_call_bindings(ret);
-        selected.ret = ret;
-        selected.member.ret = ret;
+        let mut ret = self.apply_postponed_call_bindings(ret);
         let arg_tys = args
             .iter()
             .map(|argument| self.expr_types[argument.0 as usize])
@@ -63767,63 +63780,17 @@ impl<'a> Checker<'a> {
         selected.context_args = shape.context_sources;
 
         let explicit_type_args = self.resolved_explicit_type_args(scope, call);
-        if let Some(signature) = selected.member.generic_sig.as_ref() {
-            // Selection has already specialized the declaration-owned generic shapes. Recover the
-            // chosen method substitution from those exact shapes so checked FIR receives the same
-            // decision; this is structural commit bookkeeping, not a second inference/selection
-            // attempt. It also covers zero-argument return-only methods, where the selected result
-            // is the sole concrete occurrence of the method formal.
-            let mut bindings =
-                self.member_receiver_type_bindings(selected.receiver, &selected.member);
-            let source = self.fed_source();
-            for (&declared, &actual) in signature.params.iter().zip(&selected.member.params) {
-                crate::symbol_resolver::unify_ty_from_symbols(
-                    &source,
-                    declared,
-                    actual,
-                    &mut bindings,
-                );
-            }
-            if ret != Ty::Error && !ret.mentions_pending() {
-                crate::symbol_resolver::unify_ty_from_symbols(
-                    &source,
-                    signature.ret,
-                    ret,
-                    &mut bindings,
-                );
-            }
-            let resolved = signature
-                .formals
-                .iter()
-                .enumerate()
-                .map(|(index, formal)| {
-                    explicit_type_args
-                        .get(index)
-                        .copied()
-                        .filter(|argument| *argument != Ty::Error)
-                        .or_else(|| bindings.get(formal).copied())
-                        .filter(|solution| {
-                            *solution != Ty::Error
-                                && !solution.mentions_pending()
-                                && !matches!(
-                                    solution.non_null(),
-                                    Ty::TyParam(identity, _) if identity == formal
-                                )
-                        })
-                })
-                .collect::<Vec<_>>();
-            if resolved.iter().any(Option::is_some) {
-                self.resolved_call_type_args.insert(call, resolved);
-            }
-        } else if !explicit_type_args.is_empty() {
-            let resolved = explicit_type_args
-                .into_iter()
-                .map(|argument| (argument != Ty::Error).then_some(argument))
-                .collect::<Vec<_>>();
-            if resolved.iter().any(Option::is_some) {
-                self.resolved_call_type_args.insert(call, resolved);
-            }
-        }
+        ret = self.commit_resolved_member_generic_call(
+            call,
+            &selected,
+            &shape.parameter_indices,
+            &shape.call_sig,
+            &explicit_type_args,
+            ret,
+        );
+
+        selected.ret = ret;
+        selected.member.ret = ret;
 
         self.resolved_calls
             .insert(call, ResolvedCall::Member(selected));

@@ -109,24 +109,19 @@ impl Checker<'_> {
                 intersection: None,
             }];
         }
-        let Some(arguments) = self.resolved_call_type_args.get(&expression) else {
+        let Some(call) = self.selected_generic_calls.get(&expression) else {
             return Vec::new();
         };
-        self.selected_call_reified_type_parameters
-            .get(&expression)
-            .cloned()
-            .unwrap_or_default()
+        call.reified_parameters
+            .clone()
             .into_iter()
             .filter_map(|(ordinal, formal)| {
-                let argument = (*arguments.get(ordinal)?)?;
+                let argument = (*call.arguments().get(ordinal)?)?;
                 Some(ReifiedTypeArgument {
                     ordinal,
                     argument,
                     formal,
-                    intersection: self
-                        .resolved_call_type_argument_intersections
-                        .get(&(expression, ordinal))
-                        .cloned(),
+                    intersection: call.intersections.get(&ordinal).cloned(),
                 })
             })
             .collect()
@@ -152,11 +147,12 @@ impl Checker<'_> {
                     .iter()
                     .zip(argument_spellings.iter().cloned())
                     .map(|(argument, spelling)| {
-                        let semantic = self
+                        let semantic = *self
                             .resolved_type_tys
                             .get(&(argument.span.lo, argument.span.hi))
-                            .copied()
-                            .unwrap_or(Ty::Error);
+                            .expect(
+                                "a selected type-alias argument has a resolved semantic occurrence",
+                            );
                         (semantic, spelling)
                     })
                     .collect::<Vec<_>>();
@@ -180,6 +176,8 @@ impl Checker<'_> {
             expansion_annotations: Vec::new(),
             unsafe_variance: false,
             parameter_name: None,
+            flexible_upper_bound: None,
+            enhanced_nullability: false,
         }
     }
 

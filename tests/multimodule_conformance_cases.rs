@@ -151,6 +151,29 @@ pub const MEMBER_EXTENSION_RECEIVERS: Case = Case {
              }\n",
 };
 
+/// Reified substitutions cross a real separately compiled KLIB for every callable origin. All
+/// arguments are inferred at the consumer call site, so success requires the selected call—not
+/// source spelling or an origin-specific lowering path—to publish the runtime type identity.
+pub const REIFIED_CALLABLE_ORIGINS: Case = Case {
+    stem: "multimoduleReifiedCallableOrigins",
+    source: "// MODULE: lib\n\
+             inline fun <reified T> top(value: T, probe: Any): Boolean = probe is T\n\
+             inline fun <reified T> T.topExtension(probe: Any): Boolean = probe is T\n\
+             class Host {\n\
+             \x20   inline fun <reified T> member(value: T, probe: Any): Boolean = probe is T\n\
+             \x20   inline fun <reified T> T.memberExtension(probe: Any): Boolean = probe is T\n\
+             }\n\
+             // MODULE: main(lib)\n\
+             fun box(): String {\n\
+             \x20   val host = Host()\n\
+             \x20   if (!top(\"top\", \"probe\")) return \"top\"\n\
+             \x20   if (!\"extension\".topExtension(\"probe\")) return \"extension\"\n\
+             \x20   if (!host.member(\"member\", \"probe\")) return \"member\"\n\
+             \x20   if (!host.run { \"member extension\".memberExtension(\"probe\") }) return \"member extension\"\n\
+             \x20   return \"OK\"\n\
+             }\n",
+};
+
 pub const DEPENDENCY_FUNCTION_IMPLEMENTATION_MARKERS: Case = Case {
     stem: "multimoduleDependencyFunctionImplementationMarkers",
     source: "// TARGET_BACKEND: NATIVE\n\
@@ -246,6 +269,7 @@ pub const ALL: &[Case] = &[
     LOCAL_INCREMENT_SHAPES,
     INNER_CLASS_OUTER_TYPE,
     MEMBER_EXTENSION_RECEIVERS,
+    REIFIED_CALLABLE_ORIGINS,
     DEPENDENCY_FUNCTION_IMPLEMENTATION_MARKERS,
     NATIVE_ABI_SYMBOLS,
     FLOATING_BITS,

@@ -707,6 +707,8 @@ impl Checker<'_> {
                 selected_ret,
                 ret,
             );
+        } else {
+            self.clear_selected_generic_call(call);
         }
         let target = if extension_receiver.is_none() {
             let member = selected.member_with_return(ret);
@@ -1169,6 +1171,8 @@ impl Checker<'_> {
                             selected_ret,
                             ret,
                         );
+                    } else {
+                        self.clear_selected_generic_call(call);
                     }
                     let origin = selected.callable.origin.clone();
                     let physical_params = selected.callable.physical_params.clone();

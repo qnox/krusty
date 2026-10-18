@@ -204,7 +204,14 @@ impl Checker<'_> {
             }
         };
         if let Some(else_branch) = else_branch {
-            self.publish_conditional_intersection(e, then_branch, else_branch, t);
+            self.publish_conditional_intersection(
+                e,
+                [
+                    (then_branch, self.expr_types[then_branch.0 as usize]),
+                    (else_branch, self.expr_types[else_branch.0 as usize]),
+                ],
+                t,
+            );
         } else {
             self.inferred_expression_intersections.remove(&e);
         }

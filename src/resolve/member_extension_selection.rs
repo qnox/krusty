@@ -388,16 +388,9 @@ pub(super) fn candidate(
         owner: shape.owner,
         physical_name: shape.function.physical_name.clone(),
         type_arguments: instantiated.type_arguments,
-        type_parameters: shape
-            .function
-            .signature
-            .generic_sig
-            .as_ref()
-            .map(|signature| signature.formals.clone().into_boxed_slice())
-            .unwrap_or_default(),
-        generic_sig: shape.function.signature.generic_sig.clone(),
         bindings: instantiated.bindings,
         intersection_bindings: HashMap::default(),
+        lower_inputs: instantiated.lower_inputs,
         parameter_indices: instantiated.parameter_indices,
     }
 }
@@ -434,7 +427,6 @@ impl MemberExtensionFunctionCandidate {
                 .reified_type_parameter_ordinals
                 .clone()
                 .into_boxed_slice(),
-            type_parameters: self.type_parameters.clone(),
             suspend: self.suspend,
             generic_sig: self.generic_sig.clone(),
             declared_ret: self.declared_ret,
@@ -453,8 +445,11 @@ impl Checker<'_> {
         candidate: &mut MemberExtensionFunctionCandidate,
     ) -> Ty {
         let Some(signature) = candidate.generic_sig.clone() else {
+            self.clear_selected_generic_call(call);
             return candidate.ret;
         };
+        candidate.intersection_bindings =
+            self.intersection_bindings_from_lower_inputs(&candidate.lower_inputs);
         let result = self.commit_selected_call_intersections(
             call,
             &signature,
