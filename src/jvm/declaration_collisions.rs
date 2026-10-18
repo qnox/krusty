@@ -7,6 +7,7 @@
 use crate::diag::{DiagSink, Span};
 use crate::ir::{FunId, IrFile};
 
+mod local_function_diagnostics;
 mod package_method_diagnostics;
 mod property_marker_diagnostics;
 
@@ -40,7 +41,20 @@ pub(super) fn validate(
     for (span, message) in package_clashes {
         diags.error(span, message);
     }
-    if platform_clash || package_clash {
+    let local_function_clashes = match local_function_diagnostics::report(ir, override_results) {
+        Ok(clashes) => clashes,
+        Err(errors) => {
+            for (span, message) in errors {
+                diags.error(span, message);
+            }
+            return Err(());
+        }
+    };
+    let local_function_clash = !local_function_clashes.is_empty();
+    for (span, message) in local_function_clashes {
+        diags.error(span, message);
+    }
+    if platform_clash || package_clash || local_function_clash {
         Err(())
     } else {
         Ok(())
@@ -451,6 +465,10 @@ fn report_platform_declaration_clashes(
             } else if member_method_is_inventoried(ir, class_id as u32, class, method) {
                 // A property accessor or annotation marker is inserted below with its semantic
                 // declaration identity and exact source span.
+                continue;
+            } else if ir.local_function_spans.contains_key(&method) {
+                // A lifted local function is reported at its own declaration by
+                // `local_function_diagnostics`.
                 continue;
             } else if ir.interface_delegation_forwarders.contains(&method) {
                 let offset = ir

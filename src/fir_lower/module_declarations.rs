@@ -481,6 +481,22 @@ pub(super) fn publish_referenced(
             {
                 classifiers.insert(*classifier);
             }
+            // A generated `hashCode` dispatches on the property's classifier, an interface's
+            // through `Object`, wherever in the module it is declared.
+            IrExpr::Call {
+                callee:
+                    Callee::Intrinsic {
+                        operation: crate::ir::IrIntrinsic::GeneratedPropertyHash { ty },
+                        ..
+                    },
+                ..
+            } => {
+                if let Some(classifier) = ty.non_null().obj_internal() {
+                    if index.classifier_declaration(classifier).is_some() {
+                        classifiers.insert(classifier);
+                    }
+                }
+            }
             _ => {}
         }
     }

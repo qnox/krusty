@@ -232,7 +232,8 @@ pub(super) fn number(
 /// Rename every function [`number`] named to its lifted name, once the functions are placed. One
 /// whose lifted name and descriptor another method of the same class already has keeps its name:
 /// kotlinc's names are distinct within the class it places them in, and a callable placed
-/// elsewhere must not collide. A callable a suspend lambda declares takes the name its class gives
+/// elsewhere must not collide. Local functions that collide only with each other are the
+/// exception, and keep the clash kotlinc reports. A callable a suspend lambda declares takes the name its class gives
 /// it when it is a method of that class, the lambda realized as kotlinc's `SuspendLambda`.
 pub(crate) fn realize(
     ir: &mut IrFile,
@@ -288,9 +289,17 @@ pub(crate) fn realize(
                 .or_default()
                 .push(id);
         }
+        // Local functions whose lifted names coincide (`my local` and `my-local` both spell
+        // `my_local`) keep them: kotlinc reports that platform declaration clash at each
+        // declaration, which the declaration-collision validation does.
         let clashing = holders
             .into_values()
             .filter(|holders| holders.len() > 1)
+            .filter(|holders| {
+                !holders.iter().all(|function| {
+                    renames.contains_key(function) && ir.local_function_spans.contains_key(function)
+                })
+            })
             .flatten()
             .filter(|function| renames.contains_key(function))
             .collect::<Vec<_>>();

@@ -122,6 +122,7 @@ mod member_dispatch;
 mod member_schedule;
 mod metadata_policy;
 mod method_access;
+pub(crate) use method_access::is_reifiable;
 mod method_defaults;
 mod method_entry;
 mod method_signatures;
@@ -4339,55 +4340,6 @@ fn emit_holder_method(
     );
 }
 
-/// `@NotNull`/`@Nullable` for one semantic type in the `-jvm-default` compatibility surface, the
-/// same selection the implementing-class forwarders use: reference types only, and never a bare
-/// type variable (kotlinc leaves `T`-typed positions unannotated).
-fn jd_nullability_annotation(ty: &Ty) -> Option<&'static str> {
-    if matches!(ty.non_null(), Ty::TyParam(..)) || !ir_ty_to_jvm(ty).is_reference() {
-        None
-    } else if ty.is_nullable() {
-        Some("Lorg/jetbrains/annotations/Nullable;")
-    } else {
-        Some("Lorg/jetbrains/annotations/NotNull;")
-    }
-}
-
-/// A declared member's parameter types with the side-table declared nullability applied, so the
-/// compatibility surface annotates `x: T?` parameters `@Nullable` exactly as the abstract
-/// declaration path does.
-fn jd_declared_param_tys(ir: &IrFile, fid: u32) -> Vec<Ty> {
-    let f = &ir.functions[fid as usize];
-    let declared_nullable = ir.fn_param_declared_nullable.get(&fid);
-    f.params
-        .iter()
-        .enumerate()
-        .map(|(i, t)| {
-            if declared_nullable
-                .and_then(|v| v.get(i))
-                .copied()
-                .unwrap_or(false)
-            {
-                Ty::nullable(*t)
-            } else {
-                *t
-            }
-        })
-        .collect()
-}
-
-/// Where an `enable`-mode holder forward sends its call.
-enum JdHolderTarget<'a> {
-    /// The interface's own `access$<name>$jd` bridge (the member is a default method here).
-    AccessBridge,
-    /// The `$DefaultImpls` static holding the inherited body: a `disable`-compiled dependency's,
-    /// or under `disable` an ancestor's of this module. There is no default method to bridge to.
-    DependencyHolder {
-        declaring: crate::types::TypeName,
-        holder: crate::types::TypeName,
-        descriptor: &'a str,
-    },
-}
-
 fn emit_method_inner(
     ir: &IrFile,
     fid: u32,
@@ -4398,17 +4350,28 @@ fn emit_method_inner(
     instance: bool,
     env: &EmitEnv,
 ) {
-    let placement = match jvm_static_members::singleton_static_owner(ir, fid) {
-        Some(singleton) if instance => MethodPlacement::Singleton {
+    let singleton = jvm_static_members::singleton_static_owner(ir, fid).filter(|_| instance);
+    let placement = match singleton {
+        Some(singleton) => MethodPlacement::Singleton {
             static_owner,
             singleton,
         },
-        _ => MethodPlacement::Declared {
+        None => MethodPlacement::Declared {
             static_owner,
             instance,
         },
     };
     emit_placed_method(ir, fid, placement, owner, facade, cw, env);
+    if crate::jvm::suspend_inline_functions::has_for_inline_copy(ir, fid)
+        && env.emit_time_machines.transformed(fid).is_some()
+    {
+        let copy = MethodPlacement::ForInlineCopy {
+            static_owner,
+            instance: instance && singleton.is_none(),
+            singleton,
+        };
+        emit_placed_method(ir, fid, copy, owner, facade, cw, env);
+    }
 }
 
 fn emit_placed_method(
@@ -4425,6 +4388,11 @@ fn emit_placed_method(
             static_owner,
             instance,
         } => (Some(static_owner), instance, None, None),
+        MethodPlacement::ForInlineCopy {
+            static_owner,
+            instance,
+            singleton,
+        } => (Some(static_owner), instance, None, singleton),
         MethodPlacement::Holder(receiver) => (None, true, Some(receiver), None),
         MethodPlacement::Singleton {
             static_owner,
@@ -4434,6 +4402,7 @@ fn emit_placed_method(
     // Common IR numbers a member's receiver as value 0 even where the JVM method has no `this`.
     let receiver_value = instance || singleton.is_some();
     let f = &ir.functions[fid as usize];
+    let method_name = placement.method_name(&f.name);
     let body = f.body.unwrap();
     let param_tys = jvm_function_params(ir, fid);
     let ret = jvm_declared_ty(&env.override_results.physical_result(ir, fid));
@@ -4448,6 +4417,9 @@ fn emit_placed_method(
     e.finally_markers = ir.inline_fns.contains(&fid);
     // kotlinc's transformer keeps a suspend body's own local names: they name the spills.
     let transformed = env.emit_time_machines.transformed(fid);
+    // A body kept for inlining stays as codegen wrote it, its suspension markers included.
+    let marked = placement.is_for_inline_copy()
+        || crate::jvm::suspend_inline_functions::keeps_marked_body(ir, fid);
     // Suspend lowering does not preserve source-local expression IDs.
     e.record_locals = (ir.fn_decl_lines.contains_key(&fid)
         || ir.fn_debug_locals.contains(&fid)
@@ -4476,6 +4448,10 @@ fn emit_placed_method(
                 + u32::from(receiver_value)
         });
         let slot = e.arm_transformed_machine(machine, completion);
+        if marked {
+            let inlined = crate::jvm::suspend_inline_functions::inlined_invokes(ir, fid, machine);
+            e.leave_inlined_invokes_unmarked(inlined);
+        }
         (machine, slot)
     });
     // A function whose coroutine machine emission owns reads its continuation from a slot this
@@ -4568,14 +4544,14 @@ fn emit_placed_method(
             None => method_sig,
         },
     };
-    let access = method_access::declared_method_access(
+    let access = placement.method_access(method_access::declared_method_access(
         ir,
         fid,
         owner,
         instance,
         holder_receiver.is_some(),
         env.lambda_modes,
-    );
+    ));
     let reserved_sig = method_signatures::written_signature(
         access,
         method_signatures::keeps_signature_when_synthetic(ir, fid),
@@ -4601,7 +4577,8 @@ fn emit_placed_method(
         .cloned()
         .unwrap_or_default();
     let nullability_annotated =
-        function_annotations::nullability_annotated(ir, fid, &declared_annotations);
+        function_annotations::nullability_annotated(ir, fid, &declared_annotations)
+            && !placement.is_for_inline_copy();
     // The USER annotations on this function's parameters.
     let user_param_anns: &[crate::ir::DeclarationAnnotations] = ir
         .fn_param_annotations
@@ -4621,7 +4598,7 @@ fn emit_placed_method(
         Vec::new()
     };
     e.cw.reserve_method_pool_with_annotations(
-        &f.name,
+        &method_name,
         &reserved_desc,
         reserved_sig.as_deref(),
         &ann_types,
@@ -4915,28 +4892,32 @@ fn emit_placed_method(
     if env.run.emission_failed() {
         return;
     }
-    e.cw.add_method_sig(access, &f.name, &desc, &code, reserved_sig.as_deref());
-    if let Some((machine, slot)) = transformed {
-        transformed_suspensions::request_transform(ir, e.cw, fid, (&f.name, &desc), machine, slot);
+    if marked {
+        code.keep_for_inlining();
     }
-    e.cw.set_method_parameters(&f.name, &desc, &method_parameters);
+    e.cw.add_method_sig(access, &method_name, &desc, &code, reserved_sig.as_deref());
+    if let Some((machine, slot)) = transformed.filter(|_| !marked) {
+        let method = (method_name.as_ref(), desc.as_str());
+        transformed_suspensions::request_transform(ir, e.cw, fid, method, machine, slot);
+    }
+    e.cw.set_method_parameters(&method_name, &desc, &method_parameters);
     // kotlinc annotates a reference return and each reference parameter of a declared method.
     if nullability_annotated
         && (ret_ann.is_some() || emitted_param_anns.iter().any(Option::is_some))
     {
-        e.cw.set_method_nullability(&f.name, &desc, ret_ann, &emitted_param_anns);
+        e.cw.set_method_nullability(&method_name, &desc, ret_ann, &emitted_param_anns);
     }
     // The USER parameter annotations (their types are already interned, above).
     if !user_param_anns.is_empty() {
-        e.cw.set_method_param_annotations(&f.name, &desc, user_param_anns);
+        e.cw.set_method_param_annotations(&method_name, &desc, user_param_anns);
     }
     if ir.deprecated_methods.contains(&fid) {
-        e.cw.mark_method_deprecated(&f.name, &desc);
+        e.cw.mark_method_deprecated(&method_name, &desc);
     }
     // User annotations declared on the function. A HIDDEN-deprecated declaration additionally gets
     // `ACC_SYNTHETIC`: kotlinc keeps it only for binary compatibility, and a consumer reads both
     // facts (the annotation for resolution, the flag for the JVM) off this realization.
-    function_annotations::emit_recorded(ir, e.cw, fid, &f.name, &desc);
+    function_annotations::emit_recorded(ir, e.cw, fid, &method_name, &desc);
 }
 
 /// A `Ty` as a JVM generic-signature type element: a primitive in a generic position is its BOXED wrapper

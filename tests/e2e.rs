@@ -639,6 +639,8 @@ mod data_class_metadata_wiring_e2e;
 mod data_class_nullable_value_class_e2e;
 #[path = "data_class_param_check_e2e.rs"]
 mod data_class_param_check_e2e;
+#[path = "data_class_sibling_interface_hash_e2e.rs"]
+mod data_class_sibling_interface_hash_e2e;
 #[path = "data_class_value_class_metadata_e2e.rs"]
 mod data_class_value_class_metadata_e2e;
 #[path = "data_copy_e2e.rs"]
@@ -2861,6 +2863,8 @@ mod type_intrinsics_e2e;
 #[path = "value_class_receiver_inline_only_e2e.rs"]
 mod value_class_receiver_inline_only_e2e;
 
+#[path = "accessor_jvm_name_e2e.rs"]
+mod accessor_jvm_name_e2e;
 #[path = "field_store_lines_e2e.rs"]
 mod field_store_lines_e2e;
 #[path = "written_default_accessor_e2e.rs"]

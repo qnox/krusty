@@ -104,6 +104,9 @@ pub(crate) struct PassContext<'a> {
     /// temporary may cross the selector's debug-line label even though an ordinary kotlinc
     /// temporary never does.
     pub post_coroutine: bool,
+    /// The body is kept for an inlining caller, suspension markers and all: kotlinc writes it
+    /// without optimizing it, as a method `canBeOptimized` turns away.
+    pub kept_for_inlining: bool,
 }
 
 /// What the passes did to the method.
@@ -202,8 +205,8 @@ pub(crate) fn optimize(method: &mut MethodNode, context: &PassContext<'_>) -> Ou
         removed_locals: vec![false; method.local_variables.len()],
         ..Run::default()
     };
-    let optimizable = fits_optimization(method);
-    if !optimizable {
+    let optimizable = !context.kept_for_inlining && fits_optimization(method);
+    if !optimizable && !context.kept_for_inlining {
         crate::trace_compiler!(
             "bytecode",
             "{}.{}{} is too large to optimize; only the final dead-code step runs",
@@ -265,6 +268,7 @@ mod tests {
             value_classes,
             parameter_slots: 0,
             post_coroutine: false,
+            kept_for_inlining: false,
         }
     }
 
