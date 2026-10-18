@@ -63,7 +63,7 @@ impl ResolvedModuleIndex {
         self.body_local_ownership.root(declaration)
     }
 
-    pub(super) fn publish_local_classifier_lexical_roots(
+    pub(in crate::fir) fn publish_local_classifier_lexical_roots(
         &mut self,
         roots: HashMap<DeclarationId, DeclarationId>,
     ) {
