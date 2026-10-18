@@ -304,30 +304,18 @@ fn collect(
 }
 
 /// Whether `child`, an operand of `expression`, can be spliced into this frame. A call decides for
-/// its own operands: those of an inline call can, except an argument its declaration binds to a
-/// `noinline` or non-function parameter, which the emitter materializes as an ordinary function
-/// object. Anything else (a coercion, a block, an argument wrapper) passes its parent's answer on.
+/// its own operands: only an argument of an inline call that its declaration publishes as an inline
+/// parameter can. A `noinline` or non-function parameter, and any argument whose parameter facts are
+/// missing or misaligned, is materialized by the emitter as an ordinary function object. Anything
+/// else (a coercion, a block, an argument wrapper) passes its parent's answer on.
 fn operand_spliceable(ir: &IrFile, expression: ExprId, child: ExprId, spliceable: bool) -> bool {
     match &ir.exprs[expression as usize] {
         IrExpr::Call { .. } => {
             calls_an_inline_function(ir, expression)
-                && !ordinary_value_arguments(ir, expression).contains(&child)
+                && inline_parameter_arguments(ir, expression).contains(&child)
         }
         _ => spliceable,
     }
-}
-
-/// The arguments of `call` that its declaration binds to a `noinline` or non-function parameter.
-/// Empty for anything but a call that published its parameter modifiers.
-fn ordinary_value_arguments(ir: &IrFile, call: ExprId) -> Vec<ExprId> {
-    let IrExpr::Call { args, .. } = &ir.exprs[call as usize] else {
-        return Vec::new();
-    };
-    args.iter()
-        .enumerate()
-        .filter(|&(parameter, _)| is_inline_parameter(ir, call, parameter) == Some(false))
-        .map(|(_, &argument)| argument)
-        .collect()
 }
 
 /// The arguments of `call` bound to an inline parameter, the only literals the method inliner
@@ -580,7 +568,7 @@ mod tests {
 
     /// A call to an `inline` function taking `argument` — the only position whose lambda is spliced.
     fn inline_call(ir: &mut IrFile, argument: ExprId) -> ExprId {
-        ir.add_expr(IrExpr::Call {
+        let call = ir.add_expr(IrExpr::Call {
             callee: crate::ir::Callee::Static {
                 owner: crate::types::TypeName::from("LibKt"),
                 name: "with".to_string(),
@@ -589,7 +577,18 @@ mod tests {
             },
             dispatch_receiver: None,
             args: vec![argument],
-        })
+        });
+        publish_inline_parameter(ir, call);
+        call
+    }
+
+    /// Publish the one parameter of `call` as an inline function-typed parameter, as the call
+    /// realization does for a dependency's inline function.
+    fn publish_inline_parameter(ir: &mut IrFile, call: ExprId) {
+        ir.call_inline_modifiers
+            .insert(call, Box::new([InlineParameterModifier::None]));
+        ir.call_declared_params
+            .insert(call, Box::new([Ty::fun(Vec::new(), Ty::Unit)]));
     }
 
     #[test]
@@ -676,10 +675,7 @@ mod tests {
             args: vec![argument],
         });
         ir.suspend_calls.insert(call, Ty::String);
-        ir.call_inline_modifiers
-            .insert(call, Box::new([InlineParameterModifier::None]));
-        ir.call_declared_params
-            .insert(call, Box::new([Ty::fun(Vec::new(), Ty::String)]));
+        publish_inline_parameter(ir, call);
         call
     }
 
@@ -716,6 +712,45 @@ mod tests {
             placed_lambda_suspensions(&ir, call, &HashSet::default()),
             Some(Vec::new())
         );
+    }
+
+    /// A literal of an inline call whose parameter facts are missing or misaligned is emitted as
+    /// an ordinary function object, so nothing claims its `invoke`.
+    #[test]
+    fn a_literal_without_aligned_parameter_facts_keeps_its_invoke() {
+        for facts in [None, Some((0, 1)), Some((1, 0))] {
+            let mut ir = IrFile::default();
+            let point = suspension(&mut ir);
+            let lam = lambda(&mut ir, Vec::new(), Some(point));
+            let call = inline_suspend_call(&mut ir, lam, InlineKind::CanInline);
+            ir.call_inline_modifiers.remove(&call);
+            ir.call_declared_params.remove(&call);
+            if let Some((modifiers, declared)) = facts {
+                ir.call_inline_modifiers
+                    .insert(call, vec![InlineParameterModifier::None; modifiers].into());
+                ir.call_declared_params
+                    .insert(call, vec![Ty::fun(Vec::new(), Ty::String); declared].into());
+            }
+            let body = ir.add_expr(IrExpr::Block {
+                stmts: vec![call],
+                value: None,
+            });
+            let suspend_set = HashSet::default();
+            assert_eq!(
+                placed_lambda_suspensions(&ir, body, &suspend_set),
+                Some(Vec::new()),
+                "{facts:?}"
+            );
+            assert!(
+                spliced_suspension_lambda_impls(&ir, body, &suspend_set).is_empty(),
+                "{facts:?}"
+            );
+            assert_eq!(
+                frame_suspensions(&ir, body, &suspend_set),
+                [call],
+                "{facts:?}"
+            );
+        }
     }
 
     /// A must-inline suspend callee splices its only body, not a `$$forInline` copy, and a reified
