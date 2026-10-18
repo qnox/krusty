@@ -15390,8 +15390,13 @@ impl<'a> Checker<'a> {
                         || argument_names
                             .and_then(|names| names.get(source))
                             .is_some_and(Option::is_some));
-                let (source_occurrence, source_provenance) =
-                    self.selected_argument_reified_occurrence(scope, argument, arg_tys[source]);
+                let source_occurrence =
+                    self.selected_argument_source_occurrence(scope, argument, arg_tys[source]);
+                let source_provenance = self.finalized_selected_argument_reified_provenance(
+                    scope,
+                    argument,
+                    source_occurrence,
+                );
                 SelectedArgumentBinding {
                     argument,
                     parameter,

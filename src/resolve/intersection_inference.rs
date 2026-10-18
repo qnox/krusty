@@ -285,15 +285,28 @@ fn bounds_other_than_primary(parts: &[Ty], selected_result: Ty) -> Vec<Ty> {
 }
 
 impl Checker<'_> {
-    pub(super) fn selected_argument_reified_occurrence(
+    /// Retain the source occurrence before the selected parameter context can replace the
+    /// expression's checked type. A lexical read owns a declaration type; every other expression
+    /// starts from the type produced by candidate probing.
+    pub(super) fn selected_argument_source_occurrence(
         &self,
         scope: &CheckerScope<'_>,
         expression: ExprId,
         probed: Ty,
-    ) -> (Ty, ReifiedArgumentProvenance) {
-        let occurrence = self
-            .local_variable_read(scope, expression)
-            .unwrap_or(probed);
+    ) -> Ty {
+        self.local_variable_read(scope, expression)
+            .unwrap_or(probed)
+    }
+
+    /// Build reified provenance only after contextual argument checking has finalized the source
+    /// expression's selected-call and intersection sidecars. `occurrence` is the stable
+    /// pre-contextual source type retained by [`Self::selected_argument_source_occurrence`].
+    pub(super) fn finalized_selected_argument_reified_provenance(
+        &self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        occurrence: Ty,
+    ) -> ReifiedArgumentProvenance {
         let mut provenance = reified_provenance_of_ty_with_declaration(occurrence, &|identity| {
             for rung in scope.classifier_rungs() {
                 let mut declared = None;
@@ -310,16 +323,21 @@ impl Checker<'_> {
             }
             None
         });
-        let declared_flexible = self.resolved_calls.get(&expression).is_some_and(|call| {
-            matches!(
-                call.selected_result_target().declared,
-                Ty::PlatformNullable(_)
-            )
-        });
-        if declared_flexible {
+        let selected_result_is_flexible =
+            self.resolved_calls.get(&expression).is_some_and(|call| {
+                matches!(
+                    call.selected_result_target().declared,
+                    Ty::PlatformNullable(_)
+                )
+            });
+        let inferred_intersection_is_flexible = self
+            .inferred_expression_intersections
+            .get(&expression)
+            .is_some_and(|intersection| intersection.through_flexible);
+        if selected_result_is_flexible || inferred_intersection_is_flexible {
             provenance.through_flexible = true;
         }
-        (occurrence, provenance)
+        provenance
     }
 
     fn selected_reified_argument_provenance(

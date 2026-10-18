@@ -320,6 +320,30 @@ fn an_intersection_through_a_flexible_type_is_a_deprecation_warning() {
 }
 
 #[test]
+fn selected_argument_commitment_keeps_source_dnn_and_finalized_flexible_provenance() {
+    let source = with_prelude(
+        "fun <T> committed(x: T & Any, b: Boolean) {\n\
+         \x20   ra(x)\n\
+         \x20   ra(java.util.Objects.requireNonNull(if (b) 1 else \"\"))\n\
+         }",
+    );
+    let flexible_warning = format!(
+        "{} This will become an error in language version 2.6. See \
+         https://youtrack.jetbrains.com/issue/KTLC-399.",
+        intersection("'Comparable<*>' & 'Serializable'")
+    );
+    assert_matches_kotlinc(
+        &source,
+        &[],
+        &[],
+        &[
+            &format!("4:5: {DNN_WARNING}"),
+            &format!("5:5: {flexible_warning}"),
+        ],
+    );
+}
+
+#[test]
 fn an_intersection_is_a_deprecation_warning_without_its_prohibition() {
     let message = format!(
         "{} This will become an error in language version 2.3. See \

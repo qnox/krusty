@@ -151,15 +151,8 @@ impl Checker<'_> {
                 .is_some_and(Option::is_some);
             let whole_array = call_sig.vararg_index == Some(parameter)
                 && (named || self.file.is_spread_arg(argument));
-            let (source_occurrence, source_provenance) =
-                self.selected_argument_reified_occurrence(scope, argument, probed_actual);
-            argument_bindings.push(SelectedArgumentBinding {
-                argument,
-                parameter,
-                vararg_element: call_sig.vararg_index == Some(parameter) && !whole_array,
-                source_occurrence,
-                source_provenance,
-            });
+            let source_occurrence =
+                self.selected_argument_source_occurrence(scope, argument, probed_actual);
             let inferred = argument_expectations
                 .and_then(|expectations| expectations.get(&argument))
                 .copied();
@@ -182,6 +175,18 @@ impl Checker<'_> {
                 parameter,
                 implicit_lambda_label.as_deref(),
             );
+            let source_provenance = self.finalized_selected_argument_reified_provenance(
+                scope,
+                argument,
+                source_occurrence,
+            );
+            argument_bindings.push(SelectedArgumentBinding {
+                argument,
+                parameter,
+                vararg_element: call_sig.vararg_index == Some(parameter) && !whole_array,
+                source_occurrence,
+                source_provenance,
+            });
             if whole_array {
                 self.expect_whole_array_vararg_arg(
                     Some(scope),
