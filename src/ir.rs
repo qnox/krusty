@@ -2151,6 +2151,9 @@ pub struct IrFile {
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
     /// that role participates in its own frame or register allocation.
     pub call_operand_bindings: crate::fx_hash::HashSet<ExprId>,
+    /// The call-operand holders of one inline lambda invocation, consecutive in its block: the
+    /// invocation evaluates every operand before it binds any. A backend chooses the binding order.
+    pub(crate) invocation_operand_bindings: crate::fx_hash::HashSet<ExprId>,
     /// Unnamed `Variable` declarations holding a destructuring declaration's container. This is
     /// source-role provenance; a backend decides whether that role affects physical debug lines.
     pub(crate) destructuring_containers: crate::fx_hash::HashSet<ExprId>,

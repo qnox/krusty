@@ -1,6 +1,7 @@
 //! A private suspend function takes kotlinc's coroutine transformer like any other named function
 //! (`docs/JVM_INLINE_BEFORE_CPS.md` §1a). Its continuation class re-enters it through the owner's
-//! `access$<name>` bridge.
+//! `access$<name>` bridge. A private `suspend inline` function is not transformed: every call
+//! inlines it, and kotlinc leaves its own method as written.
 //!
 //! A private function used to keep the IR machine. That machine gives each local index one type, so
 //! a loop variable that reused the index of an inlined lambda's local was restored with the other
@@ -92,4 +93,16 @@ fn a_lifted_suspend_function_re_enters_with_its_shared_capture_cell() {
         LIFTED_MUTABLE_CAPTURE,
         "a lifted suspend function with a mutable capture",
     );
+}
+
+/// A private `suspend inline` function keeps kotlinc's own body: its calls inline it, so kotlinc
+/// never runs the coroutine transformer over its method, which boxes an `Int` argument with
+/// `valueOf` and is called through no `access$` bridge.
+const PRIVATE_INLINE: &str = "private suspend inline fun <R> two(s: String, crossinline f: suspend (String, Int) -> R): R = f(s, s.length)\n\
+    suspend fun double(s: String): String = two(s) { x, n -> x + n }\n";
+
+#[test]
+fn a_private_suspend_inline_function_is_the_reference_compilers_class() {
+    let classes = common::classes_against_kotlinc_module(&[("PrivateInline.kt", PRIVATE_INLINE)]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
 }
