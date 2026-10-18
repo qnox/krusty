@@ -100,6 +100,14 @@ impl Emitter<'_> {
         let Some((_, inner)) = guard_of(self, init) else {
             return;
         };
+        // kotlinc folds a chain of safe calls only; a value-class conversion guarding one keeps
+        // the safe call's own null exit.
+        if [outer, inner]
+            .iter()
+            .any(|guard| self.ir.jvm_value_class_null_guards.contains(guard))
+        {
+            return;
+        }
         // Both guards must take the guard layout, or the shared exit would never be bound.
         let guard_shaped = |emitter: &Self, guard: u32| match emitter.ir.expr(guard) {
             IrExpr::When { branches } => {
