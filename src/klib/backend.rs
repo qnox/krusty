@@ -33,8 +33,46 @@ pub const DECLINE_PREFIX: &str = "krusty: the KLIB writer does not support ";
 pub struct KlibBackend {
     platform: KlibPlatform,
     stamp: KlibStamp,
+    native_target: Option<NativeKlibTarget>,
     annotations_in_metadata: bool,
 }
+
+/// One validated pairing of krusty's target model with Kotlin/Native's serialized identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeKlibTarget {
+    target: crate::native::NativeTarget,
+    konan_name: &'static str,
+}
+
+impl NativeKlibTarget {
+    fn konan_name(self) -> &'static str {
+        debug_assert_eq!(self.target.konan_name(), Some(self.konan_name));
+        self.konan_name
+    }
+}
+
+/// Why a metadata sink cannot be bound to one concrete Kotlin/Native target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KlibTargetBindingError {
+    NonNativePlatform(KlibPlatform),
+    UnsupportedNativeTarget(crate::native::NativeTarget),
+}
+
+impl std::fmt::Display for KlibTargetBindingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonNativePlatform(platform) => write!(
+                formatter,
+                "cannot bind Native target metadata to {platform:?} KLIB output"
+            ),
+            Self::UnsupportedNativeTarget(target) => {
+                write!(formatter, "Kotlin/Native has no target for {target}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for KlibTargetBindingError {}
 
 impl KlibBackend {
     /// A library for `platform`, stamped with the compilation's finalized versions.
@@ -42,8 +80,27 @@ impl KlibBackend {
         Self {
             platform,
             stamp,
+            native_target: None,
             annotations_in_metadata: true,
         }
+    }
+
+    /// Bind Native library output to the exact target selected by executable emission.
+    ///
+    /// [`Self::new`] remains target-neutral for metadata-only KLIBs. This boundary accepts only a
+    /// Native platform and a target Kotlin/Native itself names; it never substitutes the host.
+    pub fn with_native_target(
+        mut self,
+        target: crate::native::NativeTarget,
+    ) -> Result<Self, KlibTargetBindingError> {
+        if self.platform != KlibPlatform::Native {
+            return Err(KlibTargetBindingError::NonNativePlatform(self.platform));
+        }
+        let konan_name = target
+            .konan_name()
+            .ok_or(KlibTargetBindingError::UnsupportedNativeTarget(target))?;
+        self.native_target = Some(NativeKlibTarget { target, konan_name });
+        Ok(self)
     }
 
     /// kotlinc's `AnnotationsInMetadata` language feature (on from Kotlin 2.4).
@@ -212,6 +269,9 @@ impl KlibBackend {
 
     fn finish(&self, state: KlibModule, module_name: &str) -> Vec<Artifact> {
         let mut writer = KlibWriter::new(module_name, self.stamp, self.platform);
+        if let Some(target) = self.native_target {
+            writer.set_property("native_targets", target.konan_name());
+        }
         for (package, fragment) in state.fragments {
             writer.add_fragment(&package, fragment);
         }
@@ -655,4 +715,73 @@ fn constant_value(
         return None;
     };
     static_constant(ir, *storage)
+}
+
+#[cfg(test)]
+mod target_binding_tests {
+    use super::*;
+    use crate::native::{Arch, NativeTarget, Os};
+
+    fn stamp() -> KlibStamp {
+        KlibStamp::new(
+            crate::kotlin_version::KotlinVersion::V2_4_20,
+            crate::language_version::LanguageVersion::V2_4,
+        )
+    }
+
+    fn manifest(backend: &KlibBackend) -> String {
+        let entries = backend.finish(KlibModule::default(), "probe");
+        let bytes = entries
+            .iter()
+            .find_map(|(path, bytes)| (path == "default/manifest").then_some(bytes))
+            .expect("a KLIB backend writes its manifest");
+        String::from_utf8(bytes.clone()).expect("the manifest is UTF-8")
+    }
+
+    #[test]
+    fn native_metadata_output_stays_target_neutral_until_explicitly_bound() {
+        let neutral = KlibBackend::new(KlibPlatform::Native, stamp());
+        assert_eq!(
+            manifest(&neutral),
+            "abi_version=2.4.0\n\
+             builtins_platform=NATIVE\n\
+             compiler_version=2.4.20\n\
+             ir_signature_versions=1,2\n\
+             metadata_version=2.4.0\n\
+             native_targets=\n\
+             unique_name=probe\n"
+        );
+
+        let target = NativeTarget::new(Arch::X86_64, Os::Linux);
+        let targeted = KlibBackend::new(KlibPlatform::Native, stamp())
+            .with_native_target(target)
+            .expect("linux-x86_64 has a Kotlin/Native identity");
+        assert_eq!(
+            manifest(&targeted),
+            "abi_version=2.4.0\n\
+             builtins_platform=NATIVE\n\
+             compiler_version=2.4.20\n\
+             ir_signature_versions=1,2\n\
+             metadata_version=2.4.0\n\
+             native_targets=linux_x64\n\
+             unique_name=probe\n"
+        );
+    }
+
+    #[test]
+    fn native_target_binding_rejects_the_wrong_platform_and_unmapped_target() {
+        let x64 = NativeTarget::new(Arch::X86_64, Os::Linux);
+        assert!(matches!(
+            KlibBackend::new(KlibPlatform::WasmJs, stamp()).with_native_target(x64),
+            Err(KlibTargetBindingError::NonNativePlatform(
+                KlibPlatform::WasmJs
+            ))
+        ));
+
+        let riscv = NativeTarget::new(Arch::Riscv64, Os::Linux);
+        assert!(matches!(
+            KlibBackend::new(KlibPlatform::Native, stamp()).with_native_target(riscv),
+            Err(KlibTargetBindingError::UnsupportedNativeTarget(target)) if target == riscv
+        ));
+    }
 }

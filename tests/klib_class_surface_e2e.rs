@@ -204,7 +204,12 @@ fn kotlinc_native_consumes_a_krusty_reified_inline_body() {
             krusty::kotlin_version::KotlinVersion::V2_4_20,
             krusty::language_version::LanguageVersion::V2_4,
         ),
-    );
+    )
+    .with_native_target(krusty::native::NativeTarget::new(
+        krusty::native::Arch::X86_64,
+        krusty::native::Os::Linux,
+    ))
+    .expect("the official consumer fixture targets Kotlin/Native linux_x64");
     let entries = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "probe", &mut diags);
     assert_eq!(
         diags
