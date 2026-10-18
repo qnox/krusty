@@ -74,7 +74,9 @@ use field_nullability::{
 mod discarding;
 use discarding::discard;
 mod diverging_value_type;
+mod emission_readiness;
 mod emit_options;
+pub(crate) use emission_readiness::jvm_can_emit;
 pub(super) mod enclosure;
 mod enum_entry_subclass;
 mod enum_reflection_call;
@@ -1460,24 +1462,7 @@ fn emit_pass(
     env.run.regenerated_object_names.clear();
     env.run.when_mappings.borrow_mut().clear();
     if !jvm_can_emit(ir) {
-        crate::trace_compiler!(
-            "lower",
-            "JVM emission declined residual IR nodes: {:?}",
-            ir.exprs
-                .iter()
-                .enumerate()
-                .filter_map(|(expression, value)| match value {
-                    IrExpr::Checked(_)
-                    | IrExpr::PluginPlaceholder { .. }
-                    | IrExpr::LocalDelegateAccess(_)
-                    | IrExpr::Call {
-                        callee: Callee::Module { .. } | Callee::External { .. },
-                        ..
-                    } => Some((expression, value)),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        );
+        emission_readiness::trace_residual_nodes(ir);
         return None;
     }
     *env.run.inline_bail.borrow_mut() = None;
@@ -1894,61 +1879,6 @@ fn apply_enum_entry_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, fi
     if let Some(annotations) = c.field_annotations.iter().find(|a| a.field == field) {
         cw.set_last_late_field_annotations(&annotations.annotations);
     }
-}
-
-pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
-    fn ty_ok(t: &Ty) -> bool {
-        match t.non_null() {
-            Ty::Fun(s) => s.params.iter().all(ty_ok) && ty_ok(&s.ret),
-            Ty::Obj(_, type_args) => type_args.iter().all(ty_ok),
-            _ => true,
-        }
-    }
-    fn callee_ok(callee: &Callee) -> bool {
-        match callee {
-            Callee::Static { .. } | Callee::Special { .. } => true,
-            // Realized into `Callee::Special` before emission.
-            Callee::Super { params, ret, .. } => params.iter().all(ty_ok) && ty_ok(ret),
-            // A user (sibling-file) method carries `Ty`s; a classpath one a descriptor string.
-            Callee::Virtual { params, .. } => match params {
-                Some((ps, ret)) => ps.iter().all(ty_ok) && ty_ok(ret),
-                None => true,
-            },
-            Callee::CrossFile { params, ret, .. } => params.iter().all(ty_ok) && ty_ok(ret),
-            Callee::Module { .. }
-            | Callee::ModuleWithDefaults { .. }
-            | Callee::LocalWithDefaults { .. }
-            | Callee::ClassStaticWithDefaults { .. }
-            | Callee::External { .. } => false,
-            Callee::Local(_)
-            | Callee::LocalDefault(_)
-            | Callee::ClassStatic { .. }
-            | Callee::ClassStaticDefault { .. }
-            | Callee::Intrinsic { .. } => true,
-        }
-    }
-    if ir
-        .functions
-        .iter()
-        .any(|f| !ty_ok(&f.ret) || !f.params.iter().all(ty_ok))
-    {
-        return false;
-    }
-    if ir.statics.iter().any(|s| !ty_ok(&s.ty)) {
-        return false;
-    }
-    ir.exprs.iter().all(|e| match e {
-        IrExpr::Lambda { .. } => true,
-        IrExpr::Variable { ty, .. } => ty_ok(ty),
-        IrExpr::Call { callee, .. } => callee_ok(callee),
-        // Every other checked operation must have been consumed by its JVM realization pass.
-        IrExpr::Checked(_) => false,
-        // A plugin placeholder that reached emit means its owning plugin didn't run (or couldn't
-        // specialize it) — decline the file rather than miscompile (the node has no JVM lowering).
-        IrExpr::PluginPlaceholder { .. } => false,
-        IrExpr::LocalDelegateAccess(_) => false,
-        _ => true,
-    })
 }
 
 /// The internal class name to `checkcast` a value to when narrowing an erased `Object` to `ty` — or
