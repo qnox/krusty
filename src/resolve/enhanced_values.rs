@@ -28,6 +28,10 @@ pub(super) struct EnhancedLocals {
     declarations: HashMap<u32, EnhancedLocalDeclaration>,
     /// The marks of each read of such a local.
     reads: HashMap<ExprId, TypeEnhancement>,
+    /// The marks of a checked lambda's terminal result, before the function value is passed to a
+    /// generic call. The lambda expression owns this handoff; call substitution consumes it from
+    /// the function type's result position without reopening the body.
+    lambda_results: HashMap<ExprId, TypeEnhancement>,
 }
 
 #[derive(Clone)]
@@ -137,6 +141,25 @@ impl Checker<'_> {
         }
     }
 
+    /// Publish the checked terminal value's marks onto the lambda expression. A `Unit`-coerced
+    /// body has no value result, so a previous provisional check must not leave marks behind.
+    pub(super) fn record_lambda_result_enhancement(
+        &mut self,
+        lambda: ExprId,
+        body: ExprId,
+        coerced_to_unit: bool,
+    ) {
+        let result = super::conditional_branch::branch_value_expression(self.file, body);
+        let marks = (!coerced_to_unit)
+            .then(|| self.value_enhancement(result))
+            .unwrap_or_default();
+        if marks.is_none() {
+            self.enhanced_locals.lambda_results.remove(&lambda);
+        } else {
+            self.enhanced_locals.lambda_results.insert(lambda, marks);
+        }
+    }
+
     /// The calls whose value is itself marked, for checks that read a branch's value after
     /// checking.
     pub(super) fn enhanced_value_heads(&self) -> crate::fx_hash::HashSet<ExprId> {
@@ -151,6 +174,9 @@ impl Checker<'_> {
     pub(super) fn value_enhancement(&self, e: ExprId) -> TypeEnhancement {
         if let Some(marks) = self.enhanced_locals.reads.get(&e) {
             return marks.clone();
+        }
+        if let Some(result) = self.enhanced_locals.lambda_results.get(&e) {
+            return function_result_enhancement(self.expr_types[e.0 as usize], result);
         }
         if let Some(constructor) = self.resolved_constructors.get(&e) {
             return self.constructor_result_enhancement(e, constructor);
@@ -410,6 +436,12 @@ fn constrain(
     marks: &TypeEnhancement,
     constraints: &mut HashMap<String, Vec<TypeEnhancement>>,
 ) {
+    if let Some(positions) = function_enhancement_positions(declared, actual, marks) {
+        for (declared, actual, marks) in positions {
+            constrain(checker, formals, declared, actual, &marks, constraints);
+        }
+        return;
+    }
     super::selected_result_publication::constrain_parameters(
         formals,
         declared,
@@ -429,4 +461,94 @@ fn constrain(
             Some((view, facts))
         },
     );
+}
+
+/// Put a checked lambda result at the result position of its semantic function type. Function
+/// parameters have no result-derived marks; the layout follows the same parameter-then-result
+/// order used by Kotlin metadata.
+fn function_result_enhancement(function: Ty, result: &TypeEnhancement) -> TypeEnhancement {
+    let Ty::Fun(signature) = function.non_null() else {
+        return TypeEnhancement::NONE;
+    };
+    let mut arguments = vec![TypeEnhancement::NONE; signature.params.len()];
+    arguments.push(result.clone());
+    TypeEnhancement::new(false, arguments)
+}
+
+/// Align the enhancement positions of one semantic function argument with the function type a
+/// selected generic parameter declares. `Some` means the declared type was a function and owns the
+/// result, including an empty vector when the actual function shape cannot be correlated.
+fn function_enhancement_positions(
+    declared: Ty,
+    actual: Ty,
+    marks: &TypeEnhancement,
+) -> Option<Vec<(Ty, Ty, TypeEnhancement)>> {
+    let Ty::Fun(declared) = declared.non_null() else {
+        return None;
+    };
+    let Ty::Fun(actual) = actual.non_null() else {
+        return Some(Vec::new());
+    };
+    if declared.suspend != actual.suspend
+        || declared.context_count != actual.context_count
+        || declared.has_receiver != actual.has_receiver
+        || declared.params.len() != actual.params.len()
+    {
+        return Some(Vec::new());
+    }
+    let mut positions = declared
+        .params
+        .iter()
+        .copied()
+        .zip(actual.params.iter().copied())
+        .enumerate()
+        .map(|(index, (declared, actual))| (declared, actual, marks.argument(index).clone()))
+        .collect::<Vec<_>>();
+    positions.push((
+        declared.ret,
+        actual.ret,
+        marks.argument(declared.params.len()).clone(),
+    ));
+    Some(positions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn marked() -> TypeEnhancement {
+        TypeEnhancement::new(true, Vec::new())
+    }
+
+    #[test]
+    fn lambda_result_marks_occupy_only_the_function_result_position() {
+        let nested = TypeEnhancement::new(false, vec![marked()]);
+        let function = Ty::fun(
+            vec![Ty::Int],
+            Ty::obj_args("kotlin/collections/Set", &[Ty::String]),
+        );
+
+        assert_eq!(
+            function_result_enhancement(function, &nested),
+            TypeEnhancement::new(false, vec![TypeEnhancement::NONE, nested])
+        );
+    }
+
+    #[test]
+    fn generic_function_result_constraint_reads_the_terminal_value_marks() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let formal = Ty::ty_param("R", any);
+        let set = Ty::obj_args("kotlin/collections/Set", &[Ty::String]);
+        let nested = TypeEnhancement::new(false, vec![marked()]);
+        let marks = function_result_enhancement(Ty::fun(Vec::new(), set), &nested);
+
+        assert_eq!(
+            function_enhancement_positions(
+                Ty::fun(Vec::new(), formal),
+                Ty::fun(Vec::new(), set),
+                &marks
+            ),
+            Some(vec![(formal, set, nested)])
+        );
+    }
 }
