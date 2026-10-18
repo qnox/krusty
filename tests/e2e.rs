@@ -663,8 +663,6 @@ mod deep_nested_type_e2e;
 mod default_args_member_e2e;
 #[path = "default_args_synthetic_e2e.rs"]
 mod default_args_synthetic_e2e;
-#[path = "default_argument_overload_tie_e2e.rs"]
-mod default_argument_overload_tie_e2e;
 #[path = "default_constructor_header_pool_e2e.rs"]
 mod default_constructor_header_pool_e2e;
 #[path = "default_import_resolution_e2e.rs"]
@@ -1141,110 +1139,8 @@ mod inherited_property_reference_e2e;
 mod inherited_reference_owner_e2e;
 #[path = "init_block_lines_e2e.rs"]
 mod init_block_lines_e2e;
-#[path = "inline_body_class_source_map_e2e.rs"]
-mod inline_body_class_source_map_e2e;
-#[path = "inline_call_condition_line_e2e.rs"]
-mod inline_call_condition_line_e2e;
-#[path = "inline_call_operand_spill_e2e.rs"]
-mod inline_call_operand_spill_e2e;
-#[path = "inline_capture_default_e2e.rs"]
-mod inline_capture_default_e2e;
-#[path = "inline_capture_splice_e2e.rs"]
-mod inline_capture_splice_e2e;
-#[path = "inline_constructor_reference_e2e.rs"]
-mod inline_constructor_reference_e2e;
-#[path = "inline_crossinline_object_e2e.rs"]
-mod inline_crossinline_object_e2e;
-#[path = "inline_deep_coverage_e2e.rs"]
-mod inline_deep_coverage_e2e;
-#[path = "inline_default_bytes_e2e.rs"]
-mod inline_default_bytes_e2e;
-#[path = "inline_default_stub_e2e.rs"]
-mod inline_default_stub_e2e;
-#[path = "inline_early_return_cleanup_e2e.rs"]
-mod inline_early_return_cleanup_e2e;
-#[path = "inline_end_branch_e2e.rs"]
-mod inline_end_branch_e2e;
-#[path = "inline_erased_capture_e2e.rs"]
-mod inline_erased_capture_e2e;
-#[path = "inline_erased_parameter_e2e.rs"]
-mod inline_erased_parameter_e2e;
-#[path = "inline_finally_marker_e2e.rs"]
-mod inline_finally_marker_e2e;
-#[path = "inline_function_lambda_class_e2e.rs"]
-mod inline_function_lambda_class_e2e;
-#[path = "inline_lambda_as_value_e2e.rs"]
-mod inline_lambda_as_value_e2e;
-#[path = "inline_lambda_caller_loop_jump_e2e.rs"]
-mod inline_lambda_caller_loop_jump_e2e;
-#[path = "inline_lambda_captured_literal_e2e.rs"]
-mod inline_lambda_captured_literal_e2e;
-#[path = "inline_lambda_companion_initializer_e2e.rs"]
-mod inline_lambda_companion_initializer_e2e;
-#[path = "inline_lambda_expansion_e2e.rs"]
-mod inline_lambda_expansion_e2e;
-#[path = "inline_lambda_initializer_values_e2e.rs"]
-mod inline_lambda_initializer_values_e2e;
-#[path = "inline_lambda_local_delegate_e2e.rs"]
-mod inline_lambda_local_delegate_e2e;
-#[path = "inline_lambda_local_table_order_e2e.rs"]
-mod inline_lambda_local_table_order_e2e;
-#[path = "inline_lambda_nested_frame_return_e2e.rs"]
-mod inline_lambda_nested_frame_return_e2e;
-#[path = "inline_lambda_nested_return_e2e.rs"]
-mod inline_lambda_nested_return_e2e;
-#[path = "inline_lambda_placed_capture_suspension_e2e.rs"]
-mod inline_lambda_placed_capture_suspension_e2e;
-#[path = "inline_lambda_result_boxing_e2e.rs"]
-mod inline_lambda_result_boxing_e2e;
-#[path = "inline_lambda_resumed_value_class_e2e.rs"]
-mod inline_lambda_resumed_value_class_e2e;
-#[path = "inline_lambda_return_scope_e2e.rs"]
-mod inline_lambda_return_scope_e2e;
-#[path = "inline_lambda_sibling_value_class_e2e.rs"]
-mod inline_lambda_sibling_value_class_e2e;
-#[path = "inline_lambda_suspend_lambda_e2e.rs"]
-mod inline_lambda_suspend_lambda_e2e;
-#[path = "inline_lambda_suspend_member_e2e.rs"]
-mod inline_lambda_suspend_member_e2e;
-#[path = "inline_lambda_unintercepted_probe_e2e.rs"]
-mod inline_lambda_unintercepted_probe_e2e;
-#[path = "inline_lambda_value_argument_e2e.rs"]
-mod inline_lambda_value_argument_e2e;
-#[path = "inline_lambda_value_class_result_e2e.rs"]
-mod inline_lambda_value_class_result_e2e;
-#[path = "inline_lambda_value_return_e2e.rs"]
-mod inline_lambda_value_return_e2e;
-#[path = "inline_object_regeneration_e2e.rs"]
-mod inline_object_regeneration_e2e;
-#[path = "inline_only_extension_property_e2e.rs"]
-mod inline_only_extension_property_e2e;
-#[path = "inline_preparation_sibling_annotation_e2e.rs"]
-mod inline_preparation_sibling_annotation_e2e;
-#[path = "inline_reified_property_e2e.rs"]
-mod inline_reified_property_e2e;
-#[path = "inline_repeat_local_e2e.rs"]
-mod inline_repeat_local_e2e;
-#[path = "inline_return_bound_context_e2e.rs"]
-mod inline_return_bound_context_e2e;
-#[path = "inline_scope_function_bytes_e2e.rs"]
-mod inline_scope_function_bytes_e2e;
-#[path = "inline_splice_e2e.rs"]
-mod inline_splice_e2e;
-#[path = "inline_splice_ldc_wide_e2e.rs"]
-mod inline_splice_ldc_wide_e2e;
-#[path = "inline_tail_expansion_shape_e2e.rs"]
-mod inline_tail_expansion_shape_e2e;
-#[path = "inline_try_close_line_e2e.rs"]
-mod inline_try_close_line_e2e;
-#[path = "inline_use_close_e2e.rs"]
-mod inline_use_close_e2e;
-#[path = "inline_use_lambda_e2e.rs"]
-mod inline_use_lambda_e2e;
-#[path = "inline_value_class_lambda_e2e.rs"]
-mod inline_value_class_lambda_e2e;
-#[path = "inline_vc_suspend_coverage_e2e.rs"]
-mod inline_vc_suspend_coverage_e2e;
+#[path = "e2e/inline.rs"]
+mod inline;
 #[path = "inlined_code_inner_classes_e2e.rs"]
 mod inlined_code_inner_classes_e2e;
 #[path = "inlined_lambda_stack_spill_e2e.rs"]
@@ -1667,6 +1563,8 @@ mod open_end_range_membership_e2e;
 mod optional_expectation_annotation_e2e;
 #[path = "outcome_lists_guard_e2e.rs"]
 mod outcome_lists_guard_e2e;
+#[path = "e2e/overload_resolution.rs"]
+mod overload_resolution;
 #[path = "override_default_stub_e2e.rs"]
 mod override_default_stub_e2e;
 #[path = "override_formal_identity_e2e.rs"]
@@ -1813,11 +1711,7 @@ mod classpath_tail_forward_e2e;
 mod deprecated_since_kotlin_e2e;
 #[path = "for_loop_iterable_slot_e2e.rs"]
 mod for_loop_iterable_slot_e2e;
-#[path = "inline_arguments_in_place_e2e.rs"]
-mod inline_arguments_in_place_e2e;
 mod inline_format_arguments_e2e;
-#[path = "inline_operand_copies_e2e.rs"]
-mod inline_operand_copies_e2e;
 #[path = "intrinsic_suspension_probes_e2e.rs"]
 mod intrinsic_suspension_probes_e2e;
 #[path = "lambda_result_types_e2e.rs"]
@@ -2257,14 +2151,6 @@ mod operator_index_e2e;
 mod opt_in_usage_e2e;
 #[path = "optimization_gate_e2e.rs"]
 mod optimization_gate_e2e;
-#[path = "overload_declaration_specificity_e2e.rs"]
-mod overload_declaration_specificity_e2e;
-#[path = "overloaded_extension_e2e.rs"]
-mod overloaded_extension_e2e;
-#[path = "overloaded_inferred_return_e2e.rs"]
-mod overloaded_inferred_return_e2e;
-#[path = "overloaded_receiver_extension_expectation_e2e.rs"]
-mod overloaded_receiver_extension_expectation_e2e;
 #[path = "override_candidate_rendering_e2e.rs"]
 mod override_candidate_rendering_e2e;
 #[path = "override_type_parameter_bounds_e2e.rs"]
@@ -2649,9 +2535,6 @@ mod superclass_bridge_e2e;
 mod supertype_cycle_e2e;
 #[path = "supertype_scan_arrow_e2e.rs"]
 mod supertype_scan_arrow_e2e;
-
-#[path = "inline_lambda_operand_stack_e2e.rs"]
-mod inline_lambda_operand_stack_e2e;
 
 #[path = "synthetic_accessor_e2e.rs"]
 mod synthetic_accessor_e2e;

@@ -262,6 +262,12 @@ fn run_backend_passes_after_plugins(
     // A null check over an erased call result reads the call's own slot, ahead of the coercion
     // that narrows it; erasure and call-result boundaries below rewrite that coercion.
     crate::jvm::result_null_checks::check_before_result_coercion(ir);
+    // A conversion copied from another source file constructs that declaration file's public
+    // inline SAM wrapper. Resolve the exact source-unit identity before wrapper realization; the
+    // copy's inline provenance names the declaration and never reconstructs its facade spelling.
+    if let Some(facades) = facades {
+        crate::jvm::module_calls::resolve_foreign_template_facades(ir, facades);
+    }
     // A checked Kotlin function-value conversion is represented by one file-owned wrapper class.
     // Create it before generic erasure and bridge/value-class realization process its generated
     // method, retaining nullable-construction sites only in JVM pass facts.
@@ -364,7 +370,6 @@ fn run_backend_passes_after_plugins(
     // after value-class lowering, so each field's type is the physical slot the JVM zero-fills.
     crate::jvm::property_storage::elide_default_property_stores(ir);
     if let Some(facades) = facades {
-        crate::jvm::module_calls::resolve_foreign_template_facades(ir, facades);
         crate::jvm::module_calls::realize_default_calls(
             ir,
             facades,

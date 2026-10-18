@@ -35,7 +35,7 @@ pub(in crate::jvm::ir_emit) enum SpliceReason {
     OperandsAcrossCallee,
     /// An `@InlineOnly` callee takes its arguments in place, beside a lambda.
     InPlaceArguments,
-    /// A lambda captures a value that is not a caller local of its own type.
+    /// A lambda captures a caller local whose type is not the captured value's.
     CaptureOutsideFrame,
     /// A lambda the callee may pass to an object it creates reaches a private declaration, which
     /// kotlinc reaches from the regenerated object through synthetic accessors.
@@ -92,7 +92,7 @@ impl Emitter<'_> {
             }
             lambda_arguments.push(argument);
         }
-        if let Some(shape) = inliner::unsupported_shape(&callee, &self.bodies) {
+        if let Some(shape) = inliner::unsupported_shape(&callee) {
             return splice(SpliceReason::CalleeShape(shape));
         }
         let supplies = self
@@ -110,13 +110,13 @@ impl Emitter<'_> {
             return splice(SpliceReason::InPlaceArguments);
         }
         for &argument in &lambda_arguments {
-            if !self.lambda_captures_caller_locals(argument)? {
+            if !self.lambda_captures_bind(argument)? {
                 return splice(SpliceReason::CaptureOutsideFrame);
             }
         }
         // Whether the call's objects regenerate is settled before any code is emitted: the body is
         // inlined once with each lambda's shape in place of its body, and nothing of it is kept.
-        if inliner::constructs_anonymous_object(&callee, &self.bodies) {
+        if inliner::constructs_regenerated_object(&callee, &self.bodies) {
             for &argument in &lambda_arguments {
                 if self.lambda_reaches_private_members(argument)? {
                     return splice(SpliceReason::PrivateMemberInObject);
@@ -134,7 +134,7 @@ impl Emitter<'_> {
                 for (capture, ty) in captures {
                     captured.push(Parameter {
                         category: Category::of_descriptor(&type_descriptor(ty)),
-                        binding: self.caller_local_binding(capture, ty),
+                        binding: self.capture_binding(capture, ty),
                     });
                 }
                 lambda.captured = start..captured.len();
@@ -152,8 +152,14 @@ impl Emitter<'_> {
                 lambda_bindings.insert(operand, lambdas.len());
                 lambdas.push(lambda);
             }
-            let parameters =
-                self.call_parameters(&supplies, &physical, args, &lambda_bindings, captured);
+            let parameters = self.call_parameters(
+                &supplies,
+                &physical,
+                args,
+                &lambda_bindings,
+                captured,
+                &lambdas,
+            );
             let probe = inliner::inline(
                 &callee,
                 &parameters,

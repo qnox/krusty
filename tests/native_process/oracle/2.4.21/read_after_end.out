@@ -1,0 +1,7 @@
+status 0
+stdout 56
+only
+ReadAfterEOFException
+EOF has already been reached
+
+stderr 0

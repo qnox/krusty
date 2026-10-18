@@ -32,6 +32,7 @@ releases! {
     V2_4_0 => "2.4.0",
     V2_4_10 => "2.4.10",
     V2_4_20 => "2.4.20",
+    V2_4_21 => "2.4.21",
 }
 
 /// The vendored policy text of one release, for comparison with a fresh dump.

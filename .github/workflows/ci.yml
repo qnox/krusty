@@ -742,6 +742,7 @@ jobs:
           - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true }
           - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false }
           - { kotlin: 2.4.20, gradle: 9.7.0,  ksp: true }
+          - { kotlin: 2.4.21, gradle: 9.7.0,  ksp: true }
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

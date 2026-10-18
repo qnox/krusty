@@ -49,6 +49,12 @@ pub(super) enum SuspensionResult {
 
 impl Emitter<'_> {
     /// The declared result of `e` when it is a suspension point the transformer takes.
+    /// Whether kotlinc's coroutine transformer builds this method's machine: its suspension
+    /// markers are then the transformer's stand-in instructions.
+    pub(super) fn transformer_owns_method(&self) -> bool {
+        !self.transformed_suspensions.results.is_empty()
+    }
+
     pub(super) fn transformed_result(&self, e: ExprId) -> Option<Ty> {
         self.transformed_suspensions.results.get(&e).copied()
     }
@@ -272,14 +278,16 @@ impl Emitter<'_> {
         machine: &TransformedMachine,
         completion: Option<u32>,
     ) -> u16 {
+        // A suspend lambda is its own continuation, in slot 0: a lambda the method inliner places
+        // in its body captures it from there.
         let slot = completion.map_or(0, |completion| {
             let (slot, _) = *self
                 .slots
                 .get(&completion)
                 .expect("a transformed suspend function retains its completion identity");
-            self.continuation_slot = Some(slot);
             slot
         });
+        self.continuation_slot = Some(slot);
         self.transformed_suspensions = TransformedSuspensions {
             results: machine
                 .suspensions
@@ -326,9 +334,12 @@ pub(super) fn request_transform(
         desc,
         CoroutineRequest {
             continuation_class: machine.continuation_class.clone(),
+            // kotlinc's transformer opens the machine on the declaration's own line, which an
+            // expression body on a later line does not move.
             line_number: ir
-                .fn_decl_lines
+                .fn_sig_lines
                 .get(&fid)
+                .or_else(|| ir.fn_decl_lines.get(&fid))
                 .map(|&line| line.min(u16::MAX as u32) as u16),
             completion_slot,
             dispatch_receiver: dispatch_receiver(ir, fid).filter(|_| machine.lambda.is_none()),

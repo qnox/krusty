@@ -19124,36 +19124,24 @@ impl<'a> Checker<'a> {
                         ),
                     _ => self.resolver().top_level_candidates(&fname),
                 };
-                let toplevel_lambda_shape = toplevel_partial
+                let toplevel_lambda_shape = match toplevel_partial
                     .as_ref()
                     .filter(|_| has_lambda_argument)
                     // A library top-level function only when no user function shadows it.
                     .filter(|_| known_sig.is_none())
-                    .and_then(|partial| {
-                        self.top_level_lambda_shape(
+                    .map(|partial| {
+                        self.receiverless_lambda_shape(
                             scope,
                             &top_level_family,
+                            &fname,
                             untyped_lambda_call(partial),
                         )
-                        // A semantic `Type(args) { … }` FACTORY: the companion's `operator fun
-                        // invoke` is the callee, so its
-                        // parameter — a (suspend) receiver function type — shapes the lambda the
-                        // same way a top-level overload's would. Without it the block types
-                        // receiver-less and every member inside is "unresolved".
-                        .or_else(|| {
-                            self.companion_invoke_lambda_shape(
-                                scope,
-                                &fname,
-                                (args, partial),
-                                (
-                                    arg_names.as_deref(),
-                                    self.file.call_has_trailing_lambda.contains(&call.0),
-                                ),
-                                &explicit_type_args,
-                                CallResultConstraint::direct(expected),
-                            )
-                        })
-                    });
+                    }) {
+                    Some(Err(candidates)) => {
+                        return self.reject_ambiguous_lambda_call(scope, call, &fname, &candidates);
+                    }
+                    shape => shape.and_then(Result::ok).flatten(),
+                };
                 let invariant_expected_result_constraints = adapted_outer
                     .as_ref()
                     .map(|(_, _, constraints)| constraints.clone())

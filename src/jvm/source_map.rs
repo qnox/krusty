@@ -193,17 +193,20 @@ impl SourceMap {
             .position(|known| known.name == name && known.path == path);
         if let Some(file) = file {
             let ranges = &mut self.files[file].ranges;
-            let reusable = |range: &RangeMapping| {
-                let slack = if range.max_dest() == Some(global_max) {
-                    FRONTIER_SLACK
-                } else {
-                    0
-                };
+            let reusable = |range: &RangeMapping, slack: u16| {
                 range.call_site == call_site
                     && source >= range.source
                     && source - range.source < range.range.saturating_add(slack)
             };
-            if let Some(at) = ranges.iter().rposition(reusable) {
+            // A range that already covers the line keeps it, as kotlinc's copier returns a line it
+            // has already visited; only a line no range covers stretches the frontier range.
+            let covering = ranges.iter().rposition(|range| reusable(range, 0));
+            let stretched = || {
+                ranges.iter().rposition(|range| {
+                    range.max_dest() == Some(global_max) && reusable(range, FRONTIER_SLACK)
+                })
+            };
+            if let Some(at) = covering.or_else(stretched) {
                 let range = &mut ranges[at];
                 let offset = source.checked_sub(range.source)?;
                 let output = range.dest.checked_add(offset)?;
@@ -541,6 +544,25 @@ mod tests {
              + 1 Ret.kt\nRetKt\n\
              *L\n1#1,33:1\n9#1,13:34\n\
              *S KotlinDebug\n*F\n+ 1 Ret.kt\nRetKt\n*L\n28#1:34,13\n*E\n"
+        );
+    }
+
+    /// A private inline function (line 4) that inlines a published one (line 3), both expanded at
+    /// line 5: the closing line 4 returns to the range that already covers it rather than
+    /// stretching the published function's frontier range.
+    #[test]
+    fn a_covered_line_keeps_its_range_over_the_frontier() {
+        let mut map = SourceMap::new("A.kt", "inl/AKt", 6);
+        let outputs = map_all(&mut map, "A.kt", "inl/AKt", &[3], 4);
+        assert_eq!(outputs, vec![7]);
+        let outputs = map_all(&mut map, "A.kt", "inl/AKt", &[4, 3, 4], 5);
+        assert_eq!(outputs, vec![8, 9, 8]);
+        assert_eq!(
+            map.render().expect("a map"),
+            "SMAP\nA.kt\nKotlin\n*S Kotlin\n*F\n\
+             + 1 A.kt\ninl/AKt\n\
+             *L\n1#1,6:1\n3#1:7\n4#1:8\n3#1:9\n\
+             *S KotlinDebug\n*F\n+ 1 A.kt\ninl/AKt\n*L\n4#1:7\n5#1:8\n5#1:9\n*E\n"
         );
     }
 
