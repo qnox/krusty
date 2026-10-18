@@ -106,7 +106,6 @@ mod inline_call_outcome;
 use inline_call_outcome::InlineCallOutcome;
 mod inline_frame_marker;
 mod inline_lambda_aliases;
-mod inline_parameters;
 mod inline_return_frames;
 mod instance_field_names;
 use instance_field_names::instance_field_jvm_name;

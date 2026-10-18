@@ -20,6 +20,7 @@
 use super::super::is_suspension_point;
 use crate::fx_hash::HashSet;
 use crate::ir::{for_each_child, Callee, ExprId, IrExpr, IrFile};
+use crate::jvm::inline_parameters::is_inline_parameter;
 use crate::jvm::placed_lambda_captures::is_placed_capture;
 use crate::libraries::InlineKind;
 
@@ -125,12 +126,9 @@ pub(crate) fn spliced_return_crosses_finally(ir: &IrFile, body: ExprId) -> bool 
             }
             _ => {}
         }
-        let operands_are_spliceable = match &ir.exprs[at as usize] {
-            IrExpr::Call { .. } => calls_an_inline_function(ir, at),
-            _ => spliceable,
-        };
         for_each_child(&ir.exprs, at, &mut |child| {
-            stack.push((child, inlined, operands_are_spliceable, crosses_finally))
+            let spliceable = operand_spliceable(ir, at, child, spliceable);
+            stack.push((child, inlined, spliceable, crosses_finally))
         });
     }
     false
@@ -297,15 +295,52 @@ fn collect(
         collect(ir, *inline_body, suspend_set, false, seen, out);
         return;
     }
-    let operands_are_spliceable = match &ir.exprs[expression as usize] {
-        IrExpr::Call { .. } => calls_an_inline_function(ir, expression),
-        _ => spliceable,
-    };
     let mut children = Vec::new();
     for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
     for child in children {
-        collect(ir, child, suspend_set, operands_are_spliceable, seen, out);
+        let spliceable = operand_spliceable(ir, expression, child, spliceable);
+        collect(ir, child, suspend_set, spliceable, seen, out);
     }
+}
+
+/// Whether `child`, an operand of `expression`, can be spliced into this frame. A call decides for
+/// its own operands: those of an inline call can, except an argument its declaration binds to a
+/// `noinline` or non-function parameter, which the emitter materializes as an ordinary function
+/// object. Anything else (a coercion, a block, an argument wrapper) passes its parent's answer on.
+fn operand_spliceable(ir: &IrFile, expression: ExprId, child: ExprId, spliceable: bool) -> bool {
+    match &ir.exprs[expression as usize] {
+        IrExpr::Call { .. } => {
+            calls_an_inline_function(ir, expression)
+                && !ordinary_value_arguments(ir, expression).contains(&child)
+        }
+        _ => spliceable,
+    }
+}
+
+/// The arguments of `call` that its declaration binds to a `noinline` or non-function parameter.
+/// Empty for anything but a call that published its parameter modifiers.
+fn ordinary_value_arguments(ir: &IrFile, call: ExprId) -> Vec<ExprId> {
+    let IrExpr::Call { args, .. } = &ir.exprs[call as usize] else {
+        return Vec::new();
+    };
+    args.iter()
+        .enumerate()
+        .filter(|&(parameter, _)| is_inline_parameter(ir, call, parameter) == Some(false))
+        .map(|(_, &argument)| argument)
+        .collect()
+}
+
+/// The arguments of `call` bound to an inline parameter, the only literals the method inliner
+/// expands in place; a `noinline` literal or any other operand stays an ordinary value.
+fn inline_parameter_arguments(ir: &IrFile, call: ExprId) -> Vec<ExprId> {
+    let IrExpr::Call { args, .. } = &ir.exprs[call as usize] else {
+        return Vec::new();
+    };
+    args.iter()
+        .enumerate()
+        .filter(|&(parameter, _)| is_inline_parameter(ir, call, parameter) == Some(true))
+        .map(|(_, &argument)| argument)
+        .collect()
 }
 
 /// The suspensions of `body` that sit in the literal lambda of a call whose callee the method
@@ -406,10 +441,17 @@ impl HostedSearch<'_> {
             IrExpr::Call { .. } => Host::Other,
             _ => host,
         };
+        // Only an argument bound to an inline parameter is placed; a `noinline` literal is a
+        // function object with its own `invoke`, and so is any receiver.
+        let placed = (operands == Host::Placed).then(|| inline_parameter_arguments(ir, expression));
         let mut children = Vec::new();
         for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
         for child in children {
-            self.walk(child, frame, operands)?;
+            let host = match &placed {
+                Some(placed) if !placed.contains(&child) => Host::None,
+                _ => operands,
+            };
+            self.walk(child, frame, host)?;
         }
         Some(())
     }
@@ -501,17 +543,12 @@ impl<'a> SuspensionSearch<'a> {
             }
             return;
         }
-        // A CALL decides this for its own operands; anything else — a coercion, a block, an
-        // argument wrapper — passes the answer through, since the lambda it holds is still the
-        // operand of whatever call encloses it.
-        let operands_are_spliceable = match &ir.exprs[expression as usize] {
-            IrExpr::Call { .. } => calls_an_inline_function(ir, expression),
-            _ => spliceable,
-        };
+        // A lambda held by anything but a call is still the operand of whatever call encloses it.
         let mut children = Vec::new();
         for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
         for child in children {
-            self.walk(child, inlined, operands_are_spliceable);
+            let spliceable = operand_spliceable(ir, expression, child, spliceable);
+            self.walk(child, inlined, spliceable);
         }
     }
 }
@@ -520,7 +557,7 @@ impl<'a> SuspensionSearch<'a> {
 mod tests {
     use super::*;
     use crate::ir::IrIntrinsicSuspensionPoint;
-    use crate::types::Ty;
+    use crate::types::{InlineParameterModifier, Ty};
 
     /// Mark `point` as a suspension the way an intrinsic one is recorded, so these tests need no
     /// function table.
@@ -639,6 +676,10 @@ mod tests {
             args: vec![argument],
         });
         ir.suspend_calls.insert(call, Ty::String);
+        ir.call_inline_modifiers
+            .insert(call, Box::new([InlineParameterModifier::None]));
+        ir.call_declared_params
+            .insert(call, Box::new([Ty::fun(Vec::new(), Ty::String)]));
         call
     }
 
@@ -660,6 +701,21 @@ mod tests {
             Some(vec![point])
         );
         assert_eq!(frame_suspensions(&ir, body, &suspend_set), [call, point]);
+    }
+
+    /// A `noinline` literal is an ordinary function object: its suspension is its own `invoke`'s.
+    #[test]
+    fn a_suspension_in_a_noinline_lambda_of_an_inline_suspend_call_is_not_placed() {
+        let mut ir = IrFile::default();
+        let point = suspension(&mut ir);
+        let lam = lambda(&mut ir, Vec::new(), Some(point));
+        let call = inline_suspend_call(&mut ir, lam, InlineKind::CanInline);
+        ir.call_inline_modifiers
+            .insert(call, Box::new([InlineParameterModifier::Noinline]));
+        assert_eq!(
+            placed_lambda_suspensions(&ir, call, &HashSet::default()),
+            Some(Vec::new())
+        );
     }
 
     /// A must-inline suspend callee splices its only body, not a `$$forInline` copy, and a reified
