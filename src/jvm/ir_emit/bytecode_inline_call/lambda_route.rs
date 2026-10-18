@@ -35,7 +35,7 @@ pub(in crate::jvm::ir_emit) enum SpliceReason {
     OperandsAcrossCallee,
     /// An `@InlineOnly` callee takes its arguments in place, beside a lambda.
     InPlaceArguments,
-    /// A lambda captures a value that is not a caller local of its own type.
+    /// A lambda captures a caller local whose type is not the captured value's.
     CaptureOutsideFrame,
     /// A lambda the callee may pass to an object it creates reaches a private declaration, which
     /// kotlinc reaches from the regenerated object through synthetic accessors.
@@ -110,7 +110,7 @@ impl Emitter<'_> {
             return splice(SpliceReason::InPlaceArguments);
         }
         for &argument in &lambda_arguments {
-            if !self.lambda_captures_caller_locals(argument)? {
+            if !self.lambda_captures_bind(argument)? {
                 return splice(SpliceReason::CaptureOutsideFrame);
             }
         }
@@ -134,7 +134,7 @@ impl Emitter<'_> {
                 for (capture, ty) in captures {
                     captured.push(Parameter {
                         category: Category::of_descriptor(&type_descriptor(ty)),
-                        binding: self.caller_local_binding(capture, ty),
+                        binding: self.capture_binding(capture, ty),
                     });
                 }
                 lambda.captured = start..captured.len();

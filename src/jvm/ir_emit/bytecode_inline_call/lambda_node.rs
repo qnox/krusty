@@ -3,7 +3,7 @@
 //! captures after them, its `$i$a$` marker as its first local, and its body ending in a return of
 //! its own type. The inliner places that node at each `invoke` of the lambda.
 
-use super::lambda_route::{leaves_by_non_local_jump, SpliceReason};
+use super::lambda_route::{SpliceReason, leaves_by_non_local_jump};
 use super::*;
 use crate::jvm::classreader::{ExcEntry, MethodLocal};
 use crate::jvm::method_node::{CodeAttribute, LabelId};
@@ -151,7 +151,7 @@ impl Emitter<'_> {
             _ => {
                 return Err(
                     "a placed lambda has no checked function type with each argument's type",
-                )
+                );
             }
         };
         let result_semantic = *self
@@ -494,20 +494,18 @@ impl Emitter<'_> {
         Ok(false)
     }
 
-    /// Whether every value the lambda `argument` captures is a caller local the inlined body can
-    /// read as it is: kotlinc binds a capture to the caller's slot only without a cast.
-    pub(super) fn lambda_captures_caller_locals(
-        &self,
-        argument: u32,
-    ) -> Result<bool, &'static str> {
+    /// Whether every value the lambda `argument` captures can be bound: kotlinc binds a captured
+    /// caller local to its slot only without a cast, and evaluates any other value into a
+    /// temporary.
+    pub(super) fn lambda_captures_bind(&self, argument: u32) -> Result<bool, &'static str> {
         let (lambda, _) = self.literal_lambda(argument)?;
         Ok(lambda
             .captures
             .iter()
             .zip(&lambda.capture_types)
             .all(|(&capture, &ty)| {
-                matches!(self.ir.expr(capture), IrExpr::GetValue(value) if self.slots.contains_key(value))
-                    && !matches!(
+                !self.captures_caller_local(capture)
+                    || !matches!(
                         self.caller_local_binding(capture, ty),
                         Binding::CallerLocal {
                             checkcast: Some(_),

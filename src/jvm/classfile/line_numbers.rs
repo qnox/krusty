@@ -347,6 +347,23 @@ impl CodeBuilder {
         }
     }
 
+    /// How many line entries are recorded so far, for [`Self::withdraw_lines_since`].
+    pub(crate) fn line_entry_count(&self) -> usize {
+        self.line_marks.len()
+    }
+
+    /// Withdraw the line entries recorded after the first `count`: the code emitted since then has
+    /// no source position of its own, as kotlinc puts a lambda's captured values on the stack
+    /// without one. A retained entry is kept, since it records an inline call site rather than a
+    /// start.
+    pub(crate) fn withdraw_lines_since(&mut self, count: usize) {
+        while self.line_marks.len() > count
+            && self.retained_line_mark != Some(self.line_marks.len() - 1)
+        {
+            self.line_marks.pop();
+        }
+    }
+
     /// Withdraw `line` when it was marked at the current offset and no instruction occupies it yet.
     ///
     /// Kotlin's unsigned binary members begin their source position between a plain receiver and a
@@ -486,7 +503,7 @@ impl CodeBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{ClassWriter, CodeBuilder, ACC_PUBLIC, ACC_STATIC};
+    use super::super::{ACC_PUBLIC, ACC_STATIC, ClassWriter, CodeBuilder};
 
     /// One instruction, so the next mark lands at a different pc.
     fn advance(code: &mut CodeBuilder) {
