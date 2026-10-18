@@ -677,6 +677,7 @@ mod tests {
             Some(SemanticCallableOwner::Classifier(owner)),
         );
         cp.normalize_external_callable_generic_signature(getter_id, &mut getter);
+        cp.normalize_external_callable_generic_signature(setter_id, &mut setter);
         let property = cp.intern_external_property("value", getter_id, Some(setter_id), None);
         let mut declaration = crate::libraries::PropertyInfo {
             name: "value".to_owned(),
