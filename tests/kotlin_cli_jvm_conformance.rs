@@ -594,11 +594,7 @@ fn run_corpus(toolchain: &Toolchain) -> BTreeMap<String, Outcome> {
 }
 
 fn expectation_path(directory: &str, version: KotlinVersion) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join(directory)
-        .join("jvm")
-        .join(format!("{version}.txt"))
+    box_ratchet::read_path(directory, "jvm", version)
 }
 
 fn load_expectation(path: &Path) -> BTreeSet<String> {
@@ -628,7 +624,6 @@ fn krusty_reproduces_kotlincs_cli_test_corpus() {
     let outcomes = run_corpus(&toolchain);
     let not_applicable =
         load_expectation(&expectation_path("cli_expected_not_applicable", version));
-    let failures_path = expectation_path("cli_expected_failures", version);
 
     let mut failed = BTreeMap::new();
     let mut passed = 0;
@@ -671,9 +666,16 @@ fn krusty_reproduces_kotlincs_cli_test_corpus() {
             std::env::var_os("CI").is_none(),
             "KRUSTY_BLESS_CLI_EXPECTATIONS is refused under CI: expectations are blessed locally"
         );
-        box_ratchet::write_atomic(&failures_path, &render_failures(version, &failing))
-            .unwrap_or_else(|error| panic!("write {}: {error}", failures_path.display()));
+        box_ratchet::record(
+            "cli_expected_failures",
+            "jvm",
+            version,
+            &failing,
+            &render_failures(version, &failing),
+        )
+        .unwrap_or_else(|error| panic!("record the {version} CLI expectations: {error}"));
     }
+    let failures_path = expectation_path("cli_expected_failures", version);
     let expected_failures = load_expectation(&failures_path);
     for key in failing.difference(&expected_failures) {
         problems.push(format!("{key}: newly fails: {}", failed[key]));

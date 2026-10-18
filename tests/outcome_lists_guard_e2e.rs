@@ -256,3 +256,61 @@ fn the_cli_not_applicable_inventory_is_proven_by_the_reference_run_instead() {
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert_eq!(output.stderr, b"");
 }
+
+const LATER_FAILURES: &str = "tests/box_expected_failures/native-klib/2.4.21.txt";
+
+#[test]
+fn dropping_a_release_file_equal_to_the_one_it_inherits_passes() {
+    let repo = Repo::new("drop-equal");
+    repo.write("kotlin-versions", "2.4.20 a\n2.4.21 b\n");
+    repo.write(FAILURES, "# 2.4.20\na/one.kt\n");
+    repo.write(LATER_FAILURES, "# 2.4.21\na/one.kt\n");
+    let base = repo.commit();
+    repo.git(&["rm", "-q", LATER_FAILURES]);
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stderr, b"");
+}
+
+#[test]
+fn dropping_a_release_file_that_inherits_more_entries_fails() {
+    let repo = Repo::new("drop-longer");
+    repo.write("kotlin-versions", "2.4.20 a\n2.4.21 b\n");
+    repo.write(FAILURES, "a/one.kt\nb/two.kt\n");
+    repo.write(LATER_FAILURES, "a/one.kt\n");
+    let base = repo.commit();
+    repo.git(&["rm", "-q", LATER_FAILURES]);
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        "outcome-lists: tests/box_expected_failures/native-klib/2.4.21.txt (reads tests/box_expected_failures/native-klib/2.4.20.txt) gains 1 entry:\n    b/two.kt\n\
+         outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n"
+    );
+}
+
+#[test]
+fn a_release_that_inherits_a_growing_file_is_charged_too() {
+    let repo = Repo::new("inherit-growth");
+    repo.write("kotlin-versions", "2.4.20 a\n2.4.21 b\n");
+    repo.write(FAILURES, "a/one.kt\n");
+    let base = repo.commit();
+    repo.write(FAILURES, "a/one.kt\nb/two.kt\n");
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        "outcome-lists: tests/box_expected_failures/native-klib/2.4.20.txt gains 1 entry:\n    b/two.kt\n\
+         outcome-lists: tests/box_expected_failures/native-klib/2.4.21.txt (reads tests/box_expected_failures/native-klib/2.4.20.txt) gains 1 entry:\n    b/two.kt\n\
+         outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n"
+    );
+}

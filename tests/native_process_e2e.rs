@@ -7,7 +7,8 @@
 //!
 //! * Kotlin/Native, the target's own reference. Its answers are recorded under
 //!   `tests/native_process/oracle/<version>/` and required: a case it is a reference for fails
-//!   without one. The version is the newest reference in `kotlin-versions`.
+//!   without one. The version is the newest reference in `kotlin-versions`; a release with no
+//!   answer of its own reads its predecessor's, and recording writes one only where it differs.
 //!   Re-record them by running this module with `KRUSTY_RECORD_NATIVE_PROCESS_ORACLE` naming a
 //!   Kotlin/Native distribution (`scripts/kotlin-native.sh` provisions one); each program is
 //!   compiled with its `kotlinc-native` and run on the same bytes.
@@ -40,6 +41,8 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::{Mutex, OnceLock};
 
+use krusty::kotlin_version::KotlinVersion;
+
 use super::common;
 use super::common_core::native_backend::{native_image, run_native_image, NativeBox};
 
@@ -49,22 +52,15 @@ fn programs_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/native_process")
 }
 
-fn oracle_version() -> &'static str {
-    include_str!("../kotlin-versions")
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .filter_map(|line| line.split_whitespace().next())
-        .max_by(|left, right| {
-            left.split('.')
-                .map(|part| part.parse::<u32>().expect("numeric Kotlin version"))
-                .cmp(
-                    right
-                        .split('.')
-                        .map(|part| part.parse::<u32>().expect("numeric Kotlin version")),
-                )
-        })
-        .expect("kotlin-versions names a reference")
+fn oracle_version() -> KotlinVersion {
+    KotlinVersion::newest()
+}
+
+fn own_oracle_path(version: KotlinVersion, case: &str) -> PathBuf {
+    programs_dir()
+        .join("oracle")
+        .join(version.to_string())
+        .join(format!("{case}.out"))
 }
 
 /// One run: a program, the arguments and standard input it is started with, and which references
@@ -112,16 +108,25 @@ fn run(case: &Case) {
     }
     let native = transcript(&run_krusty_native(target, case));
     if case.kotlin_native {
-        let oracle_path = programs_dir()
-            .join("oracle")
-            .join(oracle_version())
-            .join(format!("{}.out", case.name));
+        let version = oracle_version();
         if let Some(distribution) = std::env::var_os(RECORD_ORACLE) {
             let recorded = transcript(&run_kotlin_native(Path::new(&distribution), case));
-            fs::create_dir_all(oracle_path.parent().expect("oracle directory"))
-                .expect("create the oracle directory");
-            fs::write(&oracle_path, recorded).expect("record the Kotlin/Native oracle");
+            let own = own_oracle_path(version, case.name);
+            let inherited = krusty::kotlin_version::inherited_file(version, |release| {
+                own_oracle_path(release, case.name)
+            });
+            if inherited.and_then(|path| fs::read(path).ok()).as_deref() == Some(&recorded[..]) {
+                let _ = fs::remove_file(&own);
+            } else {
+                fs::create_dir_all(own.parent().expect("oracle directory"))
+                    .expect("create the oracle directory");
+                fs::write(&own, recorded).expect("record the Kotlin/Native oracle");
+            }
         }
+        let oracle_path = krusty::kotlin_version::recorded_file(version, |release| {
+            own_oracle_path(release, case.name)
+        })
+        .unwrap_or_else(|| own_oracle_path(version, case.name));
         let oracle = fs::read(&oracle_path).unwrap_or_else(|_| {
             panic!(
                 "{}: no Kotlin/Native oracle at {}; record it with {RECORD_ORACLE}",
@@ -183,7 +188,7 @@ fn run_kotlin_native(distribution: &Path, case: &Case) -> Output {
         version.status.success()
             && version_text
                 .split_whitespace()
-                .any(|word| word == oracle_version()),
+                .any(|word| word == oracle_version().to_string()),
         "the process oracle requires Kotlin/Native {}, got: {version_text}",
         oracle_version()
     );

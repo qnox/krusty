@@ -199,17 +199,7 @@ fn an_optional_annotation_in_a_platform_source_is_rejected_like_kotlinc() {
     const MESSAGE: &str =
         "Plat.kt:3:10: declaration annotated with '@OptionalExpectation' can only \
         be used in common module sources.";
-    let expected: &[(KotlinVersion, &[&str])] = &[
-        (KotlinVersion::V2_4_0, &[MESSAGE]),
-        (KotlinVersion::V2_4_10, &[MESSAGE]),
-        (KotlinVersion::V2_4_20, &[MESSAGE]),
-        (KotlinVersion::V2_4_21, &[MESSAGE]),
-    ];
-    let target = krusty::kotlin_version::target();
-    let (_, ledger) = expected
-        .iter()
-        .find(|(version, _)| *version == target)
-        .unwrap_or_else(|| panic!("no expected ledger for kotlinc {target}"));
+    let ledger: &[&str] = common::for_reference(&[(KotlinVersion::V2_4_0, &[MESSAGE])]);
     let sources = [(
         "Plat.kt",
         "class Registry {\n\
@@ -221,7 +211,7 @@ fn an_optional_annotation_in_a_platform_source_is_rejected_like_kotlinc() {
          \n\
          class Payload\n",
     )];
-    assert_eq!(common::reference_error_ledger(&sources, &[]), *ledger);
+    assert_eq!(common::reference_error_ledger(&sources, &[]), ledger);
     common::assert_errors_match_kotlinc(&sources, &[]);
 }
 
@@ -240,17 +230,7 @@ fn an_optional_annotation_on_a_platform_accessor_is_rejected_like_kotlinc() {
         "Plat.kt:4:6: declaration annotated with '@OptionalExpectation' can only be used in \
          common module sources.",
     ];
-    let expected: &[(KotlinVersion, &[&str])] = &[
-        (KotlinVersion::V2_4_0, LEDGER),
-        (KotlinVersion::V2_4_10, LEDGER),
-        (KotlinVersion::V2_4_20, LEDGER),
-        (KotlinVersion::V2_4_21, LEDGER),
-    ];
-    let target = krusty::kotlin_version::target();
-    let (_, ledger) = expected
-        .iter()
-        .find(|(version, _)| *version == target)
-        .unwrap_or_else(|| panic!("no expected ledger for kotlinc {target}"));
+    let ledger: &[&str] = common::for_reference(&[(KotlinVersion::V2_4_0, LEDGER)]);
     let sources = [(
         "Plat.kt",
         "var count: Int = 0\n\
@@ -258,6 +238,6 @@ fn an_optional_annotation_on_a_platform_accessor_is_rejected_like_kotlinc() {
          \x20   @kotlin.js.JsStatic set(\n\
          \x20   @kotlin.js.JsStatic value) { field = value }\n",
     )];
-    assert_eq!(common::reference_error_ledger(&sources, &[]), *ledger);
+    assert_eq!(common::reference_error_ledger(&sources, &[]), ledger);
     common::assert_errors_match_kotlinc(&sources, &[]);
 }

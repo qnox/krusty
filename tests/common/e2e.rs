@@ -407,6 +407,18 @@ fn krusty_cli_diagnostics_in_process(
     )
 }
 
+/// The expectation the target reference version reads from `rows`, each recorded at the release
+/// where it changes ([`krusty::kotlin_version::ReleaseRecords`]): the newest row at or below the
+/// target.
+pub fn for_reference<T: Copy>(rows: &[(krusty::kotlin_version::KotlinVersion, T)]) -> T {
+    let target = krusty::kotlin_version::target();
+    rows.iter()
+        .rev()
+        .find(|(release, _)| *release <= target)
+        .map(|&(_, row)| row)
+        .unwrap_or_else(|| panic!("no expectation recorded at or below kotlinc {target}"))
+}
+
 /// Every error kotlinc reports for named sources, as `file:line:column: message` in emission
 /// order. The kotlinc invocation cache keys this observation by the exact compiler and arguments.
 pub fn reference_error_ledger(sources: &[(&str, &str)], extra_args: &[String]) -> Vec<String> {

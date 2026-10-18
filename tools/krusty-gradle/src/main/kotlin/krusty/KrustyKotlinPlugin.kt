@@ -422,10 +422,14 @@ private fun validateStructuredOptIns(markers: List<String>): List<String> {
     return markers
 }
 
-private fun supportedKotlinPluginVersion(version: String): String = when (version) {
-    "2.4.0", "2.4.10", "2.4.20", "2.4.21" -> version
-    else -> throw GradleException("unsupported Kotlin Gradle plugin $version; expected 2.4.0, 2.4.10, 2.4.20, or 2.4.21")
-}
+private fun supportedKotlinPluginVersion(version: String): String =
+    if (version in supportedKotlinVersions) {
+        version
+    } else {
+        val expected = supportedKotlinVersions.dropLast(1).joinToString(", ") +
+            ", or " + supportedKotlinVersions.last()
+        throw GradleException("unsupported Kotlin Gradle plugin $version; expected $expected")
+    }
 
 private fun MutableList<String>.addPair(name: String, value: String) {
     add(name)

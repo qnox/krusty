@@ -20,16 +20,20 @@ dependencies {
     compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin-api:2.4.0")
 }
 
-// Package the compiler's vendored tables separately. The plugin selects the table for the exact
-// Kotlin Gradle plugin version; merging releases would let an option from one release consume a
-// plugin-owned token under another release's grammar.
+// Package the compiler's vendored tables separately, with the manifest of supported versions. The
+// plugin selects the table the exact Kotlin Gradle plugin version reads; merging releases would let
+// an option from one release consume a plugin-owned token under another release's grammar.
 val kotlincArgumentResources = layout.buildDirectory.dir("generated/kotlinc-arguments")
 val kotlincArgumentTables = tasks.register<Sync>("kotlincArgumentTables") {
     from("../../crates/krusty-cli/src/kotlinc_arguments/releases") {
         include("*.tsv")
         exclude("*.features.tsv")
+        into("krusty/kotlinc-arguments")
     }
-    into(kotlincArgumentResources.map { it.dir("krusty/kotlinc-arguments") })
+    from("../../kotlin-versions") {
+        into("krusty")
+    }
+    into(kotlincArgumentResources)
 }
 sourceSets.main {
     resources.srcDir(files(kotlincArgumentResources).builtBy(kotlincArgumentTables))

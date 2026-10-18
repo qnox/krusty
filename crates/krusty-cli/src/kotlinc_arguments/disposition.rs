@@ -240,12 +240,13 @@ pub fn of(name: &str) -> Option<Disposition> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kotlinc_arguments::catalog::{release_versions, Catalog, Origin};
+    use crate::kotlinc_arguments::catalog::{Catalog, Origin};
+    use krusty::kotlin_version::KotlinVersion;
 
     #[test]
     fn every_kotlinc_argument_has_one_disposition() {
         let mut known = std::collections::BTreeSet::new();
-        for version in release_versions() {
+        for version in KotlinVersion::supported() {
             let catalog = Catalog::for_version(version).unwrap();
             for argument in catalog.arguments() {
                 if argument.origin == Origin::Removed {
