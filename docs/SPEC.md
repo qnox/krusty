@@ -845,6 +845,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`jvm/ir_emit/bytecode_inline_call.rs`). Its slot follows the arguments before the lambda and
   precedes those after it (`jvm/inliner/parameters.rs`). A captured local of another type still takes the byte
   splice. Test: `tests/suspend_reified_inline_lambda_e2e.rs`.
+- **A discarded library suspension result is popped uncast.** A dependency's suspending member
+  returns the erased `Object` in its descriptor, so checked IR reads its declared result through an
+  implicit coercion. A statement call has no consumer for that coercion: the coroutine
+  transformer's resumption join pops the erased result, with no `checkcast` before it, as kotlinc
+  does (`jvm/ir_emit/discarding.rs`). Test: `tests/suspend_result_operands_e2e.rs`.
 - **An inline call's erased-bound result is cast to the member call's receiver class.** A library
   inline function returning a bounded type parameter leaves its bound on the stack (`T : Throwable`
   as `Throwable`); a member call on the result names the substituted class, so kotlinc casts to it
