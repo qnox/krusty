@@ -9,6 +9,7 @@ use super::declaration_signatures::{
 use super::parameter_defaults::{DefaultSelection, ParameterDefaults};
 use super::target_intrinsics::{KlibIntrinsicFacts, TargetIntrinsicPlatform};
 use crate::libraries::{declared_type_alias, AliasExpansion};
+use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::KlibIrSignature;
 use crate::metadata::semantic::KotlinPackage;
 use crate::types::{existing_type_name_child, type_name, type_name_child, TypeName, Visibility};
@@ -59,6 +60,41 @@ pub(super) struct PackageInventory {
     /// it is not a child of any namespace.
     namespaces: HashSet<TypeName>,
     intrinsics: KlibIntrinsicFacts,
+}
+
+/// Exact prepared-inline declarations selected by metadata, grouped by declaring module.
+///
+/// The prepared IR component can contain bodies that this compilation cannot publish. Keeping the
+/// selection at the metadata inventory boundary lets archive decoding skip those bodies without
+/// inferring eligibility from IR shape or source names.
+#[derive(Default)]
+pub(super) struct InlineBodySelection {
+    by_module: HashMap<String, HashSet<KlibPublicIdSignature>>,
+}
+
+impl InlineBodySelection {
+    fn insert(&mut self, module: Option<&str>, signature: &KlibPublicIdSignature) {
+        let Some(module) = module else {
+            return;
+        };
+        self.by_module
+            .entry(module.to_owned())
+            .or_default()
+            .insert(signature.clone());
+    }
+
+    pub(super) fn contains(&self, module: &str, signature: &KlibIrSignature) -> bool {
+        let KlibIrSignature::Public(signature) = signature else {
+            return false;
+        };
+        self.by_module
+            .get(module)
+            .is_some_and(|selected| selected.contains(signature))
+    }
+}
+
+fn can_publish_inline_body_plan(function: &SignedFunction) -> bool {
+    function.declaration.is_inline && function.declaration.has_reified_type_params
 }
 
 impl PackageInventory {
@@ -404,6 +440,26 @@ impl PackageInventory {
         wanted
     }
 
+    /// Inline declarations whose prepared bodies can contribute a normalized call-site plan.
+    pub(super) fn inline_body_selection(&self) -> InlineBodySelection {
+        let mut selected = InlineBodySelection::default();
+        let mut select = |function: &SignedFunction| {
+            if can_publish_inline_body_plan(function) {
+                selected.insert(function.module.as_deref(), &function.signature);
+            }
+        };
+        self.functions.values().flatten().for_each(&mut select);
+        self.companion_functions
+            .values()
+            .flatten()
+            .for_each(|extension| select(&extension.signed));
+        for classifier in self.classifiers.values() {
+            classifier.functions.iter().for_each(&mut select);
+            classifier.associated_functions.iter().for_each(&mut select);
+        }
+        selected
+    }
+
     /// Give every function the constant defaults its library's IR declares for it.
     pub(super) fn attach_defaults(&mut self, defaults: &ParameterDefaults) {
         let mut attach = |function: &mut SignedFunction| {
@@ -433,13 +489,10 @@ impl PackageInventory {
     /// checking and lowering never search declarations by spelling.
     pub(super) fn attach_inline_body_plans(&mut self, bodies: &super::KlibDeclarationBodies) {
         let mut attach = |function: &mut SignedFunction| {
-            if !function.declaration.is_inline {
+            if !can_publish_inline_body_plan(function) {
                 return;
             }
-            let (Some(module), true) = (
-                function.module.as_ref(),
-                function.declaration.has_reified_type_params,
-            ) else {
+            let Some(module) = function.module.as_ref() else {
                 return;
             };
             let identity = crate::libraries::KlibDependencyCallable {

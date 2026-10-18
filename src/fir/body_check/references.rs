@@ -1072,16 +1072,10 @@ impl BodyFirChecker<'_> {
         }
         let substitutions = self
             .info
-            .resolved_call_type_arguments(expression)
-            .into_iter()
-            .flatten()
-            .enumerate()
+            .materialized_call_type_arguments(expression)
             .map(|(ordinal, value)| {
                 let ordinal = u32::try_from(ordinal)
                     .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
-                let value = value.ok_or_else(|| {
-                    self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
-                })?;
                 let reified = reified_type_parameter_ordinals.contains(&ordinal);
                 let value = resolved(value)?;
                 Ok(FirTypeSubstitution {
@@ -1366,16 +1360,10 @@ impl BodyFirChecker<'_> {
                 .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))
         };
         self.info
-            .resolved_call_type_arguments(expression)
-            .into_iter()
-            .flatten()
-            .enumerate()
+            .materialized_call_type_arguments(expression)
             .map(|(ordinal, value)| {
                 let ordinal = u32::try_from(ordinal)
                     .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
-                let value = value.ok_or_else(|| {
-                    self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
-                })?;
                 let reified = reified_type_parameter_ordinals.contains(&ordinal);
                 let value = resolved(value)?;
                 Ok(FirTypeSubstitution {

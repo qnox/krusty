@@ -58,6 +58,8 @@ mod local_function_tests;
 mod local_functions;
 mod local_increments;
 mod session;
+#[cfg(test)]
+mod substitution_tests;
 pub use session::BodyCheckSession;
 #[cfg(test)]
 mod nothing_instantiation_tests;

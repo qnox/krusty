@@ -855,7 +855,9 @@ fn leb128(mut value: u64, bytes: &mut Vec<u8>) {
 mod tests {
     use super::*;
     use crate::metadata::klib_ir::tree::{KlibIrBody, KlibIrExprKind, KlibIrNullability};
-    use crate::metadata::klib_ir::{read_inlinable_declaration_trees, KlibIrSignature};
+    use crate::metadata::klib_ir::{
+        read_inlinable_declaration_trees, read_inlinable_declaration_trees_where, KlibIrSignature,
+    };
 
     fn fixture() -> (PreparedFunction, KlibPublicIdSignature) {
         let signature = KlibPublicIdSignature::classifier(TypeName::from("fixture/probe"));
@@ -968,6 +970,55 @@ mod tests {
         assert_eq!(*nullability, KlibIrNullability::NotSpecified);
         assert!(arguments.is_empty());
         assert!(abbreviation.is_none());
+        std::fs::remove_dir_all(root).expect("remove fixture directory");
+    }
+
+    #[test]
+    fn a_filtered_prepared_decode_skips_unselected_declaration_bodies() {
+        let (kept, kept_signature) = fixture();
+        let (mut skipped, _) = fixture();
+        let skipped_signature =
+            KlibPublicIdSignature::classifier(TypeName::from("fixture/skipped"));
+        skipped.signature = skipped_signature.clone();
+        skipped.name = "skipped".to_owned();
+
+        let root = std::env::temp_dir().join(format!(
+            "krusty-filtered-inline-ir-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut writer = crate::klib::write::KlibWriter::native_test_fixture("fixture");
+        for (name, bytes) in artifacts(&[kept, skipped]) {
+            writer.add_file(&name, bytes);
+        }
+        for (name, bytes) in writer.entries() {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().expect("entry has a parent"))
+                .expect("create fixture directory");
+            std::fs::write(path, bytes).expect("write fixture entry");
+        }
+        let archive = crate::klib::KlibArchive::open(&root).expect("open generated KLIB");
+        let mut offered = Vec::new();
+        let trees = read_inlinable_declaration_trees_where(&archive, |identity| {
+            offered.push(identity.clone());
+            identity == &KlibIrSignature::Public(kept_signature.clone())
+        })
+        .expect("decode selected prepared IR");
+
+        assert_eq!(
+            offered,
+            [
+                KlibIrSignature::Public(kept_signature.clone()),
+                KlibIrSignature::Public(skipped_signature.clone()),
+            ]
+        );
+        assert!(trees
+            .function(&KlibIrSignature::Public(kept_signature))
+            .is_some());
+        assert!(trees
+            .function(&KlibIrSignature::Public(skipped_signature))
+            .is_none());
         std::fs::remove_dir_all(root).expect("remove fixture directory");
     }
 

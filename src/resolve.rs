@@ -15394,6 +15394,7 @@ impl<'a> Checker<'a> {
                     argument,
                     parameter,
                     vararg_element: selected.vararg == Some(parameter) && !whole_array,
+                    source_declared_type: self.local_variable_read(scope, argument),
                 }
             })
             .collect::<Vec<_>>();

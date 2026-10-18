@@ -1350,10 +1350,7 @@ impl BodyFirChecker<'_> {
         declaration: DeclarationId,
     ) -> Result<Box<[FirTypeSubstitution]>, BodyCheckFailure> {
         self.info
-            .resolved_call_type_arguments(expression)
-            .into_iter()
-            .flatten()
-            .enumerate()
+            .materialized_call_type_arguments(expression)
             .map(|(ordinal, argument)| {
                 let additional_bounds = self
                     .info
@@ -1399,14 +1396,8 @@ impl BodyFirChecker<'_> {
                             BodyCheckFailureKind::MissingStableCallTarget,
                         )
                     })?;
-                let value = argument.ok_or_else(|| {
-                    self.failure(
-                        self.file.expr_span(expression),
-                        BodyCheckFailureKind::UnsupportedCallShape,
-                    )
-                })?;
                 let reified = header.flags.is_reified();
-                let value = ResolvedTy::new(value).map_err(|error| {
+                let value = ResolvedTy::new(argument).map_err(|error| {
                     self.failure(
                         self.file.expr_span(expression),
                         BodyCheckFailureKind::UnpublishableType(error),
@@ -1689,10 +1680,7 @@ impl BodyFirChecker<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         let substitutions = self
             .info
-            .resolved_call_type_arguments(expression)
-            .into_iter()
-            .flatten()
-            .enumerate()
+            .materialized_call_type_arguments(expression)
             .map(|(ordinal, argument)| {
                 let additional_bounds = self
                     .info
@@ -1708,14 +1696,8 @@ impl BodyFirChecker<'_> {
                         BodyCheckFailureKind::UnsupportedCallShape,
                     )
                 })?;
-                let value = argument.ok_or_else(|| {
-                    self.failure(
-                        self.file.expr_span(expression),
-                        BodyCheckFailureKind::UnsupportedCallShape,
-                    )
-                })?;
                 let reified = reified_type_parameter_ordinals.contains(&ordinal);
-                let value = resolved(value)?;
+                let value = resolved(argument)?;
                 Ok(FirTypeSubstitution {
                     parameter: FirTypeParameterRef::External {
                         callable: declaration,

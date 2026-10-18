@@ -40,6 +40,7 @@ pub(super) struct InferredIntersection {
 #[derive(Clone, Debug, Default)]
 pub(super) struct SelectedGenericCall {
     arguments: Vec<Option<Ty>>,
+    argument_provenance: Vec<ReifiedArgumentProvenance>,
     additional_bounds: Vec<Vec<Ty>>,
     pub(super) reified_parameters: Vec<(usize, String)>,
     pub(super) intersections: HashMap<usize, InferredIntersection>,
@@ -50,17 +51,12 @@ impl SelectedGenericCall {
         &self.arguments
     }
 
-    /// Substitutions are a checked-FIR handoff only after every declaration slot is solved.
-    ///
-    /// The checker retains partial facts so reified validation can inspect the exact selected
-    /// parameter ordinals, but publishing a `None` slot would promise FIR a substitution that has
-    /// no materializable type. Calls still being completed therefore expose no substitution list,
-    /// matching the commitment boundary used before the facts were grouped in this record.
-    fn committed_arguments(&self) -> Option<&[Option<Ty>]> {
+    fn materialized_arguments(&self) -> impl Iterator<Item = (usize, Ty)> + '_ {
         self.arguments
             .iter()
-            .all(Option::is_some)
-            .then_some(&self.arguments)
+            .copied()
+            .enumerate()
+            .filter_map(|(ordinal, argument)| argument.map(|argument| (ordinal, argument)))
     }
 
     pub(super) fn additional_bounds(&self, ordinal: usize) -> &[Ty] {
@@ -68,6 +64,10 @@ impl SelectedGenericCall {
             .get(ordinal)
             .map(Vec::as_slice)
             .unwrap_or_default()
+    }
+
+    pub(super) fn argument_provenance(&self, ordinal: usize) -> Option<&ReifiedArgumentProvenance> {
+        self.argument_provenance.get(ordinal)
     }
 
     /// Return this winner's complete evidence with only newly proven substitutions applied.
@@ -90,12 +90,163 @@ impl SelectedGenericCall {
     }
 }
 
+/// Occurrence-level provenance needed only by inferred reified-argument diagnostics.
+///
+/// Generic inference deliberately normalizes a definitely-non-null or flexible input to the
+/// selected denotable type. This parallel tree remembers which input boundary each occurrence
+/// crossed without making source spelling or provider representation part of type identity.
+#[derive(Clone, Debug, Default)]
+pub(super) struct ReifiedArgumentProvenance {
+    through_definitely_non_null: bool,
+    through_flexible: bool,
+    type_parameter_occurrence: Option<Ty>,
+    arguments: Vec<Self>,
+}
+
+impl ReifiedArgumentProvenance {
+    pub(super) const NONE: &'static Self = &Self {
+        through_definitely_non_null: false,
+        through_flexible: false,
+        type_parameter_occurrence: None,
+        arguments: Vec::new(),
+    };
+
+    pub(super) fn is_indirect(&self) -> bool {
+        self.through_definitely_non_null || self.through_flexible
+    }
+
+    pub(super) fn type_parameter_occurrence(&self) -> Option<Ty> {
+        self.type_parameter_occurrence
+    }
+
+    pub(super) fn argument(&self, ordinal: usize) -> Option<&Self> {
+        self.arguments.get(ordinal)
+    }
+}
+
+fn reified_provenance_of_ty(ty: Ty) -> ReifiedArgumentProvenance {
+    match ty {
+        Ty::DefinitelyNotNull(inner) => {
+            let mut provenance = reified_provenance_of_ty(*inner);
+            provenance.through_definitely_non_null = true;
+            provenance
+        }
+        Ty::PlatformNullable(inner) => {
+            let mut provenance = reified_provenance_of_ty(*inner);
+            provenance.through_flexible = true;
+            provenance
+        }
+        Ty::Nullable(inner)
+        | Ty::InProjection(inner)
+        | Ty::OutProjection(inner)
+        | Ty::StarProjection(inner) => reified_provenance_of_ty(*inner),
+        Ty::TyParam(..) => ReifiedArgumentProvenance {
+            type_parameter_occurrence: Some(ty),
+            ..Default::default()
+        },
+        Ty::Obj(_, arguments) => ReifiedArgumentProvenance {
+            arguments: arguments
+                .iter()
+                .copied()
+                .map(reified_provenance_of_ty)
+                .collect(),
+            ..Default::default()
+        },
+        Ty::Fun(signature) => ReifiedArgumentProvenance {
+            arguments: signature
+                .params
+                .iter()
+                .copied()
+                .chain(std::iter::once(signature.ret))
+                .map(reified_provenance_of_ty)
+                .collect(),
+            ..Default::default()
+        },
+        _ => Default::default(),
+    }
+}
+
+fn constrain_reified_argument_provenance(
+    formals: &[String],
+    declared: Ty,
+    actual: Ty,
+    provenance: &ReifiedArgumentProvenance,
+    facts: &mut HashMap<String, Vec<ReifiedArgumentProvenance>>,
+) {
+    if let Ty::TyParam(formal, _) = declared.non_null() {
+        if formals.iter().any(|candidate| candidate == formal) {
+            facts
+                .entry(formal.to_string())
+                .or_default()
+                .push(provenance.clone());
+        }
+        return;
+    }
+    match (declared.non_null(), actual.non_null()) {
+        (Ty::Obj(declared_owner, declared_args), Ty::Obj(actual_owner, actual_args))
+            if declared_owner == actual_owner && declared_args.len() == actual_args.len() =>
+        {
+            for (index, (&declared, &actual)) in declared_args.iter().zip(actual_args).enumerate() {
+                let nested = provenance.argument(index).cloned().unwrap_or_default();
+                constrain_reified_argument_provenance(formals, declared, actual, &nested, facts);
+            }
+        }
+        (Ty::Fun(declared), Ty::Fun(actual))
+            if declared.suspend == actual.suspend
+                && declared.context_count == actual.context_count
+                && declared.has_receiver == actual.has_receiver
+                && declared.params.len() == actual.params.len() =>
+        {
+            for (index, (&declared, &actual)) in declared
+                .params
+                .iter()
+                .chain(std::iter::once(&declared.ret))
+                .zip(actual.params.iter().chain(std::iter::once(&actual.ret)))
+                .enumerate()
+            {
+                let nested = provenance.argument(index).cloned().unwrap_or_default();
+                constrain_reified_argument_provenance(formals, declared, actual, &nested, facts);
+            }
+        }
+        _ => {}
+    }
+}
+
 impl TypeInfo {
-    /// Type arguments committed with the selected call, in declaration order.
+    /// Selected-call type-argument evidence in declaration order, including unsolved slots.
     pub fn resolved_call_type_arguments(&self, expression: ExprId) -> Option<&[Option<Ty>]> {
         self.selected_generic_calls
             .get(&expression)
-            .and_then(SelectedGenericCall::committed_arguments)
+            .map(SelectedGenericCall::arguments)
+    }
+    /// Materialized substitutions with their declaration ordinals. Unsolved slots remain checker
+    /// evidence only and never cross into checked FIR as a value.
+    pub(crate) fn materialized_call_type_arguments(
+        &self,
+        expression: ExprId,
+    ) -> impl Iterator<Item = (usize, Ty)> + '_ {
+        self.selected_generic_calls
+            .get(&expression)
+            .into_iter()
+            .flat_map(|call| call.materialized_arguments())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_selected_call_type_arguments_for_test(
+        &mut self,
+        expression: ExprId,
+        arguments: Vec<Option<Ty>>,
+    ) {
+        let selected = self
+            .selected_generic_calls
+            .get_mut(&expression)
+            .expect("test expression has a selected generic call");
+        assert_eq!(
+            selected.arguments.len(),
+            arguments.len(),
+            "test replacement must retain the declaration's generic arity",
+        );
+        selected.arguments = arguments;
     }
 
     pub(crate) fn resolved_call_type_argument_bounds(
@@ -119,6 +270,103 @@ fn bounds_other_than_primary(parts: &[Ty], selected_result: Ty) -> Vec<Ty> {
 }
 
 impl Checker<'_> {
+    pub(super) fn inferred_reified_provenance(
+        &self,
+        expression: ExprId,
+    ) -> ReifiedArgumentProvenance {
+        self.inferred_reified_provenance_for_occurrence(
+            expression,
+            self.expr_types[expression.0 as usize],
+        )
+    }
+
+    fn inferred_reified_provenance_for_occurrence(
+        &self,
+        expression: ExprId,
+        occurrence: Ty,
+    ) -> ReifiedArgumentProvenance {
+        let mut provenance = reified_provenance_of_ty(occurrence);
+        let declared_flexible = self.resolved_calls.get(&expression).is_some_and(|call| {
+            matches!(
+                call.selected_result_target().declared,
+                Ty::PlatformNullable(_)
+            )
+        });
+        if declared_flexible {
+            provenance.through_flexible = true;
+        }
+        provenance
+    }
+
+    fn selected_reified_argument_provenance(
+        &self,
+        call: ExprId,
+        signature: &crate::libraries::GenericSig,
+        parameter_indices: &[usize],
+    ) -> Vec<ReifiedArgumentProvenance> {
+        fn meet(
+            left: &ReifiedArgumentProvenance,
+            right: &ReifiedArgumentProvenance,
+        ) -> ReifiedArgumentProvenance {
+            let arguments = left
+                .arguments
+                .iter()
+                .zip(&right.arguments)
+                .map(|(left, right)| meet(left, right))
+                .collect();
+            ReifiedArgumentProvenance {
+                through_definitely_non_null: left.through_definitely_non_null
+                    && right.through_definitely_non_null,
+                through_flexible: left.through_flexible && right.through_flexible,
+                type_parameter_occurrence: left
+                    .type_parameter_occurrence
+                    .zip(right.type_parameter_occurrence)
+                    .filter(|(left, right)| left == right)
+                    .map(|(occurrence, _)| occurrence),
+                arguments,
+            }
+        }
+
+        let mut facts: HashMap<String, Vec<ReifiedArgumentProvenance>> = HashMap::default();
+        if let Some(arguments) = self.resolved_call_arg_slots.get(&call) {
+            for binding in &arguments.argument_bindings {
+                let Some(&parameter) = parameter_indices.get(binding.parameter) else {
+                    continue;
+                };
+                let Some(&declared) = signature.params.get(parameter) else {
+                    continue;
+                };
+                let declared = if binding.vararg_element {
+                    declared.array_read_elem().unwrap_or(declared)
+                } else {
+                    declared
+                };
+                let checked = self.expr_types[binding.argument.0 as usize];
+                let actual = binding.source_occurrence(checked);
+                constrain_reified_argument_provenance(
+                    &signature.formals,
+                    declared,
+                    actual,
+                    &self.inferred_reified_provenance_for_occurrence(binding.argument, actual),
+                    &mut facts,
+                );
+            }
+        }
+        signature
+            .formals
+            .iter()
+            .map(|formal| {
+                let Some(values) = facts.get(formal) else {
+                    return Default::default();
+                };
+                values
+                    .iter()
+                    .skip(1)
+                    .fold(values[0].clone(), |known, next| meet(&known, next))
+            })
+            .collect()
+    }
+
     pub(super) fn selected_argument_lower_inputs(
         &self,
         call: ExprId,
@@ -226,10 +474,14 @@ impl Checker<'_> {
         arguments: Vec<Option<Ty>>,
     ) {
         self.inferred_expression_intersections.remove(&call);
+        let parameter_indices = (0..signature.params.len()).collect::<Vec<_>>();
+        let argument_provenance =
+            self.selected_reified_argument_provenance(call, signature, &parameter_indices);
         self.selected_generic_calls.insert(
             call,
             SelectedGenericCall {
                 arguments,
+                argument_provenance,
                 reified_parameters: Self::reified_parameters(signature, call_sig),
                 ..Default::default()
             },
@@ -533,6 +785,11 @@ impl Checker<'_> {
             selected_bindings,
             intersection_bindings,
         );
+        let argument_provenance = if explicit_type_args.is_empty() {
+            self.selected_reified_argument_provenance(call, signature, parameter_indices)
+        } else {
+            vec![Default::default(); signature.formals.len()]
+        };
         if !propagated.is_empty() {
             let inferred_return =
                 crate::symbol_resolver::ty_subst_keep_unbound(signature.ret, selected_bindings);
@@ -559,6 +816,7 @@ impl Checker<'_> {
             selected_bindings,
             intersection_bindings,
             &propagated,
+            argument_provenance,
             final_result,
         );
         final_result
@@ -575,6 +833,7 @@ impl Checker<'_> {
         selected_bindings: &crate::symbol_resolver::GSigBinds,
         intersection_bindings: &HashMap<String, Vec<Ty>>,
         propagated: &HashMap<String, InferredIntersection>,
+        argument_provenance: Vec<ReifiedArgumentProvenance>,
         final_result: Ty,
     ) {
         self.clear_selected_generic_call(call);
@@ -605,6 +864,7 @@ impl Checker<'_> {
             call,
             SelectedGenericCall {
                 arguments,
+                argument_provenance,
                 additional_bounds,
                 reified_parameters: Self::reified_parameters(signature, call_sig),
                 intersections,
@@ -631,6 +891,7 @@ impl Checker<'_> {
                 selected_result: final_result,
                 parts: parts.clone(),
                 through_flexible: matches!(final_result, Ty::PlatformNullable(_))
+                    || matches!(signature.ret, Ty::PlatformNullable(_))
                     || propagated
                         .get(formal)
                         .is_some_and(|fact| fact.through_flexible),
@@ -642,6 +903,41 @@ impl Checker<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suspend_function_provenance_requires_the_same_callable_shape() {
+        let formal_name = "sample:consume:X".to_string();
+        let bound = Ty::nullable(Ty::obj("kotlin/Any"));
+        let formal = Ty::ty_param(&formal_name, bound);
+        let occurrence =
+            Ty::ty_param("sample:caller:T", bound).contributed_through_nullable_formal();
+        let declared = Ty::fun_suspend(vec![formal], Ty::Unit);
+        let actual = Ty::fun_suspend(vec![occurrence], Ty::Unit);
+        let provenance = reified_provenance_of_ty(actual);
+        let formals = vec![formal_name.clone()];
+        let mut facts = HashMap::default();
+
+        constrain_reified_argument_provenance(&formals, declared, actual, &provenance, &mut facts);
+
+        let [retained] = facts[&formal_name].as_slice() else {
+            panic!("the matching suspend parameter must retain one occurrence")
+        };
+        assert!(retained.through_definitely_non_null);
+        assert!(matches!(
+            retained.type_parameter_occurrence,
+            Some(Ty::TyParam("sample:caller:T", _))
+        ));
+
+        let mut mismatched = HashMap::default();
+        constrain_reified_argument_provenance(
+            &formals,
+            declared,
+            Ty::fun(vec![occurrence], Ty::Unit),
+            &provenance,
+            &mut mismatched,
+        );
+        assert!(mismatched.is_empty());
+    }
 
     #[test]
     fn additional_bounds_exclude_the_committed_primary_by_identity() {
@@ -667,6 +963,7 @@ mod tests {
         intersections.insert(0, retained_intersection);
         let current = SelectedGenericCall {
             arguments: vec![None, Some(Ty::String)],
+            argument_provenance: Vec::new(),
             additional_bounds: vec![vec![retained_bound], Vec::new()],
             reified_parameters: vec![(1, "sample:produce:U".to_string())],
             intersections,
@@ -715,18 +1012,24 @@ mod tests {
     }
 
     #[test]
-    fn only_complete_type_arguments_cross_the_checked_fir_boundary() {
+    fn only_materialized_type_arguments_cross_the_checked_fir_boundary() {
         let partial = SelectedGenericCall {
             arguments: vec![Some(Ty::String), None],
             ..Default::default()
         };
         assert_eq!(partial.arguments(), &[Some(Ty::String), None]);
-        assert_eq!(partial.committed_arguments(), None);
+        assert_eq!(
+            partial.materialized_arguments().collect::<Vec<_>>(),
+            [(0, Ty::String)]
+        );
 
         let complete = SelectedGenericCall {
             arguments: vec![Some(Ty::String), Some(Ty::Int)],
             ..Default::default()
         };
-        assert_eq!(complete.committed_arguments(), Some(complete.arguments()));
+        assert_eq!(
+            complete.materialized_arguments().collect::<Vec<_>>(),
+            [(0, Ty::String), (1, Ty::Int)]
+        );
     }
 }

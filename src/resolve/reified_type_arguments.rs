@@ -22,6 +22,8 @@ struct ReifiedTypeArgument {
     argument: Ty,
     /// The callee's type-parameter identity, naming the parameter an intersection was inferred for.
     formal: String,
+    /// Inferred occurrence path retained from the selected source argument.
+    provenance: super::intersection_inference::ReifiedArgumentProvenance,
     /// Complete inference fact retained at selected-call commitment. The ordinary argument stays a
     /// denotable `Ty`; diagnostics must not rebuild this from FIR's additional-bound projection.
     intersection: Option<super::intersection_inference::InferredIntersection>,
@@ -32,6 +34,7 @@ struct ReifiedArgument {
     span: Span,
     /// Applied source spelling of an explicit argument, parallel to its expanded semantic type.
     spelling: Option<crate::spelling::Spelled>,
+    provenance: super::intersection_inference::ReifiedArgumentProvenance,
 }
 
 /// One finding of the checker, in kotlinc's report order.
@@ -70,11 +73,13 @@ impl Checker<'_> {
             let site = ReifiedArgument {
                 span: written.map_or_else(|| self.call_callee_name_span(expression), |r| r.span),
                 spelling: written.map(|reference| self.reified_argument_spelling(reference)),
+                provenance: written.map_or(reified.provenance, |_| Default::default()),
             };
             let mut problems = Vec::new();
             self.reified_problems(
                 scope,
                 site.spelling.as_ref(),
+                &site.provenance,
                 reified.argument,
                 reified.intersection.as_ref(),
                 false,
@@ -107,6 +112,12 @@ impl Checker<'_> {
                 argument: element,
                 formal: formal.to_string(),
                 intersection: None,
+                provenance: self
+                    .resolved_call_arg_slots
+                    .get(&expression)
+                    .and_then(|arguments| arguments.argument_bindings.first())
+                    .map(|argument| self.inferred_reified_provenance(argument.argument))
+                    .unwrap_or_default(),
             }];
         }
         let Some(call) = self.selected_generic_calls.get(&expression) else {
@@ -122,6 +133,10 @@ impl Checker<'_> {
                     argument,
                     formal,
                     intersection: call.intersections.get(&ordinal).cloned(),
+                    provenance: call
+                        .argument_provenance(ordinal)
+                        .cloned()
+                        .unwrap_or_default(),
                 })
             })
             .collect()
@@ -186,6 +201,7 @@ impl Checker<'_> {
         &self,
         scope: &CheckerScope<'_>,
         spelling: Option<&crate::spelling::Spelled>,
+        provenance: &super::intersection_inference::ReifiedArgumentProvenance,
         argument: Ty,
         intersection: Option<&super::intersection_inference::InferredIntersection>,
         in_array: bool,
@@ -194,7 +210,15 @@ impl Checker<'_> {
     ) {
         let explicitly_dnn = spelling.is_some_and(|spelling| spelling.use_site_definitely_non_null);
         let inferred_dnn = type_parameter_occurrence_is_definitely_non_null(scope, argument);
-        let through_indirect = in_dnn_or_flexible || explicitly_dnn || inferred_dnn;
+        let through_indirect = in_dnn_or_flexible
+            || explicitly_dnn
+            || inferred_dnn
+            || provenance.is_indirect()
+            || provenance
+                .type_parameter_occurrence()
+                .is_some_and(|occurrence| {
+                    type_parameter_occurrence_is_definitely_non_null(scope, occurrence)
+                });
         if explicitly_dnn {
             problems.push(ReifiedProblem::DefinitelyNonNullable);
         }
@@ -215,6 +239,9 @@ impl Checker<'_> {
                     self.reified_problems(
                         scope,
                         spelling.map(|spelling| spelling.arg(index)),
+                        provenance.argument(index).unwrap_or(
+                            super::intersection_inference::ReifiedArgumentProvenance::NONE,
+                        ),
                         element,
                         None,
                         true,
@@ -246,7 +273,9 @@ impl Checker<'_> {
                 }
             }
             Ty::DefinitelyNotNull(original) => {
-                self.reified_problems(scope, None, *original, None, in_array, true, problems);
+                self.reified_problems(
+                    scope, None, provenance, *original, None, in_array, true, problems,
+                );
             }
             Ty::Nothing => problems.push(ReifiedProblem::ForbiddenSubstitution("Nothing")),
             Ty::Null | Ty::Nullable(&Ty::Nothing) if !features.nullable_nothing => {
@@ -257,7 +286,9 @@ impl Checker<'_> {
                 in_dnn_or_flexible: through_indirect,
             }),
             Ty::PlatformNullable(lower) => {
-                self.reified_problems(scope, spelling, *lower, None, in_array, true, problems);
+                self.reified_problems(
+                    scope, spelling, provenance, *lower, None, in_array, true, problems,
+                );
             }
             _ => {}
         }

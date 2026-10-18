@@ -45,7 +45,11 @@ impl Checker<'_> {
 
     /// The declared type of the local variable or parameter `expression` reads. A variable's
     /// declared type is part of its signature, as a function's return type is.
-    fn local_variable_read(&self, scope: &CheckerScope<'_>, expression: ExprId) -> Option<Ty> {
+    pub(super) fn local_variable_read(
+        &self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+    ) -> Option<Ty> {
         let Expr::Name(name) = self.file.expr(expression) else {
             return None;
         };

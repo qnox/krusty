@@ -150,14 +150,7 @@ impl BodyFirChecker<'_> {
             )
         })?;
         let mut substitutions = HashMap::default();
-        for (ordinal, value) in self
-            .info
-            .resolved_call_type_arguments(expression)
-            .into_iter()
-            .flatten()
-            .enumerate()
-        {
-            let Some(value) = value else { continue };
+        for (ordinal, value) in self.info.materialized_call_type_arguments(expression) {
             let ordinal = u32::try_from(ordinal).map_err(|_| {
                 self.failure(
                     self.file.expr_span(expression),
@@ -190,7 +183,7 @@ impl BodyFirChecker<'_> {
                         BodyCheckFailureKind::MissingStableCallTarget,
                     )
                 })?;
-            substitutions.insert(name.to_owned(), *value);
+            substitutions.insert(name.to_owned(), value);
         }
         if signature.parameters.len() != fallback.len() {
             return Err(self.failure(

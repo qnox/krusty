@@ -16,7 +16,7 @@ use super::{
     KlibLibraryError,
 };
 use crate::metadata::klib_ir::{
-    read_declaration_trees, read_inlinable_declaration_trees, KlibIrDecodeError,
+    read_declaration_trees, read_inlinable_declaration_trees_where, KlibIrDecodeError,
 };
 
 /// One compiler input KLIB and the authority the compilation assigned to it.
@@ -310,6 +310,7 @@ impl<'a> OpenedKlibLibraries<'a> {
             .map_err(KlibLibrariesOpenError::Declaration)?;
         // Only a declaration metadata marks as defaulted has a default to read from the IR.
         let wanted = inventory.default_selection();
+        let inline_wanted = inventory.inline_body_selection();
         let mut defaults = ParameterDefaults::default();
         let mut body_libraries = Vec::new();
         let mut inline_body_libraries = Vec::new();
@@ -391,11 +392,12 @@ impl<'a> OpenedKlibLibraries<'a> {
             // IR remains the complete module body/default channel above; absence of a prepared
             // component means this library publishes no cross-module inline plan.
             let inline_trees = if record.archive.has_inlinable_ir() {
-                read_inlinable_declaration_trees(&record.archive).map_err(|error| {
-                    KlibLibrariesOpenError::Declarations {
-                        library: library.to_path_buf(),
-                        error,
-                    }
+                read_inlinable_declaration_trees_where(&record.archive, |signature| {
+                    inline_wanted.contains(&record.module, signature)
+                })
+                .map_err(|error| KlibLibrariesOpenError::Declarations {
+                    library: library.to_path_buf(),
+                    error,
                 })?
             } else {
                 crate::metadata::klib_ir::KlibIrModuleTrees::default()

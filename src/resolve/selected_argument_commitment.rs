@@ -28,6 +28,16 @@ pub struct SelectedArgumentBinding {
     pub argument: ExprId,
     pub parameter: usize,
     pub vararg_element: bool,
+    /// Declaration-owned occurrence read by this argument before contextual argument checking.
+    /// `expr_types[argument]` may subsequently carry the selected parameter's expected type; an
+    /// inferred reified argument still needs the source occurrence's DNN shape.
+    pub(super) source_declared_type: Option<Ty>,
+}
+
+impl SelectedArgumentBinding {
+    pub(super) fn source_occurrence(self, checked: Ty) -> Ty {
+        self.source_declared_type.unwrap_or(checked)
+    }
 }
 
 impl std::ops::Deref for SelectedArgumentCommitment {
@@ -147,6 +157,7 @@ impl Checker<'_> {
                 argument,
                 parameter,
                 vararg_element: call_sig.vararg_index == Some(parameter) && !whole_array,
+                source_declared_type: self.local_variable_read(scope, argument),
             });
             let inferred = argument_expectations
                 .and_then(|expectations| expectations.get(&argument))
@@ -478,7 +489,9 @@ fn required_indexed_operator_argument_slots(
 
 #[cfg(test)]
 mod tests {
-    use super::{required_indexed_operator_argument_slots, value_parameter_defaults};
+    use super::{
+        required_indexed_operator_argument_slots, value_parameter_defaults, SelectedArgumentBinding,
+    };
     use crate::ast::ExprId;
     use crate::types::Ty;
 
@@ -500,5 +513,19 @@ mod tests {
             required_indexed_operator_argument_slots(&[Ty::Int], None, &[ExprId(1), ExprId(2)],),
             Err("selected indexed operator's arguments do not match its parameters")
         );
+    }
+
+    #[test]
+    fn a_selected_argument_retains_its_declaration_owned_dnn_occurrence() {
+        let declared = Ty::ty_param("owner:T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let occurrence = Ty::ty_param("owner:T", Ty::obj("kotlin/Any"));
+        let binding = SelectedArgumentBinding {
+            argument: ExprId(1),
+            parameter: 0,
+            vararg_element: false,
+            source_declared_type: Some(occurrence),
+        };
+
+        assert_eq!(binding.source_occurrence(declared), occurrence);
     }
 }

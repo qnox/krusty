@@ -66,6 +66,55 @@ fn package_of(functions: Vec<KotlinFunction>) -> KotlinPackage {
 }
 
 #[test]
+fn prepared_inline_selection_is_exact_and_module_qualified() {
+    let parameter = KotlinTypeParameter {
+        id: KotlinTypeParameterId(1),
+        name: "T".to_owned(),
+        bounds: vec![class("kotlin/Any", true)],
+        variance: TypeVariance::Invariant,
+        only_input: false,
+        reified: true,
+    };
+    let mut selected = function("selected", None, Vec::new());
+    selected.is_inline = true;
+    selected.has_reified_type_params = true;
+    selected.formals = vec![parameter.clone()];
+    let mut ordinary_inline = function("ordinaryInline", None, Vec::new());
+    ordinary_inline.is_inline = true;
+    let mut non_inline_reified = function("nonInlineReified", None, Vec::new());
+    non_inline_reified.has_reified_type_params = true;
+    non_inline_reified.formals = vec![parameter];
+
+    let inventory = inventory::PackageInventory::from_package_inputs(vec![(
+        segments(&["fixture"]),
+        package_of(vec![selected, ordinary_inline, non_inline_reified]),
+        false,
+        false,
+        Some("fixture-module".to_owned()),
+    )])
+    .expect("the fixture functions are signable");
+    let signature = |name| {
+        crate::metadata::klib_ir::KlibIrSignature::Public(
+            inventory
+                .functions(type_name("fixture"), name)
+                .next()
+                .expect("the fixture function is published")
+                .signature
+                .clone(),
+        )
+    };
+    let selected = signature("selected");
+    let ordinary_inline = signature("ordinaryInline");
+    let non_inline_reified = signature("nonInlineReified");
+    let selection = inventory.inline_body_selection();
+
+    assert!(selection.contains("fixture-module", &selected));
+    assert!(!selection.contains("other-module", &selected));
+    assert!(!selection.contains("fixture-module", &ordinary_inline));
+    assert!(!selection.contains("fixture-module", &non_inline_reified));
+}
+
+#[test]
 fn a_package_type_alias_is_published_from_its_metadata_declaration() {
     let upper = Ty::nullable(Ty::obj("kotlin/Any"));
     let parameter = Ty::ty_param("T", upper);
@@ -107,7 +156,10 @@ fn a_package_type_alias_is_published_from_its_metadata_declaration() {
                 target,
                 formals: vec!["T".to_string()],
                 expansion,
-                expansion_spelling: Default::default(),
+                expansion_spelling: crate::spelling::Spelled {
+                    args: vec![Default::default(), Default::default()],
+                    ..Default::default()
+                },
             }
         ))
     );
@@ -120,7 +172,10 @@ fn a_package_type_alias_is_published_from_its_metadata_declaration() {
             target,
             formals: vec!["T".to_string()],
             expansion,
-            expansion_spelling: Default::default(),
+            expansion_spelling: crate::spelling::Spelled {
+                args: vec![Default::default(), Default::default()],
+                ..Default::default()
+            },
         })
     );
 }

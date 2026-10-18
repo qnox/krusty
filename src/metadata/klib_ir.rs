@@ -28,7 +28,7 @@ mod wire;
 pub use symbols::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 pub use tree_decoding::{
     read_declaration_trees, read_declaration_trees_where, read_inlinable_declaration_trees,
-    KlibIrDeclarationTree, KlibIrModuleTrees,
+    read_inlinable_declaration_trees_where, KlibIrDeclarationTree, KlibIrModuleTrees,
 };
 
 use wire::{

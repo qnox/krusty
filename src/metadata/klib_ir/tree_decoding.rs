@@ -145,6 +145,16 @@ pub fn read_inlinable_declaration_trees(
     read_declaration_trees_from(archive, true, |_| true)
 }
 
+/// Decode only the prepared inline declarations whose exact identity `keep` accepts. Rejected
+/// declarations cost only reading their top-level identity; their types, members and bodies are
+/// never decoded.
+pub fn read_inlinable_declaration_trees_where(
+    archive: &KlibArchive,
+    mut keep: impl FnMut(&KlibIrSignature) -> bool,
+) -> Result<KlibIrModuleTrees, KlibIrDecodeError> {
+    read_declaration_trees_from(archive, true, &mut keep)
+}
+
 /// Decode the top-level declaration trees whose own identity `keep` accepts. A declaration that is
 /// left out costs only reading its identity; its members and bodies are never decoded.
 pub fn read_declaration_trees_where(
@@ -1264,9 +1274,6 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
                     )));
                 }
             }
-            if self.file.file_entries.is_some() && file.is_none() {
-                return Err(msg.error("prepared inline function has no file entry"));
-            }
             (overridden, file)
         };
         let id =
@@ -1798,6 +1805,35 @@ mod tests {
             .member(&Msg::parse(declaration, 0, DECLARATIONS).unwrap())
             .unwrap();
         (decoder.arena, member)
+    }
+
+    #[test]
+    fn a_prepared_inline_function_may_omit_its_optional_file_entry() {
+        let strings = declaration_strings();
+        let signatures = [
+            public_signature(0, 1),
+            local_signature(9),
+            public_signature(0, 6),
+        ];
+        let signatures = signatures.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let types = [bytes_field(5, &varint_field(2, symbol(0, CLASS)))];
+        let mut file = FileTables {
+            strings: &strings,
+            signatures: SignatureTable::new(0, &signatures, &strings),
+            types: types.iter().map(Vec::as_slice).collect(),
+            bodies: Vec::new(),
+            file_entries: Some(1),
+        };
+        let mut function = declaration_base(symbol(0, FUNCTION), 0);
+        function.extend(varint_field(2, lattice_of(1, 0)));
+        let wrapper = bytes_field(1, &function);
+
+        let mut decoder = TreeDecoder::new(&mut file);
+        let id = decoder
+            .function(&Msg::parse(&wrapper, 0, DECLARATIONS).unwrap(), false)
+            .expect("the prepared function's file entry is optional");
+
+        assert_eq!(decoder.arena.function(id).prepared_inline_file, None);
     }
 
     fn expected_base(slot: u64, kind: u64, flags: u64) -> KlibIrDeclarationBase {

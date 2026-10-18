@@ -271,6 +271,15 @@ fn a_type_parameter_through_dnn_or_flexible_is_a_deprecation_warning() {
 }
 
 #[test]
+fn a_function_parameter_dnn_occurrence_is_a_deprecation_warning() {
+    let source = with_prelude(
+        "inline fun <reified X> rf(noinline block: (X) -> Unit) = Unit\n\
+         fun <T> f(block: (T & Any) -> Unit) = rf(block)",
+    );
+    assert_matches_kotlinc(&source, &[], &[], &[&format!("4:39: {DNN_WARNING}")]);
+}
+
+#[test]
 fn a_type_parameter_through_dnn_or_flexible_is_an_error_once_reported() {
     for (body, column, array) in THROUGH_DNN_OR_FLEXIBLE {
         let message = if *array { AS_REIFIED_ARRAY } else { AS_REIFIED };
