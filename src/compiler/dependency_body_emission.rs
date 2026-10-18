@@ -117,6 +117,12 @@ pub(super) fn emit_intrinsic_dependencies<B: Backend>(
         if let Err(decline) = unit.lower_root_with_intrinsics_and_externals(
             callable, bodies, &callees, intrinsics, &externals,
         ) {
+            if !decline.is_internal_inconsistency() {
+                // A wrapper whose body uses a form lowering does not model yet is not support: the
+                // declined body left the unit as it was, and the backend declines its call sites.
+                crate::trace_compiler!("lower", "intrinsic support root declined: {decline}");
+                continue;
+            }
             diags.error(
                 Span::new(0, 0),
                 format!(

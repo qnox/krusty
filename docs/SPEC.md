@@ -16593,7 +16593,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   or a collection operation cannot become support merely because its implementation happens to
   inspect floating-point bits or reach an instruction. Test
   `klib_lowering::tests::wasm_math_wrappers_are_scalar_roots_closing_through_one_instruction` pins
-  four Wasm wrappers, each closing through exactly one authenticated instruction. This single admitted wrapper
+  four Wasm wrappers, each closing through exactly one authenticated instruction. A root whose body,
+  or a body it reaches, uses a form KLIB lowering does not model yet is simply not support code:
+  its unit is left as it was and the backend declines the call
+  (`kotlin_box_wasm_conformance::wasm_declines_an_instruction_wrapper_whose_body_lowering_does_not_model`).
+  Only a body that disagrees with its own selected declaration is an internal error. This single admitted wrapper
   layer lets a target
   stdlib's semantic wrapper close over its instruction wrapper without making the support relation
   transitive. A caller two edges away remains owned by its ordinary target realization; common

@@ -377,6 +377,21 @@ fun box(): String {
 }
 
 #[test]
+fn wasm_declines_an_instruction_wrapper_whose_body_lowering_does_not_model() {
+    // `pow` reaches fdlibm's `__ieee754_pow`, whose locals have no initializer: the wrapper is not
+    // support code, so its call declines instead of failing compilation.
+    expect_wasm_decline(
+        r#"
+import kotlin.math.pow
+
+fun box(): String = if (2.0.pow(3.0) == 8.0) "OK" else "pow"
+"#,
+        "wasmUnmodelledInstructionWrapper",
+        "a dependency callable whose target code was not emitted",
+    );
+}
+
+#[test]
 fn kotlin_codegen_box_wasm_js_conformance() {
     box_lane::run(&WasmLane {
         target: WasmTarget::Js,
