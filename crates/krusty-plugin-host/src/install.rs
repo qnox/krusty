@@ -59,8 +59,9 @@ pub(crate) fn staging_path(dest: &Path) -> PathBuf {
     dest.with_file_name(name)
 }
 
-/// Renames a staged file or directory to `dest`. When another process published `dest` first, its
-/// copy is kept and the staged one removed.
+/// Renames a staged file or directory to `dest`, where nothing invalid is left: callers remove a
+/// broken earlier entry first. When another process published `dest` meanwhile, its verified copy
+/// is kept and the staged one removed.
 pub(crate) fn publish(staged: &Path, dest: &Path) -> std::io::Result<()> {
     match std::fs::rename(staged, dest) {
         Ok(()) => Ok(()),

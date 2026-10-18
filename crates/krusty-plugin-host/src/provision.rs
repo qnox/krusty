@@ -228,6 +228,11 @@ impl Session<'_> {
         if java.is_file() {
             return Ok(Some(jdk_at(java, pin.major)));
         }
+        // A directory without the launcher is a broken earlier install; publishing beside it would
+        // keep it, since a rename never replaces a non-empty directory.
+        if home_dir.exists() {
+            install::remove(&home_dir);
+        }
         if self.env.offline {
             self.missing.push(format!(
                 "a Java {needed} or newer JDK ({})",
@@ -279,8 +284,12 @@ impl Session<'_> {
     fn artifact(&mut self, pin: &ArtifactPin) -> Result<Option<PathBuf>, ProvisionError> {
         let dest = artifacts::cached(self.env, pin);
         // Only verified files are ever renamed into the cache.
-        if std::fs::metadata(&dest).is_ok_and(|meta| meta.is_file() && meta.len() == pin.size) {
-            return Ok(Some(dest));
+        match std::fs::metadata(&dest) {
+            Ok(meta) if meta.is_file() && meta.len() == pin.size => return Ok(Some(dest)),
+            // Anything else at `dest` is not the pinned jar, and a rename on Windows never
+            // replaces it.
+            Ok(_) => install::remove(&dest),
+            Err(_) => {}
         }
         create_dir(dest.parent().expect("a cached jar is inside the cache"))?;
         for (copy, cache) in artifacts::installed_copies(self.env, pin) {

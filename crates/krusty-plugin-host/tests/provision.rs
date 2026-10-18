@@ -303,6 +303,30 @@ fn a_verified_jar_is_copied_from_the_gradle_cache_and_a_corrupt_one_is_ignored()
 }
 
 #[test]
+fn a_broken_cache_entry_is_replaced_rather_than_kept() {
+    let fixture = fixture("broken-cache");
+    let stale_jar = &fixture.cached_jars()[0];
+    std::fs::create_dir_all(stale_jar.parent().unwrap()).unwrap();
+    std::fs::write(stale_jar, b"truncated").unwrap();
+    // An interrupted unpack by an older krusty: the directory is there, the launcher is not.
+    let stale_jdk = fixture
+        .root
+        .join("cache/jdk/test-21-linux-x86_64/jdk-21-test");
+    std::fs::create_dir_all(&stale_jdk).unwrap();
+    std::fs::write(stale_jdk.join("release"), "").unwrap();
+
+    let (result, _) = fixture.run(17);
+    let runtime = result.unwrap();
+    assert_eq!(runtime.java, stale_jdk.join("bin/java"));
+    assert_eq!(std::fs::read(stale_jar).unwrap(), b"compiler jar");
+    assert_eq!(
+        std::fs::read_to_string(stale_jdk.join("release")).unwrap(),
+        "JAVA_VERSION=\"21.0.8\"\n"
+    );
+    assert_eq!(fixture.fetched().len(), 3);
+}
+
+#[test]
 fn a_download_that_is_not_the_pinned_file_is_refused_and_not_kept() {
     let mut fixture = fixture("corrupt");
     fixture.env.java_home = Some(jdk_home(&fixture.root.join("jdk21"), "21"));
