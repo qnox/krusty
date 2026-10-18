@@ -5461,8 +5461,7 @@ mod tests {
     use crate::libraries::CollectionBarrierOutcome;
     use crate::libraries::{GenericReturnPolicy, SemanticPlatform};
     use crate::symbol_source::SymbolNamespace;
-    use crate::types::type_name;
-    use crate::types::{Ty, Visibility};
+    use crate::types::{type_name, type_parameter_source_name, Ty, Visibility};
 
     fn initialized_libraries(classpath: std::rc::Rc<super::Classpath>) -> super::JvmLibraries {
         super::JvmLibraries::new(classpath).expect("JVM provider initialization")
@@ -5893,13 +5892,10 @@ mod tests {
         assert!(type_of.callable.params.is_empty());
         assert_eq!(type_of.callable.ret, Ty::obj("kotlin/reflect/KType"));
         assert!(type_of.flags.inline.can_inline());
-        assert_eq!(
-            type_of
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.formals.as_slice()),
-            Some(["T".to_string()].as_slice())
-        );
+        let signature = type_of.generic_sig.as_ref().unwrap();
+        assert_eq!(signature.formals.len(), 1);
+        assert_ne!(signature.formals[0], "T", "semantic identity is opaque");
+        assert_eq!(type_parameter_source_name(&signature.formals[0]), "T");
         let scope = [type_name("kotlin/reflect")];
         let selected = crate::symbol_resolver::SymbolResolver::new_scoped(&libraries, &scope)
             .resolve_symbol(
@@ -6098,9 +6094,10 @@ mod tests {
                         receiver
                             .obj_internal()
                             .is_some_and(|owner| owner.matches("kotlin/collections/Iterable"))
-                    }) && signature.formals == ["T"]
-                        && signature.params.len() == 1
-                        && only_input == &["T"]
+                    }) && signature.params.len() == 1
+                        && only_input == &signature.formals
+                        && signature.formals.len() == 1
+                        && type_parameter_source_name(&signature.formals[0]) == "T"
                 }),
             "decoded contains overloads: {shapes:?}"
         );

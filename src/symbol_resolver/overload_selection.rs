@@ -29,6 +29,19 @@ impl<T> CandidateSelectionWithTies<T> {
     }
 }
 
+/// Project one inferred parameter vector into declaration-shape coordinates for overload
+/// specificity. Unbound formals owned by different declarations are alpha-equivalent by ordinal;
+/// applicability, inference, and the selected callable continue to use their stable identities.
+pub(super) fn callable_specificity_shape(candidate: &FunctionInfo, parameters: Vec<Ty>) -> Vec<Ty> {
+    let Some(signature) = candidate.generic_sig.as_ref() else {
+        return parameters;
+    };
+    parameters
+        .into_iter()
+        .map(|parameter| crate::types::ty_canonicalize_params(parameter, &signature.formals))
+        .collect()
+}
+
 pub(super) fn unique_most_specific<T>(
     candidates: impl IntoIterator<Item = (Vec<Ty>, T)>,
     at_least_as_specific: impl Fn(usize, Ty, Ty) -> bool,
@@ -72,12 +85,12 @@ pub(super) fn select_fixed_or_more_specific_vararg<'a>(
         // array can hide a narrower element before specificity runs.
         if candidate.call_sig.vararg {
             if let Some(shape) = super::candidate_vararg_shape(candidate, params, args, &fits) {
-                elements.push((shape, *candidate));
+                elements.push((callable_specificity_shape(candidate, shape), *candidate));
                 continue;
             }
         }
         if let Some(shape) = super::fixed_parameter_shape(params, args, &fits) {
-            fixed.push((shape, *candidate));
+            fixed.push((callable_specificity_shape(candidate, shape), *candidate));
         }
     }
     // No fixed declaration accepted the call argument-for-argument. Leave element
@@ -134,7 +147,12 @@ pub(super) fn non_vararg_among<'a>(
         candidates
             .iter()
             .filter(|(candidate, _)| tied.iter().any(|tied| std::ptr::eq(*tied, *candidate)))
-            .map(|(candidate, params)| (params.clone(), *candidate))
+            .map(|(candidate, params)| {
+                (
+                    callable_specificity_shape(candidate, params.clone()),
+                    *candidate,
+                )
+            })
             .collect(),
         |_, left, right| {
             super::parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
@@ -1369,9 +1387,12 @@ fn best_by_args_at_priority_with_ties<'a>(
         CandidateSelectionWithTies::Ambiguous(_) | CandidateSelectionWithTies::None => {}
     }
     match integer_literal_overload_with_ties(
-        cands
-            .iter()
-            .map(|(candidate, params)| (params.clone(), *candidate)),
+        cands.iter().map(|(candidate, params)| {
+            (
+                callable_specificity_shape(candidate, params.clone()),
+                *candidate,
+            )
+        }),
         args,
         |position, param, arg| fits(position, param, arg),
         |_position, left, right, arg| parameter_at_least_as_specific(src, left, right, arg),
@@ -1408,7 +1429,7 @@ fn best_by_args_at_priority_with_ties<'a>(
                     omitted_parameter_shape(params, args, |position, param, arg| {
                         fits(position, param, arg) || adapts(param, arg, position)
                     })
-                    .map(|shape| (shape, *candidate))
+                    .map(|shape| (callable_specificity_shape(candidate, shape), *candidate))
                 })
                 .flatten()
         }),
@@ -1447,7 +1468,12 @@ fn best_by_args_at_priority_with_ties<'a>(
                     args.last(),
                 );
                 (prefix <= last && lambda_fits && defaults_fit && prefix_fits)
-                    .then(|| (params.clone(), *candidate))
+                    .then(|| {
+                        (
+                            callable_specificity_shape(candidate, params.clone()),
+                            *candidate,
+                        )
+                    })
             }),
             specificity,
         ) {
@@ -1470,7 +1496,7 @@ fn best_by_args_at_priority_with_ties<'a>(
                 candidate_vararg_shape(candidate, params, args, |position, param, arg| {
                     fits(position, param, arg) || adapts(param, arg, position)
                 })
-                .map(|shape| (shape, *candidate))
+                .map(|shape| (callable_specificity_shape(candidate, shape), *candidate))
             })?
         }),
         specificity,
@@ -1573,7 +1599,9 @@ mod tests {
     use super::{
         select_fixed_or_more_specific_vararg, CandidateSelectionWithTies, ReceiverFunctionSelection,
     };
-    use crate::libraries::{CallSig, FnKind, FunctionInfo, LibraryCallable};
+    use crate::libraries::{
+        CallSig, FnKind, FunctionInfo, GenericReturnPolicy, GenericSig, LibraryCallable,
+    };
     use crate::types::Ty;
 
     fn candidate(name: &str, parameter: Ty, vararg: bool) -> FunctionInfo {
@@ -1622,6 +1650,65 @@ mod tests {
             selected,
             CandidateSelectionWithTies::Selected(candidate)
                 if std::ptr::eq(candidate, &vararg)
+        ));
+    }
+
+    #[test]
+    fn fixed_beats_alpha_equivalent_vararg_with_declaration_owned_formals() {
+        let nullable_any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let generic = |vararg, key: &'static str, value: &'static str| {
+            let pair = Ty::obj_args(
+                "kotlin/Pair",
+                &[
+                    Ty::ty_param(key, nullable_any),
+                    Ty::ty_param(value, nullable_any),
+                ],
+            );
+            let parameter = if vararg { Ty::array(pair) } else { pair };
+            let mut candidate = candidate("mapOf", parameter, vararg);
+            candidate.generic_sig = Some(GenericSig {
+                formals: vec![key.to_string(), value.to_string()],
+                formal_bounds: vec![vec![nullable_any], vec![nullable_any]],
+                receiver: None,
+                params: vec![parameter],
+                ret: Ty::obj_args(
+                    "kotlin/collections/Map",
+                    &[
+                        Ty::ty_param(key, nullable_any),
+                        Ty::ty_param(value, nullable_any),
+                    ],
+                ),
+                return_policy: GenericReturnPolicy::Exact,
+            });
+            candidate
+        };
+        let fixed = generic(
+            false,
+            crate::types::metadata_type_parameter("K"),
+            crate::types::metadata_type_parameter("V"),
+        );
+        let vararg = generic(
+            true,
+            crate::types::metadata_type_parameter("K"),
+            crate::types::metadata_type_parameter("V"),
+        );
+        let candidates = [
+            (&fixed, fixed.semantic_params().into_owned()),
+            (&vararg, vararg.semantic_params().into_owned()),
+        ];
+        let args = [super::CallArgKind::Typed(Ty::Error)];
+
+        let selected = select_fixed_or_more_specific_vararg(
+            &candidates,
+            &args,
+            |_, _, _| true,
+            |_, l, r| l == r,
+        );
+
+        assert!(matches!(
+            selected,
+            CandidateSelectionWithTies::Selected(candidate)
+                if std::ptr::eq(candidate, &fixed)
         ));
     }
 }

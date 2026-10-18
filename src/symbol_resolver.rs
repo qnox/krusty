@@ -45,6 +45,8 @@ mod resolved_symbol;
 mod sam;
 mod scope_level_callables;
 mod selected_call_instantiation;
+#[cfg(test)]
+mod selection_identity_tests;
 pub(crate) use selected_call_instantiation::selected_default_callable;
 pub(crate) mod selected_constructor;
 pub(crate) use selected_constructor::SelectedConstructorDeclaration;
@@ -103,11 +105,12 @@ pub(crate) use overload_selection::{
     best_by_args, CandidateSelectionWithTies, ReceiverFunctionSelection,
 };
 use overload_selection::{
-    generic_bounds_admit, generic_bounds_admit_slots, indexed_call_shape, integer_literal_overload,
-    logical_call_params, logical_value_params, select_overload,
-    select_overload_tracking_with_functions, select_receiver_overload_from_functions_tracking,
-    semantic_arg_assignable, unique_most_specific, unique_most_specific_with_conflicts, ExtCtx,
-    IndexedConvention, SelectionMode,
+    callable_specificity_shape, generic_bounds_admit, generic_bounds_admit_slots,
+    indexed_call_shape, integer_literal_overload, logical_call_params, logical_value_params,
+    select_overload, select_overload_tracking_with_functions,
+    select_receiver_overload_from_functions_tracking, semantic_arg_assignable,
+    unique_most_specific, unique_most_specific_with_conflicts, ExtCtx, IndexedConvention,
+    SelectionMode,
 };
 use property_candidates::{
     generic_property_more_specific, source_property_visible, specialize_property,
@@ -2426,7 +2429,10 @@ impl<'a> SymbolResolver<'a> {
             .collect();
         let fits = |p: &Ty, a: &CallArgKind| a.fits_parameter(self.lib, &self.src, *p);
         let adapts = |p: &Ty, a: &CallArgKind, _i: usize| a.adapts_integer_literal_to(*p);
-
+        // Unresolved variables remain declaration-owned while applicability and inference run.
+        // Specificity, however, compares declaration shapes: independently declared `<T>` slots
+        // are alpha-equivalent by ordinal. Canonicalize only that comparison projection; the
+        // selected callable and its bindings keep their stable declaration identities.
         // Kotlin removes low-priority declarations only when an ordinary declaration is actually
         // applicable. Do that once, before specificity, so every exact/literal/default/vararg branch
         // below sees one coherent candidate tier.
@@ -2476,9 +2482,9 @@ impl<'a> SymbolResolver<'a> {
             Some(exact)
         } else {
             let literal_pick = match integer_literal_overload(
-                parsed
-                    .iter()
-                    .map(|entry @ (_, params, ..)| (params.clone(), entry)),
+                parsed.iter().map(|entry @ (candidate, params, ..)| {
+                    (callable_specificity_shape(candidate, params.clone()), entry)
+                }),
                 args,
                 |_, param, arg| fits(param, arg),
                 |_position, left, right, arg| {
@@ -2494,20 +2500,20 @@ impl<'a> SymbolResolver<'a> {
             match literal_pick {
                 Some(entry) => Some(entry),
                 None => match unique_most_specific(
-                    parsed.iter().filter_map(|entry @ (_, params, ..)| {
+                    parsed.iter().filter_map(|entry @ (candidate, params, ..)| {
                         fixed_parameter_shape(params, args, |_, param, arg| fits(param, arg))
-                            .map(|shape| (shape, entry))
+                            .map(|shape| (callable_specificity_shape(candidate, shape), entry))
                     }),
                     |_, left, right| resolution_subtype(&self.src, left, right),
                 ) {
                     CandidateSelection::Selected(entry) => Some(entry),
                     CandidateSelection::Ambiguous => return None,
                     CandidateSelection::None => match unique_most_specific(
-                        parsed.iter().filter_map(|entry @ (o, params, ..)| {
-                            candidate_vararg_shape(o, params, args, |i, param, arg| {
+                        parsed.iter().filter_map(|entry @ (candidate, params, ..)| {
+                            candidate_vararg_shape(candidate, params, args, |i, param, arg| {
                                 fits(param, arg) || adapts(param, arg, i)
                             })
-                            .map(|shape| (shape, entry))
+                            .map(|shape| (callable_specificity_shape(candidate, shape), entry))
                         }),
                         |_, left, right| resolution_subtype(&self.src, left, right),
                     ) {
@@ -3079,20 +3085,25 @@ impl<'a> SymbolResolver<'a> {
             // spellings and unrelated type variables. Borrowing either one's generic signature can
             // bind a return or reified marker to the wrong formal while still producing valid bytecode.
             //
-            // krusty models `$default` with only the real parameters, so exact JVM spelling plus the
-            // logical parameter vector identifies its base without reconstructing a descriptor from
-            // lossy `Ty` values (`Byte`/`Short` both appear as `Int`).
-            let base_spelling = c.physical_name().strip_suffix("$default");
-            let base = base_spelling.and_then(|spelling| {
-                base_records
-                    .iter()
-                    .flat_map(|record| record.callables.functions())
-                    .filter(|candidate| candidate.kind == FnKind::TopLevel)
-                    .find(|candidate| {
-                        candidate.callable.physical_name() == spelling
-                            && candidate.callable.params.as_slice() == c.params.as_slice()
-                    })
-            })?;
+            // The base declaration already owns the exact physical realization. Use that stable
+            // link rather than semantic parameter equality: provider normalization gives the base
+            // and its synthetic bridge distinct declaration-owned formal identities, even though
+            // they realize one source callable.
+            let base = base_records
+                .iter()
+                .flat_map(|record| record.callables.functions())
+                .filter(|candidate| candidate.kind == FnKind::TopLevel)
+                .find(|candidate| {
+                    candidate
+                        .callable
+                        .default_realization
+                        .as_deref()
+                        .is_some_and(|realization| {
+                            realization.owner == c.owner
+                                && realization.name == c.physical_name()
+                                && realization.descriptor == c.descriptor
+                        })
+                })?;
             let semantic = base.semantic_signature();
             let mapping = self.default_argument_mapping(o, semantic.params.len(), args, slots)?;
             crate::trace_compiler!(
@@ -3168,17 +3179,16 @@ impl<'a> SymbolResolver<'a> {
                 args,
                 base.call_sig.vararg,
             );
-            // Same reasoning as `base_gsig`, for the JVM `Signature`: the `$default` synthetic carries
-            // none, and a `<reified T>` splice reads its formal type-parameter NAMES from there to bind
-            // the call's type arguments. The base's formals ARE the synthetic's — the mask/marker
-            // parameters the synthetic appends introduce no type variables — so an omitted-default call
+            // The JVM `Signature` belongs to the same source declaration as the semantic base. The
+            // `$default` synthetic usually carries none, and a `<reified T>` splice needs the base's
+            // declaration-owned formals to bind the call's type arguments. The mask/marker parameters
+            // appended by the physical bridge introduce no type variables, so an omitted-default call
             // to a reified inline can specialize its body instead of falling back to a direct
             // (throwing) invoke.
             //
-            // The base is identified by SPELLING, not by arity alone: the formal type-parameter names
-            // are what the splice substitutes by, so borrowing a same-arity SIBLING overload's
-            // signature would specialize the body against the wrong names. `sourceName-<hash>$default`
-            // belongs to `sourceName-<hash>`, and only that one.
+            // The exact default realization above identifies the source declaration, so its
+            // signature belongs to this bridge even when a same-arity sibling has different
+            // declaration-owned formals.
             if callable.signature.is_none() {
                 callable.signature = base.callable.signature.clone();
             }
@@ -6349,85 +6359,6 @@ mod tests {
         assert!(call.default_call);
         assert_eq!(call.ret, Ty::UInt);
         assert_eq!(call.physical_ret, Ty::Int);
-    }
-
-    #[test]
-    fn top_level_default_callable_preserves_specialized_source_parameters() {
-        struct DefaultSource {
-            bridge: FunctionInfo,
-            base: FunctionInfo,
-        }
-
-        impl SymbolSource for DefaultSource {
-            fn symbols(
-                &self,
-                namespace: SymbolNamespace,
-                name: &str,
-            ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
-                let overloads = match (namespace, name) {
-                    (SymbolNamespace::Package(TypeName::ROOT), "same") => vec![self.base.clone()],
-                    (SymbolNamespace::Package(TypeName::ROOT), "same$default") => {
-                        vec![self.bridge.clone()]
-                    }
-                    _ => Vec::new(),
-                };
-                std::rc::Rc::new(crate::libraries::ResolvedSymbols {
-                    builtin_classifier: false,
-                    classifier_name: None,
-                    classifier_declaration: None,
-                    classifier: None,
-                    callables: crate::libraries::Callables::Functions(FunctionSet { overloads }),
-                    importable_declaration: false,
-                })
-            }
-        }
-
-        impl crate::libraries::SemanticPlatform for DefaultSource {}
-
-        let any = Ty::obj("kotlin/Any");
-        let nullable_any = Ty::nullable(any);
-        let parameter = Ty::ty_param("T", nullable_any);
-        let mut callable = LibraryCallable::library(
-            "demo/AssertionsKt",
-            "same",
-            vec![any, any, Ty::nullable(Ty::String)],
-            Ty::Unit,
-            Ty::Unit,
-            "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)V",
-        );
-        callable.physical_name = Some("same$default".to_string());
-        callable.default_call = true;
-        let mut bridge = FunctionInfo::plain(FnKind::TopLevel, None, callable);
-        bridge.call_sig.required = 2;
-        bridge.call_sig.param_defaults = vec![false, false, true];
-        let mut base = bridge.clone();
-        base.callable.physical_name = None;
-        base.callable.default_call = false;
-        attach_default_target(&mut base, &bridge);
-        base.generic_sig = Some(GenericSig {
-            formals: vec!["T".to_string()],
-            formal_bounds: vec![vec![nullable_any]],
-            receiver: None,
-            params: vec![parameter, parameter, Ty::nullable(Ty::String)],
-            ret: Ty::Unit,
-            return_policy: GenericReturnPolicy::Exact,
-        });
-        let source = DefaultSource { bridge, base };
-        let scope = vec![type_name("")];
-        let resolver = SymbolResolver::new_scoped(&source, &scope);
-        let call = resolver
-            .resolve_symbol(
-                SymRecv::TopLevel,
-                "same",
-                &[Ty::nullable(Ty::String), Ty::String],
-                &[],
-            )
-            .and_then(Symbol::top_level_call)
-            .expect("generic default callable should resolve");
-
-        assert!(call.default_call);
-        assert_eq!(call.params[0], Ty::nullable(Ty::String));
-        assert_eq!(call.params[1], Ty::nullable(Ty::String));
     }
 
     #[test]

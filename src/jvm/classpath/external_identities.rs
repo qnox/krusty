@@ -61,6 +61,7 @@ impl Classpath {
         callable: &mut crate::libraries::LibraryCallable,
         mut formal_identity: impl FnMut(usize, &str) -> &'static str,
     ) {
+        callable.external_identity = Some(identity);
         let Some(mut signature) = callable.generic_sig.take() else {
             return;
         };
