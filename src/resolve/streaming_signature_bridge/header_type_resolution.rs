@@ -9,23 +9,82 @@ use super::super::TParams;
 use super::*;
 
 impl ProductionSignatureSemantics<'_> {
-    /// Publish an evaluated graph expression to every declaration occurrence that owns it. A
-    /// constructor parameter and its property/classifier copies have distinct compact syntax ids,
-    /// while a graph `Known(TyParam)` leaf has no lookup callback that could publish any of them.
-    /// The graph-to-header bridge is the stable identity relation; retain an already-selected
-    /// alias/classifier boundary and add only this expression's semantic result.
-    fn record_declaration_expression_type(
+    pub(super) fn project_graph_type_spelling_sites(
+        &self,
+        graph: &crate::fir::SignatureGraph,
+        syntax: crate::fir::HeaderTypeId,
+        resolved: Ty,
+    ) -> bool {
+        let sites = graph.declaration_type_syntaxes(syntax);
+        if sites.is_empty() {
+            return true;
+        }
+        let sites = sites
+            .iter()
+            .map(|site| self.headers.syntax.written_type_id(*site))
+            .collect::<Vec<_>>();
+        self.selected_types.project_graph_type_to_declaration_sites(
+            graph.written_type_id(syntax),
+            resolved,
+            &sites,
+        )
+    }
+
+    fn expression_spelling(
+        &self,
+        graph: &crate::fir::SignatureGraph,
+        expression: crate::fir::SigExprId,
+    ) -> Option<super::super::type_spellings::ResolvedTypeSpelling> {
+        if graph.written_type_application(expression).is_some() {
+            return self.selected_types.application(expression);
+        }
+        match graph.expr(expression)? {
+            crate::fir::SigExpr::Type { syntax, .. }
+            | crate::fir::SigExpr::ContextualType { syntax, .. } => self
+                .selected_types
+                .graph_spelling(graph.written_type_id(syntax)),
+            crate::fir::SigExpr::Nullable(inner) | crate::fir::SigExpr::NonNullable(inner) => {
+                self.expression_spelling(graph, inner)
+            }
+            crate::fir::SigExpr::Known(_)
+            | crate::fir::SigExpr::ClassifierType { .. }
+            | crate::fir::SigExpr::DeclarationType(_)
+            | crate::fir::SigExpr::Parameter { .. } => Some(Default::default()),
+            _ => None,
+        }
+    }
+
+    /// Project one already-evaluated graph occurrence independently to each exact stable header
+    /// role that owns it. Only the semantic `Ty` is shared. Alias/classifier/package-boundary facts
+    /// come from the graph occurrence selected during that evaluation; no header site is promoted
+    /// to a canonical source for another site.
+    fn project_declaration_expression_type(
         &self,
         graph: &crate::fir::SignatureGraph,
         expression: crate::fir::SigExprId,
         resolved: Ty,
-    ) {
-        for &syntax in graph.declaration_expression_syntaxes(expression) {
-            let syntax = self.headers.syntax.written_type_id(syntax);
-            let mut spelling = self.selected_types.spelling(syntax).unwrap_or_default();
-            spelling.resolved = Some(resolved);
+    ) -> bool {
+        let sites = graph.declaration_expression_syntaxes(expression);
+        if sites.is_empty() {
+            return true;
+        }
+        let sites = sites
+            .iter()
+            .map(|syntax| self.headers.syntax.written_type_id(*syntax))
+            .collect::<Vec<_>>();
+        if graph.written_type_application(expression).is_some() {
+            return self
+                .selected_types
+                .project_application_to_declaration_sites(expression, resolved, &sites);
+        }
+        let Some(mut spelling) = self.expression_spelling(graph, expression) else {
+            return false;
+        };
+        spelling.resolved = Some(resolved);
+        for syntax in sites {
             self.selected_types.record_spelling(syntax, spelling);
         }
+        true
     }
 
     fn apply_local_template_flags(mut ty: Ty, flags: crate::fir::LocalTypeTemplateFlags) -> Ty {
@@ -99,6 +158,7 @@ impl ProductionSignatureSemantics<'_> {
                             false,
                             Some(SelectedTypeSite {
                                 syntax: None,
+                                graph_syntax: None,
                                 application: None,
                                 local_template: Some(node_id),
                                 abbreviation_origin: None,
@@ -264,9 +324,9 @@ impl ProductionSignatureSemantics<'_> {
             Some(crate::fir::SigExpr::Type { origin, .. }) => origin,
             _ => return Err(Self::failure()),
         };
-        let declaration_syntax = graph.declaration_expression_syntax(expression);
         let selected_site = SelectedTypeSite {
-            syntax: declaration_syntax.map(|syntax| self.headers.syntax.written_type_id(syntax)),
+            syntax: None,
+            graph_syntax: None,
             application: Some(expression),
             local_template: None,
             abbreviation_origin: None,
@@ -277,10 +337,11 @@ impl ProductionSignatureSemantics<'_> {
                 .operands(application.arguments)
                 .iter()
                 .map(|argument| {
-                    evaluate_argument(*argument).map(|resolved| {
-                        self.record_declaration_expression_type(graph, *argument, resolved.get());
-                        resolved.get()
-                    })
+                    let resolved = evaluate_argument(*argument)?;
+                    if !self.project_declaration_expression_type(graph, *argument, resolved.get()) {
+                        return Err(Self::failure());
+                    }
+                    Ok(resolved.get())
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let template = graph
@@ -349,7 +410,8 @@ impl ProductionSignatureSemantics<'_> {
                 parameters.insert_binding(formal, Ty::ty_param(formal, Ty::Nothing), Vec::new());
             }
             let root_site = application.bind_root.then_some(SelectedTypeSite {
-                syntax: selected_site.syntax,
+                syntax: None,
+                graph_syntax: None,
                 application: Some(expression),
                 local_template: None,
                 abbreviation_origin: Some(origin),
@@ -407,7 +469,13 @@ impl ProductionSignatureSemantics<'_> {
                 };
                 match evaluate_argument(argument) {
                     Ok(resolved) => {
-                        self.record_declaration_expression_type(graph, argument, resolved.get());
+                        if !self.project_declaration_expression_type(
+                            graph,
+                            argument,
+                            resolved.get(),
+                        ) {
+                            return Err(Self::failure());
+                        }
                         resolved_arguments.insert(index, resolved);
                     }
                     Err(diagnostic) => {
@@ -451,6 +519,9 @@ impl ProductionSignatureSemantics<'_> {
             crate::types::ty_subst_applied_arguments(symbolic, &bindings)
         };
         self.record_type_spelling_projection(Some(selected_site), resolved);
+        if !self.project_declaration_expression_type(graph, expression, resolved) {
+            return Err(Self::failure());
+        }
         crate::fir::ResolvedTy::new(resolved).map_err(|_| Self::failure())
     }
 
@@ -470,13 +541,9 @@ impl ProductionSignatureSemantics<'_> {
                 })
                 .ok()
                 .map(crate::fir::ResolvedTy::get)?;
-            self.record_declaration_expression_type(graph, expression, resolved);
-            let sites = graph
-                .declaration_expression_syntaxes(expression)
-                .iter()
-                .map(|site| self.headers.syntax.written_type_id(*site))
-                .collect::<Vec<_>>();
-            self.publish_shared_type_spelling_sites(&sites);
+            if !self.project_declaration_expression_type(graph, expression, resolved) {
+                return None;
+            }
             return Some(resolved);
         }
         let resolved = match graph.expr(expression)? {
@@ -510,7 +577,9 @@ impl ProductionSignatureSemantics<'_> {
         if resolved.mentions_error() || resolved.mentions_pending() {
             return None;
         }
-        self.record_declaration_expression_type(graph, expression, resolved);
+        if !self.project_declaration_expression_type(graph, expression, resolved) {
+            return None;
+        }
         Some(resolved)
     }
 
@@ -533,6 +602,7 @@ impl ProductionSignatureSemantics<'_> {
                     false,
                     Some(SelectedTypeSite {
                         syntax: Some(written_syntax),
+                        graph_syntax: None,
                         application: None,
                         local_template: None,
                         abbreviation_origin: None,
@@ -563,6 +633,7 @@ impl ProductionSignatureSemantics<'_> {
             true,
             Some(SelectedTypeSite {
                 syntax: Some(written_syntax),
+                graph_syntax: None,
                 application: None,
                 local_template: None,
                 abbreviation_origin: None,
@@ -584,6 +655,7 @@ impl ProductionSignatureSemantics<'_> {
             false,
             Some(SelectedTypeSite {
                 syntax: Some(self.headers.syntax.written_type_id(syntax)),
+                graph_syntax: None,
                 application: None,
                 local_template: None,
                 abbreviation_origin: None,
@@ -601,6 +673,7 @@ impl ProductionSignatureSemantics<'_> {
     ) -> Result<Ty, crate::fir::DiagnosticId> {
         let site = SelectedTypeSite {
             syntax: Some(self.headers.syntax.written_type_id(syntax)),
+            graph_syntax: None,
             application: None,
             local_template: None,
             abbreviation_origin: None,

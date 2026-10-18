@@ -8,6 +8,9 @@ use crate::fir::{HeaderTypeId, OriginId, ResolvedTypeAbbreviation, SigExprId};
 use crate::fx_hash::HashMap;
 use std::{cell::RefCell, rc::Rc};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone, Default)]
 pub(super) struct SelectedTypeFacts {
     shared: Rc<RefCell<SelectedTypeFactsData>>,
@@ -16,6 +19,7 @@ pub(super) struct SelectedTypeFacts {
 #[derive(Default)]
 struct SelectedTypeFactsData {
     abbreviations: HashMap<OriginId, ResolvedTypeAbbreviation>,
+    graph_spellings: HashMap<HeaderTypeId, super::super::type_spellings::ResolvedTypeSpelling>,
     spellings: HashMap<HeaderTypeId, super::super::type_spellings::ResolvedTypeSpelling>,
     applications: HashMap<SigExprId, super::super::type_spellings::ResolvedTypeSpelling>,
     local_template_nodes: HashMap<
@@ -29,6 +33,43 @@ struct SelectedTypeFactsData {
 }
 
 impl SelectedTypeFacts {
+    fn project_to_declaration_sites(
+        &self,
+        spelling: Option<super::super::type_spellings::ResolvedTypeSpelling>,
+        resolved: crate::types::Ty,
+        sites: &[HeaderTypeId],
+    ) -> bool {
+        if sites.is_empty() {
+            return true;
+        }
+        let Some(mut spelling) = spelling else {
+            return false;
+        };
+        spelling.resolved = Some(resolved);
+        for &site in sites {
+            self.record_spelling(site, spelling);
+        }
+        true
+    }
+
+    pub(super) fn project_application_to_declaration_sites(
+        &self,
+        application: SigExprId,
+        resolved: crate::types::Ty,
+        sites: &[HeaderTypeId],
+    ) -> bool {
+        self.project_to_declaration_sites(self.application(application), resolved, sites)
+    }
+
+    pub(super) fn project_graph_type_to_declaration_sites(
+        &self,
+        syntax: HeaderTypeId,
+        resolved: crate::types::Ty,
+        sites: &[HeaderTypeId],
+    ) -> bool {
+        self.project_to_declaration_sites(self.graph_spelling(syntax), resolved, sites)
+    }
+
     pub(super) fn record(&self, origin: OriginId, abbreviation: ResolvedTypeAbbreviation) {
         self.shared
             .borrow_mut()
@@ -46,6 +87,24 @@ impl SelectedTypeFacts {
         spelling: super::super::type_spellings::ResolvedTypeSpelling,
     ) {
         self.shared.borrow_mut().spellings.insert(syntax, spelling);
+    }
+
+    pub(super) fn record_graph_spelling(
+        &self,
+        syntax: HeaderTypeId,
+        spelling: super::super::type_spellings::ResolvedTypeSpelling,
+    ) {
+        self.shared
+            .borrow_mut()
+            .graph_spellings
+            .insert(syntax, spelling);
+    }
+
+    pub(super) fn graph_spelling(
+        &self,
+        syntax: HeaderTypeId,
+    ) -> Option<super::super::type_spellings::ResolvedTypeSpelling> {
+        self.shared.borrow().graph_spellings.get(&syntax).copied()
     }
 
     pub(super) fn spelling(

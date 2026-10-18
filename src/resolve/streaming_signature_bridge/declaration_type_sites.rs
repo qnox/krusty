@@ -11,8 +11,8 @@ fn bind_expression(
     // tree. Binding the graph expression to the expanded id leaves a valid semantic signature
     // with no exact spelling record (for example, `Cargo` expanded to `String`).
     let declaration_syntax = headers.syntax.written_type_id(declaration_syntax);
-    graph.bind_declaration_type_syntax(expression, declaration_syntax);
     let Some(graph_syntax) = graph.expression_type_syntax(expression) else {
+        graph.bind_declaration_type_syntax(expression, declaration_syntax);
         return;
     };
     let mut pending = vec![(graph_syntax, declaration_syntax)];
@@ -33,6 +33,10 @@ fn bind_expression(
         }
         pending.extend(graph_children.into_iter().zip(declaration_children));
     }
+    // Publish the role edge only after its complete written shape has been validated. A partial
+    // root edge would let later spelling publication hide a missing child fact by treating another
+    // declaration role as canonical.
+    graph.bind_declaration_type_syntax(expression, declaration_syntax);
     let Some(arguments) = graph.written_type_application_arguments(expression) else {
         return;
     };

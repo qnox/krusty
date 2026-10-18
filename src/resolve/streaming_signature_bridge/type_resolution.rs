@@ -7,6 +7,9 @@ use super::*;
 #[derive(Clone, Copy)]
 pub(super) struct SelectedTypeSite {
     pub(super) syntax: Option<crate::fir::HeaderTypeId>,
+    /// Syntax in the compact signature graph's own arena. Selected facts stay in this identity
+    /// domain until the expression is projected to each exact declaration-header occurrence.
+    pub(super) graph_syntax: Option<crate::fir::HeaderTypeId>,
     /// Graph-local structural applications need the selected classifier boundary while the graph
     /// is alive. This id is never reinterpreted as a declaration-header syntax id.
     pub(super) application: Option<crate::fir::SigExprId>,
@@ -20,42 +23,20 @@ pub(super) struct SelectedTypeSite {
     pub(super) project_children: bool,
 }
 
-impl ProductionSignatureSemantics<'_> {
-    /// One compact expression may supply the same written source occurrence to several stable
-    /// declarations (notably a primary-constructor `val` parameter and its property). Resolution
-    /// still happens once. Mirror its already-selected structural facts to every declaration site
-    /// retained by the graph/header bridge; this performs no lookup and never reconstructs a
-    /// boundary from spelling.
-    pub(super) fn publish_shared_type_spelling_sites(&self, sites: &[crate::fir::HeaderTypeId]) {
-        let Some((&source, targets)) = sites.split_first() else {
-            return;
-        };
-        for &target in targets {
-            let mut pending = vec![(source, target)];
-            while let Some((source, target)) = pending.pop() {
-                let Some((source, source_function, source_children)) =
-                    self.headers.syntax.written_type_node(source)
-                else {
-                    break;
-                };
-                let Some((target, target_function, target_children)) =
-                    self.headers.syntax.written_type_node(target)
-                else {
-                    break;
-                };
-                if source_function != target_function
-                    || source_children.len() != target_children.len()
-                {
-                    break;
-                }
-                if let Some(spelling) = self.selected_types.spelling(source) {
-                    self.selected_types.record_spelling(target, spelling);
-                }
-                pending.extend(source_children.into_iter().zip(target_children));
-            }
+impl SelectedTypeSite {
+    pub(super) fn graph(syntax: crate::fir::HeaderTypeId, origin: crate::fir::OriginId) -> Self {
+        Self {
+            syntax: None,
+            graph_syntax: Some(syntax),
+            application: None,
+            local_template: None,
+            abbreviation_origin: Some(origin),
+            project_children: true,
         }
     }
+}
 
+impl ProductionSignatureSemantics<'_> {
     /// Resolve one written occurrence, then publish the selected binding and semantic result at
     /// its stable declaration site. Recursive lookup receives structural child sites from this
     /// module; lookup itself never reconstructs a publication site from spelling.
@@ -78,6 +59,14 @@ impl ProductionSignatureSemantics<'_> {
             let mut spelling = self.selected_types.spelling(syntax).unwrap_or_default();
             spelling.resolved = Some(resolved);
             self.selected_types.record_spelling(syntax, spelling);
+        }
+        if let Some(syntax) = selected_site.and_then(|site| site.graph_syntax) {
+            let mut spelling = self
+                .selected_types
+                .graph_spelling(syntax)
+                .unwrap_or_default();
+            spelling.resolved = Some(resolved);
+            self.selected_types.record_graph_spelling(syntax, spelling);
         }
         if let Some(application) = selected_site.and_then(|site| site.application) {
             let mut spelling = self
@@ -108,6 +97,9 @@ impl ProductionSignatureSemantics<'_> {
         if let Some(syntax) = site.and_then(|site| site.syntax) {
             self.selected_types.record_spelling(syntax, binding);
         }
+        if let Some(syntax) = site.and_then(|site| site.graph_syntax) {
+            self.selected_types.record_graph_spelling(syntax, binding);
+        }
         if let Some(application) = site.and_then(|site| site.application) {
             self.selected_types.record_application(application, binding);
         }
@@ -126,6 +118,14 @@ impl ProductionSignatureSemantics<'_> {
             let mut spelling = self.selected_types.spelling(syntax).unwrap_or_default();
             spelling.resolved = Some(resolved);
             self.selected_types.record_spelling(syntax, spelling);
+        }
+        if let Some(syntax) = site.and_then(|site| site.graph_syntax) {
+            let mut spelling = self
+                .selected_types
+                .graph_spelling(syntax)
+                .unwrap_or_default();
+            spelling.resolved = Some(resolved);
+            self.selected_types.record_graph_spelling(syntax, spelling);
         }
         if let Some(application) = site.and_then(|site| site.application) {
             let mut spelling = self
@@ -259,6 +259,7 @@ impl ProductionSignatureSemantics<'_> {
         };
         Some(SelectedTypeSite {
             syntax: Some(syntax),
+            graph_syntax: None,
             application: None,
             local_template: None,
             abbreviation_origin: None,

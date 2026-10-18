@@ -16103,16 +16103,14 @@ impl<'a> Checker<'a> {
                 for (candidate, receiver_identity, before, extension_use) in
                     deferred_implicit_receivers
                 {
-                    let semantically_used =
-                        self.implicit_receiver_identity_use_count(receiver_identity) > before
-                            || extension_use.is_some_and(|(declaration, before)| {
-                                self.extension_receiver_use_count(declaration) > before
-                            });
-                    if semantically_used
-                        || finalized.iter().any(|capture| {
-                            capture.name == candidate.name && capture.source == candidate.source
-                        })
-                    {
+                    if self.keep_anonymous_receiver(
+                        declaration,
+                        &candidate,
+                        receiver_identity,
+                        before,
+                        extension_use,
+                        &finalized,
+                    ) {
                         selected_receiver_candidates.push(candidate);
                     }
                 }
