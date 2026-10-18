@@ -5,10 +5,10 @@
 //! spelling. Backlog keys retain the provider module and complete serialized declaration identity;
 //! the paths embedded in those identities are output only. Lists live under
 //! `tests/klib_uncovered_implementations/<target>/<version>.txt` and may only shrink. A release
-//! with no list of its own reads its predecessor's ([`crate::kotlin_version::recorded_file`]). The one-off
-//! `KRUSTY_SHRINK_UNCOVERED_IMPLEMENTATIONS=1` maintenance mode creates a missing list or removes
-//! entries which became implemented; it never admits a newly uncovered declaration to an existing
-//! list.
+//! with no list of its own reads its predecessor's ([`crate::toolchain::release_list`]). The
+//! one-off `KRUSTY_SHRINK_UNCOVERED_IMPLEMENTATIONS=1` maintenance mode creates a missing list or
+//! removes entries which became implemented; it never admits a newly uncovered declaration to an
+//! existing list.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -20,7 +20,6 @@ use super::implementation_inventory::{
     wasm_intrinsic_tree, DecodedBodyState, ImplementationFact,
 };
 use crate::compilation_target::CompilationTarget;
-use crate::kotlin_version::KotlinVersion;
 use crate::libraries::{CallablePlacement, KlibDeclarationSignature, KlibDependencyCallable};
 use crate::metadata::id_signature::{KlibNamePath, KlibPublicIdSignature, MetadataAccessor};
 
@@ -93,18 +92,13 @@ fn uncovered_implementations(libraries: &KlibLibraries) -> BTreeSet<String> {
         .collect()
 }
 
-fn own_list_path(target: &str, version: KotlinVersion) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/klib_uncovered_implementations")
-        .join(target)
-        .join(format!("{version}.txt"))
-}
-
-/// The list the target reference version reads: its own, or its predecessor's.
-fn list_path(target: &str) -> PathBuf {
-    let version = crate::kotlin_version::target();
-    crate::kotlin_version::recorded_file(version, |release| own_list_path(target, release))
-        .unwrap_or_else(|| own_list_path(target, version))
+/// The target's lists, as the reference version reads and records them.
+fn release_list(target: &str) -> crate::toolchain::ReleaseList {
+    crate::toolchain::release_list(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/klib_uncovered_implementations")
+            .join(target),
+    )
 }
 
 fn target_is_required(target: &str) -> bool {
@@ -134,7 +128,7 @@ fn check_target(target: CompilationTarget, list: &str) {
     let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(stdlib, semantics)])
         .unwrap_or_else(|error| panic!("{error}"));
     let uncovered = uncovered_implementations(&libraries);
-    let path = list_path(list);
+    let path = release_list(list).read;
     let shrink = std::env::var_os("KRUSTY_SHRINK_UNCOVERED_IMPLEMENTATIONS").is_some();
     let listed = read_list(&path);
     let Some(listed) = listed else {
@@ -188,11 +182,10 @@ fn read_list(path: &std::path::Path) -> Option<BTreeSet<String>> {
 /// Record the target reference version's list: in its own file, unless it is exactly the list the
 /// version would inherit.
 fn write_list(target: &str, uncovered: &BTreeSet<String>) {
-    let version = crate::kotlin_version::target();
-    let path = own_list_path(target, version);
-    let inherited =
-        crate::kotlin_version::inherited_file(version, |release| own_list_path(target, release));
-    if inherited
+    let lists = release_list(target);
+    let path = lists.own;
+    if lists
+        .inherited
         .and_then(|inherited| read_list(&inherited))
         .as_ref()
         == Some(uncovered)

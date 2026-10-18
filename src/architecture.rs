@@ -449,8 +449,7 @@ mod tests {
         // names no target: Native and Wasm consume it alike. It opens the libraries a compilation
         // selects through the container reader, which itself depends on no compiler module, and
         // recognizes the contract DSL through the common contract model. Its tests may also
-        // analyze a source set against the provisioned stdlib KLIB and read the per-release
-        // outcome list the reference version inherits.
+        // analyze a source set against the provisioned stdlib KLIB.
         let provider = [
             "contracts",
             "fir",
@@ -465,13 +464,7 @@ mod tests {
         for path in rust_files_under("src/klib_libraries") {
             if path.starts_with(&tests) || path.ends_with("tests.rs") {
                 let mut budget = provider.to_vec();
-                budget.extend([
-                    "compilation_target",
-                    "diag",
-                    "frontend",
-                    "kotlin_version",
-                    "toolchain",
-                ]);
+                budget.extend(["compilation_target", "diag", "frontend", "toolchain"]);
                 assert_allowed_crate_modules_in_file(&path, &budget);
             } else {
                 assert_allowed_crate_modules_in_file(&path, &provider);
