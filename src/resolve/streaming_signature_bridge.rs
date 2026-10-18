@@ -4466,11 +4466,7 @@ pub(crate) fn finalized_streamed_signature_index(
             "signature finalization rejected declarations before solver: {failed:?}",
         );
         let failed_declarations = failed.iter().copied().collect::<HashSet<_>>();
-        for diagnostic in explicit_diagnostics.iter().filter(|diagnostic| {
-            !diagnostic.unconditional && failed_declarations.contains(&diagnostic.declaration)
-        }) {
-            diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
-        }
+        diagnostics::emit_failures(diags, &explicit_diagnostics, &failed_declarations, false);
     }
     let explicit_publication_diagnostics = explicit_diagnostics.len();
     drop(explicit_diagnostics);
@@ -5035,20 +5031,16 @@ pub(crate) fn finalized_streamed_signature_index(
     }
     let alias_failures =
         type_alias_publication::publish_all(headers, &explicit_type_semantics, &mut index);
-    // Alias publication is batched: by the time `publish_all` returns, diagnostics for every
-    // rejected alias are already recorded. Select the whole failed set in one ordered pass;
-    // advancing a cursor once per alias would let the first failure consume later aliases'
-    // conditional findings. Unconditional findings also survive a completely successful batch.
+    // Select the batched failures once, preserving diagnostic order and unconditional findings
+    // from successful alias publications.
     let failed_aliases = alias_failures.iter().copied().collect::<HashSet<_>>();
     let recorded = explicit_type_semantics.diagnostics.borrow();
-    for diagnostic in recorded[explicit_publication_diagnostics..]
-        .iter()
-        .filter(|diagnostic| {
-            diagnostic.unconditional || failed_aliases.contains(&diagnostic.declaration)
-        })
-    {
-        diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
-    }
+    diagnostics::emit_failures(
+        diags,
+        &recorded[explicit_publication_diagnostics..],
+        &failed_aliases,
+        true,
+    );
     drop(recorded);
     failed.extend(alias_failures);
     // An applied nested/inner classifier carries both its own type arguments and any lexically
