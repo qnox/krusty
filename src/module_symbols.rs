@@ -2437,6 +2437,7 @@ mod tests {
             vec![crate::types::TypeVariance::Invariant],
         );
         let parameter = Ty::ty_param("T", bound);
+        carrier.declared_callable_order.push("take".to_string());
         carrier
             .methods
             .insert("take".into(), vec![sig(Vec::new(), parameter)]);

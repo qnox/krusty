@@ -408,14 +408,19 @@ pub(crate) fn instantiate_vararg_element(
     source: &dyn SymbolSource,
     signature: &GenericSig,
     applied_parameters: &[Ty],
-    actual_arguments: &[Ty],
+    actual_arguments: &[CallArgKind],
     bindings: &GSigBinds,
 ) -> Option<Ty> {
     let vararg = applied_parameters
         .last()
         .is_some_and(|parameter| parameter.array_elem().is_some())
         && (applied_parameters.len() != actual_arguments.len()
-            || actual_arguments.last() != applied_parameters.last());
+            || actual_arguments.last().is_some_and(|argument| {
+                !argument.is_spread()
+                    && applied_parameters
+                        .last()
+                        .is_some_and(|parameter| argument.ty() != *parameter)
+            }));
     if !vararg || signature.params.is_empty() {
         return None;
     }
@@ -748,10 +753,10 @@ pub(super) fn specialize_call_sig(
 #[cfg(test)]
 mod projected_member_view_tests {
     use super::{
-        instantiate_slot, member_slots_are_applied, specialize_member_type, GSigBinds,
-        TypePosition, UnboundSpecialization,
+        instantiate_slot, instantiate_vararg_element, member_slots_are_applied,
+        specialize_member_type, CallArgKind, GSigBinds, TypePosition, UnboundSpecialization,
     };
-    use crate::libraries::LibraryType;
+    use crate::libraries::{GenericReturnPolicy, GenericSig, LibraryType};
     use crate::symbol_source::SymbolSource;
     use crate::types::{type_name, Ty, TypeName};
 
@@ -853,6 +858,32 @@ mod projected_member_view_tests {
                 UnboundSpecialization::Preserve,
             ),
             Ty::platform_nullable(Ty::String)
+        );
+    }
+
+    #[test]
+    fn a_spread_array_is_not_reclassified_as_one_vararg_element() {
+        let variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
+        let signature = GenericSig {
+            formals: vec!["T".to_string()],
+            formal_bounds: vec![vec![Ty::platform_nullable(Ty::obj("kotlin/Any"))]],
+            receiver: None,
+            params: vec![Ty::platform_nullable(Ty::array(variable))],
+            ret: variable,
+            return_policy: GenericReturnPolicy::Exact,
+        };
+        let applied = [Ty::platform_nullable(Ty::array(Ty::nullable(Ty::String)))];
+        let spread = [CallArgKind::Spread(Ty::array(Ty::nullable(Ty::String)))];
+
+        assert_eq!(
+            instantiate_vararg_element(
+                &Source,
+                &signature,
+                &applied,
+                &spread,
+                &bindings(Ty::nullable(Ty::String)),
+            ),
+            None
         );
     }
 }

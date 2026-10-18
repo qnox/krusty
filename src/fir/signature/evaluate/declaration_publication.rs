@@ -16,20 +16,40 @@ pub(super) fn result<S: SignatureSemantics>(
 ) -> Result<(ResolvedTy, bool, Option<ResolvedTypeAbbreviation>), DiagnosticId> {
     let current = *memo
         .get(&expression)
-        .expect("publication follows an already-evaluated signature expression");
+        .expect("the signature result must be evaluated before publication");
+    Ok(recover(semantics, expression, graph, memo)?.unwrap_or((
+        current,
+        false,
+        result_abbreviation(semantics, graph, expression, memo),
+    )))
+}
+
+/// Recover one completely evaluated publication subtree. Ordinary signature evaluation may
+/// deliberately recover a join from an untypeable operand without memoizing that operand. Such a
+/// partial subtree carries no sound declaration-publication evidence: keep the already-evaluated
+/// ordinary result transactionally instead of publishing evidence from only the surviving sides.
+fn recover<S: SignatureSemantics>(
+    semantics: &S,
+    expression: SigExprId,
+    graph: &SignatureGraph,
+    memo: &HashMap<SigExprId, ResolvedTy>,
+) -> Result<Option<(ResolvedTy, bool, Option<ResolvedTypeAbbreviation>)>, DiagnosticId> {
+    let Some(&current) = memo.get(&expression) else {
+        return Ok(None);
+    };
     match graph.expr(expression) {
         Some(SigExpr::MutableLocalFlow { declared, .. }) => {
-            let published = *memo
-                .get(&declared)
-                .expect("mutable-local evaluation records its declared value");
-            Ok((
+            let Some(&published) = memo.get(&declared) else {
+                return Ok(None);
+            };
+            Ok(Some((
                 published,
                 true,
                 result_abbreviation(semantics, graph, declared, memo),
-            ))
+            )))
         }
         Some(SigExpr::Sequence { result, .. }) | Some(SigExpr::ScopedReceiver { result, .. }) => {
-            self::result(semantics, result, graph, memo)
+            recover(semantics, result, graph, memo)
         }
         Some(SigExpr::Join {
             operands,
@@ -41,18 +61,21 @@ pub(super) fn result<S: SignatureSemantics>(
             let mut abbreviations = Vec::with_capacity(operands.len());
             let mut changed = false;
             for &operand in operands {
-                let (ty, operand_changed, abbreviation) =
-                    self::result(semantics, operand, graph, memo)?;
+                let Some((ty, operand_changed, abbreviation)) =
+                    recover(semantics, operand, graph, memo)?
+                else {
+                    return Ok(None);
+                };
                 publication.push(ty);
                 abbreviations.push(abbreviation);
                 changed |= operand_changed;
             }
             if !changed {
-                return Ok((
+                return Ok(Some((
                     current,
                     false,
                     result_abbreviation(semantics, graph, expression, memo),
-                ));
+                )));
             }
             let scope = graph
                 .scope(scope)
@@ -62,32 +85,38 @@ pub(super) fn result<S: SignatureSemantics>(
                 .iter()
                 .position(|operand| *operand == result)
                 .and_then(|index| abbreviations[index].clone());
-            Ok((result, true, abbreviation))
+            Ok(Some((result, true, abbreviation)))
         }
         Some(SigExpr::Nullable(base)) => {
-            let (published, changed, abbreviation) = self::result(semantics, base, graph, memo)?;
+            let Some((published, changed, abbreviation)) = recover(semantics, base, graph, memo)?
+            else {
+                return Ok(None);
+            };
             if changed {
                 semantics
                     .make_nullable(published)
-                    .map(|ty| (ty, true, abbreviation))
+                    .map(|ty| Some((ty, true, abbreviation)))
             } else {
-                Ok((current, false, abbreviation))
+                Ok(Some((current, false, abbreviation)))
             }
         }
         Some(SigExpr::NonNullable(base)) => {
-            let (published, changed, abbreviation) = self::result(semantics, base, graph, memo)?;
+            let Some((published, changed, abbreviation)) = recover(semantics, base, graph, memo)?
+            else {
+                return Ok(None);
+            };
             if changed {
                 semantics
                     .make_non_nullable(published)
-                    .map(|ty| (ty, true, abbreviation))
+                    .map(|ty| Some((ty, true, abbreviation)))
             } else {
-                Ok((current, false, abbreviation))
+                Ok(Some((current, false, abbreviation)))
             }
         }
-        _ => Ok((
+        _ => Ok(Some((
             current,
             false,
             result_abbreviation(semantics, graph, expression, memo),
-        )),
+        ))),
     }
 }
