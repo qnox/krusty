@@ -1275,6 +1275,8 @@ mod jvm_default_mode_e2e;
 mod jvm_name_e2e;
 #[path = "jvm_name_toplevel_e2e.rs"]
 mod jvm_name_toplevel_e2e;
+#[path = "jvm_static_functions_e2e.rs"]
+mod jvm_static_functions_e2e;
 #[path = "kclass_type_e2e.rs"]
 mod kclass_type_e2e;
 #[path = "klib_class_surface_e2e.rs"]

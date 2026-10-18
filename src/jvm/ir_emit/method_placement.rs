@@ -12,4 +12,11 @@ pub(super) enum MethodPlacement {
         instance: bool,
     },
     Holder(crate::types::TypeName),
+    /// A `@JvmStatic` member of a named object, written as a `static` method of the object. The
+    /// common IR still numbers its receiver as value 0; that value reads the singleton's instance
+    /// field instead of a parameter slot, and the descriptor carries no receiver.
+    Singleton {
+        static_owner: StaticOwner,
+        singleton: crate::types::TypeName,
+    },
 }

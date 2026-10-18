@@ -1251,6 +1251,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   realization; kotlinc rejects those sources outright), instance (constructor-property) `@JvmField`,
   and `@JvmField` on a named `object`'s properties, which keeps the previous private-static +
   accessor realization.
+- **`@JvmStatic` on source functions.** Measured against kotlinc 2.4.20. The annotation is read
+  only from its resolved identity (`kotlin/jvm/JvmStatic`, retained in `function_annotations` or a
+  module callable's header annotations); the frontend records it and the JVM backend alone places
+  the method. A NAMED OBJECT member becomes `public static final` on the object (`private static
+  final` when private): the common IR keeps the receiver as value 0 and the emitter reads it as
+  `getstatic INSTANCE`, so a property read in the body is `getstatic INSTANCE; pop; getstatic
+  field`. Its `$default` stub is static with no receiver and `invokestatic`s the member. Calls are
+  `invokestatic`, both in-file and across sibling source files: an inert receiver (the singleton
+  read, a local) is dropped, and any other receiver is evaluated and popped. A private member
+  reached from a nested class goes through a receiverless `access$<name>`. A COMPANION member
+  stays an instance method of `C$Companion`, and its callers still go through the companion
+  instance. The outer class (`C`, or an interface, where the bridge is `public static` and not
+  final) gains a `static final` bridge, `getstatic Companion; <args>; invokevirtual`. The bridge
+  carries the member's generic signature, nullability, parameter annotations, and every
+  declaration annotation (`@JvmStatic` and user annotations such as a test framework's
+  `@BeforeAll`). It has no parameter checks, and its only line is the member's end line. It sits
+  after the declared members and before the `access$` accessors. A private companion member's
+  bridge is `private static final` and calls the companion's `access$<name>(C$Companion)`. Byte
+  divergences that remain, all with kotlinc's runtime behaviour: a lambda that captures `this`
+  in an object's static member captures `INSTANCE`; an inline lambda spliced into a static member
+  emits its `getstatic INSTANCE; pop` early; a same-file `@JvmStatic inline` call stores the
+  singleton in a receiver local. A cross-file call that leaves a default argument out, made on a
+  receiver with side effects, is reported as an emission failure instead of being miscompiled.
+  Tests: `tests/jvm_static_functions_e2e.rs` (class-by-class comparison with kotlinc, plus
+  run and reflection checks).
 - **`@Metadata` writer — the CLASS round-trip (a `@Metadata` on every emitted class, not just the
   facade).** A file facade's `@Metadata` describes that file's TOP-LEVEL declarations only, so krusty
   used to emit nothing at all for a CLASS — and a krusty-compiled class was therefore unreadable by

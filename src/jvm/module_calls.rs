@@ -433,12 +433,29 @@ pub(super) fn realize_default_calls(
                     &stub_boxed,
                 )
                 .ok_or(failure)?;
-                if let Some(receiver) = dispatch_receiver {
-                    params.insert(0, dispatch_receiver_ty.ok_or(failure)?);
-                    args.insert(0, receiver);
-                    plan.insert(0, DefaultCallOperand::supplied(receiver));
-                } else if dispatch_receiver_ty.is_some() {
-                    return Err(failure);
+                // A named object's `@JvmStatic` member has a static stub that takes no receiver.
+                let static_member =
+                    super::ir_emit::jvm_static_members::module_singleton_static_owner(
+                        ir,
+                        default_provider,
+                    )
+                    .is_some();
+                match dispatch_receiver {
+                    // The static stub initializes the object itself, so a receiver that only
+                    // names it is dropped. Evaluating any other receiver first would need its own
+                    // statement around this call's realized operands.
+                    Some(receiver) if static_member => {
+                        if !super::ir_emit::jvm_static_members::receiver_is_inert(ir, receiver) {
+                            return Err(failure);
+                        }
+                    }
+                    Some(receiver) => {
+                        params.insert(0, dispatch_receiver_ty.ok_or(failure)?);
+                        args.insert(0, receiver);
+                        plan.insert(0, DefaultCallOperand::supplied(receiver));
+                    }
+                    None if dispatch_receiver_ty.is_some() => return Err(failure),
+                    None => {}
                 }
                 Some((
                     IrExpr::Call {
