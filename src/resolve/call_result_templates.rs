@@ -175,6 +175,14 @@ impl Checker<'_> {
             .filter(|formal| !self.lexically_fixed_at_call(expression, formal))
             .cloned()
             .collect::<Vec<_>>();
+        let unresolved_lambda_result = self
+            .unbound_value_lambda_call_formals
+            .get(&expression)
+            .is_some_and(|unbound| {
+                unbound
+                    .iter()
+                    .any(|formal| ty_mentions_param(signature.ret, std::slice::from_ref(formal)))
+            });
         if self
             .resolved_call_type_args
             .get(&expression)
@@ -188,6 +196,7 @@ impl Checker<'_> {
                     })
                     .all(|(index, _)| resolved.get(index).is_some_and(Option::is_some))
             })
+            && !unresolved_lambda_result
             // Rechecking may have replaced a formerly contextual call with an expectation-free
             // probe. A retained type-argument record is not proof of completion when the current
             // semantic result again contains this callee's declaration variables; the enclosing
@@ -200,7 +209,9 @@ impl Checker<'_> {
             signature.ret,
             &crate::symbol_resolver::GSigBinds::default(),
         );
-        (matches!(actual, Ty::Error) || ty_mentions_param(actual, &open_formals))
+        (matches!(actual, Ty::Error)
+            || ty_mentions_param(actual, &open_formals)
+            || unresolved_lambda_result)
             .then_some(signature)
             .or_else(|| (actual == provisional).then_some(signature))
     }

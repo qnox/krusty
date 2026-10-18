@@ -20636,28 +20636,14 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     .and_then(|signature| signature.generic_sig.as_ref())
                 {
-                    let unresolved = generic
-                        .formals
-                        .iter()
-                        .filter(|formal| {
-                            postponed_constraints.formals.contains(formal)
-                                && !postponed_solutions.contains_key(*formal)
-                                && known_generic_bindings.get(*formal).is_none_or(|binding| {
-                                    ty_mentions_param(*binding, std::slice::from_ref(*formal))
-                                })
-                                && generic.params.iter().any(|parameter| {
-                                    matches!(parameter.non_null(), Ty::Fun(function)
-                                    if !function.has_receiver
-                                        && function.params.iter().any(|input| {
-                                            ty_mentions_param(
-                                                *input,
-                                                std::slice::from_ref(*formal),
-                                            )
-                                        }))
-                                })
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
+                    let unresolved = self.unresolved_value_lambda_formals(
+                        scope,
+                        args,
+                        generic,
+                        &postponed_solutions,
+                        &known_generic_bindings,
+                        &postponed_constraints,
+                    );
                     if !unresolved.is_empty() {
                         self.unbound_value_lambda_call_formals
                             .insert(call, unresolved);
@@ -23645,7 +23631,7 @@ impl<'a> Checker<'a> {
                 c.this_labels.pop();
             }
             c.this_extension_receiver = previous_extension_receiver;
-            c.retire_type_parameter_owners(&owned_type_parameters);
+            c.restore_type_parameter_owners(owned_type_parameters);
         });
 
         // A statement-position local class is emitted as its own body unit, so the generic AST child
@@ -32995,6 +32981,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         bound_annotation_identities: HashMap::default(),
         ret_ty: Ty::Unit,
         type_parameter_owners: HashMap::default(),
+        uninferred_type_parameters: HashMap::default(),
         upper_bound_violations: Default::default(),
         expected: None,
         callable_reference_literal_constraints: HashMap::default(),
@@ -35545,6 +35532,9 @@ struct Checker<'a> {
     /// kotlinc's owner wording (`fun <T : B> f`) of each declaration-owned type parameter checked
     /// so far, keyed by semantic identity, solely for diagnostics.
     type_parameter_owners: HashMap<&'static str, String>,
+    /// Selected call formals that remain unresolved, plus whether their provider declaration is a
+    /// platform type parameter. This is diagnostic state scoped with [`Self::type_parameter_owners`].
+    uninferred_type_parameters: HashMap<&'static str, bool>,
     upper_bound_violations: upper_bound_violations::UpperBoundViolationState,
     /// Expected type for the next expression. Consumed by [`Self::expr`]; result-position
     /// propagation must re-arm it through [`Self::expr_expected`].
@@ -35715,7 +35705,8 @@ struct Checker<'a> {
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
-    /// Unsolved callee-owned formals used as ordinary lambda inputs. Receiver-lambda builder
+    /// Unsolved callee-owned formals used as ordinary lambda inputs, or whose provisional lambda
+    /// result solution still depends on another call's open variable. Receiver-lambda builder
     /// inference has separate body-constraint semantics and is deliberately absent here.
     unbound_value_lambda_call_formals: HashMap<ExprId, Vec<String>>,
     /// Diagnostics produced while a lambda input still contains a callee-owned type parameter.
@@ -37705,11 +37696,13 @@ impl<'a> Checker<'a> {
                             .any(|parameter| {
                                 ty_mentions_param(*parameter, std::slice::from_ref(*formal))
                             }))
-                    && resolved
-                        .and_then(|arguments| arguments.get(*index))
-                        .copied()
-                        .flatten()
-                        .is_none_or(|argument| ty_mentions_param(argument, &open_formals))
+                    && (unbound_value_lambda_formals
+                        .is_some_and(|formals| formals.contains(formal))
+                        || resolved
+                            .and_then(|arguments| arguments.get(*index))
+                            .copied()
+                            .flatten()
+                            .is_none_or(|argument| ty_mentions_param(argument, &open_formals)))
                     // A star-projected receiver can leave the selected method result bounded by a
                     // non-lexical classifier parameter. That stable symbolic bound is the captured
                     // result Kotlin chooses; it is neither an uninferred method formal nor a
@@ -47713,7 +47706,7 @@ impl<'a> Checker<'a> {
         self.leave_public_api_inline(public_api_inline);
         self.leave_block_body(block);
         self.lambda_returns.leave_function(enclosing_return_frame);
-        self.retire_type_parameter_owners(&owned_type_parameters);
+        self.restore_type_parameter_owners(owned_type_parameters);
         self.active_lexical_policies.truncate(suppression_depth);
     }
 
@@ -48183,7 +48176,7 @@ impl<'a> Checker<'a> {
             );
         }
         self.leave_block_body(block);
-        self.retire_type_parameter_owners(&owned_type_parameters);
+        self.restore_type_parameter_owners(owned_type_parameters);
         self.active_lexical_policies.truncate(suppression_depth);
     }
 
@@ -51522,7 +51515,7 @@ impl<'a> Checker<'a> {
                     }
                     self.this_extension_receiver = dispatch_extension_receiver;
                     self.symbolic_signature_inference = outer_symbolic_signature_inference;
-                    self.retire_type_parameter_owners(&owned_type_parameters);
+                    self.restore_type_parameter_owners(owned_type_parameters);
                     self.active_lexical_policies
                         .truncate(property_suppression_depth);
                 }
@@ -52133,7 +52126,7 @@ impl<'a> Checker<'a> {
         self.this_extension_receiver = dispatch_extension_receiver;
         self.leave_public_api_inline(public_api_inline);
         self.lambda_returns.leave_function(enclosing_return_frame);
-        self.retire_type_parameter_owners(&owned_type_parameters);
+        self.restore_type_parameter_owners(owned_type_parameters);
         self.active_lexical_policies.truncate(suppression_depth);
     }
 
@@ -53137,6 +53130,9 @@ impl<'a> Checker<'a> {
                     {
                         self.resolved_sam_conversions.insert(argument, conversion);
                     }
+                    return;
+                }
+                if self.report_open_sam_lambda_result_mismatch(scope, argument, function, sam) {
                     return;
                 }
             } else if conversion_matches
@@ -63727,7 +63723,9 @@ impl<'a> Checker<'a> {
         }
         let declared_params =
             self.declared_member_params(&selected, &shape.parameter_indices, &visible_params);
-        if !self.expect_selected_call_args(
+        let owned_type_parameters =
+            self.publish_selected_member_type_parameter_owner(call, &selected.member);
+        let arguments_valid = self.expect_selected_call_args(
             scope,
             CallArgs {
                 call,
@@ -63738,7 +63736,9 @@ impl<'a> Checker<'a> {
             &declared_params,
             &shape.call_sig,
             None,
-        ) {
+        );
+        self.restore_type_parameter_owners(owned_type_parameters);
+        if !arguments_valid {
             return Some(Ty::Error);
         }
         if matches!(selected.origin, Origin::Library)

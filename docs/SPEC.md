@@ -16859,6 +16859,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   expression and contributes nothing. Tests: `tests/self_call_type_variables_e2e.rs`,
   `symbol_resolver::generic_inference::call_site_variables::tests`.
 
+- **A postponed solution that depends on another call's open result remains uninferred.** If a
+  selected generic call's lambda result relates its `R` to the still-open `T` of a terminal generic
+  producer, `R = T` is a dependency between inference variables, not a solution. Completing the
+  enclosing expression reports `R` at the selected call and `T` at the terminal producer, including
+  when the producer is the value branch of an `if`, `when`, elvis, or `try`. A type parameter from
+  the enclosing lexical declaration is fixed and remains a valid solution. Test:
+  `conditional_block_branch_rebind_e2e::open_selected_lambda_results_preserve_terminal_branch_diagnostics`.
+
 - **An anonymous function's `return` targets the anonymous function, everywhere.** `fun (…): T { …
   return e … }` is a LOCAL return — unlike a lambda's bare `return`, which is a non-local return from
   the enclosing function. Three seams each had to agree, and each was wrong in its own way:

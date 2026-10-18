@@ -19,6 +19,104 @@ pub(super) struct TypeParameterNumbering {
     numbers: HashMap<&'static str, usize>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_nested_publication_of_the_same_formal_restores_the_outer_diagnostic_state() {
+        let identity = crate::types::intern("fixtures:map:R");
+        let mut owners = HashMap::default();
+        let mut uninferred = HashMap::default();
+
+        let mut outer = TypeParameterOwnerScope::default();
+        outer.publish(
+            &mut owners,
+            &mut uninferred,
+            identity,
+            "fun <R : Any!> map".to_string(),
+            Some(true),
+        );
+        let mut inner = TypeParameterOwnerScope::default();
+        inner.publish(
+            &mut owners,
+            &mut uninferred,
+            identity,
+            "fun <R : Any!> map".to_string(),
+            None,
+        );
+
+        inner.restore(&mut owners, &mut uninferred);
+        assert_eq!(
+            owners.get(identity).map(String::as_str),
+            Some("fun <R : Any!> map")
+        );
+        assert_eq!(uninferred.get(identity), Some(&true));
+
+        outer.restore(&mut owners, &mut uninferred);
+        assert!(!owners.contains_key(identity));
+        assert!(!uninferred.contains_key(identity));
+    }
+}
+
+/// Previous diagnostic state for one bounded owner publication. Recursive or nested checks of the
+/// same declaration reuse its stable formal identities, so leaving the inner check must restore the
+/// outer value rather than delete it.
+#[derive(Default)]
+pub(super) struct TypeParameterOwnerScope {
+    prior: Vec<(&'static str, Option<String>, Option<bool>)>,
+}
+
+impl TypeParameterOwnerScope {
+    fn publish(
+        &mut self,
+        owners: &mut HashMap<&'static str, String>,
+        uninferred: &mut HashMap<&'static str, bool>,
+        identity: &'static str,
+        owner: String,
+        platform: Option<bool>,
+    ) {
+        self.prior.push((
+            identity,
+            owners.insert(identity, owner),
+            uninferred.get(identity).copied(),
+        ));
+        match platform {
+            Some(platform) => {
+                uninferred.insert(identity, platform);
+            }
+            None => {
+                uninferred.remove(identity);
+            }
+        }
+    }
+
+    fn restore(
+        self,
+        owners: &mut HashMap<&'static str, String>,
+        uninferred: &mut HashMap<&'static str, bool>,
+    ) {
+        for (parameter, owner, unresolved) in self.prior.into_iter().rev() {
+            match owner {
+                Some(owner) => {
+                    owners.insert(parameter, owner);
+                }
+                None => {
+                    owners.remove(parameter);
+                }
+            }
+            match unresolved {
+                Some(platform) => {
+                    uninferred.insert(parameter, platform);
+                }
+                None => {
+                    uninferred.remove(parameter);
+                }
+            }
+        }
+    }
+}
+
 impl TypeParameterNumbering {
     /// Number the parameters of `mentioned`, a diagnostic's parameter identities in mention order.
     pub(super) fn new(mentioned: impl IntoIterator<Item = &'static str>) -> Self {
@@ -115,15 +213,14 @@ pub(super) fn classifier_type_parameter_owner(
 }
 
 impl Checker<'_> {
-    /// Record the owner wording of a function's formals, bound in `scope`, returning their
-    /// identities for [`Self::retire_type_parameter_owners`] when the function's check ends.
+    /// Record the owner wording of a function's formals, bound in `scope`.
     pub(super) fn publish_function_type_parameter_owner(
         &mut self,
         scope: &CheckerScope<'_>,
         function: &FunDecl,
-    ) -> Vec<&'static str> {
+    ) -> TypeParameterOwnerScope {
         if function.type_params.is_empty() {
-            return Vec::new();
+            return TypeParameterOwnerScope::default();
         }
         let formals = self.type_parameter_owner_formals(
             scope,
@@ -138,16 +235,15 @@ impl Checker<'_> {
         )
     }
 
-    /// Record the owner wording of a property's formals, bound in `scope` (`val <T> List<T>.pp`),
-    /// returning their identities for [`Self::retire_type_parameter_owners`]. The receiver is
-    /// written as the declaration spells it.
+    /// Record the owner wording of a property's formals, bound in `scope` (`val <T> List<T>.pp`).
+    /// The receiver is written as the declaration spells it.
     pub(super) fn publish_property_type_parameter_owner(
         &mut self,
         scope: &CheckerScope<'_>,
         property: &PropDecl,
-    ) -> Vec<&'static str> {
+    ) -> TypeParameterOwnerScope {
         if property.type_params.is_empty() {
-            return Vec::new();
+            return TypeParameterOwnerScope::default();
         }
         let formals = self.type_parameter_owner_formals(
             scope,
@@ -176,10 +272,66 @@ impl Checker<'_> {
         )
     }
 
-    pub(super) fn retire_type_parameter_owners(&mut self, parameters: &[&'static str]) {
-        for parameter in parameters {
-            self.type_parameter_owners.remove(parameter);
+    pub(super) fn restore_type_parameter_owners(&mut self, scope: TypeParameterOwnerScope) {
+        scope.restore(
+            &mut self.type_parameter_owners,
+            &mut self.uninferred_type_parameters,
+        );
+    }
+
+    /// Publish the owner of provider-normalized callable formals while its selected arguments are
+    /// being committed. The formals already are stable declaration identities, so no scope lookup
+    /// or source-spelling recovery is involved.
+    pub(super) fn publish_generic_signature_owner(
+        &mut self,
+        signature: &crate::libraries::GenericSig,
+        owner: String,
+        unresolved: &[String],
+    ) -> TypeParameterOwnerScope {
+        let mut scope = TypeParameterOwnerScope::default();
+        for (index, formal) in signature.formals.iter().enumerate() {
+            // `GenericSig::formals` stores the opaque semantic identity as owned text; this
+            // restores that exact identity to the interner rather than interning source spelling
+            // or deriving identity from it.
+            let identity = crate::types::intern(formal);
+            let platform = unresolved.contains(formal).then(|| {
+                signature
+                    .formal_bounds
+                    .get(index)
+                    .and_then(|bounds| bounds.first())
+                    .is_some_and(|bound| matches!(bound, Ty::PlatformNullable(_)))
+            });
+            scope.publish(
+                &mut self.type_parameter_owners,
+                &mut self.uninferred_type_parameters,
+                identity,
+                owner.clone(),
+                platform,
+            );
         }
+        scope
+    }
+
+    /// Publish the provider-normalized generic member selected at `call` while its arguments are
+    /// committed. Only formals retained as open by postponed inference receive kotlinc's
+    /// `uninferred` marker; a stable symbolic solution is still rendered with its declaration owner.
+    pub(super) fn publish_selected_member_type_parameter_owner(
+        &mut self,
+        call: crate::ast::ExprId,
+        member: &crate::libraries::LibraryMember,
+    ) -> TypeParameterOwnerScope {
+        let Some((owner, signature)) = Self::generic_library_member_header(&member.name, member)
+            .zip(member.generic_sig.as_ref())
+        else {
+            return TypeParameterOwnerScope::default();
+        };
+        let unresolved = self
+            .unbound_value_lambda_call_formals
+            .get(&call)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .to_vec();
+        self.publish_generic_signature_owner(signature, owner, &unresolved)
     }
 
     /// Record the owner wording of a classifier's formals, bound in `scope`.
@@ -222,23 +374,14 @@ impl Checker<'_> {
         context: &[Ty],
         numbering: &TypeParameterNumbering,
     ) -> String {
-        if let Some((parameter, owner)) = nullable_type_parameter(ty).and_then(|parameter| {
-            self.type_parameter_owners
-                .get(parameter)
-                .map(|owner| (parameter, owner))
-        }) {
-            let source = numbering.name(parameter);
-            return format!("{source}? (of {owner})");
+        if let Some(parameter) = nullable_type_parameter(ty) {
+            if self.type_parameter_owners.contains_key(parameter) {
+                return self.diagnostic_type_parameter_name(parameter, numbering, true);
+            }
         }
         ty.source_name_with_classifier_in(
             context,
-            &|parameter| {
-                let source = numbering.name(parameter);
-                match self.type_parameter_owners.get(parameter) {
-                    Some(owner) => format!("{source} (of {owner})"),
-                    None => source,
-                }
-            },
+            &|parameter| self.diagnostic_type_parameter_name(parameter, numbering, false),
             &|classifier| {
                 let index = self.resolved_index?;
                 let declaration = index.classifier_declaration(classifier)?;
@@ -251,20 +394,49 @@ impl Checker<'_> {
         )
     }
 
+    fn diagnostic_type_parameter_name(
+        &self,
+        parameter: &str,
+        numbering: &TypeParameterNumbering,
+        nullable: bool,
+    ) -> String {
+        let source = numbering.name(parameter);
+        let source = match self.uninferred_type_parameters.get(parameter) {
+            Some(platform) => format!("uninferred {source}{}", if *platform { "!" } else { "" }),
+            None => source,
+        };
+        let source = if nullable {
+            format!("{source}?")
+        } else {
+            source
+        };
+        match self.type_parameter_owners.get(parameter) {
+            Some(owner) => format!("{source} (of {owner})"),
+            None => source,
+        }
+    }
+
     fn publish_type_parameter_owner(
         &mut self,
         scope: &CheckerScope<'_>,
         names: &[String],
         owner: String,
-    ) -> Vec<&'static str> {
+    ) -> TypeParameterOwnerScope {
         let identities = names
             .iter()
             .filter_map(|name| scope.tparam_bound(name).ty_param_name())
             .collect::<Vec<_>>();
-        for identity in &identities {
-            self.type_parameter_owners.insert(identity, owner.clone());
+        let mut published = TypeParameterOwnerScope::default();
+        for identity in identities {
+            published.publish(
+                &mut self.type_parameter_owners,
+                &mut self.uninferred_type_parameters,
+                identity,
+                owner.clone(),
+                None,
+            );
         }
-        identities
+        published
     }
 
     fn type_parameter_owner_formals(

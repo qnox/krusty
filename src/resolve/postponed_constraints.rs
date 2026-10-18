@@ -455,6 +455,83 @@ impl PostponedCallConstraints {
 }
 
 impl Checker<'_> {
+    /// The callee formals whose postponed lambda result is still only a dependency on a nested
+    /// call's open result. A symbolic type is not sufficient evidence: captured classifier
+    /// parameters and enclosing declaration parameters are stable solutions even though they are
+    /// represented by [`Ty::TyParam`]. The retained selected-call signature is the ownership fact
+    /// that distinguishes an inference variable from either stable kind.
+    pub(super) fn unresolved_value_lambda_formals(
+        &self,
+        scope: &CheckerScope<'_>,
+        arguments: &[ExprId],
+        generic: &crate::libraries::GenericSig,
+        postponed_solutions: &crate::symbol_resolver::GSigBinds,
+        known_bindings: &crate::symbol_resolver::GSigBinds,
+        constraints: &PostponedCallConstraints,
+    ) -> Vec<String> {
+        generic
+            .formals
+            .iter()
+            .filter(|formal| {
+                let postponed_solution = postponed_solutions.get(*formal).copied();
+                let depends_on_open_result = postponed_solution.is_some_and(|solution| {
+                    self.lambda_arguments_have_open_result(arguments, solution)
+                });
+                constraints.formals.contains(formal)
+                    && (postponed_solution.is_none() || depends_on_open_result)
+                    && (depends_on_open_result
+                        || known_bindings.get(*formal).is_none_or(|binding| {
+                            ty_mentions_param(*binding, std::slice::from_ref(*formal))
+                        }))
+                    && (depends_on_open_result
+                        || generic.params.iter().any(|parameter| {
+                            matches!(parameter.non_null(), Ty::Fun(function)
+                                if !function.has_receiver
+                                    && function.params.iter().any(|input| {
+                                        ty_mentions_param(
+                                            *input,
+                                            std::slice::from_ref(*formal),
+                                        )
+                                    }))
+                        }))
+                    // A declaration-owned parameter in the surrounding lexical scope is a fixed
+                    // solution even when a retained nested-call signature happens to reuse it.
+                    && postponed_solution
+                        .is_none_or(|solution| !Self::type_is_lexically_fixed(scope, solution)
+                            || !depends_on_open_result)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn lambda_arguments_have_open_result(&self, arguments: &[ExprId], solution: Ty) -> bool {
+        arguments.iter().copied().any(|argument| {
+            let Expr::Lambda { body, .. } = self.file.expr(argument) else {
+                return false;
+            };
+            let direct = super::conditional_branch::branch_value_expression(self.file, *body);
+            std::iter::once(direct)
+                .chain(
+                    self.call_owned_conditional_branches
+                        .get(&argument)
+                        .into_iter()
+                        .flatten()
+                        .copied()
+                        .map(|branch| {
+                            super::conditional_branch::branch_value_expression(self.file, branch)
+                        }),
+                )
+                .any(|call| {
+                    self.unbound_call_result_signature(call)
+                        .is_some_and(|signature| {
+                            signature.formals.iter().any(|formal| {
+                                ty_mentions_param(solution, std::slice::from_ref(formal))
+                            })
+                        })
+                })
+        })
+    }
+
     /// Reach the fixed point of the constraints contributed by postponed function arguments.
     /// Rechecks and their diagnostic ownership stay together here; the call-site facade supplies
     /// only the selected parameter shapes and consumes the finalized argument types.

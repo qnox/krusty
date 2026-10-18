@@ -641,7 +641,7 @@ impl<'a> Checker<'a> {
             &value_parameters,
             function.ret.as_ref(),
         );
-        self.retire_type_parameter_owners(&owned);
+        self.restore_type_parameter_owners(owned);
     }
 
     /// [`Self::check_bodyless_member_bounds`] for a property of the class rung `scope`, when it
@@ -688,7 +688,7 @@ impl<'a> Checker<'a> {
             &[],
             property.declared_ty(),
         );
-        self.retire_type_parameter_owners(&owned);
+        self.restore_type_parameter_owners(owned);
     }
 
     /// The alias spellings Pass 1 recorded for the declared types of `declaration`; none for a

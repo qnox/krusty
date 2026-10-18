@@ -453,8 +453,7 @@ impl Checker<'_> {
         self.lambda_body_results.insert(lambda, inferred);
         match result_constraint {
             LambdaResultConstraint::Fixed(expected) => {
-                let result = super::conditional_branch::branch_value_expression(self.file, body);
-                self.expect_assignable(expected, inferred, self.span(result), "return");
+                self.expect_lambda_result(body, expected, inferred);
                 // A lambda whose every result is `Unit` (a statement tail such as an assignment or
                 // a declaration, an `else`-less `if`, a `Unit` call) returns `Unit` itself, a
                 // subtype of the expected function type, as kotlinc infers it.
@@ -466,6 +465,42 @@ impl Checker<'_> {
             }
             LambdaResultConstraint::Open | LambdaResultConstraint::CallOwned => inferred,
         }
+    }
+
+    /// Check a lambda result at the terminal expression that semantically owns it.
+    pub(super) fn expect_lambda_result(&mut self, body: ExprId, expected: Ty, actual: Ty) {
+        let result = super::conditional_branch::branch_value_expression(self.file, body);
+        self.expect_assignable(expected, actual, self.span(result), "return");
+    }
+
+    /// Move a selected SAM's open-result mismatch from the whole argument to the lambda result
+    /// expression that semantically owns it. Inputs must already be the selected SAM shape; the
+    /// result stays open so a terminal generic producer retains its independent inference error.
+    pub(super) fn report_open_sam_lambda_result_mismatch(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        argument: ExprId,
+        function: Ty,
+        sam: &crate::symbol_resolver::SamSignature,
+    ) -> bool {
+        if Self::type_is_lexically_fixed(scope, sam.ret) {
+            return false;
+        }
+        let Ty::Fun(signature) = function else {
+            return false;
+        };
+        if signature.params != sam.params
+            || signature.context_count != sam.context_count
+            || signature.has_receiver != sam.has_receiver
+            || signature.suspend != sam.suspend
+        {
+            return false;
+        }
+        let Expr::Lambda { body, .. } = self.file.expr(argument) else {
+            return false;
+        };
+        self.expect_lambda_result(*body, sam.ret, signature.ret);
+        true
     }
 
     fn check_lambda_body(
