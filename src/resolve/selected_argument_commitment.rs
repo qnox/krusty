@@ -28,14 +28,23 @@ pub struct SelectedArgumentBinding {
     pub argument: ExprId,
     pub parameter: usize,
     pub vararg_element: bool,
-    /// Exact source occurrence before contextual argument checking. A lexical read uses its
-    /// declaration-owned occurrence; every other expression uses its probed type. Later rechecks
-    /// may replace `expr_types[argument]` with the selected parameter's expected type.
-    pub(super) source_occurrence: Ty,
+    /// Declaration-owned occurrence read by this argument before contextual argument checking.
+    /// A non-lexical expression instead uses its final checked type: its probe can be an erased
+    /// provider upper face that is not the occurrence the selected call committed.
+    pub(super) source_declared_type: Option<Ty>,
     /// Reified provenance of the same occurrence, captured while its lexical type-parameter scope
     /// is available. Diagnostics consume this semantic tree and never recover declaration facts
     /// from a source name.
     pub(super) source_provenance: super::intersection_inference::ReifiedArgumentProvenance,
+    /// Complete source inference fact retained before contextual argument checking can replace the
+    /// expression's selected-call commitment with its expected denotable result.
+    pub(super) source_intersection: Option<super::intersection_inference::InferredIntersection>,
+}
+
+impl SelectedArgumentBinding {
+    pub(super) fn reified_occurrence(&self, checked: Ty) -> Ty {
+        self.source_declared_type.unwrap_or(checked)
+    }
 }
 
 impl std::ops::Deref for SelectedArgumentCommitment {
@@ -56,11 +65,53 @@ impl IntoIterator for SelectedArgumentCommitment {
 }
 
 impl Checker<'_> {
-    /// Publish the exact source-to-parameter mapping already selected by the source-constructor
-    /// engine through the same checked commitment consumed by every other call. The first expanded
-    /// vararg element occupies the parameter slot (matching [`map_call_args`]); every element
-    /// remains distinct in `argument_bindings`.
-    pub(super) fn commit_source_constructor_argument_mapping(
+    /// Commit an already-checked call whose semantic declaration is one vararg parameter. Compiler
+    /// supplied array creators use this after checking their operands so their reified element
+    /// diagnostics consume the same stable source facts as ordinary selected callables.
+    pub(super) fn commit_checked_single_vararg_arguments(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        arguments: &[ExprId],
+        actuals: &[Ty],
+        whole_arrays: &[bool],
+    ) {
+        if arguments.len() != actuals.len() || arguments.len() != whole_arrays.len() {
+            debug_assert!(false, "checked vararg arguments must retain source arity");
+            return;
+        }
+        let argument_bindings = arguments
+            .iter()
+            .zip(actuals)
+            .zip(whole_arrays)
+            .map(|((&argument, &actual), &whole_array)| {
+                let source_declared_type = self.local_variable_read(scope, argument);
+                let source_provenance = self.finalized_selected_argument_reified_provenance(
+                    scope,
+                    argument,
+                    source_declared_type.unwrap_or(actual),
+                );
+                let mut source_intersection = self.inferred_expression_intersection_fact(argument);
+                if let Some(intersection) = &mut source_intersection {
+                    intersection.through_flexible |= source_provenance.crossed_flexible_boundary();
+                }
+                SelectedArgumentBinding {
+                    argument,
+                    parameter: 0,
+                    vararg_element: !whole_array,
+                    source_declared_type,
+                    source_provenance,
+                    source_intersection,
+                }
+            })
+            .collect::<Vec<_>>();
+        self.commit_selected_argument_mapping(call, 1, &argument_bindings, &[]);
+    }
+
+    /// Publish an exact source-to-parameter mapping through the checked commitment consumed by
+    /// every selected call. The first expanded vararg element occupies the parameter slot
+    /// (matching [`map_call_args`]); every element remains distinct in `argument_bindings`.
+    pub(super) fn commit_selected_argument_mapping(
         &mut self,
         call: ExprId,
         parameter_count: usize,
@@ -151,8 +202,8 @@ impl Checker<'_> {
                 .is_some_and(Option::is_some);
             let whole_array = call_sig.vararg_index == Some(parameter)
                 && (named || self.file.is_spread_arg(argument));
-            let source_occurrence =
-                self.selected_argument_source_occurrence(scope, argument, probed_actual);
+            let source_declared_type = self.local_variable_read(scope, argument);
+            let mut source_intersection = self.inferred_expression_intersection_fact(argument);
             let inferred = argument_expectations
                 .and_then(|expectations| expectations.get(&argument))
                 .copied();
@@ -178,14 +229,18 @@ impl Checker<'_> {
             let source_provenance = self.finalized_selected_argument_reified_provenance(
                 scope,
                 argument,
-                source_occurrence,
+                source_declared_type.unwrap_or(actual),
             );
+            if let Some(intersection) = &mut source_intersection {
+                intersection.through_flexible |= source_provenance.crossed_flexible_boundary();
+            }
             argument_bindings.push(SelectedArgumentBinding {
                 argument,
                 parameter,
                 vararg_element: call_sig.vararg_index == Some(parameter) && !whole_array,
-                source_occurrence,
+                source_declared_type,
                 source_provenance,
+                source_intersection,
             });
             if whole_array {
                 self.expect_whole_array_vararg_arg(
@@ -495,7 +550,10 @@ fn required_indexed_operator_argument_slots(
 
 #[cfg(test)]
 mod tests {
-    use super::{required_indexed_operator_argument_slots, value_parameter_defaults, Ty};
+    use super::{
+        required_indexed_operator_argument_slots, value_parameter_defaults,
+        SelectedArgumentBinding, Ty,
+    };
     use crate::ast::ExprId;
 
     #[test]
@@ -516,5 +574,25 @@ mod tests {
             required_indexed_operator_argument_slots(&[Ty::Int], None, &[ExprId(1), ExprId(2)],),
             Err("selected indexed operator's arguments do not match its parameters")
         );
+    }
+
+    #[test]
+    fn only_a_lexical_occurrence_replaces_the_committed_argument_type() {
+        let declared = Ty::ty_param("owner:T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let occurrence = Ty::ty_param("owner:T", Ty::obj("kotlin/Any"));
+        let binding = |source_declared_type| SelectedArgumentBinding {
+            argument: ExprId(1),
+            parameter: 0,
+            vararg_element: false,
+            source_declared_type,
+            source_provenance: Default::default(),
+            source_intersection: None,
+        };
+
+        assert_eq!(
+            binding(Some(occurrence)).reified_occurrence(declared),
+            occurrence
+        );
+        assert_eq!(binding(None).reified_occurrence(declared), declared);
     }
 }

@@ -15390,19 +15390,23 @@ impl<'a> Checker<'a> {
                         || argument_names
                             .and_then(|names| names.get(source))
                             .is_some_and(Option::is_some));
-                let source_occurrence =
-                    self.selected_argument_source_occurrence(scope, argument, arg_tys[source]);
+                let source_declared_type = self.local_variable_read(scope, argument);
                 let source_provenance = self.finalized_selected_argument_reified_provenance(
                     scope,
                     argument,
-                    source_occurrence,
+                    source_declared_type.unwrap_or(arg_tys[source]),
                 );
+                let mut source_intersection = self.inferred_expression_intersection_fact(argument);
+                if let Some(intersection) = &mut source_intersection {
+                    intersection.through_flexible |= source_provenance.crossed_flexible_boundary();
+                }
                 SelectedArgumentBinding {
                     argument,
                     parameter,
                     vararg_element: selected.vararg == Some(parameter) && !whole_array,
-                    source_occurrence,
+                    source_declared_type,
                     source_provenance,
+                    source_intersection,
                 }
             })
             .collect::<Vec<_>>();
@@ -15550,7 +15554,7 @@ impl<'a> Checker<'a> {
         } else {
             declared_params
         };
-        self.commit_source_constructor_argument_mapping(
+        self.commit_selected_argument_mapping(
             call,
             params.len(),
             &argument_bindings,
@@ -63443,6 +63447,13 @@ impl<'a> Checker<'a> {
                     contributed
                 })
                 .collect::<Vec<_>>();
+            self.commit_checked_single_vararg_arguments(
+                scope,
+                call,
+                args,
+                &arg_tys,
+                &whole_array_arguments,
+            );
             if element_hint.is_none() {
                 for &t in &arg_tys {
                     elem = Some(match elem {

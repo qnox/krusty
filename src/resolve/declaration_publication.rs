@@ -880,6 +880,16 @@ impl Checker<'_> {
             .unwrap_or_default()
     }
 
+    /// Whether this checked value still owns a provider-normalized flexible interval at its root.
+    /// This is the authoritative semantic handoff after contextual rechecking; a selected generic
+    /// declaration may spell only its type parameter and therefore cannot answer this question.
+    pub(super) fn checked_value_is_flexible(&self, expression: ExprId) -> bool {
+        self.flexible_values
+            .expressions
+            .get(&expression)
+            .is_some_and(|value| value.publication.is_some())
+    }
+
     /// The declaration type owned by a checked value. Ordinary flow may view the current value
     /// through a provider upper face, but that does not replace the lower classifier selected for
     /// an inferred declaration's flexible interval.

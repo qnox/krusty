@@ -113,6 +113,10 @@ impl ReifiedArgumentProvenance {
         self.through_definitely_non_null || self.through_flexible
     }
 
+    pub(super) fn crossed_flexible_boundary(&self) -> bool {
+        self.through_flexible
+    }
+
     pub(super) fn argument(&self, ordinal: usize) -> Option<&Self> {
         self.arguments.get(ordinal)
     }
@@ -285,22 +289,9 @@ fn bounds_other_than_primary(parts: &[Ty], selected_result: Ty) -> Vec<Ty> {
 }
 
 impl Checker<'_> {
-    /// Retain the source occurrence before the selected parameter context can replace the
-    /// expression's checked type. A lexical read owns a declaration type; every other expression
-    /// starts from the type produced by candidate probing.
-    pub(super) fn selected_argument_source_occurrence(
-        &self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-        probed: Ty,
-    ) -> Ty {
-        self.local_variable_read(scope, expression)
-            .unwrap_or(probed)
-    }
-
     /// Build reified provenance only after contextual argument checking has finalized the source
-    /// expression's selected-call and intersection sidecars. `occurrence` is the stable
-    /// pre-contextual source type retained by [`Self::selected_argument_source_occurrence`].
+    /// expression's selected-call and flexible-value sidecars. `occurrence` is either a stable
+    /// lexical declaration occurrence or the final type committed by that selected recheck.
     pub(super) fn finalized_selected_argument_reified_provenance(
         &self,
         scope: &CheckerScope<'_>,
@@ -323,18 +314,7 @@ impl Checker<'_> {
             }
             None
         });
-        let selected_result_is_flexible =
-            self.resolved_calls.get(&expression).is_some_and(|call| {
-                matches!(
-                    call.selected_result_target().declared,
-                    Ty::PlatformNullable(_)
-                )
-            });
-        let inferred_intersection_is_flexible = self
-            .inferred_expression_intersections
-            .get(&expression)
-            .is_some_and(|intersection| intersection.through_flexible);
-        if selected_result_is_flexible || inferred_intersection_is_flexible {
+        if self.checked_value_is_flexible(expression) {
             provenance.through_flexible = true;
         }
         provenance
@@ -381,7 +361,7 @@ impl Checker<'_> {
                 constrain_reified_argument_provenance(
                     &signature.formals,
                     declared,
-                    binding.source_occurrence,
+                    binding.reified_occurrence(self.expr_types[binding.argument.0 as usize]),
                     &binding.source_provenance,
                     &mut facts,
                 );
@@ -651,7 +631,7 @@ impl Checker<'_> {
             .unwrap_or_default()
     }
 
-    fn inferred_expression_intersection_fact(
+    pub(super) fn inferred_expression_intersection_fact(
         &self,
         expression: ExprId,
     ) -> Option<InferredIntersection> {
@@ -733,11 +713,13 @@ impl Checker<'_> {
                 continue;
             };
             let direct_arguments = slots
+                .argument_bindings
                 .iter()
-                .enumerate()
-                .filter_map(|(visible_parameter, argument)| {
-                    let argument = (*argument)?;
-                    let parameter = *parameter_indices.get(visible_parameter)?;
+                .filter(|binding| {
+                    let visible_parameter = binding.parameter;
+                    let Some(&parameter) = parameter_indices.get(visible_parameter) else {
+                        return false;
+                    };
                     if call_sig.vararg_index == Some(visible_parameter)
                         || call_sig
                             .exact_params
@@ -752,13 +734,13 @@ impl Checker<'_> {
                             .and_then(Ty::ty_param_name)
                             != Some(formal.as_str())
                     {
-                        return None;
+                        return false;
                     }
-                    Some(argument)
+                    true
                 })
                 .collect::<Vec<_>>();
-            for &argument in &direct_arguments {
-                let Some(fact) = self.inferred_expression_intersection_fact(argument) else {
+            for argument in &direct_arguments {
+                let Some(fact) = argument.source_intersection.clone() else {
                     continue;
                 };
                 // A flexible producer is committed to a non-null generic parameter through its
@@ -770,12 +752,11 @@ impl Checker<'_> {
                 if fact.parts.len() < 2 || !selected_same_value {
                     continue;
                 }
-                let all_arguments_prove_parts = direct_arguments.iter().all(|&other| {
-                    let actual = self.expr_types[other.0 as usize];
-                    let other_fact = self.inferred_expression_intersection_fact(other);
+                let all_arguments_prove_parts = direct_arguments.iter().all(|other| {
+                    let actual = self.expr_types[other.argument.0 as usize];
                     fact.parts.iter().all(|&part| {
                         self.receiver_is_assignable(actual, part)
-                            || other_fact.as_ref().is_some_and(|other| {
+                            || other.source_intersection.as_ref().is_some_and(|other| {
                                 other
                                     .parts
                                     .iter()
