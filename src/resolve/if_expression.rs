@@ -162,7 +162,23 @@ impl Checker<'_> {
                         else_flow = flow;
                         ty
                     });
-                    self.complete_conditional_branches(scope, [(then_branch, tt), (eb, et)]);
+                    let result = conditional_branch::join_adapted_branches(
+                        self,
+                        scope,
+                        wanted.expected,
+                        then_branch,
+                        tt,
+                        eb,
+                        et,
+                        e,
+                    );
+                    self.complete_conditional_branches(
+                        scope,
+                        e,
+                        wanted.expected,
+                        result,
+                        [(then_branch, tt), (eb, et)],
+                    );
                     self.publish_joined_local_flow(
                         scope,
                         &locals,
@@ -177,16 +193,7 @@ impl Checker<'_> {
                         flows.push(else_flow);
                     }
                     CompletedFlow::publish_common(self, scope, &flows);
-                    conditional_branch::join_adapted_branches(
-                        self,
-                        scope,
-                        wanted.expected,
-                        then_branch,
-                        tt,
-                        eb,
-                        et,
-                        e,
-                    )
+                    result
                 }
                 None => {
                     self.report_unbound_conditional_branch(scope, then_branch);

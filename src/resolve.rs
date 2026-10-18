@@ -115,6 +115,7 @@ mod deprecation_usage;
 mod destructuring;
 mod diagnostic_selection;
 mod eager_lambda_analysis;
+mod elvis_expression;
 mod enum_entries;
 mod enum_entry_method_owner;
 mod explicit_backing_fields;
@@ -33086,6 +33087,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         iteration_plans: IterationPlans::default(),
         resolved_constructors: HashMap::default(),
         constructor_formal_evidence: HashMap::default(),
+        call_owned_conditional_branches: HashMap::default(),
         resolved_enum_entry_constructors: HashMap::default(),
         resolved_ctor_delegations: HashMap::default(),
         resolved_primary_ctor_delegations: HashMap::default(),
@@ -35769,6 +35771,10 @@ struct Checker<'a> {
     resolved_constructors: HashMap<ExprId, ResolvedConstructor>,
     /// How each constructor call's inference fixed its classifier's own type parameters.
     constructor_formal_evidence: HashMap<ExprId, constructor_formal_evidence::CallEvidence>,
+    /// Conditional branches whose terminal selected call stayed open while a callable candidate
+    /// shaped its lambda argument. Selection consumes each obligation exactly once after its
+    /// functional result is fixed or remains call-owned.
+    call_owned_conditional_branches: HashMap<ExprId, Vec<ExprId>>,
     resolved_enum_entry_constructors: HashMap<(u32, u32), ResolvedConstructor>,
     resolved_ctor_delegations: HashMap<(DeclId, usize), ResolvedCtorDelegation>,
     resolved_primary_ctor_delegations: HashMap<DeclId, ResolvedCtorDelegation>,
@@ -52597,6 +52603,7 @@ impl<'a> Checker<'a> {
             self.file.expr(argument),
         );
         let unbound_result = self.unbound_contextual_result_signature(argument);
+        self.commit_call_owned_conditional_branches(scope, argument, expected);
         // An argument whose recorded type already EQUALS the selected parameter has nothing left
         // for the expectation to bind: re-entering it recomputes the same type. Nested generic
         // literals (`mapOf("k" to mapOf("k" to …))`) infer each level from their arguments, so
@@ -55610,9 +55617,10 @@ impl<'a> Checker<'a> {
         // (`m.onErrorResume { Mono.empty() }` takes its element type from the SAM's own result).
         // A result that still mentions a callee formal is not fixed yet and must not be pushed —
         // overload inference owns it until it is.
-        let result_constraint = expectation
-            .fixed_result()
-            .map_or(LambdaResultConstraint::Open, LambdaResultConstraint::Fixed);
+        let result_constraint = expectation.fixed_result().map_or(
+            LambdaResultConstraint::CallOwned,
+            LambdaResultConstraint::Fixed,
+        );
         if !expectation.context_types.is_empty() || expectation.receiver.is_some() {
             self.check_lambda_with_implicit_receivers_and_return_labeled(
                 scope,
@@ -57366,7 +57374,13 @@ impl<'a> Checker<'a> {
                 &branch_types,
                 result,
             );
-            self.complete_conditional_branches(scope, branch_types.iter().copied());
+            self.complete_conditional_branches(
+                scope,
+                e,
+                wanted.expected,
+                result,
+                branch_types.iter().copied(),
+            );
             scope.restore_common_flow(&exit_flows);
             let normal_continuation = scope.flow_snapshot();
             all_exit_writes.extend(written);
@@ -57943,85 +57957,6 @@ impl<'a> Checker<'a> {
                         .to_string(),
                 );
                 read_ty
-            }
-        };
-        self.set(e, t)
-    }
-
-    fn expr_inner_elvis(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        e: ExprId,
-        expected: Option<Ty>,
-        lhs: ExprId,
-        rhs: ExprId,
-    ) -> Ty {
-        let t = {
-            let conditional_expected = conditional_branch::usable_expected(scope, expected);
-            let lt0 = match conditional_expected {
-                // The left branch is observed only after an implicit null test. Its NON-null value
-                // must fit the enclosing expectation, but the expression itself may return null;
-                // therefore `String` contextually types the left as `String?`. Passing the exact
-                // non-null expectation into a generic call prematurely constrained its result and
-                // rejected valid shapes such as `nullable.let(::nullableResult) ?: fallback`.
-                Some(ty) => self.expr_expected(scope, lhs, Ty::nullable(ty)),
-                None => self.expr(scope, lhs),
-            };
-            // The non-null LHS constrains an otherwise underdetermined generic fallback:
-            // `map[key] ?: emptyList()` must infer the element type from `map[key]`, just as the
-            // same generic call is retyped from an enclosing callable parameter elsewhere.
-            let mut lt = definitely_non_null_ty(lt0);
-            // The right operand runs only when the left is null, so a cast or assignment it proves
-            // must not become a fact of the value that took the left operand.
-            let rhs_scope = scope.child(ScopeKind::Block);
-            let rt = match conditional_expected {
-                Some(ty) => self.expr_expected(&rhs_scope, rhs, ty),
-                // The bottom type contributes no constraint to the other branch. In particular,
-                // `null ?: run { statement }` must infer `run` from its lambda as `Unit`; forcing
-                // the non-null form of `Null` (`Nothing`) into the RHS instead asks the lambda to
-                // return `Nothing` and rejects every normally-completing statement.
-                None if lt == Ty::Nothing || self.constructor_branch_is_open(lhs) => {
-                    self.expr(&rhs_scope, rhs)
-                }
-                None => self.expr_expected(&rhs_scope, rhs, lt),
-            };
-            let fixed = self.expectation_fixes_branches(scope, e, conditional_expected);
-            let lt0 = self.rebind_conditional_branch(lhs, rt, lt0, fixed, |c, exp| {
-                c.expr_expected(scope, lhs, exp)
-            });
-            lt = definitely_non_null_ty(lt0);
-            let rt = self.rebind_conditional_branch(rhs, lt, rt, fixed, |c, exp| {
-                c.expr_expected(&rhs_scope, rhs, exp)
-            });
-            self.complete_conditional_branches(scope, [(lhs, lt), (rhs, rt)]);
-            // The elvis value when lhs is non-null: a nullable-primitive lhs (`Int?`) unwraps to its
-            // unboxed primitive, while an ordinary nullable reference `T?` unwraps to `T`.
-            crate::trace_compiler!(
-                "resolve",
-                "elvis expression={e:?} lhs={lt0:?} non_null_lhs={lt:?} rhs={rt:?} expected={expected:?}"
-            );
-            if rt == Ty::Nothing {
-                // `x ?: return` (or throw/break/continue/a `Nothing` call): completing the elvis
-                // proves a stable `x` non-null for the code that follows, exactly like an
-                // `if (x == null) return` guard — the same machinery (`null_check_narrowings`)
-                // covers plain names, property paths (`a.b ?: return` narrows `a.b`), and
-                // SAFE-CALL left sides (`u?.f ?: return` proves the root `u` non-null).
-                // Unsigned stays unnarrowed because its value-box unbox to `kotlin.UInt` is
-                // not modeled.
-                let mut proven = Vec::new();
-                let mut declined = Vec::new();
-                self.null_check_narrowings(scope, lhs, &mut proven, &mut declined);
-                proven.retain(|(_, ty)| !ty.is_unsigned());
-                self.apply_narrowings(scope, &proven, &declined, false);
-                match lt0 {
-                    Ty::Nullable(inner) => *inner,
-                    _ => lt,
-                }
-            } else if lt == Ty::Null || matches!(lt0, Ty::Nullable(inner) if *inner == Ty::Nothing)
-            {
-                rt
-            } else {
-                conditional_branch::join_types(self, scope, conditional_expected, lt, rt, e)
             }
         };
         self.set(e, t)
@@ -60733,15 +60668,18 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            self.complete_conditional_branches(
-                scope,
-                arm_results.iter().map(|record| (record.body, record.ty)),
-            );
             let result = conditional_branch::join_results(
                 self,
                 scope,
                 expected,
                 arm_results.iter().map(|record| (record.ty, record.body)),
+            );
+            self.complete_conditional_branches(
+                scope,
+                e,
+                expected,
+                result.unwrap_or(Ty::Unit),
+                arm_results.iter().map(|record| (record.body, record.ty)),
             );
             let missing = if has_else {
                 None

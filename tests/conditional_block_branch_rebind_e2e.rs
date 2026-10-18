@@ -186,3 +186,37 @@ fn an_incompatible_block_branch_is_still_rejected() {
         ),
     );
 }
+
+/// Without an enclosing result expectation, the selected `flatMap` call still owns an open `R`.
+/// Its primary inference/return mismatch does not consume the independent open `T` selected for a
+/// terminal conditional branch. Every value-conditional form must retain the complete ordered
+/// diagnostic set, including the branch call's exact source location.
+#[test]
+fn open_selected_lambda_results_preserve_terminal_branch_diagnostics() {
+    let java = JAVA
+        .iter()
+        .map(|(name, source)| ((*name).into(), (*source).into()))
+        .collect::<Vec<(String, String)>>();
+    let Some((library, _)) = common::javac_compile(&java, &[]) else {
+        eprintln!("skipping: javac unavailable");
+        return;
+    };
+    let classpath = [library.clone(), common::stdlib_jar(), common::jdk_modules()];
+    for (form, body) in [
+        ("if", "if (s.isEmpty()) {} else { Mono.empty() }"),
+        ("when", "when { s.isEmpty() -> {}; else -> Mono.empty() }"),
+        ("elvis", "null ?: Mono.empty()"),
+        ("try", "try {} catch (ignored: Exception) { Mono.empty() }"),
+    ] {
+        let user = format!(
+            "import pub.Mono\n\
+             fun use(m: Mono<String>) =\n\
+             \x20 m.flatMap {{ s -> {body} }}\n"
+        );
+        let result = common::compiler_diagnostics(&[("Use.kt", &user)], &classpath);
+        common::expect_identical_rejection(
+            &result,
+            &format!("open selected lambda {form} branch completion"),
+        );
+    }
+}

@@ -225,6 +225,51 @@ pub(super) fn branch_value_expression(file: &File, expression: ExprId) -> ExprId
 }
 
 impl Checker<'_> {
+    /// Which expression owns completion of a conditional's still-open branch calls.
+    ///
+    /// A branch call owns an otherwise open result only while the conditional itself remains a
+    /// viable value for its context. A selected callable also owns the terminal result of a lambda
+    /// it is still shaping: its argument commitment reports any final mismatch or inference failure.
+    /// Adding a branch-local diagnostic during that earlier probe would report the same failed
+    /// completion twice.
+    fn conditional_completion_owner(
+        &self,
+        scope: &CheckerScope<'_>,
+        conditional: ExprId,
+        expected: Option<Ty>,
+        result: Ty,
+    ) -> ConditionalCompletionOwner {
+        if let Some((lambda, body, constraint)) = self.lambda_returns.active_result() {
+            let is_lambda_result = branch_value_expression(self.file, body) == conditional;
+            let owner = match constraint {
+                super::lambda_returns::LambdaResultConstraint::CallOwned => {
+                    ConditionalCompletionOwner::SelectedCall(lambda)
+                }
+                super::lambda_returns::LambdaResultConstraint::Open => {
+                    if self.postponed_call_constraints.is_empty() {
+                        ConditionalCompletionOwner::BranchResults
+                    } else {
+                        ConditionalCompletionOwner::EnclosingExpression
+                    }
+                }
+                super::lambda_returns::LambdaResultConstraint::Fixed(_) => {
+                    ConditionalCompletionOwner::BranchResults
+                }
+            };
+            if is_lambda_result && owner != ConditionalCompletionOwner::BranchResults {
+                return owner;
+            }
+        }
+        match usable_expected(scope, expected) {
+            Some(expected)
+                if result == Ty::Error || !self.receiver_is_assignable(result, expected) =>
+            {
+                ConditionalCompletionOwner::EnclosingExpression
+            }
+            _ => ConditionalCompletionOwner::BranchResults,
+        }
+    }
+
     fn conditional_call_result_signature(&self, expression: ExprId) -> Option<&GenericSig> {
         let expression = branch_value_expression(self.file, expression);
         if let Some(signature) = self.unbound_call_result_signature(expression) {
@@ -265,12 +310,84 @@ impl Checker<'_> {
     pub(super) fn complete_conditional_branches(
         &mut self,
         scope: &CheckerScope<'_>,
+        conditional: ExprId,
+        expected: Option<Ty>,
+        result: Ty,
         branches: impl IntoIterator<Item = (ExprId, Ty)>,
     ) {
         let branches = branches.into_iter().collect::<Vec<_>>();
         self.join_constructor_branches(scope, branches.iter().copied());
+        let owner = self.conditional_completion_owner(scope, conditional, expected, result);
         for (branch, _) in branches {
-            self.report_unbound_conditional_branch(scope, branch);
+            self.complete_conditional_branch(scope, branch, owner);
+        }
+    }
+
+    fn complete_conditional_branch(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        branch: ExprId,
+        owner: ConditionalCompletionOwner,
+    ) {
+        if self.postponed_argument_depth != 0 {
+            return;
+        }
+        match owner {
+            ConditionalCompletionOwner::BranchResults => {
+                self.report_unbound_conditional_branch(scope, branch);
+            }
+            ConditionalCompletionOwner::EnclosingExpression => {
+                let branch = branch_value_expression(self.file, branch);
+                self.constructor_formal_evidence.remove(&branch);
+            }
+            ConditionalCompletionOwner::SelectedCall(lambda) => {
+                let branches = self
+                    .call_owned_conditional_branches
+                    .entry(lambda)
+                    .or_default();
+                if !branches.contains(&branch) {
+                    branches.push(branch);
+                }
+            }
+        }
+    }
+
+    /// Commit branch-call completion retained while a selected callable shaped `lambda`.
+    ///
+    /// A fixed selected result owns any final mismatch, so its conditional branches must not add a
+    /// second inference diagnostic. When the selected result itself is still a call-owned variable,
+    /// however, kotlinc reports each terminal branch call that remains open. This is the first point
+    /// at which those cases are distinguishable: candidate probing deliberately records both as
+    /// [`LambdaResultConstraint::CallOwned`](super::lambda_returns::LambdaResultConstraint::CallOwned).
+    pub(super) fn commit_call_owned_conditional_branches(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        lambda: ExprId,
+        selected_parameter: Ty,
+    ) {
+        let Some(branches) = self.call_owned_conditional_branches.remove(&lambda) else {
+            return;
+        };
+        let selected_shape = self.functional_parameter_shape(selected_parameter);
+        let Some(Ty::Fun(selected_shape)) = selected_shape.map(Ty::non_null) else {
+            debug_assert!(
+                false,
+                "call-owned lambda completion requires a selected functional parameter"
+            );
+            for branch in branches {
+                self.report_unbound_conditional_branch(scope, branch);
+            }
+            return;
+        };
+        if Self::type_is_lexically_fixed(scope, selected_shape.ret) {
+            for branch in branches {
+                let branch = branch_value_expression(self.file, branch);
+                self.constructor_formal_evidence.remove(&branch);
+            }
+        } else {
+            for branch in branches {
+                self.report_unbound_conditional_branch(scope, branch);
+            }
         }
     }
 
@@ -408,6 +525,13 @@ impl Checker<'_> {
         );
         recheck(self, expectation)
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConditionalCompletionOwner {
+    BranchResults,
+    EnclosingExpression,
+    SelectedCall(ExprId),
 }
 
 /// One expression being checked, and whether its expectation is declared.
