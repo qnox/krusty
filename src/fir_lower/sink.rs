@@ -662,16 +662,25 @@ impl<'a> CommonIrBodySink<'a> {
         Ok(())
     }
 
-    /// Consume Pass-1 checked parameter defaults after the owning ordinary constructor/function
-    /// body has been attached. The store is drained per source, so no default FIR survives its
-    /// target file's common-lowering boundary.
+    /// Consume Pass-1 checked parameter defaults whose exact semantic owner is complete.
+    ///
+    /// Stable callable defaults are attached before ordinary bodies so tailrec lowering can expand
+    /// an omitted self-call argument into the loop step. Defaults under an incomplete body-local
+    /// classifier remain retained until its active Pass-2 group publishes that owner.
     pub fn accept_default_arguments(
         &mut self,
         index: &ResolvedModuleIndex,
         inline_bodies: &InlineBodyStore,
         bodies: &mut crate::fir::DefaultArgumentStore,
     ) -> Result<(), FirFileLoweringFailure> {
-        for (callable, body) in bodies.take_for_source(index, self.source) {
+        let ready = bodies.take_for_source_matching(index, self.source, |_, body| {
+            let declaration = DeclarationId::from_raw(body.owner().raw());
+            matches!(
+                semantic_owner(index, declaration),
+                SemanticOwner::Complete(_)
+            )
+        });
+        for (callable, body) in ready {
             // A materialized inline template has already consumed its defaults.
             if self.materialized_inline_callables.contains(&callable) {
                 continue;

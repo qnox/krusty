@@ -2770,6 +2770,8 @@ fn common_ir_sink_consumes_scheduled_function_body_and_defaults() {
     let mut sink =
         super::CommonIrBodySink::new(&index, crate::fir::SourceFileId::from_raw(0), &mut ir)
             .unwrap();
+    sink.accept_default_arguments(&index, &inline_bodies, &mut default_arguments)
+        .unwrap();
     for work in ordinary {
         let mut indexed_sink = sink.indexed(&index);
         crate::fir::check_and_dispatch_body(
@@ -2823,6 +2825,8 @@ fn common_ir_sink_prepares_inline_bodies_before_ordinary_callers() {
         super::CommonIrBodySink::new(&index, crate::fir::SourceFileId::from_raw(0), &mut ir)
             .unwrap();
     sink.accept_inline_bodies(&index, &mut inline_bodies)
+        .unwrap();
+    sink.accept_default_arguments(&index, &inline_bodies, &mut default_arguments)
         .unwrap();
     assert_eq!(inline_bodies.len(), 1);
     assert_eq!(sink.attached_body_count(), 1);
@@ -2894,6 +2898,8 @@ pub(crate) fn lower_single_source_with_platform(
         super::CommonIrBodySink::new(&index, crate::fir::SourceFileId::from_raw(0), &mut ir)
             .unwrap();
     sink.accept_inline_bodies(&index, &mut inline_bodies)
+        .unwrap();
+    sink.accept_default_arguments(&index, &inline_bodies, &mut default_arguments)
         .unwrap();
     for work in ordinary {
         let mut indexed_sink = sink.indexed(&index);
@@ -2967,6 +2973,8 @@ pub(crate) fn lower_source_from_set(sources: &[(&str, &str)], active_source: usi
     let mut ir = IrFile::default();
     let mut sink = super::CommonIrBodySink::new(&index, source_id, &mut ir).unwrap();
     sink.accept_inline_bodies(&index, &inline_bodies).unwrap();
+    sink.accept_default_arguments(&index, &inline_bodies, &mut default_arguments)
+        .unwrap();
     for work in ordinary {
         let mut deferred = DeferredBodies::default();
         crate::fir::check_and_dispatch_body(

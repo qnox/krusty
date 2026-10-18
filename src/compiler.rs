@@ -193,6 +193,19 @@ fn emit_analyzed_into<B: Backend>(
             );
             continue;
         }
+        // Stable callable defaults must precede ordinary body lowering: the tailrec transform
+        // expands an omitted self-call argument from the already-attached default. Defaults whose
+        // exact body-local owner is not complete remain retained for the final sweep below.
+        if let Err(error) =
+            sink.accept_default_arguments(&index, &inline_bodies, &mut default_arguments)
+        {
+            crate::trace_compiler!("fir", "default FIR lowering failed: {error:?}");
+            diags.error(
+                Span::new(0, 0),
+                format!("internal error: default FIR lowering failed: {error:?}"),
+            );
+            continue;
+        }
         let mut source_failed = false;
         let mut source_rejected = false;
         let source_diagnostics = diags.diags.len();
