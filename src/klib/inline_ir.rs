@@ -400,9 +400,33 @@ fn component_artifacts(
         .iter()
         .map(|(signature, _)| u64::from(*signature))
         .collect::<Vec<_>>();
+    let package = match component {
+        Component::Main => {
+            let package = functions[0].signature.package();
+            assert!(
+                functions
+                    .iter()
+                    .all(|function| function.signature.package() == package),
+                "one ordinary IrFile cannot contain declarations from different packages"
+            );
+            if package.is_empty() {
+                vec![u64::from(writer.string(""))]
+            } else {
+                package
+                    .segments()
+                    .iter()
+                    .map(|segment| u64::from(writer.string(segment)))
+                    .collect::<Vec<_>>()
+            }
+        }
+        // Kotlin's prepared-inline component uses one synthetic root file rather than any
+        // declaration's source package. Its IrFile records that root as one empty segment.
+        Component::Prepared => vec![u64::from(writer.string(""))],
+    };
     let root_file_entry = writer.file_entry(component.root_file_name());
     let mut file = Pb::new();
     file.field_packed_varints(1, &ids);
+    file.field_packed_varints(3, &package);
     file.field_varint(7, u64::from(root_file_entry));
     let entries = [
         ("files.knf", per_file(file.into_bytes())),
@@ -460,7 +484,12 @@ impl FileWriter {
             .iter()
             .enumerate()
             .map(|(index, parameter)| {
-                let signature = self.local_signature();
+                // Kotlin gives a type parameter a stable identity within its declaring
+                // function. The prepared copy therefore owns the same `<TP>`/index local
+                // identity beneath its private file-scoped function identity; a bare scoped
+                // local cannot be matched to the callee's type parameter during reified
+                // substitution.
+                let signature = self.type_parameter_signature(symbol_signature, index);
                 let symbol = symbol(signature, TYPE_PARAMETER_SYMBOL);
                 (index, parameter, symbol)
             })
@@ -687,7 +716,8 @@ impl FileWriter {
         returned.field_varint(1, declaration);
         returned.field_message(2, &tested);
         let mut return_expression = Pb::new();
-        return_expression.field_varint(2, u64::from(boolean));
+        let nothing = self.ty(Ty::Nothing, parameters);
+        return_expression.field_varint(2, u64::from(nothing));
         return_expression.field_message(12, &returned);
         let mut statement = Pb::new();
         statement.field_message(3, &return_expression);
@@ -794,6 +824,20 @@ impl FileWriter {
         let mut encoded = Pb::new();
         encoded.field_message(5, &composite);
         self.signature(encoded.canonical().into_bytes())
+    }
+
+    fn type_parameter_signature(&mut self, function: u32, index: usize) -> u32 {
+        let name = self.string("<TP>");
+        let mut local = Pb::new();
+        local.field_packed_varints(1, &[u64::from(name)]);
+        local.field_varint(
+            2,
+            u64::try_from(index).expect("type-parameter index fits u64"),
+        );
+        let mut encoded = Pb::new();
+        encoded.field_message(6, &local);
+        let local = self.signature(encoded.canonical().into_bytes());
+        self.composite_signature(function, local)
     }
 
     fn local_signature(&mut self) -> u32 {
@@ -927,7 +971,13 @@ fn leb128(mut value: u64, bytes: &mut Vec<u8>) {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
+    use crate::metadata::id_signature::{
+        callable_signature, CallableShape, DeclarationContainer, Placement, SignatureType,
+        TypeParameterShape, TypeView,
+    };
     use crate::metadata::klib_ir::tree::{KlibIrBody, KlibIrExprKind, KlibIrNullability};
     use crate::metadata::klib_ir::{
         read_declaration_trees, read_inlinable_declaration_trees,
@@ -947,8 +997,118 @@ mod tests {
         panic!("oversized test varint")
     }
 
-    /// Root file-entry id from the single `IrFile` emitted by this writer.
-    fn root_file_entry(bytes: &[u8]) -> u64 {
+    fn table_entries(bytes: &[u8]) -> Vec<&[u8]> {
+        assert_eq!(u32::from_be_bytes(bytes[0..4].try_into().unwrap()), 1);
+        let size = u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        assert_eq!(bytes.len(), 8 + size);
+        let table = &bytes[8..];
+        let count = i32::from_be_bytes(table[0..4].try_into().unwrap())
+            .checked_neg()
+            .expect("entry-table count is negative") as usize;
+        let mut cursor = 4;
+        let lengths = (0..count)
+            .map(|_| take_varint(table, &mut cursor) as usize)
+            .collect::<Vec<_>>();
+        let entries = lengths
+            .into_iter()
+            .map(|length| {
+                let start = cursor;
+                cursor += length;
+                &table[start..cursor]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(cursor, table.len());
+        entries
+    }
+
+    fn exact_message_field(bytes: &[u8], field: u64) -> Option<&[u8]> {
+        if bytes.is_empty() {
+            return None;
+        }
+        let mut cursor = 0;
+        if take_varint(bytes, &mut cursor) != (field << 3) | 2 {
+            return None;
+        }
+        let length = take_varint(bytes, &mut cursor) as usize;
+        let end = cursor.checked_add(length)?;
+        (end == bytes.len()).then_some(&bytes[cursor..end])
+    }
+
+    fn exact_composite_signature(bytes: &[u8]) -> Option<(usize, usize)> {
+        let message = exact_message_field(bytes, 5)?;
+        let mut cursor = 0;
+        if take_varint(message, &mut cursor) != 1 << 3 {
+            return None;
+        }
+        let container = take_varint(message, &mut cursor) as usize;
+        if take_varint(message, &mut cursor) != 2 << 3 {
+            return None;
+        }
+        let inner = take_varint(message, &mut cursor) as usize;
+        (cursor == message.len()).then_some((container, inner))
+    }
+
+    fn is_exact_type_parameter_local(bytes: &[u8], strings: &[&[u8]]) -> bool {
+        let Some(message) = exact_message_field(bytes, 6) else {
+            return false;
+        };
+        let mut cursor = 0;
+        if take_varint(message, &mut cursor) != (1 << 3) | 2 {
+            return false;
+        }
+        let names_length = take_varint(message, &mut cursor) as usize;
+        let names_end = cursor + names_length;
+        let name = take_varint(message, &mut cursor) as usize;
+        if cursor != names_end || strings.get(name) != Some(&b"<TP>".as_slice()) {
+            return false;
+        }
+        if take_varint(message, &mut cursor) != 2 << 3 {
+            return false;
+        }
+        take_varint(message, &mut cursor) == 0 && cursor == message.len()
+    }
+
+    fn exact_owned_type_parameter_signature(
+        signatures: &[u8],
+        strings: &[u8],
+        prepared: bool,
+    ) -> (u32, Vec<u8>) {
+        let signatures = table_entries(signatures);
+        let strings = table_entries(strings);
+        let mut matches = signatures
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, signature)| {
+                let (owner, inner) = exact_composite_signature(signature)?;
+                is_exact_type_parameter_local(signatures.get(inner)?, &strings)
+                    .then_some((slot, owner))
+            });
+        let (slot, owner) = matches.next().expect("one owned <TP> signature");
+        assert!(matches.next().is_none(), "exactly one owned <TP> signature");
+
+        let public = if prepared {
+            let (file, public) = exact_composite_signature(signatures[owner])
+                .expect("prepared function is owned by its file");
+            assert_eq!(
+                exact_message_field(signatures[file], 7),
+                Some(&[][..]),
+                "prepared function owner is an exact FileSignature"
+            );
+            exact_message_field(signatures[public], 1)
+                .expect("prepared function has an exact PublicSignature")
+        } else {
+            exact_message_field(signatures[owner], 1)
+                .expect("ordinary function has an exact PublicSignature")
+        };
+        (
+            u32::try_from(slot).expect("signature slot fits u32"),
+            public.to_vec(),
+        )
+    }
+
+    /// Package segments and root file-entry id from the single `IrFile` emitted by this writer.
+    fn root_file_identity(files: &[u8], strings: &[u8]) -> (Vec<String>, u64) {
+        let bytes = files;
         assert_eq!(u32::from_be_bytes(bytes[0..4].try_into().unwrap()), 1);
         let size = u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize;
         assert_eq!(bytes.len(), 8 + size);
@@ -957,14 +1117,66 @@ mod tests {
         assert_eq!(take_varint(message, &mut cursor), (1 << 3) | 2);
         let declaration_ids = take_varint(message, &mut cursor) as usize;
         cursor += declaration_ids;
+        assert_eq!(take_varint(message, &mut cursor), (3 << 3) | 2);
+        let package_size = take_varint(message, &mut cursor) as usize;
+        let package_end = cursor + package_size;
+        let string_entries = table_entries(strings);
+        let package = std::iter::from_fn(|| {
+            (cursor < package_end).then(|| {
+                let slot = take_varint(message, &mut cursor) as usize;
+                String::from_utf8(string_entries[slot].to_vec()).expect("package segment is UTF-8")
+            })
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(cursor, package_end);
         assert_eq!(take_varint(message, &mut cursor), 7 << 3);
         let root = take_varint(message, &mut cursor);
         assert_eq!(cursor, message.len());
-        root
+        (package, root)
     }
 
-    fn fixture() -> (PreparedFunction, KlibPublicIdSignature) {
-        let signature = KlibPublicIdSignature::classifier(TypeName::from("fixture/probe"));
+    struct FixtureSignatureType;
+
+    impl SignatureType for FixtureSignatureType {
+        type ParameterId = u32;
+
+        fn view(&self) -> Result<TypeView<'_, Self>, crate::metadata::id_signature::ManglingError> {
+            Ok(TypeView::Class {
+                fq_name: Cow::Borrowed("kotlin.Any"),
+                arguments: Vec::new(),
+                nullable: true,
+            })
+        }
+    }
+
+    fn fixture_in(package: &[&str]) -> (PreparedFunction, KlibPublicIdSignature) {
+        let package = package
+            .iter()
+            .map(|segment| (*segment).to_owned())
+            .collect::<Vec<_>>();
+        let signature_bound = FixtureSignatureType;
+        let signature = callable_signature(
+            DeclarationContainer {
+                package: &package,
+                classes: &[],
+                native_interop_library: false,
+            },
+            &CallableShape {
+                name: "probe",
+                contexts: Vec::new(),
+                receiver: None,
+                params: vec![&signature_bound],
+                vararg: None,
+                type_parameters: vec![TypeParameterShape {
+                    id: 0,
+                    bounds: vec![&signature_bound],
+                }],
+                expect: false,
+                placement: Placement::Ordinary,
+            },
+        )
+        .expect("fixture has a supported callable identity");
+        assert_eq!(signature.member_id(), Some(0x14ab_8f30_859f_59a9));
         let bound = Ty::nullable(Ty::obj("kotlin/Any"));
         let parameter = Ty::ty_param("fixture.T", bound);
         (
@@ -1000,6 +1212,50 @@ mod tests {
         )
     }
 
+    fn fixture() -> (PreparedFunction, KlibPublicIdSignature) {
+        fixture_in(&["fixture"])
+    }
+
+    #[test]
+    fn root_package_main_file_records_one_empty_segment() {
+        let (function, _) = fixture_in(&[]);
+        let artifacts = artifacts(&[function], true);
+        let raw_entry = |name: &str| {
+            artifacts
+                .iter()
+                .find(|(entry, _)| entry == name)
+                .map(|(_, bytes)| bytes.as_slice())
+                .expect("component has requested raw entry")
+        };
+        assert_eq!(
+            root_file_identity(
+                raw_entry("default/ir/files.knf"),
+                raw_entry("default/ir/strings.knt")
+            ),
+            (vec![String::new()], 0)
+        );
+    }
+
+    #[test]
+    fn multi_segment_main_file_records_each_package_segment() {
+        let (function, _) = fixture_in(&["fixture", "inline"]);
+        let artifacts = artifacts(&[function], true);
+        let raw_entry = |name: &str| {
+            artifacts
+                .iter()
+                .find(|(entry, _)| entry == name)
+                .map(|(_, bytes)| bytes.as_slice())
+                .expect("component has requested raw entry")
+        };
+        assert_eq!(
+            root_file_identity(
+                raw_entry("default/ir/files.knf"),
+                raw_entry("default/ir/strings.knt")
+            ),
+            (vec!["fixture".to_owned(), "inline".to_owned()], 0)
+        );
+    }
+
     #[test]
     fn prepared_inline_component_round_trips_exact_type_test_and_provenance() {
         let (function, signature) = fixture();
@@ -1015,20 +1271,55 @@ mod tests {
             .find(|(name, _)| name == "default/ir/files.knf")
             .map(|(_, bytes)| bytes)
             .expect("main component has one synthetic IrFile");
-        assert_eq!(root_file_entry(main_file), 0);
+        let main_strings = artifacts
+            .iter()
+            .find(|(name, _)| name == "default/ir/strings.knt")
+            .map(|(_, bytes)| bytes)
+            .expect("main component has a string table");
+        assert_eq!(
+            root_file_identity(main_file, main_strings),
+            (vec!["fixture".to_owned()], 0)
+        );
         let prepared_file = artifacts
             .iter()
             .find(|(name, _)| name == "default/ir_inlinable_functions/files.knf")
             .map(|(_, bytes)| bytes)
             .expect("prepared component has one synthetic IrFile");
+        let prepared_strings = artifacts
+            .iter()
+            .find(|(name, _)| name == "default/ir_inlinable_functions/strings.knt")
+            .map(|(_, bytes)| bytes)
+            .expect("prepared component has a string table");
         // The prepared declaration keeps `Probe.kt` at id 0; the aggregate root is distinct.
-        assert_eq!(root_file_entry(prepared_file), 1);
+        assert_eq!(
+            root_file_identity(prepared_file, prepared_strings),
+            (vec![String::new()], 1)
+        );
         let file_entries = artifacts
             .iter()
             .find(|(name, _)| name == "default/ir_inlinable_functions/fileEntries.knf")
             .map(|(_, bytes)| bytes)
             .expect("prepared component has a file-entry table");
         assert_ne!(file_entries, &per_file(entry_table(&[])));
+
+        let raw_entry = |name: &str| {
+            artifacts
+                .iter()
+                .find(|(entry, _)| entry == name)
+                .map(|(_, bytes)| bytes.as_slice())
+                .expect("component has requested raw entry")
+        };
+        let (ordinary_type_parameter_slot, ordinary_owner) = exact_owned_type_parameter_signature(
+            raw_entry("default/ir/signatures.knt"),
+            raw_entry("default/ir/strings.knt"),
+            false,
+        );
+        let (prepared_type_parameter_slot, prepared_owner) = exact_owned_type_parameter_signature(
+            raw_entry("default/ir_inlinable_functions/signatures.knt"),
+            raw_entry("default/ir_inlinable_functions/strings.knt"),
+            true,
+        );
+        assert_eq!(ordinary_owner, prepared_owner);
 
         let root = std::env::temp_dir().join(format!(
             "krusty-inline-ir-{}-{:?}",
@@ -1053,6 +1344,16 @@ mod tests {
             .expect("the ordinary declaration keeps its exact public identity");
         assert_eq!(ordinary.base.flags, 1030);
         assert_eq!(ordinary.prepared_inline_file, None);
+        let [ordinary_type_parameter] = ordinary.type_parameters.as_slice() else {
+            panic!("fixture has one ordinary type parameter")
+        };
+        assert_eq!(
+            ordinary_type_parameter.base.symbol.signature,
+            KlibIrSignature::FileLocal {
+                file: 0,
+                slot: ordinary_type_parameter_slot,
+            }
+        );
         let trees = read_inlinable_declaration_trees(&archive).expect("decode prepared IR");
         let (arena, decoded) = trees
             .function(&KlibIrSignature::Public(signature))
@@ -1080,21 +1381,43 @@ mod tests {
         else {
             panic!("body statement is an expression")
         };
-        let KlibIrExprKind::Return { value, .. } = &arena.expr(*returned).kind else {
+        let returned_expression = arena.expr(*returned);
+        let KlibIrExprKind::Return { value, .. } = &returned_expression.kind else {
             panic!("body expression is a return")
         };
+        let return_type = returned_expression.ty.expect("return has Nothing type");
+        assert!(matches!(
+            arena.ty(return_type),
+            crate::metadata::klib_ir::tree::KlibIrType::Simple { classifier, .. }
+                if classifier.signature
+                    == KlibIrSignature::Public(KlibPublicIdSignature::classifier(
+                        TypeName::from("kotlin/Nothing")
+                    ))
+        ));
         let KlibIrExprKind::TypeOperator { operand, .. } = &arena.expr(*value).kind else {
             panic!("returned expression is a type test")
         };
         let crate::metadata::klib_ir::tree::KlibIrType::Simple {
+            classifier,
             nullability,
             arguments,
             abbreviation,
-            ..
+            annotations: _,
         } = arena.ty(*operand)
         else {
             panic!("type-test operand is a simple type parameter")
         };
+        let [type_parameter] = decoded.type_parameters.as_slice() else {
+            panic!("fixture has one type parameter")
+        };
+        assert_eq!(
+            type_parameter.base.symbol.signature,
+            KlibIrSignature::FileLocal {
+                file: 0,
+                slot: prepared_type_parameter_slot,
+            }
+        );
+        assert_eq!(classifier, &type_parameter.base.symbol);
         assert_eq!(*nullability, KlibIrNullability::NotSpecified);
         assert!(arguments.is_empty());
         assert!(abbreviation.is_none());
