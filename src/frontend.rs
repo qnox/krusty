@@ -1383,7 +1383,8 @@ where
     }
     prepare_symbols(&files, &mut symbols);
     crate::resolve::install_streamed_plugin_declarations(&mut pass1_headers, &mut symbols);
-    crate::resolve::check_module_import_paths(&files[..inferred_end], &symbols, diags);
+    let bound_imports =
+        crate::resolve::check_module_import_paths(&files[..inferred_end], &symbols, diags);
     let inline_capture_selection = pass1_headers.inline_body_ranges(files.len());
     let has_inline_capture_roots = inline_capture_selection
         .roots
@@ -1501,6 +1502,13 @@ where
             &symbols,
             target,
             &mut index,
+            diags,
+        );
+        crate::resolve::check_import_deprecations(
+            &files[..inferred_end],
+            &bound_imports,
+            &symbols,
+            &index,
             diags,
         );
         crate::resolve::check_finalized_top_level_type_alias_bounds(

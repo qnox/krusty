@@ -4599,7 +4599,7 @@ impl<'a> Parser<'a> {
                             self.bump();
                             self.skip_newlines();
                             let rhs = self.parse_unlabelled_expr();
-                            let lhs = self.file.add_expr(Expr::Name(n.clone()), op_span);
+                            let lhs = self.file.add_compound_assignment_read(e, op_span);
                             let value = self.file.add_expr(
                                 Expr::Binary {
                                     op,
@@ -4619,13 +4619,7 @@ impl<'a> Parser<'a> {
                             self.bump();
                             self.skip_newlines();
                             let rhs = self.parse_unlabelled_expr();
-                            let lhs = self.file.add_expr(
-                                Expr::Member {
-                                    receiver,
-                                    name: name.clone(),
-                                },
-                                op_span,
-                            );
+                            let lhs = self.file.add_compound_assignment_read(e, op_span);
                             let value = self.file.add_expr(
                                 Expr::Binary {
                                     op,
