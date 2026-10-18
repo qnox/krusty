@@ -1714,7 +1714,7 @@ impl inliner::SourceLines for CallLines<'_, '_, '_, '_> {
         self.emitter
             .cw
             .source_map_for_inlining(self.claimable)
-            .and_then(|map| map.map_synthetic_line(1))
+            .and_then(|map| map.map_synthetic_line(1, None))
     }
     fn call_site(&self) -> Option<u16> {
         Some(self.call_line)
