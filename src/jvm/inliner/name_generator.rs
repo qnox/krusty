@@ -7,10 +7,12 @@
 //! anonymous object the call regenerates takes the next number under it (`…$<callee>$1`); the
 //! objects that object regenerates in turn are numbered under its own name.
 
-use crate::fx_hash::HashMap;
+use crate::fx_hash::{HashMap, HashSet};
 
 /// kotlinc's `SPECIAL_TRANSFORMATION_NAME`.
 const SPECIAL_TRANSFORMATION_NAME: &str = "$special";
+/// The segment kotlinc's SAM wrapper names carry (`isSamWrapper`).
+const SAM_WRAPPER_SEGMENT: &str = "$sam$";
 /// kotlinc's `INLINE_CALL_TRANSFORMATION_SUFFIX`.
 const INLINE_CALL_TRANSFORMATION_SUFFIX: &str = "$$inlined";
 
@@ -68,9 +70,20 @@ impl NameGenerator {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ClassNameGenerators {
     by_function: HashMap<String, NameGenerator>,
+    sam_wrappers: HashSet<String>,
 }
 
 impl ClassNameGenerators {
+    /// The copy of the SAM wrapper `original` in `class`: `<class>$inlined$sam$…`, the original's
+    /// name from its `$sam$` segment on. Every inline call in the class shares the one copy, so
+    /// the flag says whether this call is the first to name it and must write it.
+    pub(crate) fn sam_wrapper(&mut self, class: &str, original: &str) -> Option<(String, bool)> {
+        let wrapper = &original[original.find(SAM_WRAPPER_SEGMENT)?..];
+        let name = format!("{class}$inlined{wrapper}");
+        let first = self.sam_wrappers.insert(name.clone());
+        Some((name, first))
+    }
+
     /// `getRegeneratedObjectNameGenerator`: the generator of the function named `function` (its
     /// Kotlin name, `None` for a special name such as a constructor) in the class `class`.
     pub(crate) fn for_function(
@@ -130,5 +143,25 @@ mod tests {
         let outer = init.next_object();
         assert_eq!(outer.class(), "A$special$$inlined$make$1");
         assert_eq!(outer.next_object().class(), "A$special$$inlined$make$1$1");
+    }
+
+    #[test]
+    fn a_sam_wrapper_copy_is_shared_by_the_calling_class() {
+        let mut generators = ClassNameGenerators::default();
+        let original = "org/lib/AssertionsKt$sam$i$java_util_function_Supplier$0";
+        assert_eq!(
+            generators.sam_wrapper("MainKt", original),
+            Some((
+                "MainKt$inlined$sam$i$java_util_function_Supplier$0".to_string(),
+                true
+            ))
+        );
+        assert_eq!(
+            generators.sam_wrapper("MainKt", original),
+            Some((
+                "MainKt$inlined$sam$i$java_util_function_Supplier$0".to_string(),
+                false
+            ))
+        );
     }
 }

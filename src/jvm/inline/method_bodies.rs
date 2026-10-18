@@ -57,7 +57,7 @@ pub enum PropertyAccess {
 pub enum RegeneratedClass {
     /// An anonymous object or lambda class: its `InnerClasses` self entry has no simple name.
     AnonymousObject,
-    /// A SAM wrapper: a synthetic class that is not nested in another.
+    /// A synthetic SAM-conversion wrapper class.
     SamWrapper,
 }
 
