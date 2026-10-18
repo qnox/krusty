@@ -193,7 +193,12 @@ fn emit_analyzed_into<B: Backend>(
             );
             continue;
         }
-        if let Err(error) = sink.accept_default_arguments(&index, &mut default_arguments) {
+        // Stable callable defaults must precede ordinary body lowering: the tailrec transform
+        // expands an omitted self-call argument from the already-attached default. Defaults whose
+        // exact body-local owner is not complete remain retained for the final sweep below.
+        if let Err(error) =
+            sink.accept_default_arguments(&index, &inline_bodies, &mut default_arguments)
+        {
             crate::trace_compiler!("fir", "default FIR lowering failed: {error:?}");
             diags.error(
                 Span::new(0, 0),
@@ -289,6 +294,33 @@ fn emit_analyzed_into<B: Backend>(
             // `active_file`, its AST-keyed semantic tables, and checked FIR temporaries all
             // drop when this callback returns, before the parser resumes with the next unit.
         });
+        // The first inline sweep intentionally left templates owned by deferred body-local
+        // classifiers in the retained store. Every successfully checked group has now published
+        // and refreshed its exact owner, so materialize those templates even when no ordinary
+        // caller happened to demand them.
+        if let Err(error) = sink.accept_inline_bodies(&index, &inline_bodies) {
+            diags.error(
+                Span::new(0, 0),
+                format!(
+                    "internal error: cannot consume completed body-local inline FIR: {error:?}"
+                ),
+            );
+            source_failed = true;
+        }
+        // Body-local callable owners acquire their complete semantic headers while the active
+        // Pass-2 groups above are checked. Their retained defaults must cross into common IR only
+        // after that exact publication; consuming them before the groups creates a body without a
+        // callable owner. Inline dependencies of a default are materialized at this same boundary.
+        if let Err(error) =
+            sink.accept_default_arguments(&index, &inline_bodies, &mut default_arguments)
+        {
+            crate::trace_compiler!("fir", "default FIR lowering failed: {error:?}");
+            diags.error(
+                Span::new(0, 0),
+                format!("internal error: default FIR lowering failed: {error:?}"),
+            );
+            source_failed = true;
+        }
         // kotlinc lists a file's diagnostics by position, whichever member its checker visited first.
         diags.sort_source_order_from(source_diagnostics);
         if !source_failed && !declaration_cursor.is_finished() {
