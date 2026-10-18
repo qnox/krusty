@@ -883,6 +883,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/suspend_coroutine_inline_e2e.rs`, the `coroutines/` box corpus through the kotlinc
   byte-diff harness, and
   `fir/body_check/call_tests.rs::suspend_coroutine_is_an_ordinary_inline_suspend_call`.
+- **A suspend inline function emits its own `$$forInline` copy.** Beside the state machine a
+  direct caller runs, krusty now writes kotlinc's private `name$$forInline` method: the body before
+  the coroutine transform, with `InlineMarker` calls around each suspend call (not around the invoke
+  of an inlined function-typed parameter, whose result is still coerced), the user annotations,
+  `Deprecated`, parameters and generic signature, and no nullability annotations. No optimizer pass
+  runs over it, as kotlinc leaves the copy as written. A suspend inline function no caller can reach
+  without inlining (reified, or private) gets no copy and no continuation class: its one method holds
+  the marked body (`jvm/suspend_inline_functions.rs`). Without the copy, a krusty-built library's
+  suspend inline function could not be spliced by a consumer. Tests:
+  `tests/suspend_inline_for_inline_e2e.rs`.
 - **An `@InlineOnly` call's last operands are read in place.** kotlinc's
   `InplaceArgumentsMethodTransformer` moves each argument of an `@InlineOnly` callee that passes
   `canInlineArgumentsInPlace` to where the body loads it. Common lowering keeps a dependency
