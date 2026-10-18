@@ -118,13 +118,18 @@ impl ProductionSignatureSemantics<'_> {
         }
         if lexical.tparam_contains(&reference.name) {
             let bound = lexical.tparam_bound(&reference.name);
-            return Some(if reference.definitely_non_null() {
+            let resolved = if reference.definitely_non_null() {
                 super::super::definitely_non_null_ty(bound)
             } else if reference.nullable() {
                 Ty::nullable(bound)
             } else {
                 bound
-            });
+            };
+            // A declaration formal is already bound by this exact lexical scope; it needs no
+            // classifier lookup, but the written structural site still owns the semantic argument
+            // used to assemble an enclosing alias spelling such as `Alias<U>`.
+            self.record_type_spelling_projection(selected_site, resolved);
+            return Some(resolved);
         }
         // Arrow syntax is already a complete semantic function type. Its parser-internal `<fun>`
         // spelling is not a classifier lookup key: rebinding it through the normalized FunctionN

@@ -3872,10 +3872,9 @@ pub(crate) fn finalized_streamed_signature_index(
             vararg_constructor_property::primary_constructor_owns_vararg_property(
                 headers, stub, anchor,
             );
-        let deferred_atomic_vararg_signature =
-            deferred_local_headers::defers_atomic_vararg_signature(
-                stub.id,
-                stub.kind,
+        let deferred_owner_completed_signature =
+            deferred_local_headers::defers_owner_completed_signature(
+                stub,
                 constructor_property_vararg || primary_constructor_owns_vararg_property,
                 &deferred_local_candidates,
             );
@@ -4178,7 +4177,9 @@ pub(crate) fn finalized_streamed_signature_index(
             }
         }
         let mut invalid_vararg_shape = false;
-        for (parameter, (syntax, is_vararg)) in parameters.iter_mut().zip(parameter_types) {
+        for (parameter, (syntax, is_vararg)) in
+            parameters.iter_mut().zip(parameter_types.iter().copied())
+        {
             if let Some(syntax) = headers
                 .syntax
                 .transient_type_ref(syntax, &headers.lookup_names)
@@ -4251,10 +4252,11 @@ pub(crate) fn finalized_streamed_signature_index(
                 continue;
             }
             let mut replacement_failed = false;
-            for (parameter, expression) in parameters
+            for ((parameter, expression), (_, is_vararg)) in parameters
                 .iter_mut()
                 .skip(explicit_parameter_offset)
                 .zip(compact_parameters)
+                .zip(parameter_types.iter().skip(explicit_parameter_offset))
             {
                 let Some(resolved) =
                     explicit_type_semantics.resolve_compact_graph_type(&graph, *expression)
@@ -4262,7 +4264,7 @@ pub(crate) fn finalized_streamed_signature_index(
                     replacement_failed = true;
                     break;
                 };
-                *parameter = resolved;
+                *parameter = super::semantic_value_parameter_ty(resolved, *is_vararg);
             }
             if replacement_failed {
                 failed.push(stub.id);
@@ -4357,9 +4359,7 @@ pub(crate) fn finalized_streamed_signature_index(
             };
             resolved_receivers.insert(stub.id, receiver);
         }
-        // A primary vararg property and its constructor are one semantic relation. Neither half is
-        // independently publishable; Pass 2 completes both from the same checked declaration.
-        if deferred_atomic_vararg_signature {
+        if deferred_owner_completed_signature {
             deferred_local_headers.insert(stub.id);
             continue;
         }

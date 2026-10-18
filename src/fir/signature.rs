@@ -1398,9 +1398,13 @@ pub struct ResolvedModuleIndex {
     /// publication selects from these once per checked body group; asking the whole inventory
     /// each time was linear in the module per body, i.e. quadratic.
     local_class_declarations: Vec<DeclarationId>,
-    /// Semantic lexical owner for parser-hoisted local classifiers. Both identities are stable
-    /// declaration headers; no parser node or source coordinate crosses into Pass 2.
-    local_classifier_lexical_roots: HashMap<DeclarationId, DeclarationId>,
+    /// Stable lexical roots and the later checked-completion state for body-local classifiers.
+    /// No parser node or source coordinate crosses into Pass 2.
+    body_local_ownership: declaration_metadata::BodyLocalOwnership,
+    /// Exact top-level expect declarations removed by source-set actualization. Their anchors stay
+    /// in the stable parser inventory, but ordinary Pass 2 must not treat the missing headers as a
+    /// recovery failure or infer this lifecycle state from that absence.
+    actualized_away_declarations: crate::fx_hash::HashSet<DeclarationId>,
     /// Resolved declaration annotation identities retained as stable semantic header metadata.
     /// Source spellings, spans, and target-specific interpretations do not cross this boundary.
     declaration_annotations: HashMap<DeclarationId, Box<[TypeName]>>,
@@ -1621,15 +1625,6 @@ impl ResolvedModuleIndex {
         declaration: DeclarationId,
     ) -> Option<StableDeclarationAnchor> {
         self.declarations.stable_anchor(declaration)
-    }
-
-    pub fn local_classifier_lexical_root(
-        &self,
-        declaration: DeclarationId,
-    ) -> Option<DeclarationId> {
-        self.local_classifier_lexical_roots
-            .get(&declaration)
-            .copied()
     }
 
     pub(super) fn temporary_declaration_range(
@@ -2422,17 +2417,6 @@ impl ResolvedModuleIndex {
         self.declarations = declarations;
     }
 
-    pub(super) fn publish_local_classifier_lexical_roots(
-        &mut self,
-        roots: HashMap<DeclarationId, DeclarationId>,
-    ) {
-        assert!(
-            self.local_classifier_lexical_roots.is_empty(),
-            "local-classifier lexical ownership may be published only once"
-        );
-        self.local_classifier_lexical_roots = roots;
-    }
-
     pub(super) fn publish_source_inventory(
         &mut self,
         inventory: &[DeclarationId],
@@ -3001,7 +2985,8 @@ impl ResolvedModuleIndex {
                 * (std::mem::size_of::<DeclarationId>()
                     + std::mem::size_of::<ResolvedDeclarationHeader>())
             + self.local_class_declarations.len() * std::mem::size_of::<DeclarationId>()
-            + self.local_classifier_lexical_roots.len() * (std::mem::size_of::<DeclarationId>() * 2)
+            + self.body_local_ownership.storage_payload_bytes()
+            + self.actualized_away_declarations.len() * std::mem::size_of::<DeclarationId>()
             + self.declaration_annotations.len()
                 * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<Box<[TypeName]>>())
             + self

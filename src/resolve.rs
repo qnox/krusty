@@ -64,6 +64,7 @@ pub(crate) use checked_constant_publication::publish_checked_compile_time_consta
 pub(crate) use lexical_policies::publish_file_annotations;
 pub(crate) use type_use_annotation_publication::publish_checked_type_use_annotations;
 pub(crate) use upper_bound_violations::check_finalized_top_level_type_alias_bounds;
+mod body_local_hierarchy;
 mod body_local_property_selection;
 mod call_constraints;
 mod call_diagnostics;
@@ -34205,6 +34206,10 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         {
             continue;
         }
+        if fragment.skips_actualized_away_declaration(file, d, active_declarations, resolved_index)
+        {
+            continue;
+        }
         // Local and anonymous classes are entered at their lexical declaration/construction site.
         // Checking either here as well would reopen it without its enclosing values, receivers, or
         // postponed inference frame.
@@ -34221,14 +34226,16 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         // the exact nested classifier that owns the construction. During the scratch capture pass
         // those are the same bounded source region even when their declaration ranges differ.
         let selected_stable_root = fragment.is_signature_defaults().then(|| {
-            let stable = active_declarations.and_then(|active| active.file_declaration(file, d));
+            let stable = active_declarations.and_then(|active| {
+                selected_stable_roots
+                    .and_then(|roots| active.selected_file_declaration(file, d, roots))
+            });
+            let selected = stable.is_some();
             crate::trace_compiler!(
                 "fir",
                 "Pass 1 default root candidate parser={d:?} stable={stable:?} selected={selected_stable_roots:?}",
             );
-            stable.is_some_and(|declaration| {
-                selected_stable_roots.is_some_and(|roots| roots.contains(&declaration))
-            })
+            selected
         });
         if selected_stable_root == Some(false)
             || (selected_stable_root.is_none()
@@ -47311,61 +47318,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Applied Pass-2 supertypes of a local/anonymous classifier receiver. The stored edges are in
-    /// declaration form; specialize them when the receiver applies the local classifier's own or
-    /// captured parameters.
-    fn body_local_supertypes(&self, receiver: Ty) -> Vec<Ty> {
-        let Some(internal) = receiver.non_null().kotlin_class_internal() else {
-            return Vec::new();
-        };
-        let Some(declared) = self.resolved_body_local_supertypes.get(&internal) else {
-            return Vec::new();
-        };
-        let deferred_body_local = self
-            .resolved_index
-            .and_then(|index| {
-                index
-                    .classifier_declaration(internal)
-                    .map(|declaration| index.classifier_header(declaration).is_none())
-            })
-            .unwrap_or(false);
-        let active_bindings = || {
-            // A deferred body-local header is intentionally absent from the module provider
-            // while its class body is being checked. Its type-parameter identities belong to
-            // the live parser unit and are already resolved on that lexical declaration.
-            let formals = self
-                .resolved_index
-                .and_then(|index| index.classifier_declaration(internal))
-                .and_then(|declaration| {
-                    self.active_declarations?
-                        .span(self.file, declaration)
-                        .map(|span| span.lo)
-                })
-                .map(|start| {
-                    self.resolved_declaration_type_parameters
-                        .get(&start)
-                        .cloned()
-                        .unwrap_or_default()
-                })
-                .unwrap_or_default();
-            formals
-                .into_iter()
-                .zip(receiver.type_args().iter().copied())
-                .collect()
-        };
-        let bindings = if deferred_body_local {
-            active_bindings()
-        } else {
-            self.resolved_type_name(internal)
-                .map(|class| crate::symbol_resolver::classifier_bindings(&class, receiver))
-                .unwrap_or_else(active_bindings)
-        };
-        declared
-            .iter()
-            .map(|supertype| crate::symbol_resolver::ty_subst_keep_unbound(*supertype, &bindings))
-            .collect()
-    }
-
     /// Retry unresolved local-property signatures after direct nested classifiers have published
     /// their own checked members. A property such as `val value = Inner().x` cannot be inferred on
     /// the first local-class sweep when `Inner.x` is itself body-local. This bounded fixpoint keeps
@@ -47973,10 +47925,7 @@ impl<'a> Checker<'a> {
                         supertypes.push(supertype);
                     }
                 }
-                if !supertypes.is_empty() {
-                    self.resolved_body_local_supertypes
-                        .insert(owner, supertypes.into_boxed_slice());
-                }
+                self.record_checked_body_local_supertypes(Some(owner), &supertypes);
             }
         }
         if !self.fragment.is_type_use_annotations() {
@@ -48600,16 +48549,7 @@ impl<'a> Checker<'a> {
                 // Active member/property overlays traverse this map, so the exact direct-supertype
                 // relation must be visible regardless of whether the local classifier header was
                 // finalized in Pass 1 or completed here in Pass 2.
-                if let Some(owner) = current_owner.filter(|owner| {
-                    checked.iter().all(|supertype| {
-                        crate::fir::ResolvedTy::new(*supertype).is_ok()
-                            && supertype.kotlin_class_internal().is_some()
-                            && supertype.kotlin_class_internal() != Some(*owner)
-                    })
-                }) {
-                    self.resolved_body_local_supertypes
-                        .insert(owner, checked.clone());
-                }
+                self.record_checked_body_local_supertypes(current_owner, &checked);
                 if let Some(declaration) = current_owner.and_then(|owner| {
                     self.resolved_index
                         .and_then(|index| index.classifier_declaration(owner))
@@ -48700,17 +48640,15 @@ impl<'a> Checker<'a> {
                             }
                         };
                     let mut absent = !props.iter().any(inference_property);
-                    if absent
-                        && self.register_deferred_explicit_body_property(
-                            property_scope,
-                            current_owner,
-                            property,
-                            source_member,
-                            stable_declaration,
-                            cl.is_interface(),
-                            &mut props,
-                        )
-                    {
+                    if self.register_deferred_explicit_body_property(
+                        property_scope,
+                        current_owner,
+                        property,
+                        source_member,
+                        stable_declaration,
+                        cl.is_interface(),
+                        &mut props,
+                    ) {
                         absent = false;
                     }
                     // Publish explicit/finalized headers into the same bounded body-local overlay

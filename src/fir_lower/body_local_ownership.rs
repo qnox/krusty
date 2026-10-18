@@ -26,7 +26,7 @@ pub(super) fn semantic_owner(
         let Some(nearest) = nearest else {
             return SemanticOwner::Complete(None);
         };
-        let complete = index.declaration_semantic_header_complete(nearest)
+        let complete = index.body_local_owner_complete(nearest)
             && index
                 .owned_declarations(nearest)
                 .iter()

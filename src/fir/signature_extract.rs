@@ -979,13 +979,6 @@ impl SignatureConstraintExtractor {
             else {
                 continue;
             };
-            if constructor
-                .params
-                .iter()
-                .any(|parameter| parameter.is_vararg)
-            {
-                continue;
-            }
             let scope = declaration_scope(self, stub.id);
             let parameters = constructor
                 .params
@@ -999,9 +992,6 @@ impl SignatureConstraintExtractor {
             let Some(declaration) = self.source_functions.get(&method.span).copied() else {
                 continue;
             };
-            if method.params.iter().any(|parameter| parameter.is_vararg) {
-                continue;
-            }
             let scope = declaration_scope(self, declaration);
             let parameters = method
                 .params

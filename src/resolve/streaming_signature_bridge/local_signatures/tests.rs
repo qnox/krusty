@@ -4,6 +4,19 @@ use crate::libraries::EmptySymbolSource;
 use crate::source::SourceInput;
 
 #[test]
+fn exact_default_publication_does_not_require_an_unselected_sibling() {
+    let provider = crate::fir::DeclarationId::from_raw(2);
+    let sibling = crate::fir::DeclarationId::from_raw(3);
+    let exact = [provider];
+
+    assert!(super::selected_checked_failure(provider, &[], Some(&exact)));
+    assert!(
+        !super::selected_checked_failure(sibling, &[], Some(&exact)),
+        "an unrelated provider sibling is outside the bounded default publication",
+    );
+}
+
+#[test]
 fn deferred_local_constructor_signature_excludes_its_checked_body_capture_prefix() {
     let source = r#"
 fun make(): Any {

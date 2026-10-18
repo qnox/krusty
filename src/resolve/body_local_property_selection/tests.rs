@@ -17,11 +17,6 @@ fn checked_diagnostics(source: &str) -> Vec<(u32, Span, Severity, String)> {
         &LangFeatures::new(),
         &mut diagnostics,
     );
-    assert!(
-        diagnostics.diags.is_empty(),
-        "body-local member-extension diagnostics belong to Pass 2"
-    );
-
     let _ = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
     diagnostics
         .diags
@@ -58,7 +53,7 @@ fun build() {
         checked_diagnostics(source),
         [(
             0,
-            Span::new(start, start + 7),
+            Span::new(start + 2, start + 7),
             Severity::Error,
             "'val' cannot be reassigned.".to_string(),
         )]

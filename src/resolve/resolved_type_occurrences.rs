@@ -2,6 +2,7 @@
 
 use crate::ast::TypeRef;
 use crate::diag::Span;
+use crate::symbol_source::SymbolSource as _;
 use crate::types::Ty;
 
 use super::Checker;
@@ -9,37 +10,37 @@ use super::Checker;
 #[cfg(test)]
 mod tests;
 
+fn rewrite_spelling_deferred_bound_occurrences(
+    spelling: &mut crate::spelling::Spelled,
+    semantic_bounds: &crate::fx_hash::HashMap<String, Ty>,
+) {
+    for (semantic, argument) in &mut spelling.alias_args {
+        *semantic = crate::types::ty_with_transitive_param_bounds(*semantic, semantic_bounds);
+        rewrite_spelling_deferred_bound_occurrences(argument, semantic_bounds);
+    }
+    for argument in &mut spelling.args {
+        rewrite_spelling_deferred_bound_occurrences(argument, semantic_bounds);
+    }
+}
+
 impl Checker<'_> {
     fn rewrite_deferred_bound_occurrences(
         &mut self,
         reference: &TypeRef,
         semantic_bounds: &crate::fx_hash::HashMap<String, Ty>,
     ) {
-        fn rewrite_spelling(
-            spelling: &mut crate::spelling::Spelled,
-            semantic_bounds: &crate::fx_hash::HashMap<String, Ty>,
-        ) {
-            for (semantic, argument) in &mut spelling.alias_args {
-                *semantic = crate::types::ty_with_param_bounds(*semantic, semantic_bounds);
-                rewrite_spelling(argument, semantic_bounds);
-            }
-            for argument in &mut spelling.args {
-                rewrite_spelling(argument, semantic_bounds);
-            }
-        }
-
         let occurrence = (reference.span.lo, reference.span.hi);
         if let Some((semantic, _)) = self.resolved_type_bounds.get_mut(&occurrence) {
-            *semantic = crate::types::ty_with_param_bounds(*semantic, semantic_bounds);
+            *semantic = crate::types::ty_with_transitive_param_bounds(*semantic, semantic_bounds);
         }
         if let Some(semantic) = self.resolved_declaration_types.get_mut(&occurrence) {
-            *semantic = crate::types::ty_with_param_bounds(*semantic, semantic_bounds);
+            *semantic = crate::types::ty_with_transitive_param_bounds(*semantic, semantic_bounds);
         }
         if let Some(semantic) = self.resolved_type_tys.get_mut(&occurrence) {
-            *semantic = crate::types::ty_with_param_bounds(*semantic, semantic_bounds);
+            *semantic = crate::types::ty_with_transitive_param_bounds(*semantic, semantic_bounds);
         }
         if let Some(spelling) = self.resolved_declaration_spellings.get_mut(&occurrence) {
-            rewrite_spelling(spelling, semantic_bounds);
+            rewrite_spelling_deferred_bound_occurrences(spelling, semantic_bounds);
         }
         if let Some(argument) = reference.arg.as_deref() {
             self.rewrite_deferred_bound_occurrences(argument, semantic_bounds);
@@ -100,7 +101,7 @@ impl Checker<'_> {
             }
         }
         let implicit = Ty::nullable(Ty::obj("kotlin/Any"));
-        let mut semantic_bounds = identities
+        let semantic_bounds = identities
             .iter()
             .enumerate()
             .map(|(ordinal, &identity)| {
@@ -110,23 +111,14 @@ impl Checker<'_> {
                 )
             })
             .collect::<crate::fx_hash::HashMap<_, _>>();
-        for _ in 0..source_names.len() {
-            semantic_bounds = semantic_bounds
-                .iter()
-                .map(|(identity, bound)| {
-                    (
-                        identity.clone(),
-                        crate::types::ty_with_param_bounds(*bound, &semantic_bounds),
-                    )
-                })
-                .collect();
-        }
         let corrected = checked
             .iter()
             .map(|bounds| {
                 bounds
                     .iter()
-                    .map(|&bound| crate::types::ty_with_param_bounds(bound, &semantic_bounds))
+                    .map(|&bound| {
+                        crate::types::ty_with_transitive_param_bounds(bound, &semantic_bounds)
+                    })
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -348,6 +340,24 @@ impl Checker<'_> {
         let Some(stable) = stable else {
             return parameters.is_empty() && bounds.is_empty();
         };
+        let implicit = Ty::nullable(Ty::obj("kotlin/Any"));
+        let Some(semantic_bounds) = parameters
+            .iter()
+            .enumerate()
+            .map(|(ordinal, _)| {
+                let parameter = index.type_parameter(
+                    declaration,
+                    u32::try_from(ordinal).expect("too many type parameters"),
+                )?;
+                Some((
+                    index.type_parameter_semantic_name(parameter)?.to_string(),
+                    stable[ordinal].first().copied().unwrap_or(implicit),
+                ))
+            })
+            .collect::<Option<crate::fx_hash::HashMap<_, _>>>()
+        else {
+            return false;
+        };
         let spellings = self
             .finalized_declaration_spellings(Some(declaration))
             .clone();
@@ -360,11 +370,21 @@ impl Checker<'_> {
             let Some(&semantic) = stable[parameter].get(bound) else {
                 return false;
             };
-            self.record_finalized_declaration_type(
-                reference,
-                semantic,
-                spellings.bound(parameter, bound),
+            let semantic =
+                crate::types::ty_with_transitive_param_bounds(semantic, &semantic_bounds);
+            let mut spelling = spellings.bound(parameter, bound).clone();
+            rewrite_spelling_deferred_bound_occurrences(&mut spelling, &semantic_bounds);
+            let interface =
+                crate::fir::ResolvedTypeParameterBound::is_interface_type(semantic, |owner| {
+                    self.fed_source()
+                        .classifier(owner)
+                        .is_some_and(|classifier| classifier.is_interface())
+                });
+            self.resolved_type_bounds.insert(
+                (reference.span.lo, reference.span.hi),
+                (semantic, interface),
             );
+            self.record_finalized_declaration_type(reference, semantic, &spelling);
             ordinals[parameter] += 1;
         }
         stable

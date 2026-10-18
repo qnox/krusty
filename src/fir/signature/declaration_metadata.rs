@@ -2,6 +2,40 @@
 
 use super::*;
 
+/// Stable lexical ownership and the later checked-completion state for body-local classifiers.
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct BodyLocalOwnership {
+    roots: HashMap<DeclarationId, DeclarationId>,
+    completed: crate::fx_hash::HashSet<DeclarationId>,
+}
+
+impl BodyLocalOwnership {
+    pub(super) fn root(&self, declaration: DeclarationId) -> Option<DeclarationId> {
+        self.roots.get(&declaration).copied()
+    }
+
+    pub(super) fn publish_roots(&mut self, roots: HashMap<DeclarationId, DeclarationId>) {
+        assert!(
+            self.roots.is_empty(),
+            "local-classifier lexical ownership may be published only once"
+        );
+        self.roots = roots;
+    }
+
+    fn complete(&mut self, declaration: DeclarationId) {
+        self.completed.insert(declaration);
+    }
+
+    fn is_complete(&self, declaration: DeclarationId) -> bool {
+        self.completed.contains(&declaration)
+    }
+
+    pub(super) fn storage_payload_bytes(&self) -> usize {
+        self.roots.len() * (std::mem::size_of::<DeclarationId>() * 2)
+            + self.completed.len() * std::mem::size_of::<DeclarationId>()
+    }
+}
+
 /// The superclass constructor a generated no-arg constructor (kotlinc's no-arg plugin) delegates
 /// to, selected by the frontend.
 ///
@@ -22,6 +56,68 @@ pub enum NoArgSuperConstructor {
 }
 
 impl ResolvedModuleIndex {
+    pub fn local_classifier_lexical_root(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<DeclarationId> {
+        self.body_local_ownership.root(declaration)
+    }
+
+    pub(super) fn publish_local_classifier_lexical_roots(
+        &mut self,
+        roots: HashMap<DeclarationId, DeclarationId>,
+    ) {
+        self.body_local_ownership.publish_roots(roots);
+    }
+
+    pub(crate) fn is_actualized_away(&self, declaration: DeclarationId) -> bool {
+        self.actualized_away_declarations.contains(&declaration)
+    }
+
+    pub(crate) fn publish_actualized_away_declarations(
+        &mut self,
+        declarations: &crate::fx_hash::HashSet<DeclarationId>,
+    ) {
+        assert!(
+            self.actualized_away_declarations.is_empty(),
+            "actualization exclusions may be published only once",
+        );
+        assert!(
+            declarations
+                .iter()
+                .all(|declaration| self.declaration_anchor(*declaration).is_some()),
+            "an actualized-away declaration must retain a stable anchor",
+        );
+        self.actualized_away_declarations
+            .extend(declarations.iter().copied());
+    }
+
+    /// Mark exact body-local classifier groups whose checked semantic publication completed.
+    pub(crate) fn publish_body_local_owner_completions(
+        &mut self,
+        declarations: impl IntoIterator<Item = DeclarationId>,
+    ) {
+        for declaration in declarations {
+            assert!(
+                self.declaration_header(declaration).is_some_and(|header| {
+                    header.kind == DeclarationKind::Classifier
+                        && header.flags.has(DeclarationFlags::LOCAL_CLASS)
+                }),
+                "body-local owner completion requires a stable local classifier"
+            );
+            assert!(
+                self.declaration_semantic_header_complete(declaration),
+                "body-local owner completion requires a complete semantic header"
+            );
+            self.body_local_ownership.complete(declaration);
+        }
+    }
+
+    /// Whether the active lexical group for this exact local classifier completed publication.
+    pub(crate) fn body_local_owner_complete(&self, declaration: DeclarationId) -> bool {
+        self.body_local_ownership.is_complete(declaration)
+    }
+
     /// Whether every stable semantic record required by a declaration header is published.
     /// Source-spelling sidecars are independent metadata and deliberately do not participate in
     /// this lifecycle decision.
