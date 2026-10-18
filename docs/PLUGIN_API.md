@@ -266,6 +266,23 @@ it; a build that finds everything in place prints nothing. A Kotlin version with
 is refused by its exact name, never matched to a neighbouring release. `KRUSTY_OFFLINE=1` turns
 downloads off and fails with everything that is missing.
 
+### Starting the host
+
+`Host::start` runs `java` on the provisioned classpath with krusty's adapter in front of it. The
+adapter is Kotlin source (`crates/krusty-plugin-host/adapter/Host.kt`) that the provisioned
+`kotlin-compiler-embeddable` compiles once into the cache, so it always links against the exact
+compiler it runs on; the first build prints that it is compiling it. The host greets krusty with the
+compiler's `KotlinCompilerVersion`, and a host whose compiler is not the build's exact Kotlin version
+is refused.
+
+krusty drives the host over its stdin and stdout in length-prefixed frames
+(`src/protocol.rs`, versioned by `PROTOCOL`). Plugins may print, so the host moves `System.out` to
+stderr, which is the user's. `Host::load` loads a plugin classpath as `-Xplugin` does: its
+command-line processors read the `-P` values through kotlinc's own option parser, so an unknown or
+missing option fails with kotlinc's message, then each registrar registers its extensions, and the
+host reports every registrar with the extension points it filled. The plugins are not run yet:
+until the IR round trip lands, the registry still refuses a non-native plugin jar as `Unsupported`.
+
 ## Drop-in extension management — two layers, like kotlinc
 
 Extensions have **two registration layers**, mirroring kotlinc exactly:

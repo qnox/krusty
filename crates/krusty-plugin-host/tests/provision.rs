@@ -200,6 +200,7 @@ fn downloads_what_is_missing_says_why_and_reuses_it_silently() {
         .root
         .join("cache/jdk/test-21-linux-x86_64/jdk-21-test");
     let expected = HostRuntime {
+        kotlin_version: "2.4.20".into(),
         java: java_home.join("bin/java"),
         java_home,
         compiler_classpath: fixture.cached_jars(),

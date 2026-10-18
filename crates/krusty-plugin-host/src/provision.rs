@@ -27,6 +27,8 @@ pub struct Request<'a> {
 /// What a host process is started with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostRuntime {
+    /// The Kotlin version the compiler classpath is, exactly as the build configured it.
+    pub kotlin_version: String,
     pub java: PathBuf,
     pub java_home: PathBuf,
     /// `kotlin-compiler-embeddable` first, then its runtime dependencies.
@@ -165,6 +167,7 @@ pub fn provision(
     }
     let jdk = jdk.expect("a JDK, since nothing is missing");
     Ok(HostRuntime {
+        kotlin_version: request.kotlin_version.to_string(),
         java: jdk.java,
         java_home: jdk.home,
         compiler_classpath: classpath,
