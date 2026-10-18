@@ -16,6 +16,12 @@ impl ConstPool {
         self.utf8_index.get(text)
     }
 
+    /// Non-interning lookup of an existing `CONSTANT_Class` entry.
+    pub(super) fn lookup_class(&self, internal: &str) -> Option<u16> {
+        let utf8 = self.utf8_index.get(internal)?;
+        self.dedup.get(&Const::Class(utf8)).copied()
+    }
+
     /// Non-interning lookup of an existing `CONSTANT_String` entry.
     pub(super) fn lookup_string(&self, text: &str) -> Option<u16> {
         let utf8 = self.utf8_index.get(text)?;
