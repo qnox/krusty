@@ -183,18 +183,10 @@ impl SerializationPlugin {
 
     /// Whether a generated `$serializer`'s type parameters carry the serialized class's bounds in
     /// the backend, as the plugin of 2.4.21 and later copies them in IR. The frontend declaration,
-    /// and so the metadata, keeps them unbounded on every release. Without a jar naming its release,
-    /// the plugin is the one the target reference compiler ships.
+    /// and so the metadata, keeps them unbounded on every release.
     fn serializer_type_parameters_are_bounded(&self) -> bool {
-        let release = self.compiler_plugin.unwrap_or_else(|| {
-            let target = crate::kotlin_version::target();
-            PluginRelease::new(
-                target.major.into(),
-                target.minor.into(),
-                target.patch.into(),
-            )
-        });
-        release >= PluginRelease::V2_4_21
+        self.compiler_plugin
+            .is_none_or(|release| release >= PluginRelease::V2_4_21)
     }
 
     /// The per-class write-helper name for the target ABI. On core >= 1.6 the module name is mangled
