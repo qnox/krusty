@@ -14,6 +14,8 @@ const LOAD: u8 = 1;
 const LOADED: u8 = 2;
 const FAILED: u8 = 3;
 const SHUTDOWN: u8 = 4;
+const UNLOAD: u8 = 5;
+const UNLOADED: u8 = 6;
 
 /// A frame larger than this is a broken stream, not a message.
 const MAX_FRAME: u32 = 1 << 30;
@@ -28,17 +30,20 @@ pub(crate) struct Hello {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Request<'a> {
-    /// Load a plugin classpath with its `-P` option values.
+    /// Load a plugin classpath with its `-P` option values, replacing what was loaded.
     Load {
         entries: &'a [String],
         options: &'a [String],
     },
+    /// End the loaded plugins' lifetime: dispose their resources and close their class loader.
+    Unload,
     Shutdown,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Reply {
     Loaded(Vec<LoadedPlugin>),
+    Unloaded,
     /// The request failed in the host; the message says why, as kotlinc would.
     Failed(String),
 }
@@ -67,6 +72,7 @@ pub(crate) fn write_request(out: &mut impl Write, request: &Request) -> io::Resu
                 put_str(payload, option)
             });
         }
+        Request::Unload => payload.push(UNLOAD),
         Request::Shutdown => payload.push(SHUTDOWN),
     }
     write_frame(out, &payload)
@@ -101,6 +107,7 @@ pub(crate) fn read_reply(input: &mut impl Read) -> io::Result<Reply> {
             })?;
             Ok(Reply::Loaded(plugins))
         }
+        UNLOADED => Ok(Reply::Unloaded),
         FAILED => Ok(Reply::Failed(payload.string()?)),
         tag => Err(malformed(format!("unknown reply {tag}"))),
     }

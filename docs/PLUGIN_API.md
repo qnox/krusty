@@ -281,8 +281,11 @@ krusty drives the host over its stdin and stdout in length-prefixed frames
 (`src/protocol.rs`, versioned by `PROTOCOL`). Plugins may print, so the host moves `System.out` to
 stderr, which is the user's. `Host::load` loads a plugin classpath as `-Xplugin` does: its
 command-line processors read the `-P` values through kotlinc's own option parser, so an unknown or
-missing option fails with kotlinc's message, then each registrar registers its extensions, and the
-host reports every registrar with the extension points it filled. The plugins are not run yet:
+missing option fails with kotlinc's message. The registrars then register into one extension storage
+of a configuration made by kotlinc's own `CompilerConfiguration.create()`, so each sees what those
+before it registered, and the host reports every registrar with what it added. The resources they
+register live as long as the loaded set: `Host::unload`, a later load, a failed load and stopping
+the host all dispose them through kotlinc's `Disposer` and close the class loader. The plugins are not run yet:
 until the IR round trip lands, the registry still refuses a non-native plugin jar as `Unsupported`.
 
 ## Drop-in extension management — two layers, like kotlinc

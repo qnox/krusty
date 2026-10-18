@@ -251,3 +251,241 @@ fn a_host_on_another_kotlin_version_than_the_build_is_refused() {
         })
     );
 }
+
+/// The lifecycle fixture's classes (`tests/fixtures/Registrars.kt`), compiled once per test process
+/// by the runtime's own compiler.
+fn fixture_classes() -> PathBuf {
+    static CLASSES: OnceLock<PathBuf> = OnceLock::new();
+    CLASSES
+        .get_or_init(|| {
+            let (runtime, _) = runtime();
+            let classes = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+                .join(format!("plugin-host-fixture-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&classes);
+            let classpath = std::env::join_paths(&runtime.compiler_classpath).unwrap();
+            let output = std::process::Command::new(&runtime.java)
+                .arg("-cp")
+                .arg(&classpath)
+                .arg("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler")
+                .args([
+                    "-no-stdlib",
+                    "-no-reflect",
+                    "-jvm-target",
+                    "1.8",
+                    "-classpath",
+                ])
+                .arg(&classpath)
+                .arg("-d")
+                .arg(&classes)
+                .arg(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/Registrars.kt"
+                ))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            classes
+        })
+        .clone()
+}
+
+/// A plugin jar of the fixture classes that declares `registrars`, in order, and the fixture's
+/// option processor.
+fn fixture_jar(name: &str, registrars: &[&str]) -> String {
+    use std::io::Write;
+    let classes = fixture_classes();
+    let jar = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("plugin-host-{name}-{}.jar", std::process::id()));
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&jar).unwrap());
+    let options = zip::write::SimpleFileOptions::default();
+    for class in std::fs::read_dir(classes.join("fixture")).unwrap() {
+        let class = class.unwrap();
+        zip.start_file(
+            format!("fixture/{}", class.file_name().to_string_lossy()),
+            options,
+        )
+        .unwrap();
+        zip.write_all(&std::fs::read(class.path()).unwrap())
+            .unwrap();
+    }
+    let services = [
+        (
+            "org.jetbrains.kotlin.compiler.plugin.CommandLineProcessor",
+            "fixture.Options\n".to_string(),
+        ),
+        (
+            "org.jetbrains.kotlin.compiler.plugin.CompilerPluginRegistrar",
+            registrars
+                .iter()
+                .map(|class| format!("{class}\n"))
+                .collect(),
+        ),
+    ];
+    for (service, text) in services {
+        zip.start_file(format!("META-INF/services/{service}"), options)
+            .unwrap();
+        zip.write_all(text.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap();
+    jar.to_string_lossy().into_owned()
+}
+
+/// Where the fixture records disposals, and the `-P` value that tells it.
+fn marker(name: &str) -> (PathBuf, String) {
+    let marker = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "plugin-host-{name}-{}.disposed",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&marker);
+    let option = format!("plugin:fixture:marker={}", marker.display());
+    (marker, option)
+}
+
+fn disposed(marker: &Path) -> String {
+    std::fs::read_to_string(marker).unwrap_or_default()
+}
+
+/// Whether the host process holds `jar` open.
+#[cfg(target_os = "linux")]
+fn holds_open(host: &Host, jar: &str) -> bool {
+    std::fs::read_dir(format!("/proc/{}/fd", host.id()))
+        .unwrap()
+        .filter_map(|fd| std::fs::read_link(fd.unwrap().path()).ok())
+        .any(|target| target == Path::new(jar))
+}
+
+fn ir_extensions(count: u32) -> Vec<(String, u32)> {
+    vec![("org.jetbrains.kotlin.irGenerationExtension".into(), count)]
+}
+
+fn fixture_plugin(registrar: &str, plugin_id: &str, irs: u32) -> LoadedPlugin {
+    LoadedPlugin {
+        registrar: registrar.into(),
+        plugin_id: plugin_id.into(),
+        supports_k2: true,
+        extensions: ir_extensions(irs),
+    }
+}
+
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn registrars_share_one_storage_and_each_reports_what_it_added() {
+    let (runtime, env) = runtime();
+    let jar = fixture_jar("shared", &["fixture.First", "fixture.Second"]);
+    let (_marker, option) = marker("shared");
+    let mut host = start(&runtime, &env);
+    // Second registers one more IR extension than it finds, so 2 means it saw First's.
+    assert_eq!(
+        host.load(&[jar], &[option]).unwrap(),
+        [
+            fixture_plugin("fixture.First", "fixture.first", 1),
+            fixture_plugin("fixture.Second", "fixture.second", 2),
+        ]
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn unloading_disposes_the_registrars_resources_and_closes_the_jars() {
+    let (runtime, env) = runtime();
+    let jar = fixture_jar("unload", &["fixture.First", "fixture.Second"]);
+    let (marker, option) = marker("unload");
+    let mut host = start(&runtime, &env);
+    host.load(std::slice::from_ref(&jar), &[option]).unwrap();
+    assert!(holds_open(&host, &jar));
+    assert_eq!(disposed(&marker), "");
+    host.unload().unwrap();
+    // kotlinc's Disposer disposes the last registered first.
+    assert_eq!(disposed(&marker), "second disposed\nfirst disposed\n");
+    assert!(!holds_open(&host, &jar));
+    host.unload().unwrap();
+    assert_eq!(disposed(&marker), "second disposed\nfirst disposed\n");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn a_failing_registrar_leaves_nothing_loaded_and_nothing_open() {
+    let (runtime, env) = runtime();
+    let jar = fixture_jar("failing", &["fixture.First", "fixture.Failing"]);
+    let (marker, option) = marker("failing");
+    let mut host = start(&runtime, &env);
+    let error = host
+        .load(std::slice::from_ref(&jar), &[option])
+        .unwrap_err();
+    assert_eq!(
+        error,
+        HostError::Plugin {
+            message: "java.lang.IllegalStateException: the failing fixture registrar fails (at \
+                      fixture.Failing.registerExtensions(Registrars.kt:69))"
+                .into()
+        }
+    );
+    assert_eq!(disposed(&marker), "failing disposed\nfirst disposed\n");
+    assert!(!holds_open(&host, &jar));
+    assert_eq!(host.load(&[], &[]).unwrap(), []);
+}
+
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn loading_again_disposes_what_was_loaded_before() {
+    let (runtime, env) = runtime();
+    let jar = fixture_jar("reload", &["fixture.First"]);
+    let (marker, option) = marker("reload");
+    let mut host = start(&runtime, &env);
+    host.load(std::slice::from_ref(&jar), std::slice::from_ref(&option))
+        .unwrap();
+    assert_eq!(
+        host.load(&[jar], &[option]).unwrap(),
+        [fixture_plugin("fixture.First", "fixture.first", 1)]
+    );
+    assert_eq!(disposed(&marker), "first disposed\n");
+}
+
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn stopping_the_host_disposes_what_is_loaded() {
+    let (runtime, env) = runtime();
+    let jar = fixture_jar("stop", &["fixture.First", "fixture.Second"]);
+    let (marker, option) = marker("stop");
+    let mut host = start(&runtime, &env);
+    host.load(&[jar], &[option]).unwrap();
+    drop(host);
+    assert_eq!(disposed(&marker), "second disposed\nfirst disposed\n");
+}
+
+/// Every Kotlin version krusty supports provisions, compiles the adapter and starts a host.
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable for every supported Kotlin version"]
+fn every_supported_kotlin_version_starts_a_host() {
+    let env = Environment::from_process().expect("a cache directory");
+    let versions = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../kotlin-versions"
+    ))
+    .unwrap();
+    let versions: Vec<&str> = versions
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|line| line.split_whitespace().next().unwrap())
+        .collect();
+    assert!(!versions.is_empty());
+    let pins = Pins::builtin(&env.platform);
+    for version in versions {
+        let request = Request {
+            kotlin_version: version,
+            reason: "the plugin host test",
+            min_java: 8,
+        };
+        let runtime = provision(&request, &env, &pins, &Curl, &mut std::io::stderr())
+            .unwrap_or_else(|error| panic!("{version}: {error}"));
+        let mut host = Host::start(&runtime, &env, &mut std::io::stderr())
+            .unwrap_or_else(|error| panic!("{version}: {error}"));
+        assert_eq!(host.load(&[], &[]), Ok(Vec::new()), "{version}");
+    }
+}

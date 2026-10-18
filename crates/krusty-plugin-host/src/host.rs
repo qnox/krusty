@@ -167,7 +167,9 @@ impl Host {
 
     /// Loads a plugin classpath as kotlinc's `-Xplugin` does, with `options` the `-P` values
     /// (`plugin:<id>:<key>=<value>`), and returns each registrar it declares, in the order kotlinc's
-    /// service loader finds them.
+    /// service loader finds them, with the extensions it added. The registrars share one extension
+    /// storage, as in kotlinc. What was loaded before is unloaded first; a failed load leaves
+    /// nothing loaded.
     pub fn load(
         &mut self,
         entries: &[String],
@@ -177,7 +179,23 @@ impl Host {
         match self.exchange(&request)? {
             Reply::Loaded(plugins) => Ok(plugins),
             Reply::Failed(message) => Err(HostError::Plugin { message }),
+            Reply::Unloaded => Err(unexpected("load")),
         }
+    }
+
+    /// Ends the loaded plugins' lifetime: the resources their registrars registered are disposed as
+    /// kotlinc disposes them, and their class loader is closed. Stopping the host does the same.
+    pub fn unload(&mut self) -> Result<(), HostError> {
+        match self.exchange(&Request::Unload)? {
+            Reply::Unloaded => Ok(()),
+            Reply::Failed(message) => Err(HostError::Plugin { message }),
+            Reply::Loaded(_) => Err(unexpected("unload")),
+        }
+    }
+
+    /// The host process's id.
+    pub fn id(&self) -> u32 {
+        self.child.id()
     }
 
     fn exchange(&mut self, request: &Request) -> Result<Reply, HostError> {
@@ -224,6 +242,12 @@ impl Host {
             ),
             Err(error) => format!("it did not exit and could not be reaped: {error}"),
         }
+    }
+}
+
+fn unexpected(request: &str) -> HostError {
+    HostError::Protocol {
+        detail: format!("the reply does not answer a {request} request"),
     }
 }
 
