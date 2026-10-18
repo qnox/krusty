@@ -19,6 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use rayon::prelude::*;
 
@@ -436,7 +437,7 @@ fn comparable(text: &str) -> String {
         .to_string()
 }
 
-fn run_case(toolchain: &Toolchain, args_file: &Path) -> Outcome {
+fn run_case(toolchain: &Toolchain, args_file: &Path, recording: Option<&Recording>) -> Outcome {
     if args_file.with_extension("env").exists() {
         // `AbstractCliTest` passes the `.env` text through `kotlin.language.settings`, which
         // `CLICompiler` reads only when its class path carries
@@ -448,12 +449,30 @@ fn run_case(toolchain: &Toolchain, args_file: &Path) -> Outcome {
         );
     }
     let temp = common::scratch_dir().expect("allocate a scratch directory");
-    let test_data = args_file.parent().unwrap();
-    let invocations = match read_args(toolchain, args_file, &temp) {
-        Ok(invocations) => invocations,
-        Err(reason) => return Outcome::Unavailable(reason),
+    let outcome = match read_args(toolchain, args_file, &temp) {
+        Ok(invocations) => match recording {
+            None => evaluate(
+                toolchain,
+                args_file,
+                &temp,
+                &invoke(toolchain, &invocations),
+            ),
+            Some(recording) => recording.run(toolchain, args_file, &temp, &invocations),
+        },
+        Err(reason) => Outcome::Unavailable(reason),
     };
-    let mut output = String::new();
+    let _ = std::fs::remove_dir_all(&temp);
+    outcome
+}
+
+/// What a case's invocations wrote to stderr, and the exit code of the last one that ran.
+struct Observation {
+    stderr: String,
+    exit: Option<i32>,
+}
+
+fn invoke(toolchain: &Toolchain, invocations: &Invocations) -> Observation {
+    let mut stderr = String::new();
     let mut exit = Some(0);
     for arguments in &invocations.groups {
         // JetBrains runs the corpus under UTF-8; a JVM in the POSIX locale prints `?` for `–`.
@@ -471,16 +490,28 @@ fn run_case(toolchain: &Toolchain, args_file: &Path) -> Outcome {
         let result = command
             .output()
             .unwrap_or_else(|error| panic!("run {}: {error}", toolchain.compiler.display()));
-        output.push_str(&String::from_utf8_lossy(&result.stderr));
+        stderr.push_str(&String::from_utf8_lossy(&result.stderr));
         exit = result.status.code();
         if exit != Some(0) {
             break;
         }
     }
+    Observation { stderr, exit }
+}
+
+/// Compares an observation with the case's `.out` file and runs its `.test` checks against the
+/// files left in `temp`.
+fn evaluate(
+    toolchain: &Toolchain,
+    args_file: &Path,
+    temp: &Path,
+    observation: &Observation,
+) -> Outcome {
+    let test_data = args_file.parent().unwrap();
     let actual = format!(
         "{}\n{}\n",
-        normalize(toolchain, &output, test_data, &temp),
-        exit_code_name(exit)
+        normalize(toolchain, &observation.stderr, test_data, temp),
+        exit_code_name(observation.exit)
     );
     let expected = expected_output(toolchain, &args_file.with_extension("out"));
     let mut problems = Vec::new();
@@ -489,14 +520,217 @@ fn run_case(toolchain: &Toolchain, args_file: &Path) -> Outcome {
     }
     let checks = args_file.with_extension("test");
     if checks.is_file() {
-        problems.extend(additional_checks(&checks, test_data, &temp));
+        problems.extend(additional_checks(&checks, test_data, temp));
     }
-    let _ = std::fs::remove_dir_all(&temp);
     if problems.is_empty() {
         Outcome::Pass
     } else {
         Outcome::Fail(problems.join("\n"))
     }
+}
+
+/// The reference compiler's observations, recorded in the class-dump archive
+/// ([`common::byte_dump::reference_files`]) the byte-equality and diagnostics tests replay.
+///
+/// Only kotlinc's side is recorded: what it printed, its exit code, and for a case with `.test`
+/// checks the files it wrote. Every run still normalizes the observation, compares it with the
+/// `.out` file and runs the checks, so the runner is tested on every run while kotlinc runs only for
+/// a case whose inputs changed. The key covers the case's expanded invocations, the whole CLI
+/// corpus, the kotlinc distribution, every JDK the corpus names, and the JVM options; the archive
+/// entry is also bound to the exact compiler version.
+///
+/// A fresh observation is recorded only when it gives the outcome the not-applicable list expects,
+/// so a kotlinc run that failed for a transient reason is retried by the next run instead of being
+/// replayed.
+struct Recording<'a> {
+    not_applicable: &'a BTreeSet<String>,
+}
+
+/// Bumped when what an entry records, or how it is keyed, changes.
+const CLI_REFERENCE_SALT: &str = "cli-reference-v1";
+
+/// Stands for the case's scratch directory in a recorded stderr, which a replay runs in a new one.
+const RECORDED_TEMP_DIR: &str = "\0TEMP_DIR\0";
+
+/// Where a recorded file the compilation wrote is filed: `temp/<path under the scratch directory>`.
+const RECORDED_FILE_PREFIX: &str = "temp/";
+
+impl Recording<'_> {
+    fn run(
+        &self,
+        toolchain: &Toolchain,
+        args_file: &Path,
+        temp: &Path,
+        invocations: &Invocations,
+    ) -> Outcome {
+        let key = case_key(&toolchain.root, args_file);
+        let expect_pass = !self.not_applicable.contains(&key);
+        let fingerprint = reference_fingerprint(toolchain, &key, temp, invocations);
+        let mut live = None;
+        let recorded = common::byte_dump::reference_files(
+            &format!("cli-reference-{key}"),
+            fingerprint,
+            || {
+                let observation = invoke(toolchain, invocations);
+                let files = record(&observation, args_file, temp);
+                let outcome = evaluate(toolchain, args_file, temp, &observation);
+                let expected = match outcome {
+                    Outcome::Pass => expect_pass,
+                    Outcome::Fail(_) => !expect_pass,
+                    Outcome::Excluded(_) | Outcome::Unavailable(_) => false,
+                };
+                live = Some(outcome);
+                (expected && observation.exit.is_some()).then_some(files)
+            },
+        );
+        if let Some(outcome) = live {
+            return outcome;
+        }
+        let files = recorded.expect("a recorded observation or a live run");
+        let observation = replay(&files, temp)
+            .unwrap_or_else(|error| panic!("{key}: the recorded kotlinc observation {error}"));
+        evaluate(toolchain, args_file, temp, &observation)
+    }
+}
+
+fn record(observation: &Observation, args_file: &Path, temp: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    files.insert(
+        "stderr".to_string(),
+        observation
+            .stderr
+            .replace(&temp.display().to_string(), RECORDED_TEMP_DIR)
+            .into_bytes(),
+    );
+    if let Some(code) = observation.exit {
+        files.insert("exit".to_string(), code.to_string().into_bytes());
+    }
+    // Only the `.test` checks read the files a compilation wrote.
+    if args_file.with_extension("test").is_file() {
+        let mut stack = vec![temp.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let entries = std::fs::read_dir(&dir)
+                .unwrap_or_else(|error| panic!("read {}: {error}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("directory entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.is_file() {
+                    let relative = path
+                        .strip_prefix(temp)
+                        .expect("a file under the scratch dir");
+                    let bytes = std::fs::read(&path)
+                        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+                    files.insert(
+                        format!("{RECORDED_FILE_PREFIX}{}", relative.display()),
+                        bytes,
+                    );
+                }
+            }
+        }
+    }
+    files
+}
+
+/// Restores a recorded observation into this run's scratch directory. A file this run already
+/// wrote, such as an expanded argument file naming this scratch directory, is kept.
+fn replay(files: &BTreeMap<String, Vec<u8>>, temp: &Path) -> Result<Observation, String> {
+    let stderr = files.get("stderr").ok_or("has no stderr")?;
+    let stderr = String::from_utf8(stderr.clone())
+        .map_err(|_| "has a stderr that is not UTF-8".to_string())?
+        .replace(RECORDED_TEMP_DIR, &temp.display().to_string());
+    let exit = files.get("exit").ok_or("has no exit code")?;
+    let exit = std::str::from_utf8(exit)
+        .ok()
+        .and_then(|code| code.parse().ok())
+        .ok_or("has an exit code that is not a number")?;
+    for (name, bytes) in files {
+        let Some(relative) = name.strip_prefix(RECORDED_FILE_PREFIX) else {
+            continue;
+        };
+        let path = temp.join(relative);
+        if path.exists() {
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .unwrap_or_else(|error| panic!("create {}: {error}", parent.display()));
+        }
+        std::fs::write(&path, bytes)
+            .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+    }
+    Ok(Observation {
+        stderr,
+        exit: Some(exit),
+    })
+}
+
+/// The recording key of one reference case. The scratch directory differs on every run, so the
+/// invocations spell it as `$TEMP_DIR$`.
+fn reference_fingerprint(
+    toolchain: &Toolchain,
+    key: &str,
+    temp: &Path,
+    invocations: &Invocations,
+) -> u128 {
+    let temp = temp.display().to_string();
+    let mut parts: Vec<Vec<u8>> = vec![
+        CLI_REFERENCE_SALT.into(),
+        key.into(),
+        reference_environment(toolchain).as_bytes().to_vec(),
+        reference_jvm_options().into_bytes(),
+    ];
+    for group in &invocations.groups {
+        parts.push((group.len() as u64).to_le_bytes().to_vec());
+        parts.extend(
+            group
+                .iter()
+                .map(|argument| argument.replace(&temp, "$TEMP_DIR$").into_bytes()),
+        );
+    }
+    let parts: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+    common::byte_dump::fingerprint_parts(&parts)
+}
+
+/// Everything a reference case reads besides its own arguments, identified once per process: the
+/// CLI corpus and the checkout's third-party jars it names, the kotlinc distribution and the JDK
+/// it runs on (by content), and each JDK the corpus names (by identity), with the paths that
+/// appear in the output.
+fn reference_environment(toolchain: &Toolchain) -> &'static str {
+    static ENVIRONMENT: OnceLock<String> = OnceLock::new();
+    ENVIRONMENT.get_or_init(|| {
+        let java_home = toolchain
+            .java_home
+            .as_deref()
+            .expect("the reference compiler has a JDK");
+        let inputs: Vec<PathBuf> = ["compiler/testData/cli", "third-party"]
+            .iter()
+            .map(|path| toolchain.root.join(path))
+            .filter(|path| path.is_dir())
+            .collect();
+        let content = common::byte_dump::immutable_classpath_content_fingerprint(
+            &inputs,
+            &java_home.join("lib/modules"),
+        )
+        .unwrap_or_else(|error| panic!("identify the reference CLI environment: {error}"));
+        let mut rows = vec![
+            content,
+            format!("root:{}", toolchain.root.display()),
+            format!("compiler:{}", toolchain.compiler.display()),
+            format!("java:{}", java_home.display()),
+            format!("jvm:{}", toolchain.jvm_version.as_deref().unwrap_or("")),
+        ];
+        for (release, home) in &toolchain.jdks {
+            let identity = common::producing_jdk::jdk_identity(home)
+                .unwrap_or_else(|error| panic!("identify JDK {release}: {error}"));
+            rows.push(format!(
+                "jdk{release}:{}:{}",
+                home.display(),
+                String::from_utf8_lossy(&identity)
+            ));
+        }
+        rows.join("\n")
+    })
 }
 
 /// The committed `.out` file with `$VERSION$` spelled as the reference release, the compiler
@@ -581,13 +815,13 @@ fn additional_checks(checks: &Path, test_data: &Path, temp: &Path) -> Vec<String
     problems
 }
 
-fn run_corpus(toolchain: &Toolchain) -> BTreeMap<String, Outcome> {
+fn run_corpus(toolchain: &Toolchain, recording: Option<&Recording>) -> BTreeMap<String, Outcome> {
     cli_cases(&toolchain.root)
         .par_iter()
         .map(|args_file| {
             (
                 case_key(&toolchain.root, args_file),
-                run_case(toolchain, args_file),
+                run_case(toolchain, args_file, recording),
             )
         })
         .collect()
@@ -621,7 +855,7 @@ fn render_failures(version: KotlinVersion, failures: &BTreeSet<String>) -> Strin
 fn krusty_reproduces_kotlincs_cli_test_corpus() {
     let toolchain = Toolchain::new(common::krusty_binary(), None);
     let version = toolchain.reference;
-    let outcomes = run_corpus(&toolchain);
+    let outcomes = run_corpus(&toolchain, None);
     let not_applicable =
         load_expectation(&expectation_path("cli_expected_not_applicable", version));
 
@@ -719,10 +953,11 @@ fn krusty_reproduces_kotlincs_cli_test_corpus() {
 /// Runs the reference kotlinc through the same runner. Every case the not-applicable list does not
 /// excuse must pass and every listed one must not, which checks that the runner reproduces
 /// `AbstractCliTest` and that each listed case is an environment difference rather than a krusty
-/// gap. It is ignored in ordinary runs because it takes minutes; the conformance job runs it for
-/// every supported release (`scripts/conformance-regressions.sh`).
+/// gap. kotlinc's observations replay from the recorded-bytes archive ([`Recording`]). It is ignored
+/// in ordinary runs because a cold archive takes minutes; the conformance job runs it for every
+/// supported release (`scripts/conformance-regressions.sh`).
 #[test]
-#[ignore = "runs the reference kotlinc over the whole CLI corpus (several minutes)"]
+#[ignore = "runs the reference kotlinc over the whole CLI corpus (minutes without its recordings)"]
 fn the_reference_compiler_reproduces_every_applicable_cli_case() {
     let kotlinc = krusty::toolchain::kotlinc_path().expect("the reference kotlinc is provisioned");
     let home = kotlinc
@@ -747,7 +982,12 @@ fn the_reference_compiler_reproduces_every_applicable_cli_case() {
         "cli_expected_not_applicable",
         toolchain.reference,
     ));
-    let outcomes = run_corpus(&toolchain);
+    let outcomes = run_corpus(
+        &toolchain,
+        Some(&Recording {
+            not_applicable: &not_applicable,
+        }),
+    );
     let mut problems = Vec::new();
     for (key, outcome) in &outcomes {
         match outcome {
@@ -837,5 +1077,63 @@ mod tests {
     fn comparison_ignores_trailing_whitespace() {
         assert_eq!(comparable("a  \nb\n\n"), comparable("a\nb"));
         assert_ne!(comparable("a\n b"), comparable("a\nb"));
+    }
+
+    #[test]
+    fn a_recorded_observation_replays_into_a_new_scratch_directory() {
+        let recorded_in = common::scratch_dir().expect("scratch directory");
+        let args_file = recorded_in.join("case.args");
+        std::fs::write(recorded_in.join("case.test"), "// EXISTS: out/A.class").unwrap();
+        std::fs::create_dir_all(recorded_in.join("out")).unwrap();
+        std::fs::write(recorded_in.join("out/A.class"), b"class").unwrap();
+        std::fs::write(recorded_in.join("case.args.expanded"), "old").unwrap();
+        let observation = Observation {
+            stderr: format!("error: {}/out is odd\n", recorded_in.display()),
+            exit: Some(1),
+        };
+        let files = record(&observation, &args_file, &recorded_in);
+
+        let replayed_in = common::scratch_dir().expect("scratch directory");
+        std::fs::write(replayed_in.join("case.args.expanded"), "new").unwrap();
+        let replayed = replay(&files, &replayed_in).expect("a complete recording");
+        assert_eq!(
+            replayed.stderr,
+            format!("error: {}/out is odd\n", replayed_in.display())
+        );
+        assert_eq!(replayed.exit, Some(1));
+        assert_eq!(
+            std::fs::read(replayed_in.join("out/A.class")).unwrap(),
+            b"class"
+        );
+        assert_eq!(
+            std::fs::read_to_string(replayed_in.join("case.args.expanded")).unwrap(),
+            "new"
+        );
+        let _ = std::fs::remove_dir_all(&recorded_in);
+        let _ = std::fs::remove_dir_all(&replayed_in);
+    }
+
+    #[test]
+    fn a_case_without_checks_records_only_its_output() {
+        let temp = common::scratch_dir().expect("scratch directory");
+        std::fs::write(temp.join("A.class"), b"class").unwrap();
+        let observation = Observation {
+            stderr: "warning: w\n".to_string(),
+            exit: Some(0),
+        };
+        let files = record(&observation, &temp.join("case.args"), &temp);
+        assert_eq!(files.keys().collect::<Vec<_>>(), vec!["exit", "stderr"]);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_recording_without_an_exit_code_is_refused() {
+        let temp = common::scratch_dir().expect("scratch directory");
+        let files = BTreeMap::from([("stderr".to_string(), Vec::new())]);
+        assert_eq!(
+            replay(&files, &temp).err().as_deref(),
+            Some("has no exit code")
+        );
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }
