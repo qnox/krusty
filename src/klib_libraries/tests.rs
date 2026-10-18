@@ -416,7 +416,7 @@ fn a_top_level_function_publishes_its_return_value_status() {
 
 #[test]
 fn a_klib_function_publishes_context_and_value_inline_modifiers() {
-    use crate::types::InlineParameterModifier::{Crossinline, Noinline, None};
+    use crate::types::InlineParameterModifier::{Crossinline, Noinline, None as Plain};
 
     let mut declaration = function(
         "invoke",
@@ -430,7 +430,7 @@ fn a_klib_function_publishes_context_and_value_inline_modifiers() {
     declaration.is_inline = true;
     declaration.context_count = 1;
     declaration.context_kinds = vec![ContextParameterKind::Named];
-    declaration.inline_modifiers = vec![Crossinline, None, Noinline];
+    declaration.inline_modifiers = vec![Crossinline, Plain, Noinline];
     let libraries =
         KlibLibraries::from_packages(vec![(segments(&["p"]), package_of(vec![declaration]))])
             .expect("the function is signable");

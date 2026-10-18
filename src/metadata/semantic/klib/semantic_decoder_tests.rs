@@ -162,7 +162,7 @@ fn first_nullable_is_part_of_the_selected_semantic_type_table() {
 
 #[test]
 fn context_and_value_parameter_inline_modifiers_are_retained_exactly() {
-    use crate::types::InlineParameterModifier::{Crossinline, Noinline, None};
+    use crate::types::InlineParameterModifier::{Crossinline, Noinline, None as Plain};
 
     let (strings, qnames) = kotlin_types(&["Unit"]);
     let unit = class_type(1);
@@ -182,7 +182,7 @@ fn context_and_value_parameter_inline_modifiers_are_retained_exactly() {
         panic!("one function is decoded")
     };
     assert_eq!(function.param_defaults, [true, false, false]);
-    assert_eq!(function.inline_modifiers, [Crossinline, None, Noinline]);
+    assert_eq!(function.inline_modifiers, [Crossinline, Plain, Noinline]);
     assert_eq!(function.context_count, 1);
 }
 
