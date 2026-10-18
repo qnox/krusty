@@ -438,11 +438,11 @@ fn a_klib_function_publishes_context_and_value_inline_modifiers() {
     let function = single_function(&libraries, "p", "invoke");
     assert_eq!(
         function.call_sig.inline_modifiers,
-        [Crossinline, None, Noinline]
+        [Crossinline, Plain, Noinline]
     );
     assert_eq!(
         function.callable.inline_modifiers.as_ref(),
-        [Crossinline, None, Noinline]
+        [Crossinline, Plain, Noinline]
     );
 }
 
