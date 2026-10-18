@@ -346,9 +346,9 @@ recorded in the recorded-bytes archive (`KRUSTY_CLASS_DUMP_DIR`) that the byte-e
 diagnostics tests replay, under the same exact-version and master-publishes contract. Every run still
 normalizes the recorded output, compares it with the `.out` file and runs the checks, so the runner
 is tested on every pull request; kotlinc runs only for a case whose expanded arguments, CLI corpus,
-kotlinc distribution, JDKs or JVM options changed. An observation is recorded only when it gives the
-outcome the not-applicable list expects, so a transient kotlinc failure is retried rather than
-replayed. The script compiles a missing recording by default
+kotlinc distribution, JDK class libraries or JVM options changed. Only a passing observation is
+recorded, so a transient kotlinc failure is retried rather than replayed; the few not-applicable
+cases, which are expected to fail, always run kotlinc. The script compiles a missing recording by default
 (`KRUSTY_CLASS_DUMP_COMPILE_MISSING=1`), since running kotlinc is the only way to observe it.
 
 The corpus names JDK 8, 11, 17 and 21 homes. A case whose JDK the machine lacks fails rather than

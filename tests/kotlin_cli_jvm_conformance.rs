@@ -539,9 +539,10 @@ fn evaluate(
 /// corpus, the kotlinc distribution, every JDK the corpus names, and the JVM options; the archive
 /// entry is also bound to the exact compiler version.
 ///
-/// A fresh observation is recorded only when it gives the outcome the not-applicable list expects,
-/// so a kotlinc run that failed for a transient reason is retried by the next run instead of being
-/// replayed.
+/// Only a passing observation of a case the not-applicable list does not name is recorded. A listed
+/// case is expected to fail, and a transient kotlinc failure or out-of-memory exit would look the
+/// same, so the few listed cases always run kotlinc; a failing run of any other case is retried by
+/// the next run instead of being replayed.
 struct Recording<'a> {
     not_applicable: &'a BTreeSet<String>,
 }
@@ -564,7 +565,9 @@ impl Recording<'_> {
         invocations: &Invocations,
     ) -> Outcome {
         let key = case_key(&toolchain.root, args_file);
-        let expect_pass = !self.not_applicable.contains(&key);
+        if self.not_applicable.contains(&key) {
+            return evaluate(toolchain, args_file, temp, &invoke(toolchain, invocations));
+        }
         let fingerprint = reference_fingerprint(toolchain, &key, temp, invocations);
         let mut live = None;
         let recorded = common::byte_dump::reference_files(
@@ -574,13 +577,9 @@ impl Recording<'_> {
                 let observation = invoke(toolchain, invocations);
                 let files = record(&observation, args_file, temp);
                 let outcome = evaluate(toolchain, args_file, temp, &observation);
-                let expected = match outcome {
-                    Outcome::Pass => expect_pass,
-                    Outcome::Fail(_) => !expect_pass,
-                    Outcome::Excluded(_) | Outcome::Unavailable(_) => false,
-                };
+                let passed = outcome == Outcome::Pass;
                 live = Some(outcome);
-                (expected && observation.exit.is_some()).then_some(files)
+                passed.then_some(files)
             },
         );
         if let Some(outcome) = live {
@@ -665,6 +664,14 @@ fn replay(files: &BTreeMap<String, Vec<u8>>, temp: &Path) -> Result<Observation,
     })
 }
 
+/// A JDK's class library: the modules image, or JDK 8's `rt.jar`, which has none.
+fn jdk_class_library(home: &Path) -> Option<PathBuf> {
+    ["lib/modules", "jre/lib/rt.jar"]
+        .iter()
+        .map(|path| home.join(path))
+        .find(|path| path.is_file())
+}
+
 /// The recording key of one reference case. The scratch directory differs on every run, so the
 /// invocations spell it as `$TEMP_DIR$`.
 fn reference_fingerprint(
@@ -694,7 +701,7 @@ fn reference_fingerprint(
 
 /// Everything a reference case reads besides its own arguments, identified once per process: the
 /// CLI corpus and the checkout's third-party jars it names, the kotlinc distribution and the JDK
-/// it runs on (by content), and each JDK the corpus names (by its `release` file), with the paths
+/// it runs on, and the class library of each JDK the corpus names, all by content, with the paths
 /// that appear in the output.
 fn reference_environment(toolchain: &Toolchain) -> &'static str {
     static ENVIRONMENT: OnceLock<String> = OnceLock::new();
@@ -703,11 +710,19 @@ fn reference_environment(toolchain: &Toolchain) -> &'static str {
             .java_home
             .as_deref()
             .expect("the reference compiler has a JDK");
-        let inputs: Vec<PathBuf> = ["compiler/testData/cli", "third-party"]
+        let mut inputs: Vec<PathBuf> = ["compiler/testData/cli", "third-party"]
             .iter()
             .map(|path| toolchain.root.join(path))
             .filter(|path| path.is_dir())
             .collect();
+        inputs.extend(toolchain.jdks.iter().map(|(release, home)| {
+            jdk_class_library(home).unwrap_or_else(|| {
+                panic!(
+                    "JDK {release} at {} has neither lib/modules nor jre/lib/rt.jar",
+                    home.display()
+                )
+            })
+        }));
         let content = common::byte_dump::immutable_classpath_content_fingerprint(
             &inputs,
             &java_home.join("lib/modules"),
@@ -720,8 +735,8 @@ fn reference_environment(toolchain: &Toolchain) -> &'static str {
             format!("java:{}", java_home.display()),
             format!("jvm:{}", toolchain.jvm_version.as_deref().unwrap_or("")),
         ];
-        // JDK 8 has no modules image, so a corpus JDK is identified by its `release` file, which
-        // [`jdk_release`] already required, and by its home, which names the exact update.
+        // The class libraries above cover a JDK changed in place; the `release` file, which
+        // [`jdk_release`] already required, and the home name the update in cache inspection.
         for (release, home) in &toolchain.jdks {
             let release_file = home.join("release");
             let identity = std::fs::read(&release_file)
