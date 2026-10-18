@@ -1997,6 +1997,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   shape is retained when its value is discarded, including captured and local-class-captured
   storage. Common IR records postfix provenance. JVM emission contracts an `Int` local to `iinc`
   after entering its ordinary block lifecycle, while other storage keeps the snapshot temporary.
+  The postfix update therefore never re-reads its storage: a lambda's captured `Ref` cell, a local
+  shared into a closure, a local class's captured cell, and a `Long`/`Double`/`Byte`/`Short`/`Char`/
+  `Float` or user-`inc` local all apply `inc`/`dec` to the saved old value (byte parity across every
+  storage and type: `value_position_postfix_updates_from_the_saved_old_value_like_kotlinc`).
   Tests: `tests/increment_statement_e2e.rs`, the shared
   `multimoduleLocalIncrementShapes` JVM/Native/Wasm case, and the checked-FIR increment tests.
 - **`&&`/`||` are laid out as short-circuit jumps**, as kotlinc lays out `ANDAND`/`OROR`. In a
