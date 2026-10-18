@@ -287,7 +287,7 @@ pub(super) fn eligible_points(
     // `@DebugMetadata`. A named function with no suspension point has none of them, as kotlinc's
     // transformer returns before building them; a suspend lambda's `invokeSuspend` always has its
     // machine.
-    let machine_declines: [(&dyn Fn() -> bool, &str); 5] = [
+    let machine_declines: [(&dyn Fn() -> bool, &str); 4] = [
         (
             &|| !route.context.null_out_dead_spills,
             "no spill clean-up in the runtime",
@@ -295,16 +295,6 @@ pub(super) fn eligible_points(
         (
             &|| subject == Subject::NamedFunction && !(top_level || class_member),
             "not top-level or a class member",
-        ),
-        // kotlinc never runs its transformer over a private `suspend inline` function: every call
-        // inlines it, and its own method keeps the body as written, boxing with `valueOf`.
-        (
-            &|| {
-                subject == Subject::NamedFunction
-                    && ir.inline_fns.contains(&fid)
-                    && ir.method_visibility(fid).is_private()
-            },
-            "a private inline function",
         ),
         (
             &|| !ir.fn_decl_lines.contains_key(&fid),
