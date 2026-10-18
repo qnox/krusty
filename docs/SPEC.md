@@ -2015,6 +2015,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   structural reference equality, except that an enum-typed property, nullable or not, is compared
   by reference (`if_acmpne`) as kotlinc's `Equals` lowering does for any enum operand
   (`tests/data_class_enum_equality_e2e.rs`); `hashCode` is the `31*result + fieldHash` fold;
+  an interface-typed property hashes through `invokevirtual java/lang/Object.hashCode`, also when
+  the interface is declared in another file of the module, which the file learns from the module's
+  classifier records (`tests/data_class_sibling_interface_hash_e2e.rs`);
   `toString` is `Class(p1=v1, p2=v2)`. `copy(p = v)` is supported via the default-argument mechanism (below).
 - **Default arguments.** A parameter's default *value* is backend-agnostic IR
   (`IrFile.fn_param_defaults`). A call that omits arguments is an ordinary call with holes —
