@@ -1307,6 +1307,9 @@ impl BodyFirChecker<'_> {
         let folded = (!matches!(self.file.expr(expression), Expr::Member { .. }))
             .then(|| self.info.resolved_constants.get(&expression))
             .flatten();
+        // The payload has the type the constant adapted to, which is not always the expression's
+        // own: `60 + 1` checks as an `Int` whose value a `Long` const stores.
+        let folded_ty = folded.map(|constant| constant.ty);
         let kind = if let Some(constant) = folded {
             FirExprKind::Constant(library_constants::checked_constant_value(constant))
         } else {
@@ -2115,6 +2118,14 @@ impl BodyFirChecker<'_> {
                 }
             }
         };
+        if let Some(ty) = folded_ty {
+            let span = self
+                .file
+                .expr_span(expression)
+                .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+            let ty = self.resolved_type(span, ty)?;
+            return self.add_expression_with_type(expression, ty, kind);
+        }
         self.add_expression(expression, kind)
     }
 
