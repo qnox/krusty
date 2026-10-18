@@ -440,14 +440,14 @@ pub(super) fn realize_default_calls(
                         default_provider,
                     )
                     .is_some();
+                // The static stub takes no receiver and initializes the object itself. A receiver
+                // that runs code stays on the call, which evaluates and discards it first.
+                let mut discarded_receiver = None;
                 match dispatch_receiver {
-                    // The static stub initializes the object itself, so a receiver that only
-                    // names it is dropped. Evaluating any other receiver first would need its own
-                    // statement around this call's realized operands.
                     Some(receiver) if static_member => {
-                        if !super::ir_emit::jvm_static_members::receiver_is_inert(ir, receiver) {
-                            return Err(failure);
-                        }
+                        discarded_receiver =
+                            (!super::ir_emit::jvm_static_members::receiver_is_inert(ir, receiver))
+                                .then_some(receiver);
                     }
                     Some(receiver) => {
                         params.insert(0, dispatch_receiver_ty.ok_or(failure)?);
@@ -467,7 +467,7 @@ pub(super) fn realize_default_calls(
                             module_target: Some(default_provider),
                             module_default_call: true,
                         },
-                        dispatch_receiver: None,
+                        dispatch_receiver: discarded_receiver,
                         args,
                     },
                     plan,

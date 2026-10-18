@@ -77,7 +77,7 @@ pub(in crate::jvm) fn receiver_is_inert(ir: &IrFile, receiver: ExprId) -> bool {
 }
 
 /// The companion members `outer` declares a static bridge for, in member order.
-fn companion_bridge_functions(ir: &IrFile, outer: &IrClass) -> Vec<u32> {
+pub(in crate::jvm) fn companion_bridge_functions(ir: &IrFile, outer: &IrClass) -> Vec<u32> {
     let Some(companion) = outer
         .companion_class
         .and_then(|companion| ir.class_id_by_name(companion))
@@ -362,7 +362,11 @@ impl Emitter<'_> {
     /// Evaluate and discard the receiver of a call that `invokestatic`s a named object's member.
     /// Like kotlinc, keep only a receiver that can run code: the singleton read or a local is
     /// dropped, since the `invokestatic` initializes the object anyway.
-    fn emit_discarded_static_receiver(&mut self, receiver: ExprId, code: &mut CodeBuilder) {
+    pub(super) fn emit_discarded_static_receiver(
+        &mut self,
+        receiver: ExprId,
+        code: &mut CodeBuilder,
+    ) {
         if !receiver_is_inert(self.ir, receiver) {
             self.emit_value(receiver, code);
             code.pop();

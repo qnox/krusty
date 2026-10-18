@@ -53,11 +53,15 @@ class Host {\n\
     }\n\
 }\n";
 
-const CALLER_FILE: &str = "fun box(): String {\n\
+const CALLER_FILE: &str = "var made = 0\n\
+fun makeCounter(): Counter { made++; return Counter }\n\
+\n\
+fun box(): String {\n\
     val counter = Counter\n\
     val sum = Counter.next(1) + counter.next(2) + Counter.scaled(2) + Counter.scaled(2, 4)\n\
+    val made2 = makeCounter().scaled(2) + makeCounter().scaled(2, 4)\n\
     val text = Host.greet(\"x\")\n\
-    return if (sum == 37 && text == \"hi x\") \"OK\" else \"fail $sum $text\"\n\
+    return if (sum == 37 && made2 == 14 && made == 2 && text == \"hi x\") \"OK\" else \"fail $sum $made2 $made $text\"\n\
 }\n";
 
 const OTHER_OWNERS: &str = "interface Face {\n\
@@ -176,4 +180,24 @@ fn private_statics_and_their_accessors_match_kotlinc() {
     let classes = common::classes_against_kotlinc_module(&[("Private.kt", PRIVATE_MEMBERS)]);
     assert_eq!(classes.differences(), Vec::<String>::new());
     common::expect_box_ok_with_stdlib(PRIVATE_MEMBERS, "private jvm static members");
+}
+
+/// A companion member's static bridge occupies the outer class's method namespace, so it clashes
+/// with an outer member of the same JVM signature, listed in source order.
+#[test]
+fn a_companion_bridge_clashing_with_an_outer_member_is_reported_like_kotlinc() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "class C {\n\
+             \x20   companion object {\n\
+             \x20       @JvmStatic fun g(x: String): Int = 1\n\
+             \x20       @JvmStatic fun f() {}\n\
+             \x20   }\n\
+             \x20   fun f() {}\n\
+             \x20   fun g(y: String): Int = 2\n\
+             }\n",
+        )],
+        &[],
+    );
 }

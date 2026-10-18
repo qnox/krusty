@@ -1259,7 +1259,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `getstatic INSTANCE`, so a property read in the body is `getstatic INSTANCE; pop; getstatic
   field`. Its `$default` stub is static with no receiver and `invokestatic`s the member. Calls are
   `invokestatic`, both in-file and across sibling source files: an inert receiver (the singleton
-  read, a local) is dropped, and any other receiver is evaluated and popped. A private member
+  read, a local) is dropped, and any other receiver is evaluated and popped, including on a
+  sibling-file call that leaves a default argument out and so `invokestatic`s the `$default`
+  stub. A private member
   reached from a nested class goes through a receiverless `access$<name>`. A COMPANION member
   stays an instance method of `C$Companion`, and its callers still go through the companion
   instance. The outer class (`C`, or an interface, where the bridge is `public static` and not
@@ -1268,12 +1270,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declaration annotation (`@JvmStatic` and user annotations such as a test framework's
   `@BeforeAll`). It has no parameter checks, and its only line is the member's end line. It sits
   after the declared members and before the `access$` accessors. A private companion member's
-  bridge is `private static final` and calls the companion's `access$<name>(C$Companion)`. Byte
+  bridge is `private static final` and calls the companion's `access$<name>(C$Companion)`. A
+  bridge occupies the outer class's method namespace, so a bridge and an outer member with the
+  same JVM signature are a platform declaration clash. The clash is reported at both
+  declarations, which are listed in source order, as kotlinc lists them. Byte
   divergences that remain, all with kotlinc's runtime behaviour: a lambda that captures `this`
   in an object's static member captures `INSTANCE`; an inline lambda spliced into a static member
   emits its `getstatic INSTANCE; pop` early; a same-file `@JvmStatic inline` call stores the
-  singleton in a receiver local. A cross-file call that leaves a default argument out, made on a
-  receiver with side effects, is reported as an emission failure instead of being miscompiled.
+  singleton in a receiver local.
   Tests: `tests/jvm_static_functions_e2e.rs` (class-by-class comparison with kotlinc, plus
   run and reflection checks).
 - **`@Metadata` writer — the CLASS round-trip (a `@Metadata` on every emitted class, not just the

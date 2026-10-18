@@ -308,6 +308,12 @@ enum MemberMethodDeclaration {
         offset: u32,
         function: FunId,
     },
+    /// The outer class's static bridge of `@JvmStatic` companion member `function`, reported at
+    /// that member's declaration.
+    CompanionBridge {
+        offset: u32,
+        function: FunId,
+    },
     GeneratedDataMember {
         offset: u32,
         function: FunId,
@@ -335,6 +341,22 @@ enum MemberMethodDeclaration {
         property: PropertyAccessorDeclaration,
         setter: bool,
     },
+}
+
+impl MemberMethodDeclaration {
+    /// The source offset this declaration's clash is reported at.
+    fn offset(self) -> u32 {
+        match self {
+            Self::Source { offset, .. }
+            | Self::CompanionBridge { offset, .. }
+            | Self::GeneratedDataMember { offset, .. }
+            | Self::GeneratedMethod { offset }
+            | Self::InPlaceDelegate { offset, .. }
+            | Self::DelegationForwarder { offset, .. }
+            | Self::PropertyAnnotationMarker { offset, .. }
+            | Self::PropertyAccessor { offset, .. } => offset,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -463,6 +485,19 @@ fn report_platform_declaration_clashes(
                 .entry((function.name.clone(), descriptor))
                 .or_default()
                 .push(declaration);
+        }
+        for function in
+            crate::jvm::ir_emit::jvm_static_members::companion_bridge_functions(ir, class)
+        {
+            let Some(&offset) = ir.fn_signature_offsets.get(&function) else {
+                continue;
+            };
+            let descriptor =
+                crate::jvm::ir_emit::function_descriptor(ir, override_results, function);
+            groups
+                .entry((ir.functions[function as usize].name.clone(), descriptor))
+                .or_default()
+                .push(MemberMethodDeclaration::CompanionBridge { offset, function });
         }
         for (property_index, property) in class.properties.iter().enumerate() {
             for (setter, function, span, side) in [
@@ -640,6 +675,9 @@ fn report_platform_declaration_clashes(
                     } => ir.interface_delegation_forwarders.contains(function),
                     _ => false,
                 });
+            let includes_companion_bridge = declarations.iter().any(|declaration| {
+                matches!(declaration, MemberMethodDeclaration::CompanionBridge { .. })
+            });
             let declarations_are_renderable = declarations.iter().all(|&declaration| {
                 member_method_declaration_is_renderable(ir, class, declaration)
             });
@@ -648,10 +686,15 @@ fn report_platform_declaration_clashes(
                 && (includes_marker
                     || includes_generated_data_member
                     || includes_delegate
-                    || includes_delegation_forwarder)
+                    || includes_delegation_forwarder
+                    || includes_companion_bridge)
             {
                 let owner = class.fq_name.render().replace(['/', '$'], ".");
                 let mut listed = declarations.clone();
+                // kotlinc lists a companion bridge and the members it clashes with in source order.
+                if includes_companion_bridge {
+                    listed.sort_by_key(|declaration| declaration.offset());
+                }
                 let kind_order = |declaration: &MemberMethodDeclaration| match declaration {
                     MemberMethodDeclaration::GeneratedDataMember { .. } => 0,
                     MemberMethodDeclaration::GeneratedMethod { .. } => 0,
@@ -663,7 +706,8 @@ fn report_platform_declaration_clashes(
                     } => 2,
                     MemberMethodDeclaration::PropertyAccessor { .. } => 0,
                     MemberMethodDeclaration::PropertyAnnotationMarker { .. } => 1,
-                    MemberMethodDeclaration::Source { .. } => 2,
+                    MemberMethodDeclaration::Source { .. }
+                    | MemberMethodDeclaration::CompanionBridge { .. } => 2,
                 };
                 listed.sort_by_key(kind_order);
                 let type_context = listed
@@ -693,28 +737,23 @@ fn report_platform_declaration_clashes(
                 )
             };
             for declaration in declarations {
-                let offset = match declaration {
-                    MemberMethodDeclaration::Source { offset, .. }
-                    | MemberMethodDeclaration::GeneratedDataMember { offset, .. }
-                    | MemberMethodDeclaration::GeneratedMethod { offset, .. }
-                    | MemberMethodDeclaration::DelegationForwarder { offset, .. }
-                    | MemberMethodDeclaration::PropertyAccessor { offset, .. } => offset,
-                    MemberMethodDeclaration::InPlaceDelegate { offset, .. } => {
+                // A class header carries one report for its delegates and one for its markers.
+                match declaration {
+                    MemberMethodDeclaration::InPlaceDelegate { .. } => {
                         if reported_delegate_header {
                             continue;
                         }
                         reported_delegate_header = true;
-                        offset
                     }
-                    MemberMethodDeclaration::PropertyAnnotationMarker { offset, .. } => {
+                    MemberMethodDeclaration::PropertyAnnotationMarker { .. } => {
                         if reported_marker_header {
                             continue;
                         }
                         reported_marker_header = true;
-                        offset
                     }
-                };
-                clashes.push((offset, message.clone()));
+                    _ => {}
+                }
+                clashes.push((declaration.offset(), message.clone()));
             }
         }
     }
@@ -733,6 +772,7 @@ fn member_method_declaration_is_renderable(
 ) -> bool {
     let function = match declaration {
         MemberMethodDeclaration::Source { function, .. }
+        | MemberMethodDeclaration::CompanionBridge { function, .. }
         | MemberMethodDeclaration::GeneratedDataMember { function, .. }
         | MemberMethodDeclaration::DelegationForwarder { function, .. } => Some(function),
         MemberMethodDeclaration::InPlaceDelegate { function, .. } => {
@@ -810,7 +850,8 @@ fn render_member_method_declaration(
     type_context: &[crate::types::Ty],
 ) -> String {
     let (function, parameters) = match declaration {
-        MemberMethodDeclaration::Source { function, .. } => {
+        MemberMethodDeclaration::Source { function, .. }
+        | MemberMethodDeclaration::CompanionBridge { function, .. } => {
             return render_source_member_method(ir, function, name, owner, type_context);
         }
         MemberMethodDeclaration::GeneratedDataMember { function, .. } => {

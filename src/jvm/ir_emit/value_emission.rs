@@ -861,6 +861,11 @@ impl super::Emitter<'_> {
                         name
                     };
                     let args = args.clone();
+                    // Only a named object's static `$default` stub keeps a receiver: one that runs
+                    // code, evaluated and discarded ahead of the arguments.
+                    if let Some(receiver) = *dispatch_receiver {
+                        self.emit_discarded_static_receiver(receiver, code);
+                    }
                     if let Err(mismatch) =
                         self.emit_call_descriptor_operands(e, 0, &args, &param_tys, code)
                     {
