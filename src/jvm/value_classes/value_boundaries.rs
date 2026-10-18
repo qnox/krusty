@@ -129,7 +129,7 @@ pub(super) fn record_value_boundary(
 /// The box a value whose `when` joins on the carrier of `value_class` takes as a whole. When every
 /// branch (a safe call `x?.id` included) yields that carrier or `null`, the merge holds the carrier,
 /// so boxing a branch tail would only be unboxed again there. Like kotlinc, box the joined value
-/// once; a nullable merge keeps its `null` (`dup; ifnull`), a non-null one takes plain `box-impl`.
+/// once; a nullable `X?` keeps its `null` (`dup; ifnull`), a non-null `X` takes plain `box-impl`.
 /// A join realized on the box itself (`X?` over a primitive carrier), or one with any other branch,
 /// returns `None`: its branches are boxed individually.
 fn carrier_join_box(
@@ -163,13 +163,16 @@ fn carrier_join_box(
         }
     }
     match repr_ctx.types.join_result(join) {
-        // An exhaustive `when` (a safe call's guard included) merges on its checked result.
+        // An exhaustive `when` (a safe call's guard included) merges on its checked result, erased.
+        // That result is `X?` only when its erasure is a nullable form of a non-null carrier: over
+        // a nullable carrier (`V(val value: String?)`) `V?` is the box, so a carrier merge there is
+        // a non-null `V` whose carrier may itself be `null` (`V(null)` is still boxed).
         Some(merge) => {
             let carrier = erase(under.get(&value_class)?, under);
             if merge.non_null() != carrier.non_null() {
                 return None;
             }
-            nullable = merge.is_nullable();
+            nullable = merge.is_nullable() && !carrier.is_nullable();
         }
         // An `if` merges on the representation its branches share, which holds a `null` only
         // when the carrier can.

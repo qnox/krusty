@@ -47,3 +47,37 @@ fn a_joined_value_class_argument_to_a_type_parameter_matches_kotlinc_bytes() {
         differences.join("\n\n")
     );
 }
+
+/// Over a nullable carrier, `V?` is the box, so a join of non-null `V`s that merges on the carrier
+/// is a non-null `V` even when that carrier holds `null`: `V(null)` is boxed, never an outer null.
+const NULLABLE_CARRIER: &str = "@JvmInline
+value class V(val value: String?)
+fun <T> show(x: T): String = if (x == null) \"null\" else \"boxed:\" + x.toString()
+fun pick(n: Int) = show(when (n) { 0 -> V(null); else -> V(\"a\") })
+fun pickIf(b: Boolean) = show(if (b) V(null) else V(\"a\"))
+fun box(): String {
+    val shown = pick(0) + \" \" + pick(1) + \" \" + pickIf(true)
+    return if (shown == \"boxed:V(value=null) boxed:V(value=a) boxed:V(value=null)\") \"OK\" else shown
+}
+";
+
+#[test]
+fn a_join_over_a_nullable_carrier_boxes_a_null_carrier() {
+    assert_eq!(
+        common::compile_and_run_with_stdlib(NULLABLE_CARRIER, "NullableCarrier")
+            .expect("compiles and runs"),
+        "OK"
+    );
+}
+
+#[test]
+fn a_join_over_a_nullable_carrier_matches_kotlinc_bytes() {
+    let classes =
+        common::classes_against_kotlinc_module(&[("NullableCarrier.kt", NULLABLE_CARRIER)]);
+    let differences = classes.differences();
+    assert!(
+        differences.is_empty(),
+        "classes differ from kotlinc's:\n\n{}",
+        differences.join("\n\n")
+    );
+}
