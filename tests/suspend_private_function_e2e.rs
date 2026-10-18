@@ -63,3 +63,33 @@ const LOOP: &str = "import kotlin.coroutines.*\n\
 fn a_private_suspend_loop_after_an_inlined_lambda_runs() {
     common::expect_box_ok_with_stdlib(LOOP, "a private suspend loop after an inlined lambda");
 }
+
+/// A lambda the compiler lifts to a private suspend function takes a captured `var` as its `Ref`
+/// cell. The continuation re-enters through the `access$` bridge with a placeholder of that cell's
+/// type, and names the cell in its enclosing-method descriptor.
+const LIFTED_MUTABLE_CAPTURE: &str = "import kotlin.coroutines.*\n\
+    interface Source { suspend fun consume(sink: Sink) }\n\
+    interface Sink { suspend fun send(item: Int) }\n\
+    inline fun source(crossinline action: suspend Sink.() -> Unit): Source = object : Source {\n\
+    \x20   override suspend fun consume(sink: Sink) { action(sink) }\n\
+    }\n\
+    suspend inline fun Source.forEachItem(crossinline action: suspend (Int) -> Unit) {\n\
+    \x20   consume(object : Sink { override suspend fun send(item: Int) = action(item) })\n\
+    }\n\
+    fun range(count: Int): Source = source { for (i in 1..count) send(i) }\n\
+    fun builder(c: suspend () -> Unit) {\n\
+    \x20   c.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+    }\n\
+    fun box(): String {\n\
+    \x20   var res = 0\n\
+    \x20   builder { range(4).forEachItem { res += it } }\n\
+    \x20   return if (res == 10) \"OK\" else \"fail $res\"\n\
+    }\n";
+
+#[test]
+fn a_lifted_suspend_function_re_enters_with_its_shared_capture_cell() {
+    common::expect_box_ok_with_stdlib(
+        LIFTED_MUTABLE_CAPTURE,
+        "a lifted suspend function with a mutable capture",
+    );
+}

@@ -74,7 +74,7 @@ pub(super) fn route(
     };
     let function = &ir.functions[fid as usize];
     let name = function.name.clone();
-    let declared_params = function.params.clone();
+    let declared_params = super::physical_parameters(ir, fid, &function.params);
     let unit_return = route.context.orig_rets[fid as usize] == Ty::Unit;
 
     let fake_continuations = unintercepted_continuation_reads(ir, body);
@@ -139,10 +139,10 @@ pub(super) fn route(
             Some(owner) => (
                 crate::jvm::suspend_impls::suspend_impl_name(&name),
                 std::iter::once(Ty::obj_name(owner))
-                    .chain(function.params.iter().copied())
+                    .chain(declared_params)
                     .collect(),
             ),
-            None => (name, function.params.clone()),
+            None => (name, declared_params),
         };
     // The arrays the transformer computes replace these when the continuation class is written.
     route.outputs.continuation_metadata.insert(

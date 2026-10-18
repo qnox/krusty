@@ -12,6 +12,32 @@ use crate::ir::{
 };
 use crate::types::{type_name, Ty, TypeName};
 
+/// Physical JVM type of one suspend declaration parameter. Shared mutable captures remain their
+/// source element type in common IR and carry a sparse marker; every coroutine layout consumer must
+/// apply that marker identically so pre-normalization scope snapshots and final spill fields agree.
+pub(super) fn suspend_parameter_ty(
+    ir: &IrFile,
+    function: u32,
+    parameter: usize,
+    semantic: Ty,
+) -> Ty {
+    ir.shared_capture_parameters
+        .get(&(function, parameter as u32))
+        .map(crate::jvm::shared_captures::holder_ty)
+        .unwrap_or(semantic)
+}
+
+/// The physical types of `function`'s leading `semantic` parameters: a shared mutable capture is
+/// its `Ref` cell. The continuation's re-entry arguments, the member descriptor it calls, and its
+/// enclosing-method descriptor all take these, as the emitted method and its `access$` bridge do.
+pub(super) fn physical_parameters(ir: &IrFile, function: u32, semantic: &[Ty]) -> Vec<Ty> {
+    semantic
+        .iter()
+        .enumerate()
+        .map(|(parameter, ty)| suspend_parameter_ty(ir, function, parameter, *ty))
+        .collect()
+}
+
 /// The instance receiver captured by a continuation and the exact class owner used to re-enter a
 /// class-owned static function. A function has exactly one of these physical receiver routes.
 pub(super) fn reentry_owners(ir: &IrFile, function: u32) -> (Option<TypeName>, Option<TypeName>) {
