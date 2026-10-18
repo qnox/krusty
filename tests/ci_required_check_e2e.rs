@@ -151,6 +151,22 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
             && !ci.contains("needs:"),
         "coverage must start on its own runner without waiting for lint: {ci}"
     );
+    let coverage = ci
+        .find("run: just coverage-gate\n")
+        .expect("the coverage job runs its gate");
+    let release_candidate = ci
+        .find("- name: select the current master release candidate\n")
+        .expect("coverage selects a release candidate");
+    assert!(
+        coverage < release_candidate
+            && ci.contains(
+                "release_candidate: ${{ steps.release_candidate.outputs.publish }}\n"
+            )
+            && ci.contains(
+                "if: github.event_name == 'push' && github.ref == 'refs/heads/master'\n        id: release_candidate\n        run: scripts/release-publisher.sh check >> \"$GITHUB_OUTPUT\"\n"
+            ),
+        "release packaging must use the publisher's current-tip check only after successful coverage: {ci}"
+    );
     assert!(
         lint.contains("run: just lint\n")
             && !lint.contains("coverage-gate")
@@ -161,10 +177,11 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     let conformance = job(&workflow, "conformance");
     let klib_conformance = job(&workflow, "conformance-klib");
     assert!(
-        conformance.contains("    needs: [build-conformance-bin, build-tool-bins, versions]\n")
+        conformance.contains("    needs: [build-conformance-bin, build-tool-bins]\n")
             && conformance.contains("      fail-fast: false\n")
-            && conformance
-                .contains("        version: ${{ fromJson(needs.versions.outputs.matrix) }}\n")
+            && conformance.contains(
+                "        version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}\n"
+            )
             && conformance.contains("        target: [jvm]\n")
             && conformance.contains("    steps: &conformance-steps\n")
             && !conformance.contains("build-klib-test-bins"),
@@ -172,7 +189,7 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     );
     assert!(
         klib_conformance.contains(
-            "    needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins, versions]\n"
+            "    needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins]\n"
         ) && klib_conformance.contains("        target: [native, wasm]\n")
             && klib_conformance.contains("    steps: *conformance-steps\n"),
         "Native and Wasm wait for focused KLIB binaries while reusing the shared inventory: {klib_conformance}"
@@ -247,8 +264,17 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
         tool_build.contains("cargo build --profile gate -p krusty-cli")
             && tool_build.contains("bin=$(just krusty-build-tests)")
             && tool_build.contains("name: tool-bins\n")
+            && tool_build.contains("matrix: ${{ steps.versions.outputs.matrix }}\n")
+            && tool_build.contains("max: ${{ steps.versions.outputs.max }}\n")
+            && tool_build.contains("id: versions\n")
+            && tool_build.contains("echo \"matrix=$(just matrix-json)\"")
+            && tool_build.contains("echo \"max=$(just max-version)\"")
             && !tool_build.contains("needs:"),
-        "one independent producer owns the compiler and Gradle test binaries: {tool_build}"
+        "one independent producer owns the compiler, Gradle test binaries, and version inventory: {tool_build}"
+    );
+    assert!(
+        !workflow.contains("\n  versions:\n"),
+        "the version inventory must not consume a separate runner"
     );
     for artifact in ["conformance-bin", "klib-test-bins", "tool-bins"] {
         assert!(
@@ -261,7 +287,7 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
         "KLIB semantics are ordinary conformance coverage, not a standalone job"
     );
     for needle in [
-        "if: matrix.target == 'native' && matrix.version == needs.versions.outputs.max && (success() || steps.native_box.outcome == 'failure' || steps.native_focused.outcome == 'failure')",
+        "if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max && (success() || steps.native_box.outcome == 'failure' || steps.native_focused.outcome == 'failure')",
         "timeout 600s ./klib-e2e-tests klib_ --nocapture",
         "timeout 600s ./klib-e2e-tests value_class_declaration_e2e --nocapture",
         "native_value_classes_e2e::a_value_class_needs_no_jvm_inline_on_native --nocapture",
@@ -274,7 +300,7 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     }
     assert!(
         conformance.contains(
-            "if: matrix.target == 'wasm' || (matrix.target == 'native' && matrix.version != needs.versions.outputs.max)"
+            "if: matrix.target == 'wasm' || (matrix.target == 'native' && matrix.version != needs.build-tool-bins.outputs.max)"
         ) && conformance.contains(
             "klib_libraries::tests::implementation_coverage:: --nocapture"
         ),
@@ -290,11 +316,28 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
         focused < enforcement,
         "a corpus failure must not skip the independently folded KLIB coverage"
     );
+    let release_build = job(&workflow, "build-release");
     assert!(
-        job(&workflow, "release").contains(
-            "    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, versions, build-release]\n"
-        ),
-        "master release keeps its broader prerequisites"
+        release_build.contains("    needs: [ci]\n")
+            && release_build.contains(
+                "    if: github.ref == 'refs/heads/master' && needs.ci.outputs.release_candidate == 'true'\n"
+            )
+            && release_build.contains("      max-parallel: 2\n"),
+        "only the current covered master commit may occupy at most two release runners: {release_build}"
+    );
+    let release = job(&workflow, "release");
+    assert!(
+        release.contains(
+            "    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, build-tool-bins, build-release]\n"
+        ) && release.contains("run: scripts/release-publisher.sh check >> \"$GITHUB_OUTPUT\"\n"),
+        "master release keeps its broader prerequisites and rechecks under the publisher lock: {release}"
+    );
+    assert_eq!(
+        workflow
+            .matches("scripts/release-publisher.sh check >> \"$GITHUB_OUTPUT\"")
+            .count(),
+        2,
+        "coverage filters stale packaging early and release independently rechecks before publishing"
     );
 }
 

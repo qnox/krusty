@@ -3,6 +3,7 @@
 
 mod classifier_declarations;
 mod deprecation;
+mod diagnostic_rendering;
 mod intersection;
 pub(crate) use intersection::declaration_approximation;
 mod overridden_declaration;
@@ -1604,26 +1605,17 @@ impl Ty {
             Ty::Nothing => "Nothing".to_string(),
             Ty::Error => "<error>".to_string(),
             Ty::Fun(signature) => {
-                let parameters = signature
-                    .params
-                    .iter()
-                    .map(|parameter| {
-                        parameter.source_name_with_classifier_in(
-                            context,
-                            type_parameter,
-                            classifier,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let suspend = if signature.suspend { "suspend " } else { "" };
-                format!(
-                    "{suspend}({parameters}) -> {}",
-                    signature.ret.source_name_with_classifier_in(
-                        context,
-                        type_parameter,
-                        classifier
-                    )
+                diagnostic_rendering::function_type(signature, context, type_parameter, classifier)
+            }
+            // A type parameter's nullability marker belongs to its name, ahead of any owner text a
+            // diagnostic appends: `T? (of class Box<T>)`, `T! (of class Box<T>)`.
+            Ty::Nullable(inner) | Ty::PlatformNullable(inner)
+                if matches!(*inner, Ty::TyParam(..)) =>
+            {
+                diagnostic_rendering::qualified_type_parameter(
+                    *inner,
+                    matches!(self, Ty::Nullable(_)),
+                    type_parameter,
                 )
             }
             Ty::Nullable(inner) => intersection::spell_nullable(
@@ -1632,10 +1624,7 @@ impl Ty {
                 true,
             ),
             Ty::PlatformNullable(inner) => {
-                format!(
-                    "{}!",
-                    inner.source_name_with_classifier_in(context, type_parameter, classifier)
-                )
+                diagnostic_rendering::platform_type(*inner, context, type_parameter, classifier)
             }
             Ty::InProjection(inner) => match *inner {
                 Ty::OutProjection(conflicting) => format!(

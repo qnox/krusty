@@ -6,9 +6,10 @@
 //! function is checked; a formal leaking out through an unsolved call keeps its bare name.
 
 use super::{Checker, CheckerScope};
-use crate::ast::{ClassDecl, ClassKind, FunDecl, PropDecl, TypeRef};
+use crate::ast::{ClassDecl, ClassKind, DeclId, FunDecl, PropDecl, TypeRef};
 use crate::fx_hash::HashMap;
 use crate::libraries::LibraryType;
+use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName, TypeVariance};
 
 /// kotlinc's disambiguation of same-named type parameters within one diagnostic: when two distinct
@@ -176,16 +177,6 @@ pub(super) fn mentioned_type_parameters(ty: Ty, mentioned: &mut Vec<&'static str
     }
 }
 
-fn nullable_type_parameter(ty: Ty) -> Option<&'static str> {
-    let Ty::Nullable(inner) = ty else {
-        return None;
-    };
-    let Ty::TyParam(parameter, _) = *inner else {
-        return None;
-    };
-    Some(parameter)
-}
-
 /// The owner wording of a classifier's own formals from its provider-normalized declaration,
 /// whichever module or library declares it: `class B<T : Number>`, `interface I<in T>`.
 pub(super) fn classifier_type_parameter_owner(
@@ -213,7 +204,42 @@ pub(super) fn classifier_type_parameter_owner(
 }
 
 impl Checker<'_> {
-    /// Record the owner wording of a function's formals, bound in `scope`.
+    /// Classifiers contributed by stable enclosing `inner` ownership edges, nearest first.
+    ///
+    /// A retained inner classifier can be checked as a bounded root, without its source owner on
+    /// the live lexical-context stack. The stable declaration graph is authoritative for that
+    /// missing ancestry; generated classifier-name segments are never interpreted as owners.
+    fn active_inner_owner_classifiers(&self, parser: DeclId) -> Vec<TypeName> {
+        let Some((active, index)) = self.active_declarations.zip(self.resolved_index) else {
+            return Vec::new();
+        };
+        let Some(mut current) = active.canonical_classifier_declaration(parser, index) else {
+            return Vec::new();
+        };
+        let mut owners = Vec::new();
+        loop {
+            let Some(header) = index.declaration_header(current) else {
+                break;
+            };
+            if !header.flags.has(crate::fir::DeclarationFlags::INNER) {
+                break;
+            }
+            let Some(owner) = header.owner else {
+                break;
+            };
+            let Some(classifier) = index.classifier_identity(owner) else {
+                break;
+            };
+            if !owners.contains(&classifier) {
+                owners.push(classifier);
+            }
+            current = owner;
+        }
+        owners
+    }
+
+    /// Record the owner wording of a function's formals, bound in `scope`, returning the scoped
+    /// publication token that restores any enclosing diagnostic state when the check ends.
     pub(super) fn publish_function_type_parameter_owner(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -334,11 +360,14 @@ impl Checker<'_> {
         self.publish_generic_signature_owner(signature, owner, &unresolved)
     }
 
-    /// Record the owner wording of a classifier's formals, bound in `scope`.
+    /// Record the owner wording of a classifier's formals, bound in `scope`. An inner or local
+    /// classifier `owner` also lists the enclosing formals it captures, innermost declaration first,
+    /// as `Outer(T)` with their declared variance and bounds: `class E<out S, out Outer(T) : Number>`.
     pub(super) fn publish_class_type_parameter_owner(
         &mut self,
         scope: &CheckerScope<'_>,
         class: &ClassDecl,
+        owner: Option<TypeName>,
     ) {
         if class.type_params.is_empty() {
             return;
@@ -347,17 +376,117 @@ impl Checker<'_> {
             ClassKind::Interface => "interface",
             ClassKind::Class | ClassKind::Enum | ClassKind::Annotation => "class",
         };
-        let formals = self.type_parameter_owner_formals(
+        let mut formals = self.type_parameter_owner_formals(
             scope,
             &class.type_params,
             class.type_param_bounds(),
             class.type_param_variances(),
         );
+        if let Some(captured) = owner.and_then(|owner| self.captured_owner_formals(owner)) {
+            formals.push_str(&captured);
+        }
         self.publish_type_parameter_owner(
             scope,
             &class.type_params,
-            format!("{keyword} {}<{formals}>", class.name),
+            // A nested or local classifier's declaration name carries its parser path (`A.E`);
+            // kotlinc names the classifier itself.
+            format!(
+                "{keyword} {}<{formals}>",
+                class.name.rsplit('.').next().unwrap_or(&class.name)
+            ),
         );
+    }
+
+    /// Record the owner wording of formals declared by the classifiers enclosing parser
+    /// declaration `d`, from their provider-normalized classifier records. The live lexical stack
+    /// supplies ordinary source ancestry; stable declaration-owner edges supply an inner
+    /// classifier checked as a retained root. Generated classifier-name segments are not ancestry.
+    pub(super) fn publish_enclosing_type_parameter_owners(
+        &mut self,
+        d: crate::ast::DeclId,
+        owner: TypeName,
+    ) {
+        let source = self.fed_source();
+        let enclosing = self
+            .lexical_class_context
+            .iter()
+            .copied()
+            .filter(|classifier| *classifier != owner)
+            .chain(self.active_inner_owner_classifiers(d))
+            .fold(Vec::new(), |mut classifiers, classifier| {
+                if !classifiers.contains(&classifier) {
+                    classifiers.push(classifier);
+                }
+                classifiers
+            });
+        let mut published = Vec::new();
+        for classifier in enclosing {
+            let Some(record) = source.classifier(classifier) else {
+                continue;
+            };
+            let parameters = &record.type_parameters;
+            let own = &parameters.type_params()[..record.own_type_parameter_count];
+            if own.is_empty()
+                || own
+                    .iter()
+                    .all(|parameter| self.type_parameter_owners.contains_key(parameter.as_str()))
+            {
+                continue;
+            }
+            let formals = own
+                .iter()
+                .zip(parameters.type_param_variances())
+                .zip(parameters.type_param_bounds())
+                .map(|((parameter, variance), bounds)| {
+                    owner_formal(
+                        crate::types::type_parameter_source_name(parameter),
+                        *variance,
+                        bounds,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let captured = self.captured_owner_formals(classifier).unwrap_or_default();
+            let keyword = if record.is_interface() {
+                "interface"
+            } else {
+                "class"
+            };
+            // The classifier's own name: a nested classifier's last segment is `Outer$Inner`.
+            let segment = classifier.segment_ref();
+            let name = segment.rsplit('$').next().unwrap_or(segment);
+            let wording = format!("{keyword} {name}<{formals}{captured}>");
+            for parameter in own {
+                published.push((parameter.clone(), wording.clone()));
+            }
+        }
+        for (parameter, wording) in published {
+            self.type_parameter_owners
+                .entry(crate::types::intern(&parameter))
+                .or_insert(wording);
+        }
+    }
+
+    /// The `, Outer(T)` wording of the formals classifier `owner` captures from enclosing
+    /// declarations, which its classifier record lists after its own.
+    fn captured_owner_formals(&self, owner: TypeName) -> Option<String> {
+        let record = self.fed_source().classifier(owner)?;
+        let parameters = &record.type_parameters;
+        let captured = parameters
+            .type_params()
+            .iter()
+            .zip(parameters.type_param_variances())
+            .zip(parameters.type_param_bounds())
+            .skip(record.own_type_parameter_count)
+            .map(|((parameter, variance), bounds)| {
+                let source = crate::types::type_parameter_source_name(parameter);
+                format!(
+                    ", {}",
+                    owner_formal(&format!("Outer({source})"), *variance, bounds)
+                )
+            })
+            .collect::<String>();
+        Some(captured)
     }
 
     /// `ty` as a diagnostic names it: a declaration-owned type parameter with its owner
@@ -470,5 +599,25 @@ impl Checker<'_> {
             &bounds,
             variances,
         )
+    }
+}
+
+/// One formal of an owner wording: its variance, name and declared bounds (the default `Any?`
+/// omitted), as `out T : Number`.
+fn owner_formal(name: &str, variance: TypeVariance, bounds: &[Ty]) -> String {
+    let variance = match variance {
+        TypeVariance::In => "in ",
+        TypeVariance::Out => "out ",
+        TypeVariance::Invariant => "",
+    };
+    let bounds = bounds
+        .iter()
+        .filter(|bound| **bound != Ty::nullable(Ty::obj("kotlin/Any")))
+        .map(|bound| bound.source_name())
+        .collect::<Vec<_>>();
+    if bounds.is_empty() {
+        format!("{variance}{name}")
+    } else {
+        format!("{variance}{name} : {}", bounds.join(", "))
     }
 }

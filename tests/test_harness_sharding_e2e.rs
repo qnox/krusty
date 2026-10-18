@@ -699,7 +699,7 @@ fn ci_starts_jvm_without_waiting_for_focused_klib_binaries() {
         .find("  conformance:\n")
         .expect("workflow has one supported-version conformance matrix");
     assert!(
-        workflow.contains("version: ${{ fromJson(needs.versions.outputs.matrix) }}"),
+        workflow.contains("version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}"),
         "conformance job must expand every supported Kotlin version"
     );
     assert!(
@@ -739,7 +739,7 @@ fn ci_starts_jvm_without_waiting_for_focused_klib_binaries() {
         .expect("each version's JVM row runs every non-box conformance test");
     let release = workflow
         .find(
-            "needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, versions, build-release]",
+            "needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, build-tool-bins, build-release]",
         )
         .expect(
             "release waits on combined conformance plus the exact tested Gradle artifact and matrix",
@@ -941,12 +941,12 @@ fn ci_starts_jvm_without_waiting_for_focused_klib_binaries() {
         "a Gradle lane runs the prebuilt krusty-build tests"
     );
     assert!(
-        workflow.contains("needs: [build-conformance-bin, build-tool-bins, versions]")
+        workflow.contains("needs: [build-conformance-bin, build-tool-bins]")
             && workflow.contains(
-                "needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins, versions]"
+                "needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins]"
             )
             && workflow.contains("needs: [build-tool-bins, build-gradle-plugin]")
-            && workflow.contains("needs: [build-tool-bins, versions]"),
+            && workflow.contains("needs: [build-tool-bins]"),
         "JVM starts before focused KLIB binaries while each other consumer waits only on its artifact families"
     );
     assert!(

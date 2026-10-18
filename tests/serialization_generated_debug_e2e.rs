@@ -31,6 +31,10 @@ fn method_lines(text: &str, member: &str) -> Vec<String> {
 }
 
 fn comparison(class: &str) -> super::common::ReferenceComparison {
+    comparison_of("SerializeElementLines", SOURCE, class)
+}
+
+fn comparison_of(name: &str, source: &str, class: &str) -> super::common::ReferenceComparison {
     let plugin = common::kotlinc_lib_dir()
         .unwrap_or_else(|| panic!("reference compiler must be provisioned for this regression"))
         .join("kotlinx-serialization-compiler-plugin.jar");
@@ -52,8 +56,8 @@ fn comparison(class: &str) -> super::common::ReferenceComparison {
     });
     let classpath = [runtime, common::stdlib_jar()];
     compare_with_kotlinc_plugin(
-        "SerializeElementLines",
-        SOURCE,
+        name,
+        source,
         class,
         &classpath,
         "25",
@@ -115,4 +119,39 @@ fn only_serialize_closes_on_the_declarations_end_line() {
         expected,
         "write$Self"
     );
+}
+
+/// `write$Self` opens on the class's start line at its first instruction. A class whose element
+/// serializers are cached starts with the cache read, and one whose first element has no default
+/// starts with that element's unguarded write; neither may leave its first instructions without a
+/// line.
+#[test]
+fn write_self_opens_on_the_class_line_at_its_first_instruction() {
+    let source = "import kotlinx.serialization.Serializable\n\
+                  \n\
+                  @Serializable\n\
+                  data class Cached(\n\
+                  \x20   val names: List<String>,\n\
+                  \x20   val count: Int = 1,\n\
+                  )\n\
+                  \n\
+                  @Serializable\n\
+                  data class Leading(\n\
+                  \x20   val name: String,\n\
+                  \x20   val count: Int = 1,\n\
+                  )\n";
+    for (class, expected) in [
+        ("Cached", ["line 3: 0", "line 6: 46", "line 3: 47"]),
+        ("Leading", ["line 9: 0", "line 12: 31", "line 9: 32"]),
+    ] {
+        let compared = comparison_of("WriteSelfOpeningLine", source, class);
+        let reference = method_lines(&compared.reference, "write$Self");
+        assert_eq!(reference, expected, "kotlinc's {class}.write$Self");
+        assert_eq!(
+            method_lines(&compared.krusty, "write$Self"),
+            reference,
+            "{class}.write$Self"
+        );
+        assert_eq!(compared.krusty_bytes, compared.reference_bytes, "{class}");
+    }
 }

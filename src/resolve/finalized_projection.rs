@@ -531,6 +531,7 @@ fn abbreviation_spelling(
         alias: Some(abbreviation.alias),
         args: super::type_spellings::expansion_arg_spellings(template, &alias_args),
         alias_args,
+        unsafe_variance: template.is_some_and(|(rhs, _, _)| rhs.unsafe_variance),
         ..Spelled::default()
     };
     abbreviation

@@ -70,6 +70,17 @@ impl Checker<'_> {
         })
     }
 
+    /// Check every declared bound of one callable after its type-parameter scope is installed.
+    pub(super) fn check_callable_type_parameter_bounds(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        bounds: &[(String, TypeRef)],
+    ) {
+        for (_, bound) in bounds {
+            self.check_callable_type_parameter_bound(scope, bound);
+        }
+    }
+
     /// Run `resolve` with the outermost application of `reference` exempt from the bound check.
     pub(super) fn with_unchecked_outermost_bounds<R>(
         &mut self,
@@ -519,6 +530,11 @@ impl<'a> Checker<'a> {
                 .zip(header.interfaces.iter())
                 .enumerate()
             {
+                self.record_finalized_supertype(
+                    reference,
+                    resolved.get(),
+                    spellings.supertype(index),
+                );
                 self.check_finalized_type_bounds(
                     reference,
                     resolved.get(),
@@ -542,6 +558,7 @@ impl<'a> Checker<'a> {
                 fun_params: Vec::new(),
                 fun_context_count: 0,
             };
+            self.record_finalized_supertype(&reference, superclass.get(), &spellings.superclass);
             self.check_finalized_type_bounds(&reference, superclass.get(), &spellings.superclass);
         }
     }
@@ -572,7 +589,11 @@ impl<'a> Checker<'a> {
                         .and_then(|property| property.extension_receiver)
                 });
             if let Some(finalized) = finalized {
-                self.check_finalized_type_bounds(reference, finalized.get(), &spellings.receiver);
+                self.record_finalized_declaration_type(
+                    reference,
+                    finalized.get(),
+                    &spellings.receiver,
+                );
             }
         }
         let Some(signature) = index.signature(declaration) else {
@@ -585,16 +606,20 @@ impl<'a> Checker<'a> {
                 .enumerate()
             {
                 let finalized = finalized.get();
-                let declared = if *is_vararg {
-                    finalized.non_null().array_read_elem().unwrap_or(finalized)
-                } else {
-                    finalized
-                };
-                self.check_finalized_type_bounds(reference, declared, spellings.param(position));
+                self.record_finalized_parameter_type(
+                    reference,
+                    *is_vararg,
+                    finalized,
+                    spellings.param(position),
+                );
             }
         }
         if let Some(reference) = ret {
-            self.check_finalized_type_bounds(reference, signature.result.get(), &spellings.ret);
+            self.record_finalized_declaration_type(
+                reference,
+                signature.result.get(),
+                &spellings.ret,
+            );
         }
     }
 
@@ -627,9 +652,7 @@ impl<'a> Checker<'a> {
             function.reified_type_params.contains(name)
         });
         let owned = self.publish_function_type_parameter_owner(&method_scope, function);
-        for (_, bound) in &function.type_param_bounds {
-            self.check_callable_type_parameter_bound(&method_scope, bound);
-        }
+        self.check_callable_type_parameter_bounds(&method_scope, &function.type_param_bounds);
         let value_parameters = function
             .params
             .iter()
@@ -679,9 +702,7 @@ impl<'a> Checker<'a> {
             );
         property_scope.declare_property_tparams(property, &parameters);
         let owned = self.publish_property_type_parameter_owner(&property_scope, property);
-        for (_, bound) in &property.type_param_bounds {
-            self.check_callable_type_parameter_bound(&property_scope, bound);
-        }
+        self.check_callable_type_parameter_bounds(&property_scope, &property.type_param_bounds);
         self.check_bodyless_member_bounds(
             declaration,
             property.receiver.as_ref(),
