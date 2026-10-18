@@ -19,7 +19,7 @@ use super::function_lowering::{
 };
 use super::ir_builtins::IrBuiltinOperators;
 use crate::fir::ExternalCallableId;
-use crate::ir::{Callee, ExprId, FunId, IrFile, IrIntrinsic};
+use crate::ir::{Callee, ExprId, FunId, IrFile};
 use crate::klib_libraries::{
     KlibCalleeOrigin, KlibDeclarationBodies, KlibIntrinsicCallable, KlibIntrinsicFacts,
 };
@@ -106,11 +106,12 @@ struct PendingBody<'a> {
 }
 
 impl DependencyBodyUnit {
-    /// Whether this selected declaration has the exact scalar boundary of a reinterpret wrapper.
-    /// This is a semantic type/receiver contract, not a declaration-name allowlist. It prevents an
-    /// arbitrary stdlib caller which happens to reach a reinterpret instruction (for example a
-    /// collection hash operation) from becoming executable support code.
-    pub(crate) fn is_reinterpret_root_candidate(
+    /// Whether this selected declaration has the exact scalar boundary of an instruction wrapper:
+    /// a non-member whose operands are scalars of an instruction class and whose result is such a
+    /// scalar or `Boolean`. This is a semantic type/receiver contract, not a declaration-name
+    /// allowlist. It prevents an arbitrary stdlib caller which happens to reach an instruction (for
+    /// example a collection hash operation) from becoming executable support code.
+    pub(crate) fn is_scalar_root_candidate(
         callable: KlibBodyCallable<'_>,
         bodies: &KlibDeclarationBodies,
     ) -> bool {
@@ -135,13 +136,11 @@ impl DependencyBodyUnit {
             }
             operands.remove(context_count);
         }
-        matches!(
-            (operands.as_slice(), ret),
-            ([Ty::Float], Ty::Int)
-                | ([Ty::Int], Ty::Float)
-                | ([Ty::Double], Ty::Long)
-                | ([Ty::Long], Ty::Double)
-        )
+        !operands.is_empty()
+            && operands
+                .iter()
+                .all(|operand| crate::libraries::ScalarClass::of(*operand).is_some())
+            && (ret == Ty::Boolean || crate::libraries::ScalarClass::of(ret).is_some())
     }
 
     /// The function holding `callable`'s body, lowering it, and every body it reaches through
@@ -471,7 +470,30 @@ impl<'s> Linker<'_, 's> {
             let selected = selected_callable_for_header(selected, None, arena, declaration)
                 .map_err(&callee_declined)?;
             self.cross_check_intrinsic(callee, selected, intrinsic)?;
-            return linked_intrinsic(intrinsic);
+            // A target intrinsic stays an ordinary call of its declaration; only the target's
+            // emitter realizes it, through the provider fact frozen on the external handle. The
+            // authenticated record, not the serialized header, fixes the call's shape.
+            let Some(emitted) = self.sources.externals.get(&identity) else {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "an authenticated target intrinsic has no provider external handle".to_owned(),
+                ));
+            };
+            return Ok(LinkedCallee {
+                callee: Callee::External {
+                    target: emitted.target(),
+                    default_provider: None,
+                    params: intrinsic.params().to_vec(),
+                    ret: intrinsic.ret(),
+                    substitutions: Vec::new(),
+                    defaults: Vec::new(),
+                    extension_receiver_parameter: None,
+                },
+                receiver: intrinsic.receiver(),
+                params: intrinsic.params().to_vec(),
+                ret: intrinsic.ret(),
+                context_count: 0,
+                singleton_dispatch: None,
+            });
         }
         if let Some(&emitted) = self.sources.externals.get(&identity) {
             let selected = selected_callable_for_header(
@@ -556,24 +578,20 @@ impl<'s> Linker<'_, 's> {
             .callee_origin(&self.active_module, &signature)
         {
             KlibCalleeOrigin::Exact(identity) => Ok(identity),
-            KlibCalleeOrigin::Ambiguous => {
-                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
-                    callee.clone(),
-                )))
-            }
+            KlibCalleeOrigin::Ambiguous => Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(
+                Box::new(callee.clone()),
+            )),
             KlibCalleeOrigin::Missing if callee.declaration().segments().len() > 1 => {
                 // A member no library serializes is, in a complete library set, a fake override:
                 // its real declaration is reached through serialized class declarations, which
                 // lowering does not follow yet.
-                return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                Err(KlibBodyDeclineReason::UnsupportedOperation(
                     "a call of a member no library serializes, such as a fake override",
-                ));
+                ))
             }
-            KlibCalleeOrigin::Missing => {
-                return Err(KlibBodyDeclineReason::UndeclaredCallee(Box::new(
-                    callee.clone(),
-                )))
-            }
+            KlibCalleeOrigin::Missing => Err(KlibBodyDeclineReason::UndeclaredCallee(Box::new(
+                callee.clone(),
+            ))),
         }
     }
 
@@ -646,6 +664,7 @@ impl<'s> Linker<'_, 's> {
 /// singleton objects may inherit the same declaration identity, but only the variant whose
 /// semantic receiver matches this body (and an already-emitted contract, when present) can
 /// authenticate the call. Declaration-shape conflicts remain ambiguous in `KlibCalleeFacts`.
+#[derive(Clone, Copy)]
 enum SelectedKlibCallables<'callable, 'facts> {
     One(KlibBodyCallable<'callable>),
     Variants(&'facts [KlibBodyCallable<'callable>]),
@@ -699,55 +718,6 @@ fn selected_callable_for_header<'callable>(
                 "a selected KLIB declaration has no checked call-edge variant".to_owned(),
             )
         })
-    })
-}
-
-fn linked_intrinsic(
-    intrinsic: &KlibIntrinsicCallable,
-) -> Result<LinkedCallee, KlibBodyDeclineReason> {
-    linked_intrinsic_parts(
-        intrinsic.operation(),
-        intrinsic.receiver(),
-        intrinsic.params(),
-        intrinsic.ret(),
-    )
-}
-
-fn linked_intrinsic_parts(
-    operation: crate::libraries::CompilerIntrinsic,
-    receiver: Option<crate::types::Ty>,
-    params: &[crate::types::Ty],
-    ret: crate::types::Ty,
-) -> Result<LinkedCallee, KlibBodyDeclineReason> {
-    Ok(LinkedCallee {
-        callee: Callee::Intrinsic {
-            operation: match operation {
-                crate::libraries::CompilerIntrinsic::ReinterpretBits => {
-                    let from = match (receiver, params) {
-                        (Some(receiver), []) => receiver,
-                        (None, [parameter]) => *parameter,
-                        _ => {
-                            return Err(KlibBodyDeclineReason::SignatureMismatch(
-                                "an intrinsic reinterpretation does not have exactly one receiver or parameter"
-                                    .to_owned(),
-                            ))
-                        }
-                    };
-                    IrIntrinsic::ReinterpretBits { from, to: ret }
-                }
-                _ => {
-                    return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                        "an authenticated KLIB intrinsic operation not lowered yet",
-                    ))
-                }
-            },
-            ret,
-        },
-        receiver,
-        params: params.to_vec(),
-        ret,
-        context_count: 0,
-        singleton_dispatch: None,
     })
 }
 

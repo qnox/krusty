@@ -16636,10 +16636,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   input order never selects one.
   An executable dependency-support root is selected only when its own serialized body directly
   calls an intrinsic declaration authenticated from the same selected inputs, or when one exact
-  immediate callee makes that direct call, and its serialized boundary is exactly one supported
-  scalar reinterpret pair (`Float`/`Int` or `Double`/`Long`) after an authenticated inert companion
-  receiver is removed. An ordinary member or a collection operation cannot become support merely
-  because its implementation happens to inspect floating-point bits. This single admitted wrapper
+  immediate callee makes that direct call, and its serialized boundary is an instruction wrapper's
+  after an authenticated inert companion receiver is removed: a non-member whose operands are
+  `Int`, `UInt`, `Long`, `ULong`, `Float` or `Double` and whose result is one of those or
+  `Boolean` (`kotlin.math.sqrt`, `Long.countLeadingZeroBits`, `Float.toRawBits`). An ordinary member
+  or a collection operation cannot become support merely because its implementation happens to
+  inspect floating-point bits or reach an instruction. Test
+  `klib_lowering::tests::wasm_math_wrappers_are_scalar_roots_closing_through_one_instruction` pins
+  four Wasm wrappers, each closing through exactly one ordinary call of its authenticated instruction. A root whose body,
+  or a body it reaches, uses a form KLIB lowering does not model yet is simply not support code:
+  its unit is left as it was and the backend declines the call
+  (`kotlin_box_wasm_conformance::wasm_declines_an_instruction_wrapper_whose_body_lowering_does_not_model`).
+  Only a body that disagrees with its own selected declaration is an internal error. This single admitted wrapper
   layer lets a target
   stdlib's semantic wrapper close over its instruction wrapper without making the support relation
   transitive. A caller two edges away remains owned by its ordinary target realization; common
@@ -16735,7 +16743,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   does not carry that package evidence and is rejected rather than gaining authority from its
   annotation alone. Native's scalar bit reinterpretations require the exact string-valued
   `kotlin.native.internal.TypedIntrinsic(kind = "REINTERPRET")` application; Wasm's require the exact
-  `kotlin.wasm.internal.WasmOp` string operation. Native also authenticates the bodyless floating
+  `kotlin.wasm.internal.WasmOp` string operation. Every other Wasm scalar `WasmOp` (integral and
+  floating arithmetic, bit counts, rotations, signed and unsigned division, remainder and
+  comparison, width changes, conversions and saturating truncations: 117 operations) is a
+  `ScalarInstruction` whose operation table fixes the operand class (`I32_*` takes `Int` or `UInt`,
+  `I64_*` `Long` or `ULong`, `F32_*` `Float`, `F64_*` `Double`, and a conversion its spelled
+  source). Such a declaration must be a non-member in exactly `kotlin` or `kotlin.wasm.internal`,
+  take the instruction's arity of operands of one type (an extension receiver first), and return
+  the type the instruction admits (`ScalarInstruction::admits`); a primitive member such as
+  `Int.plus` stays the shared builtin operator. The instruction has the target instruction's own
+  semantics: `wasm_i32_div_s` traps on a zero divisor, which the stdlib guards before calling it.
+  The instruction is an emitter fact only: checked FIR and common IR keep a source call of a public
+  one (`Int.countLeadingZeroBits()`) and a serialized body's call of an internal one
+  (`wasm_f64_sqrt`) as an ordinary call of the selected declaration through its provider handle,
+  and the Wasm emitter alone replaces that call with the operands and opcode it reads from the
+  frozen callable fact. Test
+  `klib_libraries::target_intrinsics::tests::wasm_scalar_instructions_require_their_operand_class_arity_and_package`
+  pins the accepted and rejected shapes, and `kotlin_box_wasm_conformance::wasm_bit_counts_run_as_the_stdlib_declared_instructions`
+  and `wasm_math_runs_through_emitted_stdlib_instruction_wrappers` run them.
+  A KLIB body's call of a numeric class's conversion member (`kotlin.Long.toInt()` …
+  `toDouble()` between `Byte`, `Short`, `Int`, `Long`, `Float` and `Double`) lowers as the source
+  conversion does, and Wasm realizes Kotlin's narrowing conversions: an integral value keeps its
+  low bits, a floating value rounds towards zero saturating at the result's bounds with NaN as
+  zero, and a `Double` becomes the nearest `Float`
+  (`kotlin_box_wasm_conformance::wasm_narrowing_numeric_conversions_wrap_and_saturate`).
+  Native also authenticates the bodyless floating
   predicates whose exact `kotlin.native.internal.GCUnsafeCall(callee = …)` entry is one of
   `Kotlin_Float_isNaN`, `Kotlin_Double_isNaN`, `Kotlin_Float_isInfinite`, or
   `Kotlin_Double_isInfinite`. Such a declaration must be an external package extension in exactly
@@ -16754,8 +16786,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   through the exact provider handle, and Native's ordinary external-call boundary consumes the
   predicate fact plus the recorded extension-receiver coordinate. They therefore never become
   dependency-support exports with invented bodies, and no target recovers them from the callable or
-  runtime-entry spelling. Checked FIR/IR carries both reinterpretation endpoint types; Native and
-  Wasm alone choose their physical bitcast instruction. Tests:
+  runtime-entry spelling. A bit reinterpretation is linked the same way: checked FIR and common IR
+  keep its call an ordinary call of the authenticated declaration, shaped by the provider's record,
+  and only the Native and Wasm emitters replace it with their physical bitcast instruction. Tests:
   `metadata::semantic::klib::tests::function_annotations_keep_string_arguments_on_both_declaration_views`,
   `klib_libraries::target_intrinsics::tests::wasm_reinterpret_operations_require_authority_package_payload_and_signature`,
   `native_reinterpret_declarations_have_their_exact_receiver_or_parameter_shape`,
