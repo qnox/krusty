@@ -62,6 +62,17 @@ impl ClassRoles for AnonymousClasses {
     }
 }
 
+/// A classpath whose class files declare exactly these classes SAM wrappers.
+struct SamWrapperClasses(&'static [&'static str]);
+
+impl ClassRoles for SamWrapperClasses {
+    fn regenerated_class(&self, internal: &str) -> Option<RegeneratedClass> {
+        self.0
+            .contains(&internal)
+            .then_some(RegeneratedClass::SamWrapper)
+    }
+}
+
 const OBJECTS: AnonymousClasses = AnonymousClasses(&["lib/A$f$1", "lib/B$f$2"]);
 
 /// Lines left as the callee's own.
@@ -478,11 +489,11 @@ fn intrinsic_rewrites_require_the_exact_jvm_method_shape() {
     // The exact marker is not refused here: the anonymous class it guards is copied and the
     // marker is removed. A different descriptor or an interface call is not that marker.
     reified.nodes = vec![method("needClassReification", "()V", false)];
-    assert_eq!(unsupported_shape(&reified, &NoClasses), None);
+    assert_eq!(unsupported_shape(&reified), None);
     reified.nodes = vec![method("needClassReification", "(I)V", false)];
-    assert_eq!(unsupported_shape(&reified, &NoClasses), None);
+    assert_eq!(unsupported_shape(&reified), None);
     reified.nodes = vec![method("needClassReification", "()V", true)];
-    assert_eq!(unsupported_shape(&reified, &NoClasses), None);
+    assert_eq!(unsupported_shape(&reified), None);
 
     let mut null_check = MethodNode::new(ACC_STATIC, "n", "(Ljava/lang/Object;)V");
     null_check.nodes = vec![
@@ -1029,7 +1040,7 @@ fn a_class_spelled_like_an_anonymous_object_is_not_regenerated() {
         op(0x57),
         op(0xb1),
     ];
-    assert!(!constructs_anonymous_object(&node, &NoClasses));
+    assert!(!constructs_regenerated_object(&node, &NoClasses));
     let mut objects = NumberingObjects::default();
     object_regeneration::regenerate_objects(
         &mut node,
@@ -1041,6 +1052,46 @@ fn a_class_spelled_like_an_anonymous_object_is_not_regenerated() {
     .expect("keeps the construction");
     assert!(objects.asked.is_empty());
     assert_eq!(constructions(&node), ["new lib/A$f$1", "init lib/A$f$1()V"]);
+}
+
+#[test]
+fn a_sam_wrapper_is_a_constructed_copy_but_not_an_anonymous_singleton() {
+    const WRAPPER: &str = "lib/LibKt$sam$i$java_util_function_Supplier$0";
+    let classes = SamWrapperClasses(&[WRAPPER]);
+    let mut construction = MethodNode::new(ACC_STATIC, "f", "()V");
+    construction.nodes = vec![
+        new(WRAPPER),
+        op(0x59),
+        init(WRAPPER, "()V"),
+        op(0x57),
+        op(0xb1),
+    ];
+    assert!(constructs_regenerated_object(&construction, &classes));
+    let mut objects = NumberingObjects::default();
+    object_regeneration::regenerate_objects(
+        &mut construction,
+        &Parameters::default(),
+        &[],
+        &classes,
+        &mut objects,
+    )
+    .expect("copies the SAM wrapper construction");
+    assert_eq!(objects.asked, [(WRAPPER.to_string(), "()V".to_string())]);
+
+    let mut singleton = MethodNode::new(ACC_STATIC, "f", "()V");
+    singleton.nodes = vec![instance_load(WRAPPER), op(0x57), op(0xb1)];
+    object_regeneration::regenerate_objects(
+        &mut singleton,
+        &Parameters::default(),
+        &[],
+        &classes,
+        &mut objects,
+    )
+    .expect("leaves a SAM wrapper INSTANCE load alone");
+    assert!(objects.singletons.is_empty());
+    assert!(singleton.instructions().any(
+        |insn| matches!(insn, Insn::Field { owner, name, .. } if owner == WRAPPER && name == "INSTANCE")
+    ));
 }
 
 fn reification_marker() -> Node {

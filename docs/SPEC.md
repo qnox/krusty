@@ -11962,7 +11962,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `new`; bridge debug provenance comes from the first exact conversion site. Tests:
   `tests/sam_wrapper_class_e2e.rs` (`java_sam_class_mode_shares_one_wrapper`,
   `java_sam_in_an_inline_function_is_its_wrapper_class`,
-  `a_cross_file_inline_copy_constructs_the_declarations_sam_wrapper`). Corpus:
+  `a_cross_file_inline_copy_constructs_the_declarations_sam_wrapper`). A caller that inlines
+  another module's function whose body constructs such a wrapper copies the wrapper into its own
+  class as `<caller>$inlined$sam$…`, once per calling class and shared by every such call in it. The
+  copy replays the original with only its own name remapped: its `@Metadata`, its `EnclosingMethod`
+  (the original's file class, with no method), its source file and member order stay, and it has no
+  source map because the wrapper has no line numbers. Test:
+  `tests/inline_sam_wrapper_copy_e2e.rs`. Corpus:
   `inlineClasses/funInterface/mangledSamWrappers`, `mangledSamWrappersGeneric`,
   `callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction`,
   `coroutines/suspendConversion/suspendConversionBetweenFunInterfaces`, and
