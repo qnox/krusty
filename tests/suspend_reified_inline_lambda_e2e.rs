@@ -29,6 +29,34 @@ fun box(): String {\n\
     return if (result == \"boomboom\") \"OK\" else result\n\
 }\n";
 
+/// A member's suspend lambda reaches its class's state through the captured outer instance, which
+/// the inlined lambda captures in turn: kotlinc evaluates that field read into a temporary.
+const MEMBER_SOURCE: &str = "import kotlin.coroutines.Continuation\n\
+import kotlin.coroutines.EmptyCoroutineContext\n\
+import kotlin.coroutines.startCoroutine\n\
+import kotlin.test.assertFailsWith\n\
+\n\
+suspend fun off(id: String): Int = throw UnsupportedOperationException(id)\n\
+\n\
+fun launch(block: suspend () -> Unit) {\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+}\n\
+\n\
+class Holder {\n\
+    private val word = \"OK\"\n\
+    var seen = \"\"\n\
+    fun run() = launch {\n\
+        val message = assertFailsWith<UnsupportedOperationException> { off(word) }.message!!\n\
+        seen = message\n\
+    }\n\
+}\n\
+\n\
+fun box(): String {\n\
+    val holder = Holder()\n\
+    holder.run()\n\
+    return holder.seen\n\
+}\n";
+
 fn classpath() -> Vec<std::path::PathBuf> {
     let kotlin_test = common::kotlin_test_jar()
         .expect("no kotlin-test jar found; provision the reference toolchain (`just` fetches it)");
@@ -74,6 +102,45 @@ fn a_suspension_in_a_reified_inline_lambda_runs() {
         common::expect_box_run(
             SOURCE,
             "ReifiedInlineLambda",
+            &classpath,
+            Some(jdk.as_path())
+        ),
+        "OK"
+    );
+}
+
+/// The member's lambda class reads the outer instance into a temporary before the inlined body.
+#[test]
+fn a_reified_inline_lambda_capturing_the_outer_instance_matches_kotlinc() {
+    for class in ["Holder", "Holder$run$1"] {
+        let compared = common::compare_with_kotlinc_plugin(
+            "ReifiedMemberLambda",
+            MEMBER_SOURCE,
+            class,
+            &classpath(),
+            "25",
+            &[],
+        )
+        .unwrap_or_else(|| panic!("reference kotlinc and javap must be available"));
+        assert!(
+            compared.krusty_bytes == compared.reference_bytes,
+            "{class} differs\n--- kotlinc ---\n{}\n--- krusty ---\n{}",
+            compared.reference,
+            compared.krusty
+        );
+    }
+}
+
+/// The inlined lambda reads the member's state through the outer instance it captured.
+#[test]
+fn a_reified_inline_lambda_capturing_the_outer_instance_runs() {
+    let mut classpath = classpath();
+    let jdk = common::jdk_modules();
+    classpath.push(jdk.clone());
+    assert_eq!(
+        common::expect_box_run(
+            MEMBER_SOURCE,
+            "ReifiedMemberLambda",
             &classpath,
             Some(jdk.as_path())
         ),
