@@ -259,10 +259,12 @@ pub(super) fn realize(
             } => {
                 let (written_getter, written_setter) = written_default_accessor_names(ir, property)
                     .map_err(|()| PropertyReferenceRealizationTarget::Module(property))?;
-                let getter_name = written_getter.unwrap_or_else(|| getter_name.as_ref().to_owned());
-                let setter_name =
-                    written_setter.or_else(|| setter_name.as_deref().map(str::to_owned));
-                module_property(
+                // A written name is the accessor's whole JVM name: no module suffix follows it.
+                let (written_getter, written_setter) =
+                    (written_getter.as_deref(), written_setter.as_deref());
+                let getter_name = written_getter.unwrap_or(getter_name.as_ref()).to_owned();
+                let setter_name = written_setter.or(setter_name.as_deref()).map(str::to_owned);
+                let (property_ref, mut realization) = module_property(
                     ir.referenced_module_properties
                         .get(&property)
                         .ok_or(PropertyReferenceRealizationTarget::Module(property))?,
@@ -282,7 +284,10 @@ pub(super) fn realize(
                         )
                         .map_err(|()| PropertyReferenceRealizationTarget::Module(property))?,
                     },
-                )?
+                )?;
+                realization.module_suffix_getter &= written_getter.is_none();
+                realization.module_suffix_setter &= written_setter.is_none();
+                (property_ref, realization)
             }
             FirPropertyReferenceTarget::Classifier {
                 owner,

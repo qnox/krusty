@@ -98,6 +98,8 @@ fn a_property_reference_reads_through_the_written_accessor_name() {
          class Referenced {\n\
          \x20   @get:JvmName(\"readP\") val p: Int = 1\n\
          \x20   @set:JvmName(\"storeQ\") var q: Int = 2\n\
+         \x20   @get:JvmName(\"readHidden\") internal val hidden: Int = 5\n\
+         \x20   @set:JvmName(\"storeKept\") internal var kept: Int = 6\n\
          }\n\
          \n\
          @get:JvmName(\"readTop\") val top = 3\n\
@@ -107,7 +109,10 @@ fn a_property_reference_reads_through_the_written_accessor_name() {
          \x20   val q = referenced::q\n\
          \x20   q.set(4)\n\
          \x20   val t = ::top\n\
-         \x20   return p.get(referenced) + q.get() + t.get()\n\
+         \x20   val hidden = Referenced::hidden\n\
+         \x20   val kept = referenced::kept\n\
+         \x20   kept.set(7)\n\
+         \x20   return p.get(referenced) + q.get() + t.get() + hidden.get(referenced) + kept.get()\n\
          }\n",
     )]);
 }
