@@ -4529,9 +4529,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/platform_null_check_line_e2e.rs` (full-byte against kotlinc).
 - **`Char.code` ends an inlined call.** Its getter is an inline property kotlinc inlines, so the
   rule below applies after it (`return c + d.code` writes the line again at the `iadd`). The checker
-  realizes it in place as a numeric conversion and records that conversion's origin as an inlined
-  call; common lowering marks the node `SyntheticOriginKind::InlinedCall`. A constant receiver folds
-  (`'a'.code`) and the non-inline `toInt()` is not an inlined call.
+  realizes it in place as a numeric conversion. Because the getter is declared `inline` (the
+  accessor flag word's `isInline` bit, decoded from metadata for every getter and setter), the
+  checker records that conversion's origin as an inlined call; common lowering marks the node
+  `SyntheticOriginKind::InlinedCall`. A constant receiver folds (`'a'.code`) and the non-inline
+  `toInt()` is not an inlined call. `arrayOf` and `emptyArray` are declared `inline` too, but kotlinc
+  realizes them as its own intrinsics instead of inlining them, so they end no inlined call.
   `tests/char_code_inline_line_e2e.rs` (full-byte against kotlinc).
 - **The line after a call kotlinc inlines.** After an inlined call, kotlinc's
   `markLineNumberAfterInlineIfNeeded` re-emits the line in effect when the call sits inside a

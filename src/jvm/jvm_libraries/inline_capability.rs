@@ -15,10 +15,11 @@ pub(super) fn metadata_inline(
     )
 }
 
-/// A semantically visible Kotlin property whose exact classfile accessor is non-public is an inline
-/// body container, not a callable fallback.
-pub(super) fn property_accessor_inline(bytecode_public: bool) -> InlineKind {
-    InlineKind::from_flags(!bytecode_public, !bytecode_public)
+/// A property accessor's inline-ness: its metadata `inline` flag, and a semantically visible Kotlin
+/// property whose exact classfile accessor is non-public is an inline body container, not a
+/// callable fallback.
+pub(super) fn property_accessor_inline(declared_inline: bool, bytecode_public: bool) -> InlineKind {
+    InlineKind::from_flags(declared_inline || !bytecode_public, !bytecode_public)
 }
 
 #[cfg(test)]
@@ -37,5 +38,19 @@ mod tests {
     #[test]
     fn reified_flag_without_inline_does_not_invent_an_inline_declaration() {
         assert_eq!(metadata_inline(false, true, true), InlineKind::None);
+    }
+
+    #[test]
+    fn an_accessor_is_inline_by_its_metadata_flag_or_its_hidden_method() {
+        assert_eq!(property_accessor_inline(false, true), InlineKind::None);
+        assert_eq!(property_accessor_inline(true, true), InlineKind::CanInline);
+        assert_eq!(
+            property_accessor_inline(false, false),
+            InlineKind::MustInline
+        );
+        assert_eq!(
+            property_accessor_inline(true, false),
+            InlineKind::MustInline
+        );
     }
 }

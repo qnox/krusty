@@ -822,7 +822,7 @@ impl JvmLibraries {
             let Some(getter_public) = bytecode_public(&getter_sig.name, &getter_sig.desc) else {
                 continue;
             };
-            let getter_inline = property_accessor_inline(getter_public);
+            let getter_inline = property_accessor_inline(property.getter_inline, getter_public);
             let Some((getter_params, getter_ret)) = parse_method_desc(&getter_sig.desc) else {
                 continue;
             };
@@ -859,7 +859,7 @@ impl JvmLibraries {
             };
             let setter = property.setter.as_ref().and_then(|setter_sig| {
                 let setter_public = bytecode_public(&setter_sig.name, &setter_sig.desc)?;
-                let setter_inline = property_accessor_inline(setter_public);
+                let setter_inline = property_accessor_inline(property.setter_inline, setter_public);
                 let (params, ret) = parse_method_desc(&setter_sig.desc)?;
                 (params.len() == 2 && ret == Ty::Unit).then(|| {
                     accessor(
@@ -3227,7 +3227,7 @@ impl JvmLibraries {
                     getter.generic_sig = property_signature.cloned().map(Box::new);
                     getter.owner_is_interface = ci.is_interface();
                     getter.is_abstract = mp.is_abstract;
-                    getter.inline = property_accessor_inline(getter_public);
+                    getter.inline = property_accessor_inline(mp.getter_inline, getter_public);
                     getter.semantic_role =
                         crate::libraries::builtin_declaration::semantic_call_role(
                             crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
@@ -3372,7 +3372,7 @@ impl JvmLibraries {
                 getter.context_count = context_count;
                 getter.owner_is_interface = ci.is_interface();
                 getter.is_abstract = mp.is_abstract;
-                getter.inline = property_accessor_inline(getter_public);
+                getter.inline = property_accessor_inline(mp.getter_inline, getter_public);
                 getter.nonvirtual_realization = interface_holder_method(
                     &self.cp,
                     cn,

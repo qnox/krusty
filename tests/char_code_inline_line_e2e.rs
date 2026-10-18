@@ -3,6 +3,9 @@
 //! at the next instruction that marks one, such as the `iadd` that consumes it. A constant
 //! receiver folds and a non-inline conversion (`toInt()`) does not end an inlined call. A discarded
 //! `d.code;` statement ends one too, so a call after it on the same line marks that line again.
+//! The end comes from the getter's metadata `inline` flag. `arrayOf` and `emptyArray` are inline
+//! too, but kotlinc realizes them as its own intrinsics rather than inlining them, so they end no
+//! inlined call.
 use super::common;
 
 #[test]
@@ -56,6 +59,10 @@ fun discardedRead(d: Char) {
 fun discardedLine(d: Char) {
     d.code
     sink()
+}
+
+fun factories(c: Int): Int {
+    return c + arrayOf(1, 2).size + emptyArray<String>().size + 1
 }
 
 fun captured(): Int {
