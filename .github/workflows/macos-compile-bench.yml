@@ -1,7 +1,7 @@
 name: macos compile bench
 
 # Wall-clock compile of the kmp-ios-benchmark generated sources on an Apple Silicon
-# runner: krusty, kotlinc 2.4.20, and the image's swiftc. This expensive benchmark is
+# runner: krusty, kotlinc 2.4.21, and the image's swiftc. This expensive benchmark is
 # deliberately manual-only: ordinary pushes and pull requests must never schedule it.
 on:
   workflow_dispatch:
@@ -35,10 +35,10 @@ jobs:
           echo "KRUSTY_RUNTIME_CC=$clang" >> "$GITHUB_ENV"
       - name: build krusty
         run: cargo build --profile gate -p krusty-cli --bin krusty
-      - name: install kotlinc 2.4.20
+      - name: install kotlinc 2.4.21
         run: |
           set -euo pipefail
-          ver=2.4.20
+          ver=2.4.21
           dest="$RUNNER_TEMP/kotlinc-$ver"
           mkdir -p "$dest"
           curl -fsSL "https://github.com/JetBrains/kotlin/releases/download/v${ver}/kotlin-compiler-${ver}.zip" -o "$RUNNER_TEMP/kotlinc.zip"

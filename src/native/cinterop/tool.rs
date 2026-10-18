@@ -13,7 +13,7 @@ use super::library::{interop_library, CinteropError, InteropRequest};
 use super::link_facts::{self, LinkerOptions};
 use super::preprocessor::IncludeDir;
 use crate::klib::write::KlibStamp;
-use crate::kotlin_version::KotlinVersion;
+use crate::kotlin_version;
 use crate::language_version::LanguageVersion;
 use crate::native::target::NativeTarget;
 
@@ -124,7 +124,7 @@ pub fn build_interop_library(options: &CinteropOptions) -> Result<PathBuf, Cinte
         target: options.target,
         system_dirs: system_include_dirs(options.target),
         sysroot: Some(PathBuf::from("/")),
-        stamp: KlibStamp::new(KotlinVersion::V2_4_20, LanguageVersion::V2_4),
+        stamp: KlibStamp::new(kotlin_version::target(), LanguageVersion::V2_4),
         extra_headers: options.headers.clone(),
         extra_compiler_options: options.compiler_options.clone(),
     })?;

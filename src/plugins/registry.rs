@@ -222,6 +222,9 @@ pub struct NativePlugins {
     enabled: Vec<EnabledNative>,
     config: PluginConfig,
     classpath: Vec<String>,
+    /// The reference compiler's release, which is the release of every plugin it bundles. It
+    /// stands in for an extension activated without a jar that declares its own release.
+    reference_release: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -241,6 +244,16 @@ impl NativePlugins {
             enabled: Vec::new(),
             config: PluginConfig::none(),
             classpath: Vec::new(),
+            reference_release: None,
+        }
+    }
+
+    /// Build every extension as the plugin `release` of the reference compiler bundles, unless the
+    /// jar that activated it declares its own release.
+    pub fn with_reference_release(self, release: String) -> Self {
+        Self {
+            reference_release: Some(release),
+            ..self
         }
     }
 
@@ -266,7 +279,10 @@ impl NativePlugins {
         for native in &self.enabled {
             host.register((native.build)(
                 &activation,
-                native.release.as_deref(),
+                native
+                    .release
+                    .as_deref()
+                    .or(self.reference_release.as_deref()),
                 &native.options,
             ));
         }
@@ -440,6 +456,7 @@ impl PluginRegistry {
             enabled: Vec::new(),
             config: act.config.clone(),
             classpath: act.classpath.to_vec(),
+            reference_release: None,
         };
         let mut ksp_active = false;
         let mut diagnostics = Vec::new();

@@ -1190,7 +1190,7 @@ fn new_classifier_writer(
     opts: &EmitOptions,
 ) -> ClassWriter {
     let formatter = JvmSignatureFormatter::new(ir, env);
-    let recorded = ir.class_signature_name(c.fq_name);
+    let recorded = ir.lowered_class_signature(c.fq_name);
     let signature = if c.is_enum {
         jvm_enum_class_signature(&formatter, c, recorded)
     } else {

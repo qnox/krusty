@@ -1222,6 +1222,7 @@ fn recognize_iterable_indexed<'a>(
 mod tests {
     use super::*;
     use crate::jvm::jvm_libraries::JvmLibraries;
+    use crate::kotlin_version::KotlinVersion;
     use crate::libraries::{
         InlineBodyCallReceiver, InlineBodyPlan, InlineIterationIndex, InlineIterationTraversal,
     };
@@ -1509,7 +1510,8 @@ mod tests {
     #[test]
     fn iteration_frame_carries_the_declaration_bodys_resolved_debug_source() {
         let version = crate::toolchain::kotlin_version();
-        if !matches!(version.as_str(), "2.4.0" | "2.4.10" | "2.4.20") {
+        if !KotlinVersion::parse(&version).is_some_and(|v| KotlinVersion::supported().contains(&v))
+        {
             return;
         }
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
@@ -1550,7 +1552,8 @@ mod tests {
         // `toolchain::stdlib_jar()` is selected by the toolchain matrix, so this survey runs against
         // every supported Kotlin 2.4.x stdlib, each in its own CI job.
         let version = crate::toolchain::kotlin_version();
-        if !matches!(version.as_str(), "2.4.0" | "2.4.10" | "2.4.20") {
+        if !KotlinVersion::parse(&version).is_some_and(|v| KotlinVersion::supported().contains(&v))
+        {
             return;
         }
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
@@ -1655,7 +1658,8 @@ mod tests {
     #[test]
     fn text_iteration_plans_survive_jdk_member_enrichment() {
         let version = crate::toolchain::kotlin_version();
-        if !matches!(version.as_str(), "2.4.0" | "2.4.10" | "2.4.20") {
+        if !KotlinVersion::parse(&version).is_some_and(|v| KotlinVersion::supported().contains(&v))
+        {
             return;
         }
         let (Some(stdlib), Some(jdk)) = (
@@ -1704,7 +1708,8 @@ mod tests {
     #[test]
     fn plain_iterator_recognizer_uses_body_shape_and_rejects_a_wrong_erased_cast() {
         let version = crate::toolchain::kotlin_version();
-        if !matches!(version.as_str(), "2.4.0" | "2.4.10" | "2.4.20") {
+        if !KotlinVersion::parse(&version).is_some_and(|v| KotlinVersion::supported().contains(&v))
+        {
             return;
         }
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
@@ -1755,7 +1760,8 @@ mod tests {
     #[test]
     fn iterable_recognizer_rejects_effect_branch_increment_and_handler_mutations() {
         let version = crate::toolchain::kotlin_version();
-        if !matches!(version.as_str(), "2.4.0" | "2.4.10" | "2.4.20") {
+        if !KotlinVersion::parse(&version).is_some_and(|v| KotlinVersion::supported().contains(&v))
+        {
             return;
         }
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
