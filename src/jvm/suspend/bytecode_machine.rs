@@ -18,7 +18,10 @@
 
 use crate::fx_hash::HashSet;
 
-use super::cps::{spliced_inline_suspensions, TransformedMachine, TransformedSuspension};
+use super::cps::{
+    frame_suspensions, reified_host_lambda_suspensions, spliced_inline_suspensions,
+    TransformedMachine, TransformedSuspension,
+};
 use super::emission_facts::{ContinuationMetadata, MachineOutputs};
 use super::spill_layout::{suspension_points_in_order, SpillLayout};
 use super::{
@@ -228,7 +231,20 @@ pub(super) fn eligible_points(
     let function = &ir.functions[fid as usize];
     let top_level = function.is_static && function.dispatch_receiver.is_none();
     let suspend_set = route.suspend_set;
-    let points = suspension_points_in_order(ir, body, suspend_set);
+    // A suspension in a lambda the method inliner places for a reified classpath callee is one of
+    // this method's points once the lambda is inlined, in the order the frame runs them; any other
+    // spliced suspension declines below.
+    let placed = reified_host_lambda_suspensions(ir, body, suspend_set);
+    let points = match &placed {
+        Some(placed) if !placed.is_empty() => {
+            let own = suspension_points_in_order(ir, body, suspend_set);
+            frame_suspensions(ir, body, suspend_set)
+                .into_iter()
+                .filter(|point| own.contains(point) || placed.contains(point))
+                .collect()
+        }
+        _ => suspension_points_in_order(ir, body, suspend_set),
+    };
     // A class member: its machine stays in the member, or, for an overridable one, moves with its
     // body to `$suspendImpl`. An interface default is the same machine when one of its own
     // suspension points is a `super` call; the IR machine declines that invokespecial.
@@ -252,7 +268,7 @@ pub(super) fn eligible_points(
     // `suspendCoroutineUninterceptedOrReturn` block, which kotlinc realizes through a fake one.
     let body_declines: [(&dyn Fn() -> bool, &str); 2] = [
         (
-            &|| !spliced_inline_suspensions(ir, body, suspend_set).is_empty(),
+            &|| placed.is_none() && !spliced_inline_suspensions(ir, body, suspend_set).is_empty(),
             "suspends in a spliced inline body",
         ),
         (

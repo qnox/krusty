@@ -1163,6 +1163,8 @@ mod inline_default_stub_e2e;
 mod inline_early_return_cleanup_e2e;
 #[path = "inline_end_branch_e2e.rs"]
 mod inline_end_branch_e2e;
+#[path = "inline_erased_bound_receiver_e2e.rs"]
+mod inline_erased_bound_receiver_e2e;
 #[path = "inline_erased_capture_e2e.rs"]
 mod inline_erased_capture_e2e;
 #[path = "inline_erased_parameter_e2e.rs"]
