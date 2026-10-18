@@ -4,10 +4,12 @@ use super::{bridge_emission, CodeBuilder, EmitEnv, Emitter};
 use crate::ir::FunId;
 use crate::types::{Ty, TypeName};
 
+/// `receiver_value` is whether the common IR numbers a receiver as value 0, which the JVM method
+/// may realize as `this` or, for a named object's `@JvmStatic` member, as the singleton instance.
 pub(super) fn emit(
     function: FunId,
     parameter_types: &[Ty],
-    instance: bool,
+    receiver_value: bool,
     holder_receiver: Option<TypeName>,
     env: &EmitEnv<'_>,
     emitter: &mut Emitter<'_>,
@@ -18,10 +20,10 @@ pub(super) fn emit(
     // reaches a bridge. The recorded plan returns the neutral result; that parameter has no
     // further `checkNotNullParameter`, because the guard already proved it present.
     let mut covered = None;
-    if instance && holder_receiver.is_none() {
+    if receiver_value && holder_receiver.is_none() {
         if let Some(plan) = env.collection_method_entry_barriers.plan(function) {
             let value = u32::try_from(plan.parameter).expect("a barrier parameter index fits")
-                + u32::from(instance);
+                + u32::from(receiver_value);
             if let Some(&(slot, _)) = emitter.slots.get(&value) {
                 let present = code.new_label();
                 code.aload(slot);
@@ -55,7 +57,7 @@ pub(super) fn emit(
             .and_then(|names| names.get(index))
             .and_then(Clone::clone)
             .expect("a checked parameter carries an assertion spelling");
-        let value = index as u32 + u32::from(instance);
+        let value = index as u32 + u32::from(receiver_value);
         if let Some(&(slot, _)) = emitter.slots.get(&value) {
             emitter.checked_parameters.insert(value);
             code.aload(slot);

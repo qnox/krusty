@@ -118,7 +118,7 @@ impl Emitter<'_> {
                 .is_some_and(|class| class.fq_name == access_owner),
             _ => false,
         };
-        if !crate::ir::expr_runs_no_code(self.ir, receiver) && !initializes_owner {
+        if !self.operand_runs_no_code(receiver) && !initializes_owner {
             self.emit_value(receiver, code);
             code.pop();
         }
@@ -207,14 +207,16 @@ impl Emitter<'_> {
         let exact_field = matches!(&access, PropertyAccess::Field { .. });
         // Kotlin treats the expression to the left of a static `@JvmField` READ as a qualifier and
         // does not evaluate it.  A write is observably different and still evaluates an explicit
-        // receiver before `putstatic`; that rule remains in `emit_property_write`.
+        // receiver before `putstatic`; that rule remains in `emit_property_write`. A static
+        // member's own receiver is the object instance, which kotlinc loads and discards.
         let receiver_is_static_field_qualifier = matches!(
             &access,
             PropertyAccess::Field {
                 is_static: true,
                 ..
             }
-        );
+        ) && !receiver
+            .is_some_and(|receiver| self.reads_singleton_receiver(receiver));
         let access_owner = match &access {
             PropertyAccess::Field { owner, .. }
             | PropertyAccess::Accessor { owner, .. }

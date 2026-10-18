@@ -20,8 +20,11 @@ pub(super) fn emit_function_reference_access_bridge(
     // callable without an instance, so the bridge takes exactly its parameters and `invokestatic`s
     // it. An instance target keeps the owner ahead of them and a non-virtual call to the private
     // declaration.
+    // A named object's `@JvmStatic` member is a static method too.
+    let is_static =
+        function.is_static || super::jvm_static_members::singleton_static_owner(ir, fid).is_some();
     let mut bridge_parameters = Vec::with_capacity(parameters.len() + 1);
-    if !function.is_static {
+    if !is_static {
         bridge_parameters.push(Ty::obj(owner));
     }
     bridge_parameters.extend(parameters.iter().copied());
@@ -36,7 +39,7 @@ pub(super) fn emit_function_reference_access_bridge(
         code.mark_line(line);
     }
     let mut slot = 0u16;
-    if !function.is_static {
+    if !is_static {
         code.aload(0);
         slot = 1;
     }
@@ -54,13 +57,13 @@ pub(super) fn emit_function_reference_access_bridge(
     if !suspend && line != 0 {
         code.mark_line(line);
     }
-    if function.is_static {
+    if is_static {
         code.invokestatic(method, argument_words, slot_words(result) as i32);
     } else {
         code.invokespecial(method, argument_words, slot_words(result) as i32);
     }
     emit_return(result, &mut code);
-    code.ensure_locals(slot.max(1));
+    code.ensure_locals(slot);
     code.link();
     cw.add_method(
         0x1019, /* PUBLIC | STATIC | FINAL | SYNTHETIC */
@@ -68,15 +71,24 @@ pub(super) fn emit_function_reference_access_bridge(
         &bridge_descriptor,
         &code,
     );
-    set_bridge_locals(ir, fid, owner, &parameters, &name, &bridge_descriptor, cw);
+    let receiver = (!is_static).then_some(owner);
+    set_bridge_locals(
+        ir,
+        fid,
+        receiver,
+        &parameters,
+        &name,
+        &bridge_descriptor,
+        cw,
+    );
 }
 
-/// kotlinc's whole-method locals of an `access$…` bridge: `$this` for an instance target, then the
-/// target's own parameter names over the slots they arrive in.
+/// kotlinc's whole-method locals of an `access$…` bridge: `$this` for the `receiver` class of an
+/// instance target, then the target's own parameter names over the slots they arrive in.
 fn set_bridge_locals(
     ir: &IrFile,
     fid: u32,
-    owner: &str,
+    receiver: Option<&str>,
     parameters: &[Ty],
     name: &str,
     descriptor: &str,
@@ -104,7 +116,7 @@ fn set_bridge_locals(
         });
     let mut locals = Vec::with_capacity(parameters.len() + 1);
     let mut slot = 0u16;
-    if !ir.functions[fid as usize].is_static {
+    if let Some(owner) = receiver {
         locals.push(("$this".to_string(), format!("L{owner};"), 0));
         slot = 1;
     }
@@ -1220,7 +1232,7 @@ pub(super) fn emit_private_member_access_bridge(
     set_bridge_locals(
         ir,
         fid,
-        owner,
+        Some(owner),
         &parameters,
         &bridge_name,
         &bridge_descriptor,
