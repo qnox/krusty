@@ -46,6 +46,7 @@ pub use call_realization::{
 };
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::constructor_generic_signature;
+pub(crate) use classifier_callables::constructor_generic_signature_from_classifier_parameters;
 pub use classifier_callables::BoundInnerConstructor;
 pub(crate) use classifier_declaration::type_alias_target_classifier;
 pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
@@ -2462,6 +2463,22 @@ impl LibraryType {
 
     pub fn type_param_variances(&self) -> &Vec<TypeVariance> {
         &self.type_parameters.type_param_variances
+    }
+
+    /// Type parameters declared by this classifier, excluding parameters captured from an
+    /// enclosing declaration. Constructor inference owns exactly this declaration-order prefix;
+    /// captured parameters are supplied by the enclosing receiver or lexical context.
+    pub fn own_type_params(&self) -> &[String] {
+        self.type_params()
+            .get(..self.own_type_parameter_count)
+            .expect("classifier own-type-parameter count must fit its complete parameter list")
+    }
+
+    /// Bounds parallel to [`Self::own_type_params`].
+    pub fn own_type_param_bounds(&self) -> &[Vec<Ty>] {
+        self.type_param_bounds()
+            .get(..self.own_type_parameter_count)
+            .expect("classifier own-type-parameter count must fit its complete bound list")
     }
 }
 

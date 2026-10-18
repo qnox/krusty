@@ -165,7 +165,14 @@ pub(crate) fn infer_constructor_type_args(
     arg_tys: &[Ty],
     expected: Option<Ty>,
 ) -> Option<Vec<Ty>> {
-    infer_constructor_type_args_for_formals(source, owner, ty, &ty.type_params, arg_tys, expected)
+    infer_constructor_type_args_for_formals(
+        source,
+        owner,
+        ty,
+        ty.own_type_params(),
+        arg_tys,
+        expected,
+    )
 }
 
 /// Constructor inference for the classifier's own declared formals. Provider-normalized source

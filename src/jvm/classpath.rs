@@ -2401,14 +2401,13 @@ impl Classpath {
                     String::new(),
                 );
                 member.visibility = constructor.visibility;
-                member.generic_sig = Some(crate::libraries::GenericSig {
-                    formals: Vec::new(),
-                    formal_bounds: Vec::new(),
-                    receiver: None,
-                    params: constructor.params.clone(),
-                    ret: Ty::obj_name(internal),
-                    return_policy: Default::default(),
-                });
+                member.generic_sig =
+                    crate::libraries::constructor_generic_signature_from_classifier_parameters(
+                        internal,
+                        &class.formals,
+                        &class.formal_bounds,
+                        constructor.params.clone(),
+                    );
                 member.call_sig = crate::libraries::CallSig::metadata_member(
                     constructor.params.len(),
                     constructor.param_names.clone(),

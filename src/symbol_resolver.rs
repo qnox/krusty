@@ -255,7 +255,7 @@ fn specialized_constructor_params(
     // prepending the classifier's independently owned identities creates two variables for one
     // ordinal and loses both explicit and inferred arguments.
     let _coordinates = crate::libraries::ConstructorTypeParameterCoordinates::new(
-        classifier.type_params(),
+        classifier.own_type_params(),
         &signature,
     );
     let mut bindings = seeded_gsig_binds(&signature, type_args);
@@ -858,7 +858,7 @@ impl<'a> SymbolResolver<'a> {
             let mut bindings = GSigBinds::default();
             if let Some(signature) = declaration.generic_sig.as_ref() {
                 let coordinates = crate::libraries::ConstructorTypeParameterCoordinates::new(
-                    classifier.type_params(),
+                    classifier.own_type_params(),
                     signature,
                 );
                 let mut signature_bindings = seeded_gsig_binds(signature, type_args);
@@ -3429,7 +3429,7 @@ pub(crate) fn select_constructor_declaration_from_type_with_type_arguments(
     let mut selected = selected.clone();
     if let Some(signature) = selected.generic_sig.as_ref() {
         let coordinates = crate::libraries::ConstructorTypeParameterCoordinates::new(
-            classifier.type_params(),
+            classifier.own_type_params(),
             signature,
         );
         let mut bindings = seeded_gsig_binds(signature, type_args);
@@ -5567,6 +5567,63 @@ mod tests {
         assert_eq!(
             selected.declaration.ret,
             Ty::obj_args_name(source.owner, &[Ty::String])
+        );
+    }
+
+    #[test]
+    fn captured_classifier_parameter_is_not_a_constructor_coordinate() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let owner = type_name("demo/Outer$Inner");
+        let signature_formal = "callable-inner-T".to_string();
+        let parameter = Ty::ty_param(&signature_formal, any);
+        let mut constructor = LibraryMember::new(
+            "<init>".into(),
+            vec![parameter],
+            Ty::Unit,
+            "(Ljava/lang/Object;)V".into(),
+        );
+        constructor.generic_sig = Some(GenericSig {
+            formals: vec![signature_formal.clone()],
+            formal_bounds: vec![vec![any]],
+            receiver: None,
+            params: vec![parameter],
+            ret: Ty::obj_args_name(owner, &[parameter]),
+            return_policy: Default::default(),
+        });
+        let mut classifier = fake_library_type(Vec::new(), vec![constructor]);
+        classifier.type_parameters = crate::types::TypeParameters::invariant(
+            vec![
+                "classifier-inner-T".to_string(),
+                "captured-outer-T".to_string(),
+            ],
+            vec![vec![any], vec![any]],
+        );
+        classifier.own_type_parameter_count = 1;
+        let source = ConstructorIdentitySource {
+            owner,
+            classifier: std::sync::Arc::new(classifier),
+        };
+
+        let selected = SymbolResolver::new(&source)
+            .select_constructor_declaration_with_type_arguments(
+                owner,
+                &[CallArgKind::Typed(Ty::String)],
+                &[],
+            )
+            .expect("captured enclosing parameters do not belong to constructor inference");
+        assert_eq!(selected.declaration.params, [Ty::String]);
+        assert_eq!(
+            selected.declaration.ret,
+            Ty::obj_args_name(owner, &[Ty::String])
+        );
+        assert_eq!(
+            source
+                .classifier
+                .own_type_params()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["classifier-inner-T"]
         );
     }
 

@@ -30,16 +30,36 @@ pub(crate) fn constructor_generic_signature(
     if let Some(signature) = &constructor.generic_sig {
         return Some(signature.clone());
     }
-    if classifier.type_params().is_empty() {
+    constructor_generic_signature_from_classifier_parameters(
+        internal,
+        classifier.own_type_params(),
+        classifier.own_type_param_bounds(),
+        constructor.params.clone(),
+    )
+}
+
+/// Build the provider-normalized constructor signature for one classifier declaration. The
+/// classifier-owned variables are the signature's exact declaration-order prefix; a provider may
+/// append constructor-owned variables only after this common boundary has established that prefix.
+pub(crate) fn constructor_generic_signature_from_classifier_parameters(
+    internal: TypeName,
+    formals: &[String],
+    formal_bounds: &[Vec<Ty>],
+    params: Vec<Ty>,
+) -> Option<GenericSig> {
+    assert_eq!(
+        formals.len(),
+        formal_bounds.len(),
+        "classifier constructor formals and bounds must be normalized together"
+    );
+    if formals.is_empty() {
         return None;
     }
-    let type_arguments = classifier
-        .type_params()
+    let type_arguments = formals
         .iter()
         .enumerate()
         .map(|(ordinal, formal)| {
-            let bound = classifier
-                .type_param_bounds()
+            let bound = formal_bounds
                 .get(ordinal)
                 .and_then(|bounds| bounds.first())
                 .copied()
@@ -48,10 +68,10 @@ pub(crate) fn constructor_generic_signature(
         })
         .collect::<Vec<_>>();
     Some(GenericSig {
-        formals: classifier.type_params().to_vec(),
-        formal_bounds: classifier.type_param_bounds().to_vec(),
+        formals: formals.to_vec(),
+        formal_bounds: formal_bounds.to_vec(),
         receiver: None,
-        params: constructor.params.clone(),
+        params,
         ret: Ty::obj_args_name(internal, &type_arguments),
         return_policy: GenericReturnPolicy::Exact,
     })

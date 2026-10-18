@@ -6172,14 +6172,39 @@ mod tests {
             "decoded Array.iterator return: {:?}",
             iterator.callable.ret
         );
-        assert!(
-            classifier.constructors.iter().any(|constructor| {
+        let constructor = classifier
+            .constructors
+            .iter()
+            .find(|constructor| {
                 constructor.params.len() == 2
                     && constructor.params[0] == Ty::Int
                     && constructor.params[1].fun_arity() == Some(1)
-            }),
-            "Array's builtins record must publish its (size, init) constructor: {:?}",
-            classifier.constructors
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "Array's builtins record must publish its (size, init) constructor: {:?}",
+                    classifier.constructors
+                )
+            });
+        let signature = constructor
+            .generic_sig
+            .as_ref()
+            .expect("Array's constructor must retain its classifier-formal prefix");
+        assert_eq!(classifier.own_type_params().len(), 1);
+        assert_eq!(signature.formals.len(), 1);
+        assert_eq!(signature.formal_bounds.len(), 1);
+        assert_eq!(
+            signature.ret.obj_internal(),
+            Some(type_name("kotlin/Array"))
+        );
+        assert_eq!(signature.ret.type_args().len(), 1);
+        assert_eq!(
+            signature.ret.type_args()[0].ty_param_name(),
+            Some(signature.formals[0].as_str())
+        );
+        crate::libraries::ConstructorTypeParameterCoordinates::new(
+            classifier.own_type_params(),
+            signature,
         );
 
         assert!(classifier.supertypes.contains("kotlin/Cloneable"));

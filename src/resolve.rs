@@ -65468,7 +65468,7 @@ impl<'a> Checker<'a> {
             {
                 let constructor_type_parameters =
                     crate::libraries::ConstructorTypeParameterCoordinates::new(
-                        classifier.type_params(),
+                        classifier.own_type_params(),
                         signature,
                     );
                 // Explicit type arguments are fixed before any argument is inferred: one outside
