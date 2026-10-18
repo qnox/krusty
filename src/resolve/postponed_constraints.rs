@@ -455,6 +455,38 @@ impl PostponedCallConstraints {
 }
 
 impl Checker<'_> {
+    pub(super) fn postponed_reference_input_fits(&self, expected: Ty, target: Ty) -> bool {
+        let constraints = self
+            .active_callable_reference
+            .and_then(|expression| self.callable_reference_literal_constraints.get(&expression));
+        // A postponed callable-reference check gives the enclosing declaration's type parameters
+        // call-owned identities. Literal applicability was recorded before that namespace was
+        // entered, so compare through the frame's declared identity.
+        let expected = self
+            .postponed_call_constraints
+            .iter()
+            .rev()
+            .find(|frame| frame.mentions_formal(expected))
+            .map_or(expected, |frame| frame.declared_type(expected));
+        let Ty::TyParam(formal, _) = expected.non_null() else {
+            return true;
+        };
+        // A generic referenced declaration can specialize its input to the still-open formal. Its
+        // final call solution chooses the concrete literal type; only a concrete target is useful
+        // overload evidence while this call is postponed.
+        if target.mentions_ty_param() {
+            return true;
+        }
+        constraints
+            .and_then(|constraints| constraints.get(formal))
+            .is_none_or(|arguments| {
+                arguments.iter().all(|argument| {
+                    self.receiver_is_assignable(argument.ty(), target)
+                        || argument.adapts_integer_literal_to(target)
+                })
+            })
+    }
+
     /// Reach the fixed point of the constraints contributed by postponed function arguments.
     /// Rechecks and their diagnostic ownership stay together here; the call-site facade supplies
     /// only the selected parameter shapes and consumes the finalized argument types.
@@ -587,12 +619,22 @@ impl Checker<'_> {
                 } else {
                     self.postponed_diagnostics.discard(argument);
                     let diagnostic_mark = self.diags.diags.len();
+                    self.completed_failed_postponed_callable_rechecks
+                        .remove(&argument);
+                    let previous_recheck = self
+                        .active_postponed_callable_reference_recheck
+                        .replace(argument);
                     let nominal = self.expr_expected(site.scope, argument, expected);
+                    self.active_postponed_callable_reference_recheck = previous_recheck;
                     let checked = self
                         .expression_function_type(site.scope, argument, nominal)
                         .unwrap_or(nominal);
                     self.postponed_diagnostics
                         .capture_since(argument, self.diags, diagnostic_mark);
+                    if checked == Ty::Error {
+                        self.completed_failed_postponed_callable_rechecks
+                            .insert(argument);
+                    }
                     checked
                 };
                 if is_lambda

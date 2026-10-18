@@ -33021,6 +33021,8 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         expected: None,
         callable_reference_literal_constraints: HashMap::default(),
         active_callable_reference: None,
+        active_postponed_callable_reference_recheck: None,
+        completed_failed_postponed_callable_rechecks: crate::fx_hash::HashSet::default(),
         imports,
         import_levels,
         function_import_scope,
@@ -35597,6 +35599,13 @@ struct Checker<'a> {
     /// during that one reference's selection and is discarded with the bounded checker.
     callable_reference_literal_constraints: HashMap<ExprId, HashMap<String, Vec<CallArgKind>>>,
     active_callable_reference: Option<ExprId>,
+    /// The callable-reference expression whose concrete postponed shape is being rechecked.
+    /// Candidate selection uses this semantic ownership marker to leave a shape mismatch to the
+    /// enclosing call without suppressing diagnostics produced inside the reference itself.
+    active_postponed_callable_reference_recheck: Option<ExprId>,
+    /// Concrete postponed callable-reference rechecks that already failed. Final selected-argument
+    /// commitment consumes this fact instead of entering the same failed reference a third time.
+    completed_failed_postponed_callable_rechecks: crate::fx_hash::HashSet<ExprId>,
     imports: HashMap<String, String>,
     /// Classifier import rungs. Callable lookup uses [`Self::function_import_scope`]'s order.
     import_levels: Vec<crate::symbol_resolver::ClassifierImportLevel>,
@@ -38085,35 +38094,12 @@ impl<'a> Checker<'a> {
             expected_params,
             |actual, target| self.receiver_is_assignable(actual, target),
         )?;
-        let constraints = self
-            .active_callable_reference
-            .and_then(|expression| self.callable_reference_literal_constraints.get(&expression));
-        let soft_input_fits = |expected: Ty, target: Ty| {
-            let Ty::TyParam(formal, _) = expected.non_null() else {
-                return true;
-            };
-            // A generic referenced declaration can specialize its own input directly to the
-            // enclosing call's still-open formal. The literal constraint belongs to that same
-            // outer inference variable and therefore cannot reject the symbolic target now; the
-            // final call solution will choose its concrete literal type. Only a concrete target
-            // (for example `Byte` versus `String`) is useful overload evidence at this stage.
-            if target.mentions_ty_param() {
-                return true;
-            }
-            constraints
-                .and_then(|constraints| constraints.get(formal))
-                .is_none_or(|arguments| {
-                    arguments.iter().all(|argument| {
-                        self.receiver_is_assignable(argument.ty(), target)
-                            || argument.adapts_integer_literal_to(target)
-                    })
-                })
-        };
         for (target, argument) in plan.iter().enumerate() {
             let declared = *params.get(target)?;
             match argument {
                 AdaptedRefArgument::Value(value) => {
-                    if !soft_input_fits(*expected_params.get(*value)?, declared) {
+                    if !self.postponed_reference_input_fits(*expected_params.get(*value)?, declared)
+                    {
                         return None;
                     }
                 }
@@ -38127,9 +38113,9 @@ impl<'a> Checker<'a> {
                         declared.array_read_elem().unwrap_or(declared)
                     };
                     if values.iter().any(|value| {
-                        expected_params
-                            .get(*value)
-                            .is_none_or(|expected| !soft_input_fits(*expected, target))
+                        expected_params.get(*value).is_none_or(|expected| {
+                            !self.postponed_reference_input_fits(*expected, target)
+                        })
                     }) {
                         return None;
                     }
@@ -38614,13 +38600,15 @@ impl<'a> Checker<'a> {
                 if expected_is_symbolic {
                     return None;
                 }
-                let display = self
-                    .source_callable_display(candidate)
-                    .unwrap_or_else(|| Self::callable_candidate_display(name, candidate));
-                self.diags.error(
-                    self.member_name_span(expression, name),
-                    format!("inapplicable candidate(s): {display}"),
-                );
+                if self.active_postponed_callable_reference_recheck != Some(expression) {
+                    let display = self
+                        .source_callable_display(candidate)
+                        .unwrap_or_else(|| Self::callable_candidate_display(name, candidate));
+                    self.diags.error(
+                        self.member_name_span(expression, name),
+                        format!("inapplicable candidate(s): {display}"),
+                    );
+                }
                 return Some(Ty::Error);
             }
         }
@@ -52987,6 +52975,18 @@ impl<'a> Checker<'a> {
             // repeat the same selected-argument work; for a declaration-completed producer it
             // would instead run an expectation-free probe and erase the proper substitution that
             // the selected outer parameter just published.
+            actual
+        } else if matches!(self.file.expr(argument), Expr::CallableRef { .. })
+            && matches!(expected.non_null(), Ty::Fun(_))
+            && actual == Ty::Error
+            && self
+                .completed_failed_postponed_callable_rechecks
+                .contains(&argument)
+        {
+            // A concrete postponed recheck already proved this reference inapplicable. A pure
+            // contextual shape mismatch belongs to the selected outer call, while any diagnostic
+            // produced inside the reference was retained by that completed check. Re-entering the
+            // reference here would duplicate either outcome.
             actual
         } else if self.file.collection_literal_calls.contains(&argument.0)
             || (self.postponed_empty_reference_array_factory(scope, argument)
