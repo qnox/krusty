@@ -5,6 +5,9 @@
 
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 impl CheckedLocalProperty {
     fn readable(&self) -> bool {
         !self.deprecated_hidden && self.accessor_availability.getter
@@ -37,6 +40,8 @@ impl Checker<'_> {
             return false;
         };
         if property.receiver.is_some() {
+            let (deprecated_hidden, accessor_availability) =
+                self.checked_property_availability(stable_declaration);
             let header_scope = scope.child(ScopeKind::Function { receiver: None });
             let visible = header_scope.visible_tparams();
             let type_parameters = visible
@@ -140,6 +145,8 @@ impl Checker<'_> {
                             .unwrap_or(property.visibility)
                     }),
                     annotations: Vec::new(),
+                    deprecated_hidden,
+                    accessor_availability,
                     stable_declaration,
                     source_member: Some(source_member),
                     getter: None,
@@ -270,6 +277,31 @@ impl Checker<'_> {
         if has_receiver || ty.mentions_error() || ty.mentions_pending() {
             return;
         }
+        let (deprecated_hidden, accessor_availability) =
+            self.checked_property_availability(stable_declaration);
+        self.checked_local_properties.insert(
+            (owner, name.to_owned()),
+            CheckedLocalProperty {
+                ty,
+                owner,
+                mutable,
+                visibility,
+                interface,
+                source_member,
+                stable_declaration,
+                deprecated_hidden,
+                accessor_availability,
+            },
+        );
+    }
+
+    /// Normalize source availability while the stable property and accessor identities are in
+    /// hand. Both ordinary and member-extension overlays consume this fact without reopening
+    /// syntax or treating active declarations differently from provider declarations.
+    fn checked_property_availability(
+        &self,
+        stable_declaration: Option<crate::fir::DeclarationId>,
+    ) -> (bool, crate::libraries::PropertyAccessorAvailability) {
         let hidden = |declaration| {
             self.resolved_index.is_some_and(|index| {
                 index
@@ -290,23 +322,13 @@ impl Checker<'_> {
                 })
                 .is_none_or(|accessor| !hidden(accessor))
         };
-        self.checked_local_properties.insert(
-            (owner, name.to_owned()),
-            CheckedLocalProperty {
-                ty,
-                owner,
-                mutable,
-                visibility,
-                interface,
-                source_member,
-                stable_declaration,
-                deprecated_hidden,
-                accessor_availability: crate::libraries::PropertyAccessorAvailability {
-                    getter: accessor_available(0),
-                    setter: accessor_available(1),
-                },
+        (
+            deprecated_hidden,
+            crate::libraries::PropertyAccessorAvailability {
+                getter: accessor_available(0),
+                setter: accessor_available(1),
             },
-        );
+        )
     }
 
     pub(super) fn record_checked_local_property(
