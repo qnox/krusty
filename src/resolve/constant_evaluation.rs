@@ -51,7 +51,11 @@ pub(super) fn source_literal_constant(
         };
     }
     let value = match file.expr(expression) {
-        Expr::IntLit(value) => LibConst::Int(*value as i32),
+        // An integer literal takes the declared type, so `const val x: Long = 60` is a Long.
+        Expr::IntLit(value) => match ty {
+            Ty::Long => LibConst::Long(*value),
+            _ => LibConst::Int(*value as i32),
+        },
         Expr::LongLit(value) => LibConst::Long(*value),
         Expr::UIntLit(value) => match ty {
             Ty::ULong => LibConst::Long(*value),
@@ -614,6 +618,32 @@ mod tests {
             panic!("property declaration")
         };
         assert!(source_literal_constant(&file, property.init.unwrap(), Ty::Int).is_none());
+    }
+
+    #[test]
+    fn an_integer_literal_declared_long_is_a_long_constant() {
+        let file = crate::frontend::parse_source(
+            "const val a: Long = 60\nconst val b: Long = -60",
+            &crate::features::LangFeatures::new(),
+            &mut crate::diag::DiagSink::new(),
+        );
+        let values: Vec<_> = file
+            .decls
+            .iter()
+            .map(|&decl| {
+                let crate::ast::Decl::Property(property) = file.decl(decl) else {
+                    panic!("property declaration")
+                };
+                source_literal_constant(&file, property.init.unwrap(), Ty::Long)
+            })
+            .collect();
+        let long = |value| {
+            Some(LibraryConst {
+                ty: Ty::Long,
+                value: LibConst::Long(value),
+            })
+        };
+        assert_eq!(values, vec![long(60), long(-60)]);
     }
 
     #[test]

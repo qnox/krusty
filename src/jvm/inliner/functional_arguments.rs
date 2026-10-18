@@ -171,7 +171,7 @@ fn top(frame: Option<FrameView<'_, ArgumentValue>>, depth: usize) -> Option<&Arg
 }
 
 /// `markPlacesForInlineAndRemoveInlinable` for a body whose anonymous objects, SAM wrappers and
-/// reification markers were already turned away: analyze it with the call's lambdas in their
+/// reification markers were already handled: analyze it with the call's lambdas in their
 /// parameter slots, delete what only moves a lambda, its `pop`s and the unreachable code, and
 /// return the lambda each `FunctionN.invoke` calls, in order (`None` for any other function value,
 /// whose `invoke` stays a call).

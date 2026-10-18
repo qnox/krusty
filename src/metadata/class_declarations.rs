@@ -1470,7 +1470,7 @@ fn declared_supertypes(
 }
 
 /// The simple names `Class.nestedClassName` (f7) lists: every DECLARED direct nested classifier in
-/// declaration order, the names a producer generates and publishes, then the companion.
+/// declaration order, the names a producer generates and publishes, then a generated companion.
 pub(crate) fn nested_classifiers(ir: &IrFile, c: &IrClass) -> Vec<String> {
     // Declaration origin and the exact identity-tree relation keep synthesized classes out without
     // interpreting their backend spellings. Common IR carries the stable declaration order selected
@@ -1483,6 +1483,7 @@ pub(crate) fn nested_classifiers(ir: &IrFile, c: &IrClass) -> Vec<String> {
             // A classifier declared in executable code is nobody's member; one nested in a local
             // class is that class's member like any other.
             candidate.is_source_declared
+                && !candidate.is_compiler_generated
                 && candidate.enclosure.is_none()
                 && candidate.fq_name.nested_owner() == Some(c.fq_name)
         })
@@ -1501,20 +1502,16 @@ pub(crate) fn nested_classifiers(ir: &IrFile, c: &IrClass) -> Vec<String> {
         .collect();
     // A producer can generate a classifier that Kotlin code names (`Foo.$serializer`) and publish
     // that fact on the owning class. Other synthesized implementation classes stay out on their
-    // `is_source_declared` record alone. Generated names precede the COMPANION, which kotlinc lists
-    // last of that set (`$serializer` then `Companion` for a `@Serializable` class).
-    let generated_nested = c.published_nested_classifiers.iter().cloned();
+    // `is_source_declared` record alone. Generated names follow every declared classifier, a
+    // declared companion included (`N`, `Companion`, `M`, `$serializer`); a generated companion
+    // comes last (`$serializer` then `Companion` for a `@Serializable` class without one).
+    nested_names.extend(c.published_nested_classifiers.iter().cloned());
     // kotlinc lists the companion under `nestedClassName` (f7) TOO, alongside its own
     // `companionObjectName` (f4) record — both reference the same interned string.
     let companion_segment = c
         .companion_class
         .as_ref()
         .map(|companion| companion.nested_segment_ref().to_string());
-    let at = companion_segment
-        .as_ref()
-        .and_then(|segment| nested_names.iter().position(|name| name == segment))
-        .unwrap_or(nested_names.len());
-    nested_names.splice(at..at, generated_nested);
     if let Some(segment) = companion_segment {
         if !nested_names.contains(&segment) {
             nested_names.push(segment);

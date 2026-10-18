@@ -322,9 +322,9 @@ mod tests {
             .collect()
     }
 
-    const NEWEST: KotlinVersion = KotlinVersion::V2_4_20;
+    const NEWEST: KotlinVersion = KotlinVersion::V2_4_21;
 
-    /// Measured on kotlinc 2.4.20: each line of the expected output is what kotlinc printed.
+    /// Measured on kotlinc 2.4.21: each line of the expected output is what kotlinc printed.
     #[test]
     fn unknown_tokens_follow_kotlincs_three_way_split() {
         let parsed = parse(NEWEST, &["A.kt", "-foo", "-Xfoo=1", "-Xbar"]);

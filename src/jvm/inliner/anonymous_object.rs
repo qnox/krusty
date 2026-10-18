@@ -18,6 +18,7 @@ mod constructor;
 use constructor::DeclaredCapture;
 mod lambda_inlining;
 use lambda_inlining::FieldLambda;
+mod sam_wrapper;
 mod type_remapper;
 
 use crate::fx_hash::HashMap;
@@ -34,6 +35,7 @@ use crate::jvm::source_map::{DependencyMap, SourceMap};
 use super::class_roles::ClassRoles;
 use super::{InlineError, ObjectLambda};
 
+pub(crate) use sam_wrapper::copy_sam_wrapper;
 pub(crate) use type_remapper::{MalformedType, TypeRemapper};
 
 const ALOAD: u8 = 0x19;

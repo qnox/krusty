@@ -54,6 +54,25 @@ fn a_secondary_constructor_is_reached_through_its_accessor() {
     );
 }
 
+/// A suspend function's body is copied when its continuation is realized, and the copy kept the
+/// construction but lost the fact that it goes through the accessor. The suspend function then
+/// called the private primary directly, which fails only at run time with `IllegalAccessError`.
+#[test]
+fn a_suspend_function_reaches_the_primary_constructor_through_its_accessor() {
+    const HOLDER: &str = "class Holder(val count: Tag)\n";
+    const MAIN: &str = "import kotlin.coroutines.*\n\
+        suspend fun make(): Holder = Holder(Tag(3))\n\
+        fun box(): String {\n\
+        \x20   var count = 0\n\
+        \x20   suspend { make() }.startCoroutine(Continuation(EmptyCoroutineContext) { count = it.getOrThrow().count.value })\n\
+        \x20   return if (count == 3) \"OK\" else \"FAIL \" + count\n\
+        }\n";
+    expect_same_box(
+        &[("Tag.kt", TAG), ("Holder.kt", HOLDER), ("Main.kt", MAIN)],
+        "a suspend function constructing a sibling class through its accessor",
+    );
+}
+
 /// A type parameter bound to a value class at the call site is not a value-class parameter: the
 /// constructor stays public and takes the box.
 #[test]

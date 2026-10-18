@@ -12,6 +12,9 @@ pub struct PluginRelease {
 impl PluginRelease {
     /// kotlinc 2.4.20's plugin ends its checker messages with a full stop.
     pub const V2_4_20: PluginRelease = PluginRelease::new(2, 4, 20);
+    /// kotlinc 2.4.21's plugin copies the serialized class's type-parameter bounds onto its
+    /// generated `$serializer` in IR (KT-89275).
+    pub const V2_4_21: PluginRelease = PluginRelease::new(2, 4, 21);
 
     pub const fn new(major: u32, minor: u32, patch: u32) -> PluginRelease {
         PluginRelease {

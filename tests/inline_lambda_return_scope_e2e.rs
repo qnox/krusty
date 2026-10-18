@@ -6,7 +6,7 @@
 //! the value is a parameter or a property, while an inline `invoke` operator inlines like any call.
 
 use super::common;
-use super::diagnostics_parity_support::{errors, ObservedError};
+use crate::diagnostics_parity_support::{errors, ObservedError};
 
 const PROHIBITED: &str = "'return' is prohibited here.";
 

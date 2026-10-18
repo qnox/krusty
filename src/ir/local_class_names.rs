@@ -1339,6 +1339,9 @@ impl super::IrFile {
         for signature in self.class_signatures.values_mut() {
             generic_signature(signature, names);
         }
+        for signature in self.lowered_class_signatures.values_mut() {
+            generic_signature(signature, names);
+        }
         self.companion_blocks
             .remap_classifier_identities(names, |value| ty(value, names));
         self.remap_type_reflection_classifier_identities(names, |value| ty(value, names));
@@ -1543,6 +1546,7 @@ impl super::IrFile {
         remap_keyed(&mut self.class_superclass_positions, names);
         remap_keyed(&mut self.class_ctor_defaults, names);
         remap_keyed(&mut self.class_signatures, names);
+        remap_keyed(&mut self.lowered_class_signatures, names);
         remap_keyed(&mut self.field_signatures, names);
         remap_keyed(&mut self.external_value_classes, names);
         remap_keyed(&mut self.companion_clinit_bodies, names);

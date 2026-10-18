@@ -38,6 +38,7 @@ private val kotlincArgumentsByVersion: Map<String, Map<String, KotlincArgument>>
         "2.4.0" to v2_4_0,
         "2.4.10" to v2_4_0,
         "2.4.20" to readKotlincArguments("2.4.20"),
+        "2.4.21" to readKotlincArguments("2.4.21"),
     )
 }
 

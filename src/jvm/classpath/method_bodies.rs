@@ -2,6 +2,75 @@
 
 use super::*;
 
+fn declared_regeneration_role(
+    unnamed_self: bool,
+    sam_wrapper: bool,
+) -> Option<crate::jvm::inline::RegeneratedClass> {
+    use crate::jvm::inline::RegeneratedClass;
+    if sam_wrapper {
+        Some(RegeneratedClass::SamWrapper)
+    } else if unnamed_self {
+        Some(RegeneratedClass::AnonymousObject)
+    } else {
+        None
+    }
+}
+
+/// Whether `class` declares the classfile shape of a shared SAM-conversion wrapper.
+///
+/// Callable/property-reference carriers also have an unnamed `InnerClasses` self row and
+/// `ACC_SYNTHETIC`, so those two flags alone do not establish the role. A wrapper is the synthetic
+/// `Object` subclass that captures exactly one function value through its one-argument constructor
+/// and implements a declaration that is semantically eligible for SAM conversion.
+fn is_sam_wrapper_declaration(classpath: &Classpath, class: &ClassInfo) -> bool {
+    use crate::jvm::classreader::{ACC_FINAL, ACC_PRIVATE, ACC_STATIC, ACC_SYNTHETIC};
+    const ACC_ANNOTATION: u16 = 0x2000;
+    const CAPTURE_ACCESS: u16 = ACC_PRIVATE | ACC_FINAL | ACC_SYNTHETIC;
+
+    if class.access & ACC_SYNTHETIC == 0
+        || !class
+            .super_class
+            .is_some_and(|superclass| superclass.matches("java/lang/Object"))
+    {
+        return false;
+    }
+    let [capture] = class.fields.as_slice() else {
+        return false;
+    };
+    if capture.access & CAPTURE_ACCESS != CAPTURE_ACCESS || capture.access & ACC_STATIC != 0 {
+        return false;
+    }
+    let capture_type = crate::jvm::physical_type::class_descriptor_ty(&capture.descriptor);
+    if classpath.function_classifier_arity(capture_type).is_none() {
+        return false;
+    }
+    let mut constructors = class
+        .methods
+        .iter()
+        .filter(|method| method.name == "<init>");
+    let Some(constructor) = constructors.next() else {
+        return false;
+    };
+    if constructors.next().is_some() {
+        return false;
+    }
+    let Some((parameters, result)) =
+        crate::jvm::names::parse_method_descriptor(&constructor.descriptor)
+    else {
+        return false;
+    };
+    if result != "V" || parameters.as_slice() != [capture.descriptor.as_str()] {
+        return false;
+    }
+    class.interfaces.iter_ids().any(|interface| {
+        classpath.find_name(interface).is_some_and(|target| {
+            target.is_interface()
+                && target.access & ACC_ANNOTATION == 0
+                && (!target.meta.is_present() || target.meta.is_fun_interface)
+        })
+    })
+}
+
 /// The classpath is the JVM realization of the inliner's narrow [`MethodBodies`] capability — the
 /// emitter sees only this, not the whole `Classpath`.
 impl crate::jvm::inline::MethodBodies for Classpath {
@@ -15,15 +84,11 @@ impl crate::jvm::inline::MethodBodies for Classpath {
         Classpath::singleton_storage(self, classifier)
     }
     fn regenerated_class(&self, internal: &str) -> Option<crate::jvm::inline::RegeneratedClass> {
-        use crate::jvm::inline::RegeneratedClass;
         let class = self.find(internal)?;
-        match class.inner_class_self() {
-            Some(entry) if entry.name.is_none() => Some(RegeneratedClass::AnonymousObject),
-            None if class.access & crate::jvm::classfile::ACC_SYNTHETIC != 0 => {
-                Some(RegeneratedClass::SamWrapper)
-            }
-            _ => None,
-        }
+        let unnamed_self = class
+            .inner_class_self()
+            .is_some_and(|entry| entry.name.is_none());
+        declared_regeneration_role(unnamed_self, is_sam_wrapper_declaration(self, &class))
     }
     fn owner_is_interface_name(&self, owner: TypeName) -> bool {
         let owner_id = crate::jvm::jvm_class_map::to_jvm_type_name(owner);
@@ -164,8 +229,27 @@ impl Classpath {
 #[cfg(test)]
 mod tests {
     use super::super::Classpath;
+    use super::declared_regeneration_role;
     use crate::jvm::inline::MethodBodies;
+    use crate::jvm::inline::RegeneratedClass;
     use crate::types::type_name;
+
+    #[test]
+    fn a_declared_sam_wrapper_takes_precedence_over_its_unnamed_self_row() {
+        assert_eq!(
+            declared_regeneration_role(true, true),
+            Some(RegeneratedClass::SamWrapper)
+        );
+        assert_eq!(
+            declared_regeneration_role(true, false),
+            Some(RegeneratedClass::AnonymousObject)
+        );
+        assert_eq!(
+            declared_regeneration_role(false, true),
+            Some(RegeneratedClass::SamWrapper)
+        );
+        assert_eq!(declared_regeneration_role(false, false), None);
+    }
 
     #[test]
     fn interned_interface_probe_maps_physical_builtin_owners() {

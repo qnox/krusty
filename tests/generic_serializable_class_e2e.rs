@@ -63,3 +63,18 @@ fn a_companion_serializer_has_unbounded_type_parameters() {
     assert_identical("BoundedSerializableNonNull", BOUNDED, "A$Companion");
     assert_identical("BoundedSerializableNullable", BOUNDED, "B$Companion");
 }
+
+/// `deserialize` holds a type-parameter element as the `$serializer`'s own type parameter. Before
+/// 2.4.21 that parameter is unbounded: the local is `Object`, narrowed to the bound only where the
+/// deserialization constructor takes it. From 2.4.21 the plugin copies the class's bounds onto it
+/// (KT-89275): the class `Signature` names the bound and each decoded value is cast to it.
+#[test]
+fn a_bounded_type_parameter_element_is_decoded_into_an_object_local() {
+    let source = "import kotlinx.serialization.Serializable\n\
+        @Serializable\n\
+        class B<T : CharSequence?>(val t: T, val n: Int)\n\
+        @Serializable\n\
+        class C<T : Number>(val t: T)\n";
+    assert_identical("BoundedTypeParameterElement", source, "B$$serializer");
+    assert_identical("BoundedTypeParameterElement", source, "C$$serializer");
+}
