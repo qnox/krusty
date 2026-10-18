@@ -4475,11 +4475,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/platform_null_check_line_e2e.rs` (full-byte against kotlinc).
 - **A captured source `var` local is a shared cell.** kotlinc's `SharedVariablesLowering` boxes
   every `var`/`lateinit var` local a non-inline closure captures, written or not: a lambda, a local
-  function, a local class and an anonymous object all take the `Ref`. A `for` loop variable and a
-  setter's `field` are not source `var` locals and stay copied. The resolver's `CapturedBinding`
-  decides it for local classes and anonymous objects; checked FIR already did for lambdas and local
-  functions.
-  `a_captured_var_that_is_never_written_is_a_shared_cell` in `tests/captured_field_storage_e2e.rs`.
+  function, a local class and an anonymous object all take the `Ref`. A destructured `var (c) = p`
+  entry is one too. A `for` loop variable and a setter's `field` are not source `var` locals and
+  stay copied. Every local-property declaration records its source mutability once with its flow
+  identity (`resolve::local_properties`), so no declaration form is missed. The resolver's
+  `CapturedBinding` decides it for local classes and anonymous objects; checked FIR already did for
+  lambdas and local functions.
+  `a_captured_var_that_is_never_written_is_a_shared_cell` and
+  `a_captured_destructured_var_is_a_shared_cell` in `tests/captured_field_storage_e2e.rs`.
 - **The line after a call kotlinc inlines.** After an inlined call, kotlinc's
   `markLineNumberAfterInlineIfNeeded` re-emits the line in effect when the call sits inside a
   condition and otherwise forgets it, so the next expression's mark is written even on the same

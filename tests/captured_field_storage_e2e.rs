@@ -131,6 +131,7 @@ fun localFunction(): Int {
     fun r() = c
     return r()
 }
+
 ";
     for class in [
         "ReadOnlyCapturesKt",
@@ -147,4 +148,26 @@ fun localFunction(): Int {
         .expect("the reference kotlinc is provisioned")
         .unwrap_or_else(|why| panic!("{class}: {why}"));
     }
+}
+
+/// A destructured `var` entry is a source `var` too, so a local class captures it as a `Ref`. Only
+/// the class is compared: the enclosing function still places the declaration's line entry at the
+/// load rather than at the cell allocation, a separate divergence lambdas share.
+#[test]
+fn a_captured_destructured_var_is_a_shared_cell() {
+    let source = "\
+fun destructured(p: Pair<Int, Int>): Int {
+    var (c, d) = p
+    class D { fun run() = c + d }
+    return D().run()
+}
+";
+    common::byte_diff_against_kotlinc_cp(
+        "DestructuredCaptures",
+        source,
+        "DestructuredCapturesKt$destructured$D",
+        &[common::stdlib_jar()],
+    )
+    .expect("the reference kotlinc is provisioned")
+    .unwrap_or_else(|why| panic!("{why}"));
 }

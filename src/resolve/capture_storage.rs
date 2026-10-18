@@ -827,7 +827,7 @@ impl Checker<'_> {
                     already_shared: local.shared_storage_cell,
                     written_here: self.fn_reassigned.contains(&name)
                         || class_reassigned.contains(&name),
-                    source_var: self.source_var_locals.contains(&local.flow_identity),
+                    source_var: self.local_properties.is_source_var(local.flow_identity),
                 }
                 .is_shared_cell(),
                 storage_ty: local.delegate_storage_ty,

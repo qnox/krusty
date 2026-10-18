@@ -160,6 +160,7 @@ mod local_class_scope;
 mod local_extension_applicability;
 mod local_initialization;
 mod local_method_dependencies;
+mod local_properties;
 mod loop_flow;
 mod member_extension_properties;
 mod member_extension_selection;
@@ -16087,7 +16088,7 @@ impl<'a> Checker<'a> {
                         mutable: local.is_var,
                         already_shared: local.shared_storage_cell,
                         written_here,
-                        source_var: self.source_var_locals.contains(&local.flow_identity),
+                        source_var: self.local_properties.is_source_var(local.flow_identity),
                     }
                     .is_shared_cell();
                     // A shared cell keeps the declared type so a later write of `null` into
@@ -21883,8 +21884,7 @@ impl<'a> Checker<'a> {
                 }
                 self.local_decl_types.insert(s, prop_ty);
                 let flow_identity = self.declare(scope, &name, prop_ty, true);
-                self.annotation_argument_locals.record(flow_identity);
-                self.source_var_locals.insert(flow_identity);
+                self.local_properties.record(flow_identity, true);
             }
             Stmt::Destructure { entries, init } => self.stmt_destructure(scope, s, entries, init),
             Stmt::IncDec { name, dec, prefix } => self.stmt_inc_dec(scope, s, name, dec, prefix),
@@ -22098,7 +22098,9 @@ impl<'a> Checker<'a> {
                                 mutable: local.is_var,
                                 already_shared: local.shared_storage_cell,
                                 written_here: self.fn_reassigned.contains(&captured),
-                                source_var: self.source_var_locals.contains(&local.flow_identity),
+                                source_var: self
+                                    .local_properties
+                                    .is_source_var(local.flow_identity),
                             }
                             .is_shared_cell(),
                             storage_ty: local.delegate_storage_ty,
@@ -22287,10 +22289,7 @@ impl<'a> Checker<'a> {
         } else {
             self.declare_inferred(scope, &name, bound_ty, is_var, error_provenance)
         };
-        self.annotation_argument_locals.record(flow_identity);
-        if is_var {
-            self.source_var_locals.insert(flow_identity);
-        }
+        self.local_properties.record(flow_identity, is_var);
         if deferred {
             self.local_initialization.declare_deferred(s, flow_identity);
         }
@@ -22357,7 +22356,7 @@ impl<'a> Checker<'a> {
         }
         self.local_decl_types.insert(s, prop_ty);
         let flow_identity = self.declare(scope, &name, prop_ty, site.is_var);
-        self.annotation_argument_locals.record(flow_identity);
+        self.local_properties.record(flow_identity, site.is_var);
         let storage_ty = self
             .delegate_provide_targets
             .get(&delegate)
@@ -33058,8 +33057,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         implicit_receiver_selections: HashMap::default(),
         implicit_receiver_identities: HashMap::default(),
         read_flow_roots: HashMap::default(),
-        annotation_argument_locals: Default::default(),
-        source_var_locals: crate::fx_hash::HashSet::default(),
+        local_properties: Default::default(),
         local_initialization: Default::default(),
         read_callable_reference_types: HashMap::default(),
         anonymous_super_read_provenance: HashMap::default(),
@@ -35735,10 +35733,7 @@ struct Checker<'a> {
     implicit_receiver_identities: HashMap<ExprId, (usize, usize)>,
     /// The flow root each checked lexical-value or `this` read resolved to.
     read_flow_roots: HashMap<ExprId, scope::PathRoot>,
-    annotation_argument_locals: annotation_argument_constness::LocalPropertyIdentities,
-    /// Flow identities of the `var` and `lateinit var` locals a function body declares in source.
-    /// A loop variable or a setter's `field` is a mutable binding but not one of these.
-    source_var_locals: crate::fx_hash::HashSet<u32>,
+    local_properties: local_properties::LocalProperties,
     local_initialization: local_initialization::InitializationRecords,
     /// The exact function shape of a callable reference a checked name read is bound to.
     read_callable_reference_types: HashMap<ExprId, Ty>,
