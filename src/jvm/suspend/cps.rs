@@ -17,7 +17,7 @@ mod member_parameters;
 mod routing;
 
 pub(crate) use inline_suspension::{
-    frame_suspensions, reified_host_lambda_suspensions, spliced_inline_suspensions,
+    frame_suspensions, placed_lambda_suspensions, spliced_inline_suspensions,
     spliced_return_crosses_finally, spliced_suspension_lambda_impls, suspends_in_a_value_try,
 };
 pub(crate) use liveness::LocalLiveness;
