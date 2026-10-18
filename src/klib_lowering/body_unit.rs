@@ -106,11 +106,12 @@ struct PendingBody<'a> {
 }
 
 impl DependencyBodyUnit {
-    /// Whether this selected declaration has the exact scalar boundary of a reinterpret wrapper.
-    /// This is a semantic type/receiver contract, not a declaration-name allowlist. It prevents an
-    /// arbitrary stdlib caller which happens to reach a reinterpret instruction (for example a
-    /// collection hash operation) from becoming executable support code.
-    pub(crate) fn is_reinterpret_root_candidate(
+    /// Whether this selected declaration has the exact scalar boundary of an instruction wrapper:
+    /// a non-member whose operands are scalars of an instruction class and whose result is such a
+    /// scalar or `Boolean`. This is a semantic type/receiver contract, not a declaration-name
+    /// allowlist. It prevents an arbitrary stdlib caller which happens to reach an instruction (for
+    /// example a collection hash operation) from becoming executable support code.
+    pub(crate) fn is_scalar_root_candidate(
         callable: KlibBodyCallable<'_>,
         bodies: &KlibDeclarationBodies,
     ) -> bool {
@@ -135,13 +136,11 @@ impl DependencyBodyUnit {
             }
             operands.remove(context_count);
         }
-        matches!(
-            (operands.as_slice(), ret),
-            ([Ty::Float], Ty::Int)
-                | ([Ty::Int], Ty::Float)
-                | ([Ty::Double], Ty::Long)
-                | ([Ty::Long], Ty::Double)
-        )
+        !operands.is_empty()
+            && operands
+                .iter()
+                .all(|operand| crate::libraries::ScalarClass::of(*operand).is_some())
+            && (ret == Ty::Boolean || crate::libraries::ScalarClass::of(ret).is_some())
     }
 
     /// The function holding `callable`'s body, lowering it, and every body it reaches through
@@ -734,6 +733,27 @@ fn linked_intrinsic_parts(
                         }
                     };
                     IrIntrinsic::ReinterpretBits { from, to: ret }
+                }
+                crate::libraries::CompilerIntrinsic::ScalarInstruction(instruction) => {
+                    let operand =
+                        match (receiver, params) {
+                            (None, [operand, ..])
+                                if params.len() == instruction.arity()
+                                    && params.iter().all(|ty| ty == operand)
+                                    && instruction.admits(*operand, ret) =>
+                            {
+                                *operand
+                            }
+                            _ => return Err(KlibBodyDeclineReason::SignatureMismatch(
+                                "an intrinsic scalar instruction does not have its operands' shape"
+                                    .to_owned(),
+                            )),
+                        };
+                    IrIntrinsic::ScalarInstruction {
+                        instruction,
+                        operand,
+                        result: ret,
+                    }
                 }
                 _ => {
                     return Err(KlibBodyDeclineReason::UnsupportedOperation(

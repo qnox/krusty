@@ -1624,7 +1624,7 @@ fn intrinsic_support_roots_exclude_ordinary_callers_of_bit_wrappers() {
         let has_reinterpret_reachability =
             bodies.is_supported_intrinsic_root(identity, libraries.intrinsic_facts());
         let has_reinterpret_boundary =
-            DependencyBodyUnit::is_reinterpret_root_candidate(callable, bodies);
+            DependencyBodyUnit::is_scalar_root_candidate(callable, bodies);
         if callable.is_member() {
             assert!(
                 !has_reinterpret_boundary,
@@ -1666,7 +1666,7 @@ fn native_to_raw_bits_is_a_supported_root_and_lowers_its_authenticated_intrinsic
             "toRawBits on {operand:?} directly calls its authenticated reinterpret declaration"
         );
         assert!(
-            DependencyBodyUnit::is_reinterpret_root_candidate(
+            DependencyBodyUnit::is_scalar_root_candidate(
                 fact.klib_body_callable().expect("signed"),
                 bodies,
             ),
@@ -1958,6 +1958,111 @@ fn wasm_to_bits_closes_its_exact_semantic_wrapper_unit() {
                 .count(),
             1,
             "the selected isNaN body remains the exact IEEE predicate on {operand:?}"
+        );
+    }
+}
+
+#[test]
+fn wasm_math_wrappers_are_scalar_roots_closing_through_one_instruction() {
+    let Some(path) =
+        crate::toolchain::kotlin_stdlib_klib(crate::compilation_target::CompilationTarget::WasmJs)
+    else {
+        assert!(
+            std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
+            "KRUSTY_REQUIRE_KLIB is set but no Wasm/JS stdlib KLIB is provisioned"
+        );
+        return;
+    };
+    let libraries =
+        KlibLibraries::open(&[crate::klib_libraries::KlibLibraryInput::platform_stdlib(
+            path,
+            crate::klib_libraries::KlibStdlibSemantics::Wasm,
+        )])
+        .unwrap_or_else(|error| panic!("{error}"));
+    let bodies = libraries.declaration_bodies();
+
+    for (package, name, receiver, parameters, instruction, operand, result) in [
+        (
+            "kotlin/math",
+            "sqrt",
+            None,
+            vec![Ty::Double],
+            crate::libraries::ScalarInstruction::SquareRoot,
+            Ty::Double,
+            Ty::Double,
+        ),
+        (
+            "kotlin/math",
+            "min",
+            None,
+            vec![Ty::Float, Ty::Float],
+            crate::libraries::ScalarInstruction::Minimum,
+            Ty::Float,
+            Ty::Float,
+        ),
+        (
+            "kotlin/math",
+            "withSign",
+            Some(Ty::Double),
+            vec![Ty::Double],
+            crate::libraries::ScalarInstruction::CopySign,
+            Ty::Double,
+            Ty::Double,
+        ),
+        (
+            "kotlin",
+            "countLeadingZeroBits",
+            Some(Ty::Long),
+            vec![],
+            crate::libraries::ScalarInstruction::CountLeadingZeros,
+            Ty::Long,
+            Ty::Long,
+        ),
+    ] {
+        let fact = frozen_function(&libraries, package, name, receiver, &parameters);
+        let callable = fact.klib_body_callable().expect("signed");
+        assert!(
+            DependencyBodyUnit::is_scalar_root_candidate(callable, bodies),
+            "{name} has the scalar boundary of an instruction wrapper"
+        );
+        assert!(
+            bodies.is_supported_intrinsic_root(callable.identity(), libraries.intrinsic_facts()),
+            "{name} directly calls its authenticated instruction"
+        );
+        let mut unit = DependencyBodyUnit::default();
+        unit.lower_function_with_intrinsics(
+            callable,
+            bodies,
+            &KlibCalleeFacts::default(),
+            libraries.intrinsic_facts(),
+        )
+        .unwrap_or_else(|decline| panic!("{name}: {decline}"));
+        validated(unit.ir());
+        assert_eq!(unit.ir().functions.len(), 1, "{name}");
+        assert_eq!(
+            unit.ir()
+                .exprs
+                .iter()
+                .filter(|expression| matches!(
+                    expression,
+                    IrExpr::Call {
+                        callee: Callee::Intrinsic {
+                            operation: IrIntrinsic::ScalarInstruction {
+                                instruction: lowered,
+                                operand: lowered_operand,
+                                result: lowered_result,
+                            },
+                            ret,
+                        },
+                        ..
+                    } if *lowered == instruction
+                        && *lowered_operand == operand
+                        && *lowered_result == result
+                        && *ret == result
+                ))
+                .count(),
+            1,
+            "{name} closes through exactly one authenticated instruction"
         );
     }
 }

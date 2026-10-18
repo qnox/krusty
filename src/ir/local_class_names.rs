@@ -401,7 +401,12 @@ fn callee(callee: &mut Callee, names: &HashMap<TypeName, TypeName>) {
         Callee::Intrinsic { operation, ret } => {
             *ret = ty(*ret, names);
             match operation {
-                super::IrIntrinsic::ReinterpretBits { from, to } => {
+                super::IrIntrinsic::ReinterpretBits { from, to }
+                | super::IrIntrinsic::ScalarInstruction {
+                    operand: from,
+                    result: to,
+                    ..
+                } => {
                     *from = ty(*from, names);
                     *to = ty(*to, names);
                 }

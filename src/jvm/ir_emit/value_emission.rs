@@ -749,6 +749,11 @@ impl super::Emitter<'_> {
                     crate::ir::IrIntrinsic::ReinterpretBits { .. } => {
                         unreachable!("target KLIB reinterpretation cannot reach the JVM backend")
                     }
+                    crate::ir::IrIntrinsic::ScalarInstruction { .. } => {
+                        unreachable!(
+                            "a target KLIB scalar instruction cannot reach the JVM backend"
+                        )
+                    }
                     crate::ir::IrIntrinsic::Assert { mode } => {
                         self.emit_assertion(*mode, args, code)
                     }

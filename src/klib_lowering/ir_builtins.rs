@@ -34,6 +34,17 @@ const RELATIONS: [(&str, IrBinOp); 4] = [
 /// The operand types whose relations lowering realizes, as metadata class ids.
 const OPERANDS: [&str; 4] = ["kotlin/Int", "kotlin/Long", "kotlin/Float", "kotlin/Double"];
 
+/// The numeric classes whose `toByte()` … `toDouble()` members are Kotlin's numeric conversions,
+/// as metadata class ids paired with their conversion member's name.
+const NUMERIC_CONVERSIONS: [(&str, &str); 6] = [
+    ("kotlin/Byte", "toByte"),
+    ("kotlin/Short", "toShort"),
+    ("kotlin/Int", "toInt"),
+    ("kotlin/Long", "toLong"),
+    ("kotlin/Float", "toFloat"),
+    ("kotlin/Double", "toDouble"),
+];
+
 /// The operand types of `IrBuiltIns`' `ieee754equals`, as metadata class ids.
 const FLOATING_POINT: [&str; 2] = ["kotlin/Float", "kotlin/Double"];
 
@@ -63,6 +74,12 @@ pub(super) enum BuiltinOperator {
     },
     /// `kotlin.Boolean.not(): Boolean`, Kotlin's `!`.
     Not,
+    /// A numeric class's conversion member, such as `kotlin.Long.toInt(): Int`, from the
+    /// dispatch receiver's `from` to `to`.
+    NumericConversion {
+        from: Ty,
+        to: Ty,
+    },
 }
 
 /// The built-in operators lowering realizes, by exact signature.
@@ -78,6 +95,16 @@ impl IrBuiltinOperators {
             classes: &[],
             native_interop_library: false,
         };
+        let kotlin_package = ["kotlin".to_owned()];
+        let numeric_classes = NUMERIC_CONVERSIONS.map(|(owner, _)| {
+            [ClassScope {
+                name: owner
+                    .strip_prefix("kotlin/")
+                    .expect("a kotlin numeric class"),
+                type_parameters: Vec::new(),
+                expect: false,
+            }]
+        });
         let mut operators = HashMap::default();
         let mut declare = |container, name, params: Vec<&KotlinType>, operator| {
             let shape = CallableShape {
@@ -127,20 +154,36 @@ impl IrBuiltinOperators {
                 BuiltinOperator::Ieee754Equals { operand },
             );
         }
-        let kotlin = ["kotlin".to_owned()];
         let boolean = [ClassScope {
             name: "Boolean",
             type_parameters: Vec::new(),
             expect: false,
         }];
         let boolean = DeclarationContainer::<KotlinType> {
-            package: &kotlin,
+            package: &kotlin_package,
             classes: &boolean,
             native_interop_library: false,
         };
         declare(boolean, "not", Vec::new(), BuiltinOperator::Not);
+        for ((owner, _), class) in NUMERIC_CONVERSIONS.into_iter().zip(&numeric_classes) {
+            let from = semantic_ty(&KotlinType::class(owner), &HashMap::default());
+            let container = DeclarationContainer::<KotlinType> {
+                package: &kotlin_package,
+                classes: class,
+                native_interop_library: false,
+            };
+            for (target, name) in NUMERIC_CONVERSIONS {
+                let to = semantic_ty(&KotlinType::class(target), &HashMap::default());
+                declare(
+                    container,
+                    name,
+                    Vec::new(),
+                    BuiltinOperator::NumericConversion { from, to },
+                );
+            }
+        }
         let kotlin = DeclarationContainer::<KotlinType> {
-            package: &kotlin,
+            package: &kotlin_package,
             classes: &[],
             native_interop_library: false,
         };

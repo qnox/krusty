@@ -85,7 +85,7 @@ pub(super) fn emit_intrinsic_dependencies<B: Backend>(
     for callable in selected.iter().copied().filter(|callable| {
         !support_state.emitted.contains_key(callable.identity())
             && platform.is_platform_stdlib_dependency(callable.identity())
-            && DependencyBodyUnit::is_reinterpret_root_candidate(*callable, bodies)
+            && DependencyBodyUnit::is_scalar_root_candidate(*callable, bodies)
             && bodies.is_supported_intrinsic_root(callable.identity(), intrinsics)
     }) {
         if !roots
@@ -129,7 +129,8 @@ pub(super) fn emit_intrinsic_dependencies<B: Backend>(
     if unit.callable_functions().next().is_none() {
         return Vec::new();
     }
-    if !contains_reinterpret(unit.ir()) && !links_emitted_support(unit.ir(), &externals) {
+    if !contains_authenticated_intrinsic(unit.ir()) && !links_emitted_support(unit.ir(), &externals)
+    {
         diags.error(
             Span::new(0, 0),
             "internal error: authenticated KLIB intrinsic roots lowered without an intrinsic or exact emitted-support edge",
@@ -363,13 +364,14 @@ fn prepare_bodyless_externals(
     true
 }
 
-fn contains_reinterpret(ir: &crate::ir::IrFile) -> bool {
+fn contains_authenticated_intrinsic(ir: &crate::ir::IrFile) -> bool {
     ir.exprs.iter().any(|expression| {
         matches!(
             expression,
             IrExpr::Call {
                 callee: Callee::Intrinsic {
-                    operation: IrIntrinsic::ReinterpretBits { .. },
+                    operation: IrIntrinsic::ReinterpretBits { .. }
+                        | IrIntrinsic::ScalarInstruction { .. },
                     ..
                 },
                 ..

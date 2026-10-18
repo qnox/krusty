@@ -12,6 +12,14 @@ pub enum IrIntrinsic {
         from: Ty,
         to: Ty,
     },
+    /// One target-stdlib scalar instruction. Every operand is an `operand`; the
+    /// provider-authenticated declaration fixed both types, and
+    /// [`crate::libraries::ScalarInstruction::admits`] them.
+    ScalarInstruction {
+        instruction: crate::libraries::ScalarInstruction,
+        operand: Ty,
+        result: Ty,
+    },
     /// Kotlin's checked `assert` operation. Arguments are the Boolean condition followed by its
     /// optional zero-argument message function. A backend must guard/elide the whole operation
     /// before evaluating either child according to `mode`.
