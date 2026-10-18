@@ -413,11 +413,7 @@ mod tests {
     /// `-language-version <level> -Xmetadata-klib`, for every supported release and language level.
     #[test]
     fn the_stamp_follows_the_language_level_as_each_release_does() {
-        let releases = [
-            KotlinVersion::V2_4_0,
-            KotlinVersion::V2_4_10,
-            KotlinVersion::V2_4_20,
-        ];
+        let releases = KotlinVersion::supported();
         let languages = [
             LanguageVersion::V2_0,
             LanguageVersion::V2_1,
@@ -464,6 +460,11 @@ mod tests {
                 "2.4.20 2.2: abi_version=2.4.0 metadata_version=2.2.0",
                 "2.4.20 2.3: abi_version=2.4.0 metadata_version=2.3.0",
                 "2.4.20 2.4: abi_version=2.4.0 metadata_version=2.4.0",
+                "2.4.21 2.0: abi_version=2.4.0 metadata_version=2.0.0",
+                "2.4.21 2.1: abi_version=2.4.0 metadata_version=2.1.0",
+                "2.4.21 2.2: abi_version=2.4.0 metadata_version=2.2.0",
+                "2.4.21 2.3: abi_version=2.4.0 metadata_version=2.3.0",
+                "2.4.21 2.4: abi_version=2.4.0 metadata_version=2.4.0",
             ]
         );
     }

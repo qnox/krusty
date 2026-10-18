@@ -773,7 +773,7 @@ mod tests {
         assert!(module_metadata.is_file());
 
         // A value-taking option introduced in 2.4.20 must consume its following token only under
-        // that release's grammar. Under 2.4.0/2.4.10, the same token is an unknown -X option and
+        // the grammar of 2.4.20 and later. Under 2.4.0/2.4.10, the same token is an unknown -X option and
         // the following free -d remains visible to the plugin-owned destination check.
         let _ = std::fs::remove_file(&log);
         let release_boundary = build()
@@ -784,7 +784,7 @@ mod tests {
             release_boundary.is_err(),
             "release boundary probe succeeded"
         );
-        if kgp == "2.4.20" {
+        if matches!(kgp.as_str(), "2.4.20" | "2.4.21") {
             let invocation = single_invocation(&log);
             assert!(has_pair(
                 &invocation,
