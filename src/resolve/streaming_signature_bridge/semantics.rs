@@ -1,6 +1,7 @@
 //! Resolver-backed evaluation of compact signature expressions.
 
 use super::callable_references::AppliedSourceAlias;
+use super::top_level_call::SelectedTopLevelCall;
 use super::*;
 use crate::resolve::implicit_rungs::ImplicitRung;
 
@@ -144,7 +145,7 @@ impl ProductionSignatureSemantics<'_> {
         Ok(Some(receiver))
     }
 
-    fn record_scoped_member_constraints(
+    pub(super) fn record_scoped_member_constraints(
         &self,
         scope: crate::fir::SignatureScope,
         receiver: Ty,
@@ -1337,6 +1338,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             expected.map(crate::fir::ResolvedTy::get),
         );
         self.selected_calls.forget_abbreviation(origin);
+        self.forget_selected_result_publication(origin);
         let entry_candidates = self.enclosing_enum_entry_callables(scope, spelling);
         if !entry_candidates.is_empty() {
             let argument_types = arguments
@@ -1472,20 +1474,19 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 }
                 if let Some((declaration, selected_argument_types)) = self
                     .with_resolver(scope, |resolver| {
-                        let (arguments, types) = Self::mapped_constructor_arguments(
+                        let arguments = Self::mapped_constructor_arguments(
                             resolver,
                             internal,
                             arguments,
                             trailing_lambda,
-                        )
-                        .unwrap_or_else(|| (argument_kinds.clone(), argument_types.clone()));
+                        )?;
                         resolver
                             .select_constructor_declaration_with_type_arguments(
                                 internal,
-                                &arguments,
+                                &arguments.kinds,
                                 &resolved_type_arguments,
                             )
-                            .map(|declaration| (declaration, types))
+                            .map(|declaration| (declaration, arguments.types))
                     })
                     .ok()
                 {
@@ -1801,7 +1802,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             // functions at this same receiver rung. The property declaration and the `invoke`
             // convention are both selected by the shared resolver; SigExpr only composes them.
             if let Some(callee) =
-                self.selected_member_property_type(scope, receiver, spelling, demand)?
+                self.selected_member_property_type(scope, receiver, spelling, None, demand)?
             {
                 if let Ok(result) = self.select_invoke(scope, origin, callee, arguments, demand) {
                     return Ok(result);
@@ -1884,20 +1885,19 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             if self.classifier_source_spelling(classifier) == spelling {
                 if let Some((declaration, selected_argument_types)) = self
                     .with_resolver(scope, |resolver| {
-                        let (arguments, types) = Self::mapped_constructor_arguments(
+                        let arguments = Self::mapped_constructor_arguments(
                             resolver,
                             classifier,
                             arguments,
                             trailing_lambda,
-                        )
-                        .unwrap_or_else(|| (argument_kinds.clone(), argument_types.clone()));
+                        )?;
                         resolver
                             .select_constructor_declaration_with_type_arguments(
                                 classifier,
-                                &arguments,
+                                &arguments.kinds,
                                 &resolved_type_arguments,
                             )
-                            .map(|declaration| (declaration, types))
+                            .map(|declaration| (declaration, arguments.types))
                     })
                     .ok()
                 {
@@ -2069,7 +2069,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 symbol.is_some(),
             );
             // Callable selection above already used the common file/module visibility gate. This
-            // symbol query supplies only the remaining value and constructor facets.
+            // symbol query supplies the remaining value facet. Constructor selection below starts
+            // from the already-bound classifier and retains its exact source-argument mapping.
             if let Some(symbol) = symbol {
                 if let crate::symbol_resolver::Symbol::Member(facets) = &symbol {
                     if let [property] = facets.values.as_slice() {
@@ -2078,16 +2079,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             argument_types.clone(),
                         ));
                     }
-                }
-                if let crate::symbol_resolver::Symbol::Constructor(constructor) = &symbol {
-                    let selected =
-                        crate::symbol_resolver::selected_constructor::from_selected_call(
-                            constructor,
-                        );
-                    return Some((
-                        SelectedTopLevelCall::Constructor(Box::new(selected), None),
-                        argument_types.clone(),
-                    ));
                 }
             }
             // A lexically nested classifier is a nearer type-scope rung than file imports. Use
@@ -2116,22 +2107,25 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     argument_types.clone(),
                 ));
             }
-            let (constructor_arguments, constructor_argument_types) =
-                Self::mapped_constructor_arguments(
-                    resolver,
-                    internal,
-                    arguments,
-                    trailing_lambda,
-                )
-                .unwrap_or_else(|| (argument_kinds.clone(), argument_types.clone()));
+            let constructor_arguments = Self::mapped_constructor_arguments(
+                resolver,
+                internal,
+                arguments,
+                trailing_lambda,
+            )?;
             if let Some(declaration) = resolver.select_constructor_declaration_with_type_arguments(
                 internal,
-                &constructor_arguments,
+                &constructor_arguments.kinds,
                 &resolved_type_arguments,
             ) {
+                let parameter_by_argument = constructor_arguments.parameter_by_argument();
                 return Some((
-                    SelectedTopLevelCall::Constructor(Box::new(declaration), alias),
-                    constructor_argument_types,
+                    SelectedTopLevelCall::Constructor {
+                        declaration: Box::new(declaration),
+                        alias,
+                        parameter_by_argument,
+                    },
+                    constructor_arguments.types,
                 ));
             }
             let value = self.classifier_value_type(internal);
@@ -2175,6 +2169,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     callable.name,
                     callable.ret,
                 );
+                let publication = self.selected_callable_publication(
+                    &callable,
+                    parameter_by_argument.clone(),
+                    arguments,
+                    !resolved_type_arguments.is_empty(),
+                );
                 let contract = callable.contract.clone().or_else(|| {
                     declaration.and_then(|declaration| {
                         self.source_contracts.borrow().get(&declaration).cloned()
@@ -2210,7 +2210,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             &parameters,
                             &selected_argument_types,
                         );
-                        return self.apply_demanded_source_callable(
+                        let result = self.apply_demanded_source_callable(
                             source,
                             None,
                             &signature,
@@ -2220,9 +2220,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             .then_some(argument_kinds.as_slice()),
                             &resolved_type_arguments,
                             expected.map(crate::fir::ResolvedTy::get),
-                        );
+                        )?;
+                        self.record_final_selected_publication(origin, publication, result);
+                        return Ok(result);
                     }
                 }
+                self.record_selected_result_publication(origin, publication);
                 crate::fir::ResolvedTy::new(callable.ret).map_err(|_| Self::failure())
             }
             SelectedTopLevelCall::Value(property) => {
@@ -2281,7 +2284,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     expected,
                 )
             }
-            SelectedTopLevelCall::Constructor(member, alias) => {
+            SelectedTopLevelCall::Constructor {
+                declaration: member,
+                alias,
+                parameter_by_argument,
+            } => {
                 let result = self.constructor_result(
                     scope,
                     &member,
@@ -2290,14 +2297,23 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     &resolved_type_arguments,
                     expected.map(crate::fir::ResolvedTy::get),
                 )?;
-                self.named_construction_result(
+                let result = self.named_construction_result(
                     scope,
                     origin,
                     AppliedSourceAlias::selected(alias.as_deref(), &resolved_type_arguments),
                     result.get(),
                     None,
                     expected,
-                )
+                )?;
+                self.record_selected_constructor_publication(
+                    origin,
+                    &member,
+                    result.get(),
+                    parameter_by_argument,
+                    arguments,
+                    !resolved_type_arguments.is_empty(),
+                );
+                Ok(result)
             }
         }
     }
@@ -3738,6 +3754,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        self.forget_selected_result_publication(origin);
         crate::trace_compiler!(
             "signature",
             "select_member spelling={spelling} receiver={:?}",
@@ -3789,9 +3806,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     .map_err(|_| Self::failure());
             }
         }
-        if let Some(result) =
-            self.selected_member_property_type(scope, receiver.get(), spelling, demand)?
-        {
+        if let Some(result) = self.selected_member_property_type(
+            scope,
+            receiver.get(),
+            spelling,
+            Some(origin),
+            demand,
+        )? {
             return Ok(result);
         }
         // A compactly inferred extension property is intentionally registered with an unpublished
@@ -3923,6 +3944,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedMemberCall, crate::fir::DiagnosticId> {
         crate::trace_compiler!("signature", "select_member_call spelling={spelling}");
+        self.forget_selected_result_publication(origin);
         let result_constraint = signature_call_result_constraint(signature_result_constraint);
         let expected =
             signature_result_constraint.map(crate::fir::SignatureCallResultConstraint::expected);
@@ -4029,10 +4051,23 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 selected.source_key,
             );
             let postponed_bindings = projected.selected_bindings(&selected);
+            let parameter_by_argument = Self::selected_argument_parameters(
+                &selected,
+                arguments,
+                trailing_lambda,
+            );
             selected_constructor.set(selected.bound_inner_constructor.is_some());
             if selected.kind == crate::libraries::FnKind::Member {
+                let declared_receiver = selected.receiver;
                 let mut member = selected.member_with_return(result);
                 member.params = parameters;
+                let publication = self.selected_member_publication(
+                    &member,
+                    declared_receiver,
+                    parameter_by_argument,
+                    arguments,
+                    !type_arguments.is_empty(),
+                );
                 return Some((
                     result,
                     Some(member),
@@ -4041,8 +4076,17 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     argument_types,
                     postponed_bindings,
                     None,
+                    publication,
                 ));
             }
+            let mut publication_callable = selected.callable.clone();
+            publication_callable.ret = result;
+            let publication = self.selected_callable_publication(
+                &publication_callable,
+                parameter_by_argument,
+                arguments,
+                !type_arguments.is_empty(),
+            );
             Some((
                 result,
                 None,
@@ -4051,9 +4095,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 argument_types,
                 postponed_bindings,
                 Some(parameters),
+                publication,
             ))
         });
-        let (result, member, source, source_declaration, argument_types) = match selected {
+        let selected = match selected {
             Ok((
                 result,
                 member,
@@ -4062,21 +4107,22 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 argument_types,
                 postponed_bindings,
                 extension_parameters,
+                publication,
             )) => {
                 self.commit_postponed_bindings(scope, postponed_bindings);
                 if let Some(member) = member.as_ref().filter(|_| selected_constructor.get()) {
-                    return self
-                        .selected_inner_constructor_result(
-                            scope,
-                            receiver.get(),
-                            member,
-                            &argument_types,
-                            &type_arguments,
-                        )
-                        .map(|ty| crate::fir::ResolvedMemberCall {
-                            ty: Some(ty),
-                            declaration: None,
-                        });
+                    let ty = self.selected_inner_constructor_result(
+                        scope,
+                        receiver.get(),
+                        member,
+                        &argument_types,
+                        &type_arguments,
+                    )?;
+                    self.record_final_selected_publication(origin, publication, ty);
+                    return Ok(crate::fir::ResolvedMemberCall {
+                        ty: Some(ty),
+                        declaration: None,
+                    });
                 }
                 if let Some(parameters) = extension_parameters {
                     // An extension's selected value parameters can still contain active builder
@@ -4086,15 +4132,26 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     // no source declaration to demand below.
                     self.record_scoped_argument_constraints(scope, &parameters, &argument_types);
                 }
-                (result, member, source, source_declaration, argument_types)
+                (
+                    result,
+                    member,
+                    source,
+                    source_declaration,
+                    argument_types,
+                    publication,
+                )
             }
             Err(_) => {
                 // A member PROPERTY whose value is callable participates in call syntax after
                 // ordinary member functions, exactly as at a top-level callee: `outer.Inner().fn()`
                 // reads the property `fn` and applies the `invoke` convention to its value.
-                if let Some(callee) =
-                    self.selected_member_property_type(scope, receiver.get(), spelling, demand)?
-                {
+                if let Some(callee) = self.selected_member_property_type(
+                    scope,
+                    receiver.get(),
+                    spelling,
+                    None,
+                    demand,
+                )? {
                     if let Ok(result) = self.select_invoke(scope, origin, callee, arguments, demand)
                     {
                         return Ok(crate::fir::ResolvedMemberCall {
@@ -4246,109 +4303,21 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     );
             }
         };
-        if let Some(member) = member.as_ref() {
-            if let Some(declaration) = member.stable_declaration {
-                if self
-                    .headers
-                    .stub(declaration)
-                    .is_some_and(|stub| stub.signature_inference.is_some())
-                {
-                    let signature = demand(declaration)?;
-                    let parameters = signature
-                        .parameters
-                        .iter()
-                        .map(|parameter| parameter.get())
-                        .collect::<Vec<_>>();
-                    self.record_scoped_member_constraints(
-                        scope,
-                        receiver.get(),
-                        member,
-                        &parameters,
-                        &argument_types,
-                    );
-                    return self
-                        .apply_demanded_member_expecting(
-                            receiver.get(),
-                            member,
-                            &signature,
-                            &argument_types,
-                            &type_arguments,
-                            expected.map(crate::fir::ResolvedTy::get),
-                        )
-                        .map(|ty| crate::fir::ResolvedMemberCall {
-                            ty: Some(ty),
-                            declaration: Some(declaration),
-                        });
-                }
-            }
-            if let Some(signature) =
-                self.demanded_member_signature(member.stable_declaration, demand)?
-            {
-                let parameters = signature
-                    .parameters
-                    .iter()
-                    .map(|parameter| parameter.get())
-                    .collect::<Vec<_>>();
-                self.record_scoped_member_constraints(
-                    scope,
-                    receiver.get(),
-                    member,
-                    &parameters,
-                    &argument_types,
-                );
-                return self
-                    .apply_demanded_member_expecting(
-                        receiver.get(),
-                        member,
-                        &signature,
-                        &argument_types,
-                        &type_arguments,
-                        expected.map(crate::fir::ResolvedTy::get),
-                    )
-                    .map(|ty| crate::fir::ResolvedMemberCall {
-                        ty: Some(ty),
-                        declaration: member.stable_declaration,
-                    });
-            }
-            let parameters = member
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.params.as_slice())
-                .unwrap_or(&member.params);
-            self.record_scoped_member_constraints(
-                scope,
-                receiver.get(),
-                member,
-                parameters,
-                &argument_types,
-            );
-        }
-        if let Some(source) = source {
-            if let Some(signature) =
-                self.demanded_source_signature(None, source_declaration, demand)?
-            {
-                return self
-                    .apply_demanded_source_callable(
-                        source,
-                        Some(receiver.get()),
-                        &signature,
-                        &argument_types,
-                        None,
-                        &type_arguments,
-                        expected.map(crate::fir::ResolvedTy::get),
-                    )
-                    .map(|ty| crate::fir::ResolvedMemberCall {
-                        ty: Some(ty),
-                        declaration: source_declaration,
-                    });
-            }
-        }
-        let declaration = member.and_then(|member| member.stable_declaration);
-        let ty = crate::fir::ResolvedTy::new(result).ok();
-        if ty.is_none() && declaration.is_none() {
-            return Err(Self::failure());
-        }
-        Ok(crate::fir::ResolvedMemberCall { ty, declaration })
+        let (result, member, source, source_declaration, argument_types, publication) = selected;
+        self.finish_selected_member_publication(
+            scope,
+            origin,
+            receiver,
+            &type_arguments,
+            expected,
+            result,
+            member,
+            source,
+            source_declaration,
+            argument_types,
+            publication,
+            demand,
+        )
     }
 
     fn member_call_argument_expectations(
@@ -4763,13 +4732,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
     ) -> bool {
         self.selected_calls
             .proves_argument_non_null(origin, argument, condition)
-    }
-
-    fn call_result_abbreviation(
-        &self,
-        origin: crate::fir::OriginId,
-    ) -> Option<crate::fir::ResolvedTypeAbbreviation> {
-        self.selected_calls.abbreviation(origin)
     }
 
     fn type_result_abbreviation(

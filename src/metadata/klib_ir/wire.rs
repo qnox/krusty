@@ -63,6 +63,17 @@ pub(super) fn read_declaration_tree_tables(
             read_per_file_table(archive, name)
         }
     };
+    let file_entries = if inlinable
+        || archive
+            .entries()
+            .iter()
+            .any(|entry| entry.as_str() == "default/ir/fileEntries.knf")
+    {
+        Some(table("fileEntries.knf")?)
+    } else {
+        // Older ordinary-IR components omit both the IrFile reference and its table.
+        None
+    };
     let tables = DeclarationTreeTables {
         files: table("files.knf")?,
         strings: table("strings.knt")?,
@@ -70,7 +81,7 @@ pub(super) fn read_declaration_tree_tables(
         declarations: table("irDeclarations.knd")?,
         bodies: table("bodies.knb")?,
         types: table("types.knt")?,
-        file_entries: inlinable.then(|| table("fileEntries.knf")).transpose()?,
+        file_entries,
     };
     let expected = tables.files.len();
     let counts = [

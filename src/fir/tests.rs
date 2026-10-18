@@ -17,7 +17,7 @@ fn anchor(source: SourceFileId, lo: u32, kind: DeclarationKind) -> DeclarationAn
     }
 }
 
-fn inferred_stub(id: DeclarationId, kind: InferredSignatureKind) -> DeclarationStub {
+pub(super) fn inferred_stub(id: DeclarationId, kind: InferredSignatureKind) -> DeclarationStub {
     let source = SourceFileId::from_raw(0);
     DeclarationStub {
         id,
@@ -2149,11 +2149,20 @@ fn finalization_consumes_lazy_state_and_requires_every_signature() {
     assert_eq!(index.signature(a), Some(&signature));
 }
 
-struct TestSignatureSemantics {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct CallPublicationInput {
+    pub(super) receiver: Option<(ResolvedTy, ResolvedTy)>,
+    pub(super) arguments: Vec<(ResolvedTy, ResolvedTy)>,
+}
+
+pub(super) struct TestSignatureSemantics {
     evaluations: Cell<u32>,
     operations: RefCell<Vec<String>>,
     call_dependency: Option<DeclarationId>,
     call_abbreviation: Option<(OriginId, ResolvedTypeAbbreviation)>,
+    call_publication: Option<(OriginId, ResolvedTy)>,
+    call_publication_inputs: RefCell<Vec<CallPublicationInput>>,
+    qualified_call_receiver_is_value: bool,
 }
 
 impl TestSignatureSemantics {
@@ -2163,6 +2172,9 @@ impl TestSignatureSemantics {
             operations: RefCell::new(Vec::new()),
             call_dependency: None,
             call_abbreviation: None,
+            call_publication: None,
+            call_publication_inputs: RefCell::new(Vec::new()),
+            qualified_call_receiver_is_value: false,
         }
     }
 
@@ -2179,11 +2191,29 @@ impl TestSignatureSemantics {
             ..Self::new()
         }
     }
+
+    pub(super) fn with_call_publication(origin: OriginId, publication: Ty) -> Self {
+        Self {
+            call_publication: Some((origin, ResolvedTy::new(publication).unwrap())),
+            ..Self::new()
+        }
+    }
+
+    pub(super) fn with_qualified_call_publication(origin: OriginId, publication: Ty) -> Self {
+        Self {
+            qualified_call_receiver_is_value: true,
+            ..Self::with_call_publication(origin, publication)
+        }
+    }
+
+    pub(super) fn call_publication_inputs(&self) -> Vec<CallPublicationInput> {
+        self.call_publication_inputs.borrow().clone()
+    }
 }
 
 impl PostponedArgumentTransaction for TestSignatureSemantics {}
 
-impl SignatureSemantics for TestSignatureSemantics {
+impl SelectedResultPublicationSemantics for TestSignatureSemantics {
     fn call_result_abbreviation(&self, origin: OriginId) -> Option<ResolvedTypeAbbreviation> {
         self.call_abbreviation
             .as_ref()
@@ -2191,6 +2221,27 @@ impl SignatureSemantics for TestSignatureSemantics {
             .map(|(_, abbreviation)| abbreviation.clone())
     }
 
+    fn call_result_publication(
+        &self,
+        _scope: SignatureScope,
+        origin: OriginId,
+        receiver: Option<(ResolvedTy, ResolvedTy)>,
+        arguments: &[(ResolvedTy, ResolvedTy)],
+    ) -> Result<Option<ResolvedTy>, DiagnosticId> {
+        self.call_publication_inputs
+            .borrow_mut()
+            .push(CallPublicationInput {
+                receiver,
+                arguments: arguments.to_vec(),
+            });
+        Ok(match self.call_publication {
+            Some((selected, publication)) if selected == origin => Some(publication),
+            _ => None,
+        })
+    }
+}
+
+impl SignatureSemantics for TestSignatureSemantics {
     fn classifier_type(
         &self,
         _declaration: DeclarationId,
@@ -2379,7 +2430,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         self.operations
             .borrow_mut()
             .push(format!("qualified-root:{root}.{first_selector}"));
-        Ok(false)
+        Ok(self.qualified_call_receiver_is_value)
     }
 
     fn select_member(

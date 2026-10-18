@@ -11410,6 +11410,7 @@ impl<'a> Checker<'a> {
                         ty: local.ty,
                         owner: local.owner,
                         interface: local.interface,
+                        publication: None,
                         getter: None,
                         accessor: None,
                         producer: crate::libraries::PropertyProducer::KotlinAccessor,
@@ -11448,6 +11449,7 @@ impl<'a> Checker<'a> {
                 }
                 let owner = selected.owner;
                 let visibility = selected.visibility;
+                let publication = selected.read(receiver);
                 let mut selected_property = selected.property;
                 let checked_ty = selected_property.as_mut().and_then(|property| {
                     self.apply_checked_source_property_result(receiver, property)
@@ -11517,6 +11519,7 @@ impl<'a> Checker<'a> {
                         ty,
                         owner,
                         interface: selected.interface,
+                        publication,
                         getter,
                         accessor: selected_property
                             .as_ref()
@@ -12128,6 +12131,7 @@ impl<'a> Checker<'a> {
                     name,
                     owner,
                     interface,
+                    publication,
                     getter,
                     accessor,
                     producer,
@@ -12140,6 +12144,9 @@ impl<'a> Checker<'a> {
                     stable_read,
                     ..
                 } = *member;
+                if let Some(publication) = publication.as_ref() {
+                    self.record_flexible_member_property(expression, publication);
+                }
                 if let Some(constant) = compile_time_constant {
                     self.resolved_constants.insert(expression, constant);
                     return ty;
@@ -16997,7 +17004,7 @@ impl<'a> Checker<'a> {
                         .map(|(_, candidates)| candidates)
                         .unwrap_or_default();
                     let rejected_candidates = candidates.clone();
-                    if let Some(selected) = self
+                    if let Some(mut selected) = self
                         .select_callable_candidate(
                             scope,
                             CallArgs {
@@ -17066,7 +17073,23 @@ impl<'a> Checker<'a> {
                             self.context_args.insert(call, context_args);
                         }
                         self.set(receiver, Ty::obj_name(classifier));
-                        let ret = selected.callable.ret;
+                        let mut ret = selected.callable.ret;
+                        if let Some(signature) = selected.generic_sig.clone() {
+                            let return_info = selected.ret;
+                            ret = self.commit_selected_call_intersections(
+                                call,
+                                &signature,
+                                &explicit_type_args,
+                                &shape.parameter_indices,
+                                &shape.call_sig,
+                                &mut selected.bindings,
+                                &mut selected.intersection_bindings,
+                                return_info,
+                                ret,
+                            );
+                        } else {
+                            self.clear_selected_generic_call(call);
+                        }
                         let member = selected.member_with_return(ret);
                         self.record_selected_sam_arguments(scope, args, &selected.applied_params());
                         self.record_selected_qualifier_call(call, &selected);

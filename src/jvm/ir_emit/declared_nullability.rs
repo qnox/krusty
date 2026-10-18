@@ -52,12 +52,16 @@ pub(super) fn declared_nullability(ir: &IrFile, fid: u32) -> DeclaredNullability
     let suspend = ir.suspend_funs.contains(&fid);
     // An inferred Java result retains its flexible declaration type and therefore commits to
     // neither nullability face.
-    let flexible_result = matches!(
-        gsig.and_then(|signature| signature.ret)
-            .or(member_sem.map(|(_, result)| *result))
-            .unwrap_or(f.ret),
-        Ty::PlatformNullable(_)
-    );
+    let flexible_result = ir
+        .fn_declared_spellings
+        .get(&fid)
+        .is_some_and(|spellings| spellings.ret.flexible_upper_bound.is_some())
+        || matches!(
+            gsig.and_then(|signature| signature.ret)
+                .or(member_sem.map(|(_, result)| *result))
+                .unwrap_or(f.ret),
+            Ty::PlatformNullable(_)
+        );
     let ret_ann = (!lambda_impl
         && !reified_body
         && (suspend
