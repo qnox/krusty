@@ -13,14 +13,16 @@
 //! `$suspendImpl` its body moves to (`jvm::suspend_impls`). Suspend lambdas of that shape go through
 //! `suspend_lambda`, which shares the eligibility and suspension collection here. An interface
 //! default whose own suspension points include a `super` call is taken the same way: the machine
-//! lives in its `$suspendImpl` and the super call is `invokespecial`. Other interface bodies, and
-//! spliced inline bodies, keep the IR machine.
+//! lives in its `$suspendImpl` and the super call is `invokespecial`. A suspension in the literal
+//! lambda of a reified classpath inline callee, or of a classpath inline suspend callee spliced
+//! from its `$$forInline` copy, is taken as a point of this frame once the method inliner places
+//! the lambda. Other interface bodies, and other spliced inline bodies, keep the IR machine.
 
 use crate::fx_hash::HashSet;
 
 use super::cps::{
-    frame_suspensions, reified_host_lambda_suspensions, spliced_inline_suspensions,
-    TransformedMachine, TransformedSuspension,
+    frame_suspensions, placed_lambda_suspensions, spliced_inline_suspensions,
+    spliced_suspension_lambda_impls, TransformedMachine, TransformedSuspension,
 };
 use super::emission_facts::{ContinuationMetadata, MachineOutputs};
 use super::spill_layout::{suspension_points_in_order, SpillLayout};
@@ -200,6 +202,11 @@ pub(super) fn owned_suspensions(
         }
     }
     let points = eligible_points(ir, fid, body, route, subject)?;
+    // A lambda the method inliner places, whose body suspends, has no standalone `invoke` to emit:
+    // that method would have no continuation to pass on, and every call to the lambda is placed.
+    for implementation in spliced_suspension_lambda_impls(ir, body, route.suspend_set) {
+        ir.inline_only_fns.insert(implementation);
+    }
     Some(
         points
             .iter()
@@ -235,10 +242,11 @@ pub(super) fn eligible_points(
     let function = &ir.functions[fid as usize];
     let top_level = function.is_static && function.dispatch_receiver.is_none();
     let suspend_set = route.suspend_set;
-    // A suspension in a lambda the method inliner places for a reified classpath callee is one of
-    // this method's points once the lambda is inlined, in the order the frame runs them; any other
-    // spliced suspension declines below.
-    let placed = reified_host_lambda_suspensions(ir, body, suspend_set);
+    // A suspension in a lambda the method inliner places for a reified classpath callee, or for an
+    // inline suspend callee spliced from its `$$forInline` copy, is one of this method's points once
+    // the lambda is inlined, in the order the frame runs them; any other spliced suspension declines
+    // below.
+    let placed = placed_lambda_suspensions(ir, body, suspend_set);
     let points = match &placed {
         Some(placed) if !placed.is_empty() => {
             let own = suspension_points_in_order(ir, body, suspend_set);

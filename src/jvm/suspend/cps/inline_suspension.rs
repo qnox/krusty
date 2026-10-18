@@ -308,12 +308,15 @@ fn collect(
     }
 }
 
-/// The suspensions of `body` that sit in the literal lambda of a call to a classpath inline
-/// function with reified type parameters, in encounter order. kotlinc's coroutine transformer
-/// takes them once the method inliner has placed the lambda, which is the only route a reified
-/// body has: the byte splice never specializes one. `None` when a spliced body suspends anywhere
-/// else, or a placed lambda nests another spliced body, since those keep the emit-time machine.
-pub(crate) fn reified_host_lambda_suspensions(
+/// The suspensions of `body` that sit in the literal lambda of a call whose callee the method
+/// inliner places in this frame, in encounter order: a classpath inline function with reified type
+/// parameters, or a classpath inline suspend function spliced from its `$$forInline` copy. kotlinc's
+/// coroutine transformer takes them once the method inliner has placed the lambda. A reified body
+/// has no other route, since the byte splice never specializes one; a suspend callee's copy carries
+/// its own suspension markers, so the transformer takes the suspensions of the copy and of the
+/// lambda in one machine. `None` when a spliced body suspends anywhere else, or a placed lambda
+/// nests another spliced body, since those keep the emit-time machine.
+pub(crate) fn placed_lambda_suspensions(
     ir: &IrFile,
     body: ExprId,
     suspend_set: &HashSet<u32>,
@@ -328,12 +331,12 @@ pub(crate) fn reified_host_lambda_suspensions(
     Some(search.found)
 }
 
-/// Where an expression's code runs, for [`reified_host_lambda_suspensions`].
+/// Where an expression's code runs, for [`placed_lambda_suspensions`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Frame {
     /// The function's own body.
     Own,
-    /// The body of a literal lambda the method inliner places for a reified classpath callee.
+    /// The body of a literal lambda the method inliner places in this frame.
     Placed,
     /// Any other spliced body.
     Spliced,
@@ -344,8 +347,8 @@ enum Frame {
 enum Host {
     /// A real closure: its body runs in its own method.
     None,
-    /// Placed by the method inliner for a classpath inline callee with reified type parameters.
-    Reified,
+    /// Placed by the method inliner in this frame (see [`places_literal_lambdas`]).
+    Placed,
     /// Spliced by any other route.
     Other,
 }
@@ -382,7 +385,7 @@ impl HostedSearch<'_> {
                 self.walk(capture, frame, if placed { host } else { Host::None })?;
             }
             if let (true, Some(&body)) = (host != Host::None, inline_body.as_ref()) {
-                let placed = host == Host::Reified && frame == Frame::Own;
+                let placed = host == Host::Placed && frame == Frame::Own;
                 self.walk(
                     body,
                     if placed {
@@ -397,13 +400,8 @@ impl HostedSearch<'_> {
         }
         let operands = match &ir.exprs[expression as usize] {
             IrExpr::Call { .. } if !calls_an_inline_function(ir, expression) => Host::None,
-            // An inline suspend callee is a suspension of this frame the transformer does not take
-            // inlined yet.
-            IrExpr::Call { .. }
-                if ir.reified_call_subst.contains_key(&expression)
-                    && !is_suspension_point(ir, expression, self.suspend_set) =>
-            {
-                Host::Reified
+            IrExpr::Call { .. } if places_literal_lambdas(ir, expression, self.suspend_set) => {
+                Host::Placed
             }
             IrExpr::Call { .. } => Host::Other,
             _ => host,
@@ -415,6 +413,33 @@ impl HostedSearch<'_> {
         }
         Some(())
     }
+}
+
+/// Whether the method inliner places the literal lambdas of `call`, a call to an inline function,
+/// in this frame, where kotlinc's coroutine transformer then takes their suspensions.
+///
+/// A reified callee that does not suspend is one: only the method inliner specializes it. So is a
+/// callable inline suspend callee, whose `$$forInline` copy is what the emitter splices (the same
+/// rule as `try_splice_static_inline`): the copy is the untransformed body, its call to another
+/// suspend function marked as kotlinc's codegen marks one, so the transformer builds a single
+/// machine over the copy, the placed lambda and the caller, and the call is no state of its own.
+/// A reified suspend callee is neither: it splices no `$$forInline` copy.
+fn places_literal_lambdas(ir: &IrFile, call: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    let reified = ir.reified_call_subst.contains_key(&call);
+    if is_suspension_point(ir, call, suspend_set) {
+        let can_inline = matches!(
+            &ir.exprs[call as usize],
+            IrExpr::Call {
+                callee: Callee::Static {
+                    inline: InlineKind::CanInline,
+                    ..
+                },
+                ..
+            }
+        );
+        return !reified && can_inline && ir.suspend_calls.contains_key(&call);
+    }
+    reified
 }
 
 /// One search for the suspensions a frame runs: what it counts, and what it has found so far.
@@ -599,6 +624,66 @@ mod tests {
             spliced_inline_suspensions(&ir, body, &HashSet::default()),
             [inner_point]
         );
+    }
+
+    /// A call to a callable inline suspend function, spliced from its `$$forInline` copy.
+    fn inline_suspend_call(ir: &mut IrFile, argument: ExprId, inline: InlineKind) -> ExprId {
+        let call = ir.add_expr(IrExpr::Call {
+            callee: crate::ir::Callee::Static {
+                owner: crate::types::TypeName::from("lib/LibKt"),
+                name: "get".to_string(),
+                descriptor: "(Lkotlin/jvm/functions/Function0;)Ljava/lang/Object;".to_string(),
+                inline,
+            },
+            dispatch_receiver: None,
+            args: vec![argument],
+        });
+        ir.suspend_calls.insert(call, Ty::String);
+        call
+    }
+
+    /// The lambda of a callable inline suspend call is placed by the method inliner, so its
+    /// suspension is a point of this frame; the call itself is one of the frame's own.
+    #[test]
+    fn a_suspension_in_the_lambda_of_an_inline_suspend_call_is_placed() {
+        let mut ir = IrFile::default();
+        let point = suspension(&mut ir);
+        let lam = lambda(&mut ir, Vec::new(), Some(point));
+        let call = inline_suspend_call(&mut ir, lam, InlineKind::CanInline);
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![call],
+            value: None,
+        });
+        let suspend_set = HashSet::default();
+        assert_eq!(
+            placed_lambda_suspensions(&ir, body, &suspend_set),
+            Some(vec![point])
+        );
+        assert_eq!(frame_suspensions(&ir, body, &suspend_set), [call, point]);
+    }
+
+    /// A must-inline suspend callee splices its only body, not a `$$forInline` copy, and a reified
+    /// one is specialized: neither places a suspending lambda for the transformer.
+    #[test]
+    fn a_suspension_in_the_lambda_of_another_inline_suspend_call_is_not_placed() {
+        for reified in [false, true] {
+            let mut ir = IrFile::default();
+            let point = suspension(&mut ir);
+            let lam = lambda(&mut ir, Vec::new(), Some(point));
+            let inline = if reified {
+                InlineKind::CanInline
+            } else {
+                InlineKind::MustInline
+            };
+            let call = inline_suspend_call(&mut ir, lam, inline);
+            if reified {
+                ir.reified_call_subst.insert(call, Vec::new());
+            }
+            assert_eq!(
+                placed_lambda_suspensions(&ir, call, &HashSet::default()),
+                None
+            );
+        }
     }
 
     #[test]
