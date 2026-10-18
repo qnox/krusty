@@ -4977,7 +4977,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter order. A suspend lambda's last operand is the caller's continuation: it is bound to a
   `$completion` local of the lambda's own (`InlineLambdaContinuation`), read as kotlinc's fake
   continuation, so the transformer puts the machine's continuation (or the function's own when it
-  has no suspension point) in its place and spills that local like any other. Not yet matched:
+  has no suspension point) in its place and spills that local like any other. A later operand
+  that clears the operand stack (a `try`, a jump out of an enclosing loop, a suspension) cannot run
+  above the earlier ones, so such an invocation binds each operand in turn
+  (`a_spliced_lambdas_stack_clearing_operand_runs`). Not yet matched:
   kotlinc spills the operand stack before a lambda body
   splices into an expression, the inline body's lines are not remapped through a source map, and a
   suspend function that the coroutine transformer does not route records no locals.   Tests:

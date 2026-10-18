@@ -143,6 +143,40 @@ fn same_module_inline_frames_run() {
     );
 }
 
+/// A spliced lambda's later operand that clears the operand stack: a `try`, or a jump out of an
+/// enclosing loop. The operands before it cannot wait on the stack, so each is bound in turn.
+const STACK_CLEARING_OPERANDS: &str = r#"
+var cleaned = 0
+
+fun value(): String = "b"
+
+inline fun guarded(f: (String, String) -> String): String =
+    f("a", try { value() } finally { cleaned++ })
+
+inline fun firstOrSkip(xs: List<String?>, f: (String, String) -> String): String {
+    var out = ""
+    for (x in xs) {
+        out += f(out, x ?: continue)
+    }
+    return out
+}
+
+fun box(): String {
+    val joined = guarded { x, y -> x + y }
+    if (joined != "ab" || cleaned != 1) return "FAIL try: $joined $cleaned"
+    val skipped = firstOrSkip(listOf("c", null, "d")) { acc, x -> acc.length.toString() + x }
+    return if (skipped == "0c2d") "OK" else "FAIL continue: $skipped"
+}
+"#;
+
+#[test]
+fn a_spliced_lambdas_stack_clearing_operand_runs() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(STACK_CLEARING_OPERANDS, "StackClearingOperands"),
+        "OK"
+    );
+}
+
 /// The complete class file, kotlinc's exactly. The method names below identify the behavior under
 /// test in a failure, but the pass condition includes the constant pool, every method and attribute,
 /// line and local tables, SMAP, metadata, and their serialized order.

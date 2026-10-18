@@ -181,7 +181,13 @@ impl Emitter<'_> {
                 plain.then_some((declaration, index, ty, initializer, named))
             })
             .collect();
-        if operands.len() < 2 {
+        // An operand that clears the stack (a `try`, a jump out of an enclosing loop, a suspension)
+        // cannot run above the operands before it; such an invocation binds each operand in turn.
+        let clears_prefix = operands
+            .iter()
+            .skip(1)
+            .any(|&(_, _, _, initializer, _)| self.spills_operand_prefix(initializer));
+        if operands.len() < 2 || clears_prefix {
             return 0;
         }
         let mut stored = Vec::with_capacity(operands.len());
