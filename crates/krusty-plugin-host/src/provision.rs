@@ -141,13 +141,18 @@ pub fn provision(
             pinned: pins.kotlin_versions(),
         })?;
     let mut session = Session {
-        request,
+        reason: request.reason,
+        min_java: request.min_java,
         env,
         fetcher,
         report,
         missing: Vec::new(),
         missing_java: None,
-        classpath_announced: false,
+        preface: Some(format!(
+            "{} runs on kotlinc's own compiler, kotlin-compiler-embeddable {}, which krusty keeps \
+             in its cache",
+            request.reason, request.kotlin_version
+        )),
         changed: false,
     };
     let jdk = session.jdk(pins.jdk())?;
@@ -162,12 +167,7 @@ pub fn provision(
             java: session.missing_java,
         });
     }
-    if session.changed {
-        session.note(format_args!(
-            "saved in {}; later builds reuse it",
-            env.cache_dir.display()
-        ));
-    }
+    session.note_saved();
     let jdk = jdk.expect("a JDK, since nothing is missing");
     Ok(HostRuntime {
         kotlin_version: request.kotlin_version.to_string(),
@@ -178,14 +178,52 @@ pub fn provision(
     })
 }
 
+/// Finds or fetches one pinned jar the way [`provision`] finds the compiler's: krusty's cache, else a
+/// verified copy from the Gradle or Maven local cache, else a verified download, announced on
+/// `report` with `reason`, such as `the compiler plugin power-assert`, which needs it.
+pub fn provision_artifact(
+    pin: &ArtifactPin,
+    reason: &str,
+    env: &Environment,
+    fetcher: &dyn Fetcher,
+    report: &mut dyn Write,
+) -> Result<PathBuf, ProvisionError> {
+    let mut session = Session {
+        reason,
+        min_java: COMPILER_MIN_JAVA,
+        env,
+        fetcher,
+        report,
+        missing: Vec::new(),
+        missing_java: None,
+        preface: Some(format!(
+            "{reason} needs {}, which krusty keeps in its cache",
+            pin.file_name()
+        )),
+        changed: false,
+    };
+    let Some(jar) = session.artifact(pin)? else {
+        return Err(ProvisionError::Offline {
+            reason: reason.to_string(),
+            missing: session.missing,
+            java: None,
+        });
+    };
+    session.note_saved();
+    Ok(jar)
+}
+
 struct Session<'a> {
-    request: &'a Request<'a>,
+    /// What needs the files, as the user should read it.
+    reason: &'a str,
+    min_java: u32,
     env: &'a Environment,
     fetcher: &'a dyn Fetcher,
     report: &'a mut dyn Write,
     missing: Vec<String>,
     missing_java: Option<u32>,
-    classpath_announced: bool,
+    /// Said once, before the first jar is copied or downloaded.
+    preface: Option<String>,
     changed: bool,
 }
 
@@ -194,10 +232,17 @@ impl Session<'_> {
         let _ = writeln!(self.report, "info: {message}");
     }
 
+    fn note_saved(&mut self) {
+        if self.changed {
+            let cache = self.env.cache_dir.display().to_string();
+            self.note(format_args!("saved in {cache}; later builds reuse it"));
+        }
+    }
+
     /// An installed JDK when one is new enough, else the pinned one from the cache or a download.
     /// `None` only when it is missing and downloads are off.
     fn jdk(&mut self, pin: Option<&JdkPin>) -> Result<Option<Jdk>, ProvisionError> {
-        let needed = self.request.min_java.max(COMPILER_MIN_JAVA);
+        let needed = self.min_java.max(COMPILER_MIN_JAVA);
         let platform = &self.env.platform;
         let mut rejected = Vec::new();
         let candidates = jdk::candidates(
@@ -220,7 +265,7 @@ impl Session<'_> {
         let platform_name = format!("{}-{}", platform.os, platform.arch);
         let Some(pin) = pin.filter(|pin| pin.major >= needed) else {
             return Err(ProvisionError::NoJdk {
-                reason: self.request.reason.to_string(),
+                reason: self.reason.to_string(),
                 needed,
                 rejected,
                 platform: platform_name,
@@ -246,9 +291,9 @@ impl Session<'_> {
             self.missing_java = Some(needed);
             return Ok(None);
         }
+        let reason = self.reason;
         self.note(format_args!(
-            "{} runs in a JVM, but no installed JDK is Java {needed} or newer ({}); krusty downloads one",
-            self.request.reason,
+            "{reason} runs in a JVM, but no installed JDK is Java {needed} or newer ({}); krusty downloads one",
             rejections(&rejected)
         ));
         self.note(format_args!(
@@ -305,7 +350,7 @@ impl Session<'_> {
                 install::remove(&staged);
                 continue;
             }
-            self.announce_classpath();
+            self.announce();
             self.note(format_args!(
                 "copying {} from {cache} ({})",
                 pin.file_name(),
@@ -319,7 +364,7 @@ impl Session<'_> {
             self.missing.push(pin.file_name());
             return Ok(None);
         }
-        self.announce_classpath();
+        self.announce();
         let url = artifacts::url(self.env, pin);
         self.note(format_args!(
             "downloading {} ({}) from {url}",
@@ -333,14 +378,9 @@ impl Session<'_> {
         Ok(Some(dest))
     }
 
-    fn announce_classpath(&mut self) {
-        if !self.classpath_announced {
-            self.classpath_announced = true;
-            self.note(format_args!(
-                "{} runs on kotlinc's own compiler, kotlin-compiler-embeddable {}, which krusty keeps \
-                 in its cache",
-                self.request.reason, self.request.kotlin_version
-            ));
+    fn announce(&mut self) {
+        if let Some(preface) = self.preface.take() {
+            self.note(format_args!("{preface}"));
         }
     }
 

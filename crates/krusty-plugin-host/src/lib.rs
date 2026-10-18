@@ -33,4 +33,6 @@ pub use environment::{Environment, Platform};
 pub use host::{Host, HostError};
 pub use pins::{ArtifactPin, JdkPin, Pins};
 pub use protocol::LoadedPlugin;
-pub use provision::{provision, HostRuntime, ProvisionError, Request, COMPILER_MIN_JAVA};
+pub use provision::{
+    provision, provision_artifact, HostRuntime, ProvisionError, Request, COMPILER_MIN_JAVA,
+};

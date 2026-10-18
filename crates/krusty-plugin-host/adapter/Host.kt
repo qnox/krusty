@@ -1,3 +1,8 @@
+@file:OptIn(
+    org.jetbrains.kotlin.compiler.plugin.ExperimentalCompilerApi::class,
+    org.jetbrains.kotlin.config.CompilerConfiguration.Internals::class,
+)
+
 package krusty.pluginhost
 
 import org.jetbrains.kotlin.cli.plugins.processCompilerPluginsOptions

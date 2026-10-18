@@ -5,12 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use krusty_plugin_host::{
-    provision, Curl, Environment, Fetcher, Host, HostError, HostRuntime, LoadedPlugin, Pins,
-    Request,
+    provision, provision_artifact, ArtifactPin, Curl, Environment, Host, HostError, HostRuntime,
+    LoadedPlugin, Pins, Request,
 };
 use sha2::{Digest, Sha256};
 
-const POWER_ASSERT: &str = "kotlin-power-assert-compiler-plugin-embeddable-2.4.20.jar";
 const POWER_ASSERT_SHA256: &str =
     "ad1b0b93d2ebad6f02e1682cd3dd4f81c5f666902aa5a4d3e3069e1101ed0bfc";
 
@@ -33,24 +32,27 @@ fn runtime() -> (HostRuntime, Environment) {
         .clone()
 }
 
-/// The power-assert jar, fetched at most once per test process and published by an atomic rename,
-/// so neither a parallel test nor another test process ever sees it half written.
+/// The power-assert jar, provisioned like any pinned jar (verified, cached and published by an
+/// atomic rename) and at most once per test process.
 fn power_assert() -> String {
     static JAR: OnceLock<String> = OnceLock::new();
     JAR.get_or_init(|| {
-        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("plugin-host");
-        let jar = dir.join(POWER_ASSERT);
-        if digest(&jar) != POWER_ASSERT_SHA256 {
-            std::fs::create_dir_all(&dir).unwrap();
-            let staged = dir.join(format!("{POWER_ASSERT}.partial-{}", std::process::id()));
-            let url = format!(
-                "https://repo1.maven.org/maven2/org/jetbrains/kotlin/\
-                 kotlin-power-assert-compiler-plugin-embeddable/2.4.20/{POWER_ASSERT}"
-            );
-            Curl.fetch(&url, &staged).unwrap();
-            assert_eq!(digest(&staged), POWER_ASSERT_SHA256);
-            std::fs::rename(&staged, &jar).unwrap();
-        }
+        let (_, env) = runtime();
+        let pin = ArtifactPin {
+            group: "org.jetbrains.kotlin".into(),
+            artifact: "kotlin-power-assert-compiler-plugin-embeddable".into(),
+            version: "2.4.20".into(),
+            sha256: POWER_ASSERT_SHA256.into(),
+            size: 420_766,
+        };
+        let jar = provision_artifact(
+            &pin,
+            "the plugin host test",
+            &env,
+            &Curl,
+            &mut std::io::stderr(),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
         jar.to_string_lossy().into_owned()
     })
     .clone()

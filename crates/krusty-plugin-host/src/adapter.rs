@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::environment::Environment;
 use crate::host::HostError;
 use crate::install;
-use crate::provision::HostRuntime;
+use crate::provision::{HostRuntime, COMPILER_MIN_JAVA};
 
 const SOURCE: &str = include_str!("../adapter/Host.kt");
 const SOURCE_NAME: &str = "Host.kt";
@@ -20,12 +20,6 @@ const JAR: &str = "krusty-plugin-host.jar";
 /// The jar's SHA-256, recorded when it is built and checked before it is reused.
 const DIGEST: &str = "krusty-plugin-host.jar.sha256";
 pub(crate) const MAIN_CLASS: &str = "krusty.pluginhost.HostKt";
-
-/// Compiler APIs the adapter opts in to. A marker a release does not have only draws a warning.
-const OPT_INS: [&str; 2] = [
-    "org.jetbrains.kotlin.compiler.plugin.ExperimentalCompilerApi",
-    "org.jetbrains.kotlin.config.CompilerConfiguration.Internals",
-];
 
 /// The adapter jar for `runtime`, compiled first when the cache has none for this source and the
 /// runtime's exact compiler classpath. Compiling is announced on `report`; reusing the cached jar is
@@ -83,10 +77,9 @@ fn compile(runtime: &HostRuntime, dir: &Path) -> Result<(), HostError> {
         .arg("-cp")
         .arg(&classpath)
         .arg("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler")
-        .args(["-no-stdlib", "-no-reflect", "-jvm-target", "1.8"]);
-    for marker in OPT_INS {
-        command.arg(format!("-opt-in={marker}"));
-    }
+        .args(["-no-stdlib", "-no-reflect", "-jvm-target"])
+        // The adapter runs on every JDK the compiler does.
+        .arg(jvm_target(COMPILER_MIN_JAVA));
     let output = command
         .arg("-classpath")
         .arg(&classpath)
@@ -139,6 +132,15 @@ fn is_intact(dir: &Path) -> bool {
 
 fn file_digest(path: &Path) -> std::io::Result<String> {
     Ok(hex(&Sha256::digest(std::fs::read(path)?)))
+}
+
+/// kotlinc's `-jvm-target` spelling of a Java feature release: `1.8` for Java 8, `11` from Java 9.
+fn jvm_target(java: u32) -> String {
+    if java <= 8 {
+        format!("1.{java}")
+    } else {
+        java.to_string()
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
