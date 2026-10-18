@@ -23,21 +23,19 @@ pub struct SelectedArgumentCommitment {
     pub argument_bindings: Vec<SelectedArgumentBinding>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct SelectedArgumentBinding {
     pub argument: ExprId,
     pub parameter: usize,
     pub vararg_element: bool,
-    /// Declaration-owned occurrence read by this argument before contextual argument checking.
-    /// `expr_types[argument]` may subsequently carry the selected parameter's expected type; an
-    /// inferred reified argument still needs the source occurrence's DNN shape.
-    pub(super) source_declared_type: Option<Ty>,
-}
-
-impl SelectedArgumentBinding {
-    pub(super) fn source_occurrence(self, checked: Ty) -> Ty {
-        self.source_declared_type.unwrap_or(checked)
-    }
+    /// Exact source occurrence before contextual argument checking. A lexical read uses its
+    /// declaration-owned occurrence; every other expression uses its probed type. Later rechecks
+    /// may replace `expr_types[argument]` with the selected parameter's expected type.
+    pub(super) source_occurrence: Ty,
+    /// Reified provenance of the same occurrence, captured while its lexical type-parameter scope
+    /// is available. Diagnostics consume this semantic tree and never recover declaration facts
+    /// from a source name.
+    pub(super) source_provenance: super::intersection_inference::ReifiedArgumentProvenance,
 }
 
 impl std::ops::Deref for SelectedArgumentCommitment {
@@ -153,11 +151,14 @@ impl Checker<'_> {
                 .is_some_and(Option::is_some);
             let whole_array = call_sig.vararg_index == Some(parameter)
                 && (named || self.file.is_spread_arg(argument));
+            let (source_occurrence, source_provenance) =
+                self.selected_argument_reified_occurrence(scope, argument, probed_actual);
             argument_bindings.push(SelectedArgumentBinding {
                 argument,
                 parameter,
                 vararg_element: call_sig.vararg_index == Some(parameter) && !whole_array,
-                source_declared_type: self.local_variable_read(scope, argument),
+                source_occurrence,
+                source_provenance,
             });
             let inferred = argument_expectations
                 .and_then(|expectations| expectations.get(&argument))
@@ -489,11 +490,8 @@ fn required_indexed_operator_argument_slots(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        required_indexed_operator_argument_slots, value_parameter_defaults, SelectedArgumentBinding,
-    };
+    use super::{required_indexed_operator_argument_slots, value_parameter_defaults};
     use crate::ast::ExprId;
-    use crate::types::Ty;
 
     #[test]
     fn a_short_default_table_is_not_reread_as_value_parameter_flags() {
@@ -513,19 +511,5 @@ mod tests {
             required_indexed_operator_argument_slots(&[Ty::Int], None, &[ExprId(1), ExprId(2)],),
             Err("selected indexed operator's arguments do not match its parameters")
         );
-    }
-
-    #[test]
-    fn a_selected_argument_retains_its_declaration_owned_dnn_occurrence() {
-        let declared = Ty::ty_param("owner:T", Ty::nullable(Ty::obj("kotlin/Any")));
-        let occurrence = Ty::ty_param("owner:T", Ty::obj("kotlin/Any"));
-        let binding = SelectedArgumentBinding {
-            argument: ExprId(1),
-            parameter: 0,
-            vararg_element: false,
-            source_declared_type: Some(occurrence),
-        };
-
-        assert_eq!(binding.source_occurrence(declared), occurrence);
     }
 }

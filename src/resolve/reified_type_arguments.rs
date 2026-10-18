@@ -116,7 +116,7 @@ impl Checker<'_> {
                     .resolved_call_arg_slots
                     .get(&expression)
                     .and_then(|arguments| arguments.argument_bindings.first())
-                    .map(|argument| self.inferred_reified_provenance(argument.argument))
+                    .map(|argument| argument.source_provenance.clone())
                     .unwrap_or_default(),
             }];
         }
@@ -209,16 +209,7 @@ impl Checker<'_> {
         problems: &mut Vec<ReifiedProblem>,
     ) {
         let explicitly_dnn = spelling.is_some_and(|spelling| spelling.use_site_definitely_non_null);
-        let inferred_dnn = type_parameter_occurrence_is_definitely_non_null(scope, argument);
-        let through_indirect = in_dnn_or_flexible
-            || explicitly_dnn
-            || inferred_dnn
-            || provenance.is_indirect()
-            || provenance
-                .type_parameter_occurrence()
-                .is_some_and(|occurrence| {
-                    type_parameter_occurrence_is_definitely_non_null(scope, occurrence)
-                });
+        let through_indirect = in_dnn_or_flexible || explicitly_dnn || provenance.is_indirect();
         if explicitly_dnn {
             problems.push(ReifiedProblem::DefinitelyNonNullable);
         }
@@ -369,36 +360,6 @@ impl Checker<'_> {
             }
         }
     }
-}
-
-/// Whether this semantic occurrence is the definitely-non-null form of a lexical type parameter.
-/// `Ty` compactly stores `T & Any` as `T` with a tightened occurrence bound, so compare it with the
-/// declaration-owned bound retained by the scope instead of guessing from either source spelling or
-/// the normalized occurrence alone.
-fn type_parameter_occurrence_is_definitely_non_null(
-    scope: &CheckerScope<'_>,
-    occurrence: Ty,
-) -> bool {
-    let occurrence = match occurrence {
-        Ty::TyParam(identity, bound) => Some((identity, *bound)),
-        Ty::Nullable(inner) => match *inner {
-            Ty::TyParam(identity, bound) => Some((identity, *bound)),
-            _ => None,
-        },
-        _ => None,
-    };
-    let Some((identity, occurrence_bound)) = occurrence else {
-        return false;
-    };
-    let Some((declared, _, _)) = scope.tparam_binding(identity) else {
-        return false;
-    };
-    let Ty::TyParam(declared_identity, declared_bound) = declared.non_null() else {
-        return false;
-    };
-    declared_identity == identity
-        && declared_bound.upper_bound_admits_null()
-        && !occurrence_bound.upper_bound_admits_null()
 }
 
 /// Whether the type parameter with identity `identity`, in scope here, is `reified`.

@@ -99,7 +99,6 @@ impl SelectedGenericCall {
 pub(super) struct ReifiedArgumentProvenance {
     through_definitely_non_null: bool,
     through_flexible: bool,
-    type_parameter_occurrence: Option<Ty>,
     arguments: Vec<Self>,
 }
 
@@ -107,16 +106,11 @@ impl ReifiedArgumentProvenance {
     pub(super) const NONE: &'static Self = &Self {
         through_definitely_non_null: false,
         through_flexible: false,
-        type_parameter_occurrence: None,
         arguments: Vec::new(),
     };
 
     pub(super) fn is_indirect(&self) -> bool {
         self.through_definitely_non_null || self.through_flexible
-    }
-
-    pub(super) fn type_parameter_occurrence(&self) -> Option<Ty> {
-        self.type_parameter_occurrence
     }
 
     pub(super) fn argument(&self, ordinal: usize) -> Option<&Self> {
@@ -125,30 +119,51 @@ impl ReifiedArgumentProvenance {
 }
 
 fn reified_provenance_of_ty(ty: Ty) -> ReifiedArgumentProvenance {
+    reified_provenance_of_ty_with_declaration(ty, &|_| None)
+}
+
+fn reified_provenance_of_ty_with_declaration(
+    ty: Ty,
+    declaration: &impl Fn(&str) -> Option<Ty>,
+) -> ReifiedArgumentProvenance {
     match ty {
         Ty::DefinitelyNotNull(inner) => {
-            let mut provenance = reified_provenance_of_ty(*inner);
+            let mut provenance = reified_provenance_of_ty_with_declaration(*inner, declaration);
             provenance.through_definitely_non_null = true;
             provenance
         }
         Ty::PlatformNullable(inner) => {
-            let mut provenance = reified_provenance_of_ty(*inner);
+            let mut provenance = reified_provenance_of_ty_with_declaration(*inner, declaration);
             provenance.through_flexible = true;
             provenance
         }
         Ty::Nullable(inner)
         | Ty::InProjection(inner)
         | Ty::OutProjection(inner)
-        | Ty::StarProjection(inner) => reified_provenance_of_ty(*inner),
-        Ty::TyParam(..) => ReifiedArgumentProvenance {
-            type_parameter_occurrence: Some(ty),
+        | Ty::StarProjection(inner) => {
+            reified_provenance_of_ty_with_declaration(*inner, declaration)
+        }
+        Ty::TyParam(identity, occurrence_bound) => ReifiedArgumentProvenance {
+            through_definitely_non_null: declaration(identity)
+                .and_then(|declared| match declared.non_null() {
+                    Ty::TyParam(declared_identity, declared_bound)
+                        if declared_identity == identity =>
+                    {
+                        Some(*declared_bound)
+                    }
+                    _ => None,
+                })
+                .is_some_and(|declared_bound| {
+                    declared_bound.upper_bound_admits_null()
+                        && !occurrence_bound.upper_bound_admits_null()
+                }),
             ..Default::default()
         },
         Ty::Obj(_, arguments) => ReifiedArgumentProvenance {
             arguments: arguments
                 .iter()
                 .copied()
-                .map(reified_provenance_of_ty)
+                .map(|argument| reified_provenance_of_ty_with_declaration(argument, declaration))
                 .collect(),
             ..Default::default()
         },
@@ -158,7 +173,7 @@ fn reified_provenance_of_ty(ty: Ty) -> ReifiedArgumentProvenance {
                 .iter()
                 .copied()
                 .chain(std::iter::once(signature.ret))
-                .map(reified_provenance_of_ty)
+                .map(|argument| reified_provenance_of_ty_with_declaration(argument, declaration))
                 .collect(),
             ..Default::default()
         },
@@ -270,22 +285,31 @@ fn bounds_other_than_primary(parts: &[Ty], selected_result: Ty) -> Vec<Ty> {
 }
 
 impl Checker<'_> {
-    pub(super) fn inferred_reified_provenance(
+    pub(super) fn selected_argument_reified_occurrence(
         &self,
+        scope: &CheckerScope<'_>,
         expression: ExprId,
-    ) -> ReifiedArgumentProvenance {
-        self.inferred_reified_provenance_for_occurrence(
-            expression,
-            self.expr_types[expression.0 as usize],
-        )
-    }
-
-    fn inferred_reified_provenance_for_occurrence(
-        &self,
-        expression: ExprId,
-        occurrence: Ty,
-    ) -> ReifiedArgumentProvenance {
-        let mut provenance = reified_provenance_of_ty(occurrence);
+        probed: Ty,
+    ) -> (Ty, ReifiedArgumentProvenance) {
+        let occurrence = self
+            .local_variable_read(scope, expression)
+            .unwrap_or(probed);
+        let mut provenance = reified_provenance_of_ty_with_declaration(occurrence, &|identity| {
+            for rung in scope.classifier_rungs() {
+                let mut declared = None;
+                rung.own_bindings(Ns::Classifier, |_, binding| {
+                    if let ScopeBinding::TypeParam { bound, .. } = binding {
+                        if bound.non_null().ty_param_name() == Some(identity) {
+                            declared = Some(*bound);
+                        }
+                    }
+                });
+                if declared.is_some() {
+                    return declared;
+                }
+            }
+            None
+        });
         let declared_flexible = self.resolved_calls.get(&expression).is_some_and(|call| {
             matches!(
                 call.selected_result_target().declared,
@@ -295,7 +319,7 @@ impl Checker<'_> {
         if declared_flexible {
             provenance.through_flexible = true;
         }
-        provenance
+        (occurrence, provenance)
     }
 
     fn selected_reified_argument_provenance(
@@ -318,11 +342,6 @@ impl Checker<'_> {
                 through_definitely_non_null: left.through_definitely_non_null
                     && right.through_definitely_non_null,
                 through_flexible: left.through_flexible && right.through_flexible,
-                type_parameter_occurrence: left
-                    .type_parameter_occurrence
-                    .zip(right.type_parameter_occurrence)
-                    .filter(|(left, right)| left == right)
-                    .map(|(occurrence, _)| occurrence),
                 arguments,
             }
         }
@@ -341,13 +360,11 @@ impl Checker<'_> {
                 } else {
                     declared
                 };
-                let checked = self.expr_types[binding.argument.0 as usize];
-                let actual = binding.source_occurrence(checked);
                 constrain_reified_argument_provenance(
                     &signature.formals,
                     declared,
-                    actual,
-                    &self.inferred_reified_provenance_for_occurrence(binding.argument, actual),
+                    binding.source_occurrence,
+                    &binding.source_provenance,
                     &mut facts,
                 );
             }
@@ -923,10 +940,6 @@ mod tests {
             panic!("the matching suspend parameter must retain one occurrence")
         };
         assert!(retained.through_definitely_non_null);
-        assert!(matches!(
-            retained.type_parameter_occurrence,
-            Some(Ty::TyParam("sample:caller:T", _))
-        ));
 
         let mut mismatched = HashMap::default();
         constrain_reified_argument_provenance(
@@ -937,6 +950,32 @@ mod tests {
             &mut mismatched,
         );
         assert!(mismatched.is_empty());
+    }
+
+    #[test]
+    fn source_dnn_provenance_matches_semantic_identity_at_root_and_nested_occurrences() {
+        let identity = "sample:caller:T";
+        let nullable_bound = Ty::nullable(Ty::obj("kotlin/Any"));
+        let declaration = Ty::ty_param(identity, nullable_bound);
+        let occurrence = Ty::ty_param(identity, Ty::obj("kotlin/Any"));
+        let declared = |candidate: &str| (candidate == identity).then_some(declaration);
+
+        let root = reified_provenance_of_ty_with_declaration(occurrence, &declared);
+        assert!(root.is_indirect());
+
+        let nested = reified_provenance_of_ty_with_declaration(
+            Ty::fun(vec![occurrence], Ty::Unit),
+            &declared,
+        );
+        assert!(nested
+            .argument(0)
+            .is_some_and(|argument| argument.is_indirect()));
+        assert!(!nested.is_indirect());
+
+        let unrelated = reified_provenance_of_ty_with_declaration(occurrence, &|_| {
+            Some(Ty::ty_param("sample:other:T", nullable_bound))
+        });
+        assert!(!unrelated.is_indirect());
     }
 
     #[test]

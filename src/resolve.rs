@@ -15390,11 +15390,14 @@ impl<'a> Checker<'a> {
                         || argument_names
                             .and_then(|names| names.get(source))
                             .is_some_and(Option::is_some));
+                let (source_occurrence, source_provenance) =
+                    self.selected_argument_reified_occurrence(scope, argument, arg_tys[source]);
                 SelectedArgumentBinding {
                     argument,
                     parameter,
                     vararg_element: selected.vararg == Some(parameter) && !whole_array,
-                    source_declared_type: self.local_variable_read(scope, argument),
+                    source_occurrence,
+                    source_provenance,
                 }
             })
             .collect::<Vec<_>>();
