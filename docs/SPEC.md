@@ -2853,6 +2853,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `java_platform_type_publication_e2e::untouched_mutable_local_forwards_enhanced_java_arguments_like_kotlinc`,
   `java_platform_type_publication_e2e::reassigned_mutable_local_forwards_common_enhanced_java_arguments_like_kotlinc`,
   `java_platform_type_publication_e2e::reassigned_mutable_local_drops_unshared_enhanced_java_arguments_like_kotlinc`.
+- **A Java `T!` bound to a nullable argument is that nullable type.** Kotlin's flexible
+  `(X?..X?)` is `X?`, so a Java member's `T!` specialized through a receiver whose argument is
+  nullable (`java.util.ArrayList<V?>.get(0)`, `values[0]`) is `V?`, not `V!`, even when the
+  parameter's bound makes substitution yield the argument's non-null form: an unsafe call on it is
+  rejected (`only safe (?.) or non-null asserted (!!.) calls…`), and a value class keeps its box, so
+  a safe call, an elvis or a stored local tests the reference for null before `unbox-impl`, as
+  kotlinc does. Typed `V!`, the value was unboxed to its primitive carrier first and a null element
+  threw a `NullPointerException`. A non-null or platform argument keeps `T!`. Tests:
+  `tests/value_class_java_nullable_element_e2e.rs`.
 - **A PLATFORM value narrowed to a declared non-null type is guarded where it enters.** A Java value
   arrives as `T!` (`Ty::PlatformNullable`), usable as both `T` and `T?`. Where the source commits it to
   a declared non-null type, kotlinc emits `dup` + `ldc "<expression>"` +
