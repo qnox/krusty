@@ -840,9 +840,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/suspend_reified_inline_lambda_e2e.rs`, `tests/suspend_result_operands_e2e.rs`.
 - **An inlined lambda's captured value that is not a caller local goes to a temporary.** kotlinc
   binds a captured local to its own slot; any other captured value, such as a member lambda's
-  outer instance read from `this$0`, is evaluated into a temporary of the inline frame after the
-  call's own arguments (`putClosureParametersOnStack`), with no line of its own
-  (`jvm/ir_emit/bytecode_inline_call.rs`). A captured local of another type still takes the byte
+  outer instance read from `this$0`, is evaluated into a temporary of the inline frame where its
+  lambda's argument stands (`putClosureParametersOnStack`), with no line of its own
+  (`jvm/ir_emit/bytecode_inline_call.rs`). Its slot follows the arguments before the lambda and
+  precedes those after it (`jvm/inliner/parameters.rs`). A captured local of another type still takes the byte
   splice. Test: `tests/suspend_reified_inline_lambda_e2e.rs`.
 - **An inline call's erased-bound result is cast to the member call's receiver class.** A library
   inline function returning a bounded type parameter leaves its bound on the stack (`T : Throwable`

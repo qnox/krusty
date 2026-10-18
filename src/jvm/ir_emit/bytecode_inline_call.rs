@@ -628,8 +628,14 @@ impl Emitter<'_> {
                 return None;
             }
         }
-        let parameters =
-            self.call_parameters(&supplies, &physical, args, &lambda_bindings, Vec::new());
+        let parameters = self.call_parameters(
+            &supplies,
+            &physical,
+            args,
+            &lambda_bindings,
+            Vec::new(),
+            &lambdas,
+        );
         let base = self.inline_splice_base(self.frame.size());
         // The body's lines are mapped once the arguments are evaluated, like kotlinc's, so that
         // the source map numbers them after any call inlined into an argument; this first pass only
@@ -765,8 +771,14 @@ impl Emitter<'_> {
                 self.cw.restore_source_map(&checkpoint);
             }
         }
-        let parameters =
-            self.call_parameters(&supplies, &physical, args, &lambda_bindings, captured);
+        let parameters = self.call_parameters(
+            &supplies,
+            &physical,
+            args,
+            &lambda_bindings,
+            captured,
+            &lambdas,
+        );
         let base = self.inline_splice_base(self.frame.size());
         let inlined_call = InlinedCall {
             call: *call,
@@ -794,7 +806,16 @@ impl Emitter<'_> {
         args: &[u32],
         lambda_bindings: &HashMap<usize, usize>,
         captured: Vec<Parameter>,
+        lambdas: &[inliner::Lambda],
     ) -> Parameters {
+        let capture_owners = (0..captured.len())
+            .map(|capture| {
+                lambdas
+                    .iter()
+                    .position(|lambda| lambda.captured.contains(&capture))
+                    .expect("every captured value belongs to a lambda")
+            })
+            .collect();
         Parameters {
             parameters: supplies
                 .iter()
@@ -818,6 +839,7 @@ impl Emitter<'_> {
                 })
                 .collect(),
             captured,
+            capture_owners,
         }
     }
 
@@ -887,6 +909,29 @@ impl Emitter<'_> {
                 super::discard(physical[index], code);
                 continue;
             }
+            // kotlinc's `putClosureParametersOnStack` runs where the lambda's argument stands: a
+            // captured value that is not a caller local is evaluated into its temporary there,
+            // between the arguments around the lambda, without a line of its own.
+            if let Some(lambda) = lambda_at_argument(parameters, supplies, index) {
+                for capture in lambdas[lambda].captured.clone() {
+                    let Some(temporary) = temporaries[parameters.parameters.len() + capture] else {
+                        continue;
+                    };
+                    let (value, ty) = captures[capture];
+                    let slot = base + temporary;
+                    self.frame.reserve_through(slot);
+                    let operand_frame = self.frame.mark();
+                    let lines = code.line_entry_count();
+                    self.emit_value(value, code);
+                    code.withdraw_lines_since(lines);
+                    self.frame.rewind_to(operand_frame);
+                    let entered = self.frame.enter_temp(TempRole::InlineArgument, ty);
+                    debug_assert_eq!(entered.slot(), slot);
+                    store(ty, slot, code);
+                    leases.push(self.lease_frame_temporary(entered, ty));
+                }
+                continue;
+            }
             let Some(temporary) = temporaries[index] else {
                 continue;
             };
@@ -928,27 +973,6 @@ impl Emitter<'_> {
             debug_assert_eq!(entered.slot(), slot);
             store(physical[index], slot, code);
             leases.push(self.lease_frame_temporary(entered, physical[index]));
-        }
-        // kotlinc's `putClosureParametersOnStack`: a captured value that is not a caller local is
-        // evaluated into the temporary after the call's own arguments, without a line of its own.
-        for (&(capture, ty), temporary) in captures
-            .iter()
-            .zip(&temporaries[temporaries.len() - captures.len()..])
-        {
-            let Some(temporary) = *temporary else {
-                continue;
-            };
-            let slot = base + temporary;
-            self.frame.reserve_through(slot);
-            let operand_frame = self.frame.mark();
-            let lines = code.line_entry_count();
-            self.emit_value(capture, code);
-            code.withdraw_lines_since(lines);
-            self.frame.rewind_to(operand_frame);
-            let entered = self.frame.enter_temp(TempRole::InlineArgument, ty);
-            debug_assert_eq!(entered.slot(), slot);
-            store(ty, slot, code);
-            leases.push(self.lease_frame_temporary(entered, ty));
         }
 
         // Like any call, an inline call states its line once its arguments are evaluated; that line
@@ -1734,11 +1758,24 @@ pub(super) enum LambdaPlacement {
 }
 
 /// The compiled lambdas of a call, and the source map their lines are lines of.
+/// The inline lambda the call's argument `index` binds: a default bridge call's masks and method
+/// handle take no parameter, so the parameters skip them.
+fn lambda_at_argument(parameters: &Parameters, supplies: &[Supply], index: usize) -> Option<usize> {
+    let parameter = supplies[..index]
+        .iter()
+        .filter(|supply| **supply != Supply::MaskOperand)
+        .count();
+    match parameters.parameters.get(parameter)?.binding {
+        Binding::Lambda(lambda) => Some(lambda),
+        _ => None,
+    }
+}
+
 struct InlinedLambdas<'a> {
     lambdas: &'a [inliner::Lambda],
     lines: SourceMap,
     /// The values the lambdas captured, aligned with the call's captured parameters. One bound to
-    /// a temporary is evaluated into it once the arguments are stored.
+    /// a temporary is evaluated into it where its lambda's argument stands.
     captures: &'a [(u32, Ty)],
 }
 
