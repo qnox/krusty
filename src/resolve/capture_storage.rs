@@ -5,9 +5,11 @@
 //! frame have to see the same storage, so the binding becomes one mutable cell and every capture
 //! of it carries that cell. Kotlin makes this invisible, and getting it wrong is invisible too
 //! until the program runs: a copy answers with a stale value, and a cell handed where a value is
-//! expected is a pointer read as an `Int`.
+//! expected is a pointer read as an `Int`. A `var` declared by an enclosing function is a cell as
+//! soon as a closure captures it, as kotlinc's `SharedVariablesLowering` makes it, even when
+//! nothing writes it after the capture.
 //!
-//! Deciding it is one rule over four facts about the binding ([`CapturedBinding`]) plus the
+//! Deciding it is one rule over five facts about the binding ([`CapturedBinding`]) plus the
 //! question the rest of this module answers: does anything in the body being checked, or in any
 //! anonymous body nested inside it, WRITE this name? That question is asked of the AST rather than
 //! of resolved types, because the answer has to be known before the capture list exists.
@@ -20,7 +22,7 @@ use super::*;
 
 /// What the checker knows about a binding when it decides how a capture of it is represented.
 ///
-/// Named fields rather than positional arguments: three of the four are booleans, and swapping two
+/// Named fields rather than positional arguments: four of the five are booleans, and swapping two
 /// of them is a silent miscompile rather than a type error.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct CapturedBinding {
@@ -34,6 +36,10 @@ pub(super) struct CapturedBinding {
     pub(super) already_shared: bool,
     /// Something in the body being checked writes the name.
     pub(super) written_here: bool,
+    /// A `var` or `lateinit var` local declared in source. kotlinc's `SharedVariablesLowering`
+    /// makes every such local a closure captures one shared cell, whether or not anything writes
+    /// it after the capture. A loop variable or a setter's `field` is mutable but not one.
+    pub(super) source_var: bool,
 }
 
 impl CapturedBinding {
@@ -45,7 +51,9 @@ impl CapturedBinding {
     /// nothing about it. A capture that is already a cell stays one however many callables it
     /// crosses.
     pub(super) fn is_shared_cell(self) -> bool {
-        !self.delegated && self.mutable && (self.already_shared || self.written_here)
+        !self.delegated
+            && self.mutable
+            && (self.already_shared || self.written_here || self.source_var)
     }
 }
 
@@ -366,6 +374,26 @@ pub(super) fn anonymous_descendant_writes_name(
 }
 
 impl Checker<'_> {
+    /// Whether a local function's capture of `name` must be a shared cell: its body (or a lambda in
+    /// it) writes the name, or the enclosing function reassigns a `var` the body reads.
+    pub(super) fn local_capture_needs_shared_cell(
+        &self,
+        scope: &CheckerScope<'_>,
+        body: ExprId,
+        name: &str,
+    ) -> bool {
+        let single: crate::fx_hash::HashSet<String> = std::iter::once(name.to_string()).collect();
+        let written = {
+            let mut out = crate::fx_hash::HashSet::default();
+            collect_lambda_outer_writes(self.file, body, &single, &mut out);
+            out.contains(name)
+        };
+        written
+            || (self.fn_reassigned.contains(name)
+                && self.lookup(scope, name).is_some_and(|local| local.is_var)
+                && local_fun_body_uses_any(self.file, body, &single))
+    }
+
     /// What a statement-position local class reads from its enclosing scope.
     ///
     /// Deliberately syntactic and conservative: a name the class also declares is not a capture,
@@ -799,6 +827,7 @@ impl Checker<'_> {
                     already_shared: local.shared_storage_cell,
                     written_here: self.fn_reassigned.contains(&name)
                         || class_reassigned.contains(&name),
+                    source_var: self.source_var_locals.contains(&local.flow_identity),
                 }
                 .is_shared_cell(),
                 storage_ty: local.delegate_storage_ty,

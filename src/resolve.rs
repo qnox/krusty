@@ -16087,6 +16087,7 @@ impl<'a> Checker<'a> {
                         mutable: local.is_var,
                         already_shared: local.shared_storage_cell,
                         written_here,
+                        source_var: self.source_var_locals.contains(&local.flow_identity),
                     }
                     .is_shared_cell();
                     // A shared cell keeps the declared type so a later write of `null` into
@@ -21883,6 +21884,7 @@ impl<'a> Checker<'a> {
                 self.local_decl_types.insert(s, prop_ty);
                 let flow_identity = self.declare(scope, &name, prop_ty, true);
                 self.annotation_argument_locals.record(flow_identity);
+                self.source_var_locals.insert(flow_identity);
             }
             Stmt::Destructure { entries, init } => self.stmt_destructure(scope, s, entries, init),
             Stmt::IncDec { name, dec, prefix } => self.stmt_inc_dec(scope, s, name, dec, prefix),
@@ -22096,6 +22098,7 @@ impl<'a> Checker<'a> {
                                 mutable: local.is_var,
                                 already_shared: local.shared_storage_cell,
                                 written_here: self.fn_reassigned.contains(&captured),
+                                source_var: self.source_var_locals.contains(&local.flow_identity),
                             }
                             .is_shared_cell(),
                             storage_ty: local.delegate_storage_ty,
@@ -22285,6 +22288,9 @@ impl<'a> Checker<'a> {
             self.declare_inferred(scope, &name, bound_ty, is_var, error_provenance)
         };
         self.annotation_argument_locals.record(flow_identity);
+        if is_var {
+            self.source_var_locals.insert(flow_identity);
+        }
         if deferred {
             self.local_initialization.declare_deferred(s, flow_identity);
         }
@@ -33053,6 +33059,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         implicit_receiver_identities: HashMap::default(),
         read_flow_roots: HashMap::default(),
         annotation_argument_locals: Default::default(),
+        source_var_locals: crate::fx_hash::HashSet::default(),
         local_initialization: Default::default(),
         read_callable_reference_types: HashMap::default(),
         anonymous_super_read_provenance: HashMap::default(),
@@ -35729,6 +35736,9 @@ struct Checker<'a> {
     /// The flow root each checked lexical-value or `this` read resolved to.
     read_flow_roots: HashMap<ExprId, scope::PathRoot>,
     annotation_argument_locals: annotation_argument_constness::LocalPropertyIdentities,
+    /// Flow identities of the `var` and `lateinit var` locals a function body declares in source.
+    /// A loop variable or a setter's `field` is a mutable binding but not one of these.
+    source_var_locals: crate::fx_hash::HashSet<u32>,
     local_initialization: local_initialization::InitializationRecords,
     /// The exact function shape of a callable reference a checked name read is bound to.
     read_callable_reference_types: HashMap<ExprId, Ty>,
@@ -44171,24 +44181,6 @@ impl<'a> Checker<'a> {
             signature,
         });
         scope.rebind(name, Ns::Function, ScopeBinding::Funs(entries));
-    }
-
-    fn local_capture_needs_shared_cell(
-        &self,
-        scope: &CheckerScope<'_>,
-        body: ExprId,
-        name: &str,
-    ) -> bool {
-        let single: crate::fx_hash::HashSet<String> = std::iter::once(name.to_string()).collect();
-        let written = {
-            let mut out = crate::fx_hash::HashSet::default();
-            collect_lambda_outer_writes(self.file, body, &single, &mut out);
-            out.contains(name)
-        };
-        written
-            || (self.fn_reassigned.contains(name)
-                && self.lookup(scope, name).is_some_and(|local| local.is_var)
-                && local_fun_body_uses_any(self.file, body, &single))
     }
 
     fn this_ctor_delegation_candidates(
