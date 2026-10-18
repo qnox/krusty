@@ -400,9 +400,33 @@ fn component_artifacts(
         .iter()
         .map(|(signature, _)| u64::from(*signature))
         .collect::<Vec<_>>();
+    let package = match component {
+        Component::Main => {
+            let package = functions[0].signature.package();
+            assert!(
+                functions
+                    .iter()
+                    .all(|function| function.signature.package() == package),
+                "one ordinary IrFile cannot contain declarations from different packages"
+            );
+            if package.is_empty() {
+                vec![u64::from(writer.string(""))]
+            } else {
+                package
+                    .segments()
+                    .iter()
+                    .map(|segment| u64::from(writer.string(segment)))
+                    .collect::<Vec<_>>()
+            }
+        }
+        // Kotlin's prepared-inline component uses one synthetic root file rather than any
+        // declaration's source package. Its IrFile records that root as one empty segment.
+        Component::Prepared => vec![u64::from(writer.string(""))],
+    };
     let root_file_entry = writer.file_entry(component.root_file_name());
     let mut file = Pb::new();
     file.field_packed_varints(1, &ids);
+    file.field_packed_varints(3, &package);
     file.field_varint(7, u64::from(root_file_entry));
     let entries = [
         ("files.knf", per_file(file.into_bytes())),
@@ -947,7 +971,13 @@ fn leb128(mut value: u64, bytes: &mut Vec<u8>) {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
+    use crate::metadata::id_signature::{
+        callable_signature, CallableShape, DeclarationContainer, Placement, SignatureType,
+        TypeParameterShape, TypeView,
+    };
     use crate::metadata::klib_ir::tree::{KlibIrBody, KlibIrExprKind, KlibIrNullability};
     use crate::metadata::klib_ir::{
         read_declaration_trees, read_inlinable_declaration_trees,
@@ -1076,8 +1106,9 @@ mod tests {
         )
     }
 
-    /// Root file-entry id from the single `IrFile` emitted by this writer.
-    fn root_file_entry(bytes: &[u8]) -> u64 {
+    /// Package segments and root file-entry id from the single `IrFile` emitted by this writer.
+    fn root_file_identity(files: &[u8], strings: &[u8]) -> (Vec<String>, u64) {
+        let bytes = files;
         assert_eq!(u32::from_be_bytes(bytes[0..4].try_into().unwrap()), 1);
         let size = u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize;
         assert_eq!(bytes.len(), 8 + size);
@@ -1086,14 +1117,66 @@ mod tests {
         assert_eq!(take_varint(message, &mut cursor), (1 << 3) | 2);
         let declaration_ids = take_varint(message, &mut cursor) as usize;
         cursor += declaration_ids;
+        assert_eq!(take_varint(message, &mut cursor), (3 << 3) | 2);
+        let package_size = take_varint(message, &mut cursor) as usize;
+        let package_end = cursor + package_size;
+        let string_entries = table_entries(strings);
+        let package = std::iter::from_fn(|| {
+            (cursor < package_end).then(|| {
+                let slot = take_varint(message, &mut cursor) as usize;
+                String::from_utf8(string_entries[slot].to_vec()).expect("package segment is UTF-8")
+            })
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(cursor, package_end);
         assert_eq!(take_varint(message, &mut cursor), 7 << 3);
         let root = take_varint(message, &mut cursor);
         assert_eq!(cursor, message.len());
-        root
+        (package, root)
     }
 
-    fn fixture() -> (PreparedFunction, KlibPublicIdSignature) {
-        let signature = KlibPublicIdSignature::classifier(TypeName::from("fixture/probe"));
+    struct FixtureSignatureType;
+
+    impl SignatureType for FixtureSignatureType {
+        type ParameterId = u32;
+
+        fn view(&self) -> Result<TypeView<'_, Self>, crate::metadata::id_signature::ManglingError> {
+            Ok(TypeView::Class {
+                fq_name: Cow::Borrowed("kotlin.Any"),
+                arguments: Vec::new(),
+                nullable: true,
+            })
+        }
+    }
+
+    fn fixture_in(package: &[&str]) -> (PreparedFunction, KlibPublicIdSignature) {
+        let package = package
+            .iter()
+            .map(|segment| (*segment).to_owned())
+            .collect::<Vec<_>>();
+        let signature_bound = FixtureSignatureType;
+        let signature = callable_signature(
+            DeclarationContainer {
+                package: &package,
+                classes: &[],
+                native_interop_library: false,
+            },
+            &CallableShape {
+                name: "probe",
+                contexts: Vec::new(),
+                receiver: None,
+                params: vec![&signature_bound],
+                vararg: None,
+                type_parameters: vec![TypeParameterShape {
+                    id: 0,
+                    bounds: vec![&signature_bound],
+                }],
+                expect: false,
+                placement: Placement::Ordinary,
+            },
+        )
+        .expect("fixture has a supported callable identity");
+        assert_eq!(signature.member_id(), Some(0x14ab_8f30_859f_59a9));
         let bound = Ty::nullable(Ty::obj("kotlin/Any"));
         let parameter = Ty::ty_param("fixture.T", bound);
         (
@@ -1129,6 +1212,50 @@ mod tests {
         )
     }
 
+    fn fixture() -> (PreparedFunction, KlibPublicIdSignature) {
+        fixture_in(&["fixture"])
+    }
+
+    #[test]
+    fn root_package_main_file_records_one_empty_segment() {
+        let (function, _) = fixture_in(&[]);
+        let artifacts = artifacts(&[function], true);
+        let raw_entry = |name: &str| {
+            artifacts
+                .iter()
+                .find(|(entry, _)| entry == name)
+                .map(|(_, bytes)| bytes.as_slice())
+                .expect("component has requested raw entry")
+        };
+        assert_eq!(
+            root_file_identity(
+                raw_entry("default/ir/files.knf"),
+                raw_entry("default/ir/strings.knt")
+            ),
+            (vec![String::new()], 0)
+        );
+    }
+
+    #[test]
+    fn multi_segment_main_file_records_each_package_segment() {
+        let (function, _) = fixture_in(&["fixture", "inline"]);
+        let artifacts = artifacts(&[function], true);
+        let raw_entry = |name: &str| {
+            artifacts
+                .iter()
+                .find(|(entry, _)| entry == name)
+                .map(|(_, bytes)| bytes.as_slice())
+                .expect("component has requested raw entry")
+        };
+        assert_eq!(
+            root_file_identity(
+                raw_entry("default/ir/files.knf"),
+                raw_entry("default/ir/strings.knt")
+            ),
+            (vec!["fixture".to_owned(), "inline".to_owned()], 0)
+        );
+    }
+
     #[test]
     fn prepared_inline_component_round_trips_exact_type_test_and_provenance() {
         let (function, signature) = fixture();
@@ -1144,14 +1271,30 @@ mod tests {
             .find(|(name, _)| name == "default/ir/files.knf")
             .map(|(_, bytes)| bytes)
             .expect("main component has one synthetic IrFile");
-        assert_eq!(root_file_entry(main_file), 0);
+        let main_strings = artifacts
+            .iter()
+            .find(|(name, _)| name == "default/ir/strings.knt")
+            .map(|(_, bytes)| bytes)
+            .expect("main component has a string table");
+        assert_eq!(
+            root_file_identity(main_file, main_strings),
+            (vec!["fixture".to_owned()], 0)
+        );
         let prepared_file = artifacts
             .iter()
             .find(|(name, _)| name == "default/ir_inlinable_functions/files.knf")
             .map(|(_, bytes)| bytes)
             .expect("prepared component has one synthetic IrFile");
+        let prepared_strings = artifacts
+            .iter()
+            .find(|(name, _)| name == "default/ir_inlinable_functions/strings.knt")
+            .map(|(_, bytes)| bytes)
+            .expect("prepared component has a string table");
         // The prepared declaration keeps `Probe.kt` at id 0; the aggregate root is distinct.
-        assert_eq!(root_file_entry(prepared_file), 1);
+        assert_eq!(
+            root_file_identity(prepared_file, prepared_strings),
+            (vec![String::new()], 1)
+        );
         let file_entries = artifacts
             .iter()
             .find(|(name, _)| name == "default/ir_inlinable_functions/fileEntries.knf")
