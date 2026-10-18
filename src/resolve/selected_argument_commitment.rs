@@ -45,6 +45,21 @@ impl SelectedArgumentBinding {
     pub(super) fn reified_occurrence(&self, checked: Ty) -> Ty {
         self.source_declared_type.unwrap_or(checked)
     }
+
+    /// Provenance of the element this binding contributes to a selected single-vararg call.
+    /// Expanded elements contribute their occurrence directly; a named or spread whole array
+    /// contributes the provenance nested under its array element.
+    pub(super) fn single_vararg_element_reified_provenance(
+        &self,
+    ) -> &super::intersection_inference::ReifiedArgumentProvenance {
+        if self.vararg_element {
+            &self.source_provenance
+        } else {
+            self.source_provenance
+                .argument(0)
+                .unwrap_or(super::intersection_inference::ReifiedArgumentProvenance::NONE)
+        }
+    }
 }
 
 impl std::ops::Deref for SelectedArgumentCommitment {

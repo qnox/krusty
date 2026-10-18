@@ -119,7 +119,7 @@ impl Checker<'_> {
                         let mut provenances = arguments
                             .argument_bindings
                             .iter()
-                            .map(|argument| &argument.source_provenance);
+                            .map(|argument| argument.single_vararg_element_reified_provenance());
                         let first = provenances.next()?.clone();
                         Some(provenances.fold(first, |known, next| known.meet(next)))
                     })

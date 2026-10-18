@@ -360,6 +360,31 @@ fn array_element_provenance_meets_every_argument_independent_of_source_order() {
 }
 
 #[test]
+fn array_element_provenance_projects_spread_and_named_whole_arrays() {
+    let source = with_prelude(
+        "fun <T> f(values: Array<T & Any>) {\n\
+         \x20   arrayOf(*values)\n\
+         \x20   arrayOf(elements = values)\n\
+         }",
+    );
+    assert_matches_kotlinc(
+        &source,
+        &[],
+        &[],
+        &[
+            &format!("4:5: {DNN_WARNING}"),
+            &format!("5:5: {DNN_WARNING}"),
+        ],
+    );
+    assert_matches_kotlinc(
+        &source,
+        &[DNN_AND_FLEXIBLE],
+        &[&format!("4:5: {AS_REIFIED}"), &format!("5:5: {AS_REIFIED}")],
+        &[],
+    );
+}
+
+#[test]
 fn an_intersection_is_a_deprecation_warning_without_its_prohibition() {
     let message = format!(
         "{} This will become an error in language version 2.3. See \
