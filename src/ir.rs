@@ -48,10 +48,14 @@ mod cast_targets;
 mod catches;
 mod checked_types;
 mod companion_blocks;
+mod compiled_inline_calls;
+pub use compiled_inline_calls::SameModuleInlining;
 mod constants;
 mod constructors;
 mod default_arguments;
 pub(crate) use default_arguments::module_override_callable;
+mod enum_switch_whens;
+pub(crate) use enum_switch_whens::EnumSwitchWhen;
 mod enums;
 mod expression_provenance;
 mod field_flags;
@@ -2099,6 +2103,7 @@ pub struct IrFile {
     /// `import Tools.doubled` / `5.doubled` from the classpath.
     pub member_ext_props: crate::fx_hash::HashMap<TypeName, Vec<MemberExtProp>>,
     type_reflection: TypeReflectionFacts,
+    compiled_inline_calls: compiled_inline_calls::CompiledInlineCalls,
     /// Function ids declared `inline`. This is the declaration-semantic set used by metadata;
     /// visibility-specific inline handling remains in [`Self::public_inline_functions`].
     pub inline_fns: crate::fx_hash::HashSet<u32>,
