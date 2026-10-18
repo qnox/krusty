@@ -166,6 +166,14 @@ pub(super) fn emission_contexts(
                 roots.extend(defaults.iter().flatten().copied());
             }
         }
+        // The primary constructor's defaults run in this class's `$default` stub.
+        roots.extend(
+            ir.class_ctor_defaults_name(class.fq_name)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .copied(),
+        );
         roots.extend(class.init_body);
         roots.extend(ir.companion_clinit_body(class.fq_name));
         roots.extend(class.super_arg_prelude.iter().copied());

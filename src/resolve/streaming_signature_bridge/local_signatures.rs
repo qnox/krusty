@@ -254,6 +254,16 @@ pub(crate) fn publish_checked_default_local_signatures(
     )
 }
 
+fn selected_checked_failure(
+    declaration: crate::fir::DeclarationId,
+    selected_local_declarations: &[crate::fir::DeclarationId],
+    exact_declarations: Option<&[crate::fir::DeclarationId]>,
+) -> bool {
+    exact_declarations.is_none_or(|exact| {
+        exact.contains(&declaration) || selected_local_declarations.contains(&declaration)
+    })
+}
+
 fn publish_checked_local_signatures_selected(
     file: &File,
     source: crate::fir::SourceFileId,
@@ -620,32 +630,32 @@ fn publish_checked_local_signatures_selected(
         true
     }
 
-    let local_declarations = index
+    let selected_local_declarations = index
         .local_class_declarations()
         .iter()
         .copied()
         .filter_map(|declaration| {
             let header = index.declaration_header(declaration)?;
+            let subtree = inline_owners.is_some_and(|owners| {
+                let mut current = Some(declaration);
+                while let Some(candidate) = current {
+                    if owners.contains(&candidate) {
+                        return true;
+                    }
+                    current = active
+                        .and_then(|active| stable_parent(active, index, candidate))
+                        .or_else(|| {
+                            index
+                                .declaration_anchor(candidate)
+                                .and_then(|anchor| anchor.owner)
+                        });
+                }
+                false
+            });
             let selected_owner = match (inline_owners, exact_declarations) {
                 (None, None) => true,
-                (owners, exact) => {
+                (_, exact) => {
                     let exact = exact.is_some_and(|exact| exact.contains(&declaration));
-                    let subtree = owners.is_some_and(|owners| {
-                        let mut current = Some(declaration);
-                        while let Some(candidate) = current {
-                            if owners.contains(&candidate) {
-                                return true;
-                            }
-                            current = active
-                                .and_then(|active| stable_parent(active, index, candidate))
-                                .or_else(|| {
-                                    index
-                                        .declaration_anchor(candidate)
-                                        .and_then(|anchor| anchor.owner)
-                                });
-                        }
-                        false
-                    });
                     exact || subtree
                 }
             };
@@ -663,8 +673,12 @@ fn publish_checked_local_signatures_selected(
                 && index
                     .declaration_anchor(declaration)
                     .is_some_and(|anchor| anchor.source == source))
-            .then_some(declaration)
+            .then_some((declaration, exact_declarations.is_none() || subtree))
         })
+        .collect::<Vec<_>>();
+    let local_declarations = selected_local_declarations
+        .iter()
+        .map(|(declaration, _)| *declaration)
         .collect::<Vec<_>>();
     crate::trace_compiler!(
         "fir",
@@ -682,6 +696,9 @@ fn publish_checked_local_signatures_selected(
         .failed_local_declaration_bindings
         .iter()
         .copied()
+        .filter(|declaration| {
+            selected_checked_failure(*declaration, &local_declarations, exact_declarations)
+        })
         .collect::<Vec<_>>();
     let pass_one_finalized_headers = local_declarations
         .iter()
@@ -709,6 +726,20 @@ fn publish_checked_local_signatures_selected(
             index
                 .declaration_anchor(*declaration)
                 .is_some_and(|anchor| anchor.kind == DeclarationKind::Classifier)
+        })
+        .collect::<Vec<_>>();
+    // Default preparation may select an ancestor classifier only to recreate a provider's lexical
+    // scope. That exact-only ancestor has not had its ordinary member group checked and must not be
+    // marked complete. Classifiers entered by the checked subtree (`inline_owners`) are complete;
+    // every other caller selects whole checked groups and has no `exact_declarations` exception.
+    let completed_local_classifiers = selected_local_declarations
+        .iter()
+        .filter_map(|(declaration, completes_owner)| {
+            (*completes_owner
+                && index
+                    .declaration_anchor(*declaration)
+                    .is_some_and(|anchor| anchor.kind == DeclarationKind::Classifier))
+            .then_some(*declaration)
         })
         .collect::<Vec<_>>();
     for declaration in local_classifiers.iter().copied() {
@@ -2280,6 +2311,7 @@ fn publish_checked_local_signatures_selected(
                 source.raw(),
                 &local_classifiers,
             );
+            index.publish_body_local_owner_completions(completed_local_classifiers);
             return Ok(());
         }
     }

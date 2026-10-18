@@ -12,6 +12,17 @@ impl SignatureConstraintExtractor {
         scope: SignatureScopeId,
         origin: &mut impl FnMut(crate::diag::Span) -> OriginId,
     ) -> SigExprId {
+        // The parser expands source aliases for the ordinary AST, but compact resolution must bind
+        // the written alias itself. Its declaration owns the already-resolved expansion; resolving
+        // the expanded target in this use scope could redirect a declaration-site classifier to a
+        // later same-named local declaration. Capture the parser sidecar into graph syntax now,
+        // while source spans are still only an ingestion key.
+        let written = self
+            .source_type_alias_spellings
+            .get(&ty.span)
+            .cloned()
+            .unwrap_or_else(|| ty.clone());
+        let ty = &written;
         if ty.is_star_projection() {
             let star = Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")));
             return self.graph.add_expr(SigExpr::Known(
@@ -150,6 +161,15 @@ impl SignatureConstraintExtractor {
         scope: SignatureScopeId,
         formals: &[String],
     ) -> LocalTypeTemplateNodeId {
+        // As with an explicit compact type, retain a source alias as the declaration-site lookup
+        // input. The local template binds that syntax once in the alias declaration's scope.
+        let written = self
+            .source_type_alias_spellings
+            .get(&ty.span)
+            .cloned()
+            .unwrap_or_else(|| ty.clone());
+        let ty = &written;
+        let source = self.graph.add_type_syntax(ty);
         let flags = LocalTypeTemplateFlags {
             nullable: ty.nullable(),
             definitely_non_null: ty.definitely_non_null(),
@@ -160,6 +180,7 @@ impl SignatureConstraintExtractor {
             return self
                 .graph
                 .add_local_type_template_node(LocalTypeTemplateNode {
+                    source,
                     target: LocalTypeTemplateTarget::Star,
                     children: Box::new([]),
                     flags,
@@ -170,6 +191,7 @@ impl SignatureConstraintExtractor {
                 return self
                     .graph
                     .add_local_type_template_node(LocalTypeTemplateNode {
+                        source,
                         target: LocalTypeTemplateTarget::Formal(index as u32),
                         children: Box::new([]),
                         flags,
@@ -250,6 +272,7 @@ impl SignatureConstraintExtractor {
         };
         self.graph
             .add_local_type_template_node(LocalTypeTemplateNode {
+                source,
                 target,
                 children,
                 flags,

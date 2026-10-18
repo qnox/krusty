@@ -29,6 +29,23 @@ pub(super) fn emit_unconditional(
     }
 }
 
+/// Report retained findings in recording order for a complete set of failed declarations. A
+/// pre-publication caller that already emitted unconditional findings excludes them; a batched
+/// publication includes newly recorded unconditional findings in the same ordered pass.
+pub(super) fn emit_failures(
+    diagnostics: &mut crate::diag::DiagSink,
+    recorded: &[ProductionSignatureDiagnostic],
+    failed: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    include_unconditional: bool,
+) {
+    for diagnostic in recorded.iter().filter(|diagnostic| {
+        (include_unconditional && diagnostic.unconditional)
+            || (!diagnostic.unconditional && failed.contains(&diagnostic.declaration))
+    }) {
+        emit_production_signature_diagnostic(diagnostics, diagnostic);
+    }
+}
+
 /// Report findings produced after solver finalization when publication rejects `declaration`.
 /// Conditional findings for unrelated declarations remain deferred; unconditional access errors
 /// still surface on every publication exit.

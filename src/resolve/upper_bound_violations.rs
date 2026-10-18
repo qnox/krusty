@@ -65,7 +65,8 @@ pub(crate) fn check_finalized_top_level_type_alias_bounds(
         // identity by zipping lists whose rejected members differ.
         let declarations = declarations
             .into_iter()
-            .map(|declaration| {
+            .filter_map(|declaration| {
+                let header = index.type_alias_header(declaration)?;
                 let anchor = index
                     .declaration_anchor(declaration)
                     .expect("an inventoried top-level type alias has an anchor");
@@ -78,7 +79,7 @@ pub(crate) fn check_finalized_top_level_type_alias_bounds(
                     .type_alias_decls
                     .get(sibling)
                     .expect("a stable type-alias sibling names its exact parser declaration");
-                (syntax, declaration)
+                Some((syntax, header))
             })
             .collect::<Vec<_>>();
 
@@ -94,10 +95,7 @@ pub(crate) fn check_finalized_top_level_type_alias_bounds(
             diags,
         );
         checker.push_file_policies(index.file_lexical_policies(source));
-        for (syntax, declaration) in declarations {
-            let header = index
-                .type_alias_header(declaration)
-                .expect("an inventoried top-level type alias has a finalized header");
+        for (syntax, header) in declarations {
             checker.check_type_alias_declaration_bounds(
                 &syntax.target,
                 header.expansion.get(),

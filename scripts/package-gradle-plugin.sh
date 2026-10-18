@@ -63,7 +63,7 @@ pluginManagement {
 \`\`\`kotlin
 // build.gradle.kts
 plugins {
-    kotlin("jvm") version "2.4.20" // supported: 2.4.0, 2.4.10, 2.4.20
+    kotlin("jvm") version "2.4.21" // supported: 2.4.0, 2.4.10, 2.4.20, 2.4.21
     id("krusty") version "$version"
 }
 \`\`\`
@@ -92,7 +92,7 @@ plugin-id=krusty
 plugin-version=$version
 implementation=dev.krusty:krusty-gradle-plugin:$version
 marker=krusty:krusty.gradle.plugin:$version
-kotlin-gradle-plugin=2.4.0,2.4.10,2.4.20
+kotlin-gradle-plugin=2.4.0,2.4.10,2.4.20,2.4.21
 gradle=7.6.3,8.14.3,9.5.0,9.7.0
 EOF
 

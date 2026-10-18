@@ -45,6 +45,10 @@ pub struct SignatureConstraintExtractor {
     source_primary_constructors: HashMap<crate::diag::Span, DeclarationId>,
     source_functions: HashMap<crate::diag::Span, DeclarationId>,
     source_stubs: HashMap<crate::diag::Span, DeclarationStub>,
+    /// Parser-retained source alias applications for the file currently being extracted. Compact
+    /// type capture immediately converts these spellings into graph-owned syntax identities; the
+    /// map is cleared before extraction moves to another file.
+    source_type_alias_spellings: HashMap<crate::diag::Span, TypeRef>,
     direct_classifier_parents: HashMap<crate::ast::DeclId, crate::ast::DeclId>,
     lexical_values: Vec<HashMap<Box<str>, SigExprId>>,
     lexical_callables: Vec<HashMap<Box<str>, CompactLexicalCallable>>,
@@ -184,6 +188,9 @@ impl SignatureConstraintExtractor {
         self.source_stubs.clear();
         self.source_stubs
             .extend(stubs.iter().map(|stub| (stub.range, *stub)));
+        self.source_type_alias_spellings.clear();
+        self.source_type_alias_spellings
+            .extend(file.alias_spellings.clone());
         self.direct_classifier_parents.clear();
         let classifiers = file
             .decls
@@ -443,6 +450,7 @@ impl SignatureConstraintExtractor {
             self.local_classifier_stack.clear();
             self.extracting_local_effects.clear();
         }
+        self.source_type_alias_spellings.clear();
     }
 
     pub fn graph(&self) -> &SignatureGraph {
@@ -465,7 +473,8 @@ impl SignatureConstraintExtractor {
         assert!(
             self.lexical_values.is_empty()
                 && self.lexical_callables.is_empty()
-                && self.lexical_types.is_empty(),
+                && self.lexical_types.is_empty()
+                && self.source_type_alias_spellings.is_empty(),
             "signature extraction must not retain source-local spellings"
         );
         (self.graph, self.failures)
@@ -979,13 +988,6 @@ impl SignatureConstraintExtractor {
             else {
                 continue;
             };
-            if constructor
-                .params
-                .iter()
-                .any(|parameter| parameter.is_vararg)
-            {
-                continue;
-            }
             let scope = declaration_scope(self, stub.id);
             let parameters = constructor
                 .params
@@ -999,9 +1001,6 @@ impl SignatureConstraintExtractor {
             let Some(declaration) = self.source_functions.get(&method.span).copied() else {
                 continue;
             };
-            if method.params.iter().any(|parameter| parameter.is_vararg) {
-                continue;
-            }
             let scope = declaration_scope(self, declaration);
             let parameters = method
                 .params
@@ -2349,9 +2348,11 @@ impl SignatureConstraintExtractor {
                                 scope,
                                 &alias.type_params,
                             );
-                            let template = self
-                                .graph
-                                .add_local_type_alias_template(root, alias.type_params.len());
+                            let template = self.graph.add_local_type_alias_template(
+                                root,
+                                alias.type_params.len(),
+                                scope,
+                            );
                             self.lexical_types
                                 .last_mut()
                                 .expect("block type scope must exist")

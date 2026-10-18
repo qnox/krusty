@@ -231,6 +231,7 @@ impl JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kotlin_version::KotlinVersion;
     use crate::libraries::{
         InlineBodyPlan, InlineIterationIndex, InlineIterationTraversal, LibraryMember,
     };
@@ -321,7 +322,8 @@ mod tests {
     #[test]
     fn cached_iteration_dependencies_receive_each_classpaths_identity() {
         let version = crate::toolchain::kotlin_version();
-        if !matches!(version.as_str(), "2.4.0" | "2.4.10" | "2.4.20") {
+        if !KotlinVersion::parse(&version).is_some_and(|v| KotlinVersion::supported().contains(&v))
+        {
             return;
         }
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {

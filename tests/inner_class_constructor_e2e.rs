@@ -88,3 +88,30 @@ fn a_capturing_local_secondary_constructor_has_no_signature_of_its_prefix() {
     let (expected, actual) = &compared[0];
     assert_eq!(common::member_table(actual), common::member_table(expected));
 }
+
+/// A constructor default that reads a private outer property runs in the inner class's `$default`
+/// stub, which reaches the property through the outer class's `access$get<X>$p` accessor.
+const OUTER_PRIVATE_DEFAULT: &str = "class Holder {\n\
+    \x20   private val config = \"cfg\"\n\
+    \x20   inner class Fake(val item: String = config)\n\
+    \x20   fun run(): String = Fake().item\n\
+    }\n\
+    fun box(): String = if (Holder().run() == \"cfg\") \"OK\" else Holder().run()\n";
+
+#[test]
+fn an_inner_default_reading_a_private_outer_property_matches_kotlinc() {
+    let compared = common::compile_with_kotlinc(
+        "Holder",
+        OUTER_PRIVATE_DEFAULT,
+        &[],
+        &["Holder", "Holder$Fake"],
+    );
+    for (expected, actual) in &compared {
+        assert!(actual == expected, "Holder differs from kotlinc");
+    }
+}
+
+#[test]
+fn an_inner_default_reading_a_private_outer_property_runs() {
+    common::expect_box_ok_with_stdlib(OUTER_PRIVATE_DEFAULT, "Holder");
+}

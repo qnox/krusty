@@ -7,7 +7,7 @@
 //! back: `maxOf(a, b)` was `iload_0; iload_1; istore_3; iload_3; invokestatic Math.max`.
 use super::common;
 use super::common::{compare_with_kotlinc_plugin, method_instructions};
-use super::temporary_elimination_e2e::stack_map;
+use crate::temporary_elimination_e2e::stack_map;
 
 const SOURCE: &str = "import kotlin.coroutines.*\n\
     class Holder(val text: String)\n\

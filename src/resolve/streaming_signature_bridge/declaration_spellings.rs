@@ -20,6 +20,200 @@ struct SpellingContext {
     annotations: crate::fx_hash::HashMap<crate::fir::SourceFileId, RecordedTypeAnnotations>,
 }
 
+/// Expand a statement-local alias's written argument spellings through the stable structural
+/// template captured at its declaration. Local aliases have no metadata identity of their own, so
+/// publication records only the expanded shape. Repeated formal occurrences deliberately clone
+/// one already-bound source argument spelling; diagnostics still walk the source argument once.
+fn project_local_alias_spelling(
+    semantics: &super::ProductionSignatureSemantics<'_>,
+    context: &SpellingContext,
+    projection: &super::bound_local_alias_templates::AppliedLocalTypeSpellingProjection,
+    written: Spelled,
+) -> Option<Spelled> {
+    use super::bound_local_alias_templates::{
+        LocalTypeSpellingOccurrence, LocalTypeSpellingProjection,
+    };
+
+    fn overlay(
+        occurrence: &LocalTypeSpellingOccurrence,
+        context: &SpellingContext,
+        mut spelling: Spelled,
+    ) -> Option<Spelled> {
+        let annotations = context.annotations.get(&occurrence.source_file)?;
+        let inherited = annotations.at(occurrence.source.span.lo).iter().cloned();
+        let expanded = if spelling.alias.is_some() {
+            &mut spelling.expansion_annotations
+        } else {
+            &mut spelling.annotations
+        };
+        *expanded = inherited.chain(std::mem::take(expanded)).collect();
+        spelling.definitely_non_null |= occurrence.source.definitely_non_null();
+        if let Some(name) = annotations.parameter_name_at(occurrence.source.span.lo) {
+            spelling.parameter_name = Some(name.into());
+        }
+        Some(spelling)
+    }
+
+    fn projected(
+        semantics: &super::ProductionSignatureSemantics<'_>,
+        context: &SpellingContext,
+        projection: &LocalTypeSpellingProjection,
+        source_arguments: &[(crate::types::Ty, Spelled)],
+        bindings: &crate::symbol_resolver::GSigBinds,
+    ) -> Option<(crate::types::Ty, Spelled)> {
+        match projection {
+            LocalTypeSpellingProjection::Formal {
+                ordinal,
+                occurrence,
+            } => {
+                let (_, spelling) = source_arguments.get(*ordinal as usize)?.clone();
+                let resolved = crate::symbol_resolver::ty_subst_keep_unbound(
+                    occurrence.binding.resolved?,
+                    bindings,
+                );
+                Some((resolved, overlay(occurrence, context, spelling)?))
+            }
+            LocalTypeSpellingProjection::Overlay { occurrence, inner } => {
+                let (_, spelling) =
+                    projected(semantics, context, inner, source_arguments, bindings)?;
+                let resolved = crate::symbol_resolver::ty_subst_keep_unbound(
+                    occurrence.binding.resolved?,
+                    bindings,
+                );
+                Some((resolved, overlay(occurrence, context, spelling)?))
+            }
+            LocalTypeSpellingProjection::Structural {
+                occurrence,
+                children,
+            } => {
+                let mut children = children
+                    .iter()
+                    .map(|child| projected(semantics, context, child, source_arguments, bindings))
+                    .collect::<Option<Vec<_>>>()?;
+                let annotations = context.annotations.get(&occurrence.source_file)?;
+                let source = occurrence.binding.classifier_segment.and_then(|segment| {
+                    super::super::package_qualifier_type_arguments::without_package_arguments(
+                        &occurrence.source,
+                        segment,
+                    )
+                });
+                let source = source.as_ref().unwrap_or(&occurrence.source);
+                if !source.fun_params.is_empty() || source.name == "<fun>" {
+                    if source.fun_suspend() {
+                        children.truncate(source.fun_params.len());
+                    }
+                    let spelling = Spelled {
+                        classifier_segment: occurrence.binding.classifier_segment,
+                        definitely_non_null: source.definitely_non_null(),
+                        args: children.into_iter().map(|(_, spelling)| spelling).collect(),
+                        annotations: annotations.at(source.span.lo).to_vec(),
+                        parameter_name: annotations
+                            .parameter_name_at(source.span.lo)
+                            .map(Into::into),
+                        ..Spelled::default()
+                    };
+                    let resolved = crate::symbol_resolver::ty_subst_keep_unbound(
+                        occurrence.binding.resolved?,
+                        bindings,
+                    );
+                    return Some((resolved, spelling));
+                }
+                children.truncate(source.targs.len());
+                let alias = occurrence.binding.alias;
+                let alias_args = alias
+                    .is_some()
+                    .then(|| children.clone())
+                    .unwrap_or_default();
+                let dependency_alias = alias
+                    .and_then(|identity| semantics.table.libraries.type_alias_expansion(identity));
+                let template = alias.and_then(|identity| {
+                    context
+                        .expansions
+                        .get(&identity)
+                        .map(|(rhs, formals, expansion)| (rhs, formals.as_slice(), *expansion))
+                        .or_else(|| {
+                            dependency_alias.as_ref().map(|classpath| {
+                                (
+                                    &classpath.expansion_spelling,
+                                    classpath.formals.as_slice(),
+                                    classpath.expansion,
+                                )
+                            })
+                        })
+                });
+                let expansion_annotations = template
+                    .map(|(rhs, _, _)| {
+                        rhs.expansion_annotations
+                            .iter()
+                            .chain(&rhs.annotations)
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let spelling = Spelled {
+                    classifier_segment: occurrence.binding.classifier_segment,
+                    definitely_non_null: source.definitely_non_null(),
+                    alias,
+                    alias_args,
+                    args: if alias.is_some() {
+                        super::super::type_spellings::expansion_arg_spellings(template, &children)
+                    } else {
+                        children.into_iter().map(|(_, spelling)| spelling).collect()
+                    },
+                    annotations: annotations.at(source.span.lo).to_vec(),
+                    expansion_annotations,
+                    unsafe_variance: template.is_some_and(|(rhs, _, _)| rhs.unsafe_variance),
+                    parameter_name: annotations
+                        .parameter_name_at(source.span.lo)
+                        .map(Into::into),
+                };
+                let resolved = crate::symbol_resolver::ty_subst_keep_unbound(
+                    occurrence.binding.resolved?,
+                    bindings,
+                );
+                Some((resolved, spelling))
+            }
+        }
+    }
+
+    let mut written = written;
+    let source_arguments = projection
+        .arguments
+        .iter()
+        .copied()
+        .zip(std::mem::take(&mut written.args))
+        .collect::<Vec<_>>();
+    let bindings = projection
+        .formals
+        .iter()
+        .cloned()
+        .zip(projection.arguments.iter().copied())
+        .collect::<crate::symbol_resolver::GSigBinds>();
+    let (_, mut spelling) = projected(
+        semantics,
+        context,
+        &projection.root,
+        &source_arguments,
+        &bindings,
+    )?;
+    spelling.definitely_non_null |= written.definitely_non_null;
+    spelling.unsafe_variance |= written.unsafe_variance;
+    spelling.annotations = written
+        .annotations
+        .into_iter()
+        .chain(spelling.annotations)
+        .collect();
+    spelling.expansion_annotations = written
+        .expansion_annotations
+        .into_iter()
+        .chain(spelling.expansion_annotations)
+        .collect();
+    if written.parameter_name.is_some() {
+        spelling.parameter_name = written.parameter_name;
+    }
+    Some(spelling)
+}
+
 fn type_parameter_names(
     headers: &StreamedHeaderModule,
     range: HeaderTypeParameterRange,
@@ -152,7 +346,16 @@ fn spelling(
         &mut resolve_argument,
         &mut resolved_spelling,
     );
-    (complete.get() && structural_ids.next().is_none()).then_some(spelled)
+    if !complete.get() || structural_ids.next().is_some() {
+        return None;
+    }
+    match semantics
+        .selected_types
+        .local_alias_projection(headers.syntax.written_type_id(ty))
+    {
+        Some(projection) => project_local_alias_spelling(semantics, context, &projection, spelled),
+        None => Some(spelled),
+    }
 }
 
 fn bound_spellings(

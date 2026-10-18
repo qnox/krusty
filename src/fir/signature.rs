@@ -46,6 +46,7 @@ pub use declaration_metadata::NoArgSuperConstructor;
 mod file_annotations;
 pub(crate) use file_annotations::FileAnnotationFacts;
 mod result_expectation;
+mod source_inventory;
 mod source_packages;
 
 /// Exact constructor declaration selected for a serializer class named by a checked type-use
@@ -1398,9 +1399,13 @@ pub struct ResolvedModuleIndex {
     /// publication selects from these once per checked body group; asking the whole inventory
     /// each time was linear in the module per body, i.e. quadratic.
     local_class_declarations: Vec<DeclarationId>,
-    /// Semantic lexical owner for parser-hoisted local classifiers. Both identities are stable
-    /// declaration headers; no parser node or source coordinate crosses into Pass 2.
-    local_classifier_lexical_roots: HashMap<DeclarationId, DeclarationId>,
+    /// Stable lexical roots and the later checked-completion state for body-local classifiers.
+    /// No parser node or source coordinate crosses into Pass 2.
+    body_local_ownership: declaration_metadata::BodyLocalOwnership,
+    /// Exact top-level expect declarations removed by source-set actualization. Their anchors stay
+    /// in the stable parser inventory, but ordinary Pass 2 must not treat the missing headers as a
+    /// recovery failure or infer this lifecycle state from that absence.
+    actualized_away_declarations: crate::fx_hash::HashSet<DeclarationId>,
     /// Resolved declaration annotation identities retained as stable semantic header metadata.
     /// Source spellings, spans, and target-specific interpretations do not cross this boundary.
     declaration_annotations: HashMap<DeclarationId, Box<[TypeName]>>,
@@ -1623,15 +1628,6 @@ impl ResolvedModuleIndex {
         self.declarations.stable_anchor(declaration)
     }
 
-    pub fn local_classifier_lexical_root(
-        &self,
-        declaration: DeclarationId,
-    ) -> Option<DeclarationId> {
-        self.local_classifier_lexical_roots
-            .get(&declaration)
-            .copied()
-    }
-
     pub(super) fn temporary_declaration_range(
         &self,
         declaration: DeclarationId,
@@ -1825,31 +1821,11 @@ impl ResolvedModuleIndex {
         );
     }
 
-    pub(crate) fn source_inventory(&self, source: SourceFileId) -> &[DeclarationId] {
-        self.source_inventory
-            .get(&source)
-            .map(Box::as_ref)
-            .unwrap_or_default()
-    }
-
     /// Every declaration anchored in `source`, in declaration-id order, including headerless
     /// ancestry nodes the parser stream does not inventory. Per-file lowering reads this instead
     /// of scanning the module.
     pub(crate) fn declarations_in_source(&self, source: SourceFileId) -> &[DeclarationId] {
         self.declarations.in_source(source)
-    }
-
-    pub fn source_order(&self, declaration: DeclarationId) -> Option<u32> {
-        let order = self.source_orders.get(&declaration).copied();
-        if order.is_none() {
-            crate::trace_compiler!(
-                "fir",
-                "missing source order for {declaration:?}: anchor={:?}, header={:?}",
-                self.declaration_anchor(declaration),
-                self.declaration_header(declaration),
-            );
-        }
-        order
     }
 
     pub fn declaration_header(
@@ -2422,87 +2398,6 @@ impl ResolvedModuleIndex {
         self.declarations = declarations;
     }
 
-    pub(super) fn publish_local_classifier_lexical_roots(
-        &mut self,
-        roots: HashMap<DeclarationId, DeclarationId>,
-    ) {
-        assert!(
-            self.local_classifier_lexical_roots.is_empty(),
-            "local-classifier lexical ownership may be published only once"
-        );
-        self.local_classifier_lexical_roots = roots;
-    }
-
-    pub(super) fn publish_source_inventory(
-        &mut self,
-        inventory: &[DeclarationId],
-        declarations: &DeclarationIds,
-    ) {
-        assert!(
-            self.source_inventory.is_empty(),
-            "source declaration inventory may be published only once"
-        );
-        let mut grouped = HashMap::<SourceFileId, Vec<DeclarationId>>::default();
-        for &declaration in inventory {
-            let source = declarations
-                .anchor(declaration)
-                .expect("inventoried declaration must retain its stable source")
-                .source;
-            grouped.entry(source).or_default().push(declaration);
-        }
-        // `inventory` is the parser's semantic declaration stream. Preserve that order exactly:
-        // ranges are diagnostic payload, and released ordinary accessor bodies may legitimately
-        // fall back to their owner's span on a later bounded parse. Sorting by those spans turns a
-        // getter/setter pair into a body locator and can swap their stable identities.
-        for source_declarations in grouped.values() {
-            for (order, declaration) in source_declarations.iter().copied().enumerate() {
-                self.source_orders.insert(
-                    declaration,
-                    u32::try_from(order).expect("too many source declarations"),
-                );
-            }
-        }
-        // A retained inline/default body can discover compiler-generated capture storage after the
-        // parser declaration stream has been inventoried. Such a field has no independent source
-        // position: its exact ordering anchor is its owning declaration. Do not put it into the
-        // active-source inventory (there is no Pass-2 syntax to bind); publish only that structural
-        // ordering fact. Restrict this to generated declarations so a missing written declaration
-        // remains an invariant failure instead of silently inheriting an owner's position.
-        loop {
-            let mut added = false;
-            for raw in 0..declarations.len() {
-                let declaration = DeclarationId::from_raw(
-                    u32::try_from(raw).expect("too many stable declarations for a packed id"),
-                );
-                if self.source_orders.contains_key(&declaration)
-                    || !self.declaration_header(declaration).is_some_and(|header| {
-                        header
-                            .flags
-                            .has(super::DeclarationFlags::COMPILER_GENERATED)
-                    })
-                {
-                    continue;
-                }
-                let Some(order) = declarations
-                    .anchor(declaration)
-                    .and_then(|anchor| anchor.owner)
-                    .and_then(|owner| self.source_orders.get(&owner).copied())
-                else {
-                    continue;
-                };
-                self.source_orders.insert(declaration, order);
-                added = true;
-            }
-            if !added {
-                break;
-            }
-        }
-        self.source_inventory = grouped
-            .into_iter()
-            .map(|(source, declarations)| (source, declarations.into_boxed_slice()))
-            .collect();
-    }
-
     pub fn signature(&self, declaration: DeclarationId) -> Option<&ResolvedSignature> {
         self.signatures.get(&declaration)
     }
@@ -3001,7 +2896,8 @@ impl ResolvedModuleIndex {
                 * (std::mem::size_of::<DeclarationId>()
                     + std::mem::size_of::<ResolvedDeclarationHeader>())
             + self.local_class_declarations.len() * std::mem::size_of::<DeclarationId>()
-            + self.local_classifier_lexical_roots.len() * (std::mem::size_of::<DeclarationId>() * 2)
+            + self.body_local_ownership.storage_payload_bytes()
+            + self.actualized_away_declarations.len() * std::mem::size_of::<DeclarationId>()
             + self.declaration_annotations.len()
                 * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<Box<[TypeName]>>())
             + self

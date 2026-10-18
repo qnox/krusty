@@ -36,6 +36,7 @@ mod local_declaration_spellings;
 mod local_signatures;
 mod lookups;
 mod operator_conventions;
+mod postponed_argument_mapping;
 mod postponed_calls;
 mod publication_continuation;
 mod qualified_calls;
@@ -75,6 +76,7 @@ pub(crate) use local_signatures::{
 pub(crate) use local_signatures::{
     publish_checked_local_signatures, publish_discovered_local_capture_declarations,
 };
+use postponed_argument_mapping::MappedTopLevelSelection;
 pub(crate) use source_contracts::{extract_source_contract_candidates, SourceContractCandidate};
 use top_level_call::SelectedTopLevelCall;
 use type_resolution::SelectedTypeSite;
@@ -1574,62 +1576,6 @@ impl ProductionSignatureSemantics<'_> {
         });
         let selected = matching.next()?.clone();
         matching.next().is_none().then_some(selected)
-    }
-
-    fn probe_call_arguments(
-        candidates: &[crate::libraries::FunctionInfo],
-        arguments: &[crate::fir::SigCallArgumentProbe<'_>],
-        trailing_lambda: bool,
-    ) -> Option<(Vec<crate::symbol_resolver::CallArgKind>, Vec<Option<usize>>)> {
-        if arguments.iter().any(|argument| {
-            matches!(
-                argument,
-                crate::fir::SigCallArgumentProbe::PostponedLambda { spread: true, .. }
-                    | crate::fir::SigCallArgumentProbe::PostponedCallableReference {
-                        spread: true,
-                        ..
-                    }
-            )
-        }) {
-            return None;
-        }
-        let names = arguments
-            .iter()
-            .map(|argument| match argument {
-                crate::fir::SigCallArgumentProbe::Typed(argument) => {
-                    argument.name.map(str::to_owned)
-                }
-                crate::fir::SigCallArgumentProbe::PostponedLambda { name, .. }
-                | crate::fir::SigCallArgumentProbe::PostponedCallableReference { name, .. } => {
-                    name.map(str::to_owned)
-                }
-            })
-            .collect::<Vec<_>>();
-        let requires_mapping = trailing_lambda || names.iter().any(Option::is_some);
-        let extra_admitted = |first: usize, extra: usize| {
-            Self::same_vararg_element_probe(&arguments[first], &arguments[extra])
-        };
-        let slots = if requires_mapping {
-            Self::mapped_call_slots(
-                candidates,
-                &names,
-                arguments.len(),
-                trailing_lambda,
-                &extra_admitted,
-            )?
-        } else {
-            (0..arguments.len()).map(Some).collect()
-        };
-        let kinds = slots
-            .iter()
-            .map(|source| {
-                source
-                    .and_then(|source| arguments.get(source))
-                    .map(Self::probe_argument_kind)
-                    .unwrap_or(crate::symbol_resolver::CallArgKind::OmittedDefault)
-            })
-            .collect();
-        Some((kinds, slots))
     }
 
     fn probe_argument_kind(
@@ -3872,10 +3818,9 @@ pub(crate) fn finalized_streamed_signature_index(
             vararg_constructor_property::primary_constructor_owns_vararg_property(
                 headers, stub, anchor,
             );
-        let deferred_atomic_vararg_signature =
-            deferred_local_headers::defers_atomic_vararg_signature(
-                stub.id,
-                stub.kind,
+        let deferred_owner_completed_signature =
+            deferred_local_headers::defers_owner_completed_signature(
+                stub,
                 constructor_property_vararg || primary_constructor_owns_vararg_property,
                 &deferred_local_candidates,
             );
@@ -4178,7 +4123,9 @@ pub(crate) fn finalized_streamed_signature_index(
             }
         }
         let mut invalid_vararg_shape = false;
-        for (parameter, (syntax, is_vararg)) in parameters.iter_mut().zip(parameter_types) {
+        for (parameter, (syntax, is_vararg)) in
+            parameters.iter_mut().zip(parameter_types.iter().copied())
+        {
             if let Some(syntax) = headers
                 .syntax
                 .transient_type_ref(syntax, &headers.lookup_names)
@@ -4251,10 +4198,11 @@ pub(crate) fn finalized_streamed_signature_index(
                 continue;
             }
             let mut replacement_failed = false;
-            for (parameter, expression) in parameters
+            for ((parameter, expression), (_, is_vararg)) in parameters
                 .iter_mut()
                 .skip(explicit_parameter_offset)
                 .zip(compact_parameters)
+                .zip(parameter_types.iter().skip(explicit_parameter_offset))
             {
                 let Some(resolved) =
                     explicit_type_semantics.resolve_compact_graph_type(&graph, *expression)
@@ -4262,7 +4210,7 @@ pub(crate) fn finalized_streamed_signature_index(
                     replacement_failed = true;
                     break;
                 };
-                *parameter = resolved;
+                *parameter = super::semantic_value_parameter_ty(resolved, *is_vararg);
             }
             if replacement_failed {
                 failed.push(stub.id);
@@ -4357,9 +4305,7 @@ pub(crate) fn finalized_streamed_signature_index(
             };
             resolved_receivers.insert(stub.id, receiver);
         }
-        // A primary vararg property and its constructor are one semantic relation. Neither half is
-        // independently publishable; Pass 2 completes both from the same checked declaration.
-        if deferred_atomic_vararg_signature {
+        if deferred_owner_completed_signature {
             deferred_local_headers.insert(stub.id);
             continue;
         }
@@ -4512,28 +4458,18 @@ pub(crate) fn finalized_streamed_signature_index(
         compact_classifier_cycle_edges(table, &classifier_types, &resolved_classifier_parents);
     failed.sort_by_key(|declaration| declaration.raw());
     failed.dedup();
-    for diagnostic in explicit_type_semantics
-        .diagnostics
-        .borrow()
-        .iter()
-        .filter(|diagnostic| diagnostic.unconditional)
-    {
-        diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
-    }
+    let explicit_diagnostics = explicit_type_semantics.diagnostics.borrow();
+    diagnostics::emit_unconditional(diags, &explicit_diagnostics);
     if !failed.is_empty() {
         crate::trace_compiler!(
             "fir",
             "signature finalization rejected declarations before solver: {failed:?}",
         );
-        for diagnostic in explicit_type_semantics
-            .diagnostics
-            .borrow()
-            .iter()
-            .filter(|diagnostic| !diagnostic.unconditional)
-        {
-            diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
-        }
+        let failed_declarations = failed.iter().copied().collect::<HashSet<_>>();
+        diagnostics::emit_failures(diags, &explicit_diagnostics, &failed_declarations, false);
     }
+    let explicit_publication_diagnostics = explicit_diagnostics.len();
+    drop(explicit_diagnostics);
 
     let signature_origins = graph
         .constraints()
@@ -4642,25 +4578,35 @@ pub(crate) fn finalized_streamed_signature_index(
     }
     // Classifier publication resolves supertype headers after the solver's report; what it records
     // joins the same module report on every exit from publication.
+    // Publication appends diagnostics monotonically. Advance this cursor after every publication
+    // result so an unconditional finding is emitted once, and a conditional finding is considered
+    // only alongside the declaration whose publication just failed.
+    let mut publication_diagnostics = solver_diagnostics;
     macro_rules! emit_publication_diagnostics {
-        () => {
-            diagnostics::emit_unconditional(
-                diags,
-                &semantics.diagnostics.borrow()[solver_diagnostics..],
-            )
-        };
-        ($declaration:expr) => {
+        () => {{
+            let recorded = semantics.diagnostics.borrow();
+            diagnostics::emit_unconditional(diags, &recorded[publication_diagnostics..]);
+        }};
+        ($declaration:expr) => {{
+            let recorded = semantics.diagnostics.borrow();
             diagnostics::emit_publication_failure(
                 diags,
-                &semantics.diagnostics.borrow()[solver_diagnostics..],
+                &recorded[publication_diagnostics..],
                 $declaration,
-            )
-        };
+            );
+            publication_diagnostics = recorded.len();
+        }};
     }
     macro_rules! stop_with_failure {
         ($declaration:expr) => {{
             let declaration = $declaration;
-            emit_publication_diagnostics!(declaration);
+            let recorded = semantics.diagnostics.borrow();
+            diagnostics::emit_publication_failure(
+                diags,
+                &recorded[publication_diagnostics..],
+                declaration,
+            );
+            drop(recorded);
             failed.push(declaration);
             failed.sort_by_key(|declaration| declaration.raw());
             failed.dedup();
@@ -5083,22 +5029,20 @@ pub(crate) fn finalized_streamed_signature_index(
             }
         }
     }
-    for stub in headers
-        .stubs
-        .iter()
-        .filter(|stub| stub.kind == DeclarationKind::TypeAlias)
-    {
-        if type_alias_publication::publish_type_alias(
-            headers,
-            &explicit_type_semantics,
-            &mut index,
-            stub,
-        )
-        .is_err()
-        {
-            stop_with_failure!(stub.id);
-        }
-    }
+    let alias_failures =
+        type_alias_publication::publish_all(headers, &explicit_type_semantics, &mut index);
+    // Select the batched failures once, preserving diagnostic order and unconditional findings
+    // from successful alias publications.
+    let failed_aliases = alias_failures.iter().copied().collect::<HashSet<_>>();
+    let recorded = explicit_type_semantics.diagnostics.borrow();
+    diagnostics::emit_failures(
+        diags,
+        &recorded[explicit_publication_diagnostics..],
+        &failed_aliases,
+        true,
+    );
+    drop(recorded);
+    failed.extend(alias_failures);
     // An applied nested/inner classifier carries both its own type arguments and any lexically
     // captured declaration arguments. Publish their stable semantic identities once so checked FIR
     // can attach substitutions without reconstructing ownership from source spelling or AST IDs.
@@ -5921,6 +5865,7 @@ pub(crate) fn finalized_streamed_signature_index(
             index.publish_annotation_policy(classifier, retention);
         }
     }
+    deferred_local_headers::publish_pass_one_owner_completions(headers, &mut index);
     // Every spelling fact below was selected by explicit compact resolution or by the solver.
     // Assemble the stable sidecars only after those operations and all header publication finish;
     // this phase performs no resolver call and no source-spelling lookup.

@@ -2263,6 +2263,24 @@ fun CharSequence.f(): Int = choose(1)
     );
 }
 
+#[test]
+fn body_local_member_extension_val_rejects_write_like_kotlinc() {
+    let source = r#"var Int.token: Int
+    get() = 0
+    set(value) {}
+
+fun build() {
+    class Local {
+        val Int.token: Int get() = 1
+        fun write() {
+            1.token = 1
+        }
+    }
+}
+"#;
+    assert_rejection_same_as_kotlinc("BodyLocalMemberExtensionVal", source);
+}
+
 /// A prefix with no value facet (a classifier with neither an object nor a companion, or a
 /// package) that misses its next segment reports that segment, as kotlinc does. A root spelled
 /// like both a default-imported classifier and the source package commits to the classifier, so

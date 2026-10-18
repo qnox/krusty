@@ -311,11 +311,7 @@ mod tests {
                 CompilerWarningName::DataClassInvisibleCopyUsage,
             ),
         ] {
-            for release in [
-                KotlinVersion::V2_4_0,
-                KotlinVersion::V2_4_10,
-                KotlinVersion::V2_4_20,
-            ] {
+            for release in KotlinVersion::supported() {
                 let mut policy = WarningPolicy::default();
                 assert_eq!(
                     policy.configure(&format!("{name}:disabled"), release),

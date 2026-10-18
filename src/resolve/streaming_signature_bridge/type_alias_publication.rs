@@ -2,7 +2,26 @@
 
 use super::*;
 
-pub(super) fn publish_type_alias(
+/// Publish every independent source alias in inventory order. A rejected alias remains a failed
+/// stable declaration, but does not own or truncate any later alias's semantic publication.
+pub(super) fn publish_all(
+    headers: &crate::fir::StreamedHeaderModule,
+    semantics: &ProductionSignatureSemantics<'_>,
+    index: &mut crate::fir::ResolvedModuleIndex,
+) -> Vec<crate::fir::DeclarationId> {
+    headers
+        .stubs
+        .iter()
+        .filter(|stub| stub.kind == crate::fir::DeclarationKind::TypeAlias)
+        .filter_map(|stub| {
+            publish_type_alias(headers, semantics, index, stub)
+                .err()
+                .map(|()| stub.id)
+        })
+        .collect()
+}
+
+fn publish_type_alias(
     headers: &crate::fir::StreamedHeaderModule,
     semantics: &ProductionSignatureSemantics<'_>,
     index: &mut crate::fir::ResolvedModuleIndex,

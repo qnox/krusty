@@ -18,6 +18,14 @@ struct SelectedTypeFactsData {
     abbreviations: HashMap<OriginId, ResolvedTypeAbbreviation>,
     spellings: HashMap<HeaderTypeId, super::super::type_spellings::ResolvedTypeSpelling>,
     applications: HashMap<SigExprId, super::super::type_spellings::ResolvedTypeSpelling>,
+    local_template_nodes: HashMap<
+        crate::fir::LocalTypeTemplateNodeId,
+        super::super::type_spellings::ResolvedTypeSpelling,
+    >,
+    local_alias_projections: HashMap<
+        HeaderTypeId,
+        super::bound_local_alias_templates::AppliedLocalTypeSpellingProjection,
+    >,
 }
 
 impl SelectedTypeFacts {
@@ -63,5 +71,49 @@ impl SelectedTypeFacts {
         expression: SigExprId,
     ) -> Option<super::super::type_spellings::ResolvedTypeSpelling> {
         self.shared.borrow().applications.get(&expression).copied()
+    }
+
+    pub(super) fn record_local_alias_projection(
+        &self,
+        syntax: HeaderTypeId,
+        projection: super::bound_local_alias_templates::AppliedLocalTypeSpellingProjection,
+    ) {
+        self.shared
+            .borrow_mut()
+            .local_alias_projections
+            .insert(syntax, projection);
+    }
+
+    pub(super) fn local_alias_projection(
+        &self,
+        syntax: HeaderTypeId,
+    ) -> Option<super::bound_local_alias_templates::AppliedLocalTypeSpellingProjection> {
+        self.shared
+            .borrow()
+            .local_alias_projections
+            .get(&syntax)
+            .cloned()
+    }
+
+    pub(super) fn record_local_template_node(
+        &self,
+        node: crate::fir::LocalTypeTemplateNodeId,
+        spelling: super::super::type_spellings::ResolvedTypeSpelling,
+    ) {
+        self.shared
+            .borrow_mut()
+            .local_template_nodes
+            .insert(node, spelling);
+    }
+
+    pub(super) fn local_template_node(
+        &self,
+        node: crate::fir::LocalTypeTemplateNodeId,
+    ) -> Option<super::super::type_spellings::ResolvedTypeSpelling> {
+        self.shared
+            .borrow()
+            .local_template_nodes
+            .get(&node)
+            .copied()
     }
 }

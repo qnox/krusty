@@ -59,6 +59,11 @@ pub(crate) struct Parameters {
     pub parameters: Vec<Parameter>,
     /// Each lambda's captured values, the lambdas in argument order.
     pub captured: Vec<Parameter>,
+    /// The lambda each captured value belongs to, parallel to `captured`. A captured temporary is
+    /// stored where its lambda's argument is evaluated, as kotlinc stores a captured value the
+    /// caller has in no local, so its slot follows the temporaries of the arguments before that
+    /// lambda. Without an owner, a captured temporary follows every argument.
+    pub capture_owners: Vec<usize>,
 }
 
 /// Where one of the body's slots lives in the caller.
@@ -126,24 +131,41 @@ impl Parameters {
         None
     }
 
-    /// The temporary each parameter is stored to, relative to the inline frame's base; `None` for a
-    /// parameter bound to a caller local.
-    /// The captured values follow the callee's own parameters.
+    /// The temporary each parameter is stored to, relative to the inline frame's base, indexed like
+    /// [`Self::all`]; `None` for a parameter that is not a temporary. Temporaries are numbered in
+    /// store order: the arguments in turn, each lambda's captured temporaries at its argument.
     pub(crate) fn temporaries(&self) -> Vec<Option<u16>> {
+        let real = self.parameters.len();
+        let mut slots = vec![None; real + self.captured.len()];
         let mut next = 0u16;
-        self.all()
-            .map(|parameter| match parameter.binding {
-                Binding::Temporary => {
-                    let slot = next;
-                    next += parameter.category.words() as u16;
-                    Some(slot)
-                }
-                Binding::CallerLocal { .. }
-                | Binding::Lambda(_)
-                | Binding::Field { .. }
-                | Binding::Unread => None,
-            })
-            .collect()
+        let mut assign = |index: usize, parameter: &Parameter, slots: &mut Vec<Option<u16>>| {
+            if parameter.binding == Binding::Temporary {
+                slots[index] = Some(next);
+                next += parameter.category.words() as u16;
+            }
+        };
+        let mut owned = vec![false; self.captured.len()];
+        for (index, parameter) in self.parameters.iter().enumerate() {
+            assign(index, parameter, &mut slots);
+            let Binding::Lambda(lambda) = parameter.binding else {
+                continue;
+            };
+            for (capture, _) in self
+                .capture_owners
+                .iter()
+                .enumerate()
+                .filter(|&(_, &owner)| owner == lambda)
+            {
+                owned[capture] = true;
+                assign(real + capture, &self.captured[capture], &mut slots);
+            }
+        }
+        for (capture, parameter) in self.captured.iter().enumerate() {
+            if !owned[capture] {
+                assign(real + capture, parameter, &mut slots);
+            }
+        }
+        slots
     }
 
     /// The words the temporaries take (`actualParamsSize`).
@@ -160,16 +182,18 @@ impl Parameters {
         if slot >= args_size {
             return Remapped::Frame(frame_base + self.temporaries_size() + (slot - args_size));
         }
+        let temporaries = self.temporaries();
         let mut declaration = 0u16;
-        let mut temporary = 0u16;
-        for parameter in self.all() {
+        for (index, parameter) in self.all().enumerate() {
             let words = parameter.category.words() as u16;
             if slot < declaration + words {
                 return match &parameter.binding {
                     Binding::Lambda(_) => Remapped::Lambda,
                     Binding::Unread => Remapped::Unread,
                     Binding::Field { owner, name, desc } => Remapped::Field { owner, name, desc },
-                    Binding::Temporary => Remapped::Frame(frame_base + temporary),
+                    Binding::Temporary => Remapped::Frame(
+                        frame_base + temporaries[index].expect("a temporary has a slot"),
+                    ),
                     Binding::CallerLocal {
                         slot,
                         category,
@@ -182,9 +206,6 @@ impl Parameters {
                 };
             }
             declaration += words;
-            if parameter.binding == Binding::Temporary {
-                temporary += words;
-            }
         }
         unreachable!("a slot below the parameters' size belongs to a parameter")
     }
@@ -276,5 +297,52 @@ impl Parameters {
             })
             .collect();
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Binding, Parameter, Parameters};
+    use crate::jvm::method_node::Category;
+
+    fn parameter(category: Category, binding: Binding) -> Parameter {
+        Parameter { category, binding }
+    }
+
+    #[test]
+    fn a_captured_temporary_is_numbered_at_its_lambdas_argument() {
+        let parameters = Parameters {
+            parameters: vec![
+                parameter(Category::Reference, Binding::Temporary),
+                parameter(Category::Reference, Binding::Lambda(0)),
+                parameter(Category::Long, Binding::Temporary),
+            ],
+            captured: vec![parameter(Category::Reference, Binding::Temporary)],
+            capture_owners: vec![0],
+        };
+        assert_eq!(
+            parameters.temporaries(),
+            vec![Some(0), None, Some(2), Some(1)]
+        );
+    }
+
+    #[test]
+    fn a_captured_caller_local_takes_no_temporary() {
+        let parameters = Parameters {
+            parameters: vec![
+                parameter(Category::Reference, Binding::Lambda(0)),
+                parameter(Category::Int, Binding::Temporary),
+            ],
+            captured: vec![parameter(
+                Category::Int,
+                Binding::CallerLocal {
+                    slot: 1,
+                    category: Category::Int,
+                    checkcast: None,
+                },
+            )],
+            capture_owners: vec![0],
+        };
+        assert_eq!(parameters.temporaries(), vec![None, Some(0), None]);
     }
 }

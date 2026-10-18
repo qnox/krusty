@@ -117,7 +117,7 @@ fn default_check_selection(
         };
         // The provider selects the live syntax; the target selects the surviving semantic
         // declaration after expect/actual actualization. `bind_defaults` aliases both identities
-        // to that one parser declaration for this bounded check, so selection must admit both.
+        // to that one parser declaration for this bounded check.
         selected_bodies.insert(work.provider);
         selected_bodies.insert(work.target);
         let Some(selected_roots) = roots.get_mut(root.source.raw() as usize) else {

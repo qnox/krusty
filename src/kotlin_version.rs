@@ -26,6 +26,7 @@ impl KotlinVersion {
     pub const V2_4_0: Self = Self::new(2, 4, 0);
     pub const V2_4_10: Self = Self::new(2, 4, 10);
     pub const V2_4_20: Self = Self::new(2, 4, 20);
+    pub const V2_4_21: Self = Self::new(2, 4, 21);
 
     pub const fn new(major: u16, minor: u16, patch: u16) -> Self {
         Self {

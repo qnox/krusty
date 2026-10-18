@@ -36,6 +36,24 @@ pub(crate) enum SourceFragmentMode {
 }
 
 impl SourceFragmentMode {
+    /// Whether source-set actualization explicitly removed the declaration selected by this
+    /// parser root. A merely absent header is a failed/unpublished declaration and stays visible
+    /// to recovery; it must never be mistaken for this exact lifecycle fact.
+    pub(crate) fn skips_actualized_away_declaration(
+        self,
+        file: &crate::ast::File,
+        parser: crate::ast::DeclId,
+        active: Option<&crate::fir::ActiveSourceDeclarations>,
+        index: Option<&crate::fir::ResolvedModuleIndex>,
+    ) -> bool {
+        !self.is_signature_defaults()
+            && active.zip(index).is_some_and(|(active, index)| {
+                active
+                    .file_declaration(file, parser)
+                    .is_some_and(|declaration| index.is_actualized_away(declaration))
+            })
+    }
+
     /// Whether this pass may legitimately meet an annotation argument whose syntax is gone.
     ///
     /// Only a RESTRICTED pass may. A complete pass holds every expression, so released annotation
