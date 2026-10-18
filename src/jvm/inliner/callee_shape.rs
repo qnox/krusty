@@ -11,6 +11,7 @@ const ACC_STATIC: u16 = 0x0008;
 const GETSTATIC: u8 = 0xb2;
 const PUTSTATIC: u8 = 0xb3;
 const INVOKESTATIC: u8 = 0xb8;
+const NEW: u8 = 0xbb;
 
 /// A body shape the ported stages do not inline yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
