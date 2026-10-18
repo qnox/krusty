@@ -4,7 +4,6 @@ use crate::fir::{FirBinaryOperation, FirIntrinsic};
 use crate::libraries::CompilerIntrinsic;
 use crate::types::{AssertionMode, Ty};
 
-
 pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinaryOperation> {
     Some(match intrinsic {
         CompilerIntrinsic::PrimitiveBinary(operation) => match operation {

@@ -17,7 +17,10 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Result<Option<Value>, Unsupported> {
         if !matches!(
             (from, to),
-            (Ty::Float, Ty::Int) | (Ty::Double, Ty::Long) | (Ty::Int, Ty::Float) | (Ty::Long, Ty::Double)
+            (Ty::Float, Ty::Int)
+                | (Ty::Double, Ty::Long)
+                | (Ty::Int, Ty::Float)
+                | (Ty::Long, Ty::Double)
         ) {
             return Err(declined!(
                 "a scalar reinterpretation from `{from:?}` to `{to:?}`"

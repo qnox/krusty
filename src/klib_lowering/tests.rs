@@ -1575,14 +1575,21 @@ fn reinterpret_calls(
     let targets = externals
         .iter()
         .filter(|(callee, _)| {
-            libraries.intrinsic_facts().get(callee).is_some_and(|intrinsic| {
-                intrinsic.operation() == crate::libraries::CompilerIntrinsic::ReinterpretBits
-                    && intrinsic.ret() == result
-            })
+            libraries
+                .intrinsic_facts()
+                .get(callee)
+                .is_some_and(|intrinsic| {
+                    intrinsic.operation() == crate::libraries::CompilerIntrinsic::ReinterpretBits
+                        && intrinsic.ret() == result
+                })
         })
         .map(|(_, external)| external.target())
         .collect::<Vec<_>>();
-    assert_eq!(targets.len(), 1, "one reinterpretation from {operand:?} to {result:?}");
+    assert_eq!(
+        targets.len(),
+        1,
+        "one reinterpretation from {operand:?} to {result:?}"
+    );
     ir.exprs
         .iter()
         .filter(|expression| {
