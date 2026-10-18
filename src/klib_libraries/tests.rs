@@ -85,10 +85,27 @@ fn prepared_inline_selection_is_exact_and_module_qualified() {
     let mut non_inline_reified = function("nonInlineReified", None, Vec::new());
     non_inline_reified.has_reified_type_params = true;
     non_inline_reified.formals = vec![parameter];
+    let mut direct_lambda = function("directLambda", None, vec![class("kotlin/Function0", false)]);
+    direct_lambda.is_inline = true;
+    direct_lambda.annotations = vec![type_name("kotlin/internal/InlineOnly")];
+    let mut materialized_lambda = function(
+        "materializedLambda",
+        None,
+        vec![class("kotlin/Function0", false)],
+    );
+    materialized_lambda.is_inline = true;
+    materialized_lambda.annotations = vec![type_name("kotlin/internal/InlineOnly")];
+    materialized_lambda.inline_modifiers = vec![crate::types::InlineParameterModifier::Noinline];
 
     let inventory = inventory::PackageInventory::from_package_inputs(vec![(
         segments(&["fixture"]),
-        package_of(vec![selected, ordinary_inline, non_inline_reified]),
+        package_of(vec![
+            selected,
+            ordinary_inline,
+            non_inline_reified,
+            direct_lambda,
+            materialized_lambda,
+        ]),
         false,
         false,
         Some("fixture-module".to_owned()),
@@ -107,12 +124,90 @@ fn prepared_inline_selection_is_exact_and_module_qualified() {
     let selected = signature("selected");
     let ordinary_inline = signature("ordinaryInline");
     let non_inline_reified = signature("nonInlineReified");
+    let direct_lambda = signature("directLambda");
+    let materialized_lambda = signature("materializedLambda");
     let selection = inventory.inline_body_selection();
 
     assert!(selection.contains("fixture-module", &selected));
     assert!(!selection.contains("other-module", &selected));
     assert!(!selection.contains("fixture-module", &ordinary_inline));
     assert!(!selection.contains("fixture-module", &non_inline_reified));
+    assert!(selection.contains("fixture-module", &direct_lambda));
+    assert!(!selection.contains("fixture-module", &materialized_lambda));
+}
+
+#[test]
+fn native_prepared_with_publishes_its_exact_direct_invocation_plan() {
+    let Some(libraries) = analysis::native_stdlib() else {
+        return;
+    };
+    let function = single_function(&libraries, "kotlin", "with");
+    let Some(crate::libraries::InlineBodyPlan::InvokeLambda {
+        frame,
+        lambda_parameter: 1,
+        arguments,
+        prologue,
+        cleanup,
+        cause: None,
+        recovery: None,
+        defaults,
+        result: None,
+    }) = function.callable.inline_body_plan.as_deref()
+    else {
+        panic!("kotlin.with must publish its exact direct-lambda invocation plan")
+    };
+    assert_eq!(frame.callee.as_ref(), "with");
+    assert!(frame.inline_only);
+    assert!(frame.source.is_none());
+    assert_eq!(
+        arguments.as_slice(),
+        [crate::libraries::InlineBodyValue::Parameter(0)]
+    );
+    assert!(prologue.is_empty());
+    assert!(cleanup.is_empty());
+    assert!(defaults.is_empty());
+}
+
+#[test]
+fn native_prepared_extension_run_maps_ir_parameters_to_plan_coordinates() {
+    let Some(libraries) = analysis::native_stdlib() else {
+        return;
+    };
+    let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "run");
+    let runs = symbols
+        .callables
+        .functions()
+        .iter()
+        .filter(|function| function.kind == FnKind::Extension)
+        .collect::<Vec<_>>();
+    let [function] = runs.as_slice() else {
+        panic!("expected exactly one extension `run`, found {}", runs.len())
+    };
+    assert!(function.callable.source_receiver.is_some());
+    let Some(crate::libraries::InlineBodyPlan::InvokeLambda {
+        frame,
+        lambda_parameter: 1,
+        arguments,
+        prologue,
+        cleanup,
+        cause: None,
+        recovery: None,
+        defaults,
+        result: None,
+    }) = function.callable.inline_body_plan.as_deref()
+    else {
+        panic!("kotlin.run must publish its exact direct-lambda invocation plan")
+    };
+    assert_eq!(frame.callee.as_ref(), "run");
+    assert!(frame.inline_only);
+    assert!(frame.source.is_none());
+    assert_eq!(
+        arguments.as_slice(),
+        [crate::libraries::InlineBodyValue::Parameter(0)]
+    );
+    assert!(prologue.is_empty());
+    assert!(cleanup.is_empty());
+    assert!(defaults.is_empty());
 }
 
 #[test]

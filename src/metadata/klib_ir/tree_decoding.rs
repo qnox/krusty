@@ -129,6 +129,32 @@ impl KlibIrModuleTrees {
         }
         Ok(())
     }
+
+    fn remap_prepared_root(
+        &mut self,
+        tree: usize,
+        function: KlibIrFunctionId,
+        identity: KlibIrSignature,
+    ) -> Result<(), KlibIrDecodeError> {
+        let serialized = self.trees[tree]
+            .arena
+            .function(function)
+            .base
+            .symbol
+            .signature
+            .clone();
+        if self.functions.get(&serialized) == Some(&(tree, function)) {
+            self.functions.remove(&serialized);
+        }
+        if let Some((previous, _)) = self.functions.insert(identity.clone(), (tree, function)) {
+            return Err(KlibIrDecodeError::malformed(
+                DECLARATIONS,
+                0,
+                format!("declaration trees {previous} and {tree} both define {identity:?}"),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Decode every top-level declaration tree a KLIB serializes.
@@ -181,6 +207,7 @@ fn read_declaration_trees_from(
     let expected = files.len();
 
     let mut module = KlibIrModuleTrees::default();
+    let mut prepared_roots = Vec::new();
     for index in 0..expected {
         let strings = file_strings(&strings[index])?;
         let signature_entries = entries(&signatures[index], "signatures.knt")?;
@@ -217,11 +244,27 @@ fn read_declaration_trees_from(
                 )
             })?;
             let msg = Msg::parse(bytes, 0, DECLARATIONS)?;
-            if !keep(&top_level_signature(&mut file, &msg)?) {
+            // A prepared declaration table is keyed by the original public identity, while the
+            // copied function's own symbol is a private Composite(File, Public) identity. The
+            // table key is therefore both the filter input and the provider's external join key.
+            let table_identity = inlinable
+                .then(|| file.signatures.declaration_identity(id))
+                .transpose()?;
+            let identity = match &table_identity {
+                Some(identity) => identity.clone(),
+                None => top_level_signature(&mut file, &msg)?,
+            };
+            if !keep(&identity) {
                 continue;
             }
             let mut decoder = TreeDecoder::new(&mut file);
             let declaration = decoder.member(&msg)?;
+            let tree = module.trees.len();
+            if let (Some(identity), KlibIrMember::Function(function)) =
+                (table_identity, &declaration)
+            {
+                prepared_roots.push((tree, *function, identity));
+            }
             module.trees.push(KlibIrDeclarationTree {
                 arena: decoder.arena,
                 declaration,
@@ -229,6 +272,9 @@ fn read_declaration_trees_from(
         }
     }
     module.index()?;
+    for (tree, function, identity) in prepared_roots {
+        module.remap_prepared_root(tree, function, identity)?;
+    }
     Ok(module)
 }
 

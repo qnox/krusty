@@ -398,6 +398,156 @@ impl KlibDeclarationBodies {
         })
     }
 
+    /// Normalize an exact `@InlineOnly` body which returns one direct invocation of a function
+    /// parameter. Metadata has already proved which parameter is an in-caller-frame lambda; the IR
+    /// proves the invocation receiver and every argument by declaration-owned parameter symbols.
+    /// A cast, temporary, extra statement, omitted operand or non-parameter operand rejects the
+    /// shape instead of recovering an invocation from a callable spelling.
+    pub(crate) fn direct_lambda_invocation_inline_plan(
+        &self,
+        identity: &KlibDependencyCallable,
+        declaration: &crate::metadata::semantic::KotlinFunction,
+    ) -> Option<crate::libraries::InlineBodyPlan> {
+        let (arena, function) = self.function(identity)?;
+        if function.dispatch_receiver.is_some() || declaration.param_defaults.contains(&true) {
+            return None;
+        }
+        let KlibIrBody::Block(statements) = function.body.as_ref()? else {
+            return None;
+        };
+        let [KlibIrStatement::Expression(returned)] = statements.as_slice() else {
+            return None;
+        };
+        let KlibIrExprKind::Return { target, value } = &arena.expr(*returned).kind else {
+            return None;
+        };
+        if target != &function.base.symbol {
+            return None;
+        }
+        let KlibIrExprKind::Call {
+            access,
+            super_qualifier: None,
+        } = &arena.expr(*value).kind
+        else {
+            return None;
+        };
+        if !is_direct_lambda_invocation(access) {
+            return None;
+        }
+        let operands = match &access.arguments {
+            crate::metadata::klib_ir::tree::KlibIrArguments::Flat(arguments) => {
+                arguments.iter().copied().collect::<Option<Vec<_>>>()?
+            }
+            crate::metadata::klib_ir::tree::KlibIrArguments::Split {
+                dispatch_receiver: Some(dispatch),
+                extension_receiver,
+                values,
+            } => std::iter::once(*dispatch)
+                .chain(*extension_receiver)
+                .chain(values.iter().copied().collect::<Option<Vec<_>>>()?)
+                .collect(),
+            crate::metadata::klib_ir::tree::KlibIrArguments::Split {
+                dispatch_receiver: None,
+                ..
+            } => return None,
+        };
+        let parameters = function
+            .context_parameters
+            .iter()
+            .chain(function.extension_receiver.iter())
+            .chain(&function.regular_parameters)
+            .collect::<Vec<_>>();
+        #[derive(Clone, Copy)]
+        enum Operand {
+            Receiver,
+            Parameter(usize),
+        }
+        let receiver_parameter = declaration
+            .receiver
+            .as_ref()
+            .map(|_| declaration.context_count);
+        let semantic_operand = |ir_parameter: usize| {
+            if receiver_parameter == Some(ir_parameter) {
+                Some(Operand::Receiver)
+            } else {
+                Some(Operand::Parameter(ir_parameter.checked_sub(
+                    usize::from(receiver_parameter.is_some_and(|receiver| ir_parameter > receiver)),
+                )?))
+            }
+        };
+        // Inline plans use one virtual parameter coordinate which inserts the extension receiver
+        // after context parameters. Translate through semantic operands first rather than assuming
+        // the serialized IR parameter order is itself that public contract.
+        let plan_parameter = |parameter| {
+            parameter
+                + usize::from(receiver_parameter.is_some_and(|receiver| parameter >= receiver))
+        };
+        let plan_operand = |operand| {
+            Some(match operand {
+                Operand::Receiver => {
+                    crate::libraries::InlineBodyValue::Parameter(receiver_parameter?)
+                }
+                Operand::Parameter(parameter) => {
+                    crate::libraries::InlineBodyValue::Parameter(plan_parameter(parameter))
+                }
+            })
+        };
+        let operands = operands
+            .iter()
+            .map(|operand| {
+                let KlibIrExprKind::GetValue { symbol, .. } = &arena.expr(*operand).kind else {
+                    return None;
+                };
+                parameters
+                    .iter()
+                    .position(|parameter| parameter.base.symbol == *symbol)
+                    .and_then(semantic_operand)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let (&Operand::Parameter(lambda_parameter), arguments) = operands.split_first()? else {
+            return None;
+        };
+        let metadata_parameter = lambda_parameter;
+        let modifier = *declaration.inline_modifiers.get(metadata_parameter)?;
+        if !modifier.runs_in_caller_frame() {
+            return None;
+        }
+        let crate::metadata::semantic::KotlinType::Class {
+            internal,
+            args,
+            nullable: false,
+            shape,
+        } = declaration.params.get(metadata_parameter)?
+        else {
+            return None;
+        };
+        if !crate::metadata::semantic::is_kotlin_function_classifier(internal)
+            || shape.suspend
+            || args.len().checked_sub(1)? != arguments.len()
+        {
+            return None;
+        }
+        Some(crate::libraries::InlineBodyPlan::InvokeLambda {
+            frame: crate::libraries::InlineBodyFrame {
+                callee: declaration.name.clone().into_boxed_str(),
+                inline_only: true,
+                source: None,
+            },
+            lambda_parameter: plan_parameter(lambda_parameter),
+            arguments: arguments
+                .iter()
+                .copied()
+                .map(plan_operand)
+                .collect::<Option<Vec<_>>>()?,
+            prologue: Vec::new(),
+            cleanup: Vec::new(),
+            cause: None,
+            recovery: None,
+            defaults: Vec::new(),
+            result: None,
+        })
+    }
+
     /// Whether the exact serialized declaration intentionally carries an executable body.
     pub(crate) fn function_has_body(&self, identity: &KlibDependencyCallable) -> Option<bool> {
         self.function(identity)
@@ -665,6 +815,16 @@ fn declaration_owner(signature: &KlibIrSignature) -> Option<TypeName> {
         identity = identity.nested_child(nested);
     }
     Some(identity)
+}
+
+/// The compiler-owned semantic discriminator for a function-value invocation. Operand shape alone
+/// is insufficient: an `@InlineOnly` wrapper can pass its lambda to an arbitrary helper call.
+fn is_direct_lambda_invocation(
+    access: &crate::metadata::klib_ir::tree::KlibIrMemberAccess,
+) -> bool {
+    access.symbol.kind == crate::metadata::klib_ir::KlibIrSymbolKind::Function
+        && access.origin.as_deref() == Some("INVOKE")
+        && access.type_arguments.iter().all(Option::is_none)
 }
 
 fn ir_signature(declaration: &KlibDeclarationSignature) -> KlibIrSignature {
@@ -966,6 +1126,28 @@ mod tests {
             false,
         );
         assert!(bodies.reified_type_test_inline_plan(&identity).is_none());
+    }
+
+    #[test]
+    fn direct_lambda_invocation_requires_the_compiler_owned_invoke_origin() {
+        let symbol = KlibIrSymbol {
+            kind: KlibIrSymbolKind::Function,
+            signature: KlibIrSignature::FileLocal { file: 0, slot: 1 },
+        };
+        let access = |origin| KlibIrMemberAccess {
+            symbol: symbol.clone(),
+            arguments: KlibIrArguments::Flat(Vec::new()),
+            type_arguments: Vec::new(),
+            origin,
+        };
+
+        assert!(is_direct_lambda_invocation(&access(Some(
+            "INVOKE".to_owned()
+        ))));
+        assert!(!is_direct_lambda_invocation(&access(None)));
+        assert!(!is_direct_lambda_invocation(&access(Some(
+            "OTHER".to_owned()
+        ))));
     }
 
     #[test]

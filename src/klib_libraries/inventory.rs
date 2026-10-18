@@ -93,8 +93,42 @@ impl InlineBodySelection {
     }
 }
 
-fn can_publish_inline_body_plan(function: &SignedFunction) -> bool {
+fn is_inline_only(function: &SignedFunction) -> bool {
+    let inline_only = type_name("kotlin/internal/InlineOnly");
+    function
+        .declaration
+        .annotations
+        .iter()
+        .any(|annotation| annotation == &inline_only)
+}
+
+fn has_caller_frame_lambda(function: &SignedFunction) -> bool {
+    function
+        .declaration
+        .params
+        .iter()
+        .zip(&function.declaration.inline_modifiers)
+        .any(|(parameter, modifier)| {
+            modifier.runs_in_caller_frame()
+                && matches!(parameter,
+                    crate::metadata::semantic::KotlinType::Class {
+                        internal,
+                        nullable: false,
+                        ..
+                    } if crate::metadata::semantic::is_kotlin_function_classifier(internal))
+        })
+}
+
+fn can_publish_reified_type_test(function: &SignedFunction) -> bool {
     function.declaration.is_inline && function.declaration.has_reified_type_params
+}
+
+fn can_publish_direct_lambda_invocation(function: &SignedFunction) -> bool {
+    function.declaration.is_inline && is_inline_only(function) && has_caller_frame_lambda(function)
+}
+
+fn can_publish_inline_body_plan(function: &SignedFunction) -> bool {
+    can_publish_reified_type_test(function) || can_publish_direct_lambda_invocation(function)
 }
 
 impl PackageInventory {
@@ -501,26 +535,37 @@ impl PackageInventory {
                     function.signature.clone(),
                 ),
             };
-            let Some(
-                plan @ crate::libraries::InlineBodyPlan::ReifiedTypeTest { type_parameter, .. },
-            ) = bodies.reified_type_test_inline_plan(&identity)
-            else {
-                return;
+            let plan = if can_publish_reified_type_test(function) {
+                let Some(
+                    plan @ crate::libraries::InlineBodyPlan::ReifiedTypeTest {
+                        type_parameter, ..
+                    },
+                ) = bodies.reified_type_test_inline_plan(&identity)
+                else {
+                    return;
+                };
+                if !function
+                    .declaration
+                    .formals
+                    .get(type_parameter as usize)
+                    .is_some_and(|parameter| parameter.reified)
+                {
+                    return;
+                }
+                plan
+            } else {
+                let Some(plan @ crate::libraries::InlineBodyPlan::InvokeLambda { .. }) =
+                    bodies.direct_lambda_invocation_inline_plan(&identity, &function.declaration)
+                else {
+                    return;
+                };
+                plan
             };
-            if !function
-                .declaration
-                .formals
-                .get(type_parameter as usize)
-                .is_some_and(|parameter| parameter.reified)
-            {
-                return;
-            }
-            let crate::libraries::InlineBodyPlan::ReifiedTypeTest {
-                defaults: body_defaults,
-                ..
-            } = &plan
-            else {
-                unreachable!()
+            let body_defaults = match &plan {
+                crate::libraries::InlineBodyPlan::ReifiedTypeTest { defaults, .. }
+                | crate::libraries::InlineBodyPlan::InvokeLambda { defaults, .. } => defaults,
+                crate::libraries::InlineBodyPlan::Iteration { .. }
+                | crate::libraries::InlineBodyPlan::CollectionTransform { .. } => unreachable!(),
             };
             let mut declared_default_count = 0usize;
             for (parameter, &declares_default) in

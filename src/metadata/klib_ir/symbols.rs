@@ -6,9 +6,10 @@
 //! its own name; everything else (file-private, scoped, local and composite signatures) is only
 //! meaningful inside the file that serialized it, so it is kept as that file's signature slot and
 //! never matched to a declaration by spelling. Kotlin's prepared-inline component is the one
-//! exception: it wraps an otherwise public declaration in an exact `Composite(File, Public)`
-//! identity. That component projects the serialized inner public identity at its input boundary;
-//! ordinary IR composites remain file-local.
+//! exception: its private copy wraps a public-form signature in an exact
+//! `Composite(File, Public)` identity. That component projects the serialized inner identity for
+//! references inside the copied body; the declaration table separately owns the original public
+//! join key. Ordinary IR composites remain file-local.
 
 use super::wire::{message, unique_bytes, unique_varint};
 use super::KlibIrDecodeError;
@@ -129,6 +130,17 @@ impl<'a> SignatureTable<'a> {
         })
     }
 
+    /// The identity used as one `irDeclarations.knd` table key. Prepared components key a private
+    /// file-scoped copy by the original public declaration identity; that key, rather than the
+    /// copied function's own symbol, is the cross-component join.
+    pub(super) fn declaration_identity(
+        &mut self,
+        raw: u64,
+    ) -> Result<KlibIrSignature, KlibIrDecodeError> {
+        let slot = self.slot(raw, "declaration table")?;
+        self.signature(slot)
+    }
+
     fn slot(&self, raw: u64, context: &str) -> Result<usize, KlibIrDecodeError> {
         usize::try_from(raw)
             .ok()
@@ -185,11 +197,11 @@ impl<'a> SignatureTable<'a> {
                 )));
             }
         }
-        // Kotlin 2.4's prepared-inline component gives its copied top-level function a
-        // `Composite(File(<dummy>), Public(declaration))` signature. The inner public identity is
-        // the exact metadata/IR join key; the file wrapper only scopes the private prepared copy.
-        // Project it only at this component boundary. General composite identities in ordinary IR
-        // stay file-local, and neither path reconstructs an identity from a spelling.
+        // Kotlin 2.4's prepared-inline component gives its private copied function a
+        // `Composite(File(<dummy>), Public(copy))` signature. Project the exact inner identity only
+        // for references inside this component; `irDeclarations.knd` independently carries the
+        // original public declaration key used across components. General composites in ordinary
+        // IR stay file-local, and neither path reconstructs an identity from a spelling.
         if self.prepared_inline {
             if let Some(composite) = unique_bytes(&fields, 5, "composite signature", ENTRY)? {
                 let composite_offset = composite.value_offset;
@@ -361,5 +373,34 @@ mod tests {
             prepared_local.signature,
             KlibIrSignature::FileLocal { file: 7, slot: 4 }
         );
+    }
+
+    #[test]
+    fn prepared_declaration_table_identity_is_independent_of_the_private_copy_symbol() {
+        let file = [0x3a, 0x00];
+        let original = public_signature();
+        let mut private_copy = public_signature();
+        *private_copy
+            .last_mut()
+            .expect("public signature has a hash") ^= 1;
+        let composite = composite(0, 2);
+        let entries = [
+            file.as_slice(),
+            original.as_slice(),
+            private_copy.as_slice(),
+            composite.as_slice(),
+        ];
+        let strings = ["fixture".to_owned(), "probe".to_owned()];
+        let mut table = SignatureTable::prepared_inline(0, &entries, &strings);
+
+        let declaration = table
+            .declaration_identity(1)
+            .expect("the declaration table key is public");
+        let copied = table
+            .symbol(3 << 8)
+            .expect("the private prepared copy has a valid symbol")
+            .signature;
+
+        assert_ne!(declaration, copied);
     }
 }

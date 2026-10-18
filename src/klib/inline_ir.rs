@@ -1,10 +1,11 @@
 //! Standards-compatible KLIB IR for declaration-owned inline templates.
 //!
-//! Kotlin 2.4 owns a separate `default/ir_inlinable_functions/` component for prepared inline
-//! copies. It is one synthetic root file whose declarations keep their original public
-//! `IdSignature`; member functions therefore need no fabricated class wrapper. This module writes
-//! that component for the exact common-IR shape Krusty can currently serialize completely:
-//! `return value is/!is T` in an inline function with a reified own type parameter.
+//! Kotlin 2.4 owns the declaration body under `default/ir/` and a separate prepared copy under
+//! `default/ir_inlinable_functions/`. Both components use the declaration's public
+//! `IdSignature` as their table key. The prepared copy is private and its declaration symbol is
+//! scoped by the component's synthetic file. This module writes both components for the exact
+//! common-IR shape Krusty can currently serialize completely: `return value is/!is T` in an inline
+//! function with a reified own type parameter.
 
 use crate::fx_hash::HashMap;
 use crate::ir::{FunId, IrExpr, IrFile, IrParameterRole, IrTypeOp, IrTypeParameter};
@@ -12,7 +13,8 @@ use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::protobuf::Pb;
 use crate::types::{Ty, TypeName, TypeVariance};
 
-const PREFIX: &str = "default/ir_inlinable_functions/";
+const MAIN_PREFIX: &str = "default/ir/";
+const PREPARED_PREFIX: &str = "default/ir_inlinable_functions/";
 const FUNCTION_SYMBOL: u64 = 0;
 const CONSTRUCTOR_SYMBOL: u64 = 1;
 const VALUE_PARAMETER_SYMBOL: u64 = 4;
@@ -90,7 +92,7 @@ struct ReifiedTypeTest {
 /// Serialize every exact supported inline template from one checked file.
 ///
 /// Unsupported inline bodies remain metadata-only. The returned functions are later combined into
-/// one official prepared-inline component; no partial ordinary `default/ir` file is produced.
+/// matching ordinary and prepared-inline components.
 pub(super) fn collect(
     ir: &IrFile,
     file_name: &str,
@@ -227,14 +229,8 @@ fn prepared_function(
         // Other declaration annotations need their complete checked constructor/value payload.
         return None;
     }
-    let mut flags = crate::metadata::declaration_flags::function_flags(ir, function, declaration)
+    let flags = crate::metadata::declaration_flags::function_flags(ir, function, declaration)
         | u64::from(annotated);
-    if inline_only {
-        // Kotlin's prepared copy makes an `@InlineOnly` declaration private even when linkdata
-        // exposes the source declaration. With HAS_ANNOTATIONS + PRIVATE + INLINE this is 1027,
-        // exactly the standard serializer's flag word.
-        flags = (flags & !(0x7 << 1)) | (1 << 1);
-    }
     Some(PreparedFunction {
         signature: signature.clone(),
         name: ir.fn_source_names.get(&function)?.clone(),
@@ -344,15 +340,49 @@ fn supported_type(ty: Ty, parameters: &[IrTypeParameter]) -> bool {
     }
 }
 
-/// Lay the collected functions out as Kotlin 2.4's official prepared-inline IR component.
-pub(super) fn artifacts(functions: &[PreparedFunction]) -> Vec<(String, Vec<u8>)> {
+#[derive(Clone, Copy)]
+enum Component {
+    Main,
+    Prepared,
+}
+
+impl Component {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Main => MAIN_PREFIX,
+            Self::Prepared => PREPARED_PREFIX,
+        }
+    }
+}
+
+/// Lay the collected functions out as Kotlin 2.4's ordinary and prepared-inline IR components.
+pub(super) fn artifacts(
+    functions: &[PreparedFunction],
+    complete_main_ir: bool,
+) -> Vec<(String, Vec<u8>)> {
     if functions.is_empty() {
         return Vec::new();
     }
+    let components = if complete_main_ir {
+        [Some(Component::Main), Some(Component::Prepared)]
+    } else {
+        [None, Some(Component::Prepared)]
+    };
+    components
+        .into_iter()
+        .flatten()
+        .flat_map(|component| component_artifacts(functions, component))
+        .collect()
+}
+
+fn component_artifacts(
+    functions: &[PreparedFunction],
+    component: Component,
+) -> Vec<(String, Vec<u8>)> {
     let mut writer = FileWriter::default();
     let mut declarations = Vec::with_capacity(functions.len());
     for function in functions {
-        declarations.push(writer.function(function));
+        declarations.push(writer.function(function, component));
     }
     let ids = declarations
         .iter()
@@ -387,7 +417,7 @@ pub(super) fn artifacts(functions: &[PreparedFunction]) -> Vec<(String, Vec<u8>)
     ];
     entries
         .into_iter()
-        .map(|(name, bytes)| (format!("{PREFIX}{name}"), bytes))
+        .map(|(name, bytes)| (format!("{}{name}", component.prefix()), bytes))
         .collect()
 }
 
@@ -401,9 +431,16 @@ struct FileWriter {
 }
 
 impl FileWriter {
-    fn function(&mut self, function: &PreparedFunction) -> (u32, Vec<u8>) {
+    fn function(&mut self, function: &PreparedFunction, component: Component) -> (u32, Vec<u8>) {
         let declaration_signature = self.public_signature(&function.signature);
-        let declaration_symbol = symbol(declaration_signature, FUNCTION_SYMBOL);
+        let symbol_signature = match component {
+            Component::Main => declaration_signature,
+            Component::Prepared => {
+                let file = self.file_signature();
+                self.composite_signature(file, declaration_signature)
+            }
+        };
+        let declaration_symbol = symbol(symbol_signature, FUNCTION_SYMBOL);
         let type_parameters = function
             .type_parameters
             .iter()
@@ -437,7 +474,13 @@ impl FileWriter {
         let mut base = Pb::new();
         base.field_varint(1, declaration_symbol);
         base.field_varint(2, u64::from(self.string("DEFINED")));
-        base.field_varint(4, function.flags);
+        let flags = match component {
+            Component::Main => function.flags,
+            // A prepared declaration is a private copy even when the metadata and ordinary IR
+            // declaration are public. Only its table key projects back to that public identity.
+            Component::Prepared => (function.flags & !(0x7 << 1)) | (1 << 1),
+        };
+        base.field_varint(4, flags);
         if function.inline_only {
             let annotation = self.inline_only_annotation();
             base.repeated_message(5, &annotation);
@@ -508,8 +551,10 @@ impl FileWriter {
         function_base.field_varint(7, u64::from(body));
         let mut function_wrapper = Pb::new();
         function_wrapper.field_message(1, &function_base);
-        let file_entry = self.file_entry(&function.file_name);
-        function_wrapper.field_varint(3, u64::from(file_entry));
+        if matches!(component, Component::Prepared) {
+            let file_entry = self.file_entry(&function.file_name);
+            function_wrapper.field_varint(3, u64::from(file_entry));
+        }
         let mut declaration = Pb::new();
         declaration.field_message(6, &function_wrapper);
         (declaration_signature, declaration.canonical().into_bytes())
@@ -722,6 +767,21 @@ impl FileWriter {
         self.signature(encoded.canonical().into_bytes())
     }
 
+    fn file_signature(&mut self) -> u32 {
+        let mut encoded = Pb::new();
+        encoded.field_message(7, &Pb::new());
+        self.signature(encoded.into_bytes())
+    }
+
+    fn composite_signature(&mut self, container: u32, inner: u32) -> u32 {
+        let mut composite = Pb::new();
+        composite.field_varint(1, u64::from(container));
+        composite.field_varint(2, u64::from(inner));
+        let mut encoded = Pb::new();
+        encoded.field_message(5, &composite);
+        self.signature(encoded.canonical().into_bytes())
+    }
+
     fn local_signature(&mut self) -> u32 {
         let mut encoded = Pb::new();
         encoded.field_varint(4, self.signatures.len() as u64);
@@ -856,7 +916,8 @@ mod tests {
     use super::*;
     use crate::metadata::klib_ir::tree::{KlibIrBody, KlibIrExprKind, KlibIrNullability};
     use crate::metadata::klib_ir::{
-        read_inlinable_declaration_trees, read_inlinable_declaration_trees_where, KlibIrSignature,
+        read_declaration_trees, read_inlinable_declaration_trees,
+        read_inlinable_declaration_trees_where, KlibIrSignature,
     };
 
     fn fixture() -> (PreparedFunction, KlibPublicIdSignature) {
@@ -899,11 +960,11 @@ mod tests {
     #[test]
     fn prepared_inline_component_round_trips_exact_type_test_and_provenance() {
         let (function, signature) = fixture();
-        let artifacts = artifacts(&[function]);
-        assert_eq!(artifacts.len(), 8);
+        let artifacts = artifacts(&[function], true);
+        assert_eq!(artifacts.len(), 16);
         let file_entries = artifacts
             .iter()
-            .find(|(name, _)| name.ends_with("/fileEntries.knf"))
+            .find(|(name, _)| name == "default/ir_inlinable_functions/fileEntries.knf")
             .map(|(_, bytes)| bytes)
             .expect("prepared component has a file-entry table");
         assert_ne!(file_entries, &per_file(entry_table(&[])));
@@ -925,11 +986,17 @@ mod tests {
             std::fs::write(path, bytes).expect("write fixture entry");
         }
         let archive = crate::klib::KlibArchive::open(&root).expect("open generated KLIB");
+        let ordinary = read_declaration_trees(&archive).expect("decode ordinary IR");
+        let (_, ordinary) = ordinary
+            .function(&KlibIrSignature::Public(signature.clone()))
+            .expect("the ordinary declaration keeps its exact public identity");
+        assert_eq!(ordinary.base.flags, 1030);
+        assert_eq!(ordinary.prepared_inline_file, None);
         let trees = read_inlinable_declaration_trees(&archive).expect("decode prepared IR");
         let (arena, decoded) = trees
             .function(&KlibIrSignature::Public(signature))
             .expect("the exact public declaration is indexed");
-        assert_eq!(decoded.base.flags, 1030);
+        assert_eq!(decoded.base.flags, 1026);
         assert_eq!(decoded.prepared_inline_file, Some(0));
         let [parameter] = decoded.regular_parameters.as_slice() else {
             panic!("fixture has one regular parameter")
@@ -989,7 +1056,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         let mut writer = crate::klib::write::KlibWriter::native_test_fixture("fixture");
-        for (name, bytes) in artifacts(&[kept, skipped]) {
+        for (name, bytes) in artifacts(&[kept, skipped], true) {
             writer.add_file(&name, bytes);
         }
         for (name, bytes) in writer.entries() {
@@ -1025,7 +1092,7 @@ mod tests {
     #[test]
     fn inline_only_prepared_copy_has_exact_private_annotated_flags() {
         let (mut function, signature) = fixture();
-        function.flags = 1027;
+        function.flags = 1031;
         function.inline_only = true;
         let root = std::env::temp_dir().join(format!(
             "krusty-inline-only-ir-{}-{:?}",
@@ -1034,7 +1101,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         let mut writer = crate::klib::write::KlibWriter::native_test_fixture("fixture");
-        for (name, bytes) in artifacts(&[function]) {
+        for (name, bytes) in artifacts(&[function], true) {
             writer.add_file(&name, bytes);
         }
         for (name, bytes) in writer.entries() {
