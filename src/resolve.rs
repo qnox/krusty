@@ -11366,10 +11366,8 @@ impl<'a> Checker<'a> {
                     &mut candidate,
                 );
                 self.narrow_member_extension_receiver(call, &candidate);
-                self.resolved_calls.insert(
-                    call,
-                    candidate.resolved_call(dispatch_receiver, extension_receiver, interface),
-                );
+                self.resolved_calls
+                    .insert(call, candidate.resolved_call(dispatch_receiver, interface));
                 self.mark_extension_receiver_used(call, candidate.dispatch_receiver);
                 Some(result)
             }
@@ -64219,11 +64217,7 @@ impl<'a> Checker<'a> {
             .is_some_and(|shape| shape.is_interface());
         self.mark_extension_receiver_stmt_used(statement, candidate.dispatch_receiver);
         let dispatch_receiver = self.implicit_receiver_selection(candidate.dispatch_receiver);
-        Ok(Some(candidate.resolved_call(
-            dispatch_receiver,
-            recv,
-            interface,
-        )))
+        Ok(Some(candidate.resolved_call(dispatch_receiver, interface)))
     }
 
     /// When calling `f({ it.method() })` and `f`'s param is `(String) -> R`, this lets `it` have
