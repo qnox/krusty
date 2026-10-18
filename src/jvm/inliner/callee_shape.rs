@@ -48,11 +48,11 @@ pub(crate) fn unsupported_shape(callee: &MethodNode) -> Option<UnsupportedShape>
     })
 }
 
-/// Whether `callee` constructs an anonymous object, which the call site regenerates.
-pub(crate) fn constructs_anonymous_object(callee: &MethodNode, classes: &dyn ClassRoles) -> bool {
-    callee.instructions().any(
-        |insn| matches!(insn, Insn::Type { op: NEW, class } if classes.is_anonymous_object(class)),
-    )
+/// Whether `callee` constructs an object that the call site regenerates.
+pub(crate) fn constructs_regenerated_object(callee: &MethodNode, classes: &dyn ClassRoles) -> bool {
+    callee
+        .instructions()
+        .any(|insn| matches!(insn, Insn::Type { op: NEW, class } if classes.is_regenerated(class)))
 }
 
 /// `requiresEmptyStackOnEntry` (`IrInlineCodegen`): a body with try/catch blocks, a suspension

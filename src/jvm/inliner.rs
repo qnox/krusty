@@ -52,8 +52,9 @@ pub(crate) use anonymous_object::{
     copy_sam_wrapper, regenerate, CallSite, Regeneration, RegenerationError,
 };
 pub(crate) use callee_shape::{
-    can_inline_arguments_in_place, constructs_anonymous_object, in_place_arguments_begin_at_entry,
-    requires_empty_stack_on_entry, unsupported_shape, UnsupportedShape,
+    can_inline_arguments_in_place, constructs_regenerated_object,
+    in_place_arguments_begin_at_entry, requires_empty_stack_on_entry, unsupported_shape,
+    UnsupportedShape,
 };
 pub(crate) use class_roles::ClassRoles;
 pub(crate) use default_lambda::load as load_default_lambda;

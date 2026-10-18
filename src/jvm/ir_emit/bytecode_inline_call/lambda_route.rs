@@ -116,7 +116,7 @@ impl Emitter<'_> {
         }
         // Whether the call's objects regenerate is settled before any code is emitted: the body is
         // inlined once with each lambda's shape in place of its body, and nothing of it is kept.
-        if inliner::constructs_anonymous_object(&callee, &self.bodies) {
+        if inliner::constructs_regenerated_object(&callee, &self.bodies) {
             for &argument in &lambda_arguments {
                 if self.lambda_reaches_private_members(argument)? {
                     return splice(SpliceReason::PrivateMemberInObject);
