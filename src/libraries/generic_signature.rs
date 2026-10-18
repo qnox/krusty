@@ -86,7 +86,7 @@ pub enum GenericReturnPolicy {
 }
 
 impl GenericSig {
-    fn declaration_formal_renames_from(
+    pub(crate) fn declaration_formal_renames_from(
         &self,
         prior: &Self,
     ) -> crate::fx_hash::HashMap<&'static str, &'static str> {
@@ -94,13 +94,7 @@ impl GenericSig {
             .formals
             .iter()
             .zip(&self.formals)
-            .flat_map(|(prior, identity)| {
-                let identity = crate::types::intern(identity);
-                [
-                    (crate::types::intern(prior), identity),
-                    (crate::types::type_parameter_source_name(prior), identity),
-                ]
-            })
+            .map(|(prior, identity)| (crate::types::intern(prior), crate::types::intern(identity)))
             .collect()
     }
 
@@ -134,15 +128,19 @@ impl GenericSig {
         for receiver in call.lambda_receivers.iter_mut().flatten() {
             *receiver = crate::types::ty_rename_params(*receiver, &rename);
         }
-    }
-
-    pub(crate) fn normalize_contract_from(
-        &self,
-        prior: &Self,
-        contract: &std::sync::Arc<crate::contracts::Contract>,
-    ) -> std::sync::Arc<crate::contracts::Contract> {
-        let rename = self.declaration_formal_renames_from(prior);
-        normalize_contract_type_parameters(contract, &rename)
+        call.result_enhancement = match call.result_enhancement {
+            crate::libraries::ResultEnhancement::Flexible(result) => {
+                crate::libraries::ResultEnhancement::Flexible(crate::types::ty_rename_params(
+                    result, &rename,
+                ))
+            }
+            crate::libraries::ResultEnhancement::MappedFlexible(result) => {
+                crate::libraries::ResultEnhancement::MappedFlexible(crate::types::ty_rename_params(
+                    result, &rename,
+                ))
+            }
+            other => other,
+        };
     }
 
     /// Replace source-spelled formals with identities assigned by the declaration provider.
@@ -271,5 +269,79 @@ mod tests {
             &[first.to_owned()]
         ));
         assert_eq!(crate::types::type_parameter_source_name(second), "R");
+    }
+
+    #[test]
+    fn result_enhancement_moves_with_the_declaration_signature() {
+        let any = Ty::obj("kotlin/Any");
+        let source = Ty::ty_param("R", any);
+        let mut signature = GenericSig {
+            formals: vec!["R".to_owned()],
+            formal_bounds: vec![Vec::new()],
+            receiver: None,
+            params: Vec::new(),
+            ret: source,
+            return_policy: GenericReturnPolicy::Exact,
+        };
+        let prior = signature.clone();
+        let identity = crate::types::metadata_type_parameter("R");
+        signature.assign_declaration_formal_identities(|_, _| identity);
+
+        for enhancement in [
+            crate::libraries::ResultEnhancement::Flexible(source),
+            crate::libraries::ResultEnhancement::MappedFlexible(source),
+        ] {
+            let mut call = crate::libraries::CallSig {
+                result_enhancement: enhancement,
+                ..Default::default()
+            };
+            signature.normalize_call_sig_from(&prior, &mut call);
+            let result = match call.result_enhancement {
+                crate::libraries::ResultEnhancement::Flexible(result)
+                | crate::libraries::ResultEnhancement::MappedFlexible(result) => result,
+                other => panic!("expected a flexible result enhancement, got {other:?}"),
+            };
+            assert!(crate::types::ty_mentions_param(
+                result,
+                &[identity.to_owned()]
+            ));
+            assert!(!crate::types::ty_mentions_param(result, &["R".to_owned()]));
+        }
+    }
+
+    #[test]
+    fn exact_formal_identity_keeps_a_shadowed_constructor_parameter_separate() {
+        let any = Ty::obj("kotlin/Any");
+        let constructor = crate::types::constructor_type_parameter(
+            crate::types::type_name("fixture/Cell"),
+            "(Ljava/lang/Object;)V",
+            0,
+            "T",
+        );
+        let mut signature = GenericSig {
+            formals: vec!["T".to_owned(), constructor.to_owned()],
+            formal_bounds: vec![Vec::new(), Vec::new()],
+            receiver: None,
+            params: vec![Ty::ty_param(constructor, any)],
+            ret: Ty::ty_param("T", any),
+            return_policy: GenericReturnPolicy::Exact,
+        };
+        let prior = signature.clone();
+        let classifier_identity = crate::types::metadata_type_parameter("T");
+        let constructor_identity = crate::types::metadata_type_parameter("T");
+        signature.assign_declaration_formal_identities(|ordinal, _| {
+            [classifier_identity, constructor_identity][ordinal]
+        });
+
+        let enclosing_result =
+            signature.normalize_declaration_type_from(&prior, Ty::ty_param("T", any));
+        assert!(crate::types::ty_mentions_param(
+            enclosing_result,
+            &[classifier_identity.to_owned()]
+        ));
+        assert!(!crate::types::ty_mentions_param(
+            enclosing_result,
+            &[constructor_identity.to_owned()]
+        ));
     }
 }

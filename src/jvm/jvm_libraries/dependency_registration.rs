@@ -27,6 +27,7 @@ impl JvmLibraries {
         member.ret = callable.ret;
         member.declared_ret = callable.declared_ret;
         member.overridden_results = callable.overridden_results.clone();
+        member.enhanced_result = callable.enhanced_result.clone();
         member.equality_bound = callable.equality_bound;
         member.contract = callable.contract.clone();
         member.generic_sig = Some(signature.clone());
@@ -350,5 +351,125 @@ impl JvmLibraries {
         self.cp
             .find_name(property.owner)
             .is_some_and(|class| !class.meta.is_present())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{type_name, Ty};
+
+    fn libraries() -> Option<JvmLibraries> {
+        let stdlib = crate::toolchain::stdlib_jar()?;
+        JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+            vec![stdlib],
+        )))
+        .ok()
+    }
+
+    fn generic_callable(owner: TypeName) -> LibraryCallable {
+        let any = Ty::obj("kotlin/Any");
+        let parameter = Ty::ty_param("T", any);
+        let mut callable = LibraryCallable::library(
+            owner,
+            "identity",
+            vec![parameter],
+            parameter,
+            any,
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+        );
+        callable.generic_sig = Some(Box::new(crate::libraries::GenericSig {
+            formals: vec!["T".to_owned()],
+            formal_bounds: vec![Vec::new()],
+            receiver: None,
+            params: vec![parameter],
+            ret: parameter,
+            return_policy: crate::libraries::GenericReturnPolicy::Exact,
+        }));
+        callable
+    }
+
+    #[test]
+    fn cached_inline_dependency_is_rehomed_to_the_consuming_classpath() {
+        let owner = type_name("fixture/CachedInlineDependency");
+        let Some(first) = libraries() else {
+            return;
+        };
+        let mut cached = generic_callable(owner);
+        first.register_external_callable(
+            &mut cached,
+            FnKind::Member,
+            Some(SemanticCallableOwner::Classifier(owner)),
+        );
+        let first_formal = cached.generic_sig.as_ref().unwrap().formals[0].clone();
+
+        let Some(second) = libraries() else {
+            return;
+        };
+        second.register_external_inline_dependency_callable(&mut cached, FnKind::Member);
+        let second_formal = cached.generic_sig.as_ref().unwrap().formals[0].clone();
+        assert_ne!(first_formal, second_formal);
+        assert_eq!(
+            crate::types::type_parameter_source_name(&second_formal),
+            "T"
+        );
+        assert!(crate::types::ty_mentions_param(
+            cached.params[0],
+            &[second_formal.clone()]
+        ));
+        assert!(!crate::types::ty_mentions_param(
+            cached.params[0],
+            &[first_formal]
+        ));
+        let stored = second
+            .cp
+            .external_callable(cached.external_identity.unwrap())
+            .unwrap();
+        assert_eq!(
+            stored.callable.generic_sig.as_ref().unwrap().formals[0],
+            second_formal
+        );
+    }
+
+    #[test]
+    fn generic_constructor_keeps_semantic_result_and_physical_unit_separate() {
+        let owner = type_name("fixture/Constructed");
+        let any = Ty::obj("kotlin/Any");
+        let parameter = Ty::ty_param("T", any);
+        let mut member = LibraryMember::new(
+            "<init>".to_owned(),
+            vec![parameter],
+            Ty::Unit,
+            "(Ljava/lang/Object;)V".to_owned(),
+        );
+        member.owner = Some(owner);
+        member.generic_sig = Some(crate::libraries::GenericSig {
+            formals: vec!["T".to_owned()],
+            formal_bounds: vec![Vec::new()],
+            receiver: None,
+            params: vec![parameter],
+            ret: Ty::obj_args_name(owner, &[parameter]),
+            return_policy: crate::libraries::GenericReturnPolicy::Exact,
+        });
+
+        let Some(libraries) = libraries() else {
+            return;
+        };
+        libraries.register_external_constructor(owner, &mut member);
+        let formal = member.generic_sig.as_ref().unwrap().formals[0].clone();
+        assert!(crate::types::ty_mentions_param(
+            member.ret,
+            &[formal.clone()]
+        ));
+        assert_eq!(member.ret.obj_internal(), Some(owner));
+        let stored = libraries
+            .cp
+            .external_callable(member.external_identity.unwrap())
+            .unwrap();
+        assert_eq!(stored.callable.ret, Ty::Unit);
+        assert!(crate::types::ty_mentions_param(
+            stored.callable.generic_sig.as_ref().unwrap().ret,
+            &[formal]
+        ));
     }
 }
