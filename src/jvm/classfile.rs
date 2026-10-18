@@ -1968,6 +1968,9 @@ pub struct CodeBuilder {
     /// (operand-height tracking, `max_stack`, `max_locals`) runs unchanged while dead, so a revival
     /// point sees exactly the state it saw before this suppression existed.
     dead: bool,
+    /// The body is kept for an inlining caller, suspension markers and all; kotlinc's optimizer
+    /// leaves it as written.
+    kept_for_inlining: bool,
     /// Whether a dropped dead instruction named a constant. The constant stays interned, where
     /// kotlinc's writer, which never sees the instruction, interns nothing; the method's pool
     /// entries are then laid out again like a rewritten method's.
@@ -2010,6 +2013,7 @@ impl CodeBuilder {
             implicit_void_return_pc: None,
             suppress_entry_line: false,
             dead: false,
+            kept_for_inlining: false,
             dropped_constant: false,
             dead_bound: Vec::new(),
             bind_sequence: Vec::new(),

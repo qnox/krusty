@@ -101,6 +101,7 @@ pub mod source_map;
 mod string_constant;
 pub mod suspend;
 pub(crate) mod suspend_impls;
+mod suspend_inline_functions;
 mod top_level_properties;
 mod type_intrinsics;
 mod type_of;
