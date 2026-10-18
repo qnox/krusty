@@ -228,7 +228,7 @@ impl Checker<'_> {
                     Some(&access.property.getter),
                 ),
                 ExprLowering::SingletonValue(singleton) => {
-                    return self.classifier_deprecated_use(singleton.classifier)
+                    return self.classifier_deprecated_use(singleton.classifier);
                 }
                 _ => (None, None),
             },
@@ -502,6 +502,11 @@ pub(super) fn emit_deprecated_use(
                 matches!(policy, LexicalPolicy::Suppress(suppressed) if suppressed == diagnostic)
             })
     };
+    let migration_policy = migration.map(|migration| migrations.policy(migration));
+    if migration_policy.is_some_and(|policy| !policy.completed && policy.warning_format.is_none()) {
+        // This reference release predates the migration checker entirely.
+        return;
+    }
     match deprecation.level {
         DeprecationLevel::Warning => {
             if !suppresses("DEPRECATION") {
@@ -509,21 +514,23 @@ pub(super) fn emit_deprecated_use(
             }
         }
         DeprecationLevel::Error | DeprecationLevel::Hidden => {
-            let warning = migration.and_then(|migration| {
-                let policy = migrations.policy(migration);
-                (!policy.completed)
-                    .then(|| policy.warning_format.as_ref())
-                    .flatten()
-            });
-            if let Some(format) = warning {
-                // This warning stands in for the future error and is not suppressible as a
-                // regular `DEPRECATION`/`DEPRECATION_ERROR` report in kotlinc.
-                diags.warning_named(
-                    span,
-                    crate::diag::CompilerWarningName::DeprecationErrorMigrationPeriodWarning,
-                    format.message(&message),
-                );
-            } else if !suppresses("DEPRECATION_ERROR") {
+            if let Some(policy) = migration_policy {
+                if !policy.completed {
+                    let format = policy
+                        .warning_format
+                        .as_ref()
+                        .expect("an available migration checker has a warning format");
+                    // This warning stands in for the future error and is not suppressible as a
+                    // regular `DEPRECATION`/`DEPRECATION_ERROR` report in kotlinc.
+                    diags.warning_named(
+                        span,
+                        crate::diag::CompilerWarningName::DeprecationErrorMigrationPeriodWarning,
+                        format.message(&message),
+                    );
+                    return;
+                }
+            }
+            if !suppresses("DEPRECATION_ERROR") {
                 diags.error(span, message);
             }
         }

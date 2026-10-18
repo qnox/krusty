@@ -20,6 +20,16 @@ class P {
     @Deprecated("dep companion", level = DeprecationLevel.ERROR)
     companion object { operator fun plusAssign(x: Int) {} }
 }
+
+@Deprecated("warning a")
+class WarningA {
+    class C { class Y }
+}
+
+class WarningP {
+    @Deprecated("warning companion")
+    companion object { operator fun plusAssign(x: Int) {} }
+}
 "#;
 
 const OUTER_IMPORTED: &str = "-XXLanguage:+ReportDeprecationsOfOuterImportedClasses";
@@ -133,7 +143,9 @@ fn file_suppression_uses_published_policy_but_does_not_hide_migration_warning() 
         &[common::stdlib_jar(), dependency()],
         &[],
         &[],
-        &["Use.kt:3:8: 'class A : Any' is deprecated. dep a. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-397."],
+        &[
+            "Use.kt:3:8: 'class A : Any' is deprecated. dep a. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-397.",
+        ],
     );
 }
 
@@ -157,17 +169,55 @@ const MIGRATION_WARNINGS: &[&str] = &[
     "Use.kt:11:5: 'companion object Companion : Any' is deprecated. dep companion. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-408.",
 ];
 
+const WARNING_MIGRATING_USES: &str = r#"import lib.WarningA.C.Y
+import lib.WarningP
+
+@Deprecated("warning o")
+object WarningO {
+    operator fun invoke() = 4
+}
+
+fun use() {
+    WarningO()
+    WarningP += 1
+}
+"#;
+
+const ORDINARY_WARNINGS_IN_MIGRATING_POSITIONS: &[&str] = &[
+    "Use.kt:1:8: 'class WarningA : Any' is deprecated. warning a.",
+    "Use.kt:10:5: 'object WarningO : Any' is deprecated. warning o.",
+    "Use.kt:11:5: 'companion object Companion : Any' is deprecated. warning companion.",
+];
+
 #[test]
-fn migrating_positions_warn_with_exact_selected_identity_diagnostics() {
-    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
-        return;
-    }
+fn migrating_positions_follow_the_selected_releases_exact_diagnostics() {
+    let warnings: &[&str] = if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+        &[]
+    } else {
+        MIGRATION_WARNINGS
+    };
     assert_matches_kotlinc(
         &[("Use.kt", MIGRATING_USES)],
         &[common::stdlib_jar(), dependency()],
         &[],
         &[],
-        MIGRATION_WARNINGS,
+        warnings,
+    );
+}
+
+#[test]
+fn warning_deprecations_follow_the_selected_releases_migration_checker() {
+    let warnings: &[&str] = if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+        &[]
+    } else {
+        ORDINARY_WARNINGS_IN_MIGRATING_POSITIONS
+    };
+    assert_matches_kotlinc(
+        &[("Use.kt", WARNING_MIGRATING_USES)],
+        &[common::stdlib_jar(), dependency()],
+        &[],
+        &[],
+        warnings,
     );
 }
 
@@ -272,6 +322,8 @@ fn qualified_companion_assignment_keeps_the_written_target_span() {
         &[common::stdlib_jar(), dependency()],
         &[],
         &[],
-        &["Use.kt:2:9: 'companion object Companion : Any' is deprecated. dep companion. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-408."],
+        &[
+            "Use.kt:2:9: 'companion object Companion : Any' is deprecated. dep companion. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-408.",
+        ],
     );
 }

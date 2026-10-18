@@ -14105,9 +14105,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   through implicit `invoke` (`ReportDeprecationsOfClassifiersInImplicitInvokes`) and a deprecated
   companion selected through its class as an augmented-assignment target
   (`ReportDeprecatedCompanionInDelegation`). Both decisions consume the resolver's selected
-  singleton identity and provenance. While one of these migrations remains disabled, an `ERROR`
-  deprecation warns with the selected reference release's future-error suffix and is not hidden by
-  `@Suppress`; enabling the feature restores the declaration's error level.
+  singleton identity and provenance. The 2.4.0 and 2.4.10 references predate these checkers, so
+  neither a `WARNING` nor an `ERROR` deprecation reports in these positions. Starting in 2.4.20, a
+  `WARNING` reports as an ordinary deprecation; while one of the migrations remains disabled, an
+  `ERROR` warns with the selected reference release's future-error suffix and is not hidden by
+  `@Suppress`. It retains the `DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING` identity, so an explicit
+  `-Xwarning-level` for that diagnostic overrides `-Werror` or `-nowarn`. Enabling the feature
+  restores the declaration's error level.
   Test: `tests/deprecation_migration_e2e.rs`.
 - **An abstract member's metadata and nullability match a concrete one's, without the field.** An
   abstract property has no backing field, so kotlinc writes no field entry in its
