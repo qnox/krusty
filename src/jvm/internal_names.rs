@@ -853,6 +853,7 @@ pub(super) fn module_getter_is_mangled(property: &crate::ir::IrModuleProperty) -
             .annotations
             .iter()
             .any(|annotation| *annotation == crate::types::wk::published_api())
+        && !names_accessor(&property.getter_annotations)
 }
 
 pub(super) fn module_setter_is_mangled(property: &crate::ir::IrModuleProperty) -> bool {
@@ -863,6 +864,14 @@ pub(super) fn module_setter_is_mangled(property: &crate::ir::IrModuleProperty) -
             .annotations
             .iter()
             .any(|annotation| *annotation == crate::types::wk::published_api())
+        && !names_accessor(&property.setter_annotations)
+}
+
+/// A written `@JvmName` replaces an accessor's whole JVM name, module suffix included.
+fn names_accessor(annotations: &[crate::ir::IrHeaderAnnotation]) -> bool {
+    annotations
+        .iter()
+        .any(|annotation| annotation.identity.matches("kotlin/jvm/JvmName"))
 }
 
 /// Append `$<module>` to a name the value-class pass may already have mangled, keeping a

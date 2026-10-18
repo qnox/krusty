@@ -36,6 +36,13 @@ impl BodyLocalOwnership {
     }
 }
 
+/// One accessor of a property, as a key for the annotations that apply to it.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum PropertyAccessor {
+    Getter,
+    Setter,
+}
+
 /// The superclass constructor a generated no-arg constructor (kotlinc's no-arg plugin) delegates
 /// to, selected by the frontend.
 ///
@@ -296,6 +303,20 @@ impl ResolvedModuleIndex {
             .unwrap_or_default()
     }
 
+    /// The checked applications on `property`'s `accessor`, whether written on the accessor or
+    /// targeted at it from the property declaration (`@get:A`, `@set:A`), in source order with the
+    /// targeted ones first.
+    pub fn property_accessor_applied_annotations(
+        &self,
+        property: DeclarationId,
+        accessor: PropertyAccessor,
+    ) -> &[crate::types::ResolvedAnnotation] {
+        self.property_accessor_applied_annotations
+            .get(&(property, accessor))
+            .map(Box::as_ref)
+            .unwrap_or_default()
+    }
+
     pub fn declaration_annotation_string_arguments(
         &self,
         declaration: DeclarationId,
@@ -419,6 +440,27 @@ impl ResolvedModuleIndex {
                 .insert(declaration, annotations)
                 .is_none(),
             "a stable declaration may publish checked annotation applications only once"
+        );
+    }
+
+    pub fn publish_property_accessor_applied_annotations(
+        &mut self,
+        property: DeclarationId,
+        accessor: PropertyAccessor,
+        annotations: impl IntoIterator<Item = crate::types::ResolvedAnnotation>,
+    ) {
+        let annotations = annotations
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        if annotations.is_empty() {
+            return;
+        }
+        assert!(
+            self.property_accessor_applied_annotations
+                .insert((property, accessor), annotations)
+                .is_none(),
+            "a property accessor may publish checked annotation applications only once"
         );
     }
 

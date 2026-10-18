@@ -44,7 +44,7 @@ pub use selections::*;
 pub use signature_state::SignatureState;
 mod classifier_headers;
 mod declaration_metadata;
-pub use declaration_metadata::NoArgSuperConstructor;
+pub use declaration_metadata::{NoArgSuperConstructor, PropertyAccessor};
 mod file_annotations;
 pub(crate) use file_annotations::FileAnnotationFacts;
 mod result_expectation;
@@ -1413,6 +1413,13 @@ pub struct ResolvedModuleIndex {
     /// back to the identity-only header list by ordinal.
     declaration_applied_annotations:
         HashMap<DeclarationId, Box<[crate::types::ResolvedAnnotation]>>,
+    /// The checked applications that land on each accessor of a property: those written on the
+    /// accessor and those the property declaration targets at it (`@get:`/`@set:`). Keyed by the
+    /// PROPERTY's stable identity, because a compiler-default accessor has none of its own.
+    property_accessor_applied_annotations: HashMap<
+        (DeclarationId, declaration_metadata::PropertyAccessor),
+        Box<[crate::types::ResolvedAnnotation]>,
+    >,
     /// Constant string arguments parallel to selected declaration annotations. This is compact,
     /// resolved header metadata (for example the value of `@JvmName`), not retained annotation
     /// syntax. Keeping it beside the stable declaration lets target realization consume annotation
@@ -2487,6 +2494,7 @@ impl ResolvedModuleIndex {
             && self.declaration_headers.is_empty()
             && self.declaration_annotations.is_empty()
             && self.declaration_applied_annotations.is_empty()
+            && self.property_accessor_applied_annotations.is_empty()
             && self.declaration_annotation_string_arguments.is_empty()
             && self.declaration_annotation_class_arguments.is_empty()
             && self.continuation_ordinals.is_empty()
@@ -2961,6 +2969,15 @@ impl ResolvedModuleIndex {
                 .values()
                 .map(|annotations| {
                     annotations.len() * std::mem::size_of::<crate::types::ResolvedAnnotation>()
+                })
+                .sum::<usize>()
+            + self
+                .property_accessor_applied_annotations
+                .values()
+                .map(|annotations| {
+                    std::mem::size_of::<(DeclarationId, declaration_metadata::PropertyAccessor)>()
+                        + annotations.len()
+                            * std::mem::size_of::<crate::types::ResolvedAnnotation>()
                 })
                 .sum::<usize>()
             + self.declaration_annotation_string_arguments.len()

@@ -196,6 +196,30 @@ fn classifier_kind(flags: DeclarationFlags) -> IrClassifierKind {
     }
 }
 
+/// The checked applications on one accessor of `property`, as identities with their constant
+/// string arguments in argument order.
+fn accessor_annotations(
+    index: &ResolvedModuleIndex,
+    property: DeclarationId,
+    accessor: crate::fir::PropertyAccessor,
+) -> Box<[IrHeaderAnnotation]> {
+    index
+        .property_accessor_applied_annotations(property, accessor)
+        .iter()
+        .map(|annotation| IrHeaderAnnotation {
+            identity: annotation.annotation,
+            string_arguments: annotation
+                .arguments
+                .iter()
+                .filter_map(|(_, value)| match value {
+                    crate::types::AnnotationValue::String(value) => value.as_str().map(Box::from),
+                    _ => None,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 fn publish_property(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
@@ -287,6 +311,16 @@ fn publish_property(
                 .declaration_annotations(property.declaration)
                 .to_vec()
                 .into_boxed_slice(),
+            getter_annotations: accessor_annotations(
+                index,
+                property.declaration,
+                crate::fir::PropertyAccessor::Getter,
+            ),
+            setter_annotations: accessor_annotations(
+                index,
+                property.declaration,
+                crate::fir::PropertyAccessor::Setter,
+            ),
             flags: header.flags,
             compile_time_constant: index
                 .compile_time_constant(property.declaration)

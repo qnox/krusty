@@ -126,3 +126,41 @@ fn a_top_level_suppressed_source_marker_is_named_after_the_written_getter() {
          @Suppress(\"VOLATILE_ON_VALUE\") @Volatile @get:JvmName(\"readTop\") val top = 3\n",
     )]);
 }
+
+#[test]
+fn a_sibling_file_calls_a_member_through_its_written_jvm_name() {
+    assert_module_matches_kotlinc(&[
+        (
+            "Holder.kt",
+            "package named\n\
+             \n\
+             class Holder {\n\
+             \x20   @get:JvmName(\"readP\") val p: Int = 1\n\
+             \x20   @set:JvmName(\"storeQ\") var q: Int = 2\n\
+             \x20   val declared: Int @JvmName(\"readDeclared\") get() = 3\n\
+             \x20   @get:JvmName(\"readHidden\") internal val hidden: Int = 4\n\
+             \x20   @JvmName(\"compute\") fun f(): Int = 5\n\
+             }\n\
+             \n\
+             object Single {\n\
+             \x20   @get:JvmName(\"readName\") val name = \"o\"\n\
+             }\n\
+             \n\
+             class Pair(@get:JvmName(\"readFirst\") val first: Int, @set:JvmName(\"storeSecond\") var second: Int)\n\
+             \n\
+             @get:JvmName(\"readTop\") val top: Int = 7\n",
+        ),
+        (
+            "Use.kt",
+            "package named\n\
+             \n\
+             fun use(holder: Holder, pair: Pair): Int {\n\
+             \x20   holder.q = 6\n\
+             \x20   pair.second = pair.first\n\
+             \x20   val reference = Holder::p\n\
+             \x20   return holder.p + holder.q + holder.declared + holder.hidden + holder.f() +\n\
+             \x20       Single.name.length + reference.get(holder) + top\n\
+             }\n",
+        ),
+    ]);
+}

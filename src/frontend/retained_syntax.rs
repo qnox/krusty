@@ -482,6 +482,14 @@ fn declaration_annotation_arguments(declaration: &Decl) -> impl Iterator<Item = 
                     .iter()
                     .flat_map(|constructor| constructor.annotation_args.iter().flatten().copied()),
             )
+            // A constructor `val`/`var` is a property: its annotations reach its accessors.
+            .chain(
+                class
+                    .props
+                    .iter()
+                    .filter(|parameter| parameter.is_property)
+                    .flat_map(|parameter| parameter.annotation_args.iter().flatten().copied()),
+            )
     });
     classifier
         .chain(functions)
