@@ -490,7 +490,7 @@ fn required_indexed_operator_argument_slots(
 
 #[cfg(test)]
 mod tests {
-    use super::{required_indexed_operator_argument_slots, value_parameter_defaults};
+    use super::{required_indexed_operator_argument_slots, value_parameter_defaults, Ty};
     use crate::ast::ExprId;
 
     #[test]
