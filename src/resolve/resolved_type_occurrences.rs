@@ -24,6 +24,14 @@ fn rewrite_spelling_deferred_bound_occurrences(
 }
 
 impl Checker<'_> {
+    pub(super) fn checked_declaration_spelling(
+        &self,
+        reference: &TypeRef,
+    ) -> Option<&crate::spelling::Spelled> {
+        self.resolved_declaration_spellings
+            .get(&(reference.span.lo, reference.span.hi))
+    }
+
     fn rewrite_deferred_bound_occurrences(
         &mut self,
         reference: &TypeRef,
@@ -311,11 +319,158 @@ impl Checker<'_> {
         semantic
     }
 
+    fn active_deferred_spelling_owner(&self, declaration: crate::fir::DeclarationId) -> bool {
+        let (Some(active), Some(index)) = (self.active_declarations, self.resolved_index) else {
+            return false;
+        };
+        index.declaration_spellings_deferred(declaration)
+            && active
+                .stable_declarations()
+                .any(|candidate| candidate == declaration)
+    }
+
+    /// Bind a declaration role whose semantic header and written occurrence were transferred
+    /// together to active Pass 2. The role's checked annotation tree is the only source-spelling
+    /// input; an absent or already-selected role is a broken ownership contract, not permission to
+    /// enter the ordinary source path.
+    pub(super) fn bind_active_deferred_declaration_type(
+        &mut self,
+        scope: &super::CheckerScope<'_>,
+        declaration: crate::fir::DeclarationId,
+        reference: &TypeRef,
+        role: Option<crate::spelling::DeclaredSpellingRole<'_>>,
+    ) -> Ty {
+        if !self.active_deferred_spelling_owner(declaration) {
+            self.failed_local_declaration_bindings.insert(declaration);
+            return Ty::Error;
+        }
+        let checked = match role {
+            Some(crate::spelling::DeclaredSpellingRole::Selected {
+                semantic: Some(semantic),
+                spelling,
+            }) => self.record_finalized_declaration_type(reference, semantic, spelling),
+            Some(crate::spelling::DeclaredSpellingRole::Active(source_facts)) => {
+                self.check_declaration_type_with_source_facts(scope, reference, Some(source_facts))
+            }
+            _ => {
+                self.failed_local_declaration_bindings.insert(declaration);
+                return Ty::Error;
+            }
+        };
+        if checked == Ty::Error || self.checked_declaration_spelling(reference).is_none() {
+            self.failed_local_declaration_bindings.insert(declaration);
+            return Ty::Error;
+        }
+        checked
+    }
+
+    pub(super) fn bind_active_deferred_parameter_type(
+        &mut self,
+        scope: &super::CheckerScope<'_>,
+        declaration: crate::fir::DeclarationId,
+        reference: &TypeRef,
+        is_vararg: bool,
+        role: Option<crate::spelling::DeclaredSpellingRole<'_>>,
+    ) -> Ty {
+        let checked =
+            self.bind_active_deferred_declaration_type(scope, declaration, reference, role);
+        super::semantic_value_parameter_ty(checked, is_vararg)
+    }
+
+    /// Record a Pass-1 occurrence sidecar, or perform the first binding of an occurrence whose
+    /// mandatory semantic header explicitly transferred spelling ownership to active Pass 2.
+    /// Missing metadata is never sufficient to enter the latter branch.
+    pub(super) fn record_or_bind_deferred_declaration_type(
+        &mut self,
+        scope: &super::CheckerScope<'_>,
+        declaration: crate::fir::DeclarationId,
+        reference: &TypeRef,
+        semantic: Ty,
+        spelled: Option<crate::spelling::DeclaredSpellingRole<'_>>,
+    ) -> Ty {
+        if let Some(crate::spelling::DeclaredSpellingRole::Selected {
+            semantic: selected,
+            spelling,
+        }) = spelled
+        {
+            if selected.is_some_and(|selected| selected != semantic) {
+                self.failed_local_declaration_bindings.insert(declaration);
+                return Ty::Error;
+            }
+            return self.record_finalized_declaration_type(reference, semantic, spelling);
+        }
+        if !self.active_deferred_spelling_owner(declaration) {
+            self.failed_local_declaration_bindings.insert(declaration);
+            return Ty::Error;
+        }
+        let Some(crate::spelling::DeclaredSpellingRole::Active(source_facts)) = spelled else {
+            self.failed_local_declaration_bindings.insert(declaration);
+            return Ty::Error;
+        };
+        let checked =
+            self.check_declaration_type_with_source_facts(scope, reference, Some(source_facts));
+        if checked != semantic || self.checked_declaration_spelling(reference).is_none() {
+            self.failed_local_declaration_bindings.insert(declaration);
+            return Ty::Error;
+        }
+        semantic
+    }
+
+    /// [`Self::record_or_bind_deferred_declaration_type`] for one value parameter. The stable
+    /// signature owns the callable-facing vararg array; the written occurrence owns its element.
+    pub(super) fn record_or_bind_deferred_parameter_type(
+        &mut self,
+        scope: &super::CheckerScope<'_>,
+        declaration: crate::fir::DeclarationId,
+        reference: &TypeRef,
+        is_vararg: bool,
+        semantic: Ty,
+        spelled: Option<crate::spelling::DeclaredSpellingRole<'_>>,
+    ) -> Ty {
+        if let Some(crate::spelling::DeclaredSpellingRole::Selected {
+            semantic: selected,
+            spelling,
+        }) = spelled
+        {
+            let expected = if is_vararg {
+                semantic.non_null().array_read_elem().unwrap_or(semantic)
+            } else {
+                semantic
+            };
+            if selected.is_some_and(|selected| selected != expected) {
+                self.failed_local_declaration_bindings.insert(declaration);
+                return Ty::Error;
+            }
+            return self.record_finalized_parameter_type(reference, is_vararg, semantic, spelling);
+        }
+        if !self.active_deferred_spelling_owner(declaration) {
+            self.failed_local_declaration_bindings.insert(declaration);
+            return Ty::Error;
+        }
+        let expected = if is_vararg {
+            semantic.non_null().array_read_elem().unwrap_or(semantic)
+        } else {
+            semantic
+        };
+        let Some(crate::spelling::DeclaredSpellingRole::Active(source_facts)) = spelled else {
+            self.failed_local_declaration_bindings.insert(declaration);
+            return Ty::Error;
+        };
+        let checked =
+            self.check_declaration_type_with_source_facts(scope, reference, Some(source_facts));
+        if checked != expected || self.checked_declaration_spelling(reference).is_none() {
+            self.failed_local_declaration_bindings.insert(declaration);
+            return Ty::Error;
+        }
+        semantic
+    }
+
     /// Publish source occurrences for type-parameter bounds that Pass 1 already bound. Source
     /// parameter names are used only to address their declaration-owned ordinal; every semantic
     /// type and spelling comes from the stable declaration header.
     pub(super) fn record_finalized_type_parameter_bounds(
         &mut self,
+        _scope: &super::CheckerScope<'_>,
         declaration: crate::fir::DeclarationId,
         parameters: &[String],
         bounds: &[(String, TypeRef)],
@@ -358,9 +513,10 @@ impl Checker<'_> {
         else {
             return false;
         };
-        let spellings = self
-            .finalized_declaration_spellings(Some(declaration))
-            .clone();
+        let Some(spellings) = self.finalized_declaration_spellings_for_binding(Some(declaration))
+        else {
+            return false;
+        };
         let mut ordinals = vec![0usize; parameters.len()];
         for (source, reference) in bounds {
             let Some(parameter) = parameters.iter().position(|name| name == source) else {
@@ -372,8 +528,11 @@ impl Checker<'_> {
             };
             let semantic =
                 crate::types::ty_with_transitive_param_bounds(semantic, &semantic_bounds);
-            let mut spelling = spellings.bound(parameter, bound).clone();
+            let Some(mut spelling) = spellings.bound(parameter, bound).cloned() else {
+                return false;
+            };
             rewrite_spelling_deferred_bound_occurrences(&mut spelling, &semantic_bounds);
+            self.record_finalized_declaration_type(reference, semantic, &spelling);
             let interface =
                 crate::fir::ResolvedTypeParameterBound::is_interface_type(semantic, |owner| {
                     self.fed_source()
@@ -384,12 +543,36 @@ impl Checker<'_> {
                 (reference.span.lo, reference.span.hi),
                 (semantic, interface),
             );
-            self.record_finalized_declaration_type(reference, semantic, &spelling);
             ordinals[parameter] += 1;
         }
         stable
             .iter()
             .zip(ordinals)
             .all(|(stable, source)| stable.len() == source)
+    }
+
+    /// Published spelling facts for a finalized declaration. `None` denotes only the explicit
+    /// active-Pass-2 ownership state, never an inference from an absent sidecar.
+    pub(super) fn finalized_declaration_spellings_for_binding(
+        &self,
+        declaration: Option<crate::fir::DeclarationId>,
+    ) -> Option<crate::spelling::DeclaredSpellingsForBinding> {
+        let (declaration, index) = declaration.zip(self.resolved_index)?;
+        if let Some(spellings) = index.declaration_spellings(declaration) {
+            return Some(crate::spelling::DeclaredSpellingsForBinding::Complete(
+                spellings.clone(),
+            ));
+        }
+        if let Some(spellings) = index.deferred_declaration_spellings(declaration) {
+            return Some(crate::spelling::DeclaredSpellingsForBinding::Deferred(
+                spellings.clone(),
+            ));
+        }
+        index
+            .declaration_header(declaration)
+            .is_some_and(|header| !header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS))
+            .then_some(crate::spelling::DeclaredSpellingsForBinding::Complete(
+                crate::spelling::DeclaredSpellings::NONE.clone(),
+            ))
     }
 }

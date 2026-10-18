@@ -1498,6 +1498,11 @@ pub struct ResolvedModuleIndex {
     /// Source type spellings required for declaration metadata, keyed by stable identity. These are
     /// serialization sidecars for already-resolved types; they are never lookup input in Pass 2.
     declaration_spellings: HashMap<DeclarationId, crate::spelling::DeclaredSpellings>,
+    /// Written type occurrences explicitly left for their first binding on an active Pass-2
+    /// lexical rung. This is distinct from absent metadata: membership is published only when a
+    /// mandatory body-local Pass-1 semantic header could not project its compact source roles.
+    deferred_declaration_spellings:
+        HashMap<DeclarationId, crate::spelling::DeferredDeclaredSpellings>,
     /// Checked compile-time values of source properties. Pass 1 folds the bounded initializer and
     /// publishes only this provider-neutral payload; no initializer syntax or source coordinate is
     /// retained for metadata or backend consumption.
@@ -1776,6 +1781,49 @@ impl ResolvedModuleIndex {
         self.declaration_spellings.get(&declaration)
     }
 
+    pub(crate) fn declaration_spellings_deferred(&self, declaration: DeclarationId) -> bool {
+        self.deferred_declaration_spellings
+            .contains_key(&declaration)
+    }
+
+    pub(crate) fn deferred_declaration_spellings(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<&crate::spelling::DeferredDeclaredSpellings> {
+        self.deferred_declaration_spellings.get(&declaration)
+    }
+
+    pub(crate) fn seal_deferred_declaration_spellings(
+        &mut self,
+        checked: &crate::spelling::CheckedTypeUseAnnotations,
+        unchecked: &mut Vec<crate::spelling::AnnotationOccurrence>,
+    ) {
+        for spellings in self.deferred_declaration_spellings.values_mut() {
+            spellings.seal(checked, unchecked);
+        }
+    }
+
+    pub(crate) fn defer_declaration_spellings(
+        &mut self,
+        declaration: DeclarationId,
+        spellings: crate::spelling::DeferredDeclaredSpellings,
+    ) {
+        assert!(
+            self.declaration_headers.contains_key(&declaration),
+            "deferred written occurrences require a stable declaration inventory entry"
+        );
+        assert!(
+            !self.declaration_spellings.contains_key(&declaration),
+            "published declaration spellings cannot be deferred"
+        );
+        assert!(
+            self.deferred_declaration_spellings
+                .insert(declaration, spellings)
+                .is_none(),
+            "declaration spellings may be deferred only once"
+        );
+    }
+
     pub(crate) fn publish_declaration_spellings(
         &mut self,
         declaration: DeclarationId,
@@ -1791,6 +1839,7 @@ impl ResolvedModuleIndex {
                 .is_none(),
             "a declaration may publish source spellings only once"
         );
+        self.deferred_declaration_spellings.remove(&declaration);
     }
 
     pub fn compile_time_constant(

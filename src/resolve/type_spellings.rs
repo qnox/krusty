@@ -6,6 +6,26 @@ use super::{type_argument_of_ref, ClassNames, HashMap, TParams, Ty, TypeName, Ty
 use crate::diag::DiagSink;
 use crate::spelling::Spelled;
 
+/// Reconstruct the exact written type tree the parser retained before expanding source aliases.
+/// Alias arguments are expanded before their enclosing spelling is parked, so restoration must be
+/// recursive; replacing only the root would lose a nested alias's binding identity.
+pub(in crate::resolve) fn written_type_ref(
+    reference: &TypeRef,
+    aliases: &HashMap<crate::diag::Span, TypeRef>,
+) -> TypeRef {
+    let mut written = aliases.get(&reference.span).unwrap_or(reference).clone();
+    if let Some(result) = &mut written.arg {
+        **result = written_type_ref(result, aliases);
+    }
+    for argument in &mut written.targs {
+        *argument = written_type_ref(argument, aliases);
+    }
+    for parameter in &mut written.fun_params {
+        *parameter = written_type_ref(parameter, aliases);
+    }
+    written
+}
+
 /// Stable identity facts selected for one source type occurrence before its spelling sidecar is
 /// assembled. The classifier boundary and alias identity come from one left-to-right binding; the
 /// spelling walk must not rediscover either fact from the written or expanded name.
@@ -82,12 +102,14 @@ pub(in crate::resolve) fn spelling_of_ref_with(
         .as_ref()
         .unwrap_or(source_spelling);
     let annotations = spellings.annotations.at(r.span.lo).to_vec();
+    let occurrence_unsafe_variance = spellings.annotations.unsafe_variance_at(r.span.lo);
     // A type parameter shadows any same-named alias, and is never itself one.
     if tparams.contains(&spelled.name) {
         return Spelled {
             classifier_segment,
             definitely_non_null: spelled.definitely_non_null(),
             annotations,
+            unsafe_variance: occurrence_unsafe_variance,
             ..Spelled::default()
         };
     }
@@ -147,6 +169,7 @@ pub(in crate::resolve) fn spelling_of_ref_with(
             alias_args: Vec::new(),
             args,
             annotations,
+            unsafe_variance: occurrence_unsafe_variance,
             ..Spelled::default()
         };
     }
@@ -180,6 +203,7 @@ pub(in crate::resolve) fn spelling_of_ref_with(
             // position for position.
             args: argument_spellings,
             annotations,
+            unsafe_variance: occurrence_unsafe_variance,
             ..Spelled::default()
         };
     };
@@ -213,7 +237,8 @@ pub(in crate::resolve) fn spelling_of_ref_with(
             inherited.chain(&rhs.annotations).cloned().collect()
         })
         .unwrap_or_default();
-    let unsafe_variance = template.is_some_and(|(rhs, _, _)| rhs.unsafe_variance);
+    let unsafe_variance =
+        occurrence_unsafe_variance || template.is_some_and(|(rhs, _, _)| rhs.unsafe_variance);
     let expansion_args = expansion_arg_spellings(template, &alias_args);
     Spelled {
         classifier_segment,

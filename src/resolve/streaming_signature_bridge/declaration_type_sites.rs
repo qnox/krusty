@@ -130,6 +130,29 @@ pub(super) fn bind_graph_declaration_types(
         bindings.extend(explicit.getter_result.zip(getter_result));
         bindings.extend(explicit.receiver.zip(receiver));
         bindings.extend(explicit.storage.zip(storage));
+        if stub.kind == crate::fir::DeclarationKind::Property
+            && stub
+                .flags
+                .has(crate::fir::DeclarationFlags::PROPERTY_PARAMETER)
+        {
+            let shared_primary_parameter =
+                headers.declarations.anchor(stub.id).and_then(|anchor| {
+                    let owner = anchor.owner?;
+                    let declaration = headers.syntax.declaration(owner)?;
+                    let crate::fir::HeaderDeclarationKind::Classifier {
+                        primary_parameters, ..
+                    } = declaration.kind
+                    else {
+                        return None;
+                    };
+                    headers
+                        .syntax
+                        .parameters(primary_parameters)
+                        .get(anchor.sibling as usize)
+                        .map(|parameter| parameter.ty)
+                });
+            bindings.extend(explicit.result.zip(shared_primary_parameter));
+        }
     }
     let classifier_parents = graph.explicit_classifier_parents().collect::<Vec<_>>();
     for (declaration, explicit) in classifier_parents {

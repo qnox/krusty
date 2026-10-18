@@ -278,6 +278,7 @@ impl DeclaredSpellings {
 #[derive(Debug, Default)]
 pub(crate) struct RecordedTypeAnnotations {
     annotations: crate::fx_hash::HashMap<u32, Vec<TypeUseAnnotation>>,
+    unsafe_variance: crate::fx_hash::HashSet<u32>,
     parameter_names: crate::fx_hash::HashMap<u32, Box<str>>,
 }
 
@@ -293,12 +294,62 @@ impl RecordedTypeAnnotations {
         self.parameter_names.insert(occurrence, name.into());
     }
 
+    pub(crate) fn record_unsafe_variance(&mut self, occurrence: u32) {
+        self.unsafe_variance.insert(occurrence);
+    }
+
     /// The annotations recorded on the type occurrence starting at `occurrence`.
     pub(crate) fn at(&self, occurrence: u32) -> &[TypeUseAnnotation] {
         self.annotations
             .get(&occurrence)
             .map(Vec::as_slice)
             .unwrap_or_default()
+    }
+
+    pub(crate) fn unsafe_variance_at(&self, occurrence: u32) -> bool {
+        self.unsafe_variance.contains(&occurrence)
+    }
+
+    /// Re-key an already-checked, source-shaped occurrence tree onto one active parser type.
+    /// The tree contains no names or semantic types; it is only the structural handoff for
+    /// annotation applications whose arguments were folded before temporary source coordinates
+    /// were released.
+    pub(crate) fn record_checked_source_facts(
+        &mut self,
+        reference: &crate::ast::TypeRef,
+        facts: &Spelled,
+    ) -> bool {
+        if facts
+            .annotations
+            .iter()
+            .any(|annotation| matches!(annotation, TypeUseAnnotation::Bound(_)))
+        {
+            return false;
+        }
+        self.record(reference.span.lo, facts.annotations.clone());
+        if facts.unsafe_variance {
+            self.record_unsafe_variance(reference.span.lo);
+        }
+        if let Some(name) = facts.parameter_name.as_deref() {
+            self.record_parameter_name(reference.span.lo, name);
+        }
+        let children = if !reference.fun_params.is_empty() || reference.name == "<fun>" {
+            let mut children = reference.fun_params.iter().collect::<Vec<_>>();
+            if !reference.fun_suspend() {
+                let Some(result) = reference.arg.as_deref() else {
+                    return false;
+                };
+                children.push(result);
+            }
+            children
+        } else {
+            reference.targs.iter().collect()
+        };
+        children.len() == facts.args.len()
+            && children
+                .into_iter()
+                .zip(&facts.args)
+                .all(|(child, facts)| self.record_checked_source_facts(child, facts))
     }
 
     /// The name of the function-type parameter whose type starts at `occurrence`, if it was named.
@@ -349,6 +400,155 @@ pub struct DeclaredSpellings {
     pub superclass: Spelled,
     /// Class headers only: the declared INTERFACES, in declaration order.
     pub supertypes: Vec<Spelled>,
+}
+
+/// A mandatory semantic header whose compact Pass-1 graph owned only part of its source spelling
+/// surface. Selected slots carry their complete Pass-1 spelling. Active slots carry only a
+/// source-shaped annotation tree: Pass 1 folds and seals those applications, while active Pass 2
+/// performs the type's one and only name binding. Bounds are always selected by type-parameter
+/// publication and therefore never deferred here.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum DeferredSpellingRole {
+    Selected {
+        semantic: Option<Ty>,
+        spelling: Spelled,
+    },
+    Active(Spelled),
+}
+
+impl DeferredSpellingRole {
+    pub(crate) fn as_binding(&self) -> DeclaredSpellingRole<'_> {
+        match self {
+            Self::Selected { semantic, spelling } => DeclaredSpellingRole::Selected {
+                semantic: *semantic,
+                spelling,
+            },
+            Self::Active(facts) => DeclaredSpellingRole::Active(facts),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DeferredDeclaredSpellings {
+    pub ret: DeferredSpellingRole,
+    pub getter_ret: DeferredSpellingRole,
+    pub params: Vec<DeferredSpellingRole>,
+    pub receiver: DeferredSpellingRole,
+    pub type_param_bounds: Vec<Vec<Spelled>>,
+}
+
+impl DeferredDeclaredSpellings {
+    pub(crate) fn seal(
+        &mut self,
+        checked: &CheckedTypeUseAnnotations,
+        unchecked: &mut Vec<AnnotationOccurrence>,
+    ) {
+        for role in [&mut self.ret, &mut self.getter_ret, &mut self.receiver]
+            .into_iter()
+            .chain(&mut self.params)
+        {
+            match role {
+                DeferredSpellingRole::Selected { spelling, .. }
+                | DeferredSpellingRole::Active(spelling) => spelling.seal(checked, unchecked),
+            }
+        }
+        for spelling in self.type_param_bounds.iter_mut().flatten() {
+            spelling.seal(checked, unchecked);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum DeclaredSpellingRole<'a> {
+    Selected {
+        semantic: Option<Ty>,
+        spelling: &'a Spelled,
+    },
+    Active(&'a Spelled),
+}
+
+impl DeclaredSpellingRole<'_> {
+    pub(crate) fn into_owned(self) -> DeferredSpellingRole {
+        match self {
+            Self::Selected { semantic, spelling } => DeferredSpellingRole::Selected {
+                semantic,
+                spelling: spelling.clone(),
+            },
+            Self::Active(facts) => DeferredSpellingRole::Active(facts.clone()),
+        }
+    }
+}
+
+/// Read-only spelling roles consumed while an active declaration is checked. Absence of this
+/// view is invalid; `None` from one role means only that the explicit deferred record owns it.
+#[derive(Clone)]
+pub(crate) enum DeclaredSpellingsForBinding {
+    Complete(DeclaredSpellings),
+    Deferred(DeferredDeclaredSpellings),
+}
+
+impl DeclaredSpellingsForBinding {
+    pub(crate) fn ret(&self) -> Option<DeclaredSpellingRole<'_>> {
+        match self {
+            Self::Complete(spellings) => Some(DeclaredSpellingRole::Selected {
+                semantic: None,
+                spelling: &spellings.ret,
+            }),
+            Self::Deferred(spellings) => Some(match &spellings.ret {
+                role @ DeferredSpellingRole::Selected { .. } => role.as_binding(),
+                DeferredSpellingRole::Active(facts) => DeclaredSpellingRole::Active(facts),
+            }),
+        }
+    }
+
+    pub(crate) fn getter_ret(&self) -> Option<DeclaredSpellingRole<'_>> {
+        match self {
+            Self::Complete(spellings) => Some(DeclaredSpellingRole::Selected {
+                semantic: None,
+                spelling: &spellings.getter_ret,
+            }),
+            Self::Deferred(spellings) => Some(match &spellings.getter_ret {
+                role @ DeferredSpellingRole::Selected { .. } => role.as_binding(),
+                DeferredSpellingRole::Active(facts) => DeclaredSpellingRole::Active(facts),
+            }),
+        }
+    }
+
+    pub(crate) fn receiver(&self) -> Option<DeclaredSpellingRole<'_>> {
+        match self {
+            Self::Complete(spellings) => Some(DeclaredSpellingRole::Selected {
+                semantic: None,
+                spelling: &spellings.receiver,
+            }),
+            Self::Deferred(spellings) => Some(match &spellings.receiver {
+                role @ DeferredSpellingRole::Selected { .. } => role.as_binding(),
+                DeferredSpellingRole::Active(facts) => DeclaredSpellingRole::Active(facts),
+            }),
+        }
+    }
+
+    pub(crate) fn param(&self, index: usize) -> Option<DeclaredSpellingRole<'_>> {
+        match self {
+            Self::Complete(spellings) => Some(DeclaredSpellingRole::Selected {
+                semantic: None,
+                spelling: spellings.param(index),
+            }),
+            Self::Deferred(spellings) => spellings.params.get(index).map(|role| match role {
+                role @ DeferredSpellingRole::Selected { .. } => role.as_binding(),
+                DeferredSpellingRole::Active(facts) => DeclaredSpellingRole::Active(facts),
+            }),
+        }
+    }
+
+    pub(crate) fn bound(&self, parameter: usize, bound: usize) -> Option<&Spelled> {
+        match self {
+            Self::Complete(spellings) => Some(spellings.bound(parameter, bound)),
+            Self::Deferred(spellings) => spellings
+                .type_param_bounds
+                .get(parameter)
+                .and_then(|bounds| bounds.get(bound)),
+        }
+    }
 }
 
 impl DeclaredSpellings {

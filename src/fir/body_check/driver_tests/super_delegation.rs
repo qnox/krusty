@@ -480,24 +480,91 @@ fn anonymous_inner_super_delegation_reads_checked_constructor_capture_parameters
     let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
     let (mut index, mut inline_bodies, _default_arguments, mut sources) =
         streamed.module.into_parts();
-    crate::resolve::publish_checked_local_signatures(
+    let source_id = SourceFileId::from_raw(0);
+    let active =
+        ActiveSourceDeclarations::bind_complete_source(&analysis.files[0], source_id, &index)
+            .expect("focused Pass 2 source binding");
+    let root = index
+        .declarations_named("box")
+        .first()
+        .copied()
+        .expect("box declaration");
+    let selected_roots = crate::fx_hash::HashSet::from_iter([active
+        .span(&analysis.files[0], root)
+        .expect("box source span")]);
+    let selected_stable_bodies = ordinary
+        .iter()
+        .map(|work| work.declaration)
+        .collect::<crate::fx_hash::HashSet<_>>();
+    let mut selected_body_spans = selected_stable_bodies
+        .iter()
+        .filter_map(|declaration| active.span(&analysis.files[0], *declaration))
+        .collect::<crate::fx_hash::HashSet<_>>();
+    for &body in &selected_stable_bodies {
+        let mut current = body;
+        while let Some(owner) = index
+            .declaration_header(current)
+            .and_then(|header| header.owner)
+            .or_else(|| {
+                index
+                    .declaration_anchor(current)
+                    .and_then(|anchor| anchor.owner)
+            })
+        {
+            if owner == root {
+                if !index
+                    .declaration_header(owner)
+                    .is_some_and(|header| header.kind == DeclarationKind::Classifier)
+                {
+                    if let Some(span) = active.span(&analysis.files[0], owner) {
+                        selected_body_spans.insert(span);
+                    }
+                }
+                break;
+            }
+            if let Some(span) = active.span(&analysis.files[0], owner) {
+                selected_body_spans.insert(span);
+            }
+            current = owner;
+        }
+    }
+    let mut pass_two_symbols = std::mem::take(&mut analysis.symbols).into_pass_two_symbols();
+    let cache = crate::fir::StreamedModuleProjectionCache::default();
+    let info = crate::resolve::check_selected_declarations_in_pass_two(
         &analysis.files[0],
-        SourceFileId::from_raw(0),
-        &mut analysis.symbols,
-        analysis.types[0].as_ref().expect("checked source"),
+        0,
+        &selected_roots,
+        &selected_body_spans,
+        &active,
+        &selected_stable_bodies,
+        &mut pass_two_symbols,
+        &index,
+        &cache,
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    crate::resolve::publish_checked_local_signatures_in_pass_two_root(
+        &analysis.files[0],
+        &active,
+        source_id,
+        pass_two_symbols.semantic_platform(),
+        &info,
         &mut index,
+        root,
+        &selected_stable_bodies,
     )
-    .expect("checked local signatures");
+    .expect("fresh Pass 2 local signatures");
     let mut sink = RecordingSink::default();
     let mut session = BodyCheckSession::default();
     for work in ordinary {
-        check_and_dispatch_bound_body_in_session(
+        check_and_dispatch_active_body_in_session(
             crate::fir::BodyCheckUnit {
                 file: &analysis.files[0],
-                info: analysis.types[0].as_ref().expect("checked source"),
-                source: SourceFileId::from_raw(0),
+                info: &info,
+                source: source_id,
                 index: &index,
             },
+            &active,
             work,
             sources.origins_mut(),
             &mut inline_bodies,
@@ -514,7 +581,7 @@ fn anonymous_inner_super_delegation_reads_checked_constructor_capture_parameters
             let declaration = DeclarationId::from_raw(owner.raw());
             let anchor = index.declaration_anchor(declaration)?;
             (anchor.kind == DeclarationKind::Constructor && anchor.sibling == 0)
-                .then(|| anchor.owner)
+                .then_some(anchor.owner)
                 .flatten()
                 .filter(|classifier| {
                     index
