@@ -68,6 +68,10 @@ pub(in super::super) enum ExpansionReason {
     /// The callee's body creates an array whose element type is one of its reified type
     /// parameters, which its compiled body would have to mark for the inliner.
     ReifiedArrayInBody,
+    /// The callee's body reads a local delegated property. Its accessor and its
+    /// `$$delegatedProperties` entry belong to the callee's own class, which a body compiled for
+    /// the call site cannot reach.
+    LocalDelegateInBody,
 }
 
 impl BodyLowering<'_> {
@@ -239,6 +243,9 @@ impl BodyLowering<'_> {
                     if mentions_reified(*array_type, &reified) =>
                 {
                     return Some(ExpansionReason::ReifiedArrayInBody);
+                }
+                IrExpr::LocalDelegateAccess(_) => {
+                    return Some(ExpansionReason::LocalDelegateInBody);
                 }
                 _ => {}
             }
