@@ -183,7 +183,12 @@ impl Emitter<'_> {
         {
             let mut normalize_at_lambda_frame = delays_stack_normalization;
             let opening = self.external_inline_body_opening(block, stmts);
-            for &statement in stmts {
+            let mut bound_operands = 0;
+            for (index, &statement) in stmts.iter().enumerate() {
+                if bound_operands > 0 {
+                    bound_operands -= 1;
+                    continue;
+                }
                 self.open_external_inline_body(opening, statement, code);
                 self.enter_copied_function_frame(
                     copied_caller.is_some().then_some(block),
@@ -213,6 +218,12 @@ impl Emitter<'_> {
                 // verified-balanced height. Later emission still relies on accurate physical stack
                 // accounting even though final-body analysis owns verifier frames.
                 let base = code.stack_height();
+                bound_operands = self.emit_invocation_operand_bindings(&stmts[index..], code);
+                if bound_operands > 0 {
+                    bound_operands -= 1;
+                    code.set_stack(base.max(0) as u16);
+                    continue;
+                }
                 self.emit(statement, code);
                 if self.discarding_diverges(statement) {
                     dead = true;
@@ -731,7 +742,10 @@ impl Emitter<'_> {
                     IrExpr::Variable { index, .. } if *index == *slot
                 ) && !matches!(
                     self.ir.debug_local_provenance(statement),
-                    Some(crate::ir::IrDebugLocalProvenance::InlineLambdaParameter { .. })
+                    Some(
+                        crate::ir::IrDebugLocalProvenance::InlineLambdaParameter { .. }
+                            | crate::ir::IrDebugLocalProvenance::InlineLambdaContinuation { .. }
+                    )
                 )
             })
     }
@@ -1115,9 +1129,14 @@ impl Emitter<'_> {
             self.discarded_inline_results.insert(index);
         }
         let optimized_postfix = self.emit_postfix_iinc(block, true, code);
+        let mut bound_operands = 0;
         for (index, statement) in stmts.iter().copied().enumerate() {
             if optimized_postfix {
                 break;
+            }
+            if bound_operands > 0 {
+                bound_operands -= 1;
+                continue;
             }
             self.open_external_inline_body(opening, statement, code);
             self.enter_copied_function_frame(copied_function, statement, code);
@@ -1141,6 +1160,12 @@ impl Emitter<'_> {
             self.terminal_statement_target = (value.is_none() && Some(index) == last_statement)
                 .then_some(terminal_target)
                 .flatten();
+            bound_operands = self.emit_invocation_operand_bindings(&stmts[index..], code);
+            if bound_operands > 0 {
+                bound_operands -= 1;
+                code.set_stack(base.max(0) as u16);
+                continue;
+            }
             self.emit(statement, code);
             if self.discarding_diverges(statement) {
                 dead = true;

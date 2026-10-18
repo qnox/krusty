@@ -484,6 +484,13 @@ impl Code {
         self
     }
 
+    /// A saturating truncation (`i32.trunc_sat_f32_s` is 0), behind the `0xfc` prefix.
+    pub(super) fn trunc_sat(&mut self, opcode: u8) -> &mut Self {
+        self.bytes.push(0xfc);
+        uleb(&mut self.bytes, u64::from(opcode));
+        self
+    }
+
     fn gc(&mut self, opcode: u8) -> &mut Self {
         self.bytes.push(0xfb);
         uleb(&mut self.bytes, u64::from(opcode));

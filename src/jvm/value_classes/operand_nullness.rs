@@ -42,12 +42,14 @@ pub(super) fn operand_nonnull(
             ..
         } => true,
         // A checked coercion to a non-null type has that type: a generic `T` slot read as `R<Int>`
-        // holds an `R`, never a null reference, even when `R`'s own carrier admits null.
+        // holds an `R`, never a null reference, even when `R`'s own carrier admits null. Widening to
+        // a nullable type (`Wid` → `Wid?` for a `T` inferred as `Wid?`) never introduces a null, so
+        // the coerced value is as non-null as its operand.
         IrExpr::TypeOp {
             op: crate::ir::IrTypeOp::ImplicitCoercion,
             type_operand,
-            ..
-        } => non_null_ty(type_operand),
+            arg,
+        } => non_null_ty(type_operand) || operand_nonnull(exprs, rets, fields, slots, *arg),
         IrExpr::Call {
             callee: Callee::Static { name, .. },
             ..

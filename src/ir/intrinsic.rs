@@ -6,12 +6,6 @@ use crate::types::Ty;
 /// identity, not a library name: backends implement it without recovering signature facts from text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrIntrinsic {
-    /// Bit-preserving reinterpretation between equal-width integral and floating scalars. The
-    /// provider-authenticated declaration fixes both semantic endpoint types.
-    ReinterpretBits {
-        from: Ty,
-        to: Ty,
-    },
     /// Kotlin's checked `assert` operation. Arguments are the Boolean condition followed by its
     /// optional zero-argument message function. A backend must guard/elide the whole operation
     /// before evaluating either child according to `mode`.

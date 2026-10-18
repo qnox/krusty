@@ -175,3 +175,20 @@ fn a_caller_lists_no_local_class_of_an_inline_property_in_another_file() {
         );
     }
 }
+
+/// A suspend function's continuation class, a suspend lambda and an object it declares all sort as
+/// `Late.go.<no name provided>`. kotlinc lists them as its pool met them, the continuation first,
+/// which is its place once the transformed method's constants are laid out.
+#[test]
+fn a_continuation_ties_with_the_lambda_and_object_of_its_function() {
+    let source = "suspend fun later(block: suspend () -> String): String = block()\n\
+                  suspend fun tok(): String = \"t\"\n\
+                  class Late {\n\
+                  \x20   suspend fun go(id: String): String {\n\
+                  \x20       val a = tok()\n\
+                  \x20       val o = object { override fun toString() = id }\n\
+                  \x20       return a + o + later { tok() + id }\n\
+                  \x20   }\n\
+                  }\n";
+    common::assert_same_inner_classes("ContinuationTies", source, &[], &["Late"]);
+}

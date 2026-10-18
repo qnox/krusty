@@ -248,6 +248,24 @@ the contract members it reaches: the services backed by krusty's resolved model,
 builder types it constructs. The registry keeps reporting such jars as `Unsupported` until a host
 serves their extension points.
 
+### Provisioning the host
+
+A hosted plugin runs on the real compiler, so its host needs a JDK and kotlinc's jars. Neither is
+needed by a build that uses no plugin jar, so `crates/krusty-plugin-host` fetches them only on
+demand, in this order:
+
+- **JDK:** `JAVA_HOME`, then the JDK behind `java` on `PATH` (judged by its `release` file, without
+  starting it), then krusty's cache, then a pinned Eclipse Temurin 21 archive for the platform.
+- **Compiler classpath:** `kotlin-compiler-embeddable` and its runtime closure, pinned per exact
+  Kotlin version in `pins/kotlin-compiler.tsv`. Each jar comes from krusty's cache, else a copy from
+  the Gradle module cache or `~/.m2` that matches the pin, else Maven Central
+  (`KRUSTY_MAVEN_REPOSITORY` names a mirror).
+
+Every download is printed as `info:` with what it is, its size, its URL and the plugin that needs
+it; a build that finds everything in place prints nothing. A Kotlin version with no pinned classpath
+is refused by its exact name, never matched to a neighbouring release. `KRUSTY_OFFLINE=1` turns
+downloads off and fails with everything that is missing.
+
 ## Drop-in extension management — two layers, like kotlinc
 
 Extensions have **two registration layers**, mirroring kotlinc exactly:

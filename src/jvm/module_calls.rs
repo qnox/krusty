@@ -481,12 +481,29 @@ pub(super) fn realize_default_calls(
                     &stub_boxed,
                 )
                 .ok_or(failure)?;
-                if let Some(receiver) = dispatch_receiver {
-                    params.insert(0, dispatch_receiver_ty.ok_or(failure)?);
-                    args.insert(0, receiver);
-                    plan.insert(0, DefaultCallOperand::supplied(receiver));
-                } else if dispatch_receiver_ty.is_some() {
-                    return Err(failure);
+                // A named object's `@JvmStatic` member has a static stub that takes no receiver.
+                let static_member =
+                    super::ir_emit::jvm_static_members::module_singleton_static_owner(
+                        ir,
+                        default_provider,
+                    )
+                    .is_some();
+                // The static stub takes no receiver and initializes the object itself. A receiver
+                // that runs code stays on the call, which evaluates and discards it first.
+                let mut discarded_receiver = None;
+                match dispatch_receiver {
+                    Some(receiver) if static_member => {
+                        discarded_receiver =
+                            (!super::ir_emit::jvm_static_members::receiver_is_inert(ir, receiver))
+                                .then_some(receiver);
+                    }
+                    Some(receiver) => {
+                        params.insert(0, dispatch_receiver_ty.ok_or(failure)?);
+                        args.insert(0, receiver);
+                        plan.insert(0, DefaultCallOperand::supplied(receiver));
+                    }
+                    None if dispatch_receiver_ty.is_some() => return Err(failure),
+                    None => {}
                 }
                 Some((
                     IrExpr::Call {
@@ -498,7 +515,7 @@ pub(super) fn realize_default_calls(
                             module_target: Some(default_provider),
                             module_default_call: true,
                         },
-                        dispatch_receiver: None,
+                        dispatch_receiver: discarded_receiver,
                         args,
                     },
                     plan,

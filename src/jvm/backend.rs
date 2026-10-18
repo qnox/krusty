@@ -1227,6 +1227,12 @@ impl Backend for JvmBackend {
         CompilationTarget::Jvm
     }
 
+    /// kotlinc compiles a same-module inline function to a method node before inlining it
+    /// (`IrSourceCompilerForInline`), so its calls keep the callee's erased body.
+    fn same_module_inlining(&self) -> crate::ir::SameModuleInlining {
+        crate::ir::SameModuleInlining::CompiledBodies
+    }
+
     fn lower_ir_file(
         &self,
         mut file: crate::backend::CheckedIrFile<'_>,

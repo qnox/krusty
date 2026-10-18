@@ -83,8 +83,13 @@ pub(super) fn emit_default_stub(
     // is itself `public static synthetic` (measured on 2.4.20), not the private member's access.
     let holder_private_dispatch =
         is_interface && static_owner.is_none() && ir.method_visibility(fid).is_private();
+    // A named object's `@JvmStatic` member is static, and so is its stub: neither takes the
+    // receiver, whose value the stub's defaults read from the singleton instance instead.
+    let singleton = super::jvm_static_members::singleton_static_owner(ir, fid);
+    let stub_parameters = default_stub_params(ir, fid, owner_ty);
+    let stub_parameters = &stub_parameters[usize::from(singleton.is_some())..];
     let stub_name = format!("{method_name}$default");
-    let stub_desc = method_descriptor(&default_stub_params(ir, fid, owner_ty), ret);
+    let stub_desc = method_descriptor(stub_parameters, ret);
     cw.reserve_method_name(&stub_name);
     cw.reserve_descriptor(&stub_desc);
     let mut emitter = Emitter::new(
@@ -98,8 +103,11 @@ pub(super) fn emit_default_stub(
         defaults.iter().flatten().copied(),
     );
     publish_exported_private_access(&mut emitter, fid);
-    let receiver = emitter.frame.enter(FrameKey::Receiver, owner_ty);
-    emitter.slots.insert(0, (receiver, owner_ty));
+    if singleton.is_none() {
+        let receiver = emitter.frame.enter(FrameKey::Receiver, owner_ty);
+        emitter.slots.insert(0, (receiver, owner_ty));
+    }
+    emitter.singleton_receiver = singleton;
     let mut param_slots = Vec::new();
     for (index, ty) in stub_param_tys.iter().enumerate() {
         let value = index as u32 + 1;
@@ -137,7 +145,9 @@ pub(super) fn emit_default_stub(
         &mask_slots,
         None,
     );
-    code.aload(0);
+    if singleton.is_none() {
+        code.aload(0);
+    }
     for (index, &(slot, ty)) in param_slots.iter().enumerate() {
         load(ty, slot, &mut code);
         emit_adapted_unbox(
@@ -172,6 +182,8 @@ pub(super) fn emit_default_stub(
         };
         if is_interface {
             code.invokeinterface(method, argument_words, slot_words(ret) as i32);
+        } else if singleton.is_some() {
+            code.invokestatic(method, argument_words, slot_words(ret) as i32);
         } else if ir.method_visibility(fid).is_private() {
             code.invokespecial(method, argument_words, slot_words(ret) as i32);
         } else {
@@ -206,7 +218,7 @@ pub(super) fn emit_default_stub(
         PublishedDefaultAccessor {
             owner,
             stub_name: &stub_name,
-            parameters: &default_stub_params(ir, fid, owner_ty),
+            parameters: stub_parameters,
             result: ret,
             is_interface,
         },
@@ -927,5 +939,78 @@ mod catch_marker_tests {
             value: None,
         });
         assert!(body_has_reified_markers(&ir, wrapper));
+    }
+}
+
+impl Emitter<'_> {
+    /// Emit the operands a call of `fid` passes its `$default` stub after any receiver: each
+    /// supplied argument (or a zero placeholder for an omitted one, with its mask bit set), the
+    /// masks, then a null marker. Returns those operands' stub parameter types.
+    ///
+    /// A nullable-underlying value-class parameter is BOXED in the stub signature (matching
+    /// `emit_default_stub`), so a supplied argument is `box-impl`d and the placeholder uses the
+    /// boxed type. A non-null type parameter bounded by a JVM primitive is likewise the JDK wrapper
+    /// on the stub: the placeholder is `valueOf` of the primitive zero, and a supplied primitive is
+    /// boxed the same way.
+    pub(super) fn emit_default_call_arguments(
+        &mut self,
+        e: ExprId,
+        fid: u32,
+        args: &[Option<ExprId>],
+        param_tys: &[Ty],
+        code: &mut CodeBuilder,
+    ) -> Vec<Ty> {
+        let boxed = default_stub_boxed_parameters(self.ir, fid);
+        let mut stub_params: Vec<Ty> = param_tys
+            .iter()
+            .enumerate()
+            .map(|(i, t)| stub_parameter_type(self.ir, fid, i, *t))
+            .collect();
+        // Mask bits are LOGICAL (kotlinc numbers them over the declared value parameters) — a
+        // member EXTENSION's physical receiver at params[0] does not shift them, and is never
+        // omitted.
+        let recv_offset = usize::from(self.ir.extension_receiver_fns.contains(&fid));
+        let logical_param_count = param_tys
+            .len()
+            .checked_sub(recv_offset)
+            .expect("an extension receiver is a leading physical parameter");
+        let mut masks = vec![0i32; default_mask_count(logical_param_count)];
+        // Every operand the CALL synthesizes — a placeholder standing in for an omitted argument,
+        // and the trailing mask/marker group — carries the call's own line, so an argument
+        // supplied between two of them puts its own line in effect and the next group restores
+        // the call's. A call that omits nothing synthesizes nothing, which is why an ordinary
+        // call's dispatch mark sits at its invoke.
+        for (i, arg) in args.iter().enumerate() {
+            match arg {
+                Some(a) => {
+                    self.emit_value(*a, code);
+                    if let Some(vc) = boxed.get(&i) {
+                        emit_box_impl(self.ir, self.cw, vc, code);
+                    }
+                    emit_primitive_box_if_needed(
+                        self.cw,
+                        ir_ty_to_jvm(&self.value_ty(*a)),
+                        stub_params[i],
+                        code,
+                    );
+                }
+                None => {
+                    self.mark_dispatch_line(e, code);
+                    emit_omitted_default_placeholder(self.cw, param_tys[i], stub_params[i], code);
+                    let li = i
+                        .checked_sub(recv_offset)
+                        .expect("an extension receiver cannot be omitted");
+                    masks[li / 32] |= default_mask_bit(li);
+                }
+            }
+        }
+        self.mark_dispatch_line(e, code);
+        stub_params.extend(std::iter::repeat_n(Ty::Int, masks.len()));
+        for mask in masks {
+            code.push_int(mask, self.cw);
+        }
+        code.aconst_null();
+        stub_params.push(Ty::obj("java/lang/Object"));
+        stub_params
     }
 }

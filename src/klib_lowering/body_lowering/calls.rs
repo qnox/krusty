@@ -58,6 +58,9 @@ impl BodyLowering<'_, '_, '_> {
             BuiltinOperator::Relation(relation) => self.relation(access, relation, ty),
             BuiltinOperator::Not => self.negation(access, ty),
             BuiltinOperator::IsNan { operand } => self.is_nan(access, operand, ty),
+            BuiltinOperator::NumericConversion { from, to } => {
+                self.numeric_conversion(access, from, to, ty)
+            }
             equality => self.equality(access, equality, ty, false),
         }
     }
@@ -87,6 +90,28 @@ impl BodyLowering<'_, '_, '_> {
             mode: EqualityMode::Ieee754,
             lhs: receiver,
             rhs: receiver,
+        }))
+    }
+
+    /// A numeric conversion member called on its dispatch receiver, lowered as checked FIR lowers
+    /// the source `value.toInt()`: a coercion of the receiver to the conversion's result.
+    fn numeric_conversion(
+        &mut self,
+        access: &KlibIrMemberAccess,
+        from: Ty,
+        to: Ty,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        let (&[Some(receiver)], true) = (arguments(access).as_slice(), ty == to) else {
+            return Err(mismatch(
+                "a numeric conversion is called with another shape than its declaration's",
+            ));
+        };
+        let receiver = self.operand(receiver, from)?;
+        Ok(self.ir.add_expr(IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg: receiver,
+            type_operand: to,
         }))
     }
 
@@ -152,7 +177,10 @@ impl BodyLowering<'_, '_, '_> {
                 Ok(self.ir.add_expr(IrExpr::Equality { op, mode, lhs, rhs }))
             }
             (
-                BuiltinOperator::Relation(_) | BuiltinOperator::Not | BuiltinOperator::IsNan { .. },
+                BuiltinOperator::Relation(_)
+                | BuiltinOperator::Not
+                | BuiltinOperator::IsNan { .. }
+                | BuiltinOperator::NumericConversion { .. },
                 _,
             ) => {
                 unreachable!("only an equality operator is lowered as an equality")

@@ -1395,12 +1395,6 @@ pub(super) fn lower_substitutions(values: &[FirTypeSubstitution]) -> Vec<IrCheck
 
 pub(super) fn lower_fir_intrinsic(operation: &crate::fir::FirIntrinsic) -> crate::ir::IrIntrinsic {
     match operation {
-        crate::fir::FirIntrinsic::ReinterpretBits { from, to } => {
-            crate::ir::IrIntrinsic::ReinterpretBits {
-                from: from.get(),
-                to: to.get(),
-            }
-        }
         crate::fir::FirIntrinsic::Assert { mode } => crate::ir::IrIntrinsic::Assert { mode: *mode },
         crate::fir::FirIntrinsic::ArrayGet => crate::ir::IrIntrinsic::ArrayGet,
         crate::fir::FirIntrinsic::ArraySet => crate::ir::IrIntrinsic::ArraySet,
