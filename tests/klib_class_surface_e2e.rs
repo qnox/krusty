@@ -265,8 +265,10 @@ fn kotlinc_native_consumes_a_krusty_reified_inline_body() {
         .expect("run the official consumer");
     assert!(
         run.status.success(),
-        "official consumer exited {}",
-        run.status
+        "official consumer exited {}:\nstdout:\n{}\nstderr:\n{}",
+        run.status,
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
     );
     assert_eq!(run.stdout, b"OK");
     std::fs::remove_dir_all(work).expect("remove the official consumer directory");

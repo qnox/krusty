@@ -460,7 +460,12 @@ impl FileWriter {
             .iter()
             .enumerate()
             .map(|(index, parameter)| {
-                let signature = self.local_signature();
+                // Kotlin gives a type parameter a stable identity within its declaring
+                // function. The prepared copy therefore owns the same `<TP>`/index local
+                // identity beneath its private file-scoped function identity; a bare scoped
+                // local cannot be matched to the callee's type parameter during reified
+                // substitution.
+                let signature = self.type_parameter_signature(symbol_signature, index);
                 let symbol = symbol(signature, TYPE_PARAMETER_SYMBOL);
                 (index, parameter, symbol)
             })
@@ -687,7 +692,8 @@ impl FileWriter {
         returned.field_varint(1, declaration);
         returned.field_message(2, &tested);
         let mut return_expression = Pb::new();
-        return_expression.field_varint(2, u64::from(boolean));
+        let nothing = self.ty(Ty::Nothing, parameters);
+        return_expression.field_varint(2, u64::from(nothing));
         return_expression.field_message(12, &returned);
         let mut statement = Pb::new();
         statement.field_message(3, &return_expression);
@@ -794,6 +800,20 @@ impl FileWriter {
         let mut encoded = Pb::new();
         encoded.field_message(5, &composite);
         self.signature(encoded.canonical().into_bytes())
+    }
+
+    fn type_parameter_signature(&mut self, function: u32, index: usize) -> u32 {
+        let name = self.string("<TP>");
+        let mut local = Pb::new();
+        local.field_packed_varints(1, &[u64::from(name)]);
+        local.field_varint(
+            2,
+            u64::try_from(index).expect("type-parameter index fits u64"),
+        );
+        let mut encoded = Pb::new();
+        encoded.field_message(6, &local);
+        let local = self.signature(encoded.canonical().into_bytes());
+        self.composite_signature(function, local)
     }
 
     fn local_signature(&mut self) -> u32 {
@@ -1080,21 +1100,36 @@ mod tests {
         else {
             panic!("body statement is an expression")
         };
-        let KlibIrExprKind::Return { value, .. } = &arena.expr(*returned).kind else {
+        let returned_expression = arena.expr(*returned);
+        let KlibIrExprKind::Return { value, .. } = &returned_expression.kind else {
             panic!("body expression is a return")
         };
+        let return_type = returned_expression.ty.expect("return has Nothing type");
+        assert!(matches!(
+            arena.ty(return_type),
+            crate::metadata::klib_ir::tree::KlibIrType::Simple { classifier, .. }
+                if classifier.signature
+                    == KlibIrSignature::Public(KlibPublicIdSignature::classifier(
+                        TypeName::from("kotlin/Nothing")
+                    ))
+        ));
         let KlibIrExprKind::TypeOperator { operand, .. } = &arena.expr(*value).kind else {
             panic!("returned expression is a type test")
         };
         let crate::metadata::klib_ir::tree::KlibIrType::Simple {
+            classifier,
             nullability,
             arguments,
             abbreviation,
-            ..
+            annotations: _,
         } = arena.ty(*operand)
         else {
             panic!("type-test operand is a simple type parameter")
         };
+        let [type_parameter] = decoded.type_parameters.as_slice() else {
+            panic!("fixture has one type parameter")
+        };
+        assert_eq!(classifier, &type_parameter.base.symbol);
         assert_eq!(*nullability, KlibIrNullability::NotSpecified);
         assert!(arguments.is_empty());
         assert!(abbreviation.is_none());
