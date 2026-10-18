@@ -104,7 +104,6 @@ mod context_sensitive_resolution;
 mod control_flow_join;
 pub(crate) mod declaration_index;
 pub(crate) mod delegated_properties;
-mod library_constructor_type_parameters;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod contract_declarations;
 mod contract_effects;
@@ -65459,7 +65458,7 @@ impl<'a> Checker<'a> {
                 .filter(|signature| signature.params.len() == parameter_count)
             {
                 let constructor_type_parameters =
-                    library_constructor_type_parameters::LibraryConstructorTypeParameters::new(
+                    crate::libraries::ConstructorTypeParameterCoordinates::new(
                         classifier.type_params(),
                         signature,
                     );
@@ -65801,7 +65800,14 @@ impl<'a> Checker<'a> {
                     continue;
                 }
                 let result_arguments =
-                    constructor_type_parameters.completed_result_arguments(internal, &bindings);
+                    crate::symbol_resolver::completed_constructor_result_arguments(
+                        internal,
+                        constructor_type_parameters.signature_formals(),
+                        constructor_type_parameters.signature_bounds(),
+                        &bindings,
+                    );
+                let result_arguments =
+                    constructor_type_parameters.classifier_types(result_arguments);
                 member.ret = Ty::obj_args_name(internal, &result_arguments);
                 member.params = signature
                     .params

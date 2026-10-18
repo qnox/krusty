@@ -2122,13 +2122,23 @@ impl ProductionSignatureSemantics<'_> {
         for (parameter, argument) in declared_parameters.iter().zip(arguments) {
             crate::symbol_resolver::unify_inferred_ty(*parameter, *argument, &mut inferred);
         }
+        let constructor_coordinates = member.generic_sig.as_ref().map(|signature| {
+            crate::libraries::ConstructorTypeParameterCoordinates::new(
+                &class.type_params,
+                signature,
+            )
+        });
+        let inferred_classifier = constructor_coordinates
+            .as_ref()
+            .map(|coordinates| coordinates.classifier_bindings(&inferred))
+            .unwrap_or_else(|| inferred.clone());
         let mut completed_bindings = bindings.clone();
         for (index, formal) in class.type_params.iter().enumerate() {
             let explicitly_fixed = explicit_type_arguments
                 .get(index)
                 .is_some_and(|argument| *argument != Ty::Error);
             if !explicitly_fixed {
-                if let Some(inferred) = inferred.get(formal).copied() {
+                if let Some(inferred) = inferred_classifier.get(formal).copied() {
                     completed_bindings.insert(formal.clone(), inferred);
                 }
             }
@@ -2147,9 +2157,14 @@ impl ProductionSignatureSemantics<'_> {
                 &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
             ]);
             let oracle = crate::symbol_resolver::SourceOracle(&source);
+            let coordinates = constructor_coordinates
+                .as_ref()
+                .expect("a generic constructor has type-parameter coordinates");
+            let mut signature_bindings = inferred.clone();
+            signature_bindings.extend(coordinates.signature_bindings(&completed_bindings));
             crate::symbol_resolver::generic_bindings_satisfy_bounds(
                 signature,
-                &completed_bindings,
+                &signature_bindings,
                 |actual, bound| {
                     crate::assignable::is_assignable(
                         &crate::assignable::TyCtx::new(),
