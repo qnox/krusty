@@ -10,8 +10,8 @@
 
 use crate::backend::coroutines::max_value_index;
 use crate::fx_hash::HashMap;
-use crate::ir::{EnumSwitchRegistration, ExprId, IrBinOp, IrConst, IrExpr, IrFile};
-use crate::types::{Ty, TypeName};
+use crate::ir::{EnumSwitchRegistration, EnumSwitchWhen, ExprId, IrBinOp, IrConst, IrExpr, IrFile};
+use crate::types::Ty;
 
 pub(crate) fn lower(ir: &mut IrFile) {
     let mut lowering = EnumWhenLowering {
@@ -27,15 +27,6 @@ struct EnumWhenLowering {
     /// The table claims each visited expression makes, in visiting order.
     claims: HashMap<ExprId, Vec<EnumSwitchRegistration>>,
     next_value: u32,
-}
-
-/// A subject `when` this pass rewrites: the block's subject temporary and the `when` reading it.
-struct SubjectWhen {
-    block: ExprId,
-    subject: u32,
-    classifier: TypeName,
-    nullable: bool,
-    when: ExprId,
 }
 
 /// The switch key of the subject's ordinal, created by the first comparison that needs it.
@@ -59,7 +50,7 @@ impl EnumWhenLowering {
         for child in children {
             claims.extend(self.visit(ir, child));
         }
-        if let Some(subject_when) = subject_when(ir, expression) {
+        if let Some(subject_when) = ir.enum_switch_when(expression) {
             claims.extend(self.lower_subject_when(ir, subject_when, &claims));
         }
         self.claims.insert(expression, claims.clone());
@@ -69,12 +60,9 @@ impl EnumWhenLowering {
     fn lower_subject_when(
         &mut self,
         ir: &mut IrFile,
-        subject_when: SubjectWhen,
+        subject_when: EnumSwitchWhen,
         nested: &[EnumSwitchRegistration],
     ) -> Vec<EnumSwitchRegistration> {
-        if !possible_to_generate_jump_table(ir, &subject_when) {
-            return Vec::new();
-        }
         let mut provider = OrdinalProvider {
             value: None,
             claims: Vec::new(),
@@ -125,7 +113,7 @@ impl EnumWhenLowering {
     fn transform_branches(
         &mut self,
         ir: &mut IrFile,
-        subject_when: &SubjectWhen,
+        subject_when: &EnumSwitchWhen,
         when: ExprId,
         provider: &mut OrdinalProvider,
     ) {
@@ -145,7 +133,7 @@ impl EnumWhenLowering {
     fn transform_subexpression(
         &mut self,
         ir: &mut IrFile,
-        subject_when: &SubjectWhen,
+        subject_when: &EnumSwitchWhen,
         expression: ExprId,
         provider: &mut OrdinalProvider,
     ) {
@@ -163,12 +151,12 @@ impl EnumWhenLowering {
     fn transform_enum_equals(
         &mut self,
         ir: &mut IrFile,
-        subject_when: &SubjectWhen,
+        subject_when: &EnumSwitchWhen,
         lhs: ExprId,
         rhs: ExprId,
         provider: &mut OrdinalProvider,
     ) {
-        let Some(other) = other_operand(ir, subject_when.subject, lhs, rhs) else {
+        let Some(other) = subject_when.compared_operand(ir, lhs, rhs) else {
             return;
         };
         let key = match ir.expr(other) {
@@ -201,105 +189,5 @@ impl EnumWhenLowering {
         ir.exprs[rhs as usize] = key;
         ir.logical_types.remove(&lhs);
         ir.logical_types.remove(&rhs);
-    }
-}
-
-/// `Block { val subject = …; when { … } }` with an enum subject, as common lowering builds a
-/// subject `when`. The subject is an enum when some branch compares it with one of its entries.
-fn subject_when(ir: &IrFile, block: ExprId) -> Option<SubjectWhen> {
-    let IrExpr::Block {
-        stmts,
-        value: Some(when),
-    } = ir.expr(block)
-    else {
-        return None;
-    };
-    let [declaration] = stmts.as_slice() else {
-        return None;
-    };
-    let IrExpr::Variable {
-        index: subject, ty, ..
-    } = ir.expr(*declaration)
-    else {
-        return None;
-    };
-    if !matches!(ir.expr(*when), IrExpr::When { .. }) {
-        return None;
-    }
-    let (classifier, nullable) = match *ty {
-        Ty::Obj(classifier, _) => (classifier, false),
-        Ty::Nullable(Ty::Obj(classifier, _)) => (*classifier, true),
-        _ => return None,
-    };
-    let candidate = SubjectWhen {
-        block,
-        subject: *subject,
-        classifier,
-        nullable,
-        when: *when,
-    };
-    compares_an_entry(ir, &candidate, *when).then_some(candidate)
-}
-
-fn compares_an_entry(ir: &IrFile, subject_when: &SubjectWhen, expression: ExprId) -> bool {
-    match ir.expr(expression) {
-        IrExpr::When { branches } => branches.iter().any(|(condition, result)| {
-            condition.is_some_and(|condition| compares_an_entry(ir, subject_when, condition))
-                || matches!(ir.expr(*result), IrExpr::When { .. })
-                    && compares_an_entry(ir, subject_when, *result)
-        }),
-        &IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Eq,
-            lhs,
-            rhs,
-        } => other_operand(ir, subject_when.subject, lhs, rhs).is_some_and(|other| {
-            matches!(ir.expr(other), IrExpr::EnumEntry { classifier, .. } if *classifier == subject_when.classifier)
-        }),
-        _ => false,
-    }
-}
-
-/// kotlinc's `possibleToGenerateJumpTable`: no branch tests the subject with another operation,
-/// or against a value that a call computes.
-fn possible_to_generate_jump_table(ir: &IrFile, subject_when: &SubjectWhen) -> bool {
-    let IrExpr::When { branches } = ir.expr(subject_when.when) else {
-        return false;
-    };
-    branches.iter().all(|(condition, _)| {
-        let Some(condition) = condition else {
-            return true;
-        };
-        match ir.expr(*condition) {
-            &IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Eq,
-                lhs,
-                rhs,
-            } => other_operand(ir, subject_when.subject, lhs, rhs).is_none_or(|other| {
-                matches!(
-                    ir.expr(other),
-                    IrExpr::EnumEntry { .. }
-                        | IrExpr::Const(_)
-                        | IrExpr::GetValue(_)
-                        | IrExpr::GetStatic(_)
-                        | IrExpr::GetField { .. }
-                )
-            }),
-            // An `||` chain of clauses, a guard, and a type test are not calls.
-            IrExpr::When { .. } | IrExpr::TypeOp { .. } | IrExpr::GetValue(_) => true,
-            _ => false,
-        }
-    })
-}
-
-/// The operand compared with the subject, when one side reads the subject.
-fn other_operand(ir: &IrFile, subject: u32, lhs: ExprId, rhs: ExprId) -> Option<ExprId> {
-    let reads_subject =
-        |operand: ExprId| matches!(ir.expr(operand), IrExpr::GetValue(value) if *value == subject);
-    if reads_subject(lhs) {
-        Some(rhs)
-    } else if reads_subject(rhs) {
-        Some(lhs)
-    } else {
-        None
     }
 }

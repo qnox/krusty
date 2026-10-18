@@ -1714,7 +1714,9 @@ impl Accessor<'_> {
     fn private_member(&self, function: u32, cw: &mut ClassWriter) {
         let owner = self.owner.internal_name(self.facade);
         let interface = self.owner.is_interface(self.ir);
-        if self.ir.functions[function as usize].is_static {
+        if self.ir.functions[function as usize].is_static
+            || super::jvm_static_members::singleton_static_owner(self.ir, function).is_some()
+        {
             super::access_bridges::emit_function_reference_access_bridge(
                 self.ir,
                 function,

@@ -186,6 +186,7 @@ impl Emitter<'_> {
             }
             Some(crate::ir::IrDebugLocalProvenance::InlineLambdaReceiver { .. })
             | Some(crate::ir::IrDebugLocalProvenance::InlineLambdaParameter { .. })
+            | Some(crate::ir::IrDebugLocalProvenance::InlineLambdaContinuation { .. })
             | Some(crate::ir::IrDebugLocalProvenance::InlineCallableReferenceParameter {
                 ..
             }) => true,

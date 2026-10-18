@@ -18,12 +18,15 @@ use crate::types::{Ty, TypeName};
 /// first and differ only on the second. `property_declarations` is the same split for a property:
 /// a same-file `val result: Result<T>` is declared as that value class and stores its carrier, while
 /// `Box<T>.value` is declared as `T` and, once `T = Result<Boolean>`, occupies an erased slot as a box.
+/// `joins` is the JVM merge type each exhaustive `when` was realized with: the representation every
+/// branch value is adapted to before the join, whatever the branch produced.
 #[derive(Clone, Copy)]
 pub(super) struct CallTypes<'a> {
     logical: &'a HashMap<u32, Ty>,
     declared: &'a HashMap<u32, Ty>,
     property_declarations: &'a HashMap<u32, Ty>,
     statics: &'a [crate::ir::IrStatic],
+    joins: &'a HashMap<u32, Ty>,
 }
 
 impl<'a> CallTypes<'a> {
@@ -33,7 +36,13 @@ impl<'a> CallTypes<'a> {
             declared: &ir.call_declared_ret,
             property_declarations: &ir.property_declaration_types,
             statics: &ir.statics,
+            joins: &ir.whens.exhaustive,
         }
+    }
+
+    /// The realized JVM merge type of the exhaustive `when` at `id`, if it is one.
+    pub(super) fn join_result(&self, id: u32) -> Option<Ty> {
+        self.joins.get(&id).copied()
     }
 
     /// A same-file property declared as value class `X` whose representation is the unboxed
@@ -167,6 +176,7 @@ mod tests {
             declared: &declared,
             property_declarations: &declared,
             statics: &[],
+            joins: &declared,
         };
         let absent = HashMap::default();
         assert!(matches!(

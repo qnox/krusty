@@ -1974,7 +1974,9 @@ impl Parser<'_> {
             return self.parse_expr();
         }
         let start = self.tok().span;
+        self.bare_branch_value = trailing_is_value;
         let s = self.parse_stmt();
+        self.bare_branch_value = false;
         // A bare expression branch stays a bare expression (its value is the branch value);
         // a real statement (`return`, assignment, `s += i`, …) becomes a Unit-valued block.
         if let Stmt::Expr(e) = self.file.stmt(s) {

@@ -318,6 +318,80 @@ fun box(): String {
 }
 
 #[test]
+fn wasm_bit_counts_run_as_the_stdlib_declared_instructions() {
+    expect_wasm_box(
+        r#"
+fun box(): String {
+    if (0x00f0.countLeadingZeroBits() != 24) return "clz"
+    if (0x0100.countTrailingZeroBits() != 8) return "ctz"
+    if ((-1).countOneBits() != 32 || 0.countOneBits() != 0) return "popcnt"
+    if ((1L shl 40).countLeadingZeroBits() != 23) return "long clz"
+    return "OK"
+}
+"#,
+        "wasmBitCountInstructions",
+    );
+}
+
+#[test]
+fn wasm_narrowing_numeric_conversions_wrap_and_saturate() {
+    expect_wasm_box(
+        r#"
+fun box(): String {
+    val big = 0x1_0000_0005L
+    if (big.toInt() != 5 || (-1L).toInt() != -1) return "Long.toInt"
+    if (0x1ffL.toByte() != (-1).toByte() || 0x18000L.toShort() != Short.MIN_VALUE) return "Long narrow"
+    val nan = 0.0 / 0.0
+    if (nan.toInt() != 0 || 1e300.toInt() != Int.MAX_VALUE || (-1e300).toInt() != Int.MIN_VALUE) return "Double.toInt"
+    if ((-2.9).toLong() != -2L || 1e30f.toLong() != Long.MAX_VALUE) return "toLong"
+    if (2.9f.toInt() != 2) return "Float.toInt"
+    if (1.5.toFloat() != 1.5f) return "Double.toFloat"
+    return "OK"
+}
+"#,
+        "wasmNarrowingNumericConversions",
+    );
+}
+
+#[test]
+fn wasm_math_runs_through_emitted_stdlib_instruction_wrappers() {
+    expect_wasm_box(
+        r#"
+import kotlin.math.*
+
+fun box(): String {
+    if (sqrt(16.0) != 4.0 || sqrt(2.25f) != 1.5f) return "sqrt"
+    if (floor(-1.5) != -2.0 || ceil(-1.5) != -1.0 || truncate(-1.5) != -1.0) return "double rounding"
+    if (floor(-1.5f) != -2f || ceil(-1.5f) != -1f || truncate(-1.5f) != -1f) return "float rounding"
+    if (abs(-3.0) != 3.0 || abs(-3f) != 3f) return "abs"
+    if (1.0 / min(0.0, -0.0) != Double.NEGATIVE_INFINITY || max(2.0, 3.0) != 3.0) return "min max"
+    val nan = min(Double.NaN, 1.0)
+    if (nan == nan) return "min propagates NaN"
+    if (max(1f, 2f) != 2f || min(1f, 2f) != 1f) return "float min max"
+    if (2.0.withSign(-1.0) != -2.0 || 2f.withSign(-1f) != -2f) return "withSign"
+    return "OK"
+}
+"#,
+        "wasmMathInstructionWrappers",
+    );
+}
+
+#[test]
+fn wasm_declines_an_instruction_wrapper_whose_body_lowering_does_not_model() {
+    // `pow` reaches fdlibm's `__ieee754_pow`, whose locals have no initializer: the wrapper is not
+    // support code, so its call declines instead of failing compilation.
+    expect_wasm_decline(
+        r#"
+import kotlin.math.pow
+
+fun box(): String = if (2.0.pow(3.0) == 8.0) "OK" else "pow"
+"#,
+        "wasmUnmodelledInstructionWrapper",
+        "a dependency callable whose target code was not emitted",
+    );
+}
+
+#[test]
 fn kotlin_codegen_box_wasm_js_conformance() {
     box_lane::run(&WasmLane {
         target: WasmTarget::Js,

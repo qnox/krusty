@@ -1,13 +1,44 @@
 //! Ordinary dependency-call forms of compiler-supplied operations.
 //!
 //! Source operators normally arrive as `IrIntrinsic`. A callable reference to the same selected
-//! declaration arrives as an external call instead, retaining the provider's exact
-//! compiler-intrinsic fact. This boundary consumes that identity; it never reconstructs one from
-//! an owner or callable spelling.
+//! declaration, and every call of a target-stdlib intrinsic such as a bit reinterpretation, arrives
+//! as an external call instead, retaining the provider's exact compiler-intrinsic fact. This
+//! boundary consumes that identity; it never reconstructs one from an owner or callable spelling.
 
 use super::*;
 
 impl BodyLowering<'_, '_, '_> {
+    /// The provider's bit reinterpretation of `operand`, a `from` scalar, as the equal-width `to`.
+    fn reinterpret_bits(
+        &mut self,
+        operand: u32,
+        from: Ty,
+        to: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        if !matches!(
+            (from, to),
+            (Ty::Float, Ty::Int)
+                | (Ty::Double, Ty::Long)
+                | (Ty::Int, Ty::Float)
+                | (Ty::Long, Ty::Double)
+        ) {
+            return Err(declined!(
+                "a scalar reinterpretation from `{from:?}` to `{to:?}`"
+            ));
+        }
+        let Some(value) = self.coerce(operand, from)? else {
+            return Err("a scalar reinterpretation of `Unit`".into());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let clif = self
+            .carrier(to)
+            .clif()
+            .expect("a validated reinterpretation target has a scalar carrier");
+        Ok(Some(self.bits_of(value, clif)))
+    }
+
     /// Realize an exact provider intrinsic reached through an ordinary member call.
     ///
     /// Returns `None` only when the selected declaration has no operation handled here, allowing
@@ -38,12 +69,7 @@ impl BodyLowering<'_, '_, '_> {
                     ))
                 }
             };
-            return Some(self.intrinsic(
-                IrIntrinsic::ReinterpretBits { from, to: ret },
-                ret,
-                receiver,
-                args,
-            ));
+            return Some(self.reinterpret_bits(operand, from, ret));
         }
         let floating_extension_operand = |operand: Ty| {
             let value = exact_extension_operand(receiver, args, extension_receiver_parameter)?;

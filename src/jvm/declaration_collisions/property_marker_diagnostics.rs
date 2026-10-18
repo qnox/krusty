@@ -13,6 +13,7 @@ pub(super) fn member_method_group_source_order(
         .iter()
         .map(|declaration| match *declaration {
             MemberMethodDeclaration::Source { offset, function }
+            | MemberMethodDeclaration::CompanionBridge { offset, function }
             | MemberMethodDeclaration::GeneratedDataMember { offset, function }
             | MemberMethodDeclaration::DelegationForwarder { offset, function } => (
                 ir.fn_source_order.get(&function).copied().unwrap_or(offset),
@@ -152,6 +153,7 @@ pub(super) fn declaration_types(
 ) -> Vec<Ty> {
     let function = match declaration {
         MemberMethodDeclaration::Source { function, .. }
+        | MemberMethodDeclaration::CompanionBridge { function, .. }
         | MemberMethodDeclaration::GeneratedDataMember { function, .. }
         | MemberMethodDeclaration::InPlaceDelegate { function, .. }
         | MemberMethodDeclaration::DelegationForwarder { function, .. } => Some(function),

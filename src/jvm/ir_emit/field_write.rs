@@ -177,7 +177,7 @@ impl Emitter<'_> {
     ) {
         // A static-storage object field has no instance operand. Evaluate a non-trivial receiver only
         // for its effects; the value then runs on a clean stack.
-        if !matches!(self.ir.expr(receiver), IrExpr::GetValue(_)) {
+        if !self.reads_local_value(receiver) {
             self.emit_value(receiver, code);
             code.pop();
         }
