@@ -310,3 +310,38 @@ fn each_local_class_numbers_its_own_lambdas_across_top_level_declarations() {
         assert_eq!(krusty, reference, "{class}: kotlinc's methods");
     }
 }
+
+/// kotlinc spells every segment of a lifted name as a Java identifier: a backticked function's
+/// lambdas and a backticked local function replace each character that is not a letter or a digit
+/// with `_` (`my_test$lambda$0`, `outer$my_local`), while the declared function keeps its name.
+#[test]
+fn backticked_names_lift_with_identifier_characters() {
+    let source = "fun `my test-é9`(): Int {\n\
+            \x20   val first = { 1 }\n\
+            \x20   fun `my local`() = 2\n\
+            \x20   return first() + `my local`()\n\
+            }\n\
+            class Spec {\n\
+            \x20   fun `reads a value`(): Int {\n\
+            \x20       val read = { 3 }\n\
+            \x20       return read()\n\
+            \x20   }\n\
+            }\n";
+    for class in ["BacktickedKt", "Spec"] {
+        let compared = common::compare_with_kotlinc_plugin(
+            "Backticked",
+            source,
+            class,
+            &[common::stdlib_jar()],
+            "1.8",
+            &[],
+        )
+        .expect("reference kotlinc and javap must be available");
+        assert!(
+            compared.krusty_bytes == compared.reference_bytes,
+            "{class} differs\n--- kotlinc ---\n{}\n--- krusty ---\n{}",
+            compared.reference,
+            compared.krusty
+        );
+    }
+}

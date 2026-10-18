@@ -2351,7 +2351,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   callable and everything nested beneath it, rather than reconstructing the move from a name or
   owner. A method keeps its previous name only where the lifted name and descriptor are already
   taken in the class it lands in (an enum entry's argument lambdas are placed in the enum rather
-  than the entry class kotlinc uses, so they are numbered with the enum's). Tests:
+  than the entry class kotlinc uses, so they are numbered with the enum's). Each segment is spelled
+  as a Java identifier (`NameUtils.sanitizeAsJavaIdentifier`): every character that is not a letter
+  or a digit becomes `_`, so a backticked `my test` lifts `my_test$lambda$0` and a backticked local
+  function `my local` lifts `outer$my_local`, while the declared function keeps its name. Tests:
   `tests/lifted_callable_names_e2e.rs`,
   `tests/companion_initializer_lambda_e2e.rs::a_nested_moved_lambda_uses_its_parents_physical_ordinal`.
 - **What a suspend lambda declares is lifted into the lambda's class.** kotlinc makes the suspend
