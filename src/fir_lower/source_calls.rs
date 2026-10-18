@@ -1,6 +1,7 @@
 //! Realization of stable same-file callable identities as ordinary common-IR calls.
 
 pub(super) mod argument_boundaries;
+mod inline_route;
 mod reordered_operands;
 
 use crate::fir::{
@@ -1712,8 +1713,17 @@ impl BodyLowering<'_> {
             , callable.is_inline()
         );
         // A call that takes its defaults from an overridden declaration dispatches through that
-        // declaration's default stub, as kotlinc's does, so it expands nothing here.
-        if callable.is_inline() && inherited_default_provider.is_none() {
+        // declaration's default stub, as kotlinc's does, so it expands nothing here. Any other call
+        // either stays a call the backend inlines from the callee's compiled body, or expands the
+        // callee's template here.
+        let route = (callable.is_inline() && inherited_default_provider.is_none()).then(|| {
+            self.same_module_inline_route(target, function, &inline_lambdas, has_defaults)
+        });
+        if let Some(inline_route::InlineCallRoute::Expansion(reason)) = route {
+            crate::trace_compiler!(
+                "lower",
+                "inline call target={target:?} expanded: {reason:?}"
+            );
             let declined = FirLoweringFailure::InlineExpansionDeclined(target);
             let Some(function) = function else {
                 return Some(Err(declined));
@@ -1888,6 +1898,10 @@ impl BodyLowering<'_> {
             }),
             None => return None,
         };
+        if route == Some(inline_route::InlineCallRoute::CompiledBody) {
+            let function = function.expect("a compiled-body route names the callee's template");
+            self.ir.record_compiled_inline_call(call, function);
+        }
         argument_boundaries::record(
             self.ir,
             call,

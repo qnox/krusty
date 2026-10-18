@@ -5298,8 +5298,20 @@ regress.
 - ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.
   Mask expansion and singleton default lambdas (`DefaultLambda`, with reification) are ported;
   a default lambda constructed with captured values and `finally` rewriting remain.
-- ☐ 6. Same-module inline functions compiled from IR to a node (`IrSourceCompilerForInline`) and
+- ◐ 6. Same-module inline functions compiled from IR to a node (`IrSourceCompilerForInline`) and
   inlined by the same port; the JVM stops using the IR expansion (other targets keep it).
+  - ✓ 6a. Calls without lambda arguments or defaults to public top-level non-suspend callees
+    (not companion-block members) without function-typed parameters, reified type parameters or
+    anonymous objects, from named non-suspend non-inline functions. Common lowering plans the
+    route before emission (`fir_lower/source_calls/inline_route.rs`, each expansion with a named
+    reason) and records the calls kept for the backend (`IrFile::compiled_inline_call`); the JVM
+    compiles each callee once per pass into a writer of its own class and source file
+    (`classfile::emitted_method_code`) and inlines it through `try_inline_classpath_body`, failing
+    the emission rather than calling it.
+    A generic argument is now boxed into an erased `Object` temporary as kotlinc's is: 25 more
+    box files are byte-identical on 2.4.20 (3,681 to 3,706), none regresses.
+  - ☐ 6b. Lambda arguments, `$default` calls, class members, non-public callees, suspend callers
+    and callees, and calls in lambdas, local functions, initializers and accessors.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
 
