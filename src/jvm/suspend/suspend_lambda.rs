@@ -17,8 +17,8 @@
 
 use super::bytecode_machine::{eligible_points, owned_suspensions, Route, Routed, Subject};
 use super::cps::{
-    SuspendLambdaCapture, SuspendLambdaClass, SuspendLambdaMachine, SuspendLambdaParameters,
-    TransformedMachine,
+    spliced_inline_suspensions, SuspendLambdaCapture, SuspendLambdaClass, SuspendLambdaMachine,
+    SuspendLambdaParameters, TransformedMachine,
 };
 use super::{append_continuation, box_returns, continuation_ty, ensure_tail_return, int_ty};
 use crate::fx_hash::HashSet;
@@ -99,6 +99,7 @@ pub(super) fn route(
     else {
         return Routed::Failed;
     };
+    let placed = spliced_inline_suspensions(ir, body, route.suspend_set);
     let unit_return = route.context.orig_rets[fid as usize] == Ty::Unit;
     let specialized = ir.specialized_functions.contains_key(&fid);
     if specialized {
@@ -136,13 +137,18 @@ pub(super) fn route(
     );
     let parameter_reads = read_parameters(ir, class, body, first_parameter, &captures, &parameters);
     for suspension in &suspensions {
-        // The lambda is the continuation its suspension points pass on.
-        let this = ir.add_expr(IrExpr::GetValue(0));
-        let continuation = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: this,
-            type_operand: continuation_ty(),
-        });
+        // The lambda is the continuation its suspension points pass on. A point inside a lambda the
+        // method inliner places reads it as the continuation that lambda captures.
+        let continuation = if placed.contains(&suspension.call) {
+            ir.add_expr(IrExpr::CurrentContinuation)
+        } else {
+            let this = ir.add_expr(IrExpr::GetValue(0));
+            ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: this,
+                type_operand: continuation_ty(),
+            })
+        };
         if !append_continuation(
             ir,
             suspension.call,

@@ -545,9 +545,24 @@ impl Emitter<'_> {
         } = lambda;
         let LambdaFrame {
             slots: parameter_slots,
-            args_size,
+            mut args_size,
         } = lambda_frame(&capture_types, &parameter_types);
         let declared_result = self.ir.functions[impl_fn as usize].ret;
+        // A suspension in the body passes on the caller's continuation, which the lambda captures
+        // as its last value, as kotlinc's lambda captures `$completion`.
+        let continuation_read = self.continuation_read_within(inline_body);
+        let continuation_slot = continuation_read.map(|_| {
+            let slot = args_size;
+            args_size += 1;
+            slot
+        });
+        let own_captures = captures.len();
+        let mut capture_types = capture_types;
+        let mut captures = captures;
+        if let Some(read) = continuation_read {
+            capture_types.push(Ty::obj("kotlin/coroutines/Continuation"));
+            captures.push(read);
+        }
 
         // The lambda's node is a method of its own: its body's locals are laid out in a frame of
         // their own, above its parameters, captures and marker.
@@ -560,6 +575,10 @@ impl Emitter<'_> {
         let caller_next_inline_frame_identity =
             std::mem::replace(&mut self.next_inline_frame_identity, 0);
         let states_before = self.machine_next_ordinal;
+        let caller_continuation = match continuation_slot {
+            Some(slot) => self.continuation_slot.replace(slot),
+            None => self.continuation_slot,
+        };
         self.frame.reserve_through(args_size + 1);
         let mut scratch = CodeBuilder::new(args_size);
         scratch.push_int(0, self.cw);
@@ -574,6 +593,7 @@ impl Emitter<'_> {
         self.block_depth = caller_depth;
         let body_locals = std::mem::replace(&mut self.open_locals, caller_locals);
         self.next_inline_frame_identity = caller_next_inline_frame_identity;
+        self.continuation_slot = caller_continuation;
         if self.machine_next_ordinal != states_before {
             return Err("a lambda planned for the inliner started a suspension");
         }
@@ -656,7 +676,7 @@ impl Emitter<'_> {
                     )
                 } else {
                     identities
-                        .and_then(|identities| identities.get(captures.len() + index))
+                        .and_then(|identities| identities.get(own_captures + index))
                         .and_then(|identity| match identity.role {
                             // kotlinc names an extension lambda's receiver after the lambda.
                             crate::ir::IrParameterRole::ExtensionReceiver => {
@@ -672,7 +692,7 @@ impl Emitter<'_> {
                         })
                 };
                 if let Some(name) = name {
-                    let (slot, _) = parameter_slots[captures.len() + index];
+                    let (slot, _) = parameter_slots[own_captures + index];
                     scratch.add_local_entry(0, Some(end), slot, &name, &type_descriptor(ty));
                 }
             }
@@ -708,7 +728,13 @@ impl Emitter<'_> {
                 value_class_parameters,
                 value_class_return: self.invoke_coercion(result_semantic, result).value_class(),
                 captured: 0..0,
-                capture_names: self.capture_names(impl_fn, captures.len()),
+                capture_names: {
+                    let mut names = self.capture_names(impl_fn, own_captures);
+                    if continuation_read.is_some() {
+                        names.push(Some("$completion".to_string()));
+                    }
+                    names
+                },
                 default_class: None,
             },
             captures: captures
@@ -744,6 +770,22 @@ impl Emitter<'_> {
                 }
             })
             .collect()
+    }
+
+    /// A read of the current function's own continuation in `root`'s subtree, which a lambda placed
+    /// in that function captures.
+    fn continuation_read_within(&self, root: u32) -> Option<u32> {
+        self.continuation_slot?;
+        let mut pending = vec![root];
+        while let Some(expression) = pending.pop() {
+            if matches!(self.ir.expr(expression), IrExpr::CurrentContinuation)
+                && !self.is_fake_continuation(expression)
+            {
+                return Some(expression);
+            }
+            crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| pending.push(child));
+        }
+        None
     }
 
     /// Whether `root`'s subtree holds one of the current function's suspension points.
