@@ -100,3 +100,26 @@ fn assert_copies_the_wrapper_as_kotlinc(name: &str, lib: &str, main: &str) {
     assert_eq!(classes(&krusty), classes(&reference));
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// A caller compiled for a newer JVM target writes its copy of an older library's wrapper at the
+/// caller's class-file version, as kotlinc writes every class it regenerates.
+#[test]
+fn an_inlined_sam_wrapper_copy_takes_the_callers_class_file_version() {
+    let library =
+        common::compile_lib("inline_sam_wrapper_copy", LIB).expect("krusty builds the library");
+    let classpath = [library, common::stdlib_jar()];
+    for class in [
+        "MainKt",
+        "MainKt$inlined$sam$i$java_util_function_Supplier$0",
+    ] {
+        let compared =
+            common::compare_with_kotlinc_plugin("Main", MAIN, class, &classpath, "25", &[])
+                .expect("reference kotlinc and javap must be available");
+        assert!(
+            compared.krusty_bytes == compared.reference_bytes,
+            "{class} differs\n--- kotlinc ---\n{}\n--- krusty ---\n{}",
+            compared.reference,
+            compared.krusty
+        );
+    }
+}
