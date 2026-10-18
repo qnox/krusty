@@ -159,7 +159,8 @@ fn an_integer_literal_declared_long_is_stored_as_a_long_constant() {
          const val F: Long = A * 2\n\
          const val G: Long = -(60 + 1)\n\
          const val H: Long = +(2 * 3)\n\
-         fun box() = if (A + B + C + F + D + E + G + H == 130L) \"OK\" else \"fail\"\n";
+         const val I: Long = -(1 shl 31)\n\
+         fun box() = if (A + B + C + F + D + E + G + H + I == 130L - 2147483648L) \"OK\" else \"fail\"\n";
     let constants = |ci: &krusty::jvm::classreader::ClassInfo| {
         ci.fields
             .iter()

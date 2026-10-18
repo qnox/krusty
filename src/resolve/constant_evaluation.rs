@@ -347,12 +347,7 @@ fn retype_constant(mut constant: LibraryConst, ty: Ty) -> Option<LibraryConst> {
 }
 
 fn evaluate_unary(operation: UnOp, operand: LibraryConst, ty: Ty) -> Option<LibraryConst> {
-    // An integer operand takes a Long result type through the operator, as in `-(60 + 1)`.
-    let operand_value = match (operand.value, ty.non_null()) {
-        (LibConst::Int(value), Ty::Long) => LibConst::Long(i64::from(value)),
-        (value, _) => value,
-    };
-    let value = match (operation, operand_value) {
+    let value = match (operation, operand.value) {
         (
             UnOp::Plus,
             value @ (LibConst::Int(_)
@@ -368,6 +363,12 @@ fn evaluate_unary(operation: UnOp, operand: LibraryConst, ty: Ty) -> Option<Libr
             LibConst::Int(i32::from(value == 0))
         }
         _ => return None,
+    };
+    // An integer operand is negated at its own width, then widened to a Long result type: kotlinc
+    // folds `-(1 shl 31)` declared Long to -2147483648.
+    let value = match (value, ty.non_null()) {
+        (LibConst::Int(value), Ty::Long) => LibConst::Long(i64::from(value)),
+        (value, _) => value,
     };
     Some(LibraryConst { ty, value })
 }
@@ -652,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn a_unary_operator_widens_an_integer_operand_to_a_long_result() {
+    fn a_unary_operator_widens_its_integer_result_to_a_long() {
         let int = |value| LibraryConst {
             ty: Ty::Int,
             value: LibConst::Int(value),
@@ -665,6 +666,10 @@ mod tests {
         };
         assert_eq!(evaluate_unary(UnOp::Neg, int(61), Ty::Long), long(-61));
         assert_eq!(evaluate_unary(UnOp::Plus, int(6), Ty::Long), long(6));
+        assert_eq!(
+            evaluate_unary(UnOp::Neg, int(i32::MIN), Ty::Long),
+            long(i64::from(i32::MIN))
+        );
     }
 
     #[test]
