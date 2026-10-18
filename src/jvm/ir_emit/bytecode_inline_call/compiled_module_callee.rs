@@ -181,7 +181,13 @@ impl Emitter<'_> {
             allow_owner_bridge: true,
             for_inline_copy: false,
         };
-        let reified = crate::jvm::reified_arguments::ReifiedArguments::default();
+        let reified = crate::jvm::reified_operations::splice_arguments(
+            self.ir,
+            call_expression,
+            &self.facade,
+            self.ir.recursive_type_of,
+            &|ty| self.rendered_inlined_cast_target(ty),
+        );
         let call = ClasspathInlineCall {
             call_expression,
             target: &target,

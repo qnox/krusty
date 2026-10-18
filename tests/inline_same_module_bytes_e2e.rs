@@ -368,3 +368,86 @@ fn a_bound_value_class_reference_captures_the_unboxed_receiver() {
         "OK"
     );
 }
+
+// A reified callee is inlined from its compiled body: the body's `reifiedOperationMarker` calls name
+// the type parameter, and the inliner repoints the `checkcast`/`instanceof` after each to the call's
+// type argument. A smart-cast scalar the body casts to `T` is boxed before the marker.
+const REIFIED_LIBRARY: &str = r#"inline fun <reified T> isOf(x: Any?): Boolean = x is T
+
+inline fun <reified T> castTo(x: Any?): T = x as T
+
+inline fun <reified T> negated(value: T): T {
+    return when (value) {
+        is Float -> -value as T
+        is Double -> -value as T
+        else -> throw NumberFormatException()
+    }
+}
+"#;
+
+const REIFIED_MAIN: &str = r#"fun box(): String {
+    if (!isOf<String>("a")) return "is String"
+    if (isOf<Int>("a")) return "is Int"
+    if (negated(0.0).toString() != "-0.0") return "Double"
+    if (negated(0.0f).toString() != "-0.0") return "Float"
+    return castTo<String>("OK")
+}
+"#;
+
+#[test]
+fn a_reified_callee_is_inlined_from_the_compiled_body() {
+    assert_like_kotlinc(&[("lib.kt", REIFIED_LIBRARY), ("main.kt", REIFIED_MAIN)]);
+}
+
+#[test]
+fn a_reified_callee_inlined_from_the_compiled_body_runs() {
+    common::expect_box_ok_files_with_stdlib(
+        &[("lib.kt", REIFIED_LIBRARY), ("main.kt", REIFIED_MAIN)],
+        "Reified",
+    );
+}
+
+// A callee that creates an array of its reified type parameter stays expanded in IR: its compiled
+// body would need the `NEW_ARRAY` marker kotlinc places before the `anewarray`.
+const REIFIED_ARRAY: &str = r#"inline fun <reified T> jagged(n: Int, value: T): Array<Array<T>> =
+    Array(n) { Array(n) { value } }
+
+inline fun <reified T> packed(vararg elements: T): Array<out T> = arrayOf(*elements)
+
+fun box(): String {
+    val grid = jagged(2, "K")
+    if (grid[1][1] != "K") return "jagged"
+    val array: Array<out String> = packed("O", "K")
+    return array[0] + grid[0][0]
+}
+"#;
+
+#[test]
+fn a_callee_creating_a_reified_array_runs() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(REIFIED_ARRAY, "ReifiedArray"),
+        "OK"
+    );
+}
+
+// A same-file callee is compiled into the caller's own class, so a private one is inlined from
+// its compiled body as a public one is.
+const PRIVATE_CALLEE: &str = r#"private val suffix = "K"
+
+private inline fun <T> withSuffix(prefix: String, block: (String) -> T): T = block(prefix + suffix)
+
+fun box(): String = withSuffix("O") { it }
+"#;
+
+#[test]
+fn a_private_same_file_callee_is_inlined_from_the_compiled_body() {
+    assert_like_kotlinc(&[("main.kt", PRIVATE_CALLEE)]);
+}
+
+#[test]
+fn a_private_same_file_callee_inlined_from_the_compiled_body_runs() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(PRIVATE_CALLEE, "PrivateCallee"),
+        "OK"
+    );
+}

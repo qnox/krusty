@@ -5089,9 +5089,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   route once (`fir_lower/source_calls/inline_route.rs`): a call stays a call recorded for the
   backend (`IrFile::compiled_inline_call`) only when the callee is a public top-level, non-suspend
   function in this module (not a companion-block member, which its class compiles) with no
-  suspend function-typed parameter or receiver, no `crossinline` parameter, no reified type
-  parameter, and a template without lambdas, callable references, local classes, nested
-  expansions or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
+  suspend function-typed parameter or receiver, no `crossinline` parameter, and a template without
+  lambdas, callable references, local classes, nested expansions, arrays of a reified type
+  parameter or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
   called with every argument from a named, non-suspend, non-inline function body (not a lambda,
   local function, default argument, initializer or accessor), and with no literal lambda argument
   that leaves its body by a non-local `return`, `break` or `continue`. Every other call is
@@ -5150,6 +5150,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   locals. Tests: `tests/inline_use_close_e2e.rs`, `tests/inline_scope_function_bytes_e2e.rs`,
   `tests/try_debug_lines_e2e.rs` (`an_inlined_catch_parameter_is_named_at_its_expansion_depth`),
   `tests/value_class_lambda_class_e2e.rs` (`a_noinline_argument_of_an_inline_call_is_its_own_class`).
+
+- **A same-module reified or same-file private inline callee is inlined from the compiled body.**
+  The callee's compiled body carries kotlinc's `Intrinsics.reifiedOperationMarker` before each
+  `checkcast`/`instanceof` on a reified type parameter, and the call records each reified
+  parameter's call-site value by the parameter's source name (`IrFile::reified_call_subst`), so the
+  inliner repoints the marked instructions exactly as it does for a library callee. A scalar the body
+  casts to a reified `T` (a smart-cast `-value as T`) is boxed before the marker, as kotlinc's
+  `AS` operand is an object. A callee that creates an array of a reified type parameter stays
+  expanded in IR (`ReifiedArrayInBody`): its body would need the `NEW_ARRAY` marker kotlinc places
+  before the `anewarray`. A non-public callee is inlined from its compiled body when it is declared
+  in the caller's own file (its body is compiled into the same class); one declared in another file
+  stays expanded (`NonPublicCallee`), since its body may reach that file's private declarations.
+  Tests: `tests/inline_same_module_bytes_e2e.rs` (reified `is`, `as T` and a boxed `as T`, and a private
+  same-file callee against kotlinc's bytes; a reified-array callee runs).
 
 - **`inline fun` (same-module, user-defined):** expanded at each call site by the IR lowerer
   (`Lower::lower_inline_fn_call`), matching kotlinc's effect — value parameters bind to once-evaluated

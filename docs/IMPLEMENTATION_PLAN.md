@@ -5319,8 +5319,11 @@ regress.
     invokes through the classpath route (`inline_call_with_body`), with function values read from
     caller locals, unread literals dropped and stacked operands saved around a `try` or loop body
     for every inline callee: 26 more box files are byte-identical on 2.4.20 (3,706 to 3,732), none
-    regresses.
-    ☐ `$default` calls, class members, non-public callees, suspend callers and callees,
+    regresses. ✓ Reified callees (their markers repointed from `IrFile::reified_call_subst`) and
+    same-file non-public callees, with try/catch ordering around a `finally`, `Unit` call results
+    and compacted body slots placed as kotlinc's inliner places them: 3,740, none regresses.
+    ☐ `$default` calls, class members, non-public callees of another file, reified callees that
+    create arrays of a reified type parameter (`NEW_ARRAY` markers), suspend callers and callees,
     `crossinline` parameters, literals with non-local jumps, and calls in lambdas, local functions,
     initializers and accessors.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs

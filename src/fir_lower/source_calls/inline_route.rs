@@ -48,11 +48,10 @@ pub(in super::super) enum ExpansionReason {
     /// A parameter of the callee is `crossinline`: its lambda is placed in an object or lambda the
     /// callee's body creates.
     CrossinlineParameter,
-    /// The callee declares a reified type parameter.
-    ReifiedTypeParameter,
     /// The callee is a member of a class, object or interface, or of a class's companion block.
     ClassMember,
-    /// The callee is not public, so its body may reach declarations only its own class can.
+    /// The callee is not public and declared in another file, so its body may reach declarations
+    /// only its own file's class can.
     NonPublicCallee,
     /// The callee has no body of its own in this file's IR.
     NoTemplate,
@@ -66,6 +65,9 @@ pub(in super::super) enum ExpansionReason {
     /// read from a table of the callee's own class (the JVM's `$WhenMappings`), numbered as that
     /// class's emission claims them, which a body compiled for the call site cannot reproduce.
     EnumSwitchInBody,
+    /// The callee's body creates an array whose element type is one of its reified type
+    /// parameters, which its compiled body would have to mark for the inliner.
+    ReifiedArrayInBody,
 }
 
 impl BodyLowering<'_> {
@@ -141,26 +143,22 @@ impl BodyLowering<'_> {
         {
             return Some(ExpansionReason::ClassMember);
         }
-        if header.visibility != Visibility::Public {
-            return Some(ExpansionReason::NonPublicCallee);
-        }
         let Some(function) = function else {
             return Some(ExpansionReason::NoTemplate);
         };
+        // A body compiled into its own file's class reaches that file's private declarations as
+        // the class itself does; inlined into another file's class it would need accessors.
+        if header.visibility != Visibility::Public
+            && self.ir.foreign_inline_templates.contains(&function)
+        {
+            return Some(ExpansionReason::NonPublicCallee);
+        }
         if self
             .ir
             .declared_inline_modifiers(function)
             .contains(&InlineParameterModifier::Crossinline)
         {
             return Some(ExpansionReason::CrossinlineParameter);
-        }
-        if self.ir.signatures.get(&function).is_some_and(|signature| {
-            signature
-                .type_params
-                .iter()
-                .any(|parameter| parameter.reified)
-        }) {
-            return Some(ExpansionReason::ReifiedTypeParameter);
         }
         let Some(body) = self
             .ir
@@ -170,7 +168,7 @@ impl BodyLowering<'_> {
         else {
             return Some(ExpansionReason::NoTemplate);
         };
-        self.template_exclusion(body)
+        self.template_exclusion(function, body)
     }
 
     /// What about the body being lowered keeps its same-module inline calls expanded in IR.
@@ -196,7 +194,20 @@ impl BodyLowering<'_> {
     }
 
     /// What in the callee's IR template keeps a call to it expanded in IR.
-    fn template_exclusion(&self, body: ExprId) -> Option<ExpansionReason> {
+    fn template_exclusion(&self, function: FunId, body: ExprId) -> Option<ExpansionReason> {
+        let reified = self
+            .ir
+            .signatures
+            .get(&function)
+            .map(|signature| {
+                signature
+                    .type_params
+                    .iter()
+                    .filter(|formal| formal.reified)
+                    .map(|formal| formal.semantic_name.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let mut pending = vec![body];
         let mut seen = std::collections::HashSet::new();
         while let Some(expression) = pending.pop() {
@@ -224,11 +235,48 @@ impl BodyLowering<'_> {
                 {
                     return Some(ExpansionReason::LocalClassInBody);
                 }
+                IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. }
+                    if mentions_reified(*array_type, &reified) =>
+                {
+                    return Some(ExpansionReason::ReifiedArrayInBody);
+                }
                 _ => {}
             }
             crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| pending.push(child));
         }
         None
+    }
+
+    /// Record the call-site value of each reified type parameter of `function`, which `call`
+    /// inlines from its compiled body, by the parameter's source name the body's markers carry.
+    pub(in super::super) fn record_compiled_reified_arguments(
+        &mut self,
+        call: ExprId,
+        function: FunId,
+        substitutions: &[crate::fir::FirTypeSubstitution],
+    ) {
+        let Some(signature) = self.ir.signatures.get(&function) else {
+            return;
+        };
+        let reified = substitutions
+            .iter()
+            .filter(|substitution| substitution.reified)
+            .filter_map(|substitution| {
+                let crate::fir::FirTypeParameterRef::Module(parameter) = substitution.parameter
+                else {
+                    return None;
+                };
+                let semantic = self.index.type_parameter_semantic_name(parameter)?;
+                let formal = signature
+                    .type_params
+                    .iter()
+                    .find(|formal| formal.reified && formal.semantic_name == semantic)?;
+                Some((formal.name.clone(), substitution.reified_runtime.get()))
+            })
+            .collect::<Vec<_>>();
+        if !reified.is_empty() {
+            self.ir.reified_call_subst.insert(call, reified);
+        }
     }
 
     /// Whether the literal lambda `lambda` leaves its inline body by a `return` (every `return` an
@@ -242,6 +290,17 @@ impl BodyLowering<'_> {
             return false;
         };
         leaves_non_locally(self.ir, *body, &mut Vec::new())
+    }
+}
+
+/// Whether `ty` mentions a type parameter whose identity is in `reified`.
+fn mentions_reified(ty: Ty, reified: &[&str]) -> bool {
+    match ty.non_null() {
+        Ty::TyParam(name, _) => reified.contains(&name),
+        other => other
+            .type_args()
+            .iter()
+            .any(|&argument| mentions_reified(argument, reified)),
     }
 }
 

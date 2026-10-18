@@ -1476,6 +1476,17 @@ impl super::Emitter<'_> {
                 erased,
             } => {
                 self.emit_value(*arg, code);
+                // The marker and its type operation take a reference: a scalar operand is boxed
+                // first, as kotlinc's `-value as T` boxes the negated `Double`.
+                let physical = self.value_ty(*arg);
+                if physical.is_jvm_scalar() {
+                    let semantic = self.ir.logical_types.get(arg).copied().unwrap_or(physical);
+                    super::box_prim_free(
+                        self.cw,
+                        code,
+                        super::semantic_scalar_adapter(semantic, physical),
+                    );
+                }
                 // kotlinc's reified is/as placeholder: marker(3) + instanceof, marker(1) + checkcast.
                 code.push_int(if *cast { 1 } else { 3 }, self.cw);
                 code.push_string(name, self.cw);
