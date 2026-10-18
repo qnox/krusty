@@ -266,8 +266,8 @@ impl AnonymousObjects for CallObjects<'_> {
         let wrapper = sam_wrapper_copy_name(self.bodies, generators, &self.owner, class)
             .map_err(InlineError::Regeneration)?;
         if let Some((new_class, first)) = wrapper {
-            let bytes =
-                copy_sam_wrapper(&original, &new_class).map_err(InlineError::Regeneration)?;
+            let bytes = copy_sam_wrapper(&original, &new_class, self.major)
+                .map_err(InlineError::Regeneration)?;
             if self.commit && first {
                 self.run
                     .machine_classes

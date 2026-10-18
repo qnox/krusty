@@ -13,10 +13,12 @@ use crate::jvm::classfile::{ClassWriter, InnerClassSpec};
 
 use super::{remap_declaration, RegenerationError, TypeRemapper};
 
-/// Copy the SAM wrapper `original` as `new_class`.
+/// Copy the SAM wrapper `original` as `new_class`, at the caller's class-file version `major` when
+/// that is the newer one, as a regenerated object is written.
 pub(crate) fn copy_sam_wrapper(
     original: &ClassNode,
     new_class: &str,
+    major: u16,
 ) -> Result<Vec<u8>, RegenerationError> {
     if original.source_debug.is_some() {
         return Err(RegenerationError::Unsupported(
@@ -45,7 +47,7 @@ pub(crate) fn copy_sam_wrapper(
         cw.set_signature(signature);
     }
     cw.set_access(original.access);
-    cw.set_major(original.major);
+    cw.set_major(original.major.max(major));
     for interface in &original.interfaces {
         cw.add_interface(&remapper.map_type(interface)?);
     }
