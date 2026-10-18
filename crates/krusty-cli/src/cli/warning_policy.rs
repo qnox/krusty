@@ -36,6 +36,17 @@ impl WarningName {
                         .is_some_and(|table| table.get("ForbidUselessTypeArgumentsIn25").is_some())
                 }
                 krusty::diag::CompilerWarningName::Deprecation => true,
+                krusty::diag::CompilerWarningName::DeprecationErrorMigrationPeriodWarning => {
+                    FeatureTable::for_version(release).is_some_and(|table| {
+                        [
+                            "ReportDeprecatedCompanionInDelegation",
+                            "ReportDeprecationsOfClassifiersInImplicitInvokes",
+                            "ReportDeprecationsOfOuterImportedClasses",
+                        ]
+                        .iter()
+                        .any(|feature| table.get(feature).is_some())
+                    })
+                }
                 krusty::diag::CompilerWarningName::ExplicitTypeArgumentsInPropertyAccess => {
                     FeatureTable::for_version(release)
                         .is_some_and(|table| table.get("ForbidUselessTypeArgumentsIn25").is_some())

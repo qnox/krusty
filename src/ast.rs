@@ -15,11 +15,13 @@ use traversal::{any_class_decl_expr, any_fun_decl_expr, any_property_decl_expr};
 mod binary_reference_tokens;
 mod call_shape;
 mod classifier_owners;
+mod compound_assignments;
 mod constructors;
 mod declaration_prefixes;
 pub(crate) mod definitely_evaluated;
 mod destructuring;
 mod external_modifier_targets;
+mod import_path;
 mod operators;
 mod property_initializers;
 mod type_refs;
@@ -32,6 +34,7 @@ pub use constructors::{CtorDelegation, CtorDelegationCall, PrimaryCtorLines, Sec
 pub use declaration_prefixes::{DeclarationPrefix, DeclarationPrefixes};
 pub use destructuring::{DestructureProperty, DestructuringSyntax};
 pub use external_modifier_targets::{ExternalModifierTarget, ExternalModifierUse};
+pub use import_path::ImportPath;
 pub use operators::{BinOp, UnOp};
 pub use use_site_annotations::UseSiteAnnotation;
 
@@ -1532,33 +1535,6 @@ pub struct LiftingStep {
     pub position: u32,
 }
 
-/// One parsed import directive with the source span of each path segment.
-#[derive(Clone, Debug)]
-pub struct ImportPath {
-    pub segments: Vec<(String, Span)>,
-    pub wildcard: bool,
-    pub alias: Option<String>,
-}
-
-impl ImportPath {
-    pub fn path(&self) -> String {
-        self.segments
-            .iter()
-            .map(|(segment, _)| segment.as_str())
-            .collect::<Vec<_>>()
-            .join(".")
-    }
-
-    pub fn imported_name(&self) -> Option<&str> {
-        if self.wildcard {
-            return None;
-        }
-        self.alias
-            .as_deref()
-            .or_else(|| self.segments.last().map(|(segment, _)| segment.as_str()))
-    }
-}
-
 /// A top-level `expect` declaration and the keyword that introduced it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExpectDeclaration {
@@ -1679,6 +1655,8 @@ pub struct File {
     pub when_subject_variables: crate::fx_hash::HashSet<u32>,
     /// Assignment lvalue spans keyed by statement ID.
     pub assignment_target_spans: crate::fx_hash::HashMap<u32, Span>,
+    /// Source-name spans keyed by the synthetic read expression made for `target op= value`.
+    pub compound_assignment_read_spans: crate::fx_hash::HashMap<u32, Span>,
     /// Source span of the `init` KEYWORD introducing each initializer block, keyed by the block
     /// expression [`ClassInit::Block`] records. A diagnostic about an `init` block points at the
     /// keyword, which the block expression's own span (the `{`) does not cover.
@@ -1730,9 +1708,10 @@ pub struct File {
     /// Exact `(` locations for syntactically empty calls. For non-empty calls, diagnostics can point at
     /// the first argument; keeping this map sparse avoids adding location fields to every call node.
     pub empty_call_open_paren_spans: crate::fx_hash::HashMap<u32, Span>,
-    /// Exact raw name locations when a member name cannot be recovered from the expression end:
-    /// backticked members and safe calls with argument lists. Kept sparse rather than widening every
-    /// expression node.
+    /// Exact raw name locations for parsed member accesses, and for other name-bearing expressions
+    /// whose member location cannot be recovered from the expression end (for example safe calls
+    /// with argument lists). Parsed members retain this unconditionally so synthetic reads preserve
+    /// the terminal segment's source provenance without spelling recovery.
     pub exact_member_name_spans: crate::fx_hash::HashMap<u32, Span>,
     /// Exact operator tokens the expression span cannot locate: the `..`/`..<`/`until`/`downTo` of a
     /// range value or membership test, and the `!in` a negated `contains` call stands for. Kept
@@ -2010,6 +1989,8 @@ pub struct File {
     /// The exact deprecation message selected by this compilation's reference release. Releases
     /// before the warning/error split leave this absent and report the construct as a plain error.
     pub value_class_recursion_via_type_parameters_warning: Option<String>,
+    /// Declaration-use deprecation migrations selected at the language-feature boundary.
+    pub deprecation_migrations: crate::features::DeprecationMigrations,
     /// `+ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects`: a non-overriding `operator fun
     /// equals` in an enum entry or anonymous object is an error rather than a deprecation warning.
     pub forbid_operator_equals_in_enum_entries_and_anonymous_objects: bool,
@@ -2093,6 +2074,7 @@ impl File {
         // Both return-label span tables are keyed by the arenas released here.
         self.return_label_spans.clear();
         self.assignment_target_spans = Default::default();
+        self.compound_assignment_read_spans = Default::default();
         self.init_block_keywords = Default::default();
         self.incdec_accesses = Default::default();
         self.call_arg_names = Default::default();

@@ -899,11 +899,9 @@ impl Parser<'_> {
                         },
                         Span::new(lspan.lo, end.hi),
                     );
-                    if name_span != name_token.span {
-                        self.file
-                            .exact_member_name_spans
-                            .insert(member.0, name_span);
-                    }
+                    self.file
+                        .exact_member_name_spans
+                        .insert(member.0, name_span);
                     if dot_span.hi != name_span.lo {
                         self.file
                             .non_adjacent_member_dot_spans
