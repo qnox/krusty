@@ -2024,6 +2024,10 @@ pub struct IrFile {
     /// need this provenance when statement emission differs from a safe call's literal-null arm;
     /// it must not recover that distinction from the lowered branch shape.
     pub elvis_safe_call_guards: crate::fx_hash::HashSet<ExprId>,
+    /// The subset of [`Self::null_guards`] the JVM value-class pass writes to box or unbox a
+    /// nullable value class (`dup; ifnull; box-impl`). It is laid out like a safe call but is a
+    /// conversion of one, so it never folds into a safe-call chain's shared null exit.
+    pub(crate) jvm_value_class_null_guards: crate::fx_hash::HashSet<ExprId>,
     /// Physical type before a semantic read coercion.
     pub physical_types: crate::fx_hash::HashMap<u32, Ty>,
     /// Values a JVM value-class underlying-property read leaves in an erased generic slot as an
