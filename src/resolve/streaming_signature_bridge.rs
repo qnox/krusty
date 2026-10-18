@@ -3818,8 +3818,8 @@ pub(crate) fn finalized_streamed_signature_index(
             vararg_constructor_property::primary_constructor_owns_vararg_property(
                 headers, stub, anchor,
             );
-        let deferred_owner_completed_signature =
-            deferred_local_headers::defers_owner_completed_signature(
+        let deferred_atomic_vararg_signature =
+            deferred_local_headers::defers_atomic_vararg_signature(
                 stub,
                 constructor_property_vararg || primary_constructor_owns_vararg_property,
                 &deferred_local_candidates,
@@ -4305,7 +4305,7 @@ pub(crate) fn finalized_streamed_signature_index(
             };
             resolved_receivers.insert(stub.id, receiver);
         }
-        if deferred_owner_completed_signature {
+        if deferred_atomic_vararg_signature {
             deferred_local_headers.insert(stub.id);
             continue;
         }

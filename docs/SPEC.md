@@ -1099,6 +1099,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `diagnostics_language_parity_e2e::inherited_override_visibility_access_matches_kotlinc`, and
   `diagnostics_language_parity_e2e::internal_override_visibility_access_matches_kotlinc_across_modules`,
   and `diagnostics_language_parity_e2e::local_override_visibility_access_matches_kotlinc`.
+- **Body-local declaration groups publish one complete semantic owner before retained bodies are
+  lowered.** A representable explicit property and its accessors remain Pass-1 contracts; only a
+  genuinely unpublishable signature (including an atomic vararg constructor/property pair) waits
+  for the active Pass-2 group. Retained inline bodies and parameter defaults whose classifier owner
+  is still deferred wait for that exact owner-completion publication instead of constructing a
+  partial common-IR callable. Checked direct supertypes also retain their semantic roles: an
+  interface edge is never reinterpreted as the superclass merely because it is first in the local
+  overlay. Tests: `local_class_e2e::a_body_local_interface_is_not_validated_as_a_superclass`,
+  `local_class_e2e::an_explicit_body_local_property_contract_precedes_its_member_bodies`,
+  `local_class_e2e::a_retained_inline_body_waits_for_its_body_local_owner`,
+  `local_class_e2e::a_retained_default_waits_for_its_body_local_owner`, and
+  `local_class_e2e::a_body_local_extension_property_keeps_its_receiver`.
 - **Companion member properties — accessors + records.** A companion property's backing field is a
   static on the OUTER class; kotlinc realizes the property as `public final` INSTANCE accessors on
   `C$Companion` (via `access$…$cp` bridges over its private fields) and records it on the

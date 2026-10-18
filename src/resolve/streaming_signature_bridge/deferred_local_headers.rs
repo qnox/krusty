@@ -1,10 +1,8 @@
 //! Stable declarations whose semantic header may require active Pass 2 body checking.
 //!
-//! This is a candidate set, not a completion decision. Pass 1 publishes representable function and
-//! constructor contracts. Body-local property/accessor surfaces are owner-completed even when
-//! explicitly typed, while unpublishable headers transfer atomically to Pass 2. A constructor
-//! property's own declaration remains an independently publishable property fact even when its
-//! primary constructor must wait for the active body.
+//! This is a candidate set, not a completion decision. Pass 1 publishes every representable
+//! callable and property contract. Only an unpublishable header, including the inseparable
+//! primary-vararg constructor/property relation, transfers atomically to Pass 2.
 
 use crate::fir::{
     DeclarationFlags, DeclarationId, DeclarationKind, HeaderDeclarationKind, SignatureGraph,
@@ -66,31 +64,22 @@ pub(super) fn declarations(
         .collect()
 }
 
-/// Whether this declaration must remain owned by its active semantic classifier in Pass 2.
+/// Whether this declaration belongs to the atomic primary-vararg constructor/property relation.
 ///
-/// `candidates` identifies headers whose semantic seed itself is unpublishable. Explicitly typed
-/// body-local properties/accessors do not belong to that set, but their lexical member surface is
-/// still completed only when the active owner is entered. Functions and constructor properties
-/// keep their representable Pass-1 contracts.
-pub(super) fn defers_owner_completed_signature(
+/// A representable property contract is stable Pass-1 input even when its owner is body-local.
+/// Withholding that contract until Pass 2 would make member checking depend on whether a later body
+/// happens to demand it. Only an unpublishable atomic constructor/property pair moves together.
+pub(super) fn defers_atomic_vararg_signature(
     stub: &crate::fir::DeclarationStub,
     atomic_vararg_relation: bool,
     candidates: &HashSet<DeclarationId>,
 ) -> bool {
-    let body_local = stub.flags.has(DeclarationFlags::LOCAL_CLASS);
-    match stub.kind {
-        DeclarationKind::Property => {
-            body_local && !stub.flags.has(DeclarationFlags::PROPERTY_PARAMETER)
-        }
-        DeclarationKind::Accessor => body_local,
-        DeclarationKind::Constructor => candidates.contains(&stub.id) && atomic_vararg_relation,
-        DeclarationKind::Function
-        | DeclarationKind::Classifier
-        | DeclarationKind::TypeAlias
-        | DeclarationKind::Initializer
-        | DeclarationKind::EnumEntry
-        | DeclarationKind::Script => false,
-    }
+    candidates.contains(&stub.id)
+        && atomic_vararg_relation
+        && matches!(
+            stub.kind,
+            DeclarationKind::Constructor | DeclarationKind::Property
+        )
 }
 
 /// Whether an unpublishable executable seed may be completed by the active Pass-2 checker.

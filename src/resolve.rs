@@ -11668,17 +11668,6 @@ impl<'a> Checker<'a> {
             .flatten()
     }
 
-    fn direct_superclass_name(&self, owner: TypeName) -> Option<TypeName> {
-        <Self as crate::assignable::TypeOracle>::direct_supertypes(self, Ty::obj_name(owner))
-            .into_iter()
-            .filter_map(Ty::kotlin_class_internal)
-            .find(|parent| {
-                self.resolver()
-                    .classifier(*parent)
-                    .is_some_and(|classifier| !classifier.is_interface())
-            })
-    }
-
     /// Finalized result inherited by an inferred override on an applied dispatch type.
     ///
     /// Start at the direct supertypes so the incomplete declaration currently being checked cannot
@@ -47503,6 +47492,15 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
+        if cl.is_interface() && self.file.is_local_declaration(d) {
+            self.diags.error(
+                cl.span,
+                format!(
+                    "interface '{}' cannot be local. Try to use an anonymous object or abstract class instead.",
+                    class_declaration_label(&cl.name)
+                ),
+            );
+        }
         tailrec_declarations::check_members(self.diags, cl);
         // `@JvmField` changes only a target backend's physical property realization, but its Kotlin
         // declaration restrictions are frontend semantics. Validate them from resolved annotation
@@ -47610,7 +47608,14 @@ impl<'a> Checker<'a> {
                 .zip(self.resolved_index)
                 .and_then(|(active, index)| {
                     let declaration = active.canonical_classifier_declaration(d, index)?;
-                    Some((declaration, current_owner?))
+                    let classifier = if deferred_local_classifier_header {
+                        current_owner
+                    } else {
+                        index
+                            .classifier_header(declaration)
+                            .map(|header| header.classifier)
+                    }?;
+                    Some((declaration, classifier))
                 })
             {
                 self.checked_local_classifier_identities
@@ -48134,9 +48139,10 @@ impl<'a> Checker<'a> {
                     )
                 })
                 .flatten();
-            let source_primary_constructor_required = cl.primary_ctor_annotations.is_some()
-                || !cl.props.is_empty()
-                || cl.secondary_ctors.is_empty();
+            let source_primary_constructor_required = !cl.is_interface()
+                && (cl.primary_ctor_annotations.is_some()
+                    || !cl.props.is_empty()
+                    || cl.secondary_ctors.is_empty());
             if body_local_class
                 && source_primary_constructor_required
                 && stable_primary_constructor.is_none()
@@ -49866,9 +49872,9 @@ impl<'a> Checker<'a> {
                 // companion tower, exactly like a primary `super(…)` clause.
                 let target_owner = match &sc.delegation {
                     CtorDelegation::This(_) => current_owner,
-                    CtorDelegation::Super(_) => {
-                        current_owner.and_then(|owner| self.direct_superclass_name(owner))
-                    }
+                    CtorDelegation::Super(_) => current_owner
+                        .and_then(|owner| self.applied_declared_supertype(owner))
+                        .and_then(Ty::kotlin_class_internal),
                     CtorDelegation::None => None,
                 };
                 let static_this = target_owner.and_then(|owner| {
@@ -50108,7 +50114,8 @@ impl<'a> Checker<'a> {
                 let file = self.file;
                 let is_lambda = |arg: ExprId| matches!(file.expr(arg), Expr::Lambda { .. });
                 let static_this = current_owner
-                    .and_then(|owner| self.direct_superclass_name(owner))
+                    .and_then(|owner| self.applied_declared_supertype(owner))
+                    .and_then(Ty::kotlin_class_internal)
                     .and_then(|owner| {
                         crate::symbol_resolver::classifier_companion_instance(
                             &self.fed_source(),
@@ -50121,7 +50128,9 @@ impl<'a> Checker<'a> {
                     "resolve",
                     "constructor header class={} owner={current_owner:?} base={:?} companion={static_this:?}",
                     cl.name,
-                    current_owner.and_then(|owner| self.direct_superclass_name(owner)),
+                    current_owner
+                        .and_then(|owner| self.applied_declared_supertype(owner))
+                        .and_then(Ty::kotlin_class_internal),
                 );
                 {
                     let header_scope = scope.singleton_receiver_child(
@@ -57700,7 +57709,10 @@ impl<'a> Checker<'a> {
                             self.enum_entry_supertype(dispatch)
                                 .and_then(Ty::obj_internal)
                                 .or_else(|| {
-                                    self.direct_superclass_name(dispatch.kotlin_class_internal()?)
+                                    self.applied_declared_supertype(
+                                        dispatch.kotlin_class_internal()?,
+                                    )
+                                    .and_then(Ty::kotlin_class_internal)
                                 })
                         })?;
                         return on_receiver(Ty::obj_name(owner), &name, arg_tys);
