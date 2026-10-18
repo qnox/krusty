@@ -276,7 +276,7 @@ impl FlexibleValue {
             FlexibleValue {
                 source: Some(publication.lower),
                 publication: None,
-                upper: None,
+                upper: self.upper,
                 shape: publication.shape.clone(),
             }
             .apply(ty, spelling);
@@ -1318,6 +1318,18 @@ mod tests {
 
         assert!(matches!(result.shape, FlexibleShape::Fun { .. }));
         assert_eq!(spelling.flexible_upper_bound, Some(function));
+    }
+
+    #[test]
+    fn inferred_declaration_applies_the_provider_owned_root_interval() {
+        let variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
+        let selected = Ty::fun(vec![Ty::String], Ty::String);
+        let fact = FlexibleValue::selected(variable, selected, &Ty::nullable);
+        let mut spelling = Spelled::default();
+
+        fact.apply_to_inferred_declaration(selected, &mut spelling);
+
+        assert_eq!(spelling.flexible_upper_bound, Some(Ty::nullable(selected)));
     }
 
     #[test]
