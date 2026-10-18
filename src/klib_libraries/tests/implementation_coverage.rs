@@ -4,7 +4,8 @@
 //! Eligibility is declaration/body evidence from the selected KLIB, never an annotation or source
 //! spelling. Backlog keys retain the provider module and complete serialized declaration identity;
 //! the paths embedded in those identities are output only. Lists live under
-//! `tests/klib_uncovered_implementations/<target>/<version>.txt` and may only shrink. The one-off
+//! `tests/klib_uncovered_implementations/<target>/<version>.txt` and may only shrink. A release
+//! with no list of its own reads its predecessor's ([`crate::kotlin_version::recorded_file`]). The one-off
 //! `KRUSTY_SHRINK_UNCOVERED_IMPLEMENTATIONS=1` maintenance mode creates a missing list or removes
 //! entries which became implemented; it never admits a newly uncovered declaration to an existing
 //! list.
@@ -19,6 +20,7 @@ use super::implementation_inventory::{
     wasm_intrinsic_tree, DecodedBodyState, ImplementationFact,
 };
 use crate::compilation_target::CompilationTarget;
+use crate::kotlin_version::KotlinVersion;
 use crate::libraries::{CallablePlacement, KlibDeclarationSignature, KlibDependencyCallable};
 use crate::metadata::id_signature::{KlibNamePath, KlibPublicIdSignature, MetadataAccessor};
 
@@ -91,11 +93,18 @@ fn uncovered_implementations(libraries: &KlibLibraries) -> BTreeSet<String> {
         .collect()
 }
 
-fn list_path(target: &str) -> PathBuf {
+fn own_list_path(target: &str, version: KotlinVersion) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/klib_uncovered_implementations")
         .join(target)
-        .join(format!("{}.txt", crate::kotlin_version::target()))
+        .join(format!("{version}.txt"))
+}
+
+/// The list the target reference version reads: its own, or its predecessor's.
+fn list_path(target: &str) -> PathBuf {
+    let version = crate::kotlin_version::target();
+    crate::kotlin_version::recorded_file(version, |release| own_list_path(target, release))
+        .unwrap_or_else(|| own_list_path(target, version))
 }
 
 fn target_is_required(target: &str) -> bool {
@@ -127,12 +136,10 @@ fn check_target(target: CompilationTarget, list: &str) {
     let uncovered = uncovered_implementations(&libraries);
     let path = list_path(list);
     let shrink = std::env::var_os("KRUSTY_SHRINK_UNCOVERED_IMPLEMENTATIONS").is_some();
-    let listed: Option<BTreeSet<String>> = std::fs::read_to_string(&path)
-        .ok()
-        .map(|text| text.lines().map(str::to_string).collect());
+    let listed = read_list(&path);
     let Some(listed) = listed else {
         if shrink {
-            write_list(&path, &uncovered);
+            write_list(list, &uncovered);
             return;
         }
         panic!(
@@ -157,7 +164,7 @@ fn check_target(target: CompilationTarget, list: &str) {
         return;
     }
     if shrink {
-        write_list(&path, &uncovered);
+        write_list(list, &uncovered);
         return;
     }
     panic!(
@@ -172,7 +179,30 @@ fn check_target(target: CompilationTarget, list: &str) {
     );
 }
 
-fn write_list(path: &std::path::Path, uncovered: &BTreeSet<String>) {
+fn read_list(path: &std::path::Path) -> Option<BTreeSet<String>> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|text| text.lines().map(str::to_string).collect())
+}
+
+/// Record the target reference version's list: in its own file, unless it is exactly the list the
+/// version would inherit.
+fn write_list(target: &str, uncovered: &BTreeSet<String>) {
+    let version = crate::kotlin_version::target();
+    let path = own_list_path(target, version);
+    let inherited =
+        crate::kotlin_version::inherited_file(version, |release| own_list_path(target, release));
+    if inherited
+        .and_then(|inherited| read_list(&inherited))
+        .as_ref()
+        == Some(uncovered)
+    {
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .unwrap_or_else(|error| panic!("remove {}: {error}", path.display()));
+        }
+        return;
+    }
     std::fs::create_dir_all(path.parent().expect("the list has a directory"))
         .unwrap_or_else(|error| panic!("create {}: {error}", path.display()));
     let mut text = String::new();
@@ -180,7 +210,7 @@ fn write_list(path: &std::path::Path, uncovered: &BTreeSet<String>) {
         text.push_str(line);
         text.push('\n');
     }
-    std::fs::write(path, text).unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+    std::fs::write(&path, text).unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
 }
 
 #[test]

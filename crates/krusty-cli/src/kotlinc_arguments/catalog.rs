@@ -4,24 +4,23 @@
 //! run against that release's `kotlin-compiler.jar`: it reflects over the compiler's own
 //! `@Argument`, `@Enables`/`@Disables` and `@Deprecated` annotations. The parser reads these facts
 //! instead of re-spelling them, so a name, alias, value type, delimiter or lifecycle is never copied
-//! by hand. Every release has its own table, even when it equals another release's. Regenerate a
-//! table with `just kotlinc-arguments <version>`.
+//! by hand. A release has a table only where it differs from the previous release's; a release with
+//! no table reads its predecessor's ([`ReleaseRecords`]). Regenerate a table with
+//! `just kotlinc-arguments <version>`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
-use krusty::kotlin_version::KotlinVersion;
+use krusty::kotlin_version::{KotlinVersion, ReleaseRecords};
 
-/// The release tables, by reference version.
-/// `every_supported_release_has_a_table` keeps this list equal to the
-/// `kotlin-versions` manifest, and `every_release_reads_its_own_file` keeps each entry on the file
-/// named after its release.
+/// The release tables, by the release that first has each. `every_record_reads_its_own_file`
+/// keeps each entry on the file named after its release.
 macro_rules! releases {
     ($($version:ident => $file:literal),+ $(,)?) => {
-        const RELEASES: &[(KotlinVersion, &str)] = &[$((
+        static RELEASES: ReleaseRecords<&str> = ReleaseRecords::new(&[$((
             KotlinVersion::$version,
             include_str!(concat!("releases/", $file, ".tsv")),
-        )),+];
+        )),+]);
         #[cfg(test)]
         const RELEASE_FILES: &[(KotlinVersion, &str)] = &[$((KotlinVersion::$version, $file)),+];
     };
@@ -29,9 +28,7 @@ macro_rules! releases {
 
 releases! {
     V2_4_0 => "2.4.0",
-    V2_4_10 => "2.4.10",
     V2_4_20 => "2.4.20",
-    V2_4_21 => "2.4.21",
 }
 
 /// The Kotlin type of an argument's field, which decides how kotlinc reads its value.
@@ -255,13 +252,14 @@ impl Catalog {
         static CATALOGS: OnceLock<BTreeMap<KotlinVersion, Catalog>> = OnceLock::new();
         CATALOGS
             .get_or_init(|| {
-                RELEASES
-                    .iter()
-                    .map(|&(version, table)| {
+                KotlinVersion::supported()
+                    .into_iter()
+                    .filter_map(|version| {
+                        let table = RELEASES.get(version)?;
                         let catalog = Catalog::parse(version, table).unwrap_or_else(|error| {
                             panic!("kotlinc {version} argument table: {error}")
                         });
-                        (version, catalog)
+                        Some((version, catalog))
                     })
                     .collect()
             })
@@ -286,16 +284,9 @@ impl Catalog {
     }
 }
 
-/// The vendored table text of one release, for comparison with a fresh dump.
+/// The vendored table text a supported release reads, for comparison with a fresh dump.
 pub fn vendored_table(version: KotlinVersion) -> Option<&'static str> {
-    RELEASES
-        .iter()
-        .find_map(|&(release, table)| (release == version).then_some(table))
-}
-
-/// The reference releases that have a table.
-pub fn release_versions() -> impl Iterator<Item = KotlinVersion> {
-    RELEASES.iter().map(|&(version, _)| version)
+    RELEASES.get(version).copied()
 }
 
 #[cfg(test)]
@@ -304,20 +295,15 @@ mod tests {
 
     #[test]
     fn every_supported_release_has_a_table() {
-        assert_eq!(
-            release_versions().collect::<Vec<_>>(),
-            KotlinVersion::supported()
-        );
+        assert_eq!(RELEASES.check(), Ok(()));
         for version in KotlinVersion::supported() {
             let catalog = Catalog::for_version(version).expect("a table");
             assert_eq!(catalog.version, version);
         }
     }
 
-    /// A release never reads another release's file, even one with the same bytes: a later refresh
-    /// of one release must not silently change another's policy.
     #[test]
-    fn every_release_reads_its_own_file() {
+    fn every_record_reads_its_own_file() {
         for &(version, file) in RELEASE_FILES {
             assert_eq!(file, version.to_string());
         }
