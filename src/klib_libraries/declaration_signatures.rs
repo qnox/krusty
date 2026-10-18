@@ -54,6 +54,9 @@ pub(super) struct SignedFunction {
     /// Exact C target authenticated from an interop archive and this declaration's qualified
     /// annotation application.
     pub(super) direct_c_function: Option<crate::libraries::DirectCFunction>,
+    /// The expansion contract decoded from this inline declaration's serialized body, when the
+    /// body has the shape of one.
+    pub(super) inline_body_plan: Option<crate::libraries::InlineBodyPlan>,
     /// This declaration's KLIB is a friend of the current compilation. Friendship is attached to
     /// the declaration while its archive identity is still known; package ownership cannot encode
     /// it because unrelated KLIBs may contribute declarations to the same package.
@@ -199,6 +202,7 @@ pub(super) fn sign_function(
         compiler_builtin_owner: false,
         target_intrinsic: None,
         direct_c_function: None,
+        inline_body_plan: None,
         internal_friend,
         module: None,
         defaults: Vec::new(),

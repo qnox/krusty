@@ -880,6 +880,7 @@ struct SemanticValueParameter {
     ty: metadata::KotlinType,
     name: String,
     has_default: bool,
+    inline_modifier: crate::types::InlineParameterModifier,
     is_vararg: bool,
 }
 
@@ -919,10 +920,12 @@ fn semantic_value_parameter(
             "value-parameter equality bound",
         )?;
     }
+    let declared = crate::metadata::DeclaredValueParameter::of_flags(parameter.flags);
     Ok(SemanticValueParameter {
         ty,
         name,
-        has_default: parameter.flags & (1 << 1) != 0,
+        has_default: declared.declares_default,
+        inline_modifier: declared.inline_modifier,
         is_vararg: parameter.vararg_elem_body.is_some() || parameter.vararg_elem_id.is_some(),
     })
 }
@@ -1191,6 +1194,7 @@ fn semantic_function(
     let mut top_params = Vec::new();
     let mut param_names = Vec::new();
     let mut param_defaults = Vec::new();
+    let mut param_inline_modifiers = Vec::new();
     let mut vararg = None;
     let mut context_receivers = Vec::new();
     for body in &function.context_receiver_bodies {
@@ -1251,6 +1255,7 @@ fn semantic_function(
         top_params.push(ty);
         param_names.push(name);
         param_defaults.push(has_default);
+        param_inline_modifiers.push(crate::types::InlineParameterModifier::None);
     }
     let value_bodies = message_bodies(body, 6, "function declaration")?;
     if value_bodies.len() != function.value_params.len() {
@@ -1269,6 +1274,7 @@ fn semantic_function(
         top_params.push(parameter.ty);
         param_names.push(parameter.name);
         param_defaults.push(parameter.has_default);
+        param_inline_modifiers.push(parameter.inline_modifier);
     }
     let has_companion_receiver =
         function.companion_receiver_body.is_some() || function.companion_receiver_type_id.is_some();
@@ -1333,6 +1339,7 @@ fn semantic_function(
         formals,
         param_names,
         param_defaults,
+        param_inline_modifiers,
         vararg,
         visibility: function.visibility,
         modality: function.modality,

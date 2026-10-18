@@ -181,6 +181,9 @@ pub struct KotlinFunction {
     pub formals: Vec<KotlinTypeParameter>,
     pub param_names: Vec<String>,
     pub param_defaults: Vec<bool>,
+    /// The `noinline`/`crossinline` modifier of each parameter, parallel to `params`; a context
+    /// parameter writes neither.
+    pub param_inline_modifiers: Vec<crate::types::InlineParameterModifier>,
     pub vararg: Option<usize>,
     pub visibility: Visibility,
     /// Always [`KotlinModality::Final`] for a top-level function.

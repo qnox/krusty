@@ -313,6 +313,26 @@ impl PackageInventory {
         }
     }
 
+    /// Give each inline package function `module` declares the expansion plan its body in
+    /// `trees` has the shape of.
+    pub(super) fn attach_inline_body_plans(
+        &mut self,
+        module: &str,
+        trees: &crate::metadata::klib_ir::KlibIrModuleTrees,
+    ) {
+        let mut attach = |function: &mut SignedFunction| {
+            if !function.declaration.is_inline || function.module.as_deref() != Some(module) {
+                return;
+            }
+            let signature = KlibIrSignature::Public(function.signature.clone());
+            if let Some((arena, body)) = trees.function(&signature) {
+                function.inline_body_plan =
+                    super::inline_body_plans::decode(&function.declaration, arena, body);
+            }
+        };
+        self.functions.values_mut().flatten().for_each(&mut attach);
+    }
+
     /// Publish a signed function in the namespace selected by its own metadata.
     fn insert_function(&mut self, package: TypeName, function: SignedFunction) {
         if function.declaration.is_static {

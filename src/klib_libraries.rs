@@ -17,6 +17,7 @@ mod declaration_bodies;
 mod declaration_signatures;
 mod direct_c_calls;
 mod external_identities;
+mod inline_body_plans;
 mod inventory;
 mod lookup;
 pub(crate) mod parameter_defaults;

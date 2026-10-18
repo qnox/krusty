@@ -4064,6 +4064,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   publishes, so common candidate collection does not need an origin-specific lookup or fallback.
   Tests: `klib_libraries::tests::classes::members_publish_their_kind_visibility_and_member_signature`
   and `klib_class_surface_e2e::a_written_member_extension_is_visible_through_both_receivers`.
+- **A KLIB scope function's lambda runs in the caller's frame.** KLIB metadata records each value
+  parameter's `noinline`/`crossinline` flags; the provider publishes them as the callable's inline
+  modifiers, as the JVM provider does from class-file metadata, so a lambda for a plain parameter
+  of an inline KLIB function may `return` from the caller. An inline package function whose
+  serialized body only invokes one of its function-typed parameters on other parameters, then
+  returns that invocation or one of its parameters (`let`, `run`, `with`, `also`, `apply`),
+  publishes the same `InvokeLambda` plan the JVM provider decodes from bytecode, and common
+  lowering expands the call from it. Any other body publishes no plan. A `var` such a lambda
+  writes is a shared cell in common IR; the Wasm backend realizes it as a one-field mutable struct
+  local to the function and declines any other use of the cell. Tests:
+  `klib_libraries::tests::inline_body_plans`,
+  `kotlin_box_wasm_conformance::wasm_scope_functions_expand_their_stdlib_inline_bodies`,
+  `kotlin_box_wasm_conformance::wasm_inlined_stdlib_lambdas_change_the_callers_locals` and
+  `native_scope_functions_e2e`.
 - **A nullable-primitive *field* smart-cast** (`if (value != null) value` where `value: Int?`) unboxes the
   wrapper on read, like the local-variable path — else the `Integer` reaches an `int` context (verify error).
 - **A statement-position `when` may mix `Unit` arms with value arms** — kotlinc coerces every arm of

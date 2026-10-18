@@ -1882,6 +1882,8 @@ mod native_reified_declarations_e2e;
 mod native_runtime_e2e;
 #[path = "native_sam_e2e.rs"]
 mod native_sam_e2e;
+#[path = "native_scope_functions_e2e.rs"]
+mod native_scope_functions_e2e;
 #[path = "native_secondary_constructor_defaults_e2e.rs"]
 mod native_secondary_constructor_defaults_e2e;
 #[path = "native_secondary_constructors_e2e.rs"]

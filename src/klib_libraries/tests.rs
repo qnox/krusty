@@ -27,6 +27,7 @@ fn function(name: &str, receiver: Option<KotlinType>, params: Vec<KotlinType>) -
         receiver,
         param_names: vec!["value".to_owned(); params.len()],
         param_defaults: vec![false; params.len()],
+        param_inline_modifiers: Vec::new(),
         params,
         ret: class("kotlin/Unit", false),
         formals: Vec::new(),
@@ -1277,4 +1278,5 @@ mod builtin_operations;
 mod classes;
 mod implementation_coverage;
 mod implementation_inventory;
+mod inline_body_plans;
 mod properties;

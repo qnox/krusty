@@ -344,6 +344,7 @@ impl<'a> OpenedKlibLibraries<'a> {
                 }
             })?;
             inventory.attach_ir_intrinsics(&record.module, record.intrinsic_platform, &trees);
+            inventory.attach_inline_body_plans(&record.module, &trees);
             defaults.add_library(
                 &record.module,
                 &trees,

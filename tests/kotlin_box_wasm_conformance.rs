@@ -318,6 +318,41 @@ fun box(): String {
 }
 
 #[test]
+fn wasm_scope_functions_expand_their_stdlib_inline_bodies() {
+    expect_wasm_box(
+        r#"
+fun box(): String {
+    if (20.let { it + 1 } != 21) return "let"
+    if (run { 3 } != 3) return "run"
+    if (4.run { this * 2 } != 8) return "receiver run"
+    if (with(5) { this - 1 } != 4) return "with"
+    if (6.also { if (it != 6) return "also value" } != 6) return "also"
+    if (7.apply { if (this != 7) return "apply value" } != 7) return "apply"
+    return "OK"
+}
+"#,
+        "wasmScopeFunctions",
+    );
+}
+
+#[test]
+fn wasm_inlined_stdlib_lambdas_change_the_callers_locals() {
+    expect_wasm_box(
+        r#"
+fun box(): String {
+    var seen = 0
+    1.let { seen += it }
+    2.also { seen += it }
+    3.apply { seen += this }
+    with(4) { seen += this }
+    return if (seen == 10) "OK" else "seen $seen"
+}
+"#,
+        "wasmScopeFunctionCaptures",
+    );
+}
+
+#[test]
 fn wasm_bit_counts_run_as_the_stdlib_declared_instructions() {
     expect_wasm_box(
         r#"

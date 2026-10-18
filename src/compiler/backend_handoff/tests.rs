@@ -830,6 +830,7 @@ fn a_klib_declaration_signature_is_frozen_with_its_callable() {
         formals: Vec::new(),
         param_names: vec!["message".to_string()],
         param_defaults: vec![false],
+        param_inline_modifiers: Vec::new(),
         vararg: None,
         visibility: crate::types::Visibility::Public,
         modality: crate::metadata::semantic::KotlinModality::Final,
