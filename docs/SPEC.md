@@ -5088,12 +5088,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   JVM does, every other target expands the IR template. Common lowering then decides each call's
   route once (`fir_lower/source_calls/inline_route.rs`): a call stays a call recorded for the
   backend (`IrFile::compiled_inline_call`) only when the callee is a public top-level, non-suspend
-  function in this module (not a companion-block member, which its class compiles) with no function-typed parameter or receiver, no reified type parameter,
-  and a template without lambdas, callable references, local classes, nested expansions or a
-  subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`), called
-  with every argument from a named, non-suspend, non-inline function body (not a lambda, local
-  function, default argument, initializer or accessor). Every other call is expanded in IR for a
-  named reason. The JVM compiles each such callee once per emission pass, alone, into a writer of
+  function in this module (not a companion-block member, which its class compiles) with no
+  suspend function-typed parameter or receiver, no `crossinline` parameter, no reified type
+  parameter, and a template without lambdas, callable references, local classes, nested
+  expansions or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
+  called with every argument from a named, non-suspend, non-inline function body (not a lambda,
+  local function, default argument, initializer or accessor), and with no literal lambda argument
+  that leaves its body by a non-local `return`, `break` or `continue`. Every other call is
+  expanded in IR for a named reason. The JVM compiles each such callee once per emission pass, alone, into a writer of
   its declaring class and source file, and the inliner reads that body as it reads a dependency's;
   a body it cannot compile or inline fails the emission, never becoming a real call. The call
   keeps its record when a value-class representation wrapper takes its place, and a call one of
@@ -5108,6 +5110,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (same-file and cross-file calls, a value-class argument, and a call on an inlined result, against
   kotlinc's bytes, and a run; same-file and cross-file enum switches, including a nullable subject,
   as runs).
+
+- **A same-module inline call with function arguments is inlined from the compiled body too.**
+  A literal lambda or callable reference passed to an inline parameter (one that is function-typed
+  and not `noinline`) replaces the compiled body's `invoke`s, exactly as a library callee's
+  literals do: the call publishes each operand's declared `crossinline`/`noinline` modifier
+  (`IrFile::call_inline_modifiers`) when common lowering records it, so the backend marks the
+  literal's own method dead and consumes a callable reference as an inline argument. Three
+  placements follow kotlinc's `IrInlineCodegen` for every inline callee, same-module or library:
+  a function value held in a caller local for an inline parameter is read from that local by the
+  body's invokes, never stored to a parameter temporary (`genOrGetLocal`); a literal the body never
+  loads (`new { }` where `init` is unused) is dropped with nothing of it left in the caller; and a
+  body with a `try` or a loop inlined beside caller operands already on the stack saves them around
+  the body (`FixStack`) rather than taking the byte splice. An erased `FunctionN.invoke` result
+  used at its erased `Object` type is not cast: `StackValue.coerce` between equal types writes
+  nothing, so the inlined lambda's exact result type reaches the caller and the trailing narrowing
+  `checkcast` folds away. A bound reference whose value-class receiver is boxed until `!!` captures
+  the unboxed value (`unbox-impl`), as the reference's adapter takes it. A literal that jumps
+  non-locally keeps the call expanded in IR (the backend places such literals only on its byte
+  splice). Tests: `tests/inline_same_module_bytes_e2e.rs` (literal lambdas in same-file and
+  cross-file calls, function values from locals and callable references, an unread literal against
+  kotlinc's bytes; a callee with a `try` beside stacked operands, non-local jumps and a bound
+  value-class reference run).
 
 - **`inline fun` (same-module, user-defined):** expanded at each call site by the IR lowerer
   (`Lower::lower_inline_fn_call`), matching kotlinc's effect — value parameters bind to once-evaluated

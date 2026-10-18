@@ -541,7 +541,9 @@ fn inline_call_argument(ir: &IrFile, node: ExprId) -> bool {
             return false;
         };
         let call = ExprId::try_from(call).expect("IR expression index exceeds ExprId");
-        (ir.inline_call_sites.contains(&call) || ir.module_inline_calls.contains(&call))
+        (ir.inline_call_sites.contains(&call)
+            || ir.module_inline_calls.contains(&call)
+            || ir.compiled_inline_call(call).is_some())
             && args.contains(&node)
     })
 }

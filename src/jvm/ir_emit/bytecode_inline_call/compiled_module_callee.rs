@@ -192,12 +192,15 @@ impl Emitter<'_> {
             defaults: None,
         };
         let call_frame = self.frame.mark();
-        let inlined = self.try_inline_classpath_body(&call, code);
+        let base = self.frame.size().max(code.max_locals);
+        let inlined = self.inline_call_with_body(&call, base, code);
         // The call's temporaries go with its frame, as kotlinc's `leaveTemps` does.
         self.frame.drop_to(call_frame);
-        if inlined.is_none() {
-            self.run
-                .set_inline_bail("the inliner does not cover a compiled same-module inline body");
+        match inlined {
+            InlineCallOutcome::Handled | InlineCallOutcome::HandledWithError => {}
+            InlineCallOutcome::NotApplicable => self
+                .run
+                .set_inline_bail("the inliner does not cover a compiled same-module inline body"),
         }
     }
 }

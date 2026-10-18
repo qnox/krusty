@@ -177,3 +177,194 @@ fn a_same_file_inline_call_with_an_enum_subject_when_runs() {
         "OK"
     );
 }
+
+const LAMBDA: &str = r#"inline fun <T> twice(block: () -> T): T {
+    block()
+    return block()
+}
+
+inline fun <T, R> T.applied(transform: (T) -> R): R = transform(this)
+
+fun box(): String {
+    var count = 0
+    val o = twice {
+        count += 1
+        "O"
+    }
+    val k = "K".applied { it + it.length }
+    return if (count == 2) o + k.substring(0, 1) else "fail: $count"
+}
+"#;
+
+// A literal lambda argument is inlined into the invokes of the callee's compiled body, as kotlinc's
+// `MethodInliner` places it: the lambda's code replaces each `invoke`, and no lambda method is left
+// in the caller.
+#[test]
+fn a_same_file_inline_call_with_a_literal_lambda_is_inlined_from_the_compiled_body() {
+    assert_like_kotlinc(&[("Lambda.kt", LAMBDA)]);
+}
+
+#[test]
+fn a_same_file_inline_call_with_a_literal_lambda_runs() {
+    assert_eq!(common::expect_box_run_with_stdlib(LAMBDA, "Lambda"), "OK");
+}
+
+const LAMBDA_LIBRARY: &str = r#"inline fun <T> measured(name: String, block: () -> T): T {
+    log("start $name")
+    val result = block()
+    log("end $name")
+    return result
+}
+
+private var LOG = ""
+
+fun log(string: String) {
+    LOG += "$string;"
+}
+
+fun pullLog(): String {
+    val string = LOG
+    LOG = ""
+    return string
+}
+"#;
+
+const LAMBDA_MAIN: &str = r#"fun box(): String {
+    val prefix = "O"
+    val result = measured("ok") { prefix + "K" }
+    return if (pullLog() == "start ok;end ok;") result else "log"
+}
+"#;
+
+#[test]
+fn a_cross_file_inline_call_with_a_capturing_lambda_is_inlined_from_the_compiled_body() {
+    assert_like_kotlinc(&[("lib.kt", LAMBDA_LIBRARY), ("main.kt", LAMBDA_MAIN)]);
+}
+
+const FUNCTION_VALUE_LIBRARY: &str = r#"inline fun run(func: () -> Int): Int {
+    return func()
+}
+
+inline fun <T> String.app(f: (String) -> T): T = f(this)
+
+inline fun new(init: (Int) -> Unit): Int = 42
+"#;
+
+const FUNCTION_VALUE_MAIN: &str = r#"fun fff(s: String, n: Int = 42) = s
+
+fun reassigned(): Int {
+    var f = { -> 0 }
+    val get0 = f
+    f = { -> 1 }
+    return run(get0) + run(f)
+}
+
+fun box(): String {
+    if (reassigned() != 1) return "reassigned"
+    if (new(fun(z: Int) {}) != 42) return "unread"
+    if (new { } != 42) return "unread lambda"
+    return "OK".app(::fff)
+}
+"#;
+
+// A function value held in a local is read from that local by the body's invokes; a callable
+// reference is placed like a literal lambda; a literal the body never reads leaves nothing behind.
+#[test]
+fn function_values_reach_a_compiled_inline_body_as_kotlinc_places_them() {
+    assert_like_kotlinc(&[
+        ("lib.kt", FUNCTION_VALUE_LIBRARY),
+        ("main.kt", FUNCTION_VALUE_MAIN),
+    ]);
+}
+
+#[test]
+fn function_values_reach_a_compiled_inline_body_and_run() {
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            ("lib.kt", FUNCTION_VALUE_LIBRARY),
+            ("main.kt", FUNCTION_VALUE_MAIN),
+        ],
+        "FunctionValues",
+    );
+}
+
+// A callee with a try/catch inlined beside operands already on the stack saves them around its
+// body, as kotlinc's `FixStack` does.
+const TRY_CATCH: &str = r#"inline fun <T> tryOrElse(f1: () -> T, f2: () -> T): T {
+    try {
+        return f1()
+    } catch (e: Exception) {
+        return f2()
+    }
+}
+
+fun testIt() = "abc" + tryOrElse({ "def" }, { "oops" }) + "ghi"
+
+fun box(): String = if (testIt() == "abcdefghi") "OK" else testIt()
+"#;
+
+#[test]
+fn a_compiled_inline_body_with_a_try_catch_saves_the_operands_on_the_stack() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(TRY_CATCH, "TryCatch"),
+        "OK"
+    );
+}
+
+// A lambda that leaves by a non-local jump keeps the call expanded in IR.
+const NON_LOCAL_JUMPS: &str = r#"inline fun foo(block: () -> Int): Int = block()
+
+inline fun g(block: () -> Unit): Unit = block()
+
+fun sum(): Int {
+    var sum = 0
+    for (i in 1..10) {
+        sum += foo { if (i == 3) break else i }
+    }
+    return sum
+}
+
+fun box(): String {
+    if (sum() != 3) return "break"
+    try {
+        for (c in arrayOf("x")) {
+            g {
+                for (d in arrayOf(1)) {
+                    return "OK"
+                }
+            }
+        }
+    } finally {}
+    return "return"
+}
+"#;
+
+#[test]
+fn a_lambda_leaving_by_a_non_local_jump_runs() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(NON_LOCAL_JUMPS, "NonLocalJumps"),
+        "OK"
+    );
+}
+
+// A bound reference to a value class member, whose receiver is boxed until `!!`, captures the
+// unboxed value.
+const BOUND_VALUE_CLASS_REFERENCE: &str = r#"inline fun foo(init: () -> String): String = init()
+
+@JvmInline
+value class IcInt(val i: Int) {
+    fun simple(): String = i.toString()
+}
+
+fun testBoxed(i: IcInt?): String = foo(i!!::simple)
+
+fun box(): String = if (testBoxed(IcInt(3)) == "3") "OK" else "fail"
+"#;
+
+#[test]
+fn a_bound_value_class_reference_captures_the_unboxed_receiver() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(BOUND_VALUE_CLASS_REFERENCE, "BoundReference"),
+        "OK"
+    );
+}

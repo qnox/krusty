@@ -8,7 +8,7 @@
 use super::super::BodyLowering;
 use crate::fir::{CallableId, DeclarationFlags, DeclarationId};
 use crate::ir::{ExprId, FunId, IrEnclosure, IrExpr, SameModuleInlining};
-use crate::types::{Ty, Visibility};
+use crate::types::{InlineParameterModifier, Ty, Visibility};
 
 /// How one call to a same-module inline function is realized.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,12 +37,17 @@ pub(in super::super) enum ExpansionReason {
     SuspendCaller,
     /// The callee is a suspend function.
     SuspendCallee,
+    /// A literal lambda argument leaves its body by a non-local `return`, `break` or `continue`,
+    /// which the backend's inliner places only on its byte splice.
+    NonLocalJumpInLambda,
     /// The call omits an argument that has a default.
     DefaultArguments,
-    /// The call passes a lambda the expansion places.
-    LambdaArgument,
-    /// A parameter (or the receiver) of the callee has a function type.
-    FunctionTypedParameter,
+    /// A parameter (or the receiver) of the callee has a suspend function type, whose lambdas
+    /// suspend inside the caller's state machine.
+    SuspendFunctionParameter,
+    /// A parameter of the callee is `crossinline`: its lambda is placed in an object or lambda the
+    /// callee's body creates.
+    CrossinlineParameter,
     /// The callee declares a reified type parameter.
     ReifiedTypeParameter,
     /// The callee is a member of a class, object or interface, or of a class's companion block.
@@ -65,8 +70,9 @@ pub(in super::super) enum ExpansionReason {
 
 impl BodyLowering<'_> {
     /// The route of a call to the same-module inline function `target`, whose IR function is
-    /// `function`. `inline_lambdas` holds the call's lambdas the expansion would place, and
-    /// `has_defaults` whether the call omits a defaulted argument.
+    /// `function`. `inline_lambdas` holds the call's literal lambda arguments and `has_defaults`
+    /// says whether the call omits a defaulted argument. A literal lambda is no reason to expand:
+    /// the backend inlines it into the compiled body's invokes.
     pub(in super::super) fn same_module_inline_route(
         &self,
         target: CallableId,
@@ -96,8 +102,12 @@ impl BodyLowering<'_> {
         if has_defaults {
             return Some(ExpansionReason::DefaultArguments);
         }
-        if inline_lambdas.iter().any(Option::is_some) {
-            return Some(ExpansionReason::LambdaArgument);
+        if inline_lambdas
+            .iter()
+            .flatten()
+            .any(|&lambda| self.lambda_leaves_non_locally(lambda))
+        {
+            return Some(ExpansionReason::NonLocalJumpInLambda);
         }
         let Some(callable) = self.index.callable(target) else {
             return Some(ExpansionReason::NoTemplate);
@@ -109,20 +119,21 @@ impl BodyLowering<'_> {
         if header.flags.has(DeclarationFlags::SUSPEND) {
             return Some(ExpansionReason::SuspendCallee);
         }
-        let function_typed = |ty: Ty| matches!(ty.non_null(), Ty::Fun(_));
+        let suspend_function =
+            |ty: Ty| matches!(ty.non_null(), Ty::Fun(signature) if signature.suspend);
         let Some(signature) = self.index.signature(declaration) else {
             return Some(ExpansionReason::NoTemplate);
         };
         if signature
             .parameters
             .iter()
-            .any(|parameter| function_typed(parameter.get()))
+            .any(|parameter| suspend_function(parameter.get()))
             || callable
                 .shape
                 .extension_receiver
-                .is_some_and(|receiver| function_typed(receiver.get()))
+                .is_some_and(|receiver| suspend_function(receiver.get()))
         {
-            return Some(ExpansionReason::FunctionTypedParameter);
+            return Some(ExpansionReason::SuspendFunctionParameter);
         }
         // A companion-block member is a static of its class, compiled there.
         if self.index.enclosing_classifier(declaration).is_some()
@@ -136,6 +147,13 @@ impl BodyLowering<'_> {
         let Some(function) = function else {
             return Some(ExpansionReason::NoTemplate);
         };
+        if self
+            .ir
+            .declared_inline_modifiers(function)
+            .contains(&InlineParameterModifier::Crossinline)
+        {
+            return Some(ExpansionReason::CrossinlineParameter);
+        }
         if self.ir.signatures.get(&function).is_some_and(|signature| {
             signature
                 .type_params
@@ -212,4 +230,50 @@ impl BodyLowering<'_> {
         }
         None
     }
+
+    /// Whether the literal lambda `lambda` leaves its inline body by a `return` (every `return` an
+    /// inline body keeps is non-local), or by a `break` or `continue` of a loop outside it.
+    fn lambda_leaves_non_locally(&self, lambda: ExprId) -> bool {
+        let IrExpr::Lambda {
+            inline_body: Some(body),
+            ..
+        } = self.ir.expr(lambda)
+        else {
+            return false;
+        };
+        leaves_non_locally(self.ir, *body, &mut Vec::new())
+    }
+}
+
+/// Whether `expression` holds a `return`, or a `break` or `continue` of no loop in `loops` or
+/// inside `expression`. A nested lambda's inline body is spliced in place, so its jumps count.
+fn leaves_non_locally(ir: &crate::ir::IrFile, expression: ExprId, loops: &mut Vec<String>) -> bool {
+    let label = match ir.expr(expression) {
+        IrExpr::Return(_) => return true,
+        IrExpr::Break { label } | IrExpr::Continue { label } => {
+            return match label {
+                None => loops.is_empty(),
+                Some(label) => !loops.contains(label),
+            };
+        }
+        IrExpr::Lambda {
+            inline_body: Some(body),
+            ..
+        } => return leaves_non_locally(ir, *body, loops),
+        IrExpr::While { label, .. } => Some(label.clone().unwrap_or_default()),
+        IrExpr::Checked(crate::ir::IrCheckedOperation::RangeLoop { label, .. }) => {
+            Some(label.clone())
+        }
+        _ => None,
+    };
+    let entered = label.is_some();
+    loops.extend(label);
+    let mut leaves = false;
+    crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+        leaves = leaves || leaves_non_locally(ir, child, loops);
+    });
+    if entered {
+        loops.pop();
+    }
+    leaves
 }

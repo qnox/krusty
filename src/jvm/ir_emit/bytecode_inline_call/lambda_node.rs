@@ -354,6 +354,28 @@ impl Emitter<'_> {
         }
     }
 
+    /// Unbox a captured value of value-class type `evaluated` (a boxed receiver after `!!`) into
+    /// `carrier`, the unboxed representation the lambda's frame captures it as.
+    pub(super) fn unbox_captured_value_class(
+        &mut self,
+        evaluated: Ty,
+        carrier: Ty,
+        code: &mut CodeBuilder,
+    ) {
+        let Some(class) = self.unboxed_value_class(evaluated, carrier) else {
+            return;
+        };
+        if evaluated.is_nullable() {
+            return;
+        }
+        let unbox = self.cw.methodref(
+            &class,
+            "unbox-impl",
+            &format!("(){}", type_descriptor(carrier)),
+        );
+        code.invokevirtual(unbox, 0, i32::from(slot_words(carrier)));
+    }
+
     /// The value class of Kotlin type `semantic` when `carrier` is its unboxed representation.
     fn unboxed_value_class(&self, semantic: Ty, carrier: Ty) -> Option<String> {
         let class = semantic.non_null().obj_internal()?;

@@ -41,12 +41,32 @@ impl IrFile {
         self.compiled_inline_calls.lowering = lowering;
     }
 
-    /// Record that `call` is inlined from the compiled body of `function`.
+    /// Record that `call` is inlined from the compiled body of `function`. Each operand carries the
+    /// `crossinline`/`noinline` modifier its parameter declares, so the backend knows which literal
+    /// lambdas the body's invokes take in.
     pub(crate) fn record_compiled_inline_call(&mut self, call: ExprId, function: FunId) {
         debug_assert_eq!(
             self.compiled_inline_calls.lowering,
             SameModuleInlining::CompiledBodies
         );
+        let IrExpr::Call { args, .. } = self.expr(call) else {
+            panic!("expression {call} inlines function {function}'s compiled body but is no call");
+        };
+        let modifiers = self
+            .fn_params
+            .get(&function)
+            .map(|parameters| parameters.inline_modifiers.as_slice())
+            .unwrap_or_default();
+        // A declaration that published no contract has no function-typed parameter to inline.
+        if !modifiers.is_empty() {
+            assert_eq!(
+                modifiers.len(),
+                args.len(),
+                "a compiled inline call has one operand per parameter of function {function}"
+            );
+            let modifiers = modifiers.into();
+            self.call_inline_modifiers.insert(call, modifiers);
+        }
         self.compiled_inline_calls.calls.insert(call, function);
     }
 

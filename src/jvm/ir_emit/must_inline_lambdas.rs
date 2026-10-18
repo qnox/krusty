@@ -51,7 +51,12 @@ pub fn mark_must_inline_lambdas(ir: &mut IrFile) -> Result<(), MissingInlinePara
                 args,
                 ..
             } => args.clone(),
-            IrExpr::Call { args, .. } if ir.module_inline_calls.contains(&call) => args.clone(),
+            IrExpr::Call { args, .. }
+                if ir.module_inline_calls.contains(&call)
+                    || ir.compiled_inline_call(call).is_some() =>
+            {
+                args.clone()
+            }
             _ => continue,
         };
         for (parameter, a) in args.into_iter().enumerate() {
