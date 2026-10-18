@@ -2379,7 +2379,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   as a Java identifier (`NameUtils.sanitizeAsJavaIdentifier`): every character that is not a
   Unicode letter or an ASCII digit becomes `_`, so a backticked `my test` lifts
   `my_test$lambda$0` and a backticked local function `my local` lifts `outer$my_local`, while the
-  declared function keeps its name. Tests:
+  declared function keeps its name. Local functions are numbered by raw name before that spelling,
+  so `my local` and `my-local` in one body both lift to `outer$my_local`; that is a platform
+  declaration clash, reported at each local function's declaration with the lifted method's
+  physical parameters (a captured parameter `y` renders as `` `$y` ``, a captured local `v` as `v`),
+  exactly as kotlinc reports it. A foreign inline template's local functions are left to the file
+  that declares them. Tests:
   `tests/lifted_callable_names_e2e.rs`,
   `tests/companion_initializer_lambda_e2e.rs::a_nested_moved_lambda_uses_its_parents_physical_ordinal`.
 - **What a suspend lambda declares is lifted into the lambda's class.** kotlinc makes the suspend
