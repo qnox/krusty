@@ -3,7 +3,9 @@
 //! A corpus path has one of three outcomes: pass (implicit), fail, or not applicable. Expected
 //! failures and applicability exclusions are committed as deterministic text, so a local run and
 //! CI enforce the same baseline. The platform is part of the path; one backend can neither hide nor
-//! inherit another backend's backlog.
+//! inherit another backend's backlog. A release records its inventory only where it differs from
+//! the previous release's ([`krusty::kotlin_version::recorded_file`]); a release with no file of its
+//! own reads its predecessor's.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -60,20 +62,57 @@ pub struct Baseline {
     pub not_applicable: BTreeSet<String>,
 }
 
+const FAILURES: &str = "box_expected_failures";
+const NOT_APPLICABLE: &str = "box_expected_not_applicable";
+
+/// The expected-failure inventory `version` reads on `platform`.
 pub fn failure_path(platform: Platform, version: KotlinVersion) -> PathBuf {
-    manifest_path("box_expected_failures", platform, version)
+    read_path(FAILURES, platform.name(), version)
 }
 
+/// The not-applicable inventory `version` reads on `platform`.
 pub fn not_applicable_path(platform: Platform, version: KotlinVersion) -> PathBuf {
-    manifest_path("box_expected_not_applicable", platform, version)
+    read_path(NOT_APPLICABLE, platform.name(), version)
 }
 
-fn manifest_path(directory: &str, platform: Platform, version: KotlinVersion) -> PathBuf {
+/// The file `version` reads under `tests/<directory>/<lane>/`: its own, or its predecessor's. A
+/// release no file covers reads its own path, which does not exist.
+pub fn read_path(directory: &str, lane: &str, version: KotlinVersion) -> PathBuf {
+    krusty::kotlin_version::recorded_file(version, |release| own_path(directory, lane, release))
+        .unwrap_or_else(|| own_path(directory, lane, version))
+}
+
+fn own_path(directory: &str, lane: &str, version: KotlinVersion) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join(directory)
-        .join(platform.name())
+        .join(lane)
         .join(format!("{version}.txt"))
+}
+
+/// Record `paths` as the inventory of `version`: in its own file, unless they are exactly what it
+/// would inherit, in which case it keeps no file of its own.
+pub fn record(
+    directory: &str,
+    lane: &str,
+    version: KotlinVersion,
+    paths: &BTreeSet<String>,
+    rendered: &str,
+) -> std::io::Result<()> {
+    let own = own_path(directory, lane, version);
+    let inherited = krusty::kotlin_version::inherited_file(version, |release| {
+        own_path(directory, lane, release)
+    });
+    if let Some(inherited) = inherited {
+        let text = std::fs::read_to_string(&inherited)?;
+        if parse(&text).as_ref() == Ok(paths) {
+            return match std::fs::remove_file(&own) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                result => result,
+            };
+        }
+    }
+    write_atomic(&own, rendered)
 }
 
 pub fn load(platform: Platform, version: KotlinVersion) -> Baseline {
@@ -139,8 +178,9 @@ fn render(
 ) -> String {
     let mut text = format!(
         "# Kotlin {version} codegen/box files expected to {expected} on {}, relative to\n\
-         # compiler/testData/codegen/box. Regenerate both exact inventories with\n\
-         # KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local {} run. The lists only shrink.\n",
+         # compiler/testData/codegen/box. Later releases with no file of their own read this one.\n\
+         # Regenerate both exact inventories with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local\n\
+         # {} run. The lists only shrink.\n",
         platform.name(),
         platform.name(),
     );
@@ -176,12 +216,18 @@ pub fn write(
         .filter(|(_, outcome)| **outcome == Outcome::NotApplicable)
         .map(|(path, _)| path.clone())
         .collect();
-    write_atomic(
-        &failure_path(platform, version),
+    record(
+        FAILURES,
+        platform.name(),
+        version,
+        &failures,
         &render_failures(platform, version, &failures),
     )?;
-    write_atomic(
-        &not_applicable_path(platform, version),
+    record(
+        NOT_APPLICABLE,
+        platform.name(),
+        version,
+        &not_applicable,
         &render_not_applicable(platform, version, &not_applicable),
     )
 }
@@ -191,8 +237,11 @@ pub fn write_not_applicable(
     version: KotlinVersion,
     paths: &BTreeSet<String>,
 ) -> std::io::Result<()> {
-    write_atomic(
-        &not_applicable_path(platform, version),
+    record(
+        NOT_APPLICABLE,
+        platform.name(),
+        version,
+        paths,
         &render_not_applicable(platform, version, paths),
     )
 }
@@ -343,9 +392,10 @@ mod tests {
     fn platform_and_version_are_both_part_of_the_paths() {
         assert!(failure_path(Platform::Jvm, KotlinVersion::V2_4_20)
             .ends_with("tests/box_expected_failures/jvm/2.4.20.txt"));
+        // 2.4.10 records no inventory of its own and reads 2.4.0's.
         assert!(
             not_applicable_path(Platform::Native, KotlinVersion::V2_4_10)
-                .ends_with("tests/box_expected_not_applicable/native-klib/2.4.10.txt")
+                .ends_with("tests/box_expected_not_applicable/native-klib/2.4.0.txt")
         );
         assert!(failure_path(Platform::WasmJs, KotlinVersion::V2_4_20)
             .ends_with("tests/box_expected_failures/wasm-js-klib/2.4.20.txt"));

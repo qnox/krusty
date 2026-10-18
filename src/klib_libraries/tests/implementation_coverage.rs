@@ -4,10 +4,11 @@
 //! Eligibility is declaration/body evidence from the selected KLIB, never an annotation or source
 //! spelling. Backlog keys retain the provider module and complete serialized declaration identity;
 //! the paths embedded in those identities are output only. Lists live under
-//! `tests/klib_uncovered_implementations/<target>/<version>.txt` and may only shrink. The one-off
-//! `KRUSTY_SHRINK_UNCOVERED_IMPLEMENTATIONS=1` maintenance mode creates a missing list or removes
-//! entries which became implemented; it never admits a newly uncovered declaration to an existing
-//! list.
+//! `tests/klib_uncovered_implementations/<target>/<version>.txt` and may only shrink. A release
+//! with no list of its own reads its predecessor's ([`crate::toolchain::release_list`]). The
+//! one-off `KRUSTY_SHRINK_UNCOVERED_IMPLEMENTATIONS=1` maintenance mode creates a missing list or
+//! removes entries which became implemented; it never admits a newly uncovered declaration to an
+//! existing list.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -91,11 +92,13 @@ fn uncovered_implementations(libraries: &KlibLibraries) -> BTreeSet<String> {
         .collect()
 }
 
-fn list_path(target: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/klib_uncovered_implementations")
-        .join(target)
-        .join(format!("{}.txt", crate::kotlin_version::target()))
+/// The target's lists, as the reference version reads and records them.
+fn release_list(target: &str) -> crate::toolchain::ReleaseList {
+    crate::toolchain::release_list(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/klib_uncovered_implementations")
+            .join(target),
+    )
 }
 
 fn target_is_required(target: &str) -> bool {
@@ -125,14 +128,12 @@ fn check_target(target: CompilationTarget, list: &str) {
     let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(stdlib, semantics)])
         .unwrap_or_else(|error| panic!("{error}"));
     let uncovered = uncovered_implementations(&libraries);
-    let path = list_path(list);
+    let path = release_list(list).read;
     let shrink = std::env::var_os("KRUSTY_SHRINK_UNCOVERED_IMPLEMENTATIONS").is_some();
-    let listed: Option<BTreeSet<String>> = std::fs::read_to_string(&path)
-        .ok()
-        .map(|text| text.lines().map(str::to_string).collect());
+    let listed = read_list(&path);
     let Some(listed) = listed else {
         if shrink {
-            write_list(&path, &uncovered);
+            write_list(list, &uncovered);
             return;
         }
         panic!(
@@ -157,7 +158,7 @@ fn check_target(target: CompilationTarget, list: &str) {
         return;
     }
     if shrink {
-        write_list(&path, &uncovered);
+        write_list(list, &uncovered);
         return;
     }
     panic!(
@@ -172,7 +173,29 @@ fn check_target(target: CompilationTarget, list: &str) {
     );
 }
 
-fn write_list(path: &std::path::Path, uncovered: &BTreeSet<String>) {
+fn read_list(path: &std::path::Path) -> Option<BTreeSet<String>> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|text| text.lines().map(str::to_string).collect())
+}
+
+/// Record the target reference version's list: in its own file, unless it is exactly the list the
+/// version would inherit.
+fn write_list(target: &str, uncovered: &BTreeSet<String>) {
+    let lists = release_list(target);
+    let path = lists.own;
+    if lists
+        .inherited
+        .and_then(|inherited| read_list(&inherited))
+        .as_ref()
+        == Some(uncovered)
+    {
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .unwrap_or_else(|error| panic!("remove {}: {error}", path.display()));
+        }
+        return;
+    }
     std::fs::create_dir_all(path.parent().expect("the list has a directory"))
         .unwrap_or_else(|error| panic!("create {}: {error}", path.display()));
     let mut text = String::new();
@@ -180,7 +203,7 @@ fn write_list(path: &std::path::Path, uncovered: &BTreeSet<String>) {
         text.push_str(line);
         text.push('\n');
     }
-    std::fs::write(path, text).unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+    std::fs::write(&path, text).unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
 }
 
 #[test]

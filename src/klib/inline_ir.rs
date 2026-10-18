@@ -355,6 +355,16 @@ impl Component {
             Self::Prepared => PREPARED_PREFIX,
         }
     }
+
+    /// Stable provenance for the synthetic `IrFile` that aggregates this component. Individual
+    /// prepared declarations retain their real source file in the function wrapper; the aggregate
+    /// must not pretend that the first declaration's source owns every declaration in the file.
+    fn root_file_name(self) -> &'static str {
+        match self {
+            Self::Main => "<krusty-main-ir>",
+            Self::Prepared => "<krusty-prepared-inline-ir>",
+        }
+    }
 }
 
 /// Lay the collected functions out as Kotlin 2.4's ordinary and prepared-inline IR components.
@@ -390,8 +400,10 @@ fn component_artifacts(
         .iter()
         .map(|(signature, _)| u64::from(*signature))
         .collect::<Vec<_>>();
+    let root_file_entry = writer.file_entry(component.root_file_name());
     let mut file = Pb::new();
     file.field_packed_varints(1, &ids);
+    file.field_varint(7, u64::from(root_file_entry));
     let entries = [
         ("files.knf", per_file(file.into_bytes())),
         (
@@ -922,6 +934,35 @@ mod tests {
         read_inlinable_declaration_trees_where, KlibIrSignature,
     };
 
+    fn take_varint(bytes: &[u8], cursor: &mut usize) -> u64 {
+        let mut value = 0u64;
+        for shift in (0..64).step_by(7) {
+            let byte = bytes[*cursor];
+            *cursor += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return value;
+            }
+        }
+        panic!("oversized test varint")
+    }
+
+    /// Root file-entry id from the single `IrFile` emitted by this writer.
+    fn root_file_entry(bytes: &[u8]) -> u64 {
+        assert_eq!(u32::from_be_bytes(bytes[0..4].try_into().unwrap()), 1);
+        let size = u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        assert_eq!(bytes.len(), 8 + size);
+        let message = &bytes[8..];
+        let mut cursor = 0;
+        assert_eq!(take_varint(message, &mut cursor), (1 << 3) | 2);
+        let declaration_ids = take_varint(message, &mut cursor) as usize;
+        cursor += declaration_ids;
+        assert_eq!(take_varint(message, &mut cursor), 7 << 3);
+        let root = take_varint(message, &mut cursor);
+        assert_eq!(cursor, message.len());
+        root
+    }
+
     fn fixture() -> (PreparedFunction, KlibPublicIdSignature) {
         let signature = KlibPublicIdSignature::classifier(TypeName::from("fixture/probe"));
         let bound = Ty::nullable(Ty::obj("kotlin/Any"));
@@ -964,6 +1005,24 @@ mod tests {
         let (function, signature) = fixture();
         let artifacts = artifacts(&[function], true);
         assert_eq!(artifacts.len(), 16);
+        assert_eq!(Component::Main.root_file_name(), "<krusty-main-ir>");
+        assert_eq!(
+            Component::Prepared.root_file_name(),
+            "<krusty-prepared-inline-ir>"
+        );
+        let main_file = artifacts
+            .iter()
+            .find(|(name, _)| name == "default/ir/files.knf")
+            .map(|(_, bytes)| bytes)
+            .expect("main component has one synthetic IrFile");
+        assert_eq!(root_file_entry(main_file), 0);
+        let prepared_file = artifacts
+            .iter()
+            .find(|(name, _)| name == "default/ir_inlinable_functions/files.knf")
+            .map(|(_, bytes)| bytes)
+            .expect("prepared component has one synthetic IrFile");
+        // The prepared declaration keeps `Probe.kt` at id 0; the aggregate root is distinct.
+        assert_eq!(root_file_entry(prepared_file), 1);
         let file_entries = artifacts
             .iter()
             .find(|(name, _)| name == "default/ir_inlinable_functions/fileEntries.knf")

@@ -27,14 +27,15 @@ use super::tree::{
     KlibIrVarargElement, KlibIrVariable, KlibIrVariableId, KlibIrVariance,
 };
 use super::wire::{
-    current_operation, declaration_index, entries, int32, lattice, message, packed_field,
-    packed_values, read_declaration_tree_tables, unique_bytes, unique_varint, WireField,
+    current_operation, declaration_index, entries, int32, lattice, message, packed_values,
+    read_declaration_tree_tables, unique_bytes, unique_varint, WireField,
 };
 use super::{decode_literal, file_strings, KlibIrDecodeError};
 
 const BODIES: &str = "bodies.knb";
 const DECLARATIONS: &str = "irDeclarations.knd";
 const FILE_ENTRIES: &str = "fileEntries.knf";
+const FILES: &str = "files.knf";
 const TYPES: &str = "types.knt";
 
 /// Deepest expression or type nesting a body may have. Real bodies stay far below it; the bound
@@ -234,11 +235,12 @@ fn read_declaration_trees_from(
                 .map(|tables| entries(&tables[index], FILE_ENTRIES).map(|entries| entries.len()))
                 .transpose()?,
         };
+        let declaration_ids = ir_file_declaration_ids(&mut file, &files[index])?;
         let declarations = declaration_index(&declarations[index])?;
-        for id in packed_field(&files[index], "files.knf", 1, "declaration ids")? {
+        for id in declaration_ids {
             let bytes = declarations.get(&id).ok_or_else(|| {
                 KlibIrDecodeError::malformed(
-                    "files.knf",
+                    FILES,
                     0,
                     format!("references absent declaration id {id}"),
                 )
@@ -278,6 +280,18 @@ fn read_declaration_trees_from(
     Ok(module)
 }
 
+/// Validate an `IrFile`'s own provenance before decoding declarations from it. Kotlin 2.4.21
+/// requires one of fields 2 and 7 when consuming a produced KLIB; older inputs may omit both, but
+/// an id that is present must resolve in this file's `fileEntries.knf` table.
+fn ir_file_declaration_ids(
+    file: &mut FileTables<'_>,
+    bytes: &[u8],
+) -> Result<Vec<u64>, KlibIrDecodeError> {
+    let ir_file = Msg::parse(bytes, 0, FILES)?;
+    TreeDecoder::new(file).file_reference(&ir_file, 2, 7)?;
+    ir_file.packed(1, "declaration ids")
+}
+
 /// The identity of the declaration `msg` serializes, read from its base without decoding the rest.
 fn top_level_signature(
     file: &mut FileTables<'_>,
@@ -301,7 +315,7 @@ struct FileTables<'a> {
     signatures: SignatureTable<'a>,
     types: Vec<&'a [u8]>,
     bodies: Vec<&'a [u8]>,
-    /// Present only for Kotlin's prepared-inline component.
+    /// Present for prepared inline IR and for ordinary IR that records file-entry provenance.
     file_entries: Option<usize>,
 }
 
@@ -1218,9 +1232,18 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
         ) {
             (None, None) => Ok(None),
             (Some(entry), None) => self.file_entry(&entry).map(Some),
-            (None, Some(id)) => Ok(Some(KlibIrFileEntry::Id(
-                u32::try_from(id).map_err(|_| msg.error("file entry id exceeds u32"))?,
-            ))),
+            (None, Some(id)) => {
+                let id = u32::try_from(id).map_err(|_| msg.error("file entry id exceeds u32"))?;
+                let count = self.file.file_entries.ok_or_else(|| {
+                    msg.error(format!(
+                        "file entry {id} is absent because this component has no {FILE_ENTRIES}"
+                    ))
+                })?;
+                if id as usize >= count {
+                    return Err(msg.error(format!("file entry {id} is absent from {FILE_ENTRIES}")));
+                }
+                Ok(Some(KlibIrFileEntry::Id(id)))
+            }
             (Some(_), Some(_)) => Err(msg.error("file given both in place and by id")),
         }
     }
@@ -1860,6 +1883,33 @@ mod tests {
             .member(&Msg::parse(declaration, 0, DECLARATIONS).unwrap())
             .unwrap();
         (decoder.arena, member)
+    }
+
+    #[test]
+    fn ir_file_field_7_must_name_an_existing_file_entry() {
+        let strings = declaration_strings();
+        let signatures: Vec<&[u8]> = Vec::new();
+        let mut file = FileTables {
+            strings: &strings,
+            signatures: SignatureTable::new(0, &signatures, &strings),
+            types: Vec::new(),
+            bodies: Vec::new(),
+            file_entries: Some(1),
+        };
+        let mut declaration_ids = Vec::new();
+        push_varint(9, &mut declaration_ids);
+        let mut valid = bytes_field(1, &declaration_ids);
+        valid.extend(varint_field(7, 0));
+        assert_eq!(ir_file_declaration_ids(&mut file, &valid).unwrap(), [9]);
+
+        let mut absent = bytes_field(1, &declaration_ids);
+        absent.extend(varint_field(7, 1));
+        assert_eq!(
+            ir_file_declaration_ids(&mut file, &absent)
+                .unwrap_err()
+                .to_string(),
+            "invalid KLIB IR files.knf at byte 0: file entry 1 is absent from fileEntries.knf"
+        );
     }
 
     #[test]

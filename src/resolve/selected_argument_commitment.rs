@@ -80,6 +80,37 @@ impl IntoIterator for SelectedArgumentCommitment {
 }
 
 impl Checker<'_> {
+    /// Freeze one selected argument only after its contextual check has committed the nested
+    /// winner. A pre-check snapshot can retain a discarded probe or miss an intersection that the
+    /// selected expectation finalizes.
+    fn finalized_selected_argument_binding(
+        &self,
+        scope: &CheckerScope<'_>,
+        argument: ExprId,
+        parameter: usize,
+        vararg_element: bool,
+        source_declared_type: Option<Ty>,
+        mut source_intersection: Option<super::intersection_inference::InferredIntersection>,
+        actual: Ty,
+    ) -> SelectedArgumentBinding {
+        let source_provenance = self.finalized_selected_argument_reified_provenance(
+            scope,
+            argument,
+            source_declared_type.unwrap_or(actual),
+        );
+        if let Some(intersection) = &mut source_intersection {
+            intersection.through_flexible |= source_provenance.crossed_flexible_boundary();
+        }
+        SelectedArgumentBinding {
+            argument,
+            parameter,
+            vararg_element,
+            source_declared_type,
+            source_provenance,
+            source_intersection,
+        }
+    }
+
     /// Capture the source facts of an already-selected argument mapping before a later contextual
     /// check can replace an expression's committed type or intersection. Constructors use this
     /// seam because their generic class inference and concrete-parameter recheck are separate.
@@ -262,7 +293,10 @@ impl Checker<'_> {
             let whole_array = call_sig.vararg_index == Some(parameter)
                 && (named || self.file.is_spread_arg(argument));
             let source_declared_type = self.local_variable_read(scope, argument);
-            let mut source_intersection = self.inferred_expression_intersection_fact(argument);
+            // The selected parameter check may replace a non-denotable source join with its
+            // denotable expected type. Retain that source fact now, then add flexible-boundary
+            // provenance only after the contextual check has finalized the value sidecar.
+            let source_intersection = self.inferred_expression_intersection_fact(argument);
             let inferred = argument_expectations
                 .and_then(|expectations| expectations.get(&argument))
                 .copied();
@@ -285,22 +319,7 @@ impl Checker<'_> {
                 parameter,
                 implicit_lambda_label.as_deref(),
             );
-            let source_provenance = self.finalized_selected_argument_reified_provenance(
-                scope,
-                argument,
-                source_declared_type.unwrap_or(actual),
-            );
-            if let Some(intersection) = &mut source_intersection {
-                intersection.through_flexible |= source_provenance.crossed_flexible_boundary();
-            }
-            argument_bindings.push(SelectedArgumentBinding {
-                argument,
-                parameter,
-                vararg_element: call_sig.vararg_index == Some(parameter) && !whole_array,
-                source_declared_type,
-                source_provenance,
-                source_intersection,
-            });
+            let vararg_element = call_sig.vararg_index == Some(parameter) && !whole_array;
             if whole_array {
                 self.expect_whole_array_vararg_arg(
                     Some(scope),
@@ -308,6 +327,15 @@ impl Checker<'_> {
                     actual,
                     array_or_parameter,
                 );
+                argument_bindings.push(self.finalized_selected_argument_binding(
+                    scope,
+                    argument,
+                    parameter,
+                    vararg_element,
+                    source_declared_type,
+                    source_intersection,
+                    actual,
+                ));
                 continue;
             }
             if self.commit_implicit_integer_coercion(
@@ -319,6 +347,15 @@ impl Checker<'_> {
                     .copied()
                     .unwrap_or(false),
             ) {
+                argument_bindings.push(self.finalized_selected_argument_binding(
+                    scope,
+                    argument,
+                    parameter,
+                    vararg_element,
+                    source_declared_type,
+                    source_intersection,
+                    actual,
+                ));
                 continue;
             }
             let declared_parameter = declared_params[parameter];
@@ -342,6 +379,15 @@ impl Checker<'_> {
                     .unwrap_or(false),
                 implicit_lambda_label.as_deref(),
             );
+            argument_bindings.push(self.finalized_selected_argument_binding(
+                scope,
+                argument,
+                parameter,
+                vararg_element,
+                source_declared_type,
+                source_intersection,
+                actual,
+            ));
         }
         if !self.commit_selected_argument_slots(call, slots, &call_sig.param_defaults) {
             return false;

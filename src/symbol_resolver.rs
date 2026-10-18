@@ -3748,6 +3748,10 @@ impl ResolvedMember {
 
 pub struct SelectedMemberProperty {
     pub owner: TypeName,
+    /// Declaring classifier with its own type parameters still symbolic. The applied receiver is
+    /// the lookup input, but later declaration-result publication must bind through this exact
+    /// selected declaration shape instead of reconstructing it from the applied result.
+    pub declaration_receiver: Option<Ty>,
     pub ty: Ty,
     pub interface: bool,
     pub visibility: crate::types::Visibility,

@@ -1997,6 +1997,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   shape is retained when its value is discarded, including captured and local-class-captured
   storage. Common IR records postfix provenance. JVM emission contracts an `Int` local to `iinc`
   after entering its ordinary block lifecycle, while other storage keeps the snapshot temporary.
+  The postfix update therefore never re-reads its storage: a lambda's captured `Ref` cell, a local
+  shared into a closure, a local class's captured cell, and a `Long`/`Double`/`Byte`/`Short`/`Char`/
+  `Float` or user-`inc` local all apply `inc`/`dec` to the saved old value (byte parity across every
+  storage and type: `value_position_postfix_updates_from_the_saved_old_value_like_kotlinc`).
   Tests: `tests/increment_statement_e2e.rs`, the shared
   `multimoduleLocalIncrementShapes` JVM/Native/Wasm case, and the checked-FIR increment tests.
 - **`&&`/`||` are laid out as short-circuit jumps**, as kotlinc lays out `ANDAND`/`OROR`. In a
@@ -2015,6 +2019,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   structural reference equality, except that an enum-typed property, nullable or not, is compared
   by reference (`if_acmpne`) as kotlinc's `Equals` lowering does for any enum operand
   (`tests/data_class_enum_equality_e2e.rs`); `hashCode` is the `31*result + fieldHash` fold;
+  an interface-typed property hashes through `invokevirtual java/lang/Object.hashCode`, also when
+  the interface is declared in another file of the module, which the file learns from the module's
+  classifier records (`tests/data_class_sibling_interface_hash_e2e.rs`);
   `toString` is `Class(p1=v1, p2=v2)`. `copy(p = v)` is supported via the default-argument mechanism (below).
 - **Default arguments.** A parameter's default *value* is backend-agnostic IR
   (`IrFile.fn_param_defaults`). A call that omits arguments is an ordinary call with holes —
@@ -2379,7 +2386,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   as a Java identifier (`NameUtils.sanitizeAsJavaIdentifier`): every character that is not a
   Unicode letter or an ASCII digit becomes `_`, so a backticked `my test` lifts
   `my_test$lambda$0` and a backticked local function `my local` lifts `outer$my_local`, while the
-  declared function keeps its name. Tests:
+  declared function keeps its name. Local functions are numbered by raw name before that spelling,
+  so `my local` and `my-local` in one body both lift to `outer$my_local`; that is a platform
+  declaration clash, reported at each local function's declaration with the lifted method's
+  physical parameters (a captured parameter `y` renders as `` `$y` ``, a captured local `v` as `v`),
+  exactly as kotlinc reports it. A foreign inline template's local functions are left to the file
+  that declares them. Tests:
   `tests/lifted_callable_names_e2e.rs`,
   `tests/companion_initializer_lambda_e2e.rs::a_nested_moved_lambda_uses_its_parents_physical_ordinal`.
 - **What a suspend lambda declares is lifted into the lambda's class.** kotlinc makes the suspend
@@ -8019,10 +8031,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the setter's return to the whole declaration's last line. An `internal set` on a public property
   is an internal member, so its setter carries the module suffix for both its declaring class and
   sibling-file call sites; a top-level `lateinit var` may use that bodyless visibility-only setter
-  without an initializer. Known gaps, independent of annotations: `@JvmName` renames a
-  declared accessor (and the package `JvmPropertySignature`
-  names the renamed method) but not a bodyless one; use-site targets (`@get:A`) are not part of this
-  path. Tests: `property_accessor_annotation_e2e`, `written_default_accessor_e2e`,
+  without an initializer. `@JvmName` on a bodyless accessor is covered by the accessor `@JvmName`
+  entry below. Tests: `property_accessor_annotation_e2e`, `written_default_accessor_e2e`,
   `expression_line_marks_e2e` (setter fall-through), `types::annotation_targets` unit tests.
 
   A retained `PROPERTY` annotation's synthetic `$annotations` method occupies the same physical JVM
@@ -17119,6 +17129,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `companion_e2e::companion_property_custom_accessors_run`,
   `companion_e2e::computed_companion_property_reads_outside_a_qualified_receiver`,
   `feature_coverage_q_e2e::value_class_companion_function`.
+
+- **`@JvmName` on a compiler-default accessor is that accessor's whole JVM name.** The name may be
+  written on a bodyless `get`/`set` or through `@get:JvmName`/`@set:JvmName`. The JVM backend
+  realizes it from the accessor's checked annotations before emission, for a member, an object, a
+  file-facade property and a companion property whose storage is hoisted onto the outer class. The
+  declaration, same-file calls, the property's `JvmPropertySignature` and its `$annotations` marker
+  all use it. An explicit `@JvmName` is not changed further: an internal member keeps it without the
+  `$<module>` suffix (a function, a declared accessor or a default one), and a value-class-typed
+  property keeps it without the value-class hash. A companion's synthesized default accessors also
+  carry the annotations written on them (`@get:Deprecated`). Known gaps: a call from another file
+  of the module still names a member's Kotlin accessor or function (the stable header records no
+  member annotation arguments), a `@JvmStatic` companion property has no outer static wrapper, and
+  a top-level `lateinit var`, which has no checked body, carries no accessor annotations. Tests:
+  `accessor_jvm_name_e2e`.
 
 - **`@JvmName` on a top-level function names the emitted method.** The annotation's constant
   string is the bytecode method name; call sites still resolve by the SOURCE name, and each emits

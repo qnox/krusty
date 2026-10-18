@@ -1081,6 +1081,19 @@ impl Checker<'_> {
         fact.substitute(declared, &|formal| bindings.get(formal).cloned())
     }
 
+    /// Retain the declaration interval of an already-selected member property independently of
+    /// whether that property needs a physical accessor call. Source properties can lower through
+    /// their stable declaration while their generic result still binds from the explicit receiver.
+    pub(super) fn record_flexible_member_property(
+        &mut self,
+        expression: ExprId,
+        property: &crate::symbol_resolver::ResolvedMember,
+    ) {
+        let selected = super::ResolvedCall::Member(property.clone());
+        let fact = self.selected_call_flexible_publication(expression, &selected);
+        self.stage_flexible_value(expression, fact);
+    }
+
     pub(super) fn record_flexible_member_extension_property(
         &mut self,
         expression: ExprId,
@@ -1251,7 +1264,12 @@ impl Checker<'_> {
         }
         result.record_flexible_upper_bounds(ty, &|lower| self.flexible_upper_bound(lower));
         fact.apply_to_inferred_declaration(ty, &mut result);
-        result.mark_enhanced(&self.value_enhancement(value).declared());
+        let enhancement = self.value_enhancement(value);
+        // Enhancement has already selected a rigid semantic face. The inferred declaration drops
+        // the value head's attribute, but it must not resurrect that position's pre-enhancement
+        // Java interval; nested marks remain declaration attributes.
+        result.clear_enhanced_flexible_upper_bounds(&enhancement);
+        result.mark_enhanced(&enhancement.declared());
         if result.is_none() {
             return;
         }

@@ -38,6 +38,150 @@ fn recover<S: SignatureSemantics>(
         return Ok(None);
     };
     match graph.expr(expression) {
+        Some(SigExpr::Call {
+            target,
+            arguments,
+            qualified,
+        }) => {
+            let selection = graph
+                .callable_selection(target)
+                .expect("a publication call retains its selected-call coordinate");
+            let scope = graph
+                .scope(selection.scope)
+                .expect("a publication call retains its signature scope");
+            let mut published_arguments = Vec::new();
+            for argument in graph.call_arguments(arguments) {
+                let Some(&ordinary) = memo.get(&argument.value) else {
+                    return Ok(None);
+                };
+                let Some((published, _, _)) = recover(semantics, argument.value, graph, memo)?
+                else {
+                    return Ok(None);
+                };
+                published_arguments.push((ordinary, published));
+            }
+            // A syntactically qualified call remains a `SigExpr::Call` until scope-tower binding.
+            // When its root won as a value, ordinary evaluation already evaluated this exact
+            // receiver and selected a member call. Reuse that memoized decision here; an absent
+            // memo entry means the root won as a namespace, so there is no receiver to publish.
+            let published_receiver = match qualified
+                .and_then(|coordinate| graph.qualified_call_coordinate(coordinate))
+                .map(|coordinate| coordinate.receiver)
+            {
+                Some(receiver) if memo.contains_key(&receiver) => {
+                    let ordinary = memo[&receiver];
+                    let Some((published, _, _)) = recover(semantics, receiver, graph, memo)? else {
+                        return Ok(None);
+                    };
+                    Some((ordinary, published))
+                }
+                Some(_) | None => None,
+            };
+            let Some(published) = semantics.call_result_publication(
+                scope,
+                selection.origin,
+                published_receiver,
+                &published_arguments,
+            )?
+            else {
+                return Ok(Some((
+                    current,
+                    false,
+                    result_abbreviation(semantics, graph, expression, memo),
+                )));
+            };
+            Ok(Some((
+                published,
+                published != current,
+                result_abbreviation(semantics, graph, expression, memo),
+            )))
+        }
+        Some(SigExpr::MemberCall {
+            receiver,
+            target,
+            arguments,
+            origin,
+        }) => {
+            let selection = graph
+                .member_selection(target)
+                .expect("a publication member call retains its selected-call coordinate");
+            let scope = graph
+                .scope(selection.scope)
+                .expect("a publication member call retains its signature scope");
+            let Some(&ordinary_receiver) = memo.get(&receiver) else {
+                return Ok(None);
+            };
+            let Some((published_receiver, _, _)) = recover(semantics, receiver, graph, memo)?
+            else {
+                return Ok(None);
+            };
+            let mut published_arguments = Vec::new();
+            for argument in graph.call_arguments(arguments) {
+                let Some(&ordinary) = memo.get(&argument.value) else {
+                    return Ok(None);
+                };
+                let Some((published, _, _)) = recover(semantics, argument.value, graph, memo)?
+                else {
+                    return Ok(None);
+                };
+                published_arguments.push((ordinary, published));
+            }
+            let Some(published) = semantics.call_result_publication(
+                scope,
+                origin,
+                Some((ordinary_receiver, published_receiver)),
+                &published_arguments,
+            )?
+            else {
+                return Ok(Some((
+                    current,
+                    false,
+                    result_abbreviation(semantics, graph, expression, memo),
+                )));
+            };
+            Ok(Some((
+                published,
+                published != current,
+                result_abbreviation(semantics, graph, expression, memo),
+            )))
+        }
+        Some(SigExpr::Member {
+            receiver,
+            lookup,
+            origin,
+        }) => {
+            let selection = graph
+                .member_selection(lookup)
+                .expect("a publication member read retains its selected-member coordinate");
+            let scope = graph
+                .scope(selection.scope)
+                .expect("a publication member read retains its signature scope");
+            let Some(&ordinary_receiver) = memo.get(&receiver) else {
+                return Ok(None);
+            };
+            let Some((published_receiver, _, _)) = recover(semantics, receiver, graph, memo)?
+            else {
+                return Ok(None);
+            };
+            let Some(published) = semantics.call_result_publication(
+                scope,
+                origin,
+                Some((ordinary_receiver, published_receiver)),
+                &[],
+            )?
+            else {
+                return Ok(Some((
+                    current,
+                    false,
+                    result_abbreviation(semantics, graph, expression, memo),
+                )));
+            };
+            Ok(Some((
+                published,
+                published != current,
+                result_abbreviation(semantics, graph, expression, memo),
+            )))
+        }
         Some(SigExpr::MutableLocalFlow { declared, .. }) => {
             let Some(&published) = memo.get(&declared) else {
                 return Ok(None);

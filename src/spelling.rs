@@ -158,6 +158,19 @@ impl Spelled {
         }
     }
 
+    /// Remove provider intervals at positions Java enhancement already made rigid.
+    pub(crate) fn clear_enhanced_flexible_upper_bounds(
+        &mut self,
+        enhancement: &crate::libraries::TypeEnhancement,
+    ) {
+        if enhancement.head() {
+            self.flexible_upper_bound = None;
+        }
+        for (spelling, argument) in self.args.iter_mut().zip(enhancement.arguments()) {
+            spelling.clear_enhanced_flexible_upper_bounds(argument);
+        }
+    }
+
     /// Mark the positions `enhancement` lays out as `EnhancedNullability` occurrences.
     pub(crate) fn mark_enhanced(&mut self, enhancement: &crate::libraries::TypeEnhancement) {
         if enhancement.head() {

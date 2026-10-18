@@ -1841,6 +1841,7 @@ impl FunctionInfo {
         member.generic_sig = self.generic_sig.clone();
         member.projected_return_hazard = self.projected_return_hazard;
         member.inline = self.flags.inline;
+        member.inline_body_plan = self.callable.inline_body_plan.clone();
         member.reified = self.flags.reified;
         member.annotations = self.callable.annotations.clone();
         member.deprecation = self.callable.deprecation.clone();

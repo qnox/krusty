@@ -51,6 +51,16 @@ impl SelectedGenericCall {
         &self.arguments
     }
 
+    /// A semantic call result may consume substitutions only after every declaration slot is
+    /// solved. Partial evidence remains available to the checker and crosses into checked FIR as
+    /// explicit `(ordinal, type)` entries; it is not a complete specialization of the call.
+    fn committed_arguments(&self) -> Option<&[Option<Ty>]> {
+        self.arguments
+            .iter()
+            .all(Option::is_some)
+            .then_some(&self.arguments)
+    }
+
     fn materialized_arguments(&self) -> impl Iterator<Item = (usize, Ty)> + '_ {
         self.arguments
             .iter()
@@ -251,11 +261,11 @@ fn constrain_reified_argument_provenance(
 }
 
 impl TypeInfo {
-    /// Selected-call type-argument evidence in declaration order, including unsolved slots.
+    /// Fully committed selected-call type arguments in declaration order.
     pub fn resolved_call_type_arguments(&self, expression: ExprId) -> Option<&[Option<Ty>]> {
         self.selected_generic_calls
             .get(&expression)
-            .map(SelectedGenericCall::arguments)
+            .and_then(SelectedGenericCall::committed_arguments)
     }
     /// Materialized substitutions with their declaration ordinals. Unsolved slots remain checker
     /// evidence only and never cross into checked FIR as a value.
@@ -1057,6 +1067,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(partial.arguments(), &[Some(Ty::String), None]);
+        assert_eq!(partial.committed_arguments(), None);
         assert_eq!(
             partial.materialized_arguments().collect::<Vec<_>>(),
             [(0, Ty::String)]
@@ -1066,6 +1077,10 @@ mod tests {
             arguments: vec![Some(Ty::String), Some(Ty::Int)],
             ..Default::default()
         };
+        assert_eq!(
+            complete.committed_arguments(),
+            Some([Some(Ty::String), Some(Ty::Int)].as_slice())
+        );
         assert_eq!(
             complete.materialized_arguments().collect::<Vec<_>>(),
             [(0, Ty::String), (1, Ty::Int)]

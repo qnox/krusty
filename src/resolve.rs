@@ -11410,6 +11410,7 @@ impl<'a> Checker<'a> {
                         ty: local.ty,
                         owner: local.owner,
                         interface: local.interface,
+                        publication: None,
                         getter: None,
                         accessor: None,
                         producer: crate::libraries::PropertyProducer::KotlinAccessor,
@@ -11448,6 +11449,7 @@ impl<'a> Checker<'a> {
                 }
                 let owner = selected.owner;
                 let visibility = selected.visibility;
+                let publication = selected.read(receiver);
                 let mut selected_property = selected.property;
                 let checked_ty = selected_property.as_mut().and_then(|property| {
                     self.apply_checked_source_property_result(receiver, property)
@@ -11517,6 +11519,7 @@ impl<'a> Checker<'a> {
                         ty,
                         owner,
                         interface: selected.interface,
+                        publication,
                         getter,
                         accessor: selected_property
                             .as_ref()
@@ -12128,6 +12131,7 @@ impl<'a> Checker<'a> {
                     name,
                     owner,
                     interface,
+                    publication,
                     getter,
                     accessor,
                     producer,
@@ -12140,6 +12144,9 @@ impl<'a> Checker<'a> {
                     stable_read,
                     ..
                 } = *member;
+                if let Some(publication) = publication.as_ref() {
+                    self.record_flexible_member_property(expression, publication);
+                }
                 if let Some(constant) = compile_time_constant {
                     self.resolved_constants.insert(expression, constant);
                     return ty;
@@ -16997,7 +17004,7 @@ impl<'a> Checker<'a> {
                         .map(|(_, candidates)| candidates)
                         .unwrap_or_default();
                     let rejected_candidates = candidates.clone();
-                    if let Some(selected) = self
+                    if let Some(mut selected) = self
                         .select_callable_candidate(
                             scope,
                             CallArgs {
@@ -17066,7 +17073,23 @@ impl<'a> Checker<'a> {
                             self.context_args.insert(call, context_args);
                         }
                         self.set(receiver, Ty::obj_name(classifier));
-                        let ret = selected.callable.ret;
+                        let mut ret = selected.callable.ret;
+                        if let Some(signature) = selected.generic_sig.clone() {
+                            let return_info = selected.ret;
+                            ret = self.commit_selected_call_intersections(
+                                call,
+                                &signature,
+                                &explicit_type_args,
+                                &shape.parameter_indices,
+                                &shape.call_sig,
+                                &mut selected.bindings,
+                                &mut selected.intersection_bindings,
+                                return_info,
+                                ret,
+                            );
+                        } else {
+                            self.clear_selected_generic_call(call);
+                        }
                         let member = selected.member_with_return(ret);
                         self.record_selected_sam_arguments(scope, args, &selected.applied_params());
                         self.record_selected_qualifier_call(call, &selected);
@@ -19634,7 +19657,7 @@ impl<'a> Checker<'a> {
                                         inferred.lower,
                                         inferred.upper,
                                     );
-                                    self.merge_postponed_lambda(
+                                    self.merge_postponed_function_argument(
                                         a,
                                         checked,
                                         &mut postponed_constraints,
@@ -20007,7 +20030,7 @@ impl<'a> Checker<'a> {
                                     inferred.lower,
                                     inferred.upper,
                                 );
-                                let checked = self.merge_postponed_lambda(
+                                let checked = self.merge_postponed_function_argument(
                                     a,
                                     checked,
                                     &mut postponed_constraints,
@@ -20120,32 +20143,60 @@ impl<'a> Checker<'a> {
                         let expected_callable = expected_parameter
                             .and_then(|parameter| self.functional_parameter_shape(parameter));
                         if matches!(self.file.expr(a), Expr::CallableRef { .. }) {
-                            if let Some(Ty::Fun(_)) = expected_callable {
-                                let postponed_reference =
-                                    sig.generic_sig.as_ref().is_some_and(|generic| {
-                                        generic.formals.iter().any(|formal| {
-                                            !known_generic_bindings.contains_key(formal)
-                                                && ty_mentions_param(
-                                                    expected_callable
-                                                        .expect("callable expectation"),
-                                                    std::slice::from_ref(formal),
-                                                )
-                                        })
-                                    });
+                            if let Some(expected_callable @ Ty::Fun(_)) = expected_callable {
+                                let postponed_formals = sig
+                                    .generic_sig
+                                    .as_ref()
+                                    .map(|generic| {
+                                        generic
+                                            .formals
+                                            .iter()
+                                            .filter(|formal| {
+                                                !known_generic_bindings.contains_key(*formal)
+                                            })
+                                            .cloned()
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default();
+                                let (instantiated_expectation, collect_postponed) =
+                                    PostponedCallConstraints::enter_for_type(
+                                        &mut self.postponed_call_constraints,
+                                        self.compilation_id,
+                                        self.file_index,
+                                        call,
+                                        &postponed_formals,
+                                        expected_callable,
+                                    );
                                 let diagnostic_mark =
-                                    postponed_reference.then_some(self.diags.diags.len());
-                                let checked = self.expr_expected(
-                                    scope,
-                                    a,
-                                    expected_callable.expect("callable expectation"),
-                                );
+                                    collect_postponed.then_some(self.diags.diags.len());
+                                let checked =
+                                    self.expr_expected(scope, a, instantiated_expectation);
                                 if let Some(mark) = diagnostic_mark {
                                     self.postponed_diagnostics
                                         .capture_since(a, self.diags, mark);
                                 }
-                                let semantic_checked = self
+                                let mut semantic_checked = self
                                     .expression_function_type(scope, a, checked)
                                     .unwrap_or(checked);
+                                if collect_postponed {
+                                    let frame = self
+                                        .postponed_call_constraints
+                                        .pop()
+                                        .expect("postponed callable-reference binding frame");
+                                    semantic_checked = self.merge_postponed_function_argument(
+                                        a,
+                                        semantic_checked,
+                                        &mut postponed_constraints,
+                                        frame,
+                                    );
+                                    postponed_constraints.constrain_callable_reference(
+                                        &self.fed_source(),
+                                        a,
+                                        &postponed_formals,
+                                        expected_callable,
+                                        semantic_checked,
+                                    );
+                                }
                                 if let Some(generic) = sig.generic_sig.as_ref() {
                                     if let Some(&declared_parameter) = generic.params.get(pi) {
                                         let argument = CallArgKind::CallableReference {
@@ -20329,7 +20380,7 @@ impl<'a> Checker<'a> {
                                     inferred.lower,
                                     inferred.upper,
                                 );
-                                self.merge_postponed_lambda(
+                                self.merge_postponed_function_argument(
                                     a,
                                     checked,
                                     &mut postponed_constraints,
@@ -32970,6 +33021,8 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         expected: None,
         callable_reference_literal_constraints: HashMap::default(),
         active_callable_reference: None,
+        active_postponed_callable_reference_recheck: None,
+        completed_failed_postponed_callable_rechecks: crate::fx_hash::HashSet::default(),
         imports,
         import_levels,
         function_import_scope,
@@ -35546,6 +35599,13 @@ struct Checker<'a> {
     /// during that one reference's selection and is discarded with the bounded checker.
     callable_reference_literal_constraints: HashMap<ExprId, HashMap<String, Vec<CallArgKind>>>,
     active_callable_reference: Option<ExprId>,
+    /// The callable-reference expression whose concrete postponed shape is being rechecked.
+    /// Candidate selection uses this semantic ownership marker to leave a shape mismatch to the
+    /// enclosing call without suppressing diagnostics produced inside the reference itself.
+    active_postponed_callable_reference_recheck: Option<ExprId>,
+    /// Concrete postponed callable-reference rechecks that already failed. Final selected-argument
+    /// commitment consumes this fact instead of entering the same failed reference a third time.
+    completed_failed_postponed_callable_rechecks: crate::fx_hash::HashSet<ExprId>,
     imports: HashMap<String, String>,
     /// Classifier import rungs. Callable lookup uses [`Self::function_import_scope`]'s order.
     import_levels: Vec<crate::symbol_resolver::ClassifierImportLevel>,
@@ -38034,35 +38094,12 @@ impl<'a> Checker<'a> {
             expected_params,
             |actual, target| self.receiver_is_assignable(actual, target),
         )?;
-        let constraints = self
-            .active_callable_reference
-            .and_then(|expression| self.callable_reference_literal_constraints.get(&expression));
-        let soft_input_fits = |expected: Ty, target: Ty| {
-            let Ty::TyParam(formal, _) = expected.non_null() else {
-                return true;
-            };
-            // A generic referenced declaration can specialize its own input directly to the
-            // enclosing call's still-open formal. The literal constraint belongs to that same
-            // outer inference variable and therefore cannot reject the symbolic target now; the
-            // final call solution will choose its concrete literal type. Only a concrete target
-            // (for example `Byte` versus `String`) is useful overload evidence at this stage.
-            if target.mentions_ty_param() {
-                return true;
-            }
-            constraints
-                .and_then(|constraints| constraints.get(formal))
-                .is_none_or(|arguments| {
-                    arguments.iter().all(|argument| {
-                        self.receiver_is_assignable(argument.ty(), target)
-                            || argument.adapts_integer_literal_to(target)
-                    })
-                })
-        };
         for (target, argument) in plan.iter().enumerate() {
             let declared = *params.get(target)?;
             match argument {
                 AdaptedRefArgument::Value(value) => {
-                    if !soft_input_fits(*expected_params.get(*value)?, declared) {
+                    if !self.postponed_reference_input_fits(*expected_params.get(*value)?, declared)
+                    {
                         return None;
                     }
                 }
@@ -38076,9 +38113,9 @@ impl<'a> Checker<'a> {
                         declared.array_read_elem().unwrap_or(declared)
                     };
                     if values.iter().any(|value| {
-                        expected_params
-                            .get(*value)
-                            .is_none_or(|expected| !soft_input_fits(*expected, target))
+                        expected_params.get(*value).is_none_or(|expected| {
+                            !self.postponed_reference_input_fits(*expected, target)
+                        })
                     }) {
                         return None;
                     }
@@ -38563,13 +38600,15 @@ impl<'a> Checker<'a> {
                 if expected_is_symbolic {
                     return None;
                 }
-                let display = self
-                    .source_callable_display(candidate)
-                    .unwrap_or_else(|| Self::callable_candidate_display(name, candidate));
-                self.diags.error(
-                    self.member_name_span(expression, name),
-                    format!("inapplicable candidate(s): {display}"),
-                );
+                if self.active_postponed_callable_reference_recheck != Some(expression) {
+                    let display = self
+                        .source_callable_display(candidate)
+                        .unwrap_or_else(|| Self::callable_candidate_display(name, candidate));
+                    self.diags.error(
+                        self.member_name_span(expression, name),
+                        format!("inapplicable candidate(s): {display}"),
+                    );
+                }
                 return Some(Ty::Error);
             }
         }
@@ -52937,6 +52976,18 @@ impl<'a> Checker<'a> {
             // would instead run an expectation-free probe and erase the proper substitution that
             // the selected outer parameter just published.
             actual
+        } else if matches!(self.file.expr(argument), Expr::CallableRef { .. })
+            && matches!(expected.non_null(), Ty::Fun(_))
+            && actual == Ty::Error
+            && self
+                .completed_failed_postponed_callable_rechecks
+                .contains(&argument)
+        {
+            // A concrete postponed recheck already proved this reference inapplicable. A pure
+            // contextual shape mismatch belongs to the selected outer call, while any diagnostic
+            // produced inside the reference was retained by that completed check. Re-entering the
+            // reference here would duplicate either outcome.
+            actual
         } else if self.file.collection_literal_calls.contains(&argument.0)
             || (self.postponed_empty_reference_array_factory(scope, argument)
                 && expected.non_null().is_reference_array()
@@ -60996,11 +61047,18 @@ impl<'a> Checker<'a> {
             Some(Ty::Fun(function)) => Some(function),
             _ => None,
         };
+        let mut postponed_outer = false;
         let expected_constructor_params = expected_function.and_then(|function| {
             let source_parameters = if outer.is_some() && !outer_is_bound {
                 let (&actual_outer, rest) = function.params.split_first()?;
-                self.receiver_is_assignable(actual_outer, outer?)
-                    .then_some(rest)?
+                let natural_outer = outer?;
+                if !self.receiver_is_assignable(actual_outer, natural_outer) {
+                    if !self.postponed_assignability_trial(natural_outer, actual_outer) {
+                        return None;
+                    }
+                    postponed_outer = true;
+                }
+                rest
             } else {
                 &function.params[..]
             };
@@ -61176,6 +61234,7 @@ impl<'a> Checker<'a> {
                 self.expr_types.get(receiver.0 as usize).copied()
             }
             ConstructorReferenceOuter::Implicit(receiver) => Some(receiver.ty),
+            ConstructorReferenceOuter::Unbound if postponed_outer => outer,
             ConstructorReferenceOuter::Unbound => expected_function
                 .and_then(|function| outer.and_then(|_| function.params.first().copied()))
                 .or(outer),
@@ -61199,7 +61258,22 @@ impl<'a> Checker<'a> {
             result
         };
         let signature = match expected_function {
-            Some(expected) => Ty::fun(expected.params.clone(), result),
+            Some(expected) => {
+                let mut parameters = expected.params.clone();
+                if postponed_outer {
+                    if let (Some(parameter), Some(natural_outer)) = (parameters.first_mut(), outer)
+                    {
+                        *parameter = natural_outer;
+                    }
+                }
+                Ty::fun_with_shape(
+                    parameters,
+                    result,
+                    expected.context_count,
+                    expected.has_receiver,
+                    expected.suspend,
+                )
+            }
             None => {
                 let mut parameters = if outer_is_bound {
                     Vec::new()

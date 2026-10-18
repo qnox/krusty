@@ -19,6 +19,7 @@ pub(super) enum ModuleRealizationTarget {
     Property(PropertyId),
     Classifier(TypeName),
     Function(crate::ir::FunId),
+    Static(u32),
 }
 
 fn jvm_field_access(property: &IrModuleProperty, facades: &[String]) -> Option<PropertyAccess> {
@@ -122,7 +123,7 @@ fn header_jvm_name(annotations: &[crate::ir::IrHeaderAnnotation]) -> Result<Opti
     Ok(Some(name))
 }
 
-fn applied_jvm_name(
+pub(super) fn applied_jvm_name(
     annotations: Option<&crate::ir::DeclarationAnnotations>,
 ) -> Result<Option<&str>, ()> {
     let Some(annotation) = annotations.and_then(|annotations| {
@@ -147,6 +148,53 @@ fn applied_jvm_name(
         .filter(|name| !name.is_empty())
         .ok_or(())?;
     Ok(Some(name))
+}
+
+/// A compiler-default accessor has no function to rename, so its `@JvmName` (written on the
+/// accessor or through `@get:`/`@set:`) becomes the accessor's JVM name on the declaration. A
+/// source-written accessor is an ordinary function, which [`realize_declared_function_names`]
+/// renames.
+fn realize_default_accessor_names(ir: &mut IrFile) -> Result<(), ModuleRealizationTarget> {
+    for class in &mut ir.classes {
+        let failure = ModuleRealizationTarget::Classifier(class.fq_name);
+        for property in &mut class.properties {
+            let annotations = &property.accessor_annotations;
+            let getter = applied_jvm_name(Some(&annotations.getter)).map_err(|()| failure)?;
+            let setter = applied_jvm_name(Some(&annotations.setter)).map_err(|()| failure)?;
+            if let Some(getter) = getter.filter(|_| property.getter.is_none()) {
+                property.getter_jvm_name = Some(getter.to_owned());
+            }
+            if let Some(setter) = setter.filter(|_| property.setter.is_none()) {
+                property.setter_jvm_name = Some(setter.to_owned());
+            }
+        }
+    }
+    let mut names = Vec::new();
+    for (index, storage) in ir.statics.iter().enumerate() {
+        let Some(annotations) = ir.static_accessor_annotations(index as u32) else {
+            continue;
+        };
+        let failure = ModuleRealizationTarget::Static(index as u32);
+        let getter = applied_jvm_name(Some(&annotations.getter))
+            .map_err(|()| failure)?
+            .filter(|_| storage.accessors.getter == crate::ir::IrStaticAccessor::Default);
+        let setter = applied_jvm_name(Some(&annotations.setter))
+            .map_err(|()| failure)?
+            .filter(|_| storage.accessors.setter == crate::ir::IrStaticAccessor::Default);
+        if getter.is_some() || setter.is_some() {
+            names.push((index, getter.map(str::to_owned), setter.map(str::to_owned)));
+        }
+    }
+    for (index, getter, setter) in names {
+        let storage = &mut ir.statics[index];
+        if getter.is_some() {
+            storage.getter_jvm_name = getter;
+        }
+        if setter.is_some() {
+            storage.setter_jvm_name = setter;
+        }
+    }
+    Ok(())
 }
 
 fn realize_declared_function_names(ir: &mut IrFile) -> Result<(), ModuleRealizationTarget> {
@@ -718,6 +766,7 @@ pub(super) fn realize(
     jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
 ) -> Result<(), ModuleRealizationTarget> {
     realize_declared_function_names(ir)?;
+    realize_default_accessor_names(ir)?;
     realize_super_calls(ir, callables, property_realizations, jvm_default)?;
     prepare_inherited_default_calls(ir)?;
     for raw in 0..ir.exprs.len() {
