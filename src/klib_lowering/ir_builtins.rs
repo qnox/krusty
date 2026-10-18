@@ -287,7 +287,9 @@ mod tests {
             .filter(|(_, operator)| {
                 !matches!(
                     operator,
-                    BuiltinOperator::Relation(_) | BuiltinOperator::IsNan { .. }
+                    BuiltinOperator::Relation(_)
+                        | BuiltinOperator::IsNan { .. }
+                        | BuiltinOperator::NumericConversion { .. }
                 )
             })
             .map(|(signature, operator)| {

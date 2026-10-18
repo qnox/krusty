@@ -470,7 +470,20 @@ impl<'s> Linker<'_, 's> {
             let selected = selected_callable_for_header(selected, None, arena, declaration)
                 .map_err(&callee_declined)?;
             self.cross_check_intrinsic(callee, selected, intrinsic)?;
-            return linked_intrinsic(intrinsic);
+            // A target instruction stays an ordinary call of its declaration; only the target's
+            // emitter replaces it, through the provider fact frozen on the external handle.
+            if !matches!(
+                intrinsic.operation(),
+                crate::libraries::CompilerIntrinsic::ScalarInstruction(_)
+            ) {
+                return linked_intrinsic(intrinsic);
+            }
+            if !self.sources.externals.contains_key(&identity) {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "an authenticated target instruction has no provider external handle"
+                        .to_owned(),
+                ));
+            }
         }
         if let Some(&emitted) = self.sources.externals.get(&identity) {
             let selected = selected_callable_for_header(
@@ -641,6 +654,7 @@ impl<'s> Linker<'_, 's> {
 /// singleton objects may inherit the same declaration identity, but only the variant whose
 /// semantic receiver matches this body (and an already-emitted contract, when present) can
 /// authenticate the call. Declaration-shape conflicts remain ambiguous in `KlibCalleeFacts`.
+#[derive(Clone, Copy)]
 enum SelectedKlibCallables<'callable, 'facts> {
     One(KlibBodyCallable<'callable>),
     Variants(&'facts [KlibBodyCallable<'callable>]),
@@ -729,27 +743,6 @@ fn linked_intrinsic_parts(
                         }
                     };
                     IrIntrinsic::ReinterpretBits { from, to: ret }
-                }
-                crate::libraries::CompilerIntrinsic::ScalarInstruction(instruction) => {
-                    let operand =
-                        match (receiver, params) {
-                            (None, [operand, ..])
-                                if params.len() == instruction.arity()
-                                    && params.iter().all(|ty| ty == operand)
-                                    && instruction.admits(*operand, ret) =>
-                            {
-                                *operand
-                            }
-                            _ => return Err(KlibBodyDeclineReason::SignatureMismatch(
-                                "an intrinsic scalar instruction does not have its operands' shape"
-                                    .to_owned(),
-                            )),
-                        };
-                    IrIntrinsic::ScalarInstruction {
-                        instruction,
-                        operand,
-                        result: ret,
-                    }
                 }
                 _ => {
                     return Err(KlibBodyDeclineReason::UnsupportedOperation(

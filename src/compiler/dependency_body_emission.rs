@@ -135,8 +135,7 @@ pub(super) fn emit_intrinsic_dependencies<B: Backend>(
     if unit.callable_functions().next().is_none() {
         return Vec::new();
     }
-    if !contains_authenticated_intrinsic(unit.ir()) && !links_emitted_support(unit.ir(), &externals)
-    {
+    if !contains_reinterpret(unit.ir()) && !links_emitted_support(unit.ir(), &externals) {
         diags.error(
             Span::new(0, 0),
             "internal error: authenticated KLIB intrinsic roots lowered without an intrinsic or exact emitted-support edge",
@@ -332,7 +331,18 @@ fn prepare_bodyless_externals(
             if externals.contains_key(&callee) {
                 continue;
             }
-            if intrinsics.get(&callee).is_some() {
+            if let Some(intrinsic) = intrinsics.get(&callee) {
+                // A target instruction is called through its provider handle like a bodyless
+                // declaration; the target's emitter realizes that call as the instruction.
+                if matches!(
+                    intrinsic.operation(),
+                    crate::libraries::CompilerIntrinsic::ScalarInstruction(_)
+                ) {
+                    let Some(external) = provider_external(platform, &callee, diags) else {
+                        return false;
+                    };
+                    externals.insert(callee, external);
+                }
                 continue;
             }
             let Some(has_body) = bodies.function_has_body(&callee) else {
@@ -349,35 +359,46 @@ fn prepare_bodyless_externals(
                 );
                 return false;
             }
-            let Some((external, realization)) = platform.external_callable_by_dependency(&callee)
-            else {
-                diags.error(
-                    Span::new(0, 0),
-                    "internal error: a bodyless KLIB dependency has no exact provider realization",
-                );
+            let Some(external) = provider_external(platform, &callee, diags) else {
                 return false;
             };
-            if realization.dependency_callable.as_ref() != Some(&callee) {
-                diags.error(
-                    Span::new(0, 0),
-                    "internal error: a bodyless KLIB dependency realization changed its exact identity",
-                );
-                return false;
-            }
-            externals.insert(callee, EmittedDependencyCallable::new(external, None, None));
+            externals.insert(callee, external);
         }
     }
     true
 }
 
-fn contains_authenticated_intrinsic(ir: &crate::ir::IrFile) -> bool {
+/// The provider's opaque handle for a reachable declaration support code calls without a body of
+/// its own. A missing or rebound realization is an inconsistency, never a reason to search.
+fn provider_external(
+    platform: &dyn crate::libraries::SemanticPlatform,
+    callee: &KlibDependencyCallable,
+    diags: &mut DiagSink,
+) -> Option<EmittedDependencyCallable> {
+    let Some((external, realization)) = platform.external_callable_by_dependency(callee) else {
+        diags.error(
+            Span::new(0, 0),
+            "internal error: a bodyless KLIB dependency has no exact provider realization",
+        );
+        return None;
+    };
+    if realization.dependency_callable.as_ref() != Some(callee) {
+        diags.error(
+            Span::new(0, 0),
+            "internal error: a bodyless KLIB dependency realization changed its exact identity",
+        );
+        return None;
+    }
+    Some(EmittedDependencyCallable::new(external, None, None))
+}
+
+fn contains_reinterpret(ir: &crate::ir::IrFile) -> bool {
     ir.exprs.iter().any(|expression| {
         matches!(
             expression,
             IrExpr::Call {
                 callee: Callee::Intrinsic {
-                    operation: IrIntrinsic::ReinterpretBits { .. }
-                        | IrIntrinsic::ScalarInstruction { .. },
+                    operation: IrIntrinsic::ReinterpretBits { .. },
                     ..
                 },
                 ..

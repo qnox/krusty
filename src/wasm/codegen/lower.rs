@@ -869,6 +869,21 @@ impl<'a> Body<'a> {
                         params,
                         ret,
                         defaults,
+                        extension_receiver_parameter: None,
+                        ..
+                    },
+                dispatch_receiver,
+                args,
+            } if defaults.is_empty() && self.scalar_instruction_of(target).is_some() => {
+                self.scalar_instruction_call(target, dispatch_receiver, &params, ret, &args)?;
+            }
+            IrExpr::Call {
+                callee:
+                    Callee::External {
+                        target,
+                        params,
+                        ret,
+                        defaults,
                         extension_receiver_parameter,
                         ..
                     },

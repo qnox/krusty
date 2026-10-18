@@ -4653,7 +4653,7 @@ code is the one the code generator already names: provider-owned bodies through 
   evidence, so it is rejected rather than gaining intrinsic authority or falling back to source
   lookup. Every scalar `WasmOp` (117 operations: arithmetic, bit counts, rotations, unsigned
   division and comparison, conversions, saturating truncations) is a provider-authenticated
-  `ScalarInstruction` the Wasm backend emits directly, and a non-member scalar wrapper over one
+  `ScalarInstruction` the Wasm emitter realizes at the call (FIR and IR keep an ordinary call), and a non-member scalar wrapper over one
   (`kotlin.math.sqrt`, `Long.countLeadingZeroBits`) is an executable support root. The remaining
   Wasm declines are ordinary stdlib bodies (`listOf`, `let`, `Any.toString`), the next slice. The Native
   corpus passes 3542 of 7089 against the stdlib KLIB (from 2007). Every `external` function of

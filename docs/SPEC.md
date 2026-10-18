@@ -16593,7 +16593,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   or a collection operation cannot become support merely because its implementation happens to
   inspect floating-point bits or reach an instruction. Test
   `klib_lowering::tests::wasm_math_wrappers_are_scalar_roots_closing_through_one_instruction` pins
-  four Wasm wrappers, each closing through exactly one authenticated instruction. A root whose body,
+  four Wasm wrappers, each closing through exactly one ordinary call of its authenticated instruction. A root whose body,
   or a body it reaches, uses a form KLIB lowering does not model yet is simply not support code:
   its unit is left as it was and the backend declines the call
   (`kotlin_box_wasm_conformance::wasm_declines_an_instruction_wrapper_whose_body_lowering_does_not_model`).
@@ -16703,9 +16703,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the type the instruction admits (`ScalarInstruction::admits`); a primitive member such as
   `Int.plus` stays the shared builtin operator. The instruction has the target instruction's own
   semantics: `wasm_i32_div_s` traps on a zero divisor, which the stdlib guards before calling it.
-  A source call of a public one (`Int.countLeadingZeroBits()`) is that instruction in checked FIR;
-  a serialized body's call links it from the exact intrinsic table. Only the Wasm backend realizes
-  a scalar instruction. Test
+  The instruction is an emitter fact only: checked FIR and common IR keep a source call of a public
+  one (`Int.countLeadingZeroBits()`) and a serialized body's call of an internal one
+  (`wasm_f64_sqrt`) as an ordinary call of the selected declaration through its provider handle,
+  and the Wasm emitter alone replaces that call with the operands and opcode it reads from the
+  frozen callable fact. Test
   `klib_libraries::target_intrinsics::tests::wasm_scalar_instructions_require_their_operand_class_arity_and_package`
   pins the accepted and rejected shapes, and `kotlin_box_wasm_conformance::wasm_bit_counts_run_as_the_stdlib_declared_instructions`
   and `wasm_math_runs_through_emitted_stdlib_instruction_wrappers` run them.

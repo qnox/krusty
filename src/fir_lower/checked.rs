@@ -1401,15 +1401,6 @@ pub(super) fn lower_fir_intrinsic(operation: &crate::fir::FirIntrinsic) -> crate
                 to: to.get(),
             }
         }
-        crate::fir::FirIntrinsic::ScalarInstruction {
-            instruction,
-            operand,
-            result,
-        } => crate::ir::IrIntrinsic::ScalarInstruction {
-            instruction: *instruction,
-            operand: operand.get(),
-            result: result.get(),
-        },
         crate::fir::FirIntrinsic::Assert { mode } => crate::ir::IrIntrinsic::Assert { mode: *mode },
         crate::fir::FirIntrinsic::ArrayGet => crate::ir::IrIntrinsic::ArrayGet,
         crate::fir::FirIntrinsic::ArraySet => crate::ir::IrIntrinsic::ArraySet,

@@ -1,14 +1,93 @@
-//! The Wasm encoding of each target-stdlib scalar instruction.
+//! Calls of target-stdlib declarations whose implementation is one Wasm scalar instruction.
 //!
-//! The instruction and its semantic operand and result types come from the authenticated
-//! declaration; this table only selects the opcode of the operand's (and, for a conversion, the
-//! result's) physical class.
+//! Checked FIR and common IR keep such a call as an ordinary call of the selected dependency
+//! declaration. Emission alone replaces it: the frozen callable fact carries the provider's
+//! authenticated instruction, and this module emits the operands and the opcode of their physical
+//! class (and, for a conversion, the result's) instead of a call.
 
+use super::*;
 use crate::libraries::{ScalarClass, ScalarComparison, ScalarInstruction};
-use crate::types::Ty;
+
+impl Body<'_> {
+    /// The scalar instruction the provider authenticated as `target`'s implementation.
+    pub(super) fn scalar_instruction_of(
+        &self,
+        target: crate::fir::ExternalCallableId,
+    ) -> Option<ScalarInstruction> {
+        match self.callables.callable(target)?.compiler_intrinsic? {
+            crate::libraries::CompilerIntrinsic::ScalarInstruction(instruction) => {
+                Some(instruction)
+            }
+            _ => None,
+        }
+    }
+
+    /// Emit a call of `target`, a dependency declaration realized as one scalar instruction. An
+    /// extension's receiver is the instruction's first operand, followed by the call's arguments.
+    pub(super) fn scalar_instruction_call(
+        &mut self,
+        target: crate::fir::ExternalCallableId,
+        receiver: Option<u32>,
+        params: &[Ty],
+        ret: Ty,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let instruction = self
+            .scalar_instruction_of(target)
+            .ok_or_else(|| "a call of an unauthenticated scalar instruction".to_string())?;
+        let receiver_ty = match receiver {
+            Some(_) => Some(
+                self.callables
+                    .callable(target)
+                    .and_then(|callable| callable.source_receiver)
+                    .ok_or_else(|| {
+                        "a scalar instruction call whose receiver the declaration lacks".to_string()
+                    })?,
+            ),
+            None => None,
+        };
+        let params = receiver_ty
+            .into_iter()
+            .chain(params.iter().copied())
+            .collect::<Vec<_>>();
+        let operands = receiver
+            .into_iter()
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>();
+        let malformed = || {
+            format!(
+                "a call of the scalar instruction {instruction:?} with parameters {} and result {}",
+                params
+                    .iter()
+                    .map(|ty| describe(*ty))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                describe(ret)
+            )
+        };
+        let Some(&operand) = params.first() else {
+            return Err(malformed());
+        };
+        if params.len() != instruction.arity()
+            || operands.len() != params.len()
+            || params.iter().any(|ty| *ty != operand)
+        {
+            return Err(malformed());
+        }
+        let opcode = opcode(instruction, operand, ret).ok_or_else(malformed)?;
+        for value in operands {
+            self.value(value, operand)?;
+        }
+        match opcode {
+            Opcode::Plain(opcode) => self.code.op(opcode),
+            Opcode::Saturating(opcode) => self.code.trunc_sat(opcode),
+        };
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Opcode {
+enum Opcode {
     Plain(u8),
     /// A saturating truncation behind the `0xfc` prefix.
     Saturating(u8),
@@ -16,7 +95,7 @@ pub(super) enum Opcode {
 
 /// The opcode of `instruction` over `operand` operands producing `result`, if the instruction
 /// admits those types.
-pub(super) fn opcode(instruction: ScalarInstruction, operand: Ty, result: Ty) -> Option<Opcode> {
+fn opcode(instruction: ScalarInstruction, operand: Ty, result: Ty) -> Option<Opcode> {
     use ScalarClass::{Float32, Float64, Integral32, Integral64};
     use ScalarInstruction::*;
     if !instruction.admits(operand, result) {

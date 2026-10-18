@@ -837,9 +837,6 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 crate::ir::IrIntrinsic::ReinterpretBits { .. } => {
                     unreachable!("target KLIB reinterpretation cannot reach the JS backend")
                 }
-                crate::ir::IrIntrinsic::ScalarInstruction { .. } => {
-                    unreachable!("a target KLIB scalar instruction cannot reach the JS backend")
-                }
                 crate::ir::IrIntrinsic::Assert { mode } => {
                     if *mode == crate::types::AssertionMode::AlwaysDisabled {
                         "undefined".to_string()

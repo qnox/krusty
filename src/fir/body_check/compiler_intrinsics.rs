@@ -108,9 +108,6 @@ pub(super) fn selected_top_level(
                 to: resolved(result)?,
             })
         }
-        Some(CompilerIntrinsic::ScalarInstruction(instruction)) => {
-            Some(scalar_instruction(instruction, parameters, result)?)
-        }
         Some(CompilerIntrinsic::Assert) => Some(FirIntrinsic::Assert {
             mode: assertion_mode,
         }),
@@ -120,30 +117,5 @@ pub(super) fn selected_top_level(
             })
         }
         _ => None,
-    })
-}
-
-/// A selected target-stdlib scalar instruction whose operands (an extension receiver first) are
-/// `operands`. The provider authenticated the declaration's shape; this rechecks it against the
-/// selected callable, which must agree.
-pub(super) fn scalar_instruction(
-    instruction: crate::libraries::ScalarInstruction,
-    operands: &[Ty],
-    result: Ty,
-) -> Result<FirIntrinsic, BodyCheckFailureKind> {
-    let Some(&operand) = operands.first() else {
-        return Err(BodyCheckFailureKind::UnsupportedCallShape);
-    };
-    if operands.len() != instruction.arity()
-        || operands.iter().any(|ty| *ty != operand)
-        || !instruction.admits(operand, result)
-    {
-        return Err(BodyCheckFailureKind::UnsupportedCallShape);
-    }
-    let resolved = |ty| ResolvedTy::new(ty).map_err(BodyCheckFailureKind::UnpublishableType);
-    Ok(FirIntrinsic::ScalarInstruction {
-        instruction,
-        operand: resolved(operand)?,
-        result: resolved(result)?,
     })
 }

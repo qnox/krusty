@@ -796,7 +796,6 @@ impl BodyFirChecker<'_> {
             Some(
                 crate::libraries::CompilerIntrinsic::StringPlus
                     | crate::libraries::CompilerIntrinsic::NullableAnyToString
-                    | crate::libraries::CompilerIntrinsic::ScalarInstruction(_)
             )
         ) {
             if extension.callable.singleton_dispatch.is_some() {
@@ -829,17 +828,6 @@ impl BodyFirChecker<'_> {
                 crate::libraries::CompilerIntrinsic::StringPlus => FirIntrinsic::StringPlus,
                 crate::libraries::CompilerIntrinsic::NullableAnyToString => {
                     FirIntrinsic::NullableAnyToString
-                }
-                crate::libraries::CompilerIntrinsic::ScalarInstruction(instruction) => {
-                    let operands = std::iter::once(extension.receiver)
-                        .chain(parameters.iter().copied())
-                        .collect::<Vec<_>>();
-                    super::compiler_intrinsics::scalar_instruction(
-                        instruction,
-                        &operands,
-                        extension.callable.ret,
-                    )
-                    .map_err(|kind| self.failure(span, kind))?
                 }
                 _ => unreachable!(),
             };

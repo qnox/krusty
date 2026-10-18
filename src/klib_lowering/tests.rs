@@ -2029,40 +2029,67 @@ fn wasm_math_wrappers_are_scalar_roots_closing_through_one_instruction() {
             bodies.is_supported_intrinsic_root(callable.identity(), libraries.intrinsic_facts()),
             "{name} directly calls its authenticated instruction"
         );
+        // The instruction stays an ordinary call of its declaration through the provider's
+        // handle; only the target emitter replaces that call.
+        let instructions = bodies
+            .direct_callees(callable.identity())
+            .into_iter()
+            .filter(|callee| {
+                libraries
+                    .intrinsic_facts()
+                    .get(callee)
+                    .is_some_and(|intrinsic| {
+                        intrinsic.operation()
+                            == crate::libraries::CompilerIntrinsic::ScalarInstruction(instruction)
+                            && intrinsic.params().iter().all(|ty| *ty == operand)
+                            && intrinsic.ret() == result
+                    })
+            })
+            .map(|callee| {
+                let (external, _) = <KlibLibraries as crate::symbol_source::SymbolSource>::external_callable_by_dependency(
+                        &libraries, &callee,
+                    )
+                    .unwrap_or_else(|| panic!("{name}: the provider publishes its instruction"));
+                (callee, super::EmittedDependencyCallable::new(external, None, None))
+            })
+            .collect::<crate::fx_hash::HashMap<_, _>>();
+        assert_eq!(
+            instructions.len(),
+            1,
+            "{name} calls one authenticated instruction"
+        );
+        let target = instructions
+            .values()
+            .next()
+            .expect("one instruction")
+            .target();
         let mut unit = DependencyBodyUnit::default();
-        unit.lower_function_with_intrinsics(
+        unit.lower_function_with_intrinsics_and_externals(
             callable,
             bodies,
             &KlibCalleeFacts::default(),
             libraries.intrinsic_facts(),
+            &instructions,
         )
         .unwrap_or_else(|decline| panic!("{name}: {decline}"));
         validated(unit.ir());
         assert_eq!(unit.ir().functions.len(), 1, "{name}");
-        assert_eq!(
-            unit.ir()
-                .exprs
-                .iter()
-                .filter(|expression| matches!(
-                    expression,
-                    IrExpr::Call {
-                        callee: Callee::Intrinsic {
-                            operation: IrIntrinsic::ScalarInstruction {
-                                instruction: lowered,
-                                operand: lowered_operand,
-                                result: lowered_result,
-                            },
-                            ret,
-                        },
-                        ..
-                    } if *lowered == instruction
-                        && *lowered_operand == operand
-                        && *lowered_result == result
-                        && *ret == result
-                ))
-                .count(),
-            1,
-            "{name} closes through exactly one authenticated instruction"
+        let calls = unit
+            .ir()
+            .exprs
+            .iter()
+            .filter_map(|expression| match expression {
+                IrExpr::Call { callee, .. } => Some(callee),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(
+                calls.as_slice(),
+                [Callee::External { target: called, ret, .. }]
+                    if *called == target && *ret == result
+            ),
+            "{name} closes through exactly one call of its instruction: {calls:?}"
         );
     }
 }

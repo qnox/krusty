@@ -36,35 +36,6 @@ impl Body<'_> {
                 self.code.op(opcode);
                 Ok(())
             }
-            IrIntrinsic::ScalarInstruction {
-                instruction,
-                operand,
-                result,
-            } => {
-                let opcode =
-                    scalar_instructions::opcode(instruction, operand, result).ok_or_else(|| {
-                        format!(
-                            "the scalar instruction {instruction:?} from {} to {}",
-                            describe(operand),
-                            describe(result)
-                        )
-                    })?;
-                let operands = receiver
-                    .into_iter()
-                    .chain(args.iter().copied())
-                    .collect::<Vec<_>>();
-                if operands.len() != instruction.arity() {
-                    return Err("a scalar instruction with unexpected operands".to_string());
-                }
-                for value in operands {
-                    self.value(value, operand)?;
-                }
-                match opcode {
-                    scalar_instructions::Opcode::Plain(opcode) => self.code.op(opcode),
-                    scalar_instructions::Opcode::Saturating(opcode) => self.code.trunc_sat(opcode),
-                };
-                Ok(())
-            }
             IrIntrinsic::PrimitiveCompare { operand, .. } => {
                 let (lhs, rhs) = match (receiver, args) {
                     (None, [lhs, rhs]) => (*lhs, *rhs),
