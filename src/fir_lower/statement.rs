@@ -274,10 +274,42 @@ impl BodyLowering<'_> {
             return Err(FirLoweringFailure::MissingLocalClass(declaration));
         }
         self.ir.classes[class as usize].enclosure = self.enclosure;
+        // Captures are placed by their checked slot. Each field read maps through the same slots.
+        let mut by_slot = vec![None; captures.len()];
+        for capture in captures {
+            match by_slot.get_mut(capture.slot as usize) {
+                Some(entry @ None) => *entry = Some(capture),
+                _ => return Err(FirLoweringFailure::InvalidCaptureLayout(declaration)),
+            }
+        }
+        if captures
+            .iter()
+            .enumerate()
+            .any(|(field, capture)| capture.slot as usize != field)
+        {
+            let slots = captures
+                .iter()
+                .map(|capture| capture.slot)
+                .collect::<Box<[u32]>>();
+            let defaults = self
+                .ir
+                .checked_constructor_bodies
+                .iter()
+                .filter(|(constructor, _)| {
+                    self.index
+                        .declaration_anchor(**constructor)
+                        .and_then(|anchor| anchor.owner)
+                        == Some(declaration)
+                })
+                .flat_map(|(_, constructor)| constructor.defaults.iter().flatten().copied())
+                .collect::<Vec<_>>();
+            super::constructors::place_default_capture_reads(self.ir, &defaults, &slots);
+            self.ir.class_capture_slots.insert(class, slots);
+        }
         let mut values = Vec::with_capacity(captures.len());
         let mut fields = Vec::with_capacity(captures.len());
         let mut arguments = Vec::with_capacity(captures.len());
-        for (field, capture) in captures.iter().enumerate() {
+        for (field, capture) in by_slot.into_iter().flatten().enumerate() {
             let field = u32::try_from(field).expect("too many captured class fields");
             let value = match &capture.source {
                 FirLocalClassCaptureSource::Value(source) => {

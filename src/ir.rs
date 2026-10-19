@@ -1793,6 +1793,9 @@ pub struct IrFile {
     /// superclass forwarding consumes this coordinate instead of matching synthetic field names.
     pub(crate) class_capture_identities:
         crate::fx_hash::HashMap<(ClassId, u32), crate::fir::ClassCaptureIdentity>,
+    /// A local class whose captures are not laid out in field order: `slots[field]` is the field
+    /// table and constructor-prefix position of capture `field`.
+    pub(crate) class_capture_slots: crate::fx_hash::HashMap<ClassId, Box<[u32]>>,
     /// Anonymous-object super-constructor arguments evaluated at the construction site.
     /// Keyed by `(anonymous classifier, super-parameter slot before an outer-instance prefix)`.
     /// The value is `(anonymous constructor parameter, source type-operator shells that stay in

@@ -869,7 +869,11 @@ impl BodyFirChecker<'_> {
         span: Span,
         origin: OriginId,
         captures: &[crate::resolve::AnonymousObjectCapture],
+        layout: Option<&[u32]>,
     ) -> Result<Box<[FirLocalClassCapture]>, BodyCheckFailure> {
+        if layout.is_some_and(|layout| layout.len() != captures.len()) {
+            return Err(self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget));
+        }
         let mut checked = Vec::with_capacity(captures.len());
         let capture_owner = self
             .index
@@ -1193,6 +1197,7 @@ impl BodyFirChecker<'_> {
                 capture_identity,
                 source,
                 receiver: capture.receiver.clone(),
+                slot: layout.map_or(field, |layout| layout[field as usize]),
             });
         }
         if !context.values.is_empty()
@@ -1262,7 +1267,7 @@ impl BodyFirChecker<'_> {
             "fir",
             "anonymous body captures declaration={declaration:?} expression={expression:?} captures={captures:?}",
         );
-        let captures = self.checked_class_captures(declaration, span, origin, &captures)?;
+        let captures = self.checked_class_captures(declaration, span, origin, &captures, None)?;
         crate::trace_compiler!(
             "fir",
             "anonymous checked captures declaration={declaration:?} captures={}",
@@ -1566,7 +1571,21 @@ impl BodyFirChecker<'_> {
             "fir",
             "local class body captures declaration={declaration:?} statement={statement:?} captures={captures:?}",
         );
-        let captures = self.checked_class_captures(declaration, class.span, origin, &captures)?;
+        // A local class's captures take the constructor layout its checked body published.
+        let layout = self.info.local_class_capture_layouts.get(&transient);
+        if layout.is_none() && !captures.is_empty() {
+            return Err(self.failure(
+                Some(class.span),
+                BodyCheckFailureKind::MissingStableCallTarget,
+            ));
+        }
+        let captures = self.checked_class_captures(
+            declaration,
+            class.span,
+            origin,
+            &captures,
+            layout.map(AsRef::as_ref),
+        )?;
         Ok(self.body.add_statement(FirStatement {
             origin,
             kind: FirStatementKind::LocalDeclaration {

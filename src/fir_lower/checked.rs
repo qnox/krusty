@@ -31,6 +31,33 @@ struct MaterializedCallableReference {
 }
 
 impl BodyLowering<'_> {
+    /// Put a construction's capture arguments, which follow the class's capture fields, in the
+    /// constructor-prefix order its declaration laid out.
+    fn in_capture_layout<T>(
+        &self,
+        declaration: crate::fir::DeclarationId,
+        arguments: Vec<T>,
+    ) -> Result<Vec<T>, FirLoweringFailure> {
+        let Some(slots) = self
+            .ir
+            .checked_classifier_classes
+            .get(&declaration)
+            .and_then(|class| self.ir.class_capture_slots.get(class))
+        else {
+            return Ok(arguments);
+        };
+        if slots.len() != arguments.len() {
+            return Err(FirLoweringFailure::InvalidCaptureLayout(declaration));
+        }
+        let mut placed = arguments
+            .into_iter()
+            .zip(slots.iter())
+            .map(|(argument, slot)| (*slot, argument))
+            .collect::<Vec<_>>();
+        placed.sort_unstable_by_key(|(slot, _)| *slot);
+        Ok(placed.into_iter().map(|(_, argument)| argument).collect())
+    }
+
     fn constructor_capture_argument(
         &mut self,
         argument: FirConstructorCaptureArgument,
@@ -912,6 +939,8 @@ impl BodyLowering<'_> {
                             .map(|argument| self.constructor_capture_argument(argument))
                             .collect::<Result<Vec<_>, FirLoweringFailure>>()
                     })
+                    .transpose()?
+                    .map(|arguments| self.in_capture_layout(classifier.declaration, arguments))
                     .transpose()?;
                 let anchor = self
                     .index

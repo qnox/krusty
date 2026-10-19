@@ -10079,13 +10079,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Lower::emit_new` supplies them ahead of the source arguments at every construction, so no
   argument-mapping arm can forget them. `ClassSig::ctor_params` stays the SOURCE signature and is
   indexed by source position — captures are not in it.
-  The captured values come in kotlinc's first-use order, not spelling order: the class's own
-  construction code (property initializers and `init` blocks in source order, then delegate values),
-  then its primary constructor (parameter defaults, then super-constructor arguments), then its
-  members in source order. Inside each of those, a body's own reads come before the closures nested
-  in it (lambdas, inline-call lambdas included, local functions, local and anonymous classes), and
-  those follow in source order. `class W { fun run() = d + b; val g get() = c + a }` takes
-  `($d, $b, $c, $a)`. Tests: `tests/local_class_capture_order_e2e.rs`.
+  The captured values come in kotlinc's first-use order, not spelling order. A closure lists the
+  values it reads itself, in source order, then the values of the closures it includes, in the
+  order it meets them. A class reads in its construction code (property initializers and `init`
+  blocks in source order, then delegate values) and includes its primary constructor (parameter
+  defaults, then super-constructor arguments, then a local superclass) and then its members in
+  source order. Inside a body,
+  a lambda (an inline-call lambda too) or an anonymous object is included where it is written, a
+  local function where it is called or referenced, and a local or inner class where it is
+  constructed. `class W { fun run() = d + b; val g get() = c + a }` takes `($d, $b, $c, $a)`, and
+  `fun m(): Int { val l = { d }; fun f() = c; return f() + a }` reads `a`, then `d`, then `c`.
+  Every use is a resolved identity the checked class body recorded (a read or write bound to the
+  capture's field or, for a captured delegated local, to its lexical binding; an included
+  declaration's capture, by field when it is declared inside the class and by lexical binding when
+  it is declared outside), never a spelling: in
+  `class R { fun b(): Int = b(); fun first() = a + b }` the self-call is not a use of a captured
+  `b`, so `R` takes `($a, $b)`. The checker publishes the order as a layout permutation
+  (`TypeInfo::local_class_capture_layouts`); capture fields keep their identities, checked FIR
+  carries each capture's slot, and common lowering places fields, constructor parameters and
+  construction arguments by slot. A constructor default is lowered before its class is laid out
+  and is placed when the class is. A local declaration nothing uses is never included by kotlinc,
+  which then captures nothing for it; krusty still captures what it reads and orders those values
+  after everything else. Tests: `tests/local_class_capture_order_e2e.rs`.
   The enclosing INSTANCE is the second capture kind — the receiver itself rather than a binding in
   the chain — and is carried as ONE capture however many of its members are read, placed FIRST
   because lowering identifies it by position (field 0), which is what an outer member read and a

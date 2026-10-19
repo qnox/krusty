@@ -1224,6 +1224,25 @@ pub(super) fn checked_default_constant(
     })
 }
 
+/// Constructor defaults are lowered before their class is laid out, so they read a capture
+/// parameter at its field (`GetValue(field + 1)`, after `this`). Move those reads to the slots the
+/// class's layout gives the captures. The class's other constructor values follow its captures and
+/// keep their indices.
+pub(super) fn place_default_capture_reads(
+    ir: &mut crate::ir::IrFile,
+    defaults: &[crate::ir::ExprId],
+    slots: &[u32],
+) {
+    let captures = u32::try_from(slots.len()).expect("too many captured class fields");
+    crate::ir::map_value_indices(ir, defaults, 1, &|index| {
+        if index <= captures {
+            slots[index as usize - 1] + 1
+        } else {
+            index
+        }
+    });
+}
+
 pub(super) fn accept_constructor_body(
     declaration: DeclarationId,
     body: FirBody,
@@ -1267,6 +1286,11 @@ pub(super) fn accept_constructor_body(
                 .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
             return Err(FirFileLoweringFailure::DuplicateBody(callable.id));
         }
+        let lowered_defaults = lowered
+            .defaults
+            .iter()
+            .map(|(_, value)| *value)
+            .collect::<Vec<_>>();
         for (parameter, value) in lowered.defaults {
             let Some(slot) = constructor.defaults.get_mut(parameter as usize) else {
                 return Err(FirFileLoweringFailure::MissingCallable(declaration));
@@ -1279,6 +1303,11 @@ pub(super) fn accept_constructor_body(
             constructor.defaults,
         );
         let defaults = constructor.defaults.clone();
+        // A class already laid out (one declared in an inline body lowered before the defaults)
+        // places these reads now; any other class places them when it is laid out.
+        if let Some(slots) = ir.class_capture_slots.get(&class).cloned() {
+            place_default_capture_reads(ir, &lowered_defaults, &slots);
+        }
         if anchor.sibling == 0 {
             let class = &ir.classes[class as usize];
             let synthetic_prefix_count = if class.is_inner_class {

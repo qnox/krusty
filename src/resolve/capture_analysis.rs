@@ -8,10 +8,6 @@ use crate::ast::{
 };
 use crate::diag::Span;
 
-mod order;
-
-pub(super) use order::class_capture_order;
-
 /// One closure-captured write and the execution in which its assignment runs.
 ///
 /// A local function remains a distinct execution even when it contains no materialized lambda.
