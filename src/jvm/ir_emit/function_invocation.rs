@@ -181,7 +181,9 @@ impl Emitter<'_> {
                     let ci = self.cw.class_ref(&type_descriptor(rt));
                     code.checkcast(ci);
                 }
-                Ty::Obj(internal, _) => {
+                // `StackValue.coerce` between two equal types writes nothing: an erased result
+                // stays the `Object` the interface returned.
+                Ty::Obj(internal, _) if rt != Ty::obj("java/lang/Object") => {
                     let ci = self.cw.class_ref(&internal.render());
                     code.checkcast(ci);
                 }

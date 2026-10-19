@@ -792,31 +792,45 @@ pub(super) fn realize(
     let mut consumed_references = Vec::new();
     for raw in 0..ir.exprs.len() {
         let call = raw as u32;
-        let IrExpr::Call {
-            callee: crate::ir::Callee::External { target, params, .. },
-            args,
-            ..
-        } = &ir.exprs[raw]
-        else {
-            continue;
+        let (inline_parameters, args) = match &ir.exprs[raw] {
+            IrExpr::Call {
+                callee: crate::ir::Callee::External { target, params, .. },
+                args,
+                ..
+            } if ir.inline_call_sites.contains(&call) => {
+                let callable = callables
+                    .callable(*target)
+                    .ok_or(FunctionReferenceRealizationTarget::External(*target))?;
+                if !callable.inline.can_inline() {
+                    continue;
+                }
+                let inline_parameters = (0..args.len())
+                    .map(|parameter| {
+                        matches!(params.get(parameter), Some(Ty::Fun(_)))
+                            && callable
+                                .inline_modifiers
+                                .get(parameter)
+                                .is_some_and(|modifier| {
+                                    *modifier != crate::types::InlineParameterModifier::Noinline
+                                })
+                    })
+                    .collect::<Vec<_>>();
+                (inline_parameters, args)
+            }
+            // A same-module call the backend inlines from its callee's compiled body carries its
+            // declaration's parameter types and modifiers on the call.
+            IrExpr::Call { args, .. } if ir.compiled_inline_call(call).is_some() => {
+                let inline_parameters = (0..args.len())
+                    .map(|parameter| {
+                        crate::jvm::inline_parameters::is_inline_parameter(ir, call, parameter)
+                            == Some(true)
+                    })
+                    .collect::<Vec<_>>();
+                (inline_parameters, args)
+            }
+            _ => continue,
         };
-        if !ir.inline_call_sites.contains(&call) {
-            continue;
-        }
-        let callable = callables
-            .callable(*target)
-            .ok_or(FunctionReferenceRealizationTarget::External(*target))?;
-        if !callable.inline.can_inline() {
-            continue;
-        }
-        for (parameter, &argument) in args.iter().enumerate() {
-            let inline = matches!(params.get(parameter), Some(Ty::Fun(_)))
-                && callable
-                    .inline_modifiers
-                    .get(parameter)
-                    .is_some_and(|modifier| {
-                        *modifier != crate::types::InlineParameterModifier::Noinline
-                    });
+        for (&argument, inline) in args.iter().zip(inline_parameters) {
             if inline
                 && matches!(ir.expr(argument), IrExpr::CallableReference(_))
                 && ir.callable_reference_inline_template(argument).is_some()

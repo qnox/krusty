@@ -9,7 +9,9 @@
 use std::sync::Arc;
 
 use super::{ClassWriter, Const};
+use crate::jvm::bytecode_passes::{descriptors, local_slots};
 use crate::jvm::classreader::{ExcEntry, MethodCode, MethodLocal, C};
+use crate::jvm::method_node::MethodNode;
 use crate::jvm::source_map::DependencyMap;
 
 /// The one method a writer holds, with its body.
@@ -23,21 +25,13 @@ impl ClassWriter {
     /// The writer's only method, as emitted, before the rewrites that run when the class is
     /// written. `None` unless the writer declares exactly one method and it has a body whose
     /// debug tables and source map read back.
-    pub(crate) fn sole_emitted_method(&self) -> Option<EmittedMethod> {
+    fn sole_emitted_method(&self) -> Option<EmittedMethod> {
         let [method] = self.methods.as_slice() else {
             return None;
         };
         let code = method.code.clone()?;
         let code_length = u16::try_from(code.len()).ok()?;
-        let source_cp = std::iter::once(Some(C::Other))
-            .chain(
-                (1..=self.cp.slot_count()).map(|slot| match self.cp.entry_at(slot) {
-                    Some(entry) => Some(pool_entry(entry)),
-                    // The second slot of a `long` or `double` names no entry.
-                    None => Some(C::Other),
-                }),
-            )
-            .collect::<Option<Vec<_>>>()?;
+        let source_cp = self.reader_pool();
         let locals = method
             .lvt
             .iter()
@@ -84,6 +78,72 @@ impl ClassWriter {
             descriptor: self.cp.utf8_at(method.desc)?.to_string(),
             body,
         })
+    }
+}
+
+impl ClassWriter {
+    /// The pool as the class-file reader holds it, slot 0 included.
+    fn reader_pool(&self) -> Vec<C> {
+        std::iter::once(C::Other)
+            .chain(
+                (1..=self.cp.slot_count()).map(|slot| match self.cp.entry_at(slot) {
+                    Some(entry) => pool_entry(entry),
+                    // The second slot of a `long` or `double` names no entry.
+                    None => C::Other,
+                }),
+            )
+            .collect()
+    }
+
+    /// [`Self::sole_emitted_method`] with the slots no access and no variable names closed, as
+    /// kotlinc's node has them: its codegen never enters a local nothing stores, where krusty's
+    /// emission reserves one (a diverging `try`'s result) that only the class writer's last pass
+    /// closes. The inliner hands slots out in the order the body names them, so a gap would place
+    /// the body's later locals differently.
+    pub(crate) fn sole_emitted_method_for_inlining(&mut self) -> Option<EmittedMethod> {
+        let emitted = self.sole_emitted_method()?;
+        let access = self.methods.first()?.access;
+        let mut node =
+            MethodNode::read(access, &emitted.name, &emitted.descriptor, &emitted.body).ok()?;
+        let receiver = u16::from(access & 0x0008 == 0);
+        let parameters = descriptors::argument_types(&emitted.descriptor)?
+            .into_iter()
+            .map(|argument| descriptors::size(argument) as u16)
+            .sum::<u16>()
+            + receiver;
+        if !local_slots::compact(&mut node, &(0..parameters).collect()) {
+            return Some(emitted);
+        }
+        let assembled = node.assemble(self).ok()?;
+        let body = MethodCode {
+            max_locals: assembled.max_locals,
+            code: assembled.code,
+            source_cp: self.reader_pool().into(),
+            handlers: assembled
+                .exception_table
+                .iter()
+                .map(|&(start_pc, end_pc, handler_pc, catch_type)| ExcEntry {
+                    start_pc,
+                    end_pc,
+                    handler_pc,
+                    catch_type,
+                })
+                .collect(),
+            locals: assembled
+                .local_variables
+                .into_iter()
+                .map(|local| MethodLocal {
+                    start_pc: local.start_pc,
+                    length: local.length,
+                    slot: local.slot,
+                    name: local.name,
+                    descriptor: local.desc,
+                })
+                .collect(),
+            lines: assembled.line_numbers,
+            ..emitted.body
+        };
+        Some(EmittedMethod { body, ..emitted })
     }
 }
 
