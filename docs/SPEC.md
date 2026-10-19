@@ -928,9 +928,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `jvm/ir_emit/bytecode_inline_call.rs`). kotlinc refuses the move only for an argument that
   stores a local or jumps out of itself, so a field read, a property getter's invoke and a `!!`
   check stay in place as well: `h.items += F("x")` loads the receiver, builds the element and calls
-  `add` with no temporary. Tests:
+  `add` with no temporary. So do an ordinary function or getter invoke that is neither spliced
+  from an inline body nor a suspension point, an intrinsic written as one instruction or invoke
+  (an array or string access, a primitive `compareTo`), a block whose discarded statements and
+  value qualify, and primitive operators: `sb.appendLine(word())` keeps `sb` on the stack while
+  `word()` runs (`invokestatic word; invokevirtual append`), where a stored argument would write
+  `astore; invokestatic word; aload; swap`. A jump that stays inside the argument does not refuse
+  the move, so a comparison, a logical connective and an `if` over qualifying operands stay in
+  place too (`sb.appendLine(a < b)` is `getstatic sb; iload; iload; if_icmpge; …; append`).
+  Tests:
   `tests/inline_arguments_in_place_e2e.rs`, `tests/inline_repeat_local_e2e.rs`,
-  `tests/inline_format_arguments_e2e.rs`, `tests/in_place_property_receiver_e2e.rs`.
+  `tests/inline_format_arguments_e2e.rs`, `tests/in_place_property_receiver_e2e.rs`,
+  `tests/in_place_call_argument_e2e.rs`.
 - **An inlined lambda's body locals include the brace `nop` and follow its marker.** The lambda's
   inline template is the source block's statements, not a second block wrapped around that block,
   and a `Unit` coercion around the block is not another scope (`fir_lower/local_callables.rs`).
