@@ -118,3 +118,28 @@ fn finalized_local_subclass_inherits_pass_two_property_surface() {
 "#;
     assert_eq!(checked_diagnostics(source), []);
 }
+
+#[test]
+fn deferred_local_member_extension_header_is_not_reinferred_as_an_ordinary_property() {
+    let source = r#"class ActualReceiver(val value: String)
+typealias Receiver = ActualReceiver
+
+interface Left {
+    val Receiver.suffix: String
+}
+
+interface Right {
+    val Receiver.suffix: String
+}
+
+interface Both : Left, Right
+
+fun exercise(receiver: Receiver): String {
+    class Local : Both {
+        override val Receiver.suffix: String get() = this.value
+    }
+    return with(Local()) { receiver.suffix }
+}
+"#;
+    assert_eq!(checked_diagnostics(source), []);
+}

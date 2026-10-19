@@ -48675,7 +48675,7 @@ impl<'a> Checker<'a> {
                     let has_unresolved = props.iter().any(|candidate| {
                         candidate.ty == Ty::Error && inference_property(candidate)
                     });
-                    if !has_unresolved && !(absent && property.declared_ty().is_none()) {
+                    if property.declared_ty().is_some() || (!has_unresolved && !absent) {
                         continue;
                     }
                     let expression = property.init.or_else(|| match property.getter.as_ref() {
