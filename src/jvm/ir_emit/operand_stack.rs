@@ -1,6 +1,7 @@
 //! Operand sequencing: evaluation order, spilling across operands that cannot carry the stack, and the
 //! representation adapter each consumer applies as an operand lands.
 
+use super::backend_temporaries::TemporaryLease;
 use super::*;
 
 /// Whether a sequence's consumer materializes each operand at its own slot type.
@@ -236,14 +237,7 @@ impl Emitter<'_> {
     {
         let mut inside_run = false;
         if ops.iter().skip(1).any(|&o| self.spills_operand_prefix(o)) {
-            let temps = ops
-                .iter()
-                .enumerate()
-                .map(|(operand_index, &o)| {
-                    let source = self.emit_sequenced_operand(o, operand_index, operand_use, code);
-                    self.spill_operand(o, source, code)
-                })
-                .collect::<Vec<_>>();
+            let temps = self.spill_sequenced_operands(ops, operand_use, code);
             for (operand_index, (&(slot, t, _), _)) in temps.iter().zip(ops).enumerate() {
                 self.mark_synthesized_operand_run(
                     default_plan,
@@ -267,6 +261,35 @@ impl Emitter<'_> {
                 adapt(self, source, code);
             }
         }
+    }
+
+    /// Evaluate `ops` into fresh temporaries, in order, each emitted against its consumer's
+    /// physical slot `slots[i]` as [`Self::emit_operands_at_slots`] would push it. For a consumer
+    /// that must evaluate its operands on a clean stack before it can place them (a construction's
+    /// `new; dup`); the caller loads, adapts, and releases them with
+    /// [`Self::release_operand_spills`].
+    pub(super) fn spill_operands_at_slots(
+        &mut self,
+        ops: &[u32],
+        slots: &[Ty],
+        code: &mut CodeBuilder,
+    ) -> Vec<(u16, Ty, TemporaryLease)> {
+        self.spill_sequenced_operands(ops, OperandUse::Slots(slots), code)
+    }
+
+    fn spill_sequenced_operands(
+        &mut self,
+        ops: &[u32],
+        operand_use: OperandUse<'_>,
+        code: &mut CodeBuilder,
+    ) -> Vec<(u16, Ty, TemporaryLease)> {
+        ops.iter()
+            .enumerate()
+            .map(|(operand_index, &o)| {
+                let source = self.emit_sequenced_operand(o, operand_index, operand_use, code);
+                self.spill_operand(o, source, code)
+            })
+            .collect()
     }
 
     /// Emit one operand of a sequence, answering the stack type its adapter or spill receives.

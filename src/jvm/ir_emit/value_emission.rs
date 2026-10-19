@@ -278,11 +278,27 @@ impl super::Emitter<'_> {
                     };
                 let physical_params = self.constructor_physical_params(e, &desc);
                 let aw = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
+                let omitted_parameter = |parameter: usize| {
+                    parameter >= *default_prefix_count as usize
+                        && default_parameters.contains(
+                            &u32::try_from(parameter - *default_prefix_count as usize)
+                                .expect("too many constructor parameters"),
+                        )
+                };
                 if args.iter().any(|&a| self.spills_operand_prefix(a)) {
                     // An argument that enters a handler, suspends, or leaves for a loop target can't
                     // run with `[new, dup]` on the stack. Evaluate all args into temps first (clean
-                    // stack), then build. An ordinary branch keeps them, as kotlinc does.
-                    let temps = self.spill_to_temps(&args, code);
+                    // stack), then build. An ordinary branch keeps them, as kotlinc does. Each
+                    // supplied argument is evaluated against the parameter slot it fills.
+                    let supplied_slots = physical_params
+                        .iter()
+                        .copied()
+                        .take(base_parameter_count)
+                        .enumerate()
+                        .filter(|&(parameter, _)| !omitted_parameter(parameter))
+                        .map(|(_, physical)| physical)
+                        .collect::<Vec<_>>();
+                    let temps = self.spill_operands_at_slots(&args, &supplied_slots, code);
                     crate::jvm::reified_anonymous::guard_reified_construction(
                         self.ir, self.cw, code, *internal,
                     );
@@ -302,11 +318,7 @@ impl super::Emitter<'_> {
                         .take(base_parameter_count)
                         .enumerate()
                     {
-                        let omitted = parameter >= *default_prefix_count as usize
-                            && default_parameters.contains(
-                                &u32::try_from(parameter - *default_prefix_count as usize)
-                                    .expect("too many constructor parameters"),
-                            );
+                        let omitted = omitted_parameter(parameter);
                         self.mark_synthesized_run_start(e, omitted, &mut inside_run, code);
                         if omitted {
                             push_zero(physical, code, self.cw);
@@ -359,11 +371,7 @@ impl super::Emitter<'_> {
                         .take(base_parameter_count)
                         .enumerate()
                     {
-                        let omitted = parameter >= *default_prefix_count as usize
-                            && default_parameters.contains(
-                                &u32::try_from(parameter - *default_prefix_count as usize)
-                                    .expect("too many constructor parameters"),
-                            );
+                        let omitted = omitted_parameter(parameter);
                         self.mark_synthesized_run_start(e, omitted, &mut inside_run, code);
                         if omitted {
                             push_zero(physical, code, self.cw);
