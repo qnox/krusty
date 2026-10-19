@@ -234,10 +234,16 @@ pub(super) fn emit_suspend_lambda_class(
 ) -> Vec<u8> {
     let shape = Shape::new(c, lambda);
     let formatter = JvmSignatureFormatter::new(ir, env);
-    let result = formatter
-        .ty_at(&shape.result, Wildcards::Suppressed)
-        .expect("a suspend lambda's result has a JVM signature");
-    let class_signature = class_signature(&formatter, &shape, &result);
+    let continuation = match JvmSignatureFormatter::nothing_continuation(shape.result) {
+        Some(continuation) => continuation.to_string(),
+        None => format!(
+            "L{CONTINUATION}<-{}>;",
+            formatter
+                .ty_at(&shape.result, Wildcards::Suppressed)
+                .expect("a suspend lambda's result has a JVM signature")
+        ),
+    };
+    let class_signature = class_signature(&formatter, &shape, &continuation);
     let mut cw = new_writer_generic(&shape.class, Some(&class_signature), SUSPEND_LAMBDA, opts);
     cw.set_signature(&class_signature);
     // An inline or specialized suspend lambda is public: its body is copied into other packages.
@@ -313,7 +319,7 @@ pub(super) fn emit_suspend_lambda_class(
         &formatter,
         &shape,
         lambda,
-        &result,
+        &continuation,
         env.java_parameters,
     );
     // The local functions and lambdas the body declares are lifted out of `invokeSuspend` into
@@ -424,8 +430,9 @@ fn lambda_metadata(
     Ok((crate::metadata::encoding::bytes_to_strings(&bytes), strings))
 }
 
-/// `SuspendLambda` and the lambda's `FunctionN` over its parameters, its continuation and `Object`.
-fn class_signature(formatter: &JvmSignatureFormatter, shape: &Shape, result: &str) -> String {
+/// `SuspendLambda` and the lambda's `FunctionN` over its parameters, its `continuation` and
+/// `Object`.
+fn class_signature(formatter: &JvmSignatureFormatter, shape: &Shape, continuation: &str) -> String {
     let mut signature = format!(
         "L{SUSPEND_LAMBDA};L{}<",
         jvm_function_interface(shape.arity)
@@ -442,7 +449,7 @@ fn class_signature(formatter: &JvmSignatureFormatter, shape: &Shape, result: &st
                 .expect("a suspend lambda's parameter has a JVM signature"),
         );
     }
-    signature.push_str(&format!("L{CONTINUATION}<-{result}>;{OBJECT_DESC}>;"));
+    signature.push_str(&format!("{continuation}{OBJECT_DESC}>;"));
     signature
 }
 
@@ -622,7 +629,7 @@ fn emit_invoke(
     formatter: &JvmSignatureFormatter,
     shape: &Shape,
     lambda: &SuspendLambdaClass,
-    result: &str,
+    continuation: &str,
     java_parameters: bool,
 ) {
     let descriptor = shape.invoke_desc();
@@ -634,10 +641,15 @@ fn emit_invoke(
                 .expect("a suspend lambda's parameter has a JVM signature"),
         );
     }
-    signature.push_str(&format!("L{CONTINUATION}<-{result}>;){OBJECT_DESC}"));
+    signature.push_str(&format!("{continuation}){OBJECT_DESC}"));
+    // A raw continuation (a `Nothing?` result) over raw parameters spells the descriptor back, and
+    // such a `Signature` is omitted.
+    let signature = (signature != descriptor).then_some(signature);
     cw.seed_utf8("invoke");
     cw.seed_utf8(&descriptor);
-    cw.seed_utf8(&signature);
+    if let Some(signature) = &signature {
+        cw.seed_utf8(signature);
+    }
     let mut slots = Vec::with_capacity(shape.parameters.len());
     let mut completion = 1u16;
     for parameter in &shape.parameters {
@@ -690,7 +702,7 @@ fn emit_invoke(
         &descriptor,
         &mut code,
         max_locals,
-        Some(&signature),
+        signature.as_deref(),
     );
     cw.set_method_debug("invoke", &descriptor, None, &locals);
     if java_parameters {
