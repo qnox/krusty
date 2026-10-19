@@ -830,7 +830,7 @@ impl<'a> Body<'a> {
                 holder,
                 elem,
                 value,
-            } => self.shared_cell_write(holder, elem, value)?,
+            } => self.shared_cell_write(id, holder, elem, value)?,
             IrExpr::PrimitiveNeg { operand, ty } => match carrier(ty)? {
                 Some(ValType::I32) => {
                     self.code.i32_const(0);

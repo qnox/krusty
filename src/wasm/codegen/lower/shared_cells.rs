@@ -46,20 +46,34 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// `holder.element = value`, leaving `value` on the stack.
+    /// `holder.element = value` (the write `id`). The write leaves the stored value on the stack
+    /// only when its own type carries one: a source assignment is checked as `Unit` and leaves
+    /// nothing, while an unchecked write evaluates to what it stored (see `expression_type`).
     pub(super) fn shared_cell_write(
         &mut self,
+        id: u32,
         holder: u32,
         elem: Ty,
         value: u32,
     ) -> Result<(), Unsupported> {
         let cell = self.cell_holder(holder, elem)?;
         let carried = carrier(elem)?.ok_or_else(|| "a shared cell of `Unit`".to_string())?;
-        let stored = self.local(carried);
-        self.value(value, elem)?;
-        self.code.local_tee(stored);
-        self.code.struct_set(cell, 0);
-        self.code.local_get(stored);
+        match self.carrier_of(id)? {
+            None => {
+                self.value(value, elem)?;
+                self.code.struct_set(cell, 0);
+            }
+            Some(result) if result == carried => {
+                let stored = self.local(carried);
+                self.value(value, elem)?;
+                self.code.local_tee(stored);
+                self.code.struct_set(cell, 0);
+                self.code.local_get(stored);
+            }
+            Some(_) => {
+                return Err("a shared-cell write answering another type than its element".into());
+            }
+        }
         Ok(())
     }
 
@@ -89,5 +103,95 @@ impl Body<'_> {
             storage: StorageType::Val(carried),
             mutable: true,
         }])))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::backend::{CheckedBackendCallables, DependencyExportSignatures};
+    use crate::ir::{IrConst, IrExpr, IrFile, IrFunction};
+    use crate::types::Ty;
+    use crate::wasm::target::WasmTarget;
+
+    /// The encoded module of one function whose body declares the cell `0` holding an `Int`,
+    /// writes `1` into it, and either ends there or answers the write: a source assignment
+    /// statement is checked as `Unit`, while an unchecked write evaluates to what it stored.
+    fn module_of_one_write(checked: Option<Ty>, ret: Ty) -> Vec<u8> {
+        let mut ir = IrFile::default();
+        let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        let cell = ir.add_expr(IrExpr::RefNew {
+            elem: Ty::Int,
+            init: Some(zero),
+        });
+        let declaration = ir.add_expr(IrExpr::Variable {
+            index: 0,
+            ty: Ty::Int,
+            init: Some(cell),
+            named: true,
+        });
+        let holder = ir.add_expr(IrExpr::GetValue(0));
+        let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+        let write = ir.add_expr(IrExpr::RefSet {
+            holder,
+            elem: Ty::Int,
+            value: one,
+        });
+        if let Some(checked) = checked {
+            ir.logical_types.insert(write, checked);
+        }
+        let (stmts, value) = if ret == Ty::Unit {
+            (vec![declaration, write], None)
+        } else {
+            (vec![declaration], Some(write))
+        };
+        let body = ir.add_expr(IrExpr::Block { stmts, value });
+        ir.add_fun(IrFunction {
+            name: "write".to_string(),
+            params: Vec::new(),
+            ret,
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let mut started = super::super::super::Started::new(WasmTarget::Wasi);
+        let properties = crate::backend::local_properties::realize(&mut ir)
+            .expect("the body declares no local delegated property");
+        super::super::lower_file(
+            &ir,
+            &properties,
+            &CheckedBackendCallables::default(),
+            &DependencyExportSignatures::default(),
+            &mut started.module,
+            &mut started.runtime,
+            &mut started.callables,
+            &mut started.properties,
+        )
+        .expect("the cell body lowers");
+        started.module.encode()
+    }
+
+    /// Whether `bytes` holds `struct.set <any type> 0` directly followed by `tail`.
+    fn has_struct_set_followed_by(bytes: &[u8], tail: impl Fn(&[u8]) -> bool) -> bool {
+        (0..bytes.len().saturating_sub(4)).any(|at| {
+            bytes[at..].starts_with(&[0xfb, 0x05])
+                && bytes[at + 3] == 0x00
+                && tail(&bytes[at + 4..])
+        })
+    }
+
+    #[test]
+    fn a_write_checked_as_unit_leaves_nothing_on_the_stack() {
+        let bytes = module_of_one_write(Some(Ty::Unit), Ty::Unit);
+        assert!(has_struct_set_followed_by(&bytes, |rest| rest.first() == Some(&0x0b)));
+        assert!(!has_struct_set_followed_by(&bytes, |rest| rest.first() == Some(&0x20)));
+    }
+
+    #[test]
+    fn an_unchecked_write_answers_the_value_it_stored() {
+        let bytes = module_of_one_write(None, Ty::Int);
+        assert!(has_struct_set_followed_by(&bytes, |rest| {
+            rest.first() == Some(&0x20) && rest.get(2) == Some(&0x0b)
+        }));
     }
 }
