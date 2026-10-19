@@ -850,6 +850,7 @@ impl Emitter<'_> {
                 .map(|(index, ((supply, &ty), &argument))| Parameter {
                     category: Category::of_descriptor(&type_descriptor(ty)),
                     binding: match (lambda_bindings.get(&index), supply) {
+                        (Some(&lambda), Supply::Omitted) => Binding::DefaultLambda(lambda),
                         (Some(&lambda), _) => Binding::Lambda(lambda),
                         (None, Supply::CallerLocal) => self.caller_local_binding(argument, ty),
                         (None, Supply::Unread) => Binding::Unread,

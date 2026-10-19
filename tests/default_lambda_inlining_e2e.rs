@@ -120,16 +120,23 @@ fun posted(): String = get("/y") { method = "POST" }
 
 fun joinedDefault(): String = joined("a")
 
+fun fetchedThenLet(): String {
+    val response = get("/z")
+    return response.let { it + "!" }
+}
+
 fun box(): String {
     if (fetched() != "GET /x") return "FAIL fetched: " + fetched()
     if (posted() != "POST /y") return "FAIL posted: " + posted()
     if (joinedDefault() != "ab") return "FAIL joined: " + joinedDefault()
+    if (fetchedThenLet() != "GET /z!") return "FAIL let: " + fetchedThenLet()
     return "OK"
 }
 "#;
 
 /// A call that omits arguments of an ordinary public inline function inlines the library's
-/// `$default` bridge, as kotlinc does, rather than calling the bridge.
+/// `$default` bridge, as kotlinc does, rather than calling the bridge. An omitted lambda keeps
+/// its parameter's slot, which only survives when a later local reuses it.
 #[test]
 fn public_inline_default_bridges_are_inlined_where_kotlinc_inlines_them() {
     let classes = common::classes_against_kotlinc_lib(
