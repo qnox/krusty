@@ -15,11 +15,11 @@
 //! every earlier phase keeps field order.
 
 use super::context_capture::context_argument_sites;
-use super::scope::{Ns, PathRoot};
+use super::scope::PathRoot;
 use super::CheckerScope;
 use super::{
     AnonymousObjectCapture, AnonymousObjectCaptureSource, ExprLowering, Local,
-    ReceiverFnValueOrigin, ResolvedCall, ResolvedContextArgument, SelectedContextSources, Ty,
+    ReceiverFnValueOrigin, ResolvedCall, SelectedContextSources, Ty,
 };
 use crate::ast::{
     ClassDecl, ClassInit, CtorDelegation, Decl, DeclId, Expr, ExprId, FunBody, FunDecl, Stmt,
@@ -237,7 +237,7 @@ impl super::Checker<'_> {
             })
             .collect::<Vec<_>>();
         let span = self.file.stmt_spans[statement.0 as usize];
-        let context_uses = self.context_argument_captures(scope, function, &delegated);
+        let context_uses = self.context_argument_captures(function, &delegated);
         let mut uses = FirstUses {
             checker: self,
             statement,
@@ -276,21 +276,14 @@ impl super::Checker<'_> {
     }
 
     /// The captures of `function` that each expression in it passes as an implicit context
-    /// argument or receiver. `delegated` maps a capture's binding (flow identity) to the capture.
-    /// The selection is the checker's: a binding at its recorded shadow depth, resolved in the
-    /// scope the function is declared in, never matched by spelling alone.
+    /// argument or receiver. `delegated` maps a capture's binding (flow identity) to the capture;
+    /// each passed value is the flow identity the checker recorded when it selected the value.
     fn context_argument_captures(
         &self,
-        scope: &CheckerScope<'_>,
         function: &FunDecl,
         delegated: &[(u32, u32)],
     ) -> HashMap<ExprId, Vec<u32>> {
         let roots = callable_roots(&function.params, &function.body);
-        let parameters = function
-            .params
-            .iter()
-            .map(|parameter| parameter.name.clone())
-            .collect::<Vec<_>>();
         let sources = SelectedContextSources {
             expr_types: &self.expr_types,
             implicit_receiver_selections: &self.implicit_receiver_selections,
@@ -300,26 +293,9 @@ impl super::Checker<'_> {
             stmt_lowers: &self.stmt_lowers,
         };
         let mut uses = HashMap::<ExprId, Vec<u32>>::default();
-        for (site, source) in context_argument_sites(self.file, sources, &roots, &parameters) {
-            let binding = match &source {
-                ResolvedContextArgument::Binding { name, shadow_depth } => {
-                    Some((name, *shadow_depth))
-                }
-                ResolvedContextArgument::ImplicitReceiver(selection) => selection
-                    .context_binding
-                    .as_ref()
-                    .map(|(name, depth)| (name, *depth)),
-            };
-            let capture = binding
-                .and_then(|(name, depth)| scope.shadowed_binding(Ns::Value, name, depth))
-                .and_then(|binding| binding.value())
-                .and_then(|local| {
-                    delegated
-                        .iter()
-                        .find(|(identity, _)| *identity == local.flow_identity)
-                })
-                .map(|&(_, capture)| capture);
-            if let Some(capture) = capture {
+        for (site, identity) in context_argument_sites(self.file, sources, &roots) {
+            if let Some(&(_, capture)) = delegated.iter().find(|(binding, _)| *binding == identity)
+            {
                 uses.entry(site).or_default().push(capture);
             }
         }

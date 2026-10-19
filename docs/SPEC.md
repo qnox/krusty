@@ -10483,7 +10483,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc: in `context(registry: Registry) fun render(other: String)`, a class that calls
   `fun local() = other + contextualValue()` captures `($other, $registry)`; with the operands
   swapped it captures `($registry, $other)`
-  (`an_implicit_context_argument_is_a_first_use_at_its_call`). A capture no recorded use orders is
+  (`an_implicit_context_argument_is_a_first_use_at_its_call`). The checker records the flow
+  identity of the binding it selects for each context argument or named context receiver, and the
+  order maps that identity to the capture, never the value's spelling. A capture no recorded use orders is
   an internal error, never ordered by name. Field and parameter order is JVM representation, so the checker
   publishes the order as a recorded fact (`TypeInfo::local_class_capture_orders`, carried by the
   checked local-class declaration to `IrFile::class_capture_order`). Every phase before the JVM

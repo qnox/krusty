@@ -640,10 +640,12 @@ impl BodyFirChecker<'_> {
                 conversion: None,
             }));
         }
-        if let Some((name, shadow_depth)) = selected
+        if let Some(crate::resolve::ContextBinding {
+            name, shadow_depth, ..
+        }) = selected
             .context_binding
             .as_ref()
-            .filter(|(name, _)| name != "this")
+            .filter(|binding| binding.name != "this")
         {
             if let Some((owner, parameter, ty)) = self
                 .current_named_context_parameter(name)

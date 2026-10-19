@@ -518,7 +518,9 @@ impl BodyFirChecker<'_> {
             .origins
             .synthetic(cause, SyntheticOriginKind::ContextArgument);
         let value = match argument {
-            ResolvedContextArgument::Binding { name, shadow_depth } => {
+            ResolvedContextArgument::Binding {
+                name, shadow_depth, ..
+            } => {
                 let (enclosing_depth, binding) = self
                     .binding_source_at_shadow_depth(name, *shadow_depth)
                     .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnknownLocal))?;
