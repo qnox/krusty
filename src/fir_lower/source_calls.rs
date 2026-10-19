@@ -1,6 +1,7 @@
 //! Realization of stable same-file callable identities as ordinary common-IR calls.
 
 pub(super) mod argument_boundaries;
+mod dependency_inline;
 mod inline_route;
 mod reordered_operands;
 
@@ -398,6 +399,21 @@ impl BodyLowering<'_> {
             })?;
             self.ir.inline_regions.insert(expanded);
             return Some(expanded);
+        }
+        if can_inline && self.ir.same_module_inlining() == crate::ir::SameModuleInlining::ExpandInIr
+        {
+            if let Some(template) = self.dependency_templates.template(self.ir, target).cloned() {
+                return self.dependency_inline_call(dependency_inline::DependencyInlineCall {
+                    target,
+                    template,
+                    parameter_types: &parameter_types,
+                    dispatch_receiver,
+                    extension_receiver,
+                    extension_receiver_parameter,
+                    arguments,
+                    substitutions,
+                });
+            }
         }
         let (statements, receiver, args, mut defaults) =
             self.selected_semantic_operands(SelectedOperandRequest {
@@ -1506,6 +1522,52 @@ impl BodyLowering<'_> {
         Some(self.wrap_call_statements(statements, construction))
     }
 
+    /// A receiver operand (dispatch or extension) of an inline call whose declaration takes it as
+    /// `declared`, selected as `specialized`: passed in place or held in a temporary, and coerced
+    /// to a reference where the declaration takes a scalar receiver as one.
+    pub(super) fn inline_receiver_operand(
+        &mut self,
+        receiver: ExprId,
+        declared: Ty,
+        specialized: Ty,
+        direct: bool,
+        statements: &mut Vec<ExprId>,
+    ) -> ExprId {
+        let receiver = if direct {
+            // Passed in place, a scalar receiver the declaration takes as a reference
+            // (`Int?.inc()` on an `Int` value) is boxed here, where a materialized one
+            // was boxed by its reference-typed temporary.
+            let operand = self
+                .ir
+                .physical_types
+                .get(&receiver)
+                .or_else(|| self.ir.logical_types.get(&receiver))
+                .copied();
+            let receiver = self.direct_call_operand(receiver, specialized);
+            if operand.is_some_and(|operand| !operand.is_reference()) && specialized.is_reference()
+            {
+                self.ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: receiver,
+                    type_operand: specialized,
+                })
+            } else {
+                receiver
+            }
+        } else {
+            self.spill_call_operand(receiver, specialized, statements)
+        };
+        if !specialized.is_reference() && declared.is_reference() {
+            self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: receiver,
+                type_operand: declared,
+            })
+        } else {
+            receiver
+        }
+    }
+
     /// Normalize source-order checked arguments into physical parameter order. An already ordered
     /// operand stream stays direct; a reordered stream is first moved to body-local temporaries so
     /// named arguments cannot reorder user effects. Default and vararg decisions are consumed here
@@ -1582,42 +1644,15 @@ impl BodyLowering<'_> {
         };
         let extension_receiver = match extension_receiver {
             Some(receiver) => {
-                let ty = declared_extension_receiver?;
-                let specialized = crate::types::ty_subst_keep_unbound(ty.get(), &bindings);
-                let receiver = if direct {
-                    // Passed in place, a scalar receiver the declaration takes as a reference
-                    // (`Int?.inc()` on an `Int` value) is boxed here, where a materialized one
-                    // was boxed by its reference-typed temporary.
-                    let operand = self
-                        .ir
-                        .physical_types
-                        .get(&receiver)
-                        .or_else(|| self.ir.logical_types.get(&receiver))
-                        .copied();
-                    let receiver = self.direct_call_operand(receiver, specialized);
-                    if operand.is_some_and(|operand| !operand.is_reference())
-                        && specialized.is_reference()
-                    {
-                        self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: receiver,
-                            type_operand: specialized,
-                        })
-                    } else {
-                        receiver
-                    }
-                } else {
-                    self.spill_call_operand(receiver, specialized, &mut statements)
-                };
-                Some(if !specialized.is_reference() && ty.get().is_reference() {
-                    self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: receiver,
-                        type_operand: ty.get(),
-                    })
-                } else {
-                    receiver
-                })
+                let ty = declared_extension_receiver?.get();
+                let specialized = crate::types::ty_subst_keep_unbound(ty, &bindings);
+                Some(self.inline_receiver_operand(
+                    receiver,
+                    ty,
+                    specialized,
+                    direct,
+                    &mut statements,
+                ))
             }
             None => None,
         };
@@ -1744,7 +1779,7 @@ impl BodyLowering<'_> {
             let first_generated = self.ir.exprs.len();
             let mut malformed_anonymous = None;
             let Some(inlined) = self.inline_same_file_call(
-                target,
+                &super::inlining::InlineCallee::Module(target),
                 function,
                 &operands,
                 &inlined_lambda_operands,

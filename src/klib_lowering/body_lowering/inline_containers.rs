@@ -15,7 +15,7 @@ use crate::types::Ty;
 const TEMPORARY: &str = "IR_TEMPORARY_VARIABLE";
 const INLINE_PARAMETER: &str = "IR_TEMPORARY_VARIABLE_FOR_INLINED_PARAMETER";
 
-impl BodyLowering<'_, '_, '_> {
+impl BodyLowering<'_> {
     /// Lower the one compiler container shape that is semantically a single evaluation followed
     /// by a call. The two producer aliases are not source locals and therefore do not acquire
     /// common-IR slots or debug identities.
@@ -113,8 +113,16 @@ impl BodyLowering<'_, '_, '_> {
             ));
         }
 
-        let outer_ty = super::super::klib_types::semantic_type(self.arena, outer.ty)?;
-        let parameter_ty = super::super::klib_types::semantic_type(self.arena, parameter.ty)?;
+        let outer_ty = super::super::klib_types::semantic_type(
+            self.arena,
+            self.header.type_parameters(),
+            outer.ty,
+        )?;
+        let parameter_ty = super::super::klib_types::semantic_type(
+            self.arena,
+            self.header.type_parameters(),
+            parameter.ty,
+        )?;
         if outer_ty != parameter_ty
             || self.ty(self.arena.expr(outer_initializer), "inline argument")? != outer_ty
             || self.ty(

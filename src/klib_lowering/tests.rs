@@ -7,6 +7,7 @@ mod body_forms;
 mod callee_headers;
 mod control_forms;
 mod demo_package;
+mod inline_templates;
 
 use super::*;
 use crate::backend::{BackendCallableFact, CheckedBackendCallables};
@@ -258,6 +259,19 @@ pub(super) fn type_name_of(ty: Ty) -> String {
         Ty::Unit => "Unit".to_owned(),
         // Any other class without type arguments, by its qualified name (a test rendering).
         Ty::Obj(name, []) => name.render(),
+        Ty::Nullable(inner) => format!("{}?", type_name_of(*inner)),
+        // A type parameter by its interned name, which a test maps to its declared spelling.
+        Ty::TyParam(name, _) => format!("<{name:?}>"),
+        Ty::Fun(signature) => format!(
+            "({}) -> {}",
+            signature
+                .params
+                .iter()
+                .map(|param| type_name_of(*param))
+                .collect::<Vec<_>>()
+                .join(", "),
+            type_name_of(signature.ret)
+        ),
         other => format!("{other:?}"),
     }
 }
@@ -379,6 +393,14 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("call {}({args})", ir.fn_source_names[function])
+        }
+        IrExpr::InvokeFunction { func, args, .. } => {
+            let operands = std::iter::once(func)
+                .chain(args)
+                .map(|operand| render(ir, *operand))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("invoke({operands})")
         }
         IrExpr::Variable {
             index,

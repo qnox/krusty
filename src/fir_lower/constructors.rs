@@ -8,7 +8,7 @@ use crate::ir::{
 use super::checked_arguments::{
     materialize_checked_arguments, CheckedArgumentSlot, CheckedArgumentValue,
 };
-use super::{lower_body_with_context, FirFileLoweringFailure, LocalCallableLoweringContext};
+use super::{lower_body_with_context, FileLoweringContext, FirFileLoweringFailure};
 
 #[cfg(test)]
 mod enclosing_superclass_capture_tests;
@@ -1229,7 +1229,7 @@ pub(super) fn accept_constructor_body(
     body: FirBody,
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
-    local_callables: &mut LocalCallableLoweringContext,
+    local_callables: &mut FileLoweringContext,
 ) -> Result<(), FirFileLoweringFailure> {
     let default_fragment = body.is_default_fragment();
     let constructor_capture_parameter_count = body.constructor_capture_parameter_count() as usize;

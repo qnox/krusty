@@ -20,7 +20,6 @@ mod loops;
 mod string_templates;
 mod type_operators;
 
-use super::body_unit::Linker;
 use super::decline::KlibBodyDeclineReason;
 use super::function_lowering::FunctionHeader;
 use super::ir_builtins::IrBuiltinOperators;
@@ -28,7 +27,9 @@ use super::klib_types::semantic_type;
 use super::local_values::LocalValues;
 use crate::ir::{
     complete_bottom_value, Callee, ExprId, FunId, IrBindingStability, IrConst, IrExpr, IrFile,
+    IrTypeOp,
 };
+use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrExpr, KlibIrExprId, KlibIrExprKind, KlibIrStatement, KlibIrTypeOperator,
     KlibIrVariableId,
@@ -50,6 +51,17 @@ pub(super) struct LinkedCallee {
     pub(super) singleton_dispatch: Option<TypeName>,
 }
 
+/// Joins the calls a body makes of public dependency declarations to the functions they invoke.
+pub(super) trait CallLinker {
+    /// Whether a checked source edge selected this exact producer-resolved declaration. A body
+    /// call of such a declaration must remain a callable edge so the unit exports code for the
+    /// source call; an otherwise identical unselected compiler builtin may be folded.
+    fn is_selected(&self, callee: &KlibPublicIdSignature) -> Lowered<bool>;
+
+    /// The function a call of the public declaration `callee` invokes.
+    fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
+}
+
 /// The function a body is lowered into: its serialized symbol, the only target its `return`s may
 /// name, and the unit function that holds it.
 #[derive(Clone, Copy)]
@@ -59,13 +71,13 @@ pub(super) struct LoweredFunction<'a> {
 }
 
 /// Lowers the body of one function into `ir`.
-pub(super) struct BodyLowering<'a, 'l, 's> {
+pub(super) struct BodyLowering<'a> {
     arena: &'a KlibIrArena,
     function: LoweredFunction<'a>,
     header: &'a FunctionHeader,
     builtins: &'a IrBuiltinOperators,
     ir: &'a mut IrFile,
-    linker: &'a mut Linker<'l, 's>,
+    linker: &'a mut dyn CallLinker,
     locals: LocalValues,
     /// Compiler aliases admitted only by an exact inline-container shape. They are substituted
     /// while that container's value is lowered and removed before lowering continues.
@@ -75,16 +87,19 @@ pub(super) struct BodyLowering<'a, 'l, 's> {
     loops: Vec<(u32, String)>,
     /// Loops whose lowered bodies contain a `break` that names that loop.
     breakable_loops: HashSet<u32>,
+    /// The coercions of an erased body's values to their erasure, which a conversion back to the
+    /// declared type cancels.
+    erasure_coercions: HashSet<ExprId>,
 }
 
-impl<'a, 'l, 's> BodyLowering<'a, 'l, 's> {
+impl<'a> BodyLowering<'a> {
     pub(super) fn new(
         arena: &'a KlibIrArena,
         function: LoweredFunction<'a>,
         header: &'a FunctionHeader,
         builtins: &'a IrBuiltinOperators,
         ir: &'a mut IrFile,
-        linker: &'a mut Linker<'l, 's>,
+        linker: &'a mut dyn CallLinker,
     ) -> Self {
         Self {
             arena,
@@ -97,6 +112,7 @@ impl<'a, 'l, 's> BodyLowering<'a, 'l, 's> {
             compiler_aliases: HashMap::default(),
             loops: Vec::new(),
             breakable_loops: HashSet::default(),
+            erasure_coercions: HashSet::default(),
         }
     }
 
@@ -122,7 +138,7 @@ impl<'a, 'l, 's> BodyLowering<'a, 'l, 's> {
             argument,
         } = &expression.kind
         {
-            if semantic_type(self.arena, *operand)? != Ty::Unit
+            if semantic_type(self.arena, self.header.type_parameters(), *operand)? != Ty::Unit
                 || self.ty(expression, "coercion to `Unit`")? != Ty::Unit
             {
                 return Err(mismatch("a coercion to `Unit` is typed apart from `Unit`"));
@@ -142,7 +158,8 @@ impl<'a, 'l, 's> BodyLowering<'a, 'l, 's> {
             }
             KlibIrExprKind::GetValue { symbol, origin: _ } => {
                 let ty = self.ty(expression, "value read")?;
-                (self.read(symbol)?, ty)
+                let read = self.read(symbol)?;
+                (read, self.read_type(symbol, ty))
             }
             KlibIrExprKind::Call {
                 access,
@@ -280,14 +297,14 @@ impl<'a, 'l, 's> BodyLowering<'a, 'l, 's> {
         let ty = expression
             .ty
             .ok_or(KlibBodyDeclineReason::UntypedExpression(form))?;
-        semantic_type(self.arena, ty)
+        semantic_type(self.arena, self.header.type_parameters(), ty)
     }
 
     /// Lower `id` as a value used where `expected` is: the serialized body states every conversion
-    /// explicitly, and this lowering models none.
+    /// explicitly, and this lowering models none. `null` is a value of every nullable type.
     fn operand(&mut self, id: KlibIrExprId, expected: Ty) -> Lowered<ExprId> {
         let lowered = self.expression(id)?;
-        if self.lowered_type(lowered) != expected {
+        if !is_value_of(self.lowered_type(lowered), expected) {
             return Err(KlibBodyDeclineReason::ImplicitConversion);
         }
         Ok(lowered)
@@ -331,28 +348,116 @@ impl<'a, 'l, 's> BodyLowering<'a, 'l, 's> {
         if let Some(alias) = self.compiler_aliases.get(symbol).copied() {
             return self.expression(alias);
         }
-        let (index, stability) = if let Some(local) = self.locals.get(symbol) {
-            (local.index, Some(local.stability()))
+        let (index, stability, erased) = if let Some(local) = self.locals.get(symbol) {
+            (local.index, Some(local.stability()), None)
         } else {
             let parameter = self
                 .header
                 .value(symbol)
                 .ok_or(KlibBodyDeclineReason::ForeignValue)?;
             let stability = parameter.stable_read.then_some(IrBindingStability::Stable);
-            (parameter.index, stability)
+            (parameter.index, stability, parameter.erased)
         };
         let read = self.ir.add_expr(IrExpr::GetValue(index));
         if let Some(stability) = stability {
             self.ir.binding_read_stability.insert(read, stability);
         }
-        Ok(read)
+        Ok(match erased {
+            Some(erased) => {
+                // The read itself is of the declared type; its use is of the erasure.
+                let declared = self.header.slot_type(index);
+                self.ir.logical_types.insert(read, declared);
+                let coercion = self.coercion(read, erased);
+                self.erasure_coercions.insert(coercion);
+                coercion
+            }
+            None => read,
+        })
+    }
+
+    /// The type a read of `symbol` the body types `serialized` has: a function-typed parameter of
+    /// an erased body is read at its declared type, which its invocations convert from.
+    fn read_type(&self, symbol: &KlibIrSymbol, serialized: Ty) -> Ty {
+        if self.locals.get(symbol).is_some() {
+            return serialized;
+        }
+        match self.header.value(symbol) {
+            Some(parameter) if parameter.erased.is_none() => {
+                let declared = self.header.slot_type(parameter.index);
+                if self.header.erased(declared) == serialized {
+                    declared
+                } else {
+                    serialized
+                }
+            }
+            _ => serialized,
+        }
+    }
+
+    /// `value`, of an erased type, as a value of the declared type `target`. A coercion of a
+    /// declared value to its erasure cancels, and a conditional converts each branch, so the
+    /// expanded body converts no value the source does not.
+    fn declared_value(&mut self, value: ExprId, target: Ty) -> ExprId {
+        let actual = self.lowered_type(value);
+        if is_value_of(actual, target) || actual == Ty::Nothing {
+            return value;
+        }
+        match self.ir.expr(value).clone() {
+            IrExpr::TypeOp { arg, .. } if self.erasure_coercions.contains(&value) => {
+                let inner = self.lowered_type(arg);
+                if is_value_of(inner, target) {
+                    return arg;
+                }
+                if let Some(widened) = self.nullable_widening(arg, inner, target) {
+                    return widened;
+                }
+            }
+            IrExpr::When { branches } => {
+                let branches = branches
+                    .into_iter()
+                    .map(|(condition, result)| (condition, self.declared_value(result, target)))
+                    .collect();
+                self.ir.exprs[value as usize] = IrExpr::When { branches };
+                self.ir.logical_types.insert(value, target);
+                if self.ir.whens.exhaustive.contains_key(&value) {
+                    self.ir.whens.exhaustive.insert(value, target);
+                }
+                return value;
+            }
+            _ => {}
+        }
+        self.coercion(value, target)
+    }
+
+    /// `value` converted to `ty` by the coercion checked FIR lowering places at a generic
+    /// declaration's boundary, which the target represents.
+    fn coercion(&mut self, value: ExprId, ty: Ty) -> ExprId {
+        self.ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: value,
+            type_operand: ty,
+        })
+    }
+
+    /// Lower `id` as a value of the declared type `declared` where the body produces its erasure,
+    /// as a prepared-inline copy passes an erased value to a function parameter's invocation.
+    fn declared_operand(&mut self, id: KlibIrExprId, declared: Ty) -> Lowered<ExprId> {
+        let lowered = self.expression(id)?;
+        let actual = self.lowered_type(lowered);
+        if is_value_of(actual, declared) {
+            return Ok(lowered);
+        }
+        if actual != self.header.erased(declared) {
+            return Err(KlibBodyDeclineReason::ImplicitConversion);
+        }
+        Ok(self.declared_value(lowered, declared))
     }
 
     /// A local `val` or `var` with its initializer, lowered as checked FIR lowers the source
     /// declaration: a named variable in the next value slot, with no type of its own.
     fn variable(&mut self, id: KlibIrVariableId) -> Lowered<ExprId> {
         let variable = self.arena.variable(id);
-        let ty = semantic_type(self.arena, variable.ty)?;
+        let ty = semantic_type(self.arena, self.header.type_parameters(), variable.ty)?;
         let local = self.locals.slot(variable, ty)?;
         let initializer =
             variable
@@ -400,7 +505,10 @@ impl<'a, 'l, 's> BodyLowering<'a, 'l, 's> {
         if target != self.function.symbol {
             return Err(KlibBodyDeclineReason::ForeignReturnTarget);
         }
-        let value = self.operand(value, self.header.result())?;
+        let mut value = self.operand(value, self.header.body_result())?;
+        if self.header.body_result() != self.header.result() {
+            value = self.declared_value(value, self.header.result());
+        }
         let returned = self.ir.add_expr(IrExpr::Return(Some(value)));
         // The function's own return leaves the innermost callable.
         self.ir.checked_return_depths.insert(returned, 0);
@@ -423,4 +531,10 @@ fn mismatch(detail: &str) -> KlibBodyDeclineReason {
 
 fn unsupported<T>(form: &'static str) -> Lowered<T> {
     Err(KlibBodyDeclineReason::UnsupportedOperation(form))
+}
+
+/// A value typed `actual` is one of `expected` without a conversion: the same type, or the null
+/// literal where a nullable type is expected, which checked FIR lowering converts nothing for.
+fn is_value_of(actual: Ty, expected: Ty) -> bool {
+    actual == expected || (actual == Ty::Null && expected.is_nullable())
 }

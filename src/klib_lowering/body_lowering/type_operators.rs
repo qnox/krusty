@@ -14,7 +14,7 @@ use crate::types::Ty;
 use super::super::decline::KlibBodyDeclineReason;
 use super::super::klib_types::semantic_type;
 
-impl BodyLowering<'_, '_, '_> {
+impl BodyLowering<'_> {
     /// The type operator `operator` with the type operand `operand` applied to `argument`, typed
     /// `ty`. Checked types are recorded here, since an implicit cast that converts nothing adds no
     /// node of its own.
@@ -25,7 +25,7 @@ impl BodyLowering<'_, '_, '_> {
         argument: KlibIrExprId,
         ty: Ty,
     ) -> Lowered<ExprId> {
-        let target = semantic_type(self.arena, operand)?;
+        let target = semantic_type(self.arena, self.header.type_parameters(), operand)?;
         let op = match operator {
             KlibIrTypeOperator::ImplicitCast => return self.implicit_cast(target, argument, ty),
             KlibIrTypeOperator::InstanceOf | KlibIrTypeOperator::NotInstanceOf => {
@@ -74,18 +74,23 @@ impl BodyLowering<'_, '_, '_> {
     }
 
     /// An implicit cast to `target`. One to the value's own type converts nothing and adds no
-    /// node. One from a nullable type to its non-null type is the smart cast the source relies
-    /// on, which checked FIR lowering lowers as a cast of a reference and as a coercion of a
-    /// primitive value. Any other implicit cast is a narrowing or a widening this lowering cannot
-    /// tell apart without the classes' supertypes, and declines.
+    /// node, and neither does one of `null` to a nullable type. One to the value's nullable type
+    /// is a widening checked FIR lowering marks as a coercion. One from a nullable type to its
+    /// non-null type is the smart cast the source relies on, which checked FIR lowering lowers as
+    /// a cast of a reference and as a coercion of a primitive value. Any other implicit cast is a
+    /// narrowing or a widening this lowering cannot tell apart without the classes' supertypes,
+    /// and declines.
     fn implicit_cast(&mut self, target: Ty, argument: KlibIrExprId, ty: Ty) -> Lowered<ExprId> {
         if target != ty {
             return Err(mismatch("an implicit cast is typed apart from its target"));
         }
         let arg = self.expression(argument)?;
         let actual = self.lowered_type(arg);
-        if actual == target {
+        if super::is_value_of(actual, target) {
             return Ok(arg);
+        }
+        if let Some(widened) = self.nullable_widening(arg, actual, target) {
+            return Ok(self.typed(widened, ty));
         }
         if target.is_nullable() || Ty::nullable(target) != actual {
             return Err(KlibBodyDeclineReason::ImplicitConversion);
@@ -101,6 +106,22 @@ impl BodyLowering<'_, '_, '_> {
             type_operand: target,
         });
         Ok(self.typed(cast, ty))
+    }
+}
+
+impl BodyLowering<'_> {
+    /// `value`, of the non-null type `actual`, widened to its nullable type `target`: a coercion
+    /// checked FIR lowering places for the target to represent. `None` for any other pair.
+    pub(super) fn nullable_widening(
+        &mut self,
+        value: ExprId,
+        actual: Ty,
+        target: Ty,
+    ) -> Option<ExprId> {
+        if actual.is_nullable() || target != Ty::nullable(actual) {
+            return None;
+        }
+        Some(self.coercion(value, target))
     }
 }
 

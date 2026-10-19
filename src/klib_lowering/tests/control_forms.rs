@@ -812,8 +812,8 @@ fn type_checks_and_casts_lower_as_the_source_operators_do() {
     }
     assert_eq!(
         lowered_f(&type_check(KlibIrTypeOperator::Cast, T::String, T::String)),
-        "scope {scope {return@Some(0) written CastNonNull<String>(v0!: \
-         Nullable(Obj(TypeName(\"kotlin/Any\"), []))): String: Nothing}: Nothing}"
+        "scope {scope {return@Some(0) written CastNonNull<String>(v0!: kotlin/Any?): String: \
+         Nothing}: Nothing}"
     );
 }
 

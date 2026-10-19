@@ -753,6 +753,32 @@ fn an_implicit_cast_to_the_value_type_adds_nothing() {
 }
 
 #[test]
+fn an_implicit_cast_to_the_value_nullable_type_is_the_widening_coercion() {
+    let demo = demo(&[("f", &[T::Int], T::NullableInt)], |_, body| {
+        let a = body.param(0);
+        let cast = body.type_operator(KlibIrTypeOperator::ImplicitCast, a, T::NullableInt);
+        Some(vec![body.ret(cast)])
+    });
+    assert_eq!(
+        lowered_f(&demo),
+        source_body("fun f(a: Int): Int? {\n return a\n}\n", "f", 1)
+    );
+}
+
+#[test]
+fn an_implicit_cast_of_null_to_a_nullable_type_adds_nothing() {
+    let demo = demo(&[("f", &[], T::NullableString)], |_, body| {
+        let null = body.constant(T::NullableNothing, KlibIrConstant::Null);
+        let cast = body.type_operator(KlibIrTypeOperator::ImplicitCast, null, T::NullableString);
+        Some(vec![body.ret(cast)])
+    });
+    assert_eq!(
+        lowered_f(&demo),
+        source_body("fun f(): String? {\n return null\n}\n", "f", 0)
+    );
+}
+
+#[test]
 fn a_converting_or_unmodelled_type_operator_declines() {
     let converting = demo(&[("f", &[T::NullableAny], T::NullableAny)], |_, body| {
         let a = body.param(0);
@@ -947,7 +973,7 @@ fn stdlib_built_in_calls_have_the_signed_operands() {
                 .map(|argument| {
                     let argument = argument.expect("a built-in call supplies every argument");
                     let ty = arena.expr(argument).ty.expect("an argument is typed");
-                    super::super::klib_types::semantic_type(arena, ty).ok()
+                    super::super::klib_types::semantic_type(arena, &Default::default(), ty).ok()
                 })
                 .collect::<Vec<_>>();
             let (kind, expected) = match operator {

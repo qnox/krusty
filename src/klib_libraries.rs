@@ -44,6 +44,8 @@ pub use target_intrinsics::{KlibIntrinsicCallable, KlibIntrinsicFacts};
 pub struct KlibLibraries {
     inventory: std::rc::Rc<inventory::PackageInventory>,
     bodies: std::rc::Rc<KlibDeclarationBodies>,
+    /// The prepared-inline copies, the exclusive source of an inline function's cross-module body.
+    inline_bodies: std::rc::Rc<KlibDeclarationBodies>,
     body_snapshot: Option<crate::libraries::DependencyBodySnapshot>,
     identities: external_identities::ExternalIdentities,
     lookups: lookup::SymbolLookups,
@@ -91,6 +93,7 @@ impl KlibLibraries {
         Self::over_with_bodies_and_snapshot(
             std::rc::Rc::clone(&self.inventory),
             std::rc::Rc::clone(&self.bodies),
+            std::rc::Rc::clone(&self.inline_bodies),
             self.body_snapshot.clone(),
         )
     }
@@ -106,17 +109,24 @@ impl KlibLibraries {
         inventory: std::rc::Rc<inventory::PackageInventory>,
         bodies: std::rc::Rc<KlibDeclarationBodies>,
     ) -> Self {
-        Self::over_with_bodies_and_snapshot(inventory, bodies, None)
+        Self::over_with_bodies_and_snapshot(
+            inventory,
+            bodies,
+            std::rc::Rc::new(KlibDeclarationBodies::default()),
+            None,
+        )
     }
 
     fn over_with_bodies_and_snapshot(
         inventory: std::rc::Rc<inventory::PackageInventory>,
         bodies: std::rc::Rc<KlibDeclarationBodies>,
+        inline_bodies: std::rc::Rc<KlibDeclarationBodies>,
         body_snapshot: Option<crate::libraries::DependencyBodySnapshot>,
     ) -> Self {
         Self {
             inventory,
             bodies,
+            inline_bodies,
             body_snapshot,
             identities: external_identities::ExternalIdentities::default(),
             lookups: lookup::SymbolLookups::default(),
@@ -131,6 +141,11 @@ impl KlibLibraries {
     /// Exact serialized bodies indexed from the same compilation inputs as the declarations.
     pub fn declaration_bodies(&self) -> &KlibDeclarationBodies {
         &self.bodies
+    }
+
+    /// The prepared-inline copies of the inline functions the same inputs declare.
+    pub fn inline_declaration_bodies(&self) -> &KlibDeclarationBodies {
+        &self.inline_bodies
     }
 
     pub(crate) fn dependency_body_snapshot(

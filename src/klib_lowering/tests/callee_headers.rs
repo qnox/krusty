@@ -264,7 +264,7 @@ fn function_tree(
         abbreviation: None,
     });
     assert_eq!(
-        super::super::klib_types::semantic_type(&arena, box_type)
+        super::super::klib_types::semantic_type(&arena, &Default::default(), box_type)
             .expect("the fixture's class type is semantic"),
         Ty::obj_name(crate::types::type_name("demo/Box")),
         "the fixture's serialized receiver is demo.Box"
@@ -650,26 +650,39 @@ fn stdlib_calls_reach_header_declared_callees() {
     let expected =
         if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
             vec![
-                ("it declares a parameter default)", 19),
+                ("it declares a parameter default)", 27),
+                ("it declares a vararg parameter)", 10),
                 ("it uses a block of a compiler-introduced form)", 13),
-                ("it uses a call of a member function)", 41),
+                ("it uses a call of a member function)", 48),
                 ("it uses a call through a property accessor signature)", 12),
                 ("it uses a constant of another type than its value's)", 4),
                 ("it uses a constructor call)", 2),
-                ("it uses a type with type arguments)", 6),
+                ("it uses a loop whose body is not a block)", 2),
                 ("it uses an inline argument container of another shape)", 14),
+                (
+                    "it uses an inline argument container whose value is not a direct call)",
+                    1,
+                ),
                 ("it uses an inlined function body of another shape)", 6),
-                ("its library serializes none)", 37),
+                ("its library serializes none)", 66),
             ]
         } else {
             vec![
-                ("it declares a parameter default)", 19),
-                ("it uses a block of a compiler-introduced form)", 34),
-                ("it uses a call of a member function)", 36),
+                ("it declares a parameter default)", 20),
+                ("it declares a vararg parameter)", 10),
+                ("it uses a block of a compiler-introduced form)", 13),
+                ("it uses a call of a member function)", 48),
                 ("it uses a call through a property accessor signature)", 12),
+                ("it uses a constant of another type than its value's)", 4),
                 ("it uses a constructor call)", 2),
-                ("it uses a type with type arguments)", 6),
-                ("its library serializes none)", 51),
+                ("it uses a loop whose body is not a block)", 2),
+                ("it uses an inline argument container of another shape)", 14),
+                (
+                    "it uses an inline argument container whose value is not a direct call)",
+                    1,
+                ),
+                ("it uses an inlined function body of another shape)", 6),
+                ("its library serializes none)", 66),
             ]
         };
     assert_eq!(

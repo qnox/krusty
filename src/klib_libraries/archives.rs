@@ -414,7 +414,6 @@ impl<'a> OpenedKlibLibraries<'a> {
             .map_err(KlibLibrariesOpenError::Bodies)?;
         let inline_bodies = KlibDeclarationBodies::from_body_libraries(inline_body_libraries)
             .map_err(KlibLibrariesOpenError::Bodies)?;
-        inventory.attach_inline_body_plans(&inline_bodies);
         let body_snapshot = platform_module.map(|platform_module| {
             let reachable = bodies.body_provider_modules(&platform_module);
             crate::libraries::DependencyBodySnapshot::new(
@@ -436,6 +435,7 @@ impl<'a> OpenedKlibLibraries<'a> {
         Ok(KlibLibraries::over_with_bodies_and_snapshot(
             std::rc::Rc::new(inventory),
             std::rc::Rc::new(bodies),
+            std::rc::Rc::new(inline_bodies),
             body_snapshot,
         ))
     }

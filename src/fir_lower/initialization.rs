@@ -1,14 +1,14 @@
 use crate::fir::{DeclarationId, DeclarationKind, FirBody, ResolvedModuleIndex};
 use crate::ir::{IrCheckedClassInitializer, IrCheckedEnumEntryBody, IrExpr, IrFile, IrNodeOrigin};
 
-use super::{lower_body_with_context, FirFileLoweringFailure, LocalCallableLoweringContext};
+use super::{lower_body_with_context, FileLoweringContext, FirFileLoweringFailure};
 
 pub(super) fn accept_non_callable_body(
     declaration: DeclarationId,
     body: FirBody,
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
-    local_callables: &mut LocalCallableLoweringContext,
+    local_callables: &mut FileLoweringContext,
 ) -> Result<(), FirFileLoweringFailure> {
     let anchor = index.declaration_anchor(declaration).ok_or(
         FirFileLoweringFailure::UnsupportedCallableOwner(declaration),

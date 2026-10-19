@@ -1214,6 +1214,7 @@ impl BodyLowering<'_> {
             capture_slots,
             scopes,
             self.published_local_callables.clone(),
+            self.dependency_templates,
         );
         nested.enclosure = declaration_enclosure;
         nested.expansion_enclosure = expansion_enclosure;

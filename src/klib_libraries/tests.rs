@@ -67,7 +67,7 @@ fn package_of(functions: Vec<KotlinFunction>) -> KotlinPackage {
 }
 
 #[test]
-fn prepared_inline_selection_is_exact_and_module_qualified() {
+fn prepared_inline_selection_takes_every_inline_declaration_of_its_module() {
     let parameter = KotlinTypeParameter {
         id: KotlinTypeParameterId(1),
         name: "T".to_owned(),
@@ -130,118 +130,10 @@ fn prepared_inline_selection_is_exact_and_module_qualified() {
 
     assert!(selection.contains("fixture-module", &selected));
     assert!(!selection.contains("other-module", &selected));
-    assert!(!selection.contains("fixture-module", &ordinary_inline));
+    assert!(selection.contains("fixture-module", &ordinary_inline));
     assert!(!selection.contains("fixture-module", &non_inline_reified));
     assert!(selection.contains("fixture-module", &direct_lambda));
-    assert!(!selection.contains("fixture-module", &materialized_lambda));
-}
-
-#[test]
-fn native_prepared_with_publishes_its_exact_direct_invocation_plan() {
-    let Some(libraries) = analysis::native_stdlib() else {
-        return;
-    };
-    let function = single_function(&libraries, "kotlin", "with");
-    let Some(crate::libraries::InlineBodyPlan::InvokeLambda {
-        frame,
-        lambda_parameter: 1,
-        arguments,
-        prologue,
-        cleanup,
-        cause: None,
-        recovery: None,
-        defaults,
-        result: None,
-    }) = function.callable.inline_body_plan.as_deref()
-    else {
-        panic!("kotlin.with must publish its exact direct-lambda invocation plan")
-    };
-    assert_eq!(frame.callee.as_ref(), "with");
-    assert!(frame.inline_only);
-    assert!(frame.source.is_none());
-    assert_eq!(
-        arguments.as_slice(),
-        [crate::libraries::InlineBodyValue::Parameter(0)]
-    );
-    assert!(prologue.is_empty());
-    assert!(cleanup.is_empty());
-    assert!(defaults.is_empty());
-}
-
-#[test]
-fn native_prepared_extension_run_maps_ir_parameters_to_plan_coordinates() {
-    let Some(libraries) = analysis::native_stdlib() else {
-        return;
-    };
-    let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "run");
-    let runs = symbols
-        .callables
-        .functions()
-        .iter()
-        .filter(|function| function.kind == FnKind::Extension)
-        .collect::<Vec<_>>();
-    let [function] = runs.as_slice() else {
-        panic!("expected exactly one extension `run`, found {}", runs.len())
-    };
-    assert!(function.callable.source_receiver.is_some());
-    let Some(crate::libraries::InlineBodyPlan::InvokeLambda {
-        frame,
-        lambda_parameter: 1,
-        arguments,
-        prologue,
-        cleanup,
-        cause: None,
-        recovery: None,
-        defaults,
-        result: None,
-    }) = function.callable.inline_body_plan.as_deref()
-    else {
-        panic!("kotlin.run must publish its exact direct-lambda invocation plan")
-    };
-    assert_eq!(frame.callee.as_ref(), "run");
-    assert!(frame.inline_only);
-    assert!(frame.source.is_none());
-    assert_eq!(
-        arguments.as_slice(),
-        [crate::libraries::InlineBodyValue::Parameter(0)]
-    );
-    assert!(prologue.is_empty());
-    assert!(cleanup.is_empty());
-    assert!(defaults.is_empty());
-}
-
-#[test]
-fn native_prepared_also_and_apply_return_their_receiver_after_the_invocation() {
-    let Some(libraries) = analysis::native_stdlib() else {
-        return;
-    };
-    for name in ["also", "apply"] {
-        let function = single_function(&libraries, "kotlin", name);
-        let Some(crate::libraries::InlineBodyPlan::InvokeLambda {
-            frame,
-            lambda_parameter: 1,
-            arguments,
-            prologue,
-            cleanup,
-            cause: None,
-            recovery: None,
-            defaults,
-            result: Some(crate::libraries::InlineBodyValue::Parameter(0)),
-        }) = function.callable.inline_body_plan.as_deref()
-        else {
-            panic!("kotlin.{name} must invoke its lambda and then return its receiver")
-        };
-        assert_eq!(frame.callee.as_ref(), name);
-        assert!(frame.inline_only);
-        assert!(frame.source.is_none());
-        assert_eq!(
-            arguments.as_slice(),
-            [crate::libraries::InlineBodyValue::Parameter(0)]
-        );
-        assert!(prologue.is_empty());
-        assert!(cleanup.is_empty());
-        assert!(defaults.is_empty());
-    }
+    assert!(selection.contains("fixture-module", &materialized_lambda));
 }
 
 #[test]

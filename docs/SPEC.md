@@ -17153,18 +17153,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   it. A `null` of another type is an inconsistency. Test:
   `control_forms::a_nullability_smart_cast_lowers_as_the_source_smart_cast_does`.
 
-- **A KLIB `also`/`apply` call expands as an invocation that answers the receiver.** The direct
-  lambda invocation plan of an exact `@InlineOnly` prepared-inline body accepts, besides one
-  `return` of the invocation (`let`, `run`, `with`), the two statements `block(...)` and
-  `return <parameter>`: the invocation runs for its effect and the call answers the returned
-  parameter (`InvokeLambda { result: Some(..) }`, as the JVM provider decodes the same
-  declarations). Every existing guard stays: the compiler-owned `INVOKE` origin, operands and the
-  returned value read only declaration-owned parameter symbols, the lambda parameter is a non-null,
-  non-suspend `FunctionN` of matching arity whose metadata modifier runs it in the caller's frame,
-  and a body returning the lambda parameter itself publishes no plan. Tests:
-  `klib_libraries::tests::native_prepared_also_and_apply_return_their_receiver_after_the_invocation`,
-  `multimodule_conformance_cases::RECEIVER_RETURNING_SCOPE_FUNCTIONS` (JVM, Native and Wasm,
-  including a taken non-local `return` out of `also`).
+- **A KLIB inline function expands from its prepared body through the module inliner.** When the
+  backend expands same-module inline calls in IR (Native, Wasm), every `inline` declaration of a
+  dependency KLIB has its prepared-inline IR body decoded and, on its first call in a file, lowered
+  into that file as an inline-only template function. The checked call then expands exactly as a
+  same-module inline call does: the inliner takes an `InlineCallee` that is either a module
+  `CallableId` or the dependency's `ExternalCallableId` with its template, and nothing else about
+  the expansion differs. The template keeps the declaration's parameter order (dispatch receiver,
+  context parameters, extension receiver, value parameters) and its parameter defaults, lowered in
+  the callee's scope. A body the KLIB lowering cannot express declines the template and the call
+  stays an ordinary call of the dependency function; a call that selected a template but cannot
+  expand from it is an error, never retried as a plain call. No per-shape plan is decoded for a
+  KLIB declaration and checked FIR carries none: KLIB inline knowledge enters at IR only. A member
+  extension keeps its declaration's `inline`/`reified` flags through the checker's member-extension
+  view, as a top-level or member function does. Tests:
+  `klib_lowering::tests::inline_templates::*`,
+  `klib_libraries::tests::prepared_inline_selection_takes_every_inline_declaration_of_its_module`,
+  `multimodule_conformance_cases::LIBRARY_INLINE_BODIES`,
+  `multimodule_conformance_cases::RECEIVER_RETURNING_SCOPE_FUNCTIONS` and
+  `multimodule_conformance_cases::REIFIED_CALLABLE_ORIGINS` (JVM, Native and Wasm).
 
 - **A KLIB `when` keeps its source form.** A `when` with an `else` (a final branch whose condition
   is the constant `true`) of origin `WHEN` lowers to one flat `when` recorded as exhaustive at its
