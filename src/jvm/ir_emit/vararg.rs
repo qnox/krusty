@@ -5,7 +5,7 @@ use super::*;
 use crate::jvm::array_representation::array_store_op;
 
 /// An array value to create: its type, and the reification argument kotlinc marks its creation
-/// with when a reified body creates it of its own type parameter (`IrFile::reified_array_markers`).
+/// with when a reified body creates it of its own type parameter (`ReifiedMarkers::arrays`).
 #[derive(Clone, Copy)]
 pub(super) struct NewArray<'a> {
     pub(super) ty: &'a Ty,

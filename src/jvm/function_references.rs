@@ -821,7 +821,10 @@ pub(super) fn realize(
             // declaration's parameter types and modifiers on the call.
             IrExpr::Call { args, .. } if ir.compiled_inline_call(call).is_some() => {
                 let inline_parameters = (0..args.len())
-                    .map(|parameter| ir.compiled_inline_parameter(call, parameter))
+                    .map(|parameter| {
+                        crate::jvm::inline_parameters::is_inline_parameter(ir, call, parameter)
+                            == Some(true)
+                    })
                     .collect::<Vec<_>>();
                 (inline_parameters, args)
             }

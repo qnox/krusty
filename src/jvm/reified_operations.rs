@@ -322,7 +322,7 @@ fn record_reified_catches(
     parameters: &HashMap<String, ReifiedParameter>,
     functions: &HashSet<FunId>,
 ) {
-    ir.reified_catch_markers.clear();
+    ir.reified_markers.catches.clear();
     let mut visited = HashSet::default();
     let mut roots = marker_roots(ir, functions);
     for class in &ir.classes {
@@ -345,7 +345,7 @@ fn record_reified_catches(
                 .map(|catch| parameter(catch.ty, parameters).map(|found| found.source_name.clone()))
                 .collect::<Vec<_>>();
             if markers.iter().any(Option::is_some) {
-                ir.reified_catch_markers.insert(expression, markers);
+                ir.reified_markers.catches.insert(expression, markers);
             }
         }
     }
@@ -381,7 +381,7 @@ fn realize_expression_dag(
             ir.expr(expression)
         {
             if let Some((_, marker)) = new_array_reification(*array_type, parameters) {
-                ir.reified_array_markers.insert(expression, marker);
+                ir.reified_markers.arrays.insert(expression, marker);
             }
         }
         let replacement = match ir.expr(expression).clone() {
@@ -593,7 +593,7 @@ pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMe
     // An object declared in a reified body executes the marker too: inlining regenerates its class.
     let parameters = collect_reified_parameters(ir);
     let functions = reified_marker_functions(ir, lambdas);
-    ir.reified_array_markers.clear();
+    ir.reified_markers.arrays.clear();
     let marker_identities = (0..ir.exprs.len() as ExprId)
         .map(|expression| expression_reified_parameters(ir, expression, &parameters))
         .collect::<Vec<_>>();
@@ -935,7 +935,7 @@ mod tests {
         realize(&mut ir, &Default::default());
 
         assert_eq!(
-            ir.reified_catch_markers.get(&catch),
+            ir.reified_markers.catches.get(&catch),
             Some(&vec![Some("T".to_owned())])
         );
         assert_eq!(ir.reified_anonymous_declarations, HashSet::from_iter([0]));
@@ -1123,10 +1123,10 @@ mod tests {
         realize(&mut ir, &Default::default());
 
         assert_eq!(
-            ir.reified_catch_markers.get(&reified),
+            ir.reified_markers.catches.get(&reified),
             Some(&vec![Some("E".to_owned()), None])
         );
-        assert!(!ir.reified_catch_markers.contains_key(&plain));
+        assert!(!ir.reified_markers.catches.contains_key(&plain));
     }
 
     fn reified_catch(ir: &mut IrFile, identity: &str) -> ExprId {
@@ -1183,9 +1183,12 @@ mod tests {
         let lambdas = super::super::lambda_classes::LambdaMethods::for_test([1]);
         realize(&mut ir, &lambdas);
 
-        assert!(ir.reified_catch_markers.contains_key(&declaration));
-        assert!(ir.reified_catch_markers.contains_key(&lambda));
-        assert!(!ir.reified_catch_markers.contains_key(&erased_object_member));
+        assert!(ir.reified_markers.catches.contains_key(&declaration));
+        assert!(ir.reified_markers.catches.contains_key(&lambda));
+        assert!(!ir
+            .reified_markers
+            .catches
+            .contains_key(&erased_object_member));
     }
 
     #[test]
@@ -1273,9 +1276,9 @@ mod tests {
             } if name == "E"
         ));
         assert_eq!(
-            ir.reified_catch_markers.get(&declaration_default_catch),
+            ir.reified_markers.catches.get(&declaration_default_catch),
             Some(&vec![Some("E".to_owned())])
         );
-        assert!(!ir.reified_catch_markers.contains_key(&other_default));
+        assert!(!ir.reified_markers.catches.contains_key(&other_default));
     }
 }

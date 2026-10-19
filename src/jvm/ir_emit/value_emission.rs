@@ -1857,7 +1857,7 @@ impl super::Emitter<'_> {
                 elements,
                 spreads,
             } => {
-                let marker = self.ir.reified_array_markers.get(&e).cloned();
+                let marker = self.ir.reified_markers.arrays.get(&e).cloned();
                 let array = vararg::NewArray {
                     ty: array_type,
                     reified_marker: marker.as_deref(),
@@ -1872,7 +1872,7 @@ impl super::Emitter<'_> {
                 } else {
                     // Peel a nullable element's `?`: `Array<Int?>` = `Integer[]`, so the `anewarray` class
                     // is `java/lang/Integer` (the `?` only tells `Array.get`/`.set` to keep it boxed).
-                    let marker = self.ir.reified_array_markers.get(&e).cloned();
+                    let marker = self.ir.reified_markers.arrays.get(&e).cloned();
                     vararg::emit_reference_new_array(self, et, marker.as_deref(), code);
                 }
             }

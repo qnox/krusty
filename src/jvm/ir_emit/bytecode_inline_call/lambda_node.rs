@@ -3,7 +3,7 @@
 //! captures after them, its `$i$a$` marker as its first local, and its body ending in a return of
 //! its own type. The inliner places that node at each `invoke` of the lambda.
 
-use super::lambda_route::{leaves_by_non_local_jump, SpliceReason};
+use super::lambda_route::SpliceReason;
 use super::*;
 use crate::jvm::classreader::{ExcEntry, MethodLocal};
 use crate::jvm::method_node::{CodeAttribute, LabelId};
@@ -235,7 +235,11 @@ impl Emitter<'_> {
         if self.suspends_within(lambda.inline_body) || lambda.parameter_types.len() != arity {
             return Ok(Some(SpliceReason::SuspendingLambda));
         }
-        if leaves_by_non_local_jump(self.ir, lambda.inline_body) {
+        if self
+            .ir
+            .lambda_exits_non_locally(lambda.inline_body)
+            .ok_or("an inline lambda reached emission without its recorded non-local exit")?
+        {
             return Ok(Some(SpliceReason::NonLocalJump));
         }
         if lambda

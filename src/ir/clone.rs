@@ -381,8 +381,8 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
         ir.jvm_erased_primitive_wrapper_values.insert(target);
     }
     copy_map!(reified_call_subst);
-    copy_map!(reified_catch_markers);
-    copy_map!(reified_array_markers);
+    ir.copy_reified_markers(source, target);
+    ir.copy_lambda_exit(source, target);
     copy_map!(inline_call_type_arguments);
     copy_map!(ext_call_source_receiver);
     copy_map!(external_singleton_dispatches);

@@ -1295,7 +1295,7 @@ impl Emitter<'_> {
             // callee: the body's invokes load it where it lives (`genOrGetLocal`).
             if function_typed(operand) {
                 let parameter = index.checked_sub(leading_non_argument_operands)?;
-                if super::inline_parameters::is_inline_parameter(
+                if crate::jvm::inline_parameters::is_inline_parameter(
                     self.ir,
                     call_expression,
                     parameter,

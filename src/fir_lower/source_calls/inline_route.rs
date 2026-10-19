@@ -73,7 +73,7 @@ impl BodyLowering<'_> {
     /// says whether the call omits a defaulted argument. A literal lambda is no reason to expand:
     /// the backend inlines it into the compiled body's invokes.
     pub(in super::super) fn same_module_inline_route(
-        &self,
+        &mut self,
         target: CallableId,
         function: Option<FunId>,
         inline_lambdas: &[Option<ExprId>],
@@ -86,7 +86,7 @@ impl BodyLowering<'_> {
     }
 
     fn compiled_body_exclusion(
-        &self,
+        &mut self,
         target: CallableId,
         function: Option<FunId>,
         inline_lambdas: &[Option<ExprId>],
@@ -258,49 +258,16 @@ impl BodyLowering<'_> {
         }
     }
 
-    /// Whether the literal lambda `lambda` leaves its inline body by a `return` (every `return` an
-    /// inline body keeps is non-local), or by a `break` or `continue` of a loop outside it.
-    fn lambda_leaves_non_locally(&self, lambda: ExprId) -> bool {
+    /// Whether the literal `lambda` leaves its inline body non-locally, the fact common lowering
+    /// records once for that body (`IrFile::record_lambda_exit`).
+    fn lambda_leaves_non_locally(&mut self, lambda: ExprId) -> bool {
         let IrExpr::Lambda {
             inline_body: Some(body),
             ..
-        } = self.ir.expr(lambda)
+        } = *self.ir.expr(lambda)
         else {
             return false;
         };
-        leaves_non_locally(self.ir, *body, &mut Vec::new())
+        self.ir.record_lambda_exit(body)
     }
-}
-
-/// Whether `expression` holds a `return`, or a `break` or `continue` of no loop in `loops` or
-/// inside `expression`. A nested lambda's inline body is spliced in place, so its jumps count.
-fn leaves_non_locally(ir: &crate::ir::IrFile, expression: ExprId, loops: &mut Vec<String>) -> bool {
-    let label = match ir.expr(expression) {
-        IrExpr::Return(_) => return true,
-        IrExpr::Break { label } | IrExpr::Continue { label } => {
-            return match label {
-                None => loops.is_empty(),
-                Some(label) => !loops.contains(label),
-            };
-        }
-        IrExpr::Lambda {
-            inline_body: Some(body),
-            ..
-        } => return leaves_non_locally(ir, *body, loops),
-        IrExpr::While { label, .. } => Some(label.clone().unwrap_or_default()),
-        IrExpr::Checked(crate::ir::IrCheckedOperation::RangeLoop { label, .. }) => {
-            Some(label.clone())
-        }
-        _ => None,
-    };
-    let entered = label.is_some();
-    loops.extend(label);
-    let mut leaves = false;
-    crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-        leaves = leaves || leaves_non_locally(ir, child, loops);
-    });
-    if entered {
-        loops.pop();
-    }
-    leaves
 }

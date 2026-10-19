@@ -5087,11 +5087,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   body is lowered whether it inlines from compiled bodies (`Backend::same_module_inlining`); the
   JVM does, every other target expands the IR template. Common lowering then decides each call's
   route once (`fir_lower/source_calls/inline_route.rs`): a call stays a call recorded for the
-  backend (`IrFile::compiled_inline_call`) only when the callee is a public top-level, non-suspend
-  function in this module (not a companion-block member, which its class compiles) with no
-  suspend function-typed parameter or receiver, no `crossinline` parameter, and a template without
-  lambdas, callable references, local classes, nested expansions, arrays of a reified type
-  parameter or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
+  backend (`IrFile::compiled_inline_call`) only when the callee is a top-level, non-suspend
+  function in this module (public, or declared in the caller's own file; not a companion-block
+  member, which its class compiles) with no suspend function-typed parameter or receiver, no
+  `crossinline` parameter, and a template without lambdas, callable references, local classes,
+  nested expansions or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
   called with every argument from a named, non-suspend, non-inline function body (not a lambda,
   local function, default argument, initializer or accessor), and with no literal lambda argument
   that leaves its body by a non-local `return`, `break` or `continue`. Every other call is
@@ -5136,8 +5136,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **An inline call's body is placed as kotlinc's `MethodInliner` places it.** Four rules hold for
   every inline callee, compiled in this module or read from a dependency. A `noinline` literal of a
   call inlined from a compiled body is a value the body receives, so it keeps its own class
-  (`IrFile::compiled_inline_parameter`, which mirrors `InlineUtil.isInlineParameter` for those
-  calls). When the inlined body's own try/catch blocks include a `finally` (a block catching any
+  (`jvm::inline_parameters::is_inline_parameter`, kotlinc's `InlineUtil.isInlineParameter`, the
+  one predicate for library and compiled inline calls). When the inlined body's own try/catch blocks include a `finally` (a block catching any
   throwable), its blocks, the inlined lambdas' first, are rewritten as
   `InternalFinallyBlockInliner.processInlineFunFinallyBlocks` does through
   `substituteTryBlockNodes`: ordered by handler, then start, then end position, with empty ranges
@@ -5162,7 +5162,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its `anewarray` (`ExpressionCodegen.newArrayInstruction`), in the declaration's own method as in
   the body compiled for a call; its argument is kotlinc's `ReificationArgument.asString`: a `[` per
   nested array level, the parameter's source name, and `?` for a marked-nullable element
-  (`IrFile::reified_array_markers`). The inliner makes `[T` the array class of the call-site class.
+  (`ReifiedMarkers::arrays`). The inliner makes `[T` the array class of the call-site class.
   A non-public callee is inlined from its compiled body when it is declared in the caller's own
   file (its body is compiled into the same class); one declared in another file stays expanded
   (`NonPublicCallee`), since its body may reach that file's private declarations. A local

@@ -545,7 +545,9 @@ fn inline_call_argument(ir: &IrFile, node: ExprId) -> bool {
             // A `noinline` literal of a call inlined from a compiled body is a value the body
             // receives, so it keeps its class.
             return args.iter().enumerate().any(|(parameter, &argument)| {
-                argument == node && ir.compiled_inline_parameter(call, parameter)
+                argument == node
+                    && crate::jvm::inline_parameters::is_inline_parameter(ir, call, parameter)
+                        == Some(true)
             });
         }
         (ir.inline_call_sites.contains(&call) || ir.module_inline_calls.contains(&call))

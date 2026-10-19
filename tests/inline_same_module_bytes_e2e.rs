@@ -349,6 +349,37 @@ fn a_lambda_leaving_by_a_non_local_jump_runs() {
 
 // A bound reference to a value class member, whose receiver is boxed until `!!`, captures the
 // unboxed value.
+// A `break` or `continue` of a range loop inside the literal stays in the literal: the call is
+// inlined from the compiled body, and a library call's literal takes the MethodInliner as well.
+const RANGE_LOOP_JUMPS: &str = r#"inline fun <T> measured(block: () -> T): T = block()
+
+fun box(): String {
+    val found = measured {
+        var last = 0
+        for (i in 0..9) {
+            if (i == 3) break
+            if (i == 1) continue
+            last = i
+        }
+        last
+    }
+    val listed = listOf(1, 2, 3).map {
+        var sum = 0
+        for (i in 0 until it) {
+            if (i == 2) break
+            sum += i
+        }
+        sum
+    }
+    return if (found == 2 && listed == listOf(0, 1, 1)) "OK" else "fail $found $listed"
+}
+"#;
+
+#[test]
+fn a_local_jump_in_a_range_loop_of_an_inlined_literal_is_inlined_like_kotlinc() {
+    assert_like_kotlinc(&[("main.kt", RANGE_LOOP_JUMPS)]);
+}
+
 const BOUND_VALUE_CLASS_REFERENCE: &str = r#"inline fun foo(init: () -> String): String = init()
 
 @JvmInline
@@ -407,8 +438,8 @@ fn a_reified_callee_inlined_from_the_compiled_body_runs() {
     );
 }
 
-// A callee that creates an array of its reified type parameter stays expanded in IR: its compiled
-// body would need the `NEW_ARRAY` marker kotlinc places before the `anewarray`.
+// A callee that creates nested arrays of its reified type parameter is inlined from its compiled
+// body, whose `NEW_ARRAY` markers the inliner repoints at `String[]` and `String[][]`.
 const REIFIED_ARRAY: &str = r#"inline fun <reified T> jagged(n: Int, value: T): Array<Array<T>> =
     Array(n) { Array(n) { value } }
 
