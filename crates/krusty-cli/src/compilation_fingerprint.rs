@@ -20,7 +20,7 @@ use krusty_build::{digest_file, Digest, Hasher};
 use crate::{cli, kotlinc_arguments};
 
 /// Bumped whenever the inputs read here change, so a digest from an older compiler never matches.
-const FORMAT: &str = "krusty compilation fingerprint 1";
+const FORMAT: &str = "krusty compilation fingerprint 2";
 
 /// The fingerprint of the compilation `argv` describes, or why it cannot be taken. A command line
 /// the compilation itself would reject has no fingerprint.
@@ -83,17 +83,62 @@ pub fn fingerprint(argv: Vec<String>) -> Result<Digest, String> {
         )
         .collect::<Vec<_>>();
     hasher.count("entries", entries.len());
-    for (role, entry) in entries {
+    for ((role, entry), contents) in entries.iter().zip(entry_contents(&entries)?) {
         hasher.text(role, &entry.to_string_lossy());
-        if entry.is_dir() {
-            hasher.nested("directory", read(entry, directory_fingerprint)?);
-        } else if entry.exists() {
-            hasher.nested("file", read(entry, digest_file)?);
-        } else {
-            hasher.text("missing", "");
-        }
+        match contents {
+            Contents::Directory(digest) => hasher.nested("directory", digest),
+            Contents::File(digest) => hasher.nested("file", digest),
+            Contents::Missing => hasher.text("missing", ""),
+        };
     }
     Ok(hasher.finish())
+}
+
+enum Contents {
+    Directory(Digest),
+    File(Digest),
+    Missing,
+}
+
+/// Every entry's contents, in order. A classpath is dozens of jars and directories read
+/// independently, so they are read on every core.
+fn entry_contents(entries: &[(&str, &Path)]) -> Result<Vec<Contents>, String> {
+    let contents = |entry: &Path| -> Result<Contents, String> {
+        Ok(if entry.is_dir() {
+            Contents::Directory(read(entry, directory_fingerprint)?)
+        } else if entry.exists() {
+            Contents::File(read(entry, digest_file)?)
+        } else {
+            Contents::Missing
+        })
+    };
+    let workers = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(entries.len())
+        .max(1);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let worker = || -> Result<Vec<(usize, Contents)>, String> {
+        let mut read = Vec::new();
+        loop {
+            let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some((_, entry)) = entries.get(index) else {
+                return Ok(read);
+            };
+            read.push((index, contents(entry)?));
+        }
+    };
+    let mut read = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers).map(|_| scope.spawn(worker)).collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("a fingerprint worker panicked"))
+            .collect::<Result<Vec<_>, String>>()
+    })?
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    read.sort_by_key(|(index, _)| *index);
+    Ok(read.into_iter().map(|(_, contents)| contents).collect())
 }
 
 fn read(path: &Path, digest: fn(&Path) -> std::io::Result<Digest>) -> Result<Digest, String> {

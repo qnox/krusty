@@ -115,19 +115,81 @@ pub fn digest_bytes(bytes: &[u8]) -> Digest {
     Digest(state.finalize())
 }
 
-/// Digest a file's contents, read in bounded chunks so a large JDK image is never held whole.
+/// The size of the pieces [`digest_file`] digests independently.
+const FILE_CHUNK: u64 = 4 << 20;
+
+/// Digest a file's contents: its length and the digest of each consecutive [`FILE_CHUNK`]-sized
+/// piece, absorbed in order. The pieces are independent, so a large file (a JDK image, the
+/// compiler binary) is digested on every core rather than one, and no file is ever held whole.
+/// Every byte still enters the digest; only the way the bytes are grouped differs from a plain
+/// SHA-256 of the file.
 pub fn digest_file(path: &std::path::Path) -> std::io::Result<Digest> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
-    let mut state = Sha256::default();
-    let mut buffer = vec![0; 1 << 16];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            return Ok(Digest(state.finalize()));
+    let file = std::fs::File::open(path)?;
+    let length = file.metadata()?.len();
+    let chunks = length.div_ceil(FILE_CHUNK).max(1) as usize;
+    let workers = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(chunks);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let digest_chunks = || -> std::io::Result<Vec<(usize, Digest)>> {
+        let mut digests = Vec::new();
+        let mut buffer = vec![0; FILE_CHUNK as usize];
+        loop {
+            let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if index >= chunks {
+                return Ok(digests);
+            }
+            let start = index as u64 * FILE_CHUNK;
+            let size = (length - start.min(length)).min(FILE_CHUNK) as usize;
+            read_exact_at(&file, &mut buffer[..size], start)?;
+            digests.push((index, digest_bytes(&buffer[..size])));
         }
-        state.update(&buffer[..read]);
+    };
+    let mut digests = if workers <= 1 {
+        digest_chunks()?
+    } else {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers).map(|_| scope.spawn(digest_chunks)).collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("a digest worker panicked"))
+                .collect::<std::io::Result<Vec<_>>>()
+        })?
+        .into_iter()
+        .flatten()
+        .collect()
+    };
+    digests.sort_by_key(|(index, _)| *index);
+    let mut hasher = Hasher::new();
+    hasher.field("length", &length.to_le_bytes());
+    hasher.count("chunks", digests.len());
+    for (_, digest) in digests {
+        hasher.nested("chunk", digest);
     }
+    Ok(hasher.finish())
+}
+
+#[cfg(unix)]
+fn read_exact_at(file: &std::fs::File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(file, buffer, offset)
+}
+
+#[cfg(windows)]
+fn read_exact_at(
+    file: &std::fs::File,
+    mut buffer: &mut [u8],
+    mut offset: u64,
+) -> std::io::Result<()> {
+    while !buffer.is_empty() {
+        match std::os::windows::fs::FileExt::seek_read(file, buffer, offset)? {
+            0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+            read => {
+                buffer = &mut buffer[read..];
+                offset += read as u64;
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -375,5 +437,27 @@ mod tests {
             h.finish()
         };
         assert_eq!(build(), build());
+    }
+
+    /// Every byte of a file spanning several chunks enters its digest, the last chunk's included.
+    #[test]
+    fn a_file_digest_covers_every_chunk() {
+        let path = std::env::temp_dir().join(format!("krusty-digest-file-{}", std::process::id()));
+        let mut contents = vec![7u8; 2 * super::FILE_CHUNK as usize + 1];
+        let digest = |contents: &[u8]| {
+            std::fs::write(&path, contents).expect("write the file");
+            super::digest_file(&path).expect("digest the file")
+        };
+        let base = digest(&contents);
+        assert_eq!(digest(&contents), base);
+        for index in [0, super::FILE_CHUNK as usize, contents.len() - 1] {
+            contents[index] ^= 1;
+            assert_ne!(digest(&contents), base, "byte {index}");
+            contents[index] ^= 1;
+        }
+        contents.push(7);
+        assert_ne!(digest(&contents), base, "an appended byte");
+        assert_ne!(digest(&[]), digest(&[0]), "an empty file");
+        let _ = std::fs::remove_file(&path);
     }
 }
