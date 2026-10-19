@@ -29,7 +29,7 @@ use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
 use super::analysis::{
-    analyze_with, opcode, AnalyzerError, AnalyzerOptions, FrameView, Frames, PlainFrames,
+    analyze_kept, opcode, AnalyzerError, AnalyzerOptions, FrameView, Frames, PlainFrames,
 };
 use super::opcodes::*;
 use super::optimization_limits::fits_source_interpreter;
@@ -67,6 +67,20 @@ fn is_pop(insn: &Insn) -> bool {
 /// `isPrimitiveTypeConversion`: `i2l`…`i2s`.
 fn is_primitive_type_conversion(insn: &Insn) -> bool {
     (I2L..=I2S).contains(&opcode(insn))
+}
+
+/// The `pop`s and stack shuffles whose operands the hazard walk looks at.
+fn is_walked(op: u8) -> bool {
+    matches!(op, POP | POP2 | DUP_X1 | DUP_X2 | DUP2_X1 | DUP2_X2)
+}
+
+/// Whether the pass reads the frame before `node`: the instructions the hazard walk looks at, and
+/// the boxings and conversions a `pop` can fuse with.
+fn reads_frame(_: usize, node: &Node) -> bool {
+    let Node::Insn(insn) = node else {
+        return false;
+    };
+    is_walked(opcode(insn)) || is_primitive_boxing_insn(insn) || is_primitive_type_conversion(insn)
 }
 
 fn insn_at(nodes: &[Node], index: usize) -> Option<&Insn> {
@@ -139,7 +153,13 @@ impl Run<'_> {
     /// The first walk: the `pop`s and stack shuffles that keep their operands' pushers.
     fn mark_hazards(&mut self) {
         for (index, node) in self.nodes.iter().enumerate() {
-            let (Node::Insn(insn), Some(frame)) = (node, self.frames.get(index)) else {
+            let Node::Insn(insn) = node else {
+                continue;
+            };
+            if !is_walked(opcode(insn)) {
+                continue;
+            }
+            let Some(frame) = self.frames.get(index) else {
                 continue;
             };
             let words = match opcode(insn) {
@@ -210,7 +230,10 @@ impl Run<'_> {
     fn transformations(&self) -> Result<BTreeMap<usize, Transformation>, AnalyzerError> {
         let mut transformations = BTreeMap::new();
         for (index, node) in self.nodes.iter().enumerate() {
-            let (Node::Insn(Insn::Op(POP)), Some(frame)) = (node, self.frames.get(index)) else {
+            let Node::Insn(Insn::Op(POP)) = node else {
+                continue;
+            };
+            let Some(frame) = self.frames.get(index) else {
                 continue;
             };
             let Some(top) = frame.stack.last() else {
@@ -248,12 +271,13 @@ pub(crate) fn propagate(method: &mut MethodNode, owner: &str) -> Result<bool, An
         return Ok(false);
     }
     let mut interpreter = HazardsTracking::new(method.nodes.len());
-    let frames = analyze_with(
+    let frames = analyze_kept(
         method,
         owner,
         &mut interpreter,
         &mut PlainFrames,
         AnalyzerOptions::default(),
+        reads_frame,
     )?;
     let mut run = Run {
         nodes: &method.nodes,
