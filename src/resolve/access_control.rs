@@ -175,7 +175,7 @@ impl<'a> Checker<'a> {
             return false;
         }
         if let Some(bindings) = bindings {
-            self.report_rejected_library_constructor_evidence(call, owner, classifier, bindings);
+            self.report_rejected_constructor_type_arguments(call, owner, classifier, bindings);
         }
         self.diags.error(
             self.call_callee_name_span(call),
