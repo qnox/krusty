@@ -2975,11 +2975,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   occurrences before Java nullability applies. A method formal of the same name (`<T> T shadow(T)`)
   is a different variable and shadows the class formal. A chain of formals
   (`<A extends CharSequence, B extends A, C extends B>`) is hydrated through the complete chain, so a
-  `C` is bounded by `B`, `A` and finally `CharSequence!`. Where no type argument replaces `T` (a raw
+  `C` is bounded by `B`, `A` and finally `CharSequence!`. A non-static member class reads the
+  formals of each enclosing class the same way (`Outer<T extends CharSequence>.Inner.get()` is a
+  `CharSequence`), its own formals shadowing theirs. The provider publishes those enclosing formals
+  as the member class's captured type parameters after its own (`own_type_parameter_count` counts
+  only its own), as the common classifier model lists an inner class's: `Outer<String>.Inner`
+  binds `T = String`, so `get()` and `value` are `String`; through `Outer<String>.Mid<Int>.Deep`
+  the binding reaches two levels out. A captured formal the member class hides behind its own of
+  the same spelling (`class Shadow<T>`) keeps its slot under an identity of its own, and a static
+  nested class captures nothing. Where no type argument replaces `T` (a raw
   `Box` a Java method returns), `get().length` therefore resolves on `CharSequence`, as kotlinc does;
   the parser's `Any` placeholder rejected it.
   Tests: `tests/java_class_formal_bound_e2e.rs` (Java-source and javac class-file declarations,
-  `Box<*>` and raw access, a raw `C extends B extends A` chain),
+  `Box<*>` and raw access, a raw `C extends B extends A` chain, `Outer<*>.Inner` and raw inner access, `Outer<String>.Inner` exact access),
   `generic_signatures::class_formal_bound_tests`.
 - **A PLATFORM value narrowed to a declared non-null type is guarded where it enters.** A Java value
   arrives as `T!` (`Ty::PlatformNullable`), usable as both `T` and `T?`. Where the source commits it to
