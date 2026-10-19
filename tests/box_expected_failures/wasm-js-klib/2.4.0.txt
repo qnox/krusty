@@ -4550,7 +4550,6 @@ objects/kt2719.kt
 objects/kt32351.kt
 objects/kt32749.kt
 objects/kt3684.kt
-objects/kt45170.kt
 objects/kt46136.kt
 objects/kt52540.kt
 objects/kt535.kt

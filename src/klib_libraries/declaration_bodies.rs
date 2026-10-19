@@ -398,11 +398,13 @@ impl KlibDeclarationBodies {
         })
     }
 
-    /// Normalize an exact `@InlineOnly` body which returns one direct invocation of a function
-    /// parameter. Metadata has already proved which parameter is an in-caller-frame lambda; the IR
-    /// proves the invocation receiver and every argument by declaration-owned parameter symbols.
-    /// A cast, temporary, extra statement, omitted operand or non-parameter operand rejects the
-    /// shape instead of recovering an invocation from a callable spelling.
+    /// Normalize an exact `@InlineOnly` body which either returns one direct invocation of a
+    /// function parameter, or evaluates that invocation and then returns one of its other
+    /// parameters (`also`/`apply` return their receiver). Metadata has already proved which
+    /// parameter is an in-caller-frame lambda; the IR proves the invocation receiver, every
+    /// argument and the returned value by declaration-owned parameter symbols. A cast, temporary,
+    /// extra statement, omitted operand or non-parameter operand rejects the shape instead of
+    /// recovering an invocation from a callable spelling.
     pub(crate) fn direct_lambda_invocation_inline_plan(
         &self,
         identity: &KlibDependencyCallable,
@@ -415,19 +417,33 @@ impl KlibDeclarationBodies {
         let KlibIrBody::Block(statements) = function.body.as_ref()? else {
             return None;
         };
-        let [KlibIrStatement::Expression(returned)] = statements.as_slice() else {
-            return None;
+        // `let`/`run`/`with` return the invocation itself; `also`/`apply` evaluate it as a
+        // statement and then return one of their own parameters.
+        let returned_value = |statement: crate::metadata::klib_ir::tree::KlibIrExprId| match &arena
+            .expr(statement)
+            .kind
+        {
+            KlibIrExprKind::Return { target, value } if target == &function.base.symbol => {
+                Some(*value)
+            }
+            _ => None,
         };
-        let KlibIrExprKind::Return { target, value } = &arena.expr(*returned).kind else {
-            return None;
+        let (invocation, returned_symbol) = match statements.as_slice() {
+            [KlibIrStatement::Expression(returned)] => (returned_value(*returned)?, None),
+            [KlibIrStatement::Expression(invocation), KlibIrStatement::Expression(returned)] => {
+                let KlibIrExprKind::GetValue { symbol, .. } =
+                    &arena.expr(returned_value(*returned)?).kind
+                else {
+                    return None;
+                };
+                (*invocation, Some(symbol))
+            }
+            _ => return None,
         };
-        if target != &function.base.symbol {
-            return None;
-        }
         let KlibIrExprKind::Call {
             access,
             super_qualifier: None,
-        } = &arena.expr(*value).kind
+        } = &arena.expr(invocation).kind
         else {
             return None;
         };
@@ -492,20 +508,31 @@ impl KlibDeclarationBodies {
                 }
             })
         };
+        let parameter_operand = |symbol: &crate::metadata::klib_ir::KlibIrSymbol| {
+            parameters
+                .iter()
+                .position(|parameter| parameter.base.symbol == *symbol)
+                .and_then(semantic_operand)
+        };
         let operands = operands
             .iter()
             .map(|operand| {
                 let KlibIrExprKind::GetValue { symbol, .. } = &arena.expr(*operand).kind else {
                     return None;
                 };
-                parameters
-                    .iter()
-                    .position(|parameter| parameter.base.symbol == *symbol)
-                    .and_then(semantic_operand)
+                parameter_operand(symbol)
             })
             .collect::<Option<Vec<_>>>()?;
         let (&Operand::Parameter(lambda_parameter), arguments) = operands.split_first()? else {
             return None;
+        };
+        // The returned parameter is a value the caller supplied, never the inlined lambda itself.
+        let result = match returned_symbol.map(parameter_operand) {
+            None => None,
+            Some(Some(Operand::Parameter(parameter))) if parameter == lambda_parameter => {
+                return None;
+            }
+            Some(operand) => Some(plan_operand(operand?)?),
         };
         let metadata_parameter = lambda_parameter;
         let modifier = *declaration.inline_modifiers.get(metadata_parameter)?;
@@ -544,7 +571,7 @@ impl KlibDeclarationBodies {
             cause: None,
             recovery: None,
             defaults: Vec::new(),
-            result: None,
+            result,
         })
     }
 
