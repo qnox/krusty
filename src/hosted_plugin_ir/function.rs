@@ -6,7 +6,7 @@ use krusty_plugin_ir::{
     FunctionIr, ParameterIr, StatementIr, ValueId, VariableIr, Visibility,
 };
 
-use crate::ast::{FunBody, FunDecl, Param};
+use crate::ast::{AnnotationRef, File, FunBody, FunDecl, Param};
 use crate::compiler::ObservedBody;
 use crate::diag::Span;
 use crate::fir::{
@@ -60,6 +60,12 @@ pub(super) fn encode_function(
         return Err(refuse(
             syntax.span,
             format!("the `{modifier}` modifier of `{name}`"),
+        ));
+    }
+    if let Some(annotation) = type_annotation(observed.file, syntax.span) {
+        return Err(refuse(
+            Span::new(annotation.at, annotation.span.hi),
+            format!("an annotated type in `{name}`"),
         ));
     }
     let visibility = match index
@@ -142,6 +148,20 @@ fn modifier(function: &FunDecl) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// The first type-use annotation written in `span`: on a parameter, the return type, a local, or a
+/// type argument nested in any of them. [`TypeIdentity`] has room for a type's annotations, but the
+/// encoder does not resolve them and the host does not build them, so an annotated type is refused
+/// rather than published as the same type without them.
+///
+/// [`TypeIdentity`]: krusty_plugin_ir::TypeIdentity
+fn type_annotation(file: &File, span: Span) -> Option<&AnnotationRef> {
+    file.type_annotations
+        .iter()
+        .filter(|(start, _)| (span.lo..span.hi).contains(*start))
+        .min_by_key(|(start, _)| **start)
+        .and_then(|(_, annotations)| annotations.first())
 }
 
 /// What `parameter` has that [`ParameterIr`] does not carry, which kotlinc's IR records. Its
