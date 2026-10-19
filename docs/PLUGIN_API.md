@@ -269,7 +269,7 @@ downloads off and fails with everything that is missing.
 ### Starting the host
 
 `Host::start` runs `java` on the provisioned classpath with krusty's adapter in front of it. The
-adapter is Kotlin source (`crates/krusty-plugin-host/adapter/Host.kt`) that the provisioned
+adapter is Kotlin source (`crates/krusty-plugin-host/adapter/`) that the provisioned
 `kotlin-compiler-embeddable` compiles once into the cache, so it always links against the exact
 compiler it runs on; the first build prints that it is compiling it. The cache key is the source and
 the pinned identity of the compiler classpath, so a corrected pin builds afresh, and a cached jar is
@@ -289,6 +289,25 @@ before it registered, and the host reports every registrar with what it added. T
 register live as long as the loaded set: `Host::unload`, a later load, a failed load and stopping
 the host all dispose them through kotlinc's `Disposer` and close the class loader. The plugins are not run yet:
 until the IR round trip lands, the registry still refuses a non-native plugin jar as `Unsupported`.
+
+### The compilation's session
+
+An IR plugin looks declarations up through `IrPluginContext` and builds IR against kotlinc's
+builtins, so the host needs kotlinc's own view of the build's dependencies. `Host::open_session`
+gives it one: the host runs kotlinc's JVM configuration, frontend and fir2ir phases over the
+`SessionRequest` (the build's exact classpath, standard library included, its JDK, module name,
+language and API versions and JVM target) with no source files, kotlinc's own `allowNoSourceFiles`
+mode, and keeps the `Fir2IrActualizedResult` whose plugin context IR plugins receive. kotlinc's
+errors refuse the session in kotlinc's words, such as
+`error: JDK home directory does not exist: <path>`; its warnings go to stderr. The module's sources
+are not part of the session: krusty supplies their IR.
+
+`Host::resolve` finds declarations in the session by `CallableIdentity`: the owner, the name, and
+the signature as kotlinc's IR declares it (type parameter count, context parameters, extension
+receiver and value parameter types, a vararg parameter by its array type, each type with its
+nullability and the classes of its annotations). The lookup goes through the same plugin context a
+plugin uses, and an identity that names no declaration, or more than one, fails by name. This is the
+identity krusty names a dependency's declaration by when it hands the host IR that calls it.
 
 ## Drop-in extension management — two layers, like kotlinc
 

@@ -5,32 +5,15 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use krusty_plugin_host::{
-    provision, provision_artifact, ArtifactPin, Curl, Environment, Host, HostError, HostRuntime,
-    LoadedPlugin, Pins, Request,
+    provision_artifact, ArtifactPin, Curl, Environment, Host, HostError, HostRuntime, LoadedPlugin,
 };
 use sha2::{Digest, Sha256};
 
+mod support;
+use support::{kotlinc, runtime, start};
+
 const POWER_ASSERT_SHA256: &str =
     "ad1b0b93d2ebad6f02e1682cd3dd4f81c5f666902aa5a4d3e3069e1101ed0bfc";
-
-/// Provisioned once per test process, so parallel tests do not download the same jars side by side.
-fn runtime() -> (HostRuntime, Environment) {
-    static RUNTIME: OnceLock<(HostRuntime, Environment)> = OnceLock::new();
-    RUNTIME
-        .get_or_init(|| {
-            let env = Environment::from_process().expect("a cache directory");
-            let request = Request {
-                kotlin_version: "2.4.20",
-                reason: "the plugin host test",
-                min_java: 8,
-            };
-            let pins = Pins::builtin(&env.platform);
-            let runtime = provision(&request, &env, &pins, &Curl, &mut std::io::stderr())
-                .unwrap_or_else(|error| panic!("{error}"));
-            (runtime, env)
-        })
-        .clone()
-}
 
 /// The power-assert jar, provisioned like any pinned jar (verified, cached and published by an
 /// atomic rename) and at most once per test process.
@@ -95,10 +78,6 @@ fn started(runtime: &HostRuntime, env: &Environment) -> (Result<(), HostError>, 
 
 const COMPILING: &str =
     "info: compiling krusty's plugin host for kotlinc 2.4.20, once; later builds reuse it\n";
-
-fn start(runtime: &HostRuntime, env: &Environment) -> Host {
-    Host::start(runtime, env, &mut std::io::stderr()).unwrap_or_else(|error| panic!("{error}"))
-}
 
 #[test]
 #[ignore = "downloads kotlin-compiler-embeddable 2.4.20 and power-assert"]
@@ -328,31 +307,11 @@ fn fixture_classes() -> PathBuf {
             let classes = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
                 .join(format!("plugin-host-fixture-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&classes);
-            let classpath = std::env::join_paths(&runtime.compiler_classpath).unwrap();
-            let output = std::process::Command::new(&runtime.java)
-                .arg("-cp")
-                .arg(&classpath)
-                .arg("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler")
-                .args([
-                    "-no-stdlib",
-                    "-no-reflect",
-                    "-jvm-target",
-                    "1.8",
-                    "-classpath",
-                ])
-                .arg(&classpath)
-                .arg("-d")
-                .arg(&classes)
-                .arg(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/tests/fixtures/Registrars.kt"
-                ))
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
+            kotlinc(
+                &runtime,
+                &runtime.compiler_classpath,
+                &classes,
+                &[concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/Registrars.kt").as_ref()],
             );
             classes
         })
@@ -523,35 +482,4 @@ fn stopping_the_host_disposes_what_is_loaded() {
     host.load(&[jar], &[option]).unwrap();
     drop(host);
     assert_eq!(disposed(&marker), "second disposed\nfirst disposed\n");
-}
-
-/// Every Kotlin version krusty supports provisions, compiles the adapter and starts a host.
-#[test]
-#[ignore = "downloads kotlin-compiler-embeddable for every supported Kotlin version"]
-fn every_supported_kotlin_version_starts_a_host() {
-    let env = Environment::from_process().expect("a cache directory");
-    let versions = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../kotlin-versions"
-    ))
-    .unwrap();
-    let versions: Vec<&str> = versions
-        .lines()
-        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
-        .map(|line| line.split_whitespace().next().unwrap())
-        .collect();
-    assert!(!versions.is_empty());
-    let pins = Pins::builtin(&env.platform);
-    for version in versions {
-        let request = Request {
-            kotlin_version: version,
-            reason: "the plugin host test",
-            min_java: 8,
-        };
-        let runtime = provision(&request, &env, &pins, &Curl, &mut std::io::stderr())
-            .unwrap_or_else(|error| panic!("{version}: {error}"));
-        let mut host = Host::start(&runtime, &env, &mut std::io::stderr())
-            .unwrap_or_else(|error| panic!("{version}: {error}"));
-        assert_eq!(host.load(&[], &[]), Ok(Vec::new()), "{version}");
-    }
 }

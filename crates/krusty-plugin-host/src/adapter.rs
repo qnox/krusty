@@ -1,4 +1,4 @@
-//! The host's own code, `adapter/Host.kt`, compiled once per Kotlin version by that version's
+//! The host's own code, the Kotlin sources in `adapter/`, compiled once per Kotlin version by that version's
 //! `kotlin-compiler-embeddable` and kept in the cache. Compiling it against the exact compiler the
 //! host loads means the adapter always links against that compiler, whatever changed between
 //! releases.
@@ -13,8 +13,12 @@ use crate::host::HostError;
 use crate::install;
 use crate::provision::{HostRuntime, COMPILER_MIN_JAVA};
 
-const SOURCE: &str = include_str!("../adapter/Host.kt");
-const SOURCE_NAME: &str = "Host.kt";
+/// The adapter's sources, by file name.
+const SOURCES: [(&str, &str); 3] = [
+    ("Host.kt", include_str!("../adapter/Host.kt")),
+    ("Session.kt", include_str!("../adapter/Session.kt")),
+    ("Wire.kt", include_str!("../adapter/Wire.kt")),
+];
 const JAR: &str = "krusty-plugin-host.jar";
 /// The jar's SHA-256, recorded when it is built and checked before it is reused.
 const DIGEST: &str = "krusty-plugin-host.jar.sha256";
@@ -24,7 +28,7 @@ pub(crate) const MAIN_CLASS: &str = "krusty.pluginhost.HostKt";
 /// runtime's exact compiler classpath. Compiling is announced on `report`; reusing the cached jar is
 /// silent.
 ///
-/// The cache key is the source and [`HostRuntime::compiler_identity`], the pins the classpath was
+/// The cache key is the sources and [`HostRuntime::compiler_identity`], the pins the classpath was
 /// verified against, so a corrected pin for the same Kotlin version builds afresh. A cached jar is
 /// reused only when it still has the digest recorded when it was built.
 pub(crate) fn jar(
@@ -64,9 +68,12 @@ pub(crate) fn jar(
 
 /// Compiles the adapter into `<dir>/krusty-plugin-host.jar` with the runtime's own compiler.
 fn compile(runtime: &HostRuntime, dir: &Path) -> Result<(), HostError> {
-    std::fs::create_dir_all(dir).map_err(|error| HostError::io(dir, error))?;
-    let source = dir.join(SOURCE_NAME);
-    std::fs::write(&source, SOURCE).map_err(|error| HostError::io(&source, error))?;
+    let sources = dir.join("src");
+    std::fs::create_dir_all(&sources).map_err(|error| HostError::io(&sources, error))?;
+    for (name, text) in SOURCES {
+        let source = sources.join(name);
+        std::fs::write(&source, text).map_err(|error| HostError::io(&source, error))?;
+    }
     let classpath =
         std::env::join_paths(&runtime.compiler_classpath).map_err(|error| HostError::Build {
             detail: format!("the compiler classpath cannot be passed to java: {error}"),
@@ -84,7 +91,7 @@ fn compile(runtime: &HostRuntime, dir: &Path) -> Result<(), HostError> {
         .arg(&classpath)
         .arg("-d")
         .arg(dir.join(JAR))
-        .arg(&source)
+        .arg(&sources)
         .output()
         .map_err(|error| HostError::Build {
             detail: format!("could not run {}: {error}", runtime.java.display()),
@@ -108,12 +115,16 @@ fn compile(runtime: &HostRuntime, dir: &Path) -> Result<(), HostError> {
     })
 }
 
-/// Names the adapter build in the cache: the adapter source and the classpath identity it is
+/// Names the adapter build in the cache: the adapter sources and the classpath identity they are
 /// compiled against, so a change to either compiles afresh.
 fn build_key(runtime: &HostRuntime) -> String {
     let mut digest = Sha256::new();
-    digest.update(SOURCE.as_bytes());
-    digest.update([0]);
+    for (name, text) in SOURCES {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update(text.as_bytes());
+        digest.update([0]);
+    }
     digest.update(runtime.compiler_identity.as_bytes());
     hex(&digest.finalize()[..8])
 }
