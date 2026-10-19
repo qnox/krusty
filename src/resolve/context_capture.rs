@@ -28,6 +28,37 @@ pub(crate) fn selected_context_values(
     body: ExprId,
     deep: bool,
 ) -> (Vec<ResolvedContextArgument>, Vec<ImplicitReceiverSelection>) {
+    let scanned = scan_context_sources(file, sources, &[body], &[], deep, false);
+    (scanned.0, scanned.1)
+}
+
+/// Each implicit context argument or receiver a callable's `roots` (its parameter defaults and
+/// body) and the lambdas in them use, with the expression that uses it, in walk order. Sources are
+/// normalized to the callable's boundary like [`selected_context_values`]; `bound` names the
+/// callable's own parameters, which a source inside it may be shadowed by.
+pub(crate) fn context_argument_sites(
+    file: &File,
+    sources: SelectedContextSources<'_>,
+    roots: &[ExprId],
+    bound: &[String],
+) -> Vec<(ExprId, ResolvedContextArgument)> {
+    scan_context_sources(file, sources, roots, bound, true, true).2
+}
+
+type ScannedContextSources = (
+    Vec<ResolvedContextArgument>,
+    Vec<ImplicitReceiverSelection>,
+    Vec<(ExprId, ResolvedContextArgument)>,
+);
+
+fn scan_context_sources(
+    file: &File,
+    sources: SelectedContextSources<'_>,
+    roots: &[ExprId],
+    bound: &[String],
+    deep: bool,
+    collect_sites: bool,
+) -> ScannedContextSources {
     #[derive(Clone, Copy, Default)]
     struct NestedReceiverCounts {
         all: usize,
@@ -39,6 +70,8 @@ pub(crate) fn selected_context_values(
         nested_bound_names: Vec<String>,
         out: Vec<ResolvedContextArgument>,
         direct_implicit_receivers: Vec<ImplicitReceiverSelection>,
+        /// When collected, each implicit context source with the expression that uses it.
+        sites: Option<Vec<(ExprId, ResolvedContextArgument)>>,
     }
 
     fn push_unique(out: &mut Vec<ResolvedContextArgument>, source: &ResolvedContextArgument) {
@@ -47,14 +80,16 @@ pub(crate) fn selected_context_values(
         }
     }
 
+    /// Record `source`, normalized to the scanned callable's boundary. `site` is the expression
+    /// whose implicit context argument or receiver it is; `None` for a source that is not one.
     fn record_source(
-        out: &mut Vec<ResolvedContextArgument>,
-        direct_implicit_receivers: &mut Vec<ImplicitReceiverSelection>,
+        state: &mut ScanState,
+        site: Option<ExprId>,
         source: &ResolvedContextArgument,
         nested_callable: bool,
-        nested_bound_names: &[String],
         nested_receiver_count: NestedReceiverCounts,
     ) {
+        let nested_bound_names = &state.nested_bound_names;
         if !nested_callable {
             if let ResolvedContextArgument::ImplicitReceiver(selection) = source {
                 let mut selection = selection.clone();
@@ -69,8 +104,14 @@ pub(crate) fn selected_context_values(
                     };
                     *shadow_depth = normalized_depth;
                 }
-                if !direct_implicit_receivers.contains(&selection) {
-                    direct_implicit_receivers.push(selection);
+                if let (Some(site), Some(sites)) = (site, state.sites.as_mut()) {
+                    sites.push((
+                        site,
+                        ResolvedContextArgument::ImplicitReceiver(selection.clone()),
+                    ));
+                }
+                if !state.direct_implicit_receivers.contains(&selection) {
+                    state.direct_implicit_receivers.push(selection);
                 }
                 return;
             }
@@ -114,7 +155,10 @@ pub(crate) fn selected_context_values(
                 ResolvedContextArgument::ImplicitReceiver(selection)
             }
         };
-        push_unique(out, &normalized);
+        if let (Some(site), Some(sites)) = (site, state.sites.as_mut()) {
+            sites.push((site, normalized.clone()));
+        }
+        push_unique(&mut state.out, &normalized);
     }
 
     fn scan(
@@ -128,32 +172,29 @@ pub(crate) fn selected_context_values(
     ) {
         if let Some(selection) = sources.implicit_receiver_selections.get(&e) {
             record_source(
-                &mut state.out,
-                &mut state.direct_implicit_receivers,
+                state,
+                Some(e),
                 &ResolvedContextArgument::ImplicitReceiver(selection.clone()),
                 nested_callable,
-                &state.nested_bound_names,
                 nested_receiver_count,
             );
         }
         if let Some(target) = sources.resolved_super_calls.get(&e) {
             record_source(
-                &mut state.out,
-                &mut state.direct_implicit_receivers,
+                state,
+                Some(e),
                 &ResolvedContextArgument::ImplicitReceiver(target.receiver.clone()),
                 nested_callable,
-                &state.nested_bound_names,
                 nested_receiver_count,
             );
         }
         if let Some(context_args) = sources.context_args.get(&e) {
             for source in context_args {
                 record_source(
-                    &mut state.out,
-                    &mut state.direct_implicit_receivers,
+                    state,
+                    Some(e),
                     source,
                     nested_callable,
-                    &state.nested_bound_names,
                     nested_receiver_count,
                 );
             }
@@ -163,11 +204,10 @@ pub(crate) fn selected_context_values(
                 ResolvedCall::TopLevel(target) => {
                     for source in target.context_args.iter().flatten() {
                         record_source(
-                            &mut state.out,
-                            &mut state.direct_implicit_receivers,
+                            state,
+                            Some(e),
                             source,
                             nested_callable,
-                            &state.nested_bound_names,
                             nested_receiver_count,
                         );
                     }
@@ -175,11 +215,10 @@ pub(crate) fn selected_context_values(
                 ResolvedCall::Extension(target) => {
                     for source in target.context_args.iter().flatten() {
                         record_source(
-                            &mut state.out,
-                            &mut state.direct_implicit_receivers,
+                            state,
+                            Some(e),
                             source,
                             nested_callable,
-                            &state.nested_bound_names,
                             nested_receiver_count,
                         );
                     }
@@ -190,20 +229,18 @@ pub(crate) fn selected_context_values(
                     ..
                 } => {
                     record_source(
-                        &mut state.out,
-                        &mut state.direct_implicit_receivers,
+                        state,
+                        Some(e),
                         &ResolvedContextArgument::ImplicitReceiver(dispatch_receiver.clone()),
                         nested_callable,
-                        &state.nested_bound_names,
                         nested_receiver_count,
                     );
                     for source in context_args.iter().flatten() {
                         record_source(
-                            &mut state.out,
-                            &mut state.direct_implicit_receivers,
+                            state,
+                            Some(e),
                             source,
                             nested_callable,
-                            &state.nested_bound_names,
                             nested_receiver_count,
                         );
                     }
@@ -214,25 +251,23 @@ pub(crate) fn selected_context_values(
                     {
                         for capture in &function.captures {
                             record_source(
-                                &mut state.out,
-                                &mut state.direct_implicit_receivers,
+                                state,
+                                None,
                                 &ResolvedContextArgument::Binding {
                                     name: capture.name.clone(),
                                     shadow_depth: 0,
                                 },
                                 nested_callable,
-                                &state.nested_bound_names,
                                 nested_receiver_count,
                             );
                         }
                     }
                     for source in &target.context_args {
                         record_source(
-                            &mut state.out,
-                            &mut state.direct_implicit_receivers,
+                            state,
+                            Some(e),
                             source,
                             nested_callable,
-                            &state.nested_bound_names,
                             nested_receiver_count,
                         );
                     }
@@ -247,11 +282,10 @@ pub(crate) fn selected_context_values(
                     sources.stmt_lowers.get(&statement)
                 {
                     record_source(
-                        &mut state.out,
-                        &mut state.direct_implicit_receivers,
+                        state,
+                        Some(e),
                         &ResolvedContextArgument::ImplicitReceiver(target.receiver.clone()),
                         nested_callable,
-                        &state.nested_bound_names,
                         nested_receiver_count,
                     );
                 }
@@ -260,11 +294,10 @@ pub(crate) fn selected_context_values(
                 }) = sources.stmt_lowers.get(&statement)
                 {
                     record_source(
-                        &mut state.out,
-                        &mut state.direct_implicit_receivers,
+                        state,
+                        Some(e),
                         &ResolvedContextArgument::ImplicitReceiver(receiver.clone()),
                         nested_callable,
-                        &state.nested_bound_names,
                         nested_receiver_count,
                     );
                 }
@@ -501,15 +534,25 @@ pub(crate) fn selected_context_values(
         }
     }
 
-    let mut state = ScanState::default();
-    scan(
-        file,
-        &sources,
-        body,
-        deep,
-        false,
-        NestedReceiverCounts::default(),
-        &mut state,
-    );
-    (state.out, state.direct_implicit_receivers)
+    let mut state = ScanState {
+        nested_bound_names: bound.to_vec(),
+        sites: collect_sites.then(Vec::new),
+        ..ScanState::default()
+    };
+    for &root in roots {
+        scan(
+            file,
+            &sources,
+            root,
+            deep,
+            false,
+            NestedReceiverCounts::default(),
+            &mut state,
+        );
+    }
+    (
+        state.out,
+        state.direct_implicit_receivers,
+        state.sites.unwrap_or_default(),
+    )
 }

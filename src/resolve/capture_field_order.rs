@@ -14,11 +14,12 @@
 //! storage identities that body recorded. The order is a recorded fact the JVM backend applies;
 //! every earlier phase keeps field order.
 
-use super::scope::PathRoot;
+use super::context_capture::context_argument_sites;
+use super::scope::{Ns, PathRoot};
 use super::CheckerScope;
 use super::{
     AnonymousObjectCapture, AnonymousObjectCaptureSource, ExprLowering, Local,
-    ReceiverFnValueOrigin, ResolvedCall, Ty,
+    ReceiverFnValueOrigin, ResolvedCall, ResolvedContextArgument, SelectedContextSources, Ty,
 };
 use crate::ast::{
     ClassDecl, ClassInit, CtorDelegation, Decl, DeclId, Expr, ExprId, FunBody, FunDecl, Stmt,
@@ -183,11 +184,12 @@ impl super::Checker<'_> {
             delegated,
             fields: Vec::new(),
             included: HashSet::default(),
+            context_uses: HashMap::default(),
             unordered: None,
         };
         uses.collect(Closure::Class(class, Some(declaration)));
         if let Some(unordered) = uses.unordered.take() {
-            let message = format!("unsupported: local class '{}': {unordered}", class.name);
+            let message = format!("internal error: local class '{}': {unordered}", class.name);
             self.diags.error(class.span, message);
             return;
         }
@@ -233,8 +235,9 @@ impl super::Checker<'_> {
             .filter_map(|(capture, local)| {
                 Some((local.as_ref()?.flow_identity, u32::try_from(capture).ok()?))
             })
-            .collect();
+            .collect::<Vec<_>>();
         let span = self.file.stmt_spans[statement.0 as usize];
+        let context_uses = self.context_argument_captures(scope, function, &delegated);
         let mut uses = FirstUses {
             checker: self,
             statement,
@@ -245,6 +248,7 @@ impl super::Checker<'_> {
             delegated,
             fields: Vec::new(),
             included: std::iter::once(Inclusion::LocalFunction(statement)).collect(),
+            context_uses,
             unordered: None,
         };
         uses.collect(Closure::Callable(callable_roots(
@@ -269,6 +273,57 @@ impl super::Checker<'_> {
         self.class_capture_uses
             .function_orders
             .insert(statement, order);
+    }
+
+    /// The captures of `function` that each expression in it passes as an implicit context
+    /// argument or receiver. `delegated` maps a capture's binding (flow identity) to the capture.
+    /// The selection is the checker's: a binding at its recorded shadow depth, resolved in the
+    /// scope the function is declared in, never matched by spelling alone.
+    fn context_argument_captures(
+        &self,
+        scope: &CheckerScope<'_>,
+        function: &FunDecl,
+        delegated: &[(u32, u32)],
+    ) -> HashMap<ExprId, Vec<u32>> {
+        let roots = callable_roots(&function.params, &function.body);
+        let parameters = function
+            .params
+            .iter()
+            .map(|parameter| parameter.name.clone())
+            .collect::<Vec<_>>();
+        let sources = SelectedContextSources {
+            expr_types: &self.expr_types,
+            implicit_receiver_selections: &self.implicit_receiver_selections,
+            context_args: &self.context_args,
+            resolved_calls: &self.resolved_calls,
+            resolved_super_calls: &self.resolved_super_calls,
+            stmt_lowers: &self.stmt_lowers,
+        };
+        let mut uses = HashMap::<ExprId, Vec<u32>>::default();
+        for (site, source) in context_argument_sites(self.file, sources, &roots, &parameters) {
+            let binding = match &source {
+                ResolvedContextArgument::Binding { name, shadow_depth } => {
+                    Some((name, *shadow_depth))
+                }
+                ResolvedContextArgument::ImplicitReceiver(selection) => selection
+                    .context_binding
+                    .as_ref()
+                    .map(|(name, depth)| (name, *depth)),
+            };
+            let capture = binding
+                .and_then(|(name, depth)| scope.shadowed_binding(Ns::Value, name, depth))
+                .and_then(|binding| binding.value())
+                .and_then(|local| {
+                    delegated
+                        .iter()
+                        .find(|(identity, _)| *identity == local.flow_identity)
+                })
+                .map(|&(_, capture)| capture);
+            if let Some(capture) = capture {
+                uses.entry(site).or_default().push(capture);
+            }
+        }
+        uses
     }
 
     /// Record an assignment to capture storage or to a local's binding.
@@ -298,9 +353,10 @@ pub(super) struct ClassCaptureUses {
     function_orders: HashMap<StmtId, Result<Box<[u32]>, UnorderedCapture>>,
 }
 
-/// A local function's captured value that no recorded use places: one the body consumes without a
-/// use the resolver records (an implicit context argument). Only a class that includes the
-/// function needs the order; it reports this rather than placing the value by name.
+/// A local function's captured value that no recorded use places. Every capture is a read, write,
+/// implicit context argument or included declaration the checker recorded, so this is an internal
+/// error; only a class that includes the function needs the order, and it reports this rather than
+/// placing the value by name.
 #[derive(Clone)]
 struct UnorderedCapture {
     function: String,
@@ -404,6 +460,8 @@ struct FirstUses<'w, 'c> {
     delegated: Vec<(u32, u32)>,
     fields: Vec<u32>,
     included: HashSet<Inclusion>,
+    /// The captures each expression passes as an implicit context argument or receiver.
+    context_uses: HashMap<ExprId, Vec<u32>>,
     /// An included local function whose captures have no complete first-use order.
     unordered: Option<UnorderedCapture>,
 }
@@ -599,7 +657,11 @@ impl<'w> FirstUses<'w, '_> {
         let Stmt::LocalFun(function) = checker.file.stmt(statement) else {
             return;
         };
-        if self.inside_class(checker.file.stmt_spans[statement.0 as usize]) {
+        // A function nested in the walked function has its own recorded order, which includes
+        // the values it passes implicitly; one inside a class reads the class's storage.
+        if matches!(self.owner, Owner::Class)
+            && self.inside_class(checker.file.stmt_spans[statement.0 as usize])
+        {
             for root in callable_roots(&function.params, &function.body) {
                 self.expression(root, uses);
             }
@@ -720,6 +782,10 @@ impl<'w> FirstUses<'w, '_> {
         };
         uses.direct
             .extend(read.and_then(|read| self.storage_use(read)));
+        // An implicit context argument is a use of the value it passes, where the call is.
+        if let Some(captures) = self.context_uses.get(&expression) {
+            uses.direct.extend(captures.iter().copied());
+        }
         let function = match checker.expr_lowers.get(&expression) {
             Some(
                 ExprLowering::LocalFunction { stmt_id, .. }

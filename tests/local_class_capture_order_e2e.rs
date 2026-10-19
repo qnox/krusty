@@ -172,3 +172,42 @@ fn differently_typed_captures_record_their_physical_constructor_signature() {
         assert_same_class("MixedCaptures", MIXED_TYPES, class);
     }
 }
+
+/// An implicit context argument is a use of the value it passes, at the call: `local` reads
+/// `other` before it passes `registry` to `contextualValue()`, so it is lifted as
+/// `local(other, registry)` and a class that calls it captures `($other, $registry)`; the other
+/// function passes `registry` first.
+#[test]
+fn an_implicit_context_argument_is_a_first_use_at_its_call() {
+    let source = "\
+class Registry(val value: String)
+
+context(registry: Registry)
+fun contextualValue(): String = registry.value
+
+context(registry: Registry)
+fun render(other: String): String {
+    fun local(): String = other + contextualValue()
+    class C { fun f() = local() }
+    return C().f()
+}
+
+context(registry: Registry)
+fun renderFirst(other: String): String {
+    fun local(): String = contextualValue() + other
+    class C { fun f() = local() }
+    return C().f()
+}
+";
+    assert_same_class("ContextCaptureOrder", source, "ContextCaptureOrderKt");
+    assert_same_class(
+        "ContextCaptureOrder",
+        source,
+        "ContextCaptureOrderKt$render$C",
+    );
+    assert_same_class(
+        "ContextCaptureOrder",
+        source,
+        "ContextCaptureOrderKt$renderFirst$C",
+    );
+}
