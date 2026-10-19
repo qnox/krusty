@@ -264,7 +264,7 @@ fn scan_context_sources(
                                 &ResolvedContextArgument::Binding {
                                     name: capture.name.clone(),
                                     shadow_depth: 0,
-                                    flow_identity: None,
+                                    flow_identity: capture.flow_identity,
                                 },
                                 nested_callable,
                                 nested_receiver_count,

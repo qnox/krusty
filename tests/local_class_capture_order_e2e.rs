@@ -174,9 +174,10 @@ fn differently_typed_captures_record_their_physical_constructor_signature() {
 }
 
 /// An implicit context argument is a use of the value it passes, at the call: `local` reads
-/// `other` before it passes `registry` to `contextualValue()`, so it is lifted as
-/// `local(other, registry)` and a class that calls it captures `($other, $registry)`; the other
-/// function passes `registry` first.
+/// `other` before it passes `registry` to `contextualValue()`, so a class that calls it captures
+/// `($other, $registry)`; in `renderFirst`, which passes `registry` first, the class captures
+/// `($registry, $other)`. A same-named nearer local does not stand in for the context value the
+/// call passes.
 #[test]
 fn an_implicit_context_argument_is_a_first_use_at_its_call() {
     let source = "\
@@ -198,6 +199,16 @@ fun renderFirst(other: String): String {
     class C { fun f() = local() }
     return C().f()
 }
+
+// A nearer `val registry` shadows the context parameter's name but is not a `Registry`: the call
+// still passes the context receiver, so `local` captures `(other, registry)` of type `Registry`.
+context(registry: Registry)
+fun renderShadowed(other: String): String {
+    val registry = \"shadow\"
+    fun local(): String = other + contextualValue()
+    class C { fun f() = local() }
+    return C().f() + registry
+}
 ";
     assert_same_class("ContextCaptureOrder", source, "ContextCaptureOrderKt");
     assert_same_class(
@@ -209,5 +220,10 @@ fun renderFirst(other: String): String {
         "ContextCaptureOrder",
         source,
         "ContextCaptureOrderKt$renderFirst$C",
+    );
+    assert_same_class(
+        "ContextCaptureOrder",
+        source,
+        "ContextCaptureOrderKt$renderShadowed$C",
     );
 }

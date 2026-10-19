@@ -209,18 +209,15 @@ impl super::Checker<'_> {
     /// uses. Every use is the flow identity a read or write of the captured binding recorded, or
     /// the lexical identity an included declaration captured, never a spelling. A capture with no
     /// recorded use or no lexical identity has no first-use position; that is reported, and no
-    /// order is published, rather than placing it by name or declaration.
+    /// order is published, rather than placing it by name or declaration. `locals` is the exact
+    /// binding of each capture in `captured`.
     pub(super) fn record_local_function_first_use(
         &mut self,
-        scope: &CheckerScope<'_>,
         statement: StmtId,
         function: &FunDecl,
         captured: &[(String, Ty, bool)],
+        locals: &[Option<Local>],
     ) {
-        let locals = captured
-            .iter()
-            .map(|(name, _, _)| self.lookup(scope, name))
-            .collect::<Vec<_>>();
         let bindings = locals
             .iter()
             .map(|local| {

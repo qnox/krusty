@@ -118,26 +118,7 @@ impl BodyFirChecker<'_> {
         // local body. Ordinary reads still add captures on demand; the wider transient view also
         // lets a checked local-class constructor operand publish a capture dependency that the
         // legacy name-based resolver inventory could not see through the constructor boundary.
-        let mut visible = self
-            .outer_values
-            .iter()
-            .map(|(name, (depth, binding))| {
-                (
-                    name.clone(),
-                    (
-                        depth.checked_add(1).expect("too many nested bodies"),
-                        *binding,
-                    ),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        for scope in &self.scopes {
-            visible.extend(
-                scope
-                    .iter()
-                    .map(|(name, binding)| (name.clone(), (0, *binding))),
-            );
-        }
+        let mut visible = self.outer_values.nested(&self.scopes);
         let mut visible_delegates = self
             .outer_delegates
             .iter()
@@ -158,16 +139,11 @@ impl BodyFirChecker<'_> {
                     .map(|(name, binding)| (name.clone(), (0, binding.clone()))),
             );
         }
-        visible.extend(
-            visible_delegates
-                .iter()
-                .filter_map(|(name, (depth, binding))| {
-                    binding
-                        .storage
-                        .local()
-                        .map(|storage| (name.clone(), (*depth, storage)))
-                }),
-        );
+        for (name, (depth, binding)) in &visible_delegates {
+            if let Some(storage) = binding.storage.local() {
+                visible.replace_nearest(name.clone(), (*depth, storage));
+            }
+        }
         let outer_callables = self.nested_outer_callables();
         let receiver_frame = self.receiver_frame();
         let class_values = self.nested_class_values()?;
@@ -259,8 +235,15 @@ impl BodyFirChecker<'_> {
                 .body
                 .add_parameter(FirValueParameter::bound(origin, value, ty));
         }
+        // A capture names the exact binding the checker captured, at its shadow depth where the
+        // function is declared: a nearer same-named value does not stand in for it.
         for capture in &info.captures {
-            if let Some((depth, binding)) = nested.outer_values.get(&capture.name).copied() {
+            if let Some((depth, binding)) = nested
+                .outer_values
+                .shadowed(&capture.name)
+                .nth(capture.lexical_shadow_depth as usize)
+                .copied()
+            {
                 nested.body.add_capture(FirCapture {
                     origin,
                     enclosing_depth: depth,

@@ -9177,6 +9177,11 @@ pub struct LocalCapture {
     pub name: String,
     pub ty: Ty,
     pub shared_cell: bool,
+    /// The captured binding's flow identity, which an enclosing callable that calls this function
+    /// maps the capture by.
+    pub flow_identity: Option<u32>,
+    /// How many nearer same-named bindings shadow the captured one where the function is declared.
+    pub lexical_shadow_depth: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -23505,61 +23510,39 @@ impl<'a> Checker<'a> {
         }
 
         // A lifted local function can consume an implicit context binding without spelling its source
-        // name. Add those checker-selected bindings to the same capture ABI as explicit name reads;
-        // lowering must never rediscover a context source from the surrounding scope.
+        // name. Add each checker-selected binding, retrieved by the identity recorded when it was
+        // selected, to the same capture ABI as explicit name reads.
+        let mut selected = Vec::new();
         if let FunBody::Expr(body) | FunBody::Block(body) = &f.body {
-            let (selected_contexts, direct_receivers) = selected_context_values(
-                self.file,
-                SelectedContextSources {
-                    expr_types: &self.expr_types,
-                    implicit_receiver_selections: &self.implicit_receiver_selections,
-                    context_args: &self.context_args,
-                    resolved_calls: &self.resolved_calls,
-                    resolved_super_calls: &self.resolved_super_calls,
-                    stmt_lowers: &self.stmt_lowers,
-                },
-                *body,
-                true,
-            );
-            let selected_names = selected_contexts
-                .into_iter()
-                .filter_map(|source| match source {
-                    ResolvedContextArgument::Binding { name, .. } => Some(name),
-                    ResolvedContextArgument::ImplicitReceiver(selection) => {
-                        selection.context_binding.map(|binding| binding.name)
-                    }
-                })
-                .chain(
-                    direct_receivers
-                        .into_iter()
-                        .filter_map(|selection| selection.context_binding.map(|binding| binding.name)),
-                );
-            for name in selected_names {
+            for (name, local) in self.selected_context_bindings(scope, *body) {
                 if outer_names.contains(&name)
                     && !captured_locals
                         .iter()
-                        .any(|(captured, _, _)| captured == &name)
+                        .any(|(captured, _, _)| *captured == name)
                 {
-                    let ty = self
-                        .lookup(scope, &name)
-                        .map(|local| local.ty)
-                        .unwrap_or(Ty::Error);
-                    captured_locals.push((name, ty, false));
+                    captured_locals.push((name.clone(), local.ty, false));
+                    selected.push((name, local));
                 }
             }
         }
         captured_locals.sort_by(|left, right| left.0.cmp(&right.0));
-        self.record_local_function_first_use(scope, stmt_id, f, &captured_locals);
-        let capture_bindings = captured_locals
+        let (locals, shadow_depths): (Vec<_>, Vec<_>) = self
+            .captured_local_bindings(scope, &captured_locals, &selected)
+            .into_iter()
+            .unzip();
+        self.record_local_function_first_use(stmt_id, f, &captured_locals, &locals);
+        let capture_bindings = locals
             .iter()
-            .map(|(name, _, _)| {
-                self.lookup(scope, name)
-                    .and_then(|binding| binding.lexical_capture_identity)
+            .map(|local| {
+                local
+                    .as_ref()
+                    .and_then(|local| local.lexical_capture_identity)
             })
             .collect::<Vec<_>>();
         let captures = captured_locals
             .into_iter()
-            .map(|(name, ty, shared_hint)| {
+            .zip(locals.iter().zip(shadow_depths))
+            .map(|((name, ty, shared_hint), (local, lexical_shadow_depth))| {
                 let shared_cell = shared_hint
                     || match &f.body {
                         FunBody::Expr(e) | FunBody::Block(e) => {
@@ -23575,6 +23558,8 @@ impl<'a> Checker<'a> {
                     name,
                     ty,
                     shared_cell,
+                    flow_identity: local.as_ref().map(|local| local.flow_identity),
+                    lexical_shadow_depth,
                 }
             })
             .collect();
@@ -35014,9 +34999,8 @@ pub enum ResolvedContextArgument {
         name: String,
         /// Number of nearer runtime bindings with the same name.
         shadow_depth: usize,
-        /// The binding's flow identity, recorded when the checker selected it. A source
-        /// synthesized from a lifted local function's capture list names its binding only by
-        /// spelling and carries none.
+        /// The binding's flow identity, recorded when the checker selected it, or carried by a
+        /// lifted local function's capture.
         flow_identity: Option<u32>,
     },
     ImplicitReceiver(ImplicitReceiverSelection),

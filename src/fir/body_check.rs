@@ -57,6 +57,7 @@ mod local_classes;
 mod local_function_tests;
 mod local_functions;
 mod local_increments;
+mod outer_values;
 mod session;
 #[cfg(test)]
 mod substitution_tests;
@@ -492,7 +493,7 @@ struct BodyFirChecker<'a> {
     body: FirBody,
     scopes: Vec<HashMap<String, LocalBinding>>,
     delegate_scopes: Vec<HashMap<String, LocalDelegateBinding>>,
-    outer_values: HashMap<String, (u32, LocalBinding)>,
+    outer_values: outer_values::OuterValues,
     outer_delegates: HashMap<String, (u32, LocalDelegateBinding)>,
     class_values: HashMap<String, ClassCaptureBinding>,
     class_capture_values: Vec<(String, ClassCaptureBinding)>,
@@ -943,7 +944,7 @@ impl BodyFirChecker<'_> {
             body,
             scopes: vec![HashMap::default()],
             delegate_scopes: vec![HashMap::default()],
-            outer_values: HashMap::default(),
+            outer_values: outer_values::OuterValues::default(),
             outer_delegates: HashMap::default(),
             class_values: class_context.values,
             class_capture_values: class_context.capture_values,
@@ -1083,7 +1084,7 @@ impl BodyFirChecker<'_> {
             .filter_map(|scope| scope.get(name).copied().map(|binding| (None, binding)))
             .chain(
                 self.outer_values
-                    .get(name)
+                    .shadowed(name)
                     .map(|(depth, binding)| (Some(*depth), *binding)),
             )
             .nth(shadow_depth)
