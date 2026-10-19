@@ -85,6 +85,18 @@ impl ClassWriter {
         self.start_inline_origin_source_map_at(lines, &path);
     }
 
+    /// Start the class's identity map over the `lines` its own source file has, before code from
+    /// a source file with another line count is emitted into it: the map an inlined line is then
+    /// numbered against claims lines past this file's own, whichever file the emission runs for.
+    pub fn start_source_map(&mut self, lines: u16) {
+        if self.source_map.is_unstarted() {
+            let Some(source_file) = self.source_file.clone() else {
+                return;
+            };
+            self.source_map = SourceMap::new(&source_file, &self.internal_name, lines);
+        }
+    }
+
     /// Start a regenerated inline class's identity map under its declaration class path. A
     /// call-site copy has a different emitted internal name, but its primary source remains the
     /// declaration lambda class that the inliner regenerated.
