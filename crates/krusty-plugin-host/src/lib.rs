@@ -25,7 +25,6 @@ mod environment;
 mod host;
 mod install;
 mod jdk;
-mod module_ir;
 mod pins;
 mod protocol;
 mod provision;
@@ -34,16 +33,14 @@ mod session;
 pub use download::{Curl, Fetcher};
 pub use environment::{Environment, Platform};
 pub use host::{Host, HostError};
-pub use module_ir::{
-    BodyIr, CallIr, Callee, Constant, ExpressionIr, ExpressionKind, FileIr, FunctionIr, ModuleIr,
-    ParameterIr, Span, StatementIr, ValueId, VariableIr, Visibility,
+pub use krusty_plugin_ir::{
+    BodyIr, CallIr, CallableIdentity, CallableKind, Callee, ClassName, Classifier, Constant,
+    ExpressionIr, ExpressionKind, FileIr, FunctionIr, ModuleIr, ParameterIr, Span, StatementIr,
+    TypeArgument, TypeIdentity, TypeParameterOwner, ValueId, VariableIr, Visibility,
 };
 pub use pins::{ArtifactPin, JdkPin, Pins};
 pub use protocol::LoadedPlugin;
 pub use provision::{
     provision, provision_artifact, HostRuntime, ProvisionError, Request, COMPILER_MIN_JAVA,
 };
-pub use session::{
-    CallableIdentity, CallableKind, ClassName, Classifier, SessionRequest, TypeArgument,
-    TypeIdentity, TypeParameterOwner,
-};
+pub use session::SessionRequest;

@@ -1079,9 +1079,15 @@ impl Emitter<'_> {
             );
             code.inline_call_marker(true);
         }
+        // Inside the bracket the body runs over the empty stack FixStack leaves.
+        let saved = code.stack_height();
+        if spills_operands {
+            code.set_stack_height(0);
+        }
         self.write_inlined_node(&inlined, placement, code);
         if spills_operands {
             code.inline_call_marker(false);
+            code.set_stack_height(saved + code.stack_height());
         }
         // kotlinc's `markLineNumberAfterInlineIfNeeded`: inside a condition the caller's line is
         // marked again for the jump that follows; elsewhere it is forgotten, so the next mark of

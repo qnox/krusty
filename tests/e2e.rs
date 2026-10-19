@@ -991,6 +991,8 @@ mod fq_targ_trailing_lambda_e2e;
 mod fq_toplevel_call_e2e;
 #[path = "fq_vararg_call_e2e.rs"]
 mod fq_vararg_call_e2e;
+#[path = "fragment_arguments_e2e.rs"]
+mod fragment_arguments_e2e;
 #[path = "friend_internal_property_override_e2e.rs"]
 mod friend_internal_property_override_e2e;
 #[path = "friend_module_smart_cast_e2e.rs"]
@@ -1225,6 +1227,8 @@ mod java_abstract_override_e2e;
 mod java_array_covariance_e2e;
 #[path = "java_bridge_members_e2e.rs"]
 mod java_bridge_members_e2e;
+#[path = "java_class_formal_bound_e2e.rs"]
+mod java_class_formal_bound_e2e;
 #[path = "java_class_intrinsic_e2e.rs"]
 mod java_class_intrinsic_e2e;
 #[path = "java_constructor_expected_type_e2e.rs"]
@@ -1659,6 +1663,8 @@ mod value_class_inherited_default_names_e2e;
 mod value_class_interface_default_receiver_e2e;
 #[path = "value_class_interface_entry_e2e.rs"]
 mod value_class_interface_entry_e2e;
+#[path = "value_class_java_generic_constructor_e2e.rs"]
+mod value_class_java_generic_constructor_e2e;
 #[path = "value_class_java_nullable_element_e2e.rs"]
 mod value_class_java_nullable_element_e2e;
 #[path = "value_class_lambda_class_e2e.rs"]

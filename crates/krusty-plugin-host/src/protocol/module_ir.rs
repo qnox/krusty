@@ -2,7 +2,7 @@
 //! order. The host's reader is `adapter/ModuleIr.kt`.
 
 use super::{put_callable, put_list, put_str, put_type};
-use crate::module_ir::{
+use krusty_plugin_ir::{
     BodyIr, Callee, Constant, ExpressionIr, ExpressionKind, FileIr, FunctionIr, ModuleIr,
     ParameterIr, Span, StatementIr, VariableIr, Visibility,
 };
@@ -150,7 +150,7 @@ fn put_u32(payload: &mut Vec<u8>, value: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{ClassName, Classifier, TypeIdentity};
+    use krusty_plugin_ir::{ClassName, Classifier, TypeIdentity};
 
     #[test]
     fn a_module_is_framed_file_by_file_with_each_elements_offsets_first() {

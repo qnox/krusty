@@ -9,7 +9,7 @@
 
 use super::collect_reachable;
 use crate::fx_hash::{HashMap, HashSet};
-use crate::ir::{ExprId, IrExpr, IrFile};
+use crate::ir::{CtorDelegateTarget, ExprId, IrExpr, IrFile};
 use crate::types::Ty;
 
 pub(super) type SlotTypes = HashMap<u32, Ty>;
@@ -104,9 +104,38 @@ impl ConstructorSlots {
         }
     }
 
-    /// The slot types the superclass constructor arguments of `class` run over.
-    pub(super) fn super_args(&self, class: usize) -> &SlotTypes {
-        &self.super_args[class]
+    /// Every constructor delegation's arguments with the parameters they are passed to and the
+    /// slot types they run over: each class's superclass call, then each secondary constructor's
+    /// `this(...)` or `super(...)`. The parameters are the selected declaration's, so a generic
+    /// target's bare `T` still says the argument crosses as a box.
+    pub(super) fn delegations<'a>(
+        &'a self,
+        ir: &'a IrFile,
+    ) -> impl Iterator<Item = (&'a SlotTypes, &'a [ExprId], &'a [Ty])> {
+        ir.classes
+            .iter()
+            .enumerate()
+            .flat_map(move |(class, declaration)| {
+                let primary = std::iter::once((
+                    &self.super_args[class],
+                    declaration.super_args.as_slice(),
+                    declaration.super_ctor_params.as_slice(),
+                ));
+                let secondary = declaration
+                    .secondary_ctors
+                    .iter()
+                    .zip(&self.secondary[class])
+                    .filter_map(|(constructor, slots)| match &constructor.delegate {
+                        CtorDelegateTarget::This { target_params, .. }
+                        | CtorDelegateTarget::Super { target_params, .. } => Some((
+                            slots,
+                            constructor.delegate_args.as_slice(),
+                            target_params.as_slice(),
+                        )),
+                        CtorDelegateTarget::ImplicitEnumBase => None,
+                    });
+                primary.chain(secondary)
+            })
     }
 
     /// Every constructor-owned root of `class` with its slot types.

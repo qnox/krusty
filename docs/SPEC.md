@@ -1525,6 +1525,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a custom value class through a bare-`T` box boundary; `Ok`/`Err`-style factories over a two-parameter
   value class with an `Any?` carrier), `generic_hof_vc_binding_e2e::nullable_generic_return_keeps_null`,
   and the `cross_file_*_value_class_return_*` cases in `tests/reference_adaptation_e2e.rs`.
+- **A value class passed to a dependency's generic constructor parameter crosses as its box.**
+  `Holder(Money(7))` for the Java `class Holder<T> { Holder(T value) }` selects `<init>(Object)` with
+  `T = Money`. The declaration consumes bare `T`, so the argument is `Money`'s box, as kotlinc passes
+  it, whether the carrier is a primitive (`Money(Int)`) or a reference (`Label(String)`). Checked FIR
+  keeps the selected dependency constructor's parameters before classifier type-argument
+  substitution beside the specialized ones (`FirConstructorTarget::External::declared_parameters`),
+  common lowering records them as the construction's declared parameters with the enclosing
+  instance prepended, and JVM value-class boundaries read that declaration shape instead of the
+  specialized `New::ctor_params`. Reading the specialization passed the bare `int` or `String`
+  carrier into the `Object` slot. Super-constructor delegation (`class D(v: Money) :
+  Base<Money>(v)`, or a secondary `constructor(v: Money) : super(v)`) maps its arguments onto the
+  specialized parameters but stores the declared ones as `super_ctor_params` / the delegate's
+  `target_params`, and the JVM records the value-class boundary of every delegation argument,
+  secondary `this(...)`/`super(...)` included, against those declared parameters before erasure. A
+  secondary `super(m)` into a generic base's `T` previously passed `Money`'s `int` as an `Integer`,
+  for a Kotlin base as well as a Java one. Tests: `tests/value_class_java_generic_constructor_e2e.rs`
+  (constructions, primary and secondary delegations, run against kotlinc),
+  `constructor_tests::java_generic_constructor_keeps_its_declared_class_formal_beside_the_specialization`
+  and the `external_constructions` IR tests.
 - **A library inline call's expanded lambda yields the value class as the call's type gives it.**
   `s.let { Id(it) }`, `s.run { Id(this) }` and `with(s) { Id(this) }` are expanded in place: the
   lambda's body becomes the call's value, and the lambda's implementation loses its body. That
@@ -2937,6 +2956,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/value_class_java_nullable_element_e2e.rs`, `tests/java_type_variable_bound_e2e.rs`
   (Java-source and javac class-file declarations, an unbounded and a `Number`-bounded variable),
   `reified_type_arguments_e2e::reified_type_argument_shapes_match_kotlinc`.
+- **A Java member's class-formal occurrence carries the class's declared bound.** In
+  `class Box<T extends CharSequence>`, every `T` a member mentions without declaring it (a return,
+  a parameter, a field, a generic argument, a method bound `<U extends T>`) is the class formal,
+  bounded by `CharSequence!` as the class `Signature` declares; the provider hydrates those
+  occurrences before Java nullability applies. A method formal of the same name (`<T> T shadow(T)`)
+  is a different variable and shadows the class formal. A chain of formals
+  (`<A extends CharSequence, B extends A, C extends B>`) is hydrated through the complete chain, so a
+  `C` is bounded by `B`, `A` and finally `CharSequence!`. Where no type argument replaces `T` (a raw
+  `Box` a Java method returns), `get().length` therefore resolves on `CharSequence`, as kotlinc does;
+  the parser's `Any` placeholder rejected it.
+  Tests: `tests/java_class_formal_bound_e2e.rs` (Java-source and javac class-file declarations,
+  `Box<*>` and raw access, a raw `C extends B extends A` chain),
+  `generic_signatures::class_formal_bound_tests`.
 - **A PLATFORM value narrowed to a declared non-null type is guarded where it enters.** A Java value
   arrives as `T!` (`Ty::PlatformNullable`), usable as both `T` and `T?`. Where the source commits it to
   a declared non-null type, kotlinc emits `dup` + `ldc "<expression>"` +
@@ -5170,15 +5202,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   member, which its class compiles) with no suspend function-typed parameter or receiver, no
   `crossinline` parameter, and a template without lambdas, callable references, local classes,
   nested expansions or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
-  called with every argument from any body outside a suspend state machine and an inline
-  function's template: a named function, a lambda's method, a local function, a property
-  initializer, an `init` block, a constructor or an accessor, as kotlinc inlines wherever the call
-  is written. A suspend function or suspend lambda, and a lambda written in one (whose body may be
+  called with every argument from any body outside a suspend state machine: a named function, an
+  inline function (whose compiled body then holds the nested callee's code, as kotlinc's does), a
+  lambda's method, a local function, a property initializer, an `init` block, a constructor or an
+  accessor, as kotlinc inlines wherever the call is written. A suspend function or suspend lambda, and a lambda written in one (whose body may be
   spliced into its state machine), keep their calls expanded (`SuspendCaller`), as does a default
   argument. With no literal lambda argument
-  that leaves its body by a non-local `return`, `break` or `continue`. Every other call is
+  that leaves its body by a non-local `return`, `break` or `continue`, and, in an inline function,
+  none that reads one of that function's inline parameters at any depth (`InlineParameterInLiteral`):
+  a caller that expands the function's template splices its own literal for that parameter, which
+  reaches a literal only through an expanded body, never through one the backend inlines. Checking
+  publishes the values it binds for the function's splice-mode parameters, so an anonymous context
+  parameter, which binds none, does not shift the parameters after it. Every other call is
   expanded in IR for a named reason. The JVM compiles each such callee once per emission pass, alone, into a writer of
-  its declaring class and source file, and the inliner reads that body as it reads a dependency's;
+  its declaring class and source file, and the inliner reads that body as it reads a dependency's.
+  A callee whose body inlines another same-module callee is compiled after it, as kotlinc compiles
+  a callee's node when a call first needs it; the node carries its method's own source map (the
+  lines it inlined are numbered past its file's own line count, not the caller's), so the caller
+  maps a nested line through it back to the nested callee's source. A body bracketed for FixStack
+  over caller operands runs over an empty stack inside the bracket, so a literal it expands is
+  bracketed again only for operands of its own, and a literal that always throws leaves none open;
   a body it cannot compile or inline fails the emission, never becoming a real call. The call
   keeps its record when a value-class representation wrapper takes its place, and a call one of
   whose operands is such a call marks its line again at its invoke, as kotlinc forgets the line
@@ -5192,9 +5235,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (same-file and cross-file calls, a value-class argument, a call on an inlined result, and calls in
   a lambda, a local function, initializers, an `init` block, a secondary constructor and a getter,
   against kotlinc's bytes, and a run; same-file and cross-file enum switches, including a nullable
-  subject, and calls in a suspend lambda and in a lambda of a suspend local function, as runs) and
+  subject, and calls in a suspend lambda and in a lambda of a suspend local function, as runs;
+  inline functions inlining their own same-module calls, and a literal that always throws inside a
+  bracketed body, against kotlinc's bytes and as runs) and
   `fir_lower::source_calls::inline_route::tests` (those suspend-context calls stay expanded while
-  the same call in an ordinary function's lambda is kept for the backend).
+  the same call in an ordinary function's lambda is kept for the backend; literals reading an
+  inline parameter keep their call expanded, at any depth, while a function's own literal or one
+  reading a `noinline` parameter does not), with
+  `tests/inline_deep_coverage_e2e.rs` (`inline_nonlocal_return_two_frames`) and
+  `tests/nested_inline_lambda_e2e.rs` for a caller's literal forwarded through two inline frames.
 
 - **A same-module inline call with function arguments is inlined from the compiled body too.**
   A literal lambda or callable reference passed to an inline parameter (one that is function-typed
@@ -14292,6 +14341,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   each argument of each release against its disposition; `tests/unsupported_kotlinc_arguments_e2e.rs`
   and `tests/inert_kotlinc_arguments_e2e.rs` check exit code, complete stderr and output against
   kotlinc.)
+- **One multiplatform fragment compiles as the plain module.** A build tool passes a JVM-only
+  module with several source roots as `-Xmulti-platform -Xfragments=main` plus one
+  `-Xfragment-sources=main:<file>` per source. `-Xmulti-platform` enables
+  `MultiPlatformProjects`; with a single fragment kotlinc's classes and `.kotlin_module` are the
+  plain compilation's. kotlinc 2.4.20 matches each free argument by its exact spelling (a
+  directory included, a `.java` file exempt) against the listed sources, ignores
+  `-Xfragment-sources` without `-Xfragments`, and reports, in order, each malformed value
+  (`incorrect syntax for -Xfragment-sources argument. …`), each value naming an undeclared
+  fragment (`passed <value>, but fragment … is not specified in -Xfragments`), each source listed
+  for a second fragment (`file '<file>' can be a part of only one module, …`), then each unlisted
+  free argument (`source '<arg>' does not belong to any module`), exiting 1 before writing anything. krusty reproduces these as configuration errors.
+  A name declared twice (`-Xfragments=main,main`, or `-Xfragments=main` repeated) is one
+  fragment, and the empty name is a fragment. Each distinct `-Xfragment-sources` value and free
+  spelling is checked once, in first-seen order (`bad,bad` is one diagnostic, `,` one empty
+  value). These errors are reported for any number of fragments; only a well-formed structure
+  with more than one distinct fragment (a common/platform hierarchy, with `-Xfragment-refines`)
+  is refused. (`tests/fragment_arguments_e2e.rs` compares exit code, complete stderr and the
+  output tree with kotlinc; `crates/krusty-cli/src/cli/fragments.rs` unit tests; five
+  `compiler/testData/cli/jvm/hmpp` cases in the CLI corpus.)
 - **A supertype missing from the classpath is `MISSING_DEPENDENCY_SUPERCLASS`.** As kotlinc's
   `FirMissingDependencySupertype*` checkers, a classpath classifier naming a supertype that no
   source or classpath entry provides makes every use that depends on that hierarchy an error:
@@ -17150,6 +17218,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Nothing?`; it lowers to the `null` constant typed as the null literal, as checked FIR records
   it. A `null` of another type is an inconsistency. Test:
   `control_forms::a_nullability_smart_cast_lowers_as_the_source_smart_cast_does`.
+
+- **A KLIB `also`/`apply` call expands as an invocation that answers the receiver.** The direct
+  lambda invocation plan of an exact `@InlineOnly` prepared-inline body accepts, besides one
+  `return` of the invocation (`let`, `run`, `with`), the two statements `block(...)` and
+  `return <parameter>`: the invocation runs for its effect and the call answers the returned
+  parameter (`InvokeLambda { result: Some(..) }`, as the JVM provider decodes the same
+  declarations). Every existing guard stays: the compiler-owned `INVOKE` origin, operands and the
+  returned value read only declaration-owned parameter symbols, the lambda parameter is a non-null,
+  non-suspend `FunctionN` of matching arity whose metadata modifier runs it in the caller's frame,
+  and a body returning the lambda parameter itself publishes no plan. Tests:
+  `klib_libraries::tests::native_prepared_also_and_apply_return_their_receiver_after_the_invocation`,
+  `multimodule_conformance_cases::RECEIVER_RETURNING_SCOPE_FUNCTIONS` (JVM, Native and Wasm,
+  including a taken non-local `return` out of `also`).
 
 - **A KLIB `when` keeps its source form.** A `when` with an `else` (a final branch whose condition
   is the constant `true`) of origin `WHEN` lowers to one flat `when` recorded as exhaustive at its
