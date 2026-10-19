@@ -604,3 +604,98 @@ fn calls_in_suspend_lambdas_and_their_nested_lambdas_run() {
         "OK"
     );
 }
+
+// An inline function's own same-module inline calls are inlined from their compiled bodies into
+// its compiled body, which its callers inline in turn: the nested callee's lines reach the caller
+// through the callee class's source map, numbered past that class's own file.
+const NESTED_LIBRARY: &str = r#"inline fun plusThree(x: Int): Int {
+    return x + 3
+}
+
+inline fun plusTwo(x: Int): Int {
+    return x + 2
+}
+
+inline fun plusTwoAgain(x: Int): Int {
+    return plusTwo(x)
+}
+
+inline fun chained(x: Int): Int {
+    return plusTwoAgain(x) * plusThree(x)
+}
+"#;
+
+const NESTED_MAIN: &str = r#"fun compute(x: Int): Int {
+    return plusTwoAgain(x) + plusThree(x)
+}
+
+fun box(): String = if (compute(2) == 9) "OK" else "fail ${compute(2)}"
+"#;
+
+// Not yet kotlinc's bytes: a nested line the class map already holds in a range other than its
+// first or last is mapped anew by kotlinc's `SourceMapper`, where krusty reuses that range.
+const NESTED_CHAIN_MAIN: &str = r#"fun compute(x: Int): Int {
+    return plusTwoAgain(x) + plusThree(x) + chained(x)
+}
+
+fun box(): String = if (compute(2) == 29) "OK" else "fail ${compute(2)}"
+"#;
+
+#[test]
+fn an_inline_body_inlines_its_own_calls_from_compiled_bodies() {
+    assert_like_kotlinc(&[("lib.kt", NESTED_LIBRARY), ("main.kt", NESTED_MAIN)]);
+}
+
+#[test]
+fn an_inline_body_inlining_its_own_calls_runs() {
+    common::expect_box_ok_files_with_stdlib(
+        &[("lib.kt", NESTED_LIBRARY), ("main.kt", NESTED_CHAIN_MAIN)],
+        "Nested",
+    );
+}
+
+// A body with a `try` inlined over a caller operand is bracketed for FixStack, and inside the
+// bracket it runs over an empty stack: a literal it expands is bracketed again only for operands
+// of its own, so a literal that always throws leaves no bracket open.
+const DIVERGING_LITERAL_LIBRARY: &str = r#"inline fun catchAll(x: String, block: () -> Unit): String {
+    try {
+        block()
+    } catch (e: Throwable) {
+    }
+    return x
+}
+
+inline fun throwIt(msg: String) {
+    throw Exception(msg)
+}
+
+inline fun bar(x: String): String = x + catchAll("") { throwIt("oops!") }
+"#;
+
+const DIVERGING_LITERAL_MAIN: &str = r#"fun direct(x: String): String = x + catchAll("") { throwIt("oops!") }
+
+fun box(): String = direct("OK")
+"#;
+
+// Through another inline body (`bar`) the literal's locals are not yet named as kotlinc names them
+// (`msg$iv$iv`, `$i$a$-catchAll-LibKt$bar$1$iv`), so that shape only runs.
+const DIVERGING_LITERAL_NESTED_MAIN: &str = r#"fun box(): String = bar("OK")
+"#;
+
+#[test]
+fn a_diverging_literal_inside_a_bracketed_body_is_inlined_like_kotlinc() {
+    assert_like_kotlinc(&[
+        ("lib.kt", DIVERGING_LITERAL_LIBRARY),
+        ("main.kt", DIVERGING_LITERAL_MAIN),
+    ]);
+}
+
+#[test]
+fn a_diverging_literal_inside_a_bracketed_body_runs() {
+    for main in [DIVERGING_LITERAL_MAIN, DIVERGING_LITERAL_NESTED_MAIN] {
+        common::expect_box_ok_files_with_stdlib(
+            &[("lib.kt", DIVERGING_LITERAL_LIBRARY), ("main.kt", main)],
+            "DivergingLiteral",
+        );
+    }
+}

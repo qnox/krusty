@@ -1858,6 +1858,10 @@ pub struct FirBody {
     /// this once; common lowering copies it without consulting declaration headers or types.
     inline_parameter_modifiers: Vec<crate::types::InlineParameterModifier>,
     inline_expansion_modes: Vec<crate::types::InlineExpansionMode>,
+    /// The bound values of the parameters whose inline expansion mode is `Splice`, published as
+    /// each parameter is bound. The contract above is in physical order and also lists context
+    /// receivers that bind no value, so it does not pair positionally with `parameters`.
+    spliced_inline_parameters: Vec<LocalValueId>,
     parameters: Vec<FirValueParameter>,
     default_values: Vec<FirDefaultValue>,
     captures: Vec<FirCapture>,
@@ -1921,6 +1925,7 @@ impl FirBody {
             type_parameters: Box::default(),
             inline_parameter_modifiers: Vec::new(),
             inline_expansion_modes: Vec::new(),
+            spliced_inline_parameters: Vec::new(),
             parameters: Vec::new(),
             default_values: Vec::new(),
             captures: Vec::new(),
@@ -2178,6 +2183,15 @@ impl FirBody {
             &self.inline_parameter_modifiers,
             &self.inline_expansion_modes,
         )
+    }
+
+    pub(crate) fn add_spliced_inline_parameter(&mut self, value: LocalValueId) {
+        self.spliced_inline_parameters.push(value);
+    }
+
+    /// The bound values of this body's `Splice`-mode inline parameters.
+    pub(crate) fn spliced_inline_parameters(&self) -> &[LocalValueId] {
+        &self.spliced_inline_parameters
     }
 
     pub fn add_default_value(&mut self, default: FirDefaultValue) {
@@ -2839,6 +2853,7 @@ impl FirBody {
                 * std::mem::size_of::<crate::types::InlineParameterModifier>()
             + self.inline_expansion_modes.len()
                 * std::mem::size_of::<crate::types::InlineExpansionMode>()
+            + self.spliced_inline_parameters.len() * std::mem::size_of::<LocalValueId>()
             + self
                 .property_delegate
                 .as_ref()
