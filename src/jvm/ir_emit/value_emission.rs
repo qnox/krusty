@@ -228,7 +228,10 @@ impl super::Emitter<'_> {
                 let (desc, use_accessor, base_parameter_count, source_parameter_count) =
                     if let Some(d) = ctor_desc {
                         debug_assert!(default_parameters.is_empty());
-                        (d.clone(), false, args.len(), args.len())
+                        // Every parameter of a verbatim descriptor is a supplied operand; the
+                        // descriptor, not the argument count, says how many there are.
+                        let parameters = self.constructor_physical_params(e, d).len();
+                        (d.clone(), false, parameters, parameters)
                     } else {
                         let mut field_tys: Vec<Ty> = match ctor_params {
                             Some(ps) => jvm_tys(ps),
@@ -285,20 +288,37 @@ impl super::Emitter<'_> {
                                 .expect("too many constructor parameters"),
                         )
                 };
+                // The parameter slot each supplied argument fills. A construction supplying a
+                // different number of arguments is malformed IR: refuse it before `new`, as a call
+                // refuses a descriptor it cannot fill, rather than drop or invent an operand.
+                let supplied_slots = physical_params
+                    .iter()
+                    .copied()
+                    .take(base_parameter_count)
+                    .enumerate()
+                    .filter(|&(parameter, _)| !omitted_parameter(parameter))
+                    .map(|(_, physical)| physical)
+                    .collect::<Vec<_>>();
+                if let Err(mismatch) = super::call_operands::DescriptorArityMismatch::check(
+                    None,
+                    args.len(),
+                    supplied_slots.len(),
+                ) {
+                    self.bail_descriptor_arity(&mismatch, self.value_ty(e), code);
+                    return;
+                }
                 if args.iter().any(|&a| self.spills_operand_prefix(a)) {
                     // An argument that enters a handler, suspends, or leaves for a loop target can't
                     // run with `[new, dup]` on the stack. Evaluate all args into temps first (clean
                     // stack), then build. An ordinary branch keeps them, as kotlinc does. Each
                     // supplied argument is evaluated against the parameter slot it fills.
-                    let supplied_slots = physical_params
-                        .iter()
-                        .copied()
-                        .take(base_parameter_count)
-                        .enumerate()
-                        .filter(|&(parameter, _)| !omitted_parameter(parameter))
-                        .map(|(_, physical)| physical)
-                        .collect::<Vec<_>>();
-                    let temps = self.spill_operands_at_slots(&args, &supplied_slots, code);
+                    let temps = match self.spill_operands_at_slots(&args, &supplied_slots, code) {
+                        Ok(temps) => temps,
+                        Err(mismatch) => {
+                            self.bail_descriptor_arity(&mismatch, self.value_ty(e), code);
+                            return;
+                        }
+                    };
                     crate::jvm::reified_anonymous::guard_reified_construction(
                         self.ir, self.cw, code, *internal,
                     );

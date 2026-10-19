@@ -2,6 +2,7 @@
 //! representation adapter each consumer applies as an operand lands.
 
 use super::backend_temporaries::TemporaryLease;
+use super::call_operands::DescriptorArityMismatch;
 use super::*;
 
 /// Whether a sequence's consumer materializes each operand at its own slot type.
@@ -190,6 +191,9 @@ impl Emitter<'_> {
 
     /// [`Self::emit_operands_adapted`] for a consumer whose physical slot for each operand is
     /// `slots[i]`, so a reference slot reads an erased scalar result without unboxing it first.
+    ///
+    /// Every operand must have its slot. A count that disagrees is malformed IR, refused before
+    /// anything is pushed rather than emitted against a guessed slot.
     pub(super) fn emit_operands_at_slots<F>(
         &mut self,
         default_plan: Option<(
@@ -200,10 +204,13 @@ impl Emitter<'_> {
         slots: &[Ty],
         code: &mut CodeBuilder,
         adapt: F,
-    ) where
+    ) -> Result<(), DescriptorArityMismatch>
+    where
         F: FnMut(&mut Self, Ty, &mut CodeBuilder),
     {
+        DescriptorArityMismatch::check(None, ops.len(), slots.len())?;
         self.sequence_operands(default_plan, ops, code, OperandUse::Slots(slots), adapt);
+        Ok(())
     }
 
     /// Push operands into reference-comparison slots, preserving a box already returned through an
@@ -267,14 +274,16 @@ impl Emitter<'_> {
     /// physical slot `slots[i]` as [`Self::emit_operands_at_slots`] would push it. For a consumer
     /// that must evaluate its operands on a clean stack before it can place them (a construction's
     /// `new; dup`); the caller loads, adapts, and releases them with
-    /// [`Self::release_operand_spills`].
+    /// [`Self::release_operand_spills`]. The same arity contract: a missing slot is refused before
+    /// anything is evaluated.
     pub(super) fn spill_operands_at_slots(
         &mut self,
         ops: &[u32],
         slots: &[Ty],
         code: &mut CodeBuilder,
-    ) -> Vec<(u16, Ty, TemporaryLease)> {
-        self.spill_sequenced_operands(ops, OperandUse::Slots(slots), code)
+    ) -> Result<Vec<(u16, Ty, TemporaryLease)>, DescriptorArityMismatch> {
+        DescriptorArityMismatch::check(None, ops.len(), slots.len())?;
+        Ok(self.spill_sequenced_operands(ops, OperandUse::Slots(slots), code))
     }
 
     fn spill_sequenced_operands(
@@ -302,10 +311,16 @@ impl Emitter<'_> {
     ) -> Ty {
         match operand_use {
             OperandUse::Materialized => self.emit_consumed_operand(o, code),
-            OperandUse::Slots(slots) => slots
-                .get(operand_index)
-                .and_then(|&slot| self.emit_erased_scalar_box(o, slot, code))
-                .unwrap_or_else(|| self.emit_consumed_operand(o, code)),
+            OperandUse::Slots(slots) => {
+                // The entry points refuse a slot count that disagrees with the operands, so every
+                // operand has its slot. Only an operand that is not an erased scalar result bound
+                // for a reference slot takes the ordinary materialization.
+                let slot = slots[operand_index];
+                match self.emit_erased_scalar_box(o, slot, code) {
+                    Some(erased) => erased,
+                    None => self.emit_consumed_operand(o, code),
+                }
+            }
             OperandUse::ReferenceComparison => match self.erased_scalar_result(o) {
                 Some((source, slot)) => {
                     self.emit_value(source, code);

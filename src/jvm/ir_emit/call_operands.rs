@@ -64,7 +64,7 @@ impl std::fmt::Display for JvmCallableIdentity {
 }
 
 impl DescriptorArityMismatch {
-    fn check(
+    pub(super) fn check(
         target: Option<VirtualCallTarget<'_>>,
         supplied: usize,
         physical: usize,
@@ -364,8 +364,7 @@ impl Emitter<'_> {
                     this.adapt_physical_operand_for(expression, source, target, code);
                 }
             },
-        );
-        Ok(())
+        )
     }
 
     pub(super) fn emit_descriptor_virtual_operands(
@@ -431,8 +430,7 @@ impl Emitter<'_> {
                 );
             }
             index += 1;
-        });
-        Ok(())
+        })
     }
 }
 
@@ -599,6 +597,49 @@ mod tests {
         });
         let (emitted, bail) = emit_single_call(&mut ir, call);
         assert!(!emitted, "a refused call must not produce a class file");
+        assert_eq!(bail.as_deref(), Some("call arity mismatch"));
+    }
+
+    /// A construction against a verbatim descriptor, supplying `supplied` null operands.
+    fn construction(ir: &mut IrFile, supplied: usize) -> u32 {
+        let args = (0..supplied)
+            .map(|_| ir.add_expr(IrExpr::Const(IrConst::Null)))
+            .collect();
+        ir.add_expr(IrExpr::New {
+            internal: crate::types::type_name("sample/Holder"),
+            args,
+            ctor_params: None,
+            ctor_desc: Some("(Ljava/lang/Object;Ljava/lang/Object;)V".into()),
+            external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
+        })
+    }
+
+    /// A construction with an operand its constructor has no slot for is refused before `new`,
+    /// rather than evaluating the extra operand and leaving it out of the invocation.
+    #[test]
+    fn a_construction_past_its_constructor_parameters_is_refused_not_emitted() {
+        let mut ir = IrFile::default();
+        let call = construction(&mut ir, 3);
+        let (emitted, bail) = emit_single_call(&mut ir, call);
+        assert!(
+            !emitted,
+            "a refused construction must not produce a class file"
+        );
+        assert_eq!(bail.as_deref(), Some("call arity mismatch"));
+    }
+
+    /// And one short of them: the descriptor, not the supplied count, fixes the slots to fill.
+    #[test]
+    fn a_construction_short_of_its_constructor_parameters_is_refused_not_emitted() {
+        let mut ir = IrFile::default();
+        let call = construction(&mut ir, 1);
+        let (emitted, bail) = emit_single_call(&mut ir, call);
+        assert!(
+            !emitted,
+            "a refused construction must not produce a class file"
+        );
         assert_eq!(bail.as_deref(), Some("call arity mismatch"));
     }
 }
