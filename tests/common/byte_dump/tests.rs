@@ -712,6 +712,29 @@ fn a_fragment_sources_flag_keeps_the_fragment_and_hashes_the_source() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A list of values, an empty fragment name, and values naming no file (a malformed value, a
+/// missing path) key the recording too: files by content, everything else literally.
+#[test]
+fn a_fragment_sources_list_hashes_files_and_keeps_other_values_literal() {
+    let root = temp_root("fragment-src-list");
+    std::fs::create_dir_all(&root).unwrap();
+    let file = root.join("First.kt");
+    std::fs::write(&file, "class A\n").unwrap();
+    let hashed =
+        normalize_invocation_flag(&format!("-Xfragment-sources=main:{}", file.display())).unwrap();
+    let hash = hashed.strip_prefix("-Xfragment-sources=main:").unwrap();
+    assert_eq!(
+        normalize_invocation_flag(&format!(
+            "-Xfragment-sources=bad,other:x,,:{},main:{}",
+            file.display(),
+            file.display()
+        ))
+        .unwrap(),
+        format!("-Xfragment-sources=bad,other:x,,:{hash},main:{hash}")
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn a_friend_paths_flag_fingerprints_output_directories_not_their_paths() {
     let root = temp_root("friend-paths");

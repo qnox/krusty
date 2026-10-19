@@ -14206,7 +14206,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   fragment (`passed <value>, but fragment … is not specified in -Xfragments`), then each unlisted free argument (`source '<arg>' does not belong to any
   module`), exiting 1 before writing anything. krusty reproduces these as configuration errors.
   A name declared twice (`-Xfragments=main,main`, or `-Xfragments=main` repeated) is one
-  fragment. More than one distinct fragment (a common/platform hierarchy, with
+  fragment, and the empty name is a fragment. Each distinct `-Xfragment-sources` value and free
+  spelling is checked once, in first-seen order (`bad,bad` is one diagnostic, `,` one empty
+  value). More than one distinct fragment (a common/platform hierarchy, with
   `-Xfragment-refines`) is refused.
   (`tests/fragment_arguments_e2e.rs` compares exit code, complete stderr and the output tree with
   kotlinc; `crates/krusty-cli/src/cli/fragments.rs` unit tests.)

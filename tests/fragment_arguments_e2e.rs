@@ -140,6 +140,42 @@ fn a_source_outside_every_fragment_is_kotlincs_configuration_error() {
     assert_eq!(compiled.krusty, compiled.kotlinc);
 }
 
+/// kotlinc reports each repeated `-Xfragment-sources` value and each repeated free spelling once,
+/// in first-seen order; `-Xfragment-sources=,` is one empty value.
+#[test]
+fn repeated_values_are_reported_once_as_kotlinc_does() {
+    let compiled = compile(|first, second| {
+        vec![
+            "-Xfragments=main".to_string(),
+            "-Xfragment-sources=bad,bad,other:x,other:x".to_string(),
+            "-Xfragment-sources=,".to_string(),
+            format!("-Xfragment-sources=main:{second}"),
+            first.to_string(),
+        ]
+    });
+    let (code, stderr, output) = &compiled.kotlinc;
+    assert_eq!(*code, 1, "kotlinc");
+    assert_eq!(stderr.lines().count(), 4, "kotlinc: {stderr}");
+    assert!(output.is_empty(), "kotlinc wrote {output:?}");
+    assert_eq!(compiled.krusty, compiled.kotlinc);
+}
+
+/// The empty name is a fragment: `-Xfragments=` with `-Xfragment-sources=:<file>` compiles.
+#[test]
+fn the_empty_fragment_name_compiles_as_kotlinc_does() {
+    let compiled = compile(|first, second| {
+        vec![
+            "-Xfragments=".to_string(),
+            format!("-Xfragment-sources=:{first}"),
+            format!("-Xfragment-sources=:{second}"),
+        ]
+    });
+    let (code, stderr, output) = &compiled.kotlinc;
+    assert_eq!((*code, stderr.as_str()), (0, ""), "kotlinc");
+    assert_eq!(output.len(), 4, "kotlinc: {output:?}");
+    assert_eq!(compiled.krusty, compiled.kotlinc);
+}
+
 #[test]
 fn more_than_one_fragment_is_refused() {
     let compiled = compile(|first, second| {
