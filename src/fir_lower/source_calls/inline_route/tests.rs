@@ -95,6 +95,9 @@ inline fun forwards(f: () -> Unit) { inner { f() } }
 
 inline fun forwardsDeeper(f: () -> Unit) { inner { inner { f() } } }
 
+context(_: String)
+inline fun forwardsInContext(f: () -> Unit) { inner { f() } }
+
 inline fun ownLiteral(f: () -> Unit) {
     inner { println("own") }
     f()
@@ -105,6 +108,7 @@ inline fun notInlined(noinline f: () -> Unit) { inner { f() } }
 fun box(): String {
     forwards {}
     forwardsDeeper {}
+    with("context") { forwardsInContext {} }
     ownLiteral {}
     notInlined {}
     return "OK"
@@ -115,6 +119,7 @@ fun box(): String {
 // which it reaches only through expanded bodies: a literal reading one, at any depth, keeps its
 // call expanded (`InlineParameterInLiteral`). A literal of the function's own, or one reading a
 // `noinline` parameter (a value the template keeps), leaves the call to the compiled-body inliner.
+// An anonymous context parameter binds no value, and the parameters after it are still recognized.
 #[test]
 fn literals_reading_an_inline_parameter_keep_their_call_expanded_in_the_template() {
     let ir = lowered_for_compiled_bodies(INLINE_PARAMETER_LITERALS);
@@ -122,8 +127,10 @@ fn literals_reading_an_inline_parameter_keep_their_call_expanded_in_the_template
     let named = |names: &[&str], wanted: &str| names.contains(&wanted);
     assert!(named(&expanded, "forwards"), "{expanded:?}");
     assert!(named(&expanded, "forwardsDeeper"), "{expanded:?}");
+    assert!(named(&expanded, "forwardsInContext"), "{expanded:?}");
     assert!(!named(&compiled, "forwards"), "{compiled:?}");
     assert!(!named(&compiled, "forwardsDeeper"), "{compiled:?}");
+    assert!(!named(&compiled, "forwardsInContext"), "{compiled:?}");
     assert!(named(&compiled, "ownLiteral"), "{compiled:?}");
     assert!(named(&compiled, "notInlined"), "{compiled:?}");
 }

@@ -12,7 +12,7 @@ use crate::fir::{
 };
 use crate::fx_hash::HashSet;
 use crate::ir::{ExprId, FunId, IrExpr, SameModuleInlining};
-use crate::types::{InlineExpansionMode, InlineParameterModifier, Ty, Visibility};
+use crate::types::{InlineParameterModifier, Ty, Visibility};
 
 #[cfg(test)]
 mod tests;
@@ -288,19 +288,10 @@ pub(in super::super) struct InlineParameterValues {
 }
 
 impl InlineParameterValues {
-    /// The splice-mode value parameters of an inline function's `body`. Its published contract
-    /// lists each value parameter in order, and the extension receiver as the one `Receiver`.
+    /// The splice-mode value parameters of an inline function's `body`, as checking bound them.
     pub(in super::super) fn of_inline_function(body: &FirBody) -> Self {
-        let (_, modes) = body.inline_parameter_contract();
-        let own = modes
-            .iter()
-            .filter(|mode| **mode != InlineExpansionMode::Receiver)
-            .zip(body.parameters())
-            .filter(|(mode, _)| **mode == InlineExpansionMode::Splice)
-            .map(|(_, parameter)| parameter.value)
-            .collect();
         Self {
-            own,
+            own: body.spliced_inline_parameters().iter().copied().collect(),
             captured: HashSet::default(),
         }
     }

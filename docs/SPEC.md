@@ -5179,7 +5179,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that leaves its body by a non-local `return`, `break` or `continue`, and, in an inline function,
   none that reads one of that function's inline parameters at any depth (`InlineParameterInLiteral`):
   a caller that expands the function's template splices its own literal for that parameter, which
-  reaches a literal only through an expanded body, never through one the backend inlines. Every other call is
+  reaches a literal only through an expanded body, never through one the backend inlines. Checking
+  publishes the values it binds for the function's splice-mode parameters, so an anonymous context
+  parameter, which binds none, does not shift the parameters after it. Every other call is
   expanded in IR for a named reason. The JVM compiles each such callee once per emission pass, alone, into a writer of
   its declaring class and source file, and the inliner reads that body as it reads a dependency's.
   A callee whose body inlines another same-module callee is compiled after it, as kotlinc compiles
