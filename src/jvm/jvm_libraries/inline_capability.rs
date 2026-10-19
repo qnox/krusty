@@ -21,6 +21,12 @@ pub(super) fn property_accessor_inline(bytecode_public: bool) -> InlineKind {
     InlineKind::from_flags(!bytecode_public, !bytecode_public)
 }
 
+/// A property getter's inline-ness: the metadata `inline` flag of its accessor word, which a
+/// public getter alone can carry, and the non-public accessor rule above.
+pub(super) fn property_getter_inline(declared_inline: bool, bytecode_public: bool) -> InlineKind {
+    InlineKind::from_flags(declared_inline || !bytecode_public, !bytecode_public)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -37,5 +43,13 @@ mod tests {
     #[test]
     fn reified_flag_without_inline_does_not_invent_an_inline_declaration() {
         assert_eq!(metadata_inline(false, true, true), InlineKind::None);
+    }
+
+    #[test]
+    fn a_getter_is_inline_by_its_metadata_flag_or_its_hidden_method() {
+        assert_eq!(property_getter_inline(false, true), InlineKind::None);
+        assert_eq!(property_getter_inline(true, true), InlineKind::CanInline);
+        assert_eq!(property_getter_inline(false, false), InlineKind::MustInline);
+        assert_eq!(property_getter_inline(true, false), InlineKind::MustInline);
     }
 }
