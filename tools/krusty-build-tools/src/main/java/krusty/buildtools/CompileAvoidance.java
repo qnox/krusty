@@ -29,9 +29,14 @@ import java.util.stream.Stream;
  *   <li>a file such as a jar, by its contents.</li>
  * </ul>
  *
- * Any other path an argument names (a JDK home, for instance) enters by its spelling only. The
- * output directory must also be exactly as the last run left it. When anything cannot be read,
- * the compilation runs.
+ * Any other path an argument names (a JDK home, for instance) enters by its spelling only. An
+ * argument file ({@code @file}) can name further entries, so a compilation with one always runs.
+ * The output directory's contents must also be exactly as the last run left them. When anything
+ * cannot be read, the compilation runs.
+ *
+ * <p>Both memos below live as long as the build tool's process: within one build an entry whose
+ * size and modification time are unchanged is not read again, but the state compared across
+ * builds is always derived from contents.
  */
 final class CompileAvoidance {
     private static final String STATE_FILE = "krusty-compilation.state";
@@ -51,8 +56,11 @@ final class CompileAvoidance {
         this.destination = destination;
     }
 
-    /** The inputs' fingerprint, or empty when one of them cannot be read. */
+    /** The inputs' fingerprint, or empty when one of them cannot be read or an argument file is used. */
     Optional<String> inputs(Path binary, String kotlinVersion, List<String> arguments, List<Path> sources) {
+        if (arguments.stream().anyMatch(argument -> argument.startsWith("@"))) {
+            return Optional.empty();
+        }
         try {
             Fingerprint fingerprint = new Fingerprint();
             fingerprint.add("format", FORMAT);
@@ -91,7 +99,7 @@ final class CompileAvoidance {
                 return false;
             }
             List<String> state = Files.readAllLines(stateFile, StandardCharsets.UTF_8);
-            return state.equals(List.of(inputs, treeState(destination)));
+            return state.equals(List.of(inputs, treeContents(destination)));
         } catch (IOException e) {
             return false;
         }
@@ -110,7 +118,7 @@ final class CompileAvoidance {
     void record(String inputs) {
         try {
             Files.createDirectories(stateFile.getParent());
-            Files.write(stateFile, List.of(inputs, treeState(destination)), StandardCharsets.UTF_8);
+            Files.write(stateFile, List.of(inputs, treeContents(destination)), StandardCharsets.UTF_8);
         } catch (IOException e) {
             forget();
         }
@@ -216,17 +224,17 @@ final class CompileAvoidance {
         return HexFormat.of().formatHex(digest.digest());
     }
 
-    /** Every file's relative path and contents digest. */
+    /** Every file's relative path and contents digest, read afresh. */
     private static String treeContents(Path root) throws IOException {
         Fingerprint fingerprint = new Fingerprint();
         for (Path file : files(root)) {
             fingerprint.add("file", root.relativize(file).toString());
-            fingerprint.add("contents", fileDigest(file));
+            fingerprint.add("contents", contentsDigest(file));
         }
         return fingerprint.finish();
     }
 
-    /** Every file's relative path, size and modification time: cheap evidence the tree is unchanged. */
+    /** Every file's relative path, size and modification time: the in-process memo key of a tree. */
     private static String treeState(Path root) throws IOException {
         Fingerprint fingerprint = new Fingerprint();
         for (Path file : files(root)) {

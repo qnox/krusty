@@ -116,7 +116,11 @@ final class JvmCompilation implements JvmCompilationOperation, KrustyOperation<C
             avoidance.forget();
         }
         CompilationResult result = compile(binary, logger);
-        if (result == CompilationResult.COMPILATION_SUCCESS && inputs != null) {
+        // Recorded only when the inputs still match: one edited while krusty ran may or may not be
+        // in its output, so that output must not stand for either version.
+        if (result == CompilationResult.COMPILATION_SUCCESS && inputs != null && inputs.equals(avoidance
+            .inputs(binary, configuration.kotlinVersion(), arguments.toArgumentStrings(), sources)
+            .orElse(null))) {
             avoidance.record(inputs);
         }
         return result;
