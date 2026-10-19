@@ -1688,6 +1688,10 @@ pub struct File {
     /// `<…>` span in one retained value prevents compaction from remapping semantic input while
     /// leaving diagnostic syntax under an obsolete `ExprId`. Absent means no explicit arguments.
     pub call_type_args: crate::fx_hash::HashMap<u32, CallTypeArguments>,
+    /// Outermost parentheses written around an expression (`((pkg)).f()` keeps the outer pair),
+    /// keyed by the wrapped expression. Parentheses leave no AST node, but a parenthesized package
+    /// qualifier is reported at them.
+    pub parenthesized_expression_spans: crate::fx_hash::HashMap<u32, Span>,
     /// Qualifier expressions whose explicit type-argument list ends the postfix expression
     /// (`val u = Unit<Any>`). The selected classifier identity, not this syntax marker, decides
     /// whether the access is a deprecated or invalid singleton value access.
@@ -1948,6 +1952,16 @@ pub struct File {
     /// Release-owned warning formatting for class-literal diagnostics whose declaration-specific
     /// leading message is known only after classifier selection.
     pub useless_type_arguments_warning_format: Option<crate::features::DeprecationWarningFormat>,
+    /// `+ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier`: an annotated or
+    /// type-argument segment cannot name a package, and a parenthesized package qualifier is an
+    /// error rather than a deprecation warning.
+    pub forbid_package_qualifier_forms: bool,
+    /// Exact warning text for a parenthesized package qualifier before that transition; `None` for
+    /// a release without it.
+    pub parenthesized_package_qualifier_warning: Option<String>,
+    /// Exact warning text for type arguments on an earlier package segment before that
+    /// transition; `None` for a release without it.
+    pub package_qualifier_type_arguments_warning: Option<String>,
     /// Exact per-compilation warning text for the useless-type-argument transition.
     pub type_arguments_not_allowed_warning: Option<String>,
     /// Exact warning text when the same transition applies to a standalone singleton value.
@@ -2022,6 +2036,7 @@ impl File {
         self.trailing_call_close_paren_ends = Default::default();
         self.infix_calls = Default::default();
         self.call_type_args = Default::default();
+        self.parenthesized_expression_spans = Default::default();
         self.annotation_qualifier_arguments = Default::default();
         self.standalone_type_argument_qualifiers = Default::default();
         self.anonymous_object_classes = Default::default();

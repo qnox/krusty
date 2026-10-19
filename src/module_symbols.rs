@@ -73,9 +73,15 @@ impl<'a> ModuleSymbols<'a> {
         name: &str,
     ) -> Option<crate::libraries::AliasExpansion> {
         let identity = match namespace {
-            SymbolNamespace::Package(package) | SymbolNamespace::Classifier(package) => {
+            SymbolNamespace::Package(package) => {
                 crate::types::existing_type_name_child(package, name)?
             }
+            // A nested alias is a declaration of its owner's classifier namespace, keyed by the
+            // owner's identity: a local or hoisted owner's runtime name is not the alias's path.
+            SymbolNamespace::Classifier(owner) => *self
+                .syms
+                .nested_type_aliases
+                .get(&(owner, name.to_owned()))?,
         };
         self.type_alias_binding(identity)
     }
