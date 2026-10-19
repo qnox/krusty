@@ -214,6 +214,38 @@ fn nested_enum_operations_are_inlined_like_kotlinc() {
     );
 }
 
+/// An enum nested in a class of the module being compiled: its accessor is published by its
+/// semantic identity `Holder.Mode`, and the call names its JVM class `Holder$Mode`.
+const SOURCE_NESTED_MAIN: &str = r#"import lib.listed
+
+class Holder {
+    enum class Mode { ON, OFF }
+}
+
+fun modes(): List<Holder.Mode> = listed<Holder.Mode>()
+
+fun box(): String = if (modes() == listOf(Holder.Mode.ON, Holder.Mode.OFF)) "OK" else "modes"
+"#;
+
+#[test]
+fn a_source_nested_enum_s_entries_run() {
+    let Some(output) = common::expect_box_run_against_kotlinc(LIB, SOURCE_NESTED_MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+#[test]
+fn a_source_nested_enum_s_entries_are_inlined_like_kotlinc() {
+    let library = common::kotlinc_library(LIB).expect("reference kotlinc is provisioned");
+    common::assert_classes_identical_to_kotlinc_against(
+        "SourceNestedEnum",
+        SOURCE_NESTED_MAIN,
+        &["SourceNestedEnumKt"],
+        &[library],
+    );
+}
+
 /// A copy of the class-output directory `library` in which `enum_class` has the shape of an enum
 /// compiled before `EnumEntries`: its `@Metadata` class flags without `HAS_ENUM_ENTRIES` (bit 15)
 /// and no `getEntries()` method. Both compilers then decide from that declaration that the enum

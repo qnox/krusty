@@ -165,11 +165,7 @@ impl EnumEntriesReads for CallEnumEntries<'_> {
             return None;
         }
         if let Some(accessor) = &declaration.enum_entries_accessor {
-            return Some(EnumEntriesRead::Accessor {
-                owner: accessor.owner.render(),
-                name: accessor.name.to_string(),
-                descriptor: accessor.descriptor.to_string(),
-            });
+            return Some(accessor_call(accessor));
         }
         let index = self
             .run
@@ -183,6 +179,17 @@ impl EnumEntriesReads for CallEnumEntries<'_> {
     }
 }
 
+/// The static call of a published entries accessor. Its owner is a semantic classifier identity
+/// (`pkg/Outer.Inner` for a nested enum), so the instruction names the JVM binary class
+/// (`pkg/Outer$Inner`) the classfile boundary spells for it.
+fn accessor_call(accessor: &crate::backend::EnumEntriesAccessor) -> EnumEntriesRead {
+    EnumEntriesRead::Accessor {
+        owner: crate::jvm::names::owned_classfile_internal_name(accessor.owner),
+        name: accessor.name.to_string(),
+        descriptor: accessor.descriptor.to_string(),
+    }
+}
+
 impl<'a> Emitter<'a> {
     /// How an inline call emitted into this class reads enum entries; `commit` false only probes.
     pub(super) fn call_enum_entries(&self, commit: bool) -> CallEnumEntries<'_> {
@@ -192,5 +199,27 @@ impl<'a> Emitter<'a> {
             owner: &self.owner,
             commit,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_nested_enum_s_accessor_is_called_on_its_jvm_binary_class() {
+        let accessor = crate::backend::EnumEntriesAccessor {
+            owner: crate::types::type_name("entries_probe/Outer.Inner"),
+            name: "getEntries".into(),
+            descriptor: "()Lkotlin/enums/EnumEntries;".into(),
+        };
+        assert_eq!(
+            accessor_call(&accessor),
+            EnumEntriesRead::Accessor {
+                owner: "entries_probe/Outer$Inner".to_owned(),
+                name: "getEntries".to_owned(),
+                descriptor: "()Lkotlin/enums/EnumEntries;".to_owned(),
+            }
+        );
     }
 }
