@@ -1227,6 +1227,7 @@ pub(crate) struct ReplayedClasses {
 struct Invocation {
     out: PathBuf,
     sources: Vec<String>,
+    fragment_sources: Vec<(String, String)>,
     fingerprint: u128,
     legacy_fingerprint: u128,
     label: String,
@@ -1284,7 +1285,11 @@ fn replay_class_dump_with_policy(
             }
             continue;
         }
-        replayed.stderr = materialize_diagnostic_sources(&replayed.stderr, &invocation.sources);
+        replayed.stderr = materialize_diagnostic_sources(
+            &replayed.stderr,
+            &invocation.sources,
+            &invocation.fragment_sources,
+        );
         return Some(replayed);
     }
     if saw_incomplete && !compile_missing {
@@ -1389,11 +1394,32 @@ fn split_replay(mut files: BTreeMap<String, Vec<u8>>) -> ReplayedClasses {
 /// recorded in one process may replay in another directory. Diagnostics are part of that dump and
 /// must follow the same location-independent identity instead of leaking the recorder's path. A
 /// source path may lead a located diagnostic or appear inside a configuration-error sentence.
-fn materialize_diagnostic_sources(stderr: &str, sources: &[String]) -> String {
+fn materialize_diagnostic_sources(
+    stderr: &str,
+    sources: &[String],
+    fragment_sources: &[(String, String)],
+) -> String {
     let mut by_basename = BTreeMap::<String, Option<&str>>::new();
     for source in sources {
         let entry = by_basename.entry(diagnostic_source_basename(source).to_string());
         match entry {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(Some(source));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if entry.get().is_some_and(|existing| existing != source) {
+                    entry.insert(None);
+                }
+            }
+        }
+    }
+    let mut by_fragment_and_basename = BTreeMap::<String, BTreeMap<String, Option<&str>>>::new();
+    for (fragment, source) in fragment_sources {
+        let by_basename = by_fragment_and_basename
+            .entry(fragment.clone())
+            .or_default();
+        let basename = diagnostic_source_basename(source).to_string();
+        match by_basename.entry(basename) {
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(Some(source));
             }
@@ -1410,22 +1436,32 @@ fn materialize_diagnostic_sources(stderr: &str, sources: &[String]) -> String {
         let (body, newline) = line
             .strip_suffix('\n')
             .map_or((line, ""), |body| (body, "\n"));
-        let mut ranges = fragment_diagnostic_source_ranges(body);
+        let mut ranges = diagnostic_source_ranges(body);
         if let Some(recorded) = located_diagnostic_source(body) {
-            ranges.push(0..recorded.len());
+            ranges.push(DiagnosticSourceRange::Free(0..recorded.len()));
         }
-        ranges.sort_unstable_by_key(|range| (range.start, range.end));
+        ranges.sort_unstable_by_key(|source| {
+            let range = source.range();
+            (range.start, range.end)
+        });
 
         let mut cursor = 0;
-        for range in ranges {
+        for diagnostic_source in ranges {
+            let range = diagnostic_source.range();
             if range.start < cursor {
                 continue;
             }
             let recorded = &body[range.clone()];
-            let Some(source) = by_basename
-                .get(diagnostic_source_basename(recorded))
-                .and_then(|source| *source)
-            else {
+            let source = match &diagnostic_source {
+                DiagnosticSourceRange::Free(_) => by_basename
+                    .get(diagnostic_source_basename(recorded))
+                    .and_then(|source| *source),
+                DiagnosticSourceRange::Fragment { fragment, .. } => by_fragment_and_basename
+                    .get(*fragment)
+                    .and_then(|sources| sources.get(diagnostic_source_basename(recorded)))
+                    .and_then(|source| *source),
+            };
+            let Some(source) = source else {
                 continue;
             };
             materialized.push_str(&body[cursor..range.start]);
@@ -1442,7 +1478,23 @@ fn diagnostic_source_basename(source: &str) -> &str {
     source.rsplit(['/', '\\']).next().unwrap_or(source)
 }
 
-fn fragment_diagnostic_source_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
+enum DiagnosticSourceRange<'a> {
+    Free(std::ops::Range<usize>),
+    Fragment {
+        fragment: &'a str,
+        range: std::ops::Range<usize>,
+    },
+}
+
+impl DiagnosticSourceRange<'_> {
+    fn range(&self) -> &std::ops::Range<usize> {
+        match self {
+            Self::Free(range) | Self::Fragment { range, .. } => range,
+        }
+    }
+}
+
+fn diagnostic_source_ranges(line: &str) -> Vec<DiagnosticSourceRange<'_>> {
     const PASSED: &str = "error: passed ";
     const FRAGMENT: &str = ", but fragment `";
     const SOURCE_FILE: &str = " of source file ";
@@ -1456,13 +1508,19 @@ fn fragment_diagnostic_source_ranges(line: &str) -> Vec<std::ops::Range<usize>> 
             let argument = &rest[..argument_end];
             if let Some((fragment, source)) = argument.split_once(':') {
                 let start = PASSED.len() + fragment.len() + 1;
-                ranges.push(start..start + source.len());
-            }
-        }
-        if let Some(marker) = line.find(SOURCE_FILE) {
-            let start = marker + SOURCE_FILE.len();
-            if let Some(end) = line[start..].find(NOT_SPECIFIED) {
-                ranges.push(start..start + end);
+                ranges.push(DiagnosticSourceRange::Fragment {
+                    fragment,
+                    range: start..start + source.len(),
+                });
+                if let Some(marker) = line.find(SOURCE_FILE) {
+                    let start = marker + SOURCE_FILE.len();
+                    if let Some(end) = line[start..].find(NOT_SPECIFIED) {
+                        ranges.push(DiagnosticSourceRange::Fragment {
+                            fragment,
+                            range: start..start + end,
+                        });
+                    }
+                }
             }
         }
     }
@@ -1470,7 +1528,9 @@ fn fragment_diagnostic_source_ranges(line: &str) -> Vec<std::ops::Range<usize>> 
         .strip_prefix(SOURCE)
         .and_then(|rest| rest.strip_suffix(NO_MODULE))
     {
-        ranges.push(SOURCE.len()..SOURCE.len() + path.len());
+        ranges.push(DiagnosticSourceRange::Free(
+            SOURCE.len()..SOURCE.len() + path.len(),
+        ));
     }
     ranges
 }
@@ -1505,6 +1565,7 @@ fn exit_code(bytes: &[u8]) -> i32 {
 fn parse_invocation(args: &[String]) -> Result<Option<Invocation>, String> {
     let mut out = None;
     let mut source_args = Vec::new();
+    let mut fragment_source_args = Vec::new();
     let mut sources: Vec<(String, Vec<u8>)> = Vec::new();
     let mut classpath = Vec::new();
     let mut flags = Vec::new();
@@ -1540,6 +1601,15 @@ fn parse_invocation(args: &[String]) -> Result<Option<Invocation>, String> {
             index += 1;
             continue;
         }
+        if let Some(value) = arg.strip_prefix("-Xfragment-sources=") {
+            for part in value.split(',') {
+                if let Some((fragment, source)) = part.split_once(':') {
+                    if Path::new(source).is_file() {
+                        fragment_source_args.push((fragment.to_string(), source.to_string()));
+                    }
+                }
+            }
+        }
         flags.push(normalize_invocation_flag(arg)?);
         index += 1;
     }
@@ -1569,6 +1639,7 @@ fn parse_invocation(args: &[String]) -> Result<Option<Invocation>, String> {
     Ok(Some(Invocation {
         out,
         sources: source_args,
+        fragment_sources: fragment_source_args,
         fingerprint: fingerprint_of(&classpath),
         legacy_fingerprint: fingerprint_of(&legacy_classpath),
         label,

@@ -376,30 +376,38 @@ fn a_published_miss_stores_the_live_invocation_and_a_private_miss_does_not() {
 #[test]
 fn replayed_diagnostics_use_the_current_source_spelling() {
     let root = temp_root("diagnostic-source");
-    let recorded = root.join("recorded/F.kt");
-    let current = root.join("current/F.kt");
-    for source in [&recorded, &current] {
+    let recorded_free = root.join("recorded/Main.kt");
+    let current_free = root.join("current/Main.kt");
+    let recorded_fragment = root.join("recorded/fragment/Fragment.kt");
+    let current_fragment = root.join("current/fragment/Fragment.kt");
+    for (source, text) in [
+        (&recorded_free, "fun main() = 1\n"),
+        (&current_free, "fun main() = 1\n"),
+        (&recorded_fragment, "expect fun platform(): Int\n"),
+        (&current_fragment, "expect fun platform(): Int\n"),
+    ] {
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
-        std::fs::write(source, "fun f() = 1\n").unwrap();
+        std::fs::write(source, text).unwrap();
     }
     let out = root.join("out");
-    let args = |source: &Path| {
+    let args = |free_source: &Path, fragment_source: &Path| {
         vec![
             "-d".to_string(),
             out.display().to_string(),
-            source.display().to_string(),
+            format!("-Xfragment-sources=other:{}", fragment_source.display()),
+            free_source.display().to_string(),
         ]
     };
     let recorded_stderr = format!(
-        "error: warnings found and -Werror specified\nerror: passed other:{}, but fragment `other` of source file {} is not specified in -Xfragments\nerror: source '{}' does not belong to any module\n{}:1:1: warning: visibility required\nfun f() = 1\n^^^^^\n",
-        recorded.display(),
-        recorded.display(),
-        recorded.display(),
-        recorded.display(),
+        "error: warnings found and -Werror specified\nerror: passed other:{}, but fragment `other` of source file {} is not specified in -Xfragments\nerror: source '{}' does not belong to any module\n{}:1:1: warning: visibility required\nfun main() = 1\n^^^^^\n",
+        recorded_fragment.display(),
+        recorded_fragment.display(),
+        recorded_free.display(),
+        recorded_free.display(),
     );
     let release = version("2.4.20");
     remember_live_compile(
-        &args(&recorded),
+        &args(&recorded_free, &recorded_fragment),
         1,
         &recorded_stderr,
         &root,
@@ -407,18 +415,23 @@ fn replayed_diagnostics_use_the_current_source_spelling() {
         true,
     );
 
-    let replayed =
-        replay_class_dump_with_policy(&args(&current), &root, Some(release), false, false)
-            .expect("identical source bytes replay");
+    let replayed = replay_class_dump_with_policy(
+        &args(&current_free, &current_fragment),
+        &root,
+        Some(release),
+        false,
+        false,
+    )
+    .expect("identical source bytes replay");
     assert_eq!(replayed.code, 1);
     assert_eq!(
         replayed.stderr,
         format!(
-            "error: warnings found and -Werror specified\nerror: passed other:{}, but fragment `other` of source file {} is not specified in -Xfragments\nerror: source '{}' does not belong to any module\n{}:1:1: warning: visibility required\nfun f() = 1\n^^^^^\n",
-            current.display(),
-            current.display(),
-            current.display(),
-            current.display(),
+            "error: warnings found and -Werror specified\nerror: passed other:{}, but fragment `other` of source file {} is not specified in -Xfragments\nerror: source '{}' does not belong to any module\n{}:1:1: warning: visibility required\nfun main() = 1\n^^^^^\n",
+            current_fragment.display(),
+            current_fragment.display(),
+            current_free.display(),
+            current_free.display(),
         )
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -427,22 +440,31 @@ fn replayed_diagnostics_use_the_current_source_spelling() {
 #[test]
 fn only_fragment_configuration_source_paths_are_materialized() {
     let recorded = "/old/root/F.kt";
-    let current = r"C:\new root\F.kt".to_string();
+    let current_free = r"C:\free root\F.kt".to_string();
+    let current_fragment = r"C:\fragment root\F.kt".to_string();
     let stderr = format!(
-        "error: passed common:{recorded}, but fragment `common` of source file {recorded} is not specified in -Xfragments\nerror: source '{recorded}' does not belong to any module\nprintln(\"{recorded}\")\n"
+        "error: passed common:{recorded}, but fragment `common` of source file {recorded} is not specified in -Xfragments\nerror: source '{recorded}' does not belong to any module\n{recorded}:1:1: error: failure\nprintln(\"{recorded}\")\n"
     );
     assert_eq!(
-        materialize_diagnostic_sources(&stderr, std::slice::from_ref(&current)),
+        materialize_diagnostic_sources(
+            &stderr,
+            std::slice::from_ref(&current_free),
+            &[("common".to_string(), current_fragment.clone())],
+        ),
         format!(
-            "error: passed common:{current}, but fragment `common` of source file {current} is not specified in -Xfragments\nerror: source '{current}' does not belong to any module\nprintln(\"{recorded}\")\n"
+            "error: passed common:{current_fragment}, but fragment `common` of source file {current_fragment} is not specified in -Xfragments\nerror: source '{current_free}' does not belong to any module\n{current_free}:1:1: error: failure\nprintln(\"{recorded}\")\n"
         )
     );
 
     let duplicate_sources = vec!["/current/a/F.kt".to_string(), "/current/b/F.kt".to_string()];
+    let duplicate_fragment_sources = vec![
+        ("common".to_string(), "/fragment/a/F.kt".to_string()),
+        ("common".to_string(), "/fragment/b/F.kt".to_string()),
+    ];
     assert_eq!(
-        materialize_diagnostic_sources(&stderr, &duplicate_sources),
+        materialize_diagnostic_sources(&stderr, &duplicate_sources, &duplicate_fragment_sources),
         stderr,
-        "an ambiguous basename is never guessed"
+        "a basename ambiguous within its source role is never guessed"
     );
 }
 
