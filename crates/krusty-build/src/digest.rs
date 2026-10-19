@@ -26,6 +26,8 @@
 
 use std::fmt;
 
+mod lanes;
+
 /// A 256-bit content digest.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Digest([u8; 32]);
@@ -116,40 +118,64 @@ pub fn digest_bytes(bytes: &[u8]) -> Digest {
 }
 
 /// The size of the pieces [`digest_file`] digests independently.
-const FILE_CHUNK: u64 = 4 << 20;
+const FILE_CHUNK: u64 = 1 << 20;
 
-/// Digest a file's contents: its length and the digest of each consecutive [`FILE_CHUNK`]-sized
+/// Digest a file's contents: its length and the SHA-256 of each consecutive [`FILE_CHUNK`]-sized
 /// piece, absorbed in order. The pieces are independent, so a large file (a JDK image, the
-/// compiler binary) is digested on every core rather than one, and no file is ever held whole.
-/// Every byte still enters the digest; only the way the bytes are grouped differs from a plain
-/// SHA-256 of the file.
+/// compiler binary) is digested on every core, several pieces per core at once, and no file is
+/// ever held whole. Every byte still enters the digest; only the way the bytes are grouped differs
+/// from a plain SHA-256 of the file.
 pub fn digest_file(path: &std::path::Path) -> std::io::Result<Digest> {
     let file = std::fs::File::open(path)?;
     let length = file.metadata()?.len();
     let chunks = length.div_ceil(FILE_CHUNK).max(1) as usize;
+    let groups = chunks.div_ceil(lanes::LANES);
     let workers = std::thread::available_parallelism()
         .map_or(1, usize::from)
-        .min(chunks);
+        .min(groups);
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let digest_chunks = || -> std::io::Result<Vec<(usize, Digest)>> {
+    let digest_groups = || -> std::io::Result<Vec<(usize, Digest)>> {
         let mut digests = Vec::new();
-        let mut buffer = vec![0; FILE_CHUNK as usize];
+        let mut buffer = vec![0; lanes::LANES * FILE_CHUNK as usize];
         loop {
-            let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if index >= chunks {
+            let group = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if group >= groups {
                 return Ok(digests);
             }
-            let start = index as u64 * FILE_CHUNK;
-            let size = (length - start.min(length)).min(FILE_CHUNK) as usize;
+            let first = group * lanes::LANES;
+            let start = first as u64 * FILE_CHUNK;
+            let size = (length - start).min(buffer.len() as u64) as usize;
             read_exact_at(&file, &mut buffer[..size], start)?;
-            digests.push((index, digest_bytes(&buffer[..size])));
+            let pieces: Vec<&[u8]> = buffer[..size].chunks(FILE_CHUNK as usize).collect();
+            let (full, partial) = match pieces.last() {
+                Some(last) if last.len() < FILE_CHUNK as usize => {
+                    (&pieces[..pieces.len() - 1], Some(*last))
+                }
+                _ => (&pieces[..], None),
+            };
+            let full_digests = if full.is_empty() {
+                Vec::new()
+            } else {
+                lanes::digest_equal(full)
+            };
+            let piece_digests = full_digests
+                .into_iter()
+                .map(Digest)
+                .chain(partial.map(digest_bytes))
+                // An empty file is one empty piece.
+                .chain((size == 0).then(|| digest_bytes(&[])));
+            digests.extend(
+                piece_digests
+                    .enumerate()
+                    .map(|(offset, digest)| (first + offset, digest)),
+            );
         }
     };
     let mut digests = if workers <= 1 {
-        digest_chunks()?
+        digest_groups()?
     } else {
         std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..workers).map(|_| scope.spawn(digest_chunks)).collect();
+            let handles: Vec<_> = (0..workers).map(|_| scope.spawn(digest_groups)).collect();
             handles
                 .into_iter()
                 .map(|handle| handle.join().expect("a digest worker panicked"))
@@ -208,6 +234,10 @@ const K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
+const IV: [u32; 8] = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+];
+
 #[derive(Clone)]
 struct Sha256 {
     state: [u32; 8],
@@ -219,10 +249,7 @@ struct Sha256 {
 impl Default for Sha256 {
     fn default() -> Self {
         Self {
-            state: [
-                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-                0x5be0cd19,
-            ],
+            state: IV,
             buffer: [0; 64],
             buffered: 0,
             length: 0,
@@ -443,14 +470,16 @@ mod tests {
     #[test]
     fn a_file_digest_covers_every_chunk() {
         let path = std::env::temp_dir().join(format!("krusty-digest-file-{}", std::process::id()));
-        let mut contents = vec![7u8; 2 * super::FILE_CHUNK as usize + 1];
+        let chunk = super::FILE_CHUNK as usize;
+        // More pieces than one pass digests at once, and a partial last piece.
+        let mut contents = vec![7u8; (super::lanes::LANES + 1) * chunk + 1];
         let digest = |contents: &[u8]| {
             std::fs::write(&path, contents).expect("write the file");
             super::digest_file(&path).expect("digest the file")
         };
         let base = digest(&contents);
         assert_eq!(digest(&contents), base);
-        for index in [0, super::FILE_CHUNK as usize, contents.len() - 1] {
+        for index in [0, chunk, super::lanes::LANES * chunk, contents.len() - 1] {
             contents[index] ^= 1;
             assert_ne!(digest(&contents), base, "byte {index}");
             contents[index] ^= 1;
