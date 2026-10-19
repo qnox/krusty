@@ -7,7 +7,7 @@
 
 use super::super::BodyLowering;
 use crate::fir::{CallableId, DeclarationFlags, DeclarationId};
-use crate::ir::{ExprId, FunId, IrEnclosure, IrExpr, SameModuleInlining};
+use crate::ir::{ExprId, FunId, IrExpr, SameModuleInlining};
 use crate::types::{InlineParameterModifier, Ty, Visibility};
 
 /// How one call to a same-module inline function is realized.
@@ -27,13 +27,10 @@ pub(in super::super) enum ExpansionReason {
     /// The call is in an inline function's body (or in a callable nested in one), which is itself
     /// a template some caller may expand.
     InlineCaller,
-    /// The call is in a lambda or a local function.
-    LocalCallable,
     /// The call is in a default-argument expression.
     DefaultArgument,
-    /// The call is not in a named function's body (an initializer, a constructor, an accessor).
-    NotInFunctionBody,
-    /// The call is in a suspend function, whose state machine is built around expanded bodies.
+    /// The call is in a suspend function or a suspend lambda, or in a lambda written in one,
+    /// whose state machine is built around expanded bodies.
     SuspendCaller,
     /// The callee is a suspend function.
     SuspendCallee,
@@ -173,20 +170,15 @@ impl BodyLowering<'_> {
         if self.inline_declaration.is_some() {
             return Some(ExpansionReason::InlineCaller);
         }
-        if self.declaration_lambda.is_some() || !self.control_path.is_empty() {
-            return Some(ExpansionReason::LocalCallable);
-        }
         if self.in_default_argument {
             return Some(ExpansionReason::DefaultArgument);
         }
-        if !matches!(self.expansion_enclosure, Some(IrEnclosure::Function(_))) {
-            return Some(ExpansionReason::NotInFunctionBody);
-        }
         let caller = DeclarationId::from_raw(self.body.owner().raw());
-        let suspend = self
-            .index
-            .declaration_header(caller)
-            .is_some_and(|header| header.flags.has(DeclarationFlags::SUSPEND));
+        let suspend = self.suspend_context
+            || self
+                .index
+                .declaration_header(caller)
+                .is_some_and(|header| header.flags.has(DeclarationFlags::SUSPEND));
         suspend.then_some(ExpansionReason::SuspendCaller)
     }
 

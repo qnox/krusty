@@ -522,3 +522,49 @@ fn a_private_same_file_callee_inlined_from_the_compiled_body_runs() {
         "OK"
     );
 }
+
+// kotlinc inlines a same-module call from the callee's compiled body wherever the call is written:
+// in a lambda's method, a local function, a top-level or member property initializer, an `init`
+// block, a constructor and an accessor.
+const CALLERS_OUTSIDE_FUNCTION_BODIES: &str = r#"inline fun twice(x: Int): Int = x * 2
+
+val top = twice(21)
+
+class Holder(val seed: Int) {
+    val doubled = twice(seed)
+    var log = ""
+
+    init {
+        log += twice(seed)
+    }
+
+    constructor() : this(twice(2)) {
+        log += "secondary"
+    }
+
+    val next: Int
+        get() = twice(seed) + 1
+}
+
+fun box(): String {
+    val lambda = { y: Int -> twice(y) }
+    fun local(z: Int) = twice(z) + 1
+    val holder = Holder(3)
+    if (top != 42 || lambda(4) != 8 || local(5) != 11) return "fail"
+    if (holder.doubled != 6 || holder.next != 7 || holder.log != "6") return holder.log
+    return if (Holder().log == "8secondary") "OK" else "secondary"
+}
+"#;
+
+#[test]
+fn calls_outside_named_function_bodies_are_inlined_from_the_compiled_body() {
+    assert_like_kotlinc(&[("main.kt", CALLERS_OUTSIDE_FUNCTION_BODIES)]);
+}
+
+#[test]
+fn calls_outside_named_function_bodies_run() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(CALLERS_OUTSIDE_FUNCTION_BODIES, "Callers"),
+        "OK"
+    );
+}

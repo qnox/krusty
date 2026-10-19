@@ -5170,8 +5170,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   member, which its class compiles) with no suspend function-typed parameter or receiver, no
   `crossinline` parameter, and a template without lambdas, callable references, local classes,
   nested expansions or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
-  called with every argument from a named, non-suspend, non-inline function body (not a lambda,
-  local function, default argument, initializer or accessor), and with no literal lambda argument
+  called with every argument from any body outside a suspend state machine and an inline
+  function's template: a named function, a lambda's method, a local function, a property
+  initializer, an `init` block, a constructor or an accessor, as kotlinc inlines wherever the call
+  is written. A suspend function or suspend lambda, and a lambda written in one (whose body may be
+  spliced into its state machine), keep their calls expanded (`SuspendCaller`), as does a default
+  argument. With no literal lambda argument
   that leaves its body by a non-local `return`, `break` or `continue`. Every other call is
   expanded in IR for a named reason. The JVM compiles each such callee once per emission pass, alone, into a writer of
   its declaring class and source file, and the inliner reads that body as it reads a dependency's;
@@ -5185,8 +5189,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   emission claims them, so a body compiled alone for the call site cannot know that class's
   numbering, and such a callee is expanded in IR instead (`EnumSwitchInBody`, its own table in the
   caller's class) rather than failing the emission. Tests: `tests/inline_same_module_bytes_e2e.rs`
-  (same-file and cross-file calls, a value-class argument, and a call on an inlined result, against
-  kotlinc's bytes, and a run; same-file and cross-file enum switches, including a nullable subject,
+  (same-file and cross-file calls, a value-class argument, a call on an inlined result, and calls in
+  a lambda, a local function, initializers, an `init` block, a secondary constructor and a getter,
+  against kotlinc's bytes, and a run; same-file and cross-file enum switches, including a nullable subject,
   as runs).
 
 - **A same-module inline call with function arguments is inlined from the compiled body too.**
