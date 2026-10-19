@@ -148,7 +148,7 @@ impl Checker<'_> {
         }) || self
             .postponed_diagnostics
             .contains_error_in_span(self.file_index, call_span);
-        let Some(formal) = signature
+        let Some((index, formal)) = signature
             .formals
             .iter()
             .enumerate()
@@ -197,12 +197,19 @@ impl Checker<'_> {
                                 || lexical_formals.iter().any(|lexical| lexical == bound)
                         })
             })
-            .map(|(_, formal)| formal)
         else {
             return false;
         };
+        // With written type arguments, only a `_` placeholder leaves a formal open; kotlinc
+        // reports it at that placeholder rather than at the callee.
+        let span = self
+            .file
+            .call_type_args
+            .get(&call.0)
+            .and_then(|syntax| syntax.arguments.get(index))
+            .map_or_else(|| self.call_callee_name_span(call), |argument| argument.span);
         self.diags.error(
-            self.call_callee_name_span(call),
+            span,
             format!(
                 "cannot infer type for type parameter '{}'. Specify it explicitly.",
                 crate::types::type_parameter_source_name(formal)

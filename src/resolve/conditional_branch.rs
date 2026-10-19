@@ -348,17 +348,14 @@ impl Checker<'_> {
     }
 
     /// Whether a conditional branch's selected call still has a result formal without a recorded
-    /// solution while its checked result substituted a provisional completion for it. That
-    /// completion (`D<Any?>` for an unconstrained `D(1)`) is not a constraint supplied by source.
+    /// solution. Its checked result is only a provisional completion (`D<Any?>` for an
+    /// unconstrained `D(1)`, or a symbolic `C<Comparable<T>>`), not a constraint supplied by source.
     pub(super) fn branch_result_is_open(&self, branch: ExprId) -> bool {
         let call = branch_value_expression(self.file, branch);
-        let actual = self.expr_types[call.0 as usize];
         self.unbound_call_result_signature(call)
             .is_some_and(|signature| {
                 signature.formals.iter().enumerate().any(|(index, formal)| {
-                    let formal = std::slice::from_ref(formal);
-                    crate::types::ty_mentions_param(signature.ret, formal)
-                        && !crate::types::ty_mentions_param(actual, formal)
+                    crate::types::ty_mentions_param(signature.ret, std::slice::from_ref(formal))
                         && self.recorded_solution_is_absent(call, index)
                 })
             })

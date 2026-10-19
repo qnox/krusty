@@ -255,11 +255,16 @@ impl Checker<'_> {
         &self,
         expression: ExprId,
     ) -> Option<std::borrow::Cow<'_, GenericSig>> {
+        // Written type arguments fix every formal, except that a `_` placeholder (`P<String, _>`)
+        // leaves its formal to inference: the selected record then has no solution for it.
         if self
             .file
             .call_type_args
             .get(&expression.0)
             .is_some_and(|arguments| !arguments.is_empty())
+            && self
+                .selected_call_type_arguments(expression)
+                .is_none_or(|arguments| arguments.iter().all(Option::is_some))
         {
             return None;
         }

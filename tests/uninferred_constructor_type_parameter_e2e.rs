@@ -140,6 +140,23 @@ fun box(): String {
     );
 }
 
+/// A `_` placeholder leaves its formal to inference; kotlinc reports an uninferable one at the
+/// placeholder. A sibling also completes a constructor whose provisional bound is still symbolic
+/// (`C<Comparable<T>>`).
+#[test]
+fn a_placeholder_and_a_symbolic_bound_branch_follow_kotlinc() {
+    let main = "class P<A, B>(val a: A)\n\
+        class C<T : Comparable<T>>(val n: Int)\n\
+        fun box(flag: Boolean): String {\n\
+            val p = P<String, _>(\"x\")\n\
+            if (flag) C(1) else C<String>(2)\n\
+            val c = if (flag) C(3) else C<String>(4)\n\
+            return \"OK\"\n\
+        }\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", main)], &[]);
+    common::expect_identical_rejection(&result, "placeholder and symbolic bound branch");
+}
+
 /// A sibling that is not the constructor's class constrains nothing: kotlinc reports the open
 /// constructor branch alone.
 #[test]
