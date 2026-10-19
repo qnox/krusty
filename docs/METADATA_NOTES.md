@@ -269,6 +269,13 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `toString-impl`) and the generated list keeps only the members source left out. The visit order is the order strings enter `d2` and the
   order within each protobuf list (`function`, `property`, `enum_entry`); the lists themselves stay
   in field-number order. Test: `tests/metadata_member_order_e2e.rs`.
+- A boxed value class (`+FullValueClasses`, kotlinc 2.4.20) is still a value class in metadata:
+  `IS_VALUE` (class flag bit 13) with no inline underlying property. A final one's generated
+  `equals`/`hashCode`/`toString` follow its declarations as SYNTHESIZED records with the data-class
+  flags (`0x101d6`, `0x100d6`). An abstract or sealed one has no generated bodies, yet declares each
+  `Any` member its source does not override as an open DECLARATION (`0x10116`, `0x10016`) without a
+  `JvmMethodSignature` and without a JVM method. Test:
+  `tests/metadata_value_class_synthesized_members_e2e.rs`.
 - Captured type parameters (kotlinc 2.4.20): a local or anonymous class refers to a type parameter
   of an enclosing declaration by id alone (`Type.type_parameter`). Ids come from kotlinc's
   per-declaration interner: the class's own parameters first, then each captured one on first use,

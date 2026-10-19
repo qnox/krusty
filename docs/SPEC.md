@@ -1841,6 +1841,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   ordinary class does. `Unit` and `Nothing` are legal constructor properties: their JVM value
   positions are `kotlin.Unit` and `java.lang.Void`, not `void`. A local-variable descriptor follows
   the same rule, including a type parameter that erases to `Unit`. `tests/full_value_classes_e2e.rs`.
+- **`@Metadata` of a boxed value class is a value class's.** kotlinc 2.4.20 sets `IS_VALUE` on a
+  `+FullValueClasses` class as on a `@JvmInline` one, but writes no inline underlying property. A
+  final one lists, after its declared functions, each `equals`/`hashCode`/`toString` it generates as
+  a SYNTHESIZED function record (the data-class flags: `0x101d6` for `equals`, `0x100d6` for the
+  other two). An abstract or sealed one declares each `Any` member its source does not override as
+  an open DECLARATION (`0x10116`/`0x10016`) that has no JVM method; a regular class extending it
+  declares none. krusty records the final class's generated members as common IR roles where it
+  synthesizes their bodies, and the metadata writer reads the roles; the abstract class's
+  declarations come from the class kind and its `Any` overrides, as an inline value class's do.
+  `tests/metadata_value_class_synthesized_members_e2e.rs`, which also pins the `@JvmInline` forms.
 - `==` on `String` (Kotlin `==` = `.equals`, `===` = reference). Structural
   `==`/`!=` on reference operands compiles to `kotlin/jvm/internal/Intrinsics.areEqual(Object,Object)Z`
   — the exact helper kotlinc's JVM backend emits (`backend.jvm/.../intrinsics/Equals.kt`), so the

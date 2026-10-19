@@ -47,10 +47,14 @@ pub(crate) enum FunctionOrigin {
     Declared(crate::fir::CallableId),
     /// An `interface by` forwarder the class generates for its delegate.
     Delegation(u32),
-    /// A data class's generated member.
+    /// A data class's generated member, or a boxed value class's generated `equals`/`hashCode`/
+    /// `toString`.
     DataMember(IrDataClassMemberRole),
-    /// A value class's generated `equals`/`hashCode`/`toString`.
+    /// An inline value class's generated `equals`/`hashCode`/`toString`.
     ValueClassAny(IrValueClassAnyMember),
+    /// An abstract or sealed boxed value class's open `equals`/`hashCode`/`toString`, which no
+    /// target realizes.
+    OpenValueClassAny(IrValueClassAnyMember),
     /// A function a compiler plugin generated and published.
     Generated(u32),
 }
@@ -788,6 +792,14 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         let mut declared = declared_method_list;
         declared.extend(value_class_functions(ir, c));
         declared
+    } else if c.is_full_value {
+        let mut declared = declared_method_list;
+        if c.is_abstract || c.is_sealed {
+            declared.extend(open_value_class_functions(ir, c));
+        } else {
+            declared.extend(structural_functions(ir, c));
+        }
+        declared
     } else {
         declared_method_list
     };
@@ -1195,8 +1207,15 @@ fn data_class_functions(
             FunctionOrigin::DataMember(IrDataClassMemberRole::Copy),
         ));
     }
-    // `equals`, `hashCode` and `toString` override `Any`'s and have no source of their own.
-    let overrides = [
+    methods.extend(structural_functions(ir, c));
+    Some(methods)
+}
+
+/// The `equals`, `hashCode` and `toString` common lowering generated for a data class or a boxed
+/// value class, in kotlinc's order. They override `Any`'s and have no source of their own; a
+/// member the source declares has no generated role and stays a declared function.
+fn structural_functions(ir: &IrFile, c: &IrClass) -> Vec<(FnMeta, FunctionOrigin)> {
+    [
         (IrDataClassMemberRole::Equals, IrValueClassAnyMember::Equals),
         (
             IrDataClassMemberRole::HashCode,
@@ -1206,19 +1225,39 @@ fn data_class_functions(
             IrDataClassMemberRole::ToString,
             IrValueClassAnyMember::ToString,
         ),
-    ];
-    for (role, member) in overrides {
-        if ir.data_class_member(owner, role).is_none() {
-            continue;
-        }
-        methods.push((any_override(member), FunctionOrigin::DataMember(role)));
-    }
-    Some(methods)
+    ]
+    .into_iter()
+    .filter(|(role, _)| ir.data_class_member(c.fq_name_id(), *role).is_some())
+    .map(|(role, member)| (any_override(member), FunctionOrigin::DataMember(role)))
+    .collect()
 }
 
-/// The `equals`/`hashCode`/`toString` a value class generates, in kotlinc's order: each `Any`
-/// member its source does not override.
+/// The `equals`/`hashCode`/`toString` an inline value class generates, in kotlinc's order.
 fn value_class_functions(ir: &IrFile, c: &IrClass) -> Vec<(FnMeta, FunctionOrigin)> {
+    any_members_not_overridden(ir, c)
+        .map(|member| (any_override(member), FunctionOrigin::ValueClassAny(member)))
+        .collect()
+}
+
+/// The `equals`/`hashCode`/`toString` an abstract or sealed boxed value class declares, in
+/// kotlinc's order. Each is an open DECLARATION rather than a synthesized member: the class has no
+/// constructor properties to compare, so no target realizes a body, and its final value subclasses
+/// synthesize their own.
+fn open_value_class_functions(ir: &IrFile, c: &IrClass) -> Vec<(FnMeta, FunctionOrigin)> {
+    any_members_not_overridden(ir, c)
+        .map(|member| {
+            let mut record = any_override(member);
+            record.flags &= !crate::metadata::function_flags::MEMBER_KIND_MASK;
+            (record, FunctionOrigin::OpenValueClassAny(member))
+        })
+        .collect()
+}
+
+/// Each `Any` member, in kotlinc's order, that no function of `c` overrides.
+fn any_members_not_overridden<'a>(
+    ir: &IrFile,
+    c: &'a IrClass,
+) -> impl Iterator<Item = IrValueClassAnyMember> + 'a {
     let overridden = ir.any_member_overrides(c.fq_name_id());
     [
         IrValueClassAnyMember::Equals,
@@ -1226,13 +1265,11 @@ fn value_class_functions(ir: &IrFile, c: &IrClass) -> Vec<(FnMeta, FunctionOrigi
         IrValueClassAnyMember::ToString,
     ]
     .into_iter()
-    .filter(|member| {
+    .filter(move |member| {
         !c.methods
             .iter()
             .any(|function| overridden.get(function) == Some(member))
     })
-    .map(|member| (any_override(member), FunctionOrigin::ValueClassAny(member)))
-    .collect()
 }
 
 /// Add to each class's record the functions a target's compiler plugins published after the

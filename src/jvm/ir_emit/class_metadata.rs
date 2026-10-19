@@ -300,8 +300,11 @@ impl<'a> JvmClassRealization<'a> {
                 &self.local_classifiers,
             )
             .unwrap_or_default(),
-            // A data class's `equals`/`hashCode`/`toString` keep `Any`'s derivable signatures.
-            FunctionOrigin::DataMember(_) => JvmFunctionSignature::default(),
+            // A data or boxed value class's `equals`/`hashCode`/`toString` keep `Any`'s derivable
+            // signatures; an abstract value class's open ones have no method at all.
+            FunctionOrigin::DataMember(_) | FunctionOrigin::OpenValueClassAny(_) => {
+                JvmFunctionSignature::default()
+            }
             FunctionOrigin::ValueClassAny(member) => value_class_override_metadata::signature(
                 &crate::jvm::names::type_descriptor(c.fields[0].ty),
                 member,
