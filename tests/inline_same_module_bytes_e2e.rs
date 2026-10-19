@@ -462,8 +462,9 @@ fn a_callee_creating_a_reified_array_runs() {
 }
 
 // kotlinc marks each array a reified body creates of its parameter with `reifiedOperationMarker(0,
-// …)` before the `anewarray`, naming nested arrays with a `[` per level and a nullable element with
-// `?`; the inliner repoints it at the call-site class.
+// …)` before the `anewarray`, naming nested arrays with a `[` per level and a nullable element of
+// the created array with `?`, read before the levels are descended (an `Array<Array<T?>>` names
+// `[T`, an `Array<Array<T>?>` names `[T?`); the inliner repoints it at the call-site class.
 const REIFIED_ARRAY_LIBRARY: &str = r#"inline fun <reified T> two(a: T, b: T): Array<T> = arrayOf(a, b)
 
 inline fun <reified T> nulls(n: Int): Array<T?> = arrayOfNulls<T>(n)
@@ -471,6 +472,10 @@ inline fun <reified T> nulls(n: Int): Array<T?> = arrayOfNulls<T>(n)
 inline fun <reified T> filled(n: Int, x: T): Array<T> = Array<T>(n) { x }
 
 inline fun <reified T> rows(x: T): Array<Array<T>> = arrayOf(arrayOf(x), arrayOf(x, x))
+
+inline fun <reified T> nullableCells(x: T): Array<Array<T?>> = arrayOf(arrayOf<T?>(x, null))
+
+inline fun <reified T> nullableRows(x: T): Array<Array<T>?> = arrayOf<Array<T>?>(arrayOf(x), null)
 "#;
 
 const REIFIED_ARRAY_MAIN: &str = r#"fun box(): String {
@@ -478,7 +483,10 @@ const REIFIED_ARRAY_MAIN: &str = r#"fun box(): String {
     val empty: Array<String?> = nulls(2)
     val filled: Array<CharSequence> = filled(2, "K")
     val square: Array<Array<String>> = rows("O")
+    val cells: Array<Array<String?>> = nullableCells("K")
+    val sparse: Array<Array<String>?> = nullableRows("O")
     if (empty.size != 2 || filled[1] != "K") return "fail"
+    if (cells[0][1] != null || sparse[1] != null || sparse[0]!![0] != "O") return "nested"
     return square[1][1] + pair[1]
 }
 "#;

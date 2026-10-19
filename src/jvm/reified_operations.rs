@@ -56,8 +56,8 @@ fn parameter(ty: Ty, parameters: &HashMap<String, ReifiedParameter>) -> Option<&
 
 /// kotlinc's `extractReificationArgument` for the element type of an array a reified body creates:
 /// the reified parameter the element type reaches through nested arrays, with the marker argument
-/// that names it (`[` per array level, the source spelling, `?` when the element is marked
-/// nullable). `None` when the element is no reified parameter of this file, or reaches one only
+/// that names it (`[` per array level, the source spelling, `?` when the created array's own
+/// element is marked nullable, whatever the levels below it are). `None` when the element is no reified parameter of this file, or reaches one only
 /// through another classifier or a star projection.
 fn new_array_reification(
     array_type: Ty,
@@ -69,6 +69,8 @@ fn new_array_reification(
         element => Some(element),
     };
     let element = projected(array_type.non_null().array_elem()?)?;
+    // kotlinc reads the mark from the created array's element before descending its levels, so
+    // `Array<Array<T?>>` names `[T` and `Array<Array<T>?>` names `[T?`.
     let nullable = element.is_nullable();
     let mut depth = 0;
     let mut current = element;
