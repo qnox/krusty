@@ -630,14 +630,15 @@ jobs:
     steps: *conformance-steps
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
-  # check that is skipped counts as passing, so this job is always scheduled and fails itself unless
-  # core CI, the complete conformance matrix (including KLIB semantics), the plugin build, and the
-  # complete Gradle matrix succeeded. A failed shared build or version inventory skips a consumer,
-  # which fails this aggregate too.
+  # check that is skipped counts as passing, so this job runs after an ordinary upstream failure and
+  # fails itself unless core CI, the complete conformance matrix (including KLIB semantics), the
+  # plugin build, and the complete Gradle matrix succeeded. A failed shared build or version
+  # inventory skips a consumer, which fails this aggregate too. A superseded workflow cancellation
+  # skips the aggregate as well, instead of leaving a zombie job waiting for another runner.
   ci-and-conformance:
     name: ci-and-conformance
     needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: require every merge gate to succeed
