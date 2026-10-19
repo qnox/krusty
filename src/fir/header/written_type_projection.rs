@@ -123,6 +123,48 @@ impl HeaderSyntaxArena {
         self.source_spellings.get(&id).copied().unwrap_or(id)
     }
 
+    /// Whether this compact type tree contains a parser-recorded source-spelling projection.
+    ///
+    /// The relationship is queried by compact identity, before either tree is rendered. A nested
+    /// alias rewrite therefore remains visible even when the expanded and written classifiers
+    /// happen to share a source span or source name.
+    pub(crate) fn has_source_spelling_projection(&self, root: HeaderTypeId) -> bool {
+        fn visit(arena: &HeaderSyntaxArena, id: HeaderTypeId) -> bool {
+            if arena.source_spellings.contains_key(&id) {
+                return true;
+            }
+            let Some(ty) = arena.ty(id) else {
+                return false;
+            };
+            match ty.kind {
+                HeaderTypeKind::Classifier {
+                    detail,
+                    abbreviated_argument,
+                } => {
+                    arena.classifier_type(detail).is_some_and(|detail| {
+                        arena
+                            .type_operands(detail.arguments)
+                            .iter()
+                            .copied()
+                            .any(|argument| visit(arena, argument))
+                    }) || abbreviated_argument.is_some_and(|argument| visit(arena, argument))
+                }
+                HeaderTypeKind::Function {
+                    parameters, result, ..
+                } => {
+                    arena
+                        .type_operands(parameters)
+                        .iter()
+                        .copied()
+                        .any(|parameter| visit(arena, parameter))
+                        || result.is_some_and(|result| visit(arena, result))
+                }
+            }
+        }
+
+        visit(self, root)
+    }
+
     pub(crate) fn written_type_node(
         &self,
         id: HeaderTypeId,
@@ -265,5 +307,37 @@ mod tests {
             projected.arg.as_deref().map(|result| result.name.as_str()),
             Some("Unit")
         );
+        assert!(arena.has_source_spelling_projection(root));
+    }
+
+    #[test]
+    fn a_nested_source_spelling_projection_is_found_by_compact_identity() {
+        let span = crate::diag::Span::new(7, 13);
+        let mut arena = HeaderSyntaxArena::default();
+        let mut names = LookupNames::default();
+        let root = arena.add_type(
+            &TypeRef {
+                name: "List".to_owned(),
+                flags: TrFlags::default(),
+                arg: None,
+                targs: vec![leaf("String", span)],
+                span,
+                fun_params: Box::new([]),
+                fun_context_count: 0,
+                qualifier_arguments: Default::default(),
+            },
+            &mut names,
+        );
+        let child = match arena.ty(root).expect("root").kind {
+            HeaderTypeKind::Classifier { detail, .. } => {
+                let detail = arena.classifier_type(detail).expect("root detail");
+                arena.type_operands(detail.arguments)[0]
+            }
+            HeaderTypeKind::Function { .. } => panic!("classifier root"),
+        };
+        let written = arena.add_type(&leaf("Text", span), &mut names);
+        arena.source_spellings.insert(child, written);
+
+        assert!(arena.has_source_spelling_projection(root));
     }
 }

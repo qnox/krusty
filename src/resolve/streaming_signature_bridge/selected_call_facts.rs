@@ -10,11 +10,13 @@ use std::cell::RefCell;
 
 use crate::contracts::{Condition, Contract, Effect, ParamRef, ReturnsValue};
 use crate::fir::{OriginId, ResolvedTypeAbbreviation};
+use crate::resolve::selected_result_publication::CompactSelectedResultPublication;
 
 #[derive(Default)]
 pub(super) struct SelectedCallFacts {
     contracts: RefCell<HashMap<OriginId, SelectedCallContract>>,
     abbreviations: RefCell<HashMap<OriginId, ResolvedTypeAbbreviation>>,
+    publications: RefCell<HashMap<OriginId, CompactSelectedResultPublication>>,
 }
 
 struct SelectedCallContract {
@@ -106,5 +108,23 @@ impl SelectedCallFacts {
 
     pub(super) fn abbreviation(&self, origin: OriginId) -> Option<ResolvedTypeAbbreviation> {
         self.abbreviations.borrow().get(&origin).cloned()
+    }
+
+    /// A call is being selected again under refined expectations. Facts from the former winner
+    /// must not escape that selection transaction.
+    pub(super) fn forget_publication(&self, origin: OriginId) {
+        self.publications.borrow_mut().remove(&origin);
+    }
+
+    pub(super) fn record_publication(
+        &self,
+        origin: OriginId,
+        publication: CompactSelectedResultPublication,
+    ) {
+        self.publications.borrow_mut().insert(origin, publication);
+    }
+
+    pub(super) fn publication(&self, origin: OriginId) -> Option<CompactSelectedResultPublication> {
+        self.publications.borrow().get(&origin).cloned()
     }
 }

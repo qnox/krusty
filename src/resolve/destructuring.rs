@@ -159,7 +159,7 @@ impl Checker<'_> {
         is_var: bool,
     ) {
         let flow_identity = self.declare(scope, name, ty, is_var);
-        self.annotation_argument_locals.record(flow_identity);
+        self.local_properties.record(flow_identity, is_var);
     }
 
     fn destructure_component_target(

@@ -603,8 +603,15 @@ fn materialize_member_extension_property(
             ir.open_methods.insert(function);
         }
         ir.classes[class_id as usize].methods.push(function);
+        // A member-extension accessor's JVM method parameters include its extension receiver.
+        // Preserve that exact declaration shape even when only the enclosing class owns the type
+        // parameter (`class C<T> { val String.x: T }`): accessor synthesis does not pass through
+        // `attach_callable_generic_facts`, and erasure would otherwise lose the receiver-bearing
+        // generic `Signature`.
+        let signature = &ir.functions[function as usize];
+        ir.member_semantic_sigs
+            .insert(function, (signature.params.clone(), signature.ret));
         if !type_params.is_empty() {
-            let signature = &ir.functions[function as usize];
             ir.signatures.insert(
                 function,
                 crate::ir::IrGenericSig {
@@ -1414,6 +1421,13 @@ fn materialize_member_property(
     }
     let type_params = declaration_type_parameters(index, property.declaration);
     for function in getter.iter().chain(setter.iter()).copied() {
+        // Concrete accessors, like abstract and member-extension accessors, are synthesized from
+        // the property and never pass through callable generic-fact attachment. Preserve their
+        // common-IR semantic shape so an enclosing class type parameter survives erasure in the
+        // JVM Signature attribute (`class C<T> { val property: T }`).
+        let signature = &ir.functions[function as usize];
+        ir.member_semantic_sigs
+            .insert(function, (signature.params.clone(), signature.ret));
         attach_accessor_type_parameters(ir, function, &type_params);
     }
     let property_index = ir.classes[class_id as usize].properties.len() as u32;

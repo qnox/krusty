@@ -108,6 +108,7 @@ pub(in crate::resolve) fn spelling_of_ref_with(
         return Spelled {
             classifier_segment,
             definitely_non_null: spelled.definitely_non_null(),
+            use_site_definitely_non_null: spelled.definitely_non_null(),
             annotations,
             unsafe_variance: occurrence_unsafe_variance,
             ..Spelled::default()
@@ -165,6 +166,7 @@ pub(in crate::resolve) fn spelling_of_ref_with(
         return Spelled {
             classifier_segment,
             definitely_non_null: spelled.definitely_non_null(),
+            use_site_definitely_non_null: spelled.definitely_non_null(),
             alias: None,
             alias_args: Vec::new(),
             args,
@@ -197,6 +199,7 @@ pub(in crate::resolve) fn spelling_of_ref_with(
         return Spelled {
             classifier_segment,
             definitely_non_null: spelled.definitely_non_null(),
+            use_site_definitely_non_null: spelled.definitely_non_null(),
             alias: None,
             alias_args: Vec::new(),
             // Without an alias at this node the expanded type's arguments ARE the spelled ones,
@@ -243,6 +246,7 @@ pub(in crate::resolve) fn spelling_of_ref_with(
     Spelled {
         classifier_segment,
         definitely_non_null: spelled.definitely_non_null(),
+        use_site_definitely_non_null: spelled.definitely_non_null(),
         alias: Some(alias),
         alias_args,
         // The expansion's argument spellings come from TWO places. A right-hand side that spells an
@@ -259,6 +263,7 @@ pub(in crate::resolve) fn spelling_of_ref_with(
         expansion_annotations,
         unsafe_variance,
         parameter_name: None,
+        ..Spelled::default()
     }
 }
 
@@ -372,6 +377,8 @@ fn substituted_parameter_spelling(occurrence: &Spelled, argument: Spelled) -> Sp
     *expanded = inherited.chain(std::mem::take(expanded)).collect();
     spelling.unsafe_variance |= occurrence.unsafe_variance;
     spelling.definitely_non_null |= occurrence.definitely_non_null;
+    // The occurrence is part of the alias declaration's right-hand side. Only the substituted
+    // argument was written at this alias use, so its use-site provenance survives expansion.
     if occurrence.parameter_name.is_some() {
         spelling.parameter_name = occurrence.parameter_name.clone();
     }
@@ -454,6 +461,9 @@ fn substitute_expansion_spelling(
     Spelled {
         classifier_segment: None,
         definitely_non_null: spelling.definitely_non_null,
+        // Every fixed node here came from an alias right-hand side. Parameter substitutions return
+        // above and retain the actual argument's use-site provenance instead.
+        use_site_definitely_non_null: false,
         alias: spelling.alias,
         alias_args,
         args,
@@ -461,5 +471,51 @@ fn substitute_expansion_spelling(
         expansion_annotations: spelling.expansion_annotations.clone(),
         unsafe_variance: spelling.unsafe_variance,
         parameter_name: spelling.parameter_name.clone(),
+        flexible_upper_bound: spelling.flexible_upper_bound,
+        enhanced_nullability: spelling.enhanced_nullability,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alias_expansion_demotes_rhs_dnn_but_keeps_argument_dnn_at_the_use_site() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let expansion = Ty::array(Ty::ty_param("X", any));
+        let rhs = Spelled {
+            args: vec![Spelled {
+                definitely_non_null: true,
+                use_site_definitely_non_null: true,
+                ..Spelled::default()
+            }],
+            ..Spelled::default()
+        };
+        let formals = vec!["X".to_owned()];
+        let actual = Ty::ty_param("T", any);
+
+        let from_rhs = expansion_arg_spellings(
+            Some((&rhs, &formals, expansion)),
+            &[(actual, Spelled::default())],
+        );
+        assert!(from_rhs[0].definitely_non_null);
+        assert!(!from_rhs[0].use_site_definitely_non_null);
+
+        let written_argument = Spelled {
+            definitely_non_null: true,
+            use_site_definitely_non_null: true,
+            ..Spelled::default()
+        };
+        let plain_rhs = Spelled {
+            args: vec![Spelled::default()],
+            ..Spelled::default()
+        };
+        let from_argument = expansion_arg_spellings(
+            Some((&plain_rhs, &formals, expansion)),
+            &[(actual, written_argument)],
+        );
+        assert!(from_argument[0].definitely_non_null);
+        assert!(from_argument[0].use_site_definitely_non_null);
     }
 }

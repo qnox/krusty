@@ -15,7 +15,9 @@ use super::{
     KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError, KlibLibraries,
     KlibLibraryError,
 };
-use crate::metadata::klib_ir::{read_declaration_trees, KlibIrDecodeError};
+use crate::metadata::klib_ir::{
+    read_declaration_trees, read_inlinable_declaration_trees_where, KlibIrDecodeError,
+};
 
 /// One compiler input KLIB and the authority the compilation assigned to it.
 pub struct KlibLibraryInput {
@@ -308,12 +310,18 @@ impl<'a> OpenedKlibLibraries<'a> {
             .map_err(KlibLibrariesOpenError::Declaration)?;
         // Only a declaration metadata marks as defaulted has a default to read from the IR.
         let wanted = inventory.default_selection();
+        let inline_wanted = inventory.inline_body_selection();
         let mut defaults = ParameterDefaults::default();
         let mut body_libraries = Vec::new();
+        let mut inline_body_libraries = Vec::new();
         let mut body_provider_snapshots = Vec::new();
         for record in &records {
             let library = &record.input.path;
             let body_provider = body_provider_snapshot(record)?;
+            let manifest = record
+                .archive
+                .manifest()
+                .map_err(KlibLibrariesOpenError::Archive)?;
             // A metadata KLIB (`-Xmetadata-klib`) deliberately carries linkdata without an IR
             // channel. Its declaration-level default flags remain useful, but it publishes no
             // constant realization to attach. Once any IR entry exists, keep treating the channel
@@ -322,10 +330,6 @@ impl<'a> OpenedKlibLibraries<'a> {
                 // A metadata-only archive still owns its producer-declared dependency edges. Keep
                 // an empty graph node so body lookup can traverse through it to a reachable
                 // body-carrying provider without treating this archive itself as one.
-                let manifest = record
-                    .archive
-                    .manifest()
-                    .map_err(KlibLibrariesOpenError::Archive)?;
                 let body_library = KlibBodyLibrary::from_manifest(
                     &manifest,
                     crate::metadata::klib_ir::KlibIrModuleTrees::default(),
@@ -334,38 +338,83 @@ impl<'a> OpenedKlibLibraries<'a> {
                     library: library.to_path_buf(),
                 })?;
                 body_libraries.push(body_library);
+                let inline_library = KlibBodyLibrary::from_manifest(
+                    &manifest,
+                    crate::metadata::klib_ir::KlibIrModuleTrees::default(),
+                )
+                .ok_or_else(|| KlibLibrariesOpenError::MissingUniqueName {
+                    library: library.to_path_buf(),
+                })?;
+                inline_body_libraries.push(inline_library);
                 body_provider_snapshots.push((record.module.clone(), body_provider));
                 continue;
             }
-            let trees = read_declaration_trees(&record.archive).map_err(|error| {
-                KlibLibrariesOpenError::Declarations {
+            // Ordinary IR remains authoritative for defaults, intrinsic bodies and general body
+            // queries. Prepared-inline IR is decoded independently below: its declaration copies
+            // are not allowed to masquerade as the module's complete ordinary IR.
+            let main_trees = if record.archive.has_main_ir() {
+                Some(read_declaration_trees(&record.archive).map_err(|error| {
+                    KlibLibrariesOpenError::Declarations {
+                        library: library.to_path_buf(),
+                        error,
+                    }
+                })?)
+            } else {
+                None
+            };
+            if let Some(trees) = main_trees {
+                inventory.attach_ir_intrinsics(&record.module, record.intrinsic_platform, &trees);
+                defaults.add_library(
+                    &record.module,
+                    &trees,
+                    &wanted,
+                    record.compiler_builtin_owner,
+                );
+                let body_library =
+                    KlibBodyLibrary::from_manifest(&manifest, trees).ok_or_else(|| {
+                        KlibLibrariesOpenError::MissingUniqueName {
+                            library: library.to_path_buf(),
+                        }
+                    })?;
+                body_libraries.push(body_library);
+            } else {
+                let body_library = KlibBodyLibrary::from_manifest(
+                    &manifest,
+                    crate::metadata::klib_ir::KlibIrModuleTrees::default(),
+                )
+                .ok_or_else(|| KlibLibrariesOpenError::MissingUniqueName {
+                    library: library.to_path_buf(),
+                })?;
+                body_libraries.push(body_library);
+            }
+
+            // Kotlin's prepared component exclusively owns cross-module inline copies. Ordinary
+            // IR remains the complete module body/default channel above; absence of a prepared
+            // component means this library publishes no cross-module inline plan.
+            let inline_trees = if record.archive.has_inlinable_ir() {
+                read_inlinable_declaration_trees_where(&record.archive, |signature| {
+                    inline_wanted.contains(&record.module, signature)
+                })
+                .map_err(|error| KlibLibrariesOpenError::Declarations {
                     library: library.to_path_buf(),
                     error,
-                }
-            })?;
-            inventory.attach_ir_intrinsics(&record.module, record.intrinsic_platform, &trees);
-            defaults.add_library(
-                &record.module,
-                &trees,
-                &wanted,
-                record.compiler_builtin_owner,
-            );
-            let manifest = record
-                .archive
-                .manifest()
-                .map_err(KlibLibrariesOpenError::Archive)?;
-            let body_library =
-                KlibBodyLibrary::from_manifest(&manifest, trees).ok_or_else(|| {
-                    KlibLibrariesOpenError::MissingUniqueName {
-                        library: library.to_path_buf(),
-                    }
+                })?
+            } else {
+                crate::metadata::klib_ir::KlibIrModuleTrees::default()
+            };
+            let inline_library = KlibBodyLibrary::from_manifest(&manifest, inline_trees)
+                .ok_or_else(|| KlibLibrariesOpenError::MissingUniqueName {
+                    library: library.to_path_buf(),
                 })?;
-            body_libraries.push(body_library);
+            inline_body_libraries.push(inline_library);
             body_provider_snapshots.push((record.module.clone(), body_provider));
         }
         inventory.attach_defaults(&defaults);
         let bodies = KlibDeclarationBodies::from_body_libraries(body_libraries)
             .map_err(KlibLibrariesOpenError::Bodies)?;
+        let inline_bodies = KlibDeclarationBodies::from_body_libraries(inline_body_libraries)
+            .map_err(KlibLibrariesOpenError::Bodies)?;
+        inventory.attach_inline_body_plans(&inline_bodies);
         let body_snapshot = platform_module.map(|platform_module| {
             let reachable = bodies.body_provider_modules(&platform_module);
             crate::libraries::DependencyBodySnapshot::new(

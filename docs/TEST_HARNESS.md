@@ -337,9 +337,21 @@ KRUSTY_BLESS_CLI_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> \
 `tests/cli_expected_not_applicable/jvm/<version>.txt` lists the cases the reference kotlinc does not
 reproduce outside JetBrains' environment, and the cases no released compiler can run (the `.env`
 cases), each under a comment saying why. `the_reference_compiler_reproduces_every_applicable_cli_case`
-runs kotlinc through the same runner: it must pass every unlisted case and no listed one. It takes
-minutes, so ordinary runs ignore it; `scripts/conformance-regressions.sh`, which the conformance job
-runs for every supported release, runs it explicitly under `KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS`.
+runs kotlinc through the same runner: it must pass every unlisted case and no listed one. A cold run
+takes minutes, so ordinary runs ignore it; `scripts/conformance-regressions.sh`, which the conformance
+job runs for every supported release, runs it explicitly under `KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS`.
+
+What kotlinc prints for each case, its exit code, and the files a case with `.test` checks reads are
+recorded in the recorded-bytes archive (`KRUSTY_CLASS_DUMP_DIR`) that the byte-equality and
+diagnostics tests replay, under the same exact-version and master-publishes contract. Every run
+still normalizes the recorded output, compares it with the `.out` file and runs the checks, so the
+runner is tested on every pull request; kotlinc runs only for a case whose expanded arguments, CLI
+corpus, kotlinc distribution and launchers, JDK class libraries, or JVM options (including inherited
+`JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS` and `JDK_JAVA_OPTIONS`) changed. Only a passing observation is
+recorded, so a transient kotlinc failure is retried rather than replayed; the few not-applicable
+cases, which are expected to fail, always run kotlinc. The script compiles a missing recording by
+default (`KRUSTY_CLASS_DUMP_COMPILE_MISSING=1`), since running kotlinc is the only way to observe
+it.
 
 The corpus names JDK 8, 11, 17 and 21 homes. A case whose JDK the machine lacks fails rather than
 being skipped, so the gate never tests fewer cases than it claims. JDKs are found under

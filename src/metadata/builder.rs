@@ -1866,4 +1866,52 @@ mod tests {
         );
         assert_eq!(d2.iter().filter(|s| s.is_empty()).count(), 1);
     }
+
+    #[test]
+    fn package_function_preserves_nested_occurrence_flexibility_from_declaration_spelling() {
+        let element = Ty::String;
+        let list = Ty::obj_args("kotlin/collections/List", &[element]);
+        let mut spelling = crate::spelling::DeclaredSpellings::default();
+        spelling.ret.flexible_upper_bound = Some(list);
+        spelling.ret.args = vec![crate::spelling::Spelled {
+            // Provider normalization may retain the classifier form while the selected semantic
+            // argument uses Ty's canonical builtin variant. Both name the exact same classifier;
+            // the explicit occurrence interval must still survive package construction.
+            flexible_upper_bound: Some(Ty::obj("kotlin/String")),
+            ..crate::spelling::Spelled::default()
+        }];
+        let (d1, d2) = build_package(
+            &[FnMeta {
+                spellings: spelling,
+                ..FnMeta::plain("nested", Vec::new(), Ty::platform_nullable(list))
+            }],
+            &[],
+            &[],
+            (None, &[]),
+            true,
+        );
+        let d1 = String::from_iter(d1.into_iter().map(char::from));
+        let metadata = crate::jvm::metadata::decode_metadata(
+            &[d1],
+            &d2,
+            Some(2),
+            "sample/NestedKt",
+            None,
+            &[],
+        )
+        .expect("decode generated package metadata");
+        let function = metadata
+            .package_functions
+            .iter()
+            .find(|function| function.kotlin_name == "nested")
+            .expect("nested package function");
+
+        assert_eq!(
+            function.generic_sig.as_ref().map(|signature| signature.ret),
+            Some(Ty::platform_nullable(Ty::obj_args(
+                "kotlin/collections/List",
+                &[Ty::platform_nullable(Ty::String)],
+            )))
+        );
+    }
 }

@@ -35,6 +35,9 @@ pub enum CompilerWarningName {
     ExplicitTypeArgumentsInPropertyAccess,
     InapplicableOperatorModifier,
     ParenthesizedPackageQualifier,
+    TypeIntersectionAsReified,
+    TypeIntersectionAsReifiedDeprecation,
+    TypeParameterAsReifiedDeprecation,
     TypeArgumentsNotAllowed,
     TypeArgumentsNotAllowedInPackageQualifier,
     WrongNumberOfTypeArgumentsInGetClass,
@@ -58,6 +61,13 @@ impl CompilerWarningName {
             }
             Self::InapplicableOperatorModifier => "INAPPLICABLE_OPERATOR_MODIFIER_WARNING",
             Self::ParenthesizedPackageQualifier => "PARENTHESIZED_PACKAGE_QUALIFIER_WARNING",
+            Self::TypeIntersectionAsReified => "TYPE_INTERSECTION_AS_REIFIED_WARNING",
+            Self::TypeIntersectionAsReifiedDeprecation => {
+                "TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING"
+            }
+            Self::TypeParameterAsReifiedDeprecation => {
+                "TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING"
+            }
             Self::TypeArgumentsNotAllowed => "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING",
             Self::TypeArgumentsNotAllowedInPackageQualifier => {
                 "TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING"
@@ -87,6 +97,13 @@ impl CompilerWarningName {
             }
             "INAPPLICABLE_OPERATOR_MODIFIER_WARNING" => Self::InapplicableOperatorModifier,
             "PARENTHESIZED_PACKAGE_QUALIFIER_WARNING" => Self::ParenthesizedPackageQualifier,
+            "TYPE_INTERSECTION_AS_REIFIED_WARNING" => Self::TypeIntersectionAsReified,
+            "TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING" => {
+                Self::TypeIntersectionAsReifiedDeprecation
+            }
+            "TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING" => {
+                Self::TypeParameterAsReifiedDeprecation
+            }
             "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING" => Self::TypeArgumentsNotAllowed,
             "TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING" => {
                 Self::TypeArgumentsNotAllowedInPackageQualifier
@@ -117,6 +134,9 @@ mod warning_name_tests {
             CompilerWarningName::ExplicitTypeArgumentsInPropertyAccess,
             CompilerWarningName::InapplicableOperatorModifier,
             CompilerWarningName::ParenthesizedPackageQualifier,
+            CompilerWarningName::TypeIntersectionAsReified,
+            CompilerWarningName::TypeIntersectionAsReifiedDeprecation,
+            CompilerWarningName::TypeParameterAsReifiedDeprecation,
             CompilerWarningName::TypeArgumentsNotAllowed,
             CompilerWarningName::TypeArgumentsNotAllowedInPackageQualifier,
             CompilerWarningName::WrongNumberOfTypeArgumentsInGetClass,

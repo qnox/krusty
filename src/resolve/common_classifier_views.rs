@@ -10,11 +10,6 @@ use crate::types::Ty;
 use super::{common_result_nullability, Checker};
 
 impl Checker<'_> {
-    /// Every incomparable most-specific common classifier view of two branch results.
-    pub(super) fn minimal_common_classifier_views(&self, left: Ty, right: Ty) -> Vec<Ty> {
-        self.minimal_common_classifier_views_many(&[left, right])
-    }
-
     /// Most-specific common classifier intersection for any number of lower constraints. Each
     /// common owner is joined with all of its applied type arguments before dominance filtering,
     /// so `C<String>` and `D<String>` preserve `BBB<String>` beside an unrelated marker interface.

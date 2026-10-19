@@ -105,6 +105,13 @@ pub struct FirInlineBodySource {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirInlineBodyPlan {
+    /// Provider-authenticated KLIB body returning a test against one checked reified substitution.
+    ReifiedTypeTest {
+        value: FirInlineValue,
+        type_parameter: u32,
+        negated: bool,
+        defaults: Box<[FirInlineDefault]>,
+    },
     InvokeLambda {
         frame: FirInlineBodyFrame,
         lambda_parameter: u32,

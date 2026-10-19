@@ -390,7 +390,13 @@ impl<'a> JvmSignatureFormatter<'a> {
 
     /// `Continuation<in result>`, the continuation a suspend function takes. Its `in` projection is
     /// written unless it is redundant, as over `Any`: kotlinc signs `Continuation<Object>` there.
+    /// A `Nothing` result is an argument like any other: the star `Continuation<*>`, since the
+    /// parameter is `in`, and a `Nothing?` result leaves the continuation raw. Any other result's
+    /// nullability is not written (`String?` signs as `-Ljava/lang/String;`).
     pub(super) fn continuation(&self, result: Ty, wildcards: Wildcards) -> Option<String> {
+        if let Some(continuation) = Self::nothing_continuation(result) {
+            return Some(continuation.to_string());
+        }
         let wildcard = if self.wildcard_is_redundant(TypeVariance::In, result)? {
             ""
         } else {
@@ -400,6 +406,18 @@ impl<'a> JvmSignatureFormatter<'a> {
             "Lkotlin/coroutines/Continuation<{wildcard}{}>;",
             self.ty_at(&result, wildcards)?
         ))
+    }
+
+    /// `Continuation<in result>` when `result` is `Nothing` (the star `Continuation<*>`) or
+    /// `Nothing?` (the raw `Continuation`), as for any other type argument; `None` otherwise.
+    pub(super) fn nothing_continuation(result: Ty) -> Option<&'static str> {
+        if type_arguments::makes_raw(TypeVariance::In, result) {
+            Some("Lkotlin/coroutines/Continuation;")
+        } else if type_arguments::is_star(TypeVariance::In, result) {
+            Some("Lkotlin/coroutines/Continuation<*>;")
+        } else {
+            None
+        }
     }
 
     fn function_ty(&self, signature: &crate::types::FnSig, wildcards: Wildcards) -> Option<String> {
@@ -424,6 +442,8 @@ impl<'a> JvmSignatureFormatter<'a> {
         // parameter is `Nothing?` or the result is `Nothing`/`Nothing?`: the value parameters are
         // `in` (a non-null `Nothing` there is the star `type_argument` writes), the result is
         // `out`. The same rule the lambda-class supertype follows (`IrLambdaClass.raw_supertype`).
+        // A suspend function type's result is `Any?`; its declared result is the continuation's
+        // argument, where `Nothing` is a star and `Nothing?` leaves only the continuation raw.
         fn is_nothing(ty: Ty) -> bool {
             matches!(ty.non_null(), Ty::Nothing | Ty::Null)
         }
@@ -432,7 +452,7 @@ impl<'a> JvmSignatureFormatter<'a> {
             .iter()
             .copied()
             .any(|ty| is_nothing(ty) && ty.admits_null())
-            || is_nothing(signature.ret)
+            || (!signature.suspend && is_nothing(signature.ret))
         {
             return Some(format!("Lkotlin/jvm/functions/Function{arity};"));
         }

@@ -941,6 +941,29 @@ fun test() { consume(::mismatched) }
 }
 
 #[test]
+fn standalone_callable_reference_shape_mismatch_keeps_its_candidate_diagnostic() {
+    let source = r#"
+fun target(value: String): Int = value.length
+val reference: (Int) -> Int = ::target
+"#;
+    let diagnostics = common::front_end_diagnostics_with_stdlib(source);
+    assert_eq!(
+        diagnostics,
+        vec!["inapplicable candidate(s): fun target(value: String): Int"]
+    );
+}
+
+#[test]
+fn postponed_callable_reference_keeps_its_nested_unresolved_diagnostic() {
+    let source = r#"
+fun <T> consume(block: (T) -> T) {}
+fun test() { consume(::missing) }
+"#;
+    let diagnostics = common::front_end_diagnostics_with_stdlib(source);
+    assert_eq!(diagnostics, vec!["unresolved reference 'missing'."]);
+}
+
+#[test]
 fn selected_empty_array_uses_the_target_element_type() {
     let src = r#"
 fun accept(values: Array<String>): Array<String> = values

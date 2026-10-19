@@ -64,10 +64,14 @@ pub(super) fn declarations(
         .collect()
 }
 
-/// Whether the declaration owns a written type occurrence that the active lexical checker must
-/// bind. A candidate without such an occurrence has an explicitly empty spelling record and may
-/// keep its pending-free semantic header in Pass 1.
-pub(super) fn owns_written_type_occurrence(
+/// Whether the declaration's semantic header must remain atomic with active Pass-2 type binding.
+///
+/// A function's exact, pending-free source ABI may publish independently from its spelling
+/// sidecar. A parser-recorded alias projection or declaration-owned generic scope keeps that
+/// function atomic with the lexical binding that selected it. Properties and accessors retain
+/// their aggregate lifecycle: their property shape and accessor surface publish together with the
+/// active owner unless a retained Pass-1 body explicitly requires them.
+pub(super) fn requires_active_type_binding(
     headers: &crate::fir::StreamedHeaderModule,
     stub: &crate::fir::DeclarationStub,
 ) -> bool {
@@ -76,7 +80,36 @@ pub(super) fn owns_written_type_occurrence(
     };
     match (stub.kind, declaration.kind) {
         (
-            DeclarationKind::Function | DeclarationKind::Accessor,
+            DeclarationKind::Function,
+            HeaderDeclarationKind::Callable {
+                receiver,
+                parameters,
+                result,
+                type_parameters,
+                bounds,
+                ..
+            },
+        ) => {
+            !headers.syntax.type_parameters(type_parameters).is_empty()
+                || receiver
+                    .into_iter()
+                    .chain(
+                        headers
+                            .syntax
+                            .parameters(parameters)
+                            .iter()
+                            .map(|parameter| parameter.ty),
+                    )
+                    .chain(match result {
+                        crate::fir::HeaderResultType::Explicit(result) => Some(result),
+                        crate::fir::HeaderResultType::ImplicitUnit
+                        | crate::fir::HeaderResultType::Inferred => None,
+                    })
+                    .chain(headers.syntax.bounds(bounds).iter().map(|bound| bound.ty))
+                    .any(|ty| headers.syntax.has_source_spelling_projection(ty))
+        }
+        (
+            DeclarationKind::Accessor,
             HeaderDeclarationKind::Callable {
                 receiver,
                 parameters,
@@ -115,6 +148,39 @@ pub(super) fn owns_written_type_occurrence(
         // occurrence lifecycle when compact binding is unavailable.
         _ => false,
     }
+}
+
+/// Whether a property's exact stable owner chain reaches an inline body retained in Pass 1.
+///
+/// Semantic declaration ownership is authoritative. Parser-hoisted local classifiers use their
+/// stable lexical root only when no owner edge exists. The retained body needs the property
+/// contract before accessor publication; ordinary body-local properties remain atomic with Pass 2.
+pub(super) fn retained_inline_property(
+    headers: &crate::fir::StreamedHeaderModule,
+    stub: &crate::fir::DeclarationStub,
+) -> bool {
+    if stub.kind != DeclarationKind::Property {
+        return false;
+    }
+    let mut declaration = Some(stub.id);
+    let mut seen = HashSet::default();
+    while let Some(candidate) = declaration {
+        if !seen.insert(candidate) {
+            return false;
+        }
+        if headers
+            .stub(candidate)
+            .is_some_and(|owner| owner.flags.has(DeclarationFlags::INLINE))
+        {
+            return true;
+        }
+        declaration = headers
+            .declarations
+            .anchor(candidate)
+            .and_then(|anchor| anchor.owner)
+            .or_else(|| headers.local_classifier_lexical_root(candidate));
+    }
+    false
 }
 
 /// Local declarations whose mandatory semantic header has no compact graph node owning one of

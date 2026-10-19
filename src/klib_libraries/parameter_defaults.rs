@@ -260,6 +260,7 @@ mod tests {
             receiver: None,
             param_names: vec!["value".to_owned()],
             param_defaults: vec![defaulted],
+            inline_modifiers: vec![crate::types::InlineParameterModifier::None],
             params: vec![class(parameter)],
             ret: class("kotlin/Unit"),
             formals: Vec::new(),

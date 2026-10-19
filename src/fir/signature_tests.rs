@@ -321,3 +321,38 @@ fun <E, A> Either<E, A>.getOrElse(default: A) = when (this) {
         matches!(graph.expr(receiver), Some(SigExpr::ContextualType { .. }))
     }));
 }
+
+#[test]
+fn compact_mutable_local_keeps_its_declared_value_beside_assignment_flow() {
+    let text = "fun inferred(flag: Boolean, x: String) = if (flag) {\n\
+                \x20   var value = java.util.Collections.singletonList(x)\n\
+                \x20   value = listOf(x)\n\
+                \x20   value\n\
+                } else java.util.Collections.singletonList(x)\n";
+    let sources = [SourceInput::kotlin(text).with_file_stem("MutablePublication")];
+    let mut diagnostics = DiagSink::new();
+    let file = crate::frontend::parse_source_with_detected_features(text, &mut diagnostics);
+    let headers = inventory_parsed_source_headers(&sources, std::slice::from_ref(&file));
+    let mut origins = OriginStore::default();
+    let mut extractor = SignatureConstraintExtractor::default();
+    extractor.extract_file(&file, SourceFileId::from_raw(0), &headers.stubs, |span| {
+        origins.source(SourceFileId::from_raw(0), span)
+    });
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    assert_eq!(extractor.failures(), []);
+    let graph = extractor.finish().unwrap();
+    let SigExpr::Join { operands, .. } = graph.expr(graph.constraints()[0].result).unwrap() else {
+        panic!("the inferred function must retain its branch join")
+    };
+    let [then_branch, _] = graph.operands(operands) else {
+        panic!("the if expression must retain both branches")
+    };
+    let SigExpr::Sequence { result, .. } = graph.expr(*then_branch).unwrap() else {
+        panic!("the then block must retain its source-ordered effects")
+    };
+    let SigExpr::MutableLocalFlow { current, declared } = graph.expr(result).unwrap() else {
+        panic!("the final local read must retain current and declaration identities")
+    };
+    assert_ne!(current, declared);
+}

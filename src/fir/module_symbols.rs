@@ -945,12 +945,28 @@ impl<'a> StreamedModuleSymbols<'a> {
         shape.no_infer_params = no_infer;
         shape.implicit_integer_coercion = implicit_integer_coercion;
         shape.inline_modifiers = inline_modifiers;
-        let reified = self.index.callable(callable).is_some_and(|callable| {
-            (0..)
-                .map_while(|ordinal| self.index.type_parameter(callable.declaration, ordinal))
-                .filter_map(|parameter| self.index.type_parameter_header(parameter))
-                .any(|parameter| parameter.flags.is_reified())
-        });
+        let reified_type_parameter_ordinals = self
+            .index
+            .callable(callable)
+            .into_iter()
+            .flat_map(|callable| {
+                (0..)
+                    .map_while(move |ordinal| {
+                        self.index
+                            .type_parameter(callable.declaration, ordinal)
+                            .map(|parameter| (ordinal, parameter))
+                    })
+                    .filter_map(|(ordinal, parameter)| {
+                        self.index
+                            .type_parameter_header(parameter)?
+                            .flags
+                            .is_reified()
+                            .then_some(ordinal)
+                    })
+            })
+            .collect::<Vec<_>>();
+        let reified = !reified_type_parameter_ordinals.is_empty();
+        shape.reified_type_parameter_ordinals = reified_type_parameter_ordinals;
         (shape, reified)
     }
 

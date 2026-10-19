@@ -62,20 +62,13 @@ impl Checker<'_> {
                     visible_type_parameters.clone()
                 })
         } else if deferred_local_header {
-            stable_declaration
-                .and_then(|declaration| {
-                    self.finalized_type_parameters(
-                        &visible_type_parameters,
-                        declaration,
-                        &f.type_params,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    if let Some(declaration) = stable_declaration {
-                        self.failed_local_declaration_bindings.insert(declaration);
-                    }
-                    visible_type_parameters.clone()
-                })
+            self.bind_deferred_type_parameters(
+                scope,
+                &f.type_params,
+                &f.type_param_bounds,
+                f.signature_span.lo,
+                true,
+            )
         } else {
             visible_type_parameters
                 .symbolic_extended_with(&f.type_params, &f.type_param_bounds, &|name| {
@@ -106,7 +99,7 @@ impl Checker<'_> {
         });
         let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
         let suppression_depth = self.check_function_annotation_applications(scope, f, "function");
-        if finalized_local_header || deferred_local_header {
+        if finalized_local_header {
             if let Some(declaration) = stable_declaration {
                 if !self.record_finalized_type_parameter_bounds(
                     scope,
@@ -468,6 +461,7 @@ impl Checker<'_> {
                     } else {
                         self.expr(scope, *e)
                     };
+                    let inferred = self.inferred_declaration_value_ty(*e, inferred);
                     self.finish_executable_root(*e);
                     crate::trace_compiler!(
                         "lower",
@@ -512,6 +506,11 @@ impl Checker<'_> {
                 }
             } else {
                 self.check_fun_body(scope, f);
+            }
+        }
+        if (!self.signature_defaults_only || default_owned_method) && f.ret.is_none() {
+            if let (Some(declaration), FunBody::Expr(body)) = (stable_declaration, &f.body) {
+                self.record_inferred_declaration_publication(declaration, *body, self.ret_ty);
             }
         }
         if infer_ret {
@@ -989,6 +988,7 @@ impl Checker<'_> {
             } else if infer_ret {
                 if let FunBody::Expr(e) = &f.body {
                     let inferred = self.expr(scope, *e);
+                    let inferred = self.inferred_declaration_value_ty(*e, inferred);
                     self.finish_executable_root(*e);
                     if inferred != Ty::Error {
                         self.ret_ty = inferred;
@@ -1004,6 +1004,11 @@ impl Checker<'_> {
                 }
             } else if check_ordinary_body {
                 self.check_fun_body(scope, f);
+            }
+        }
+        if !self.signature_defaults_only && check_ordinary_body && f.ret.is_none() {
+            if let (Some(declaration), FunBody::Expr(body)) = (stable_declaration, &f.body) {
+                self.record_inferred_declaration_publication(declaration, *body, self.ret_ty);
             }
         }
         if infer_ret {

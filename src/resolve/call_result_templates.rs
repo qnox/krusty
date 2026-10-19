@@ -14,6 +14,58 @@
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SelectedGenericDeclaration {
+    Source(crate::fir::DeclarationId),
+    External(crate::fir::ExternalCallableId),
+    Local(StmtId),
+}
+
+fn selected_declaration(
+    source: Option<crate::fir::DeclarationId>,
+    external: Option<crate::fir::ExternalCallableId>,
+) -> Option<SelectedGenericDeclaration> {
+    match (source, external) {
+        (Some(declaration), _) => Some(SelectedGenericDeclaration::Source(declaration)),
+        (None, Some(declaration)) => Some(SelectedGenericDeclaration::External(declaration)),
+        (None, None) => None,
+    }
+}
+
+/// The declaration and generic call shape selected for one checked expression. A contextual
+/// completion is reapplied only when both snapshots carry the same stable semantic identity; an
+/// identity-less synthesized declaration is left exactly as its recheck committed it.
+pub(super) struct SelectedGenericCallShape {
+    declaration: Option<SelectedGenericDeclaration>,
+    signature: GenericSig,
+}
+
+impl SelectedGenericCallShape {
+    pub(super) fn can_reapply_completion_to(&self, other: &Self) -> bool {
+        match (self.declaration, other.declaration) {
+            (Some(left), Some(right)) => left == right && self.signature == other.signature,
+            (Some(_), None) | (None, Some(_)) | (None, None) => false,
+        }
+    }
+
+    pub(super) fn signature(&self) -> &GenericSig {
+        &self.signature
+    }
+
+    #[cfg(test)]
+    pub(super) fn source_for_test(
+        declaration: u32,
+        signature: GenericSig,
+    ) -> SelectedGenericCallShape {
+        SelectedGenericCallShape {
+            declaration: Some(SelectedGenericDeclaration::Source(
+                crate::fir::DeclarationId::from_raw(declaration),
+            )),
+            signature,
+        }
+    }
+}
+
 impl Checker<'_> {
     /// Whether this nested call has no input-fixed result shape and therefore receives an ordinary
     /// successful-argument score until the enclosing declarations' parameter shapes are compared.
@@ -82,6 +134,50 @@ impl Checker<'_> {
             ResolvedCall::Companion(member) => member.generic_sig.as_ref(),
             ResolvedCall::Extension(call) => call.callable.generic_sig.as_deref(),
             ResolvedCall::LocalFunction(call) => call.sig.generic_sig.as_ref(),
+            ResolvedCall::MemberExtension { .. } => None,
+        }
+    }
+
+    /// Declaration-owned generic and source-call shapes of the currently selected winner. Expected
+    /// type rechecks use this paired snapshot to replace their commitment atomically; neither half
+    /// may be retained from the provisional winner.
+    pub(super) fn selected_generic_call_shape(
+        &self,
+        expression: ExprId,
+    ) -> Option<SelectedGenericCallShape> {
+        match self.resolved_calls.get(&expression)? {
+            ResolvedCall::Member(member) => Some(SelectedGenericCallShape {
+                declaration: selected_declaration(
+                    member.member.stable_declaration,
+                    member.member.external_identity,
+                ),
+                signature: member.member.generic_sig.clone()?,
+            }),
+            ResolvedCall::TopLevel(call) => Some(SelectedGenericCallShape {
+                declaration: selected_declaration(
+                    call.stable_declaration,
+                    call.callable.external_identity,
+                ),
+                signature: call.callable.generic_sig.as_deref()?.clone(),
+            }),
+            ResolvedCall::Companion(member) => Some(SelectedGenericCallShape {
+                declaration: selected_declaration(
+                    member.stable_declaration,
+                    member.external_identity,
+                ),
+                signature: member.generic_sig.clone()?,
+            }),
+            ResolvedCall::Extension(call) => Some(SelectedGenericCallShape {
+                declaration: selected_declaration(
+                    call.stable_declaration,
+                    call.callable.external_identity,
+                ),
+                signature: call.callable.generic_sig.as_deref()?.clone(),
+            }),
+            ResolvedCall::LocalFunction(call) => Some(SelectedGenericCallShape {
+                declaration: Some(SelectedGenericDeclaration::Local(call.stmt_id)),
+                signature: call.sig.generic_sig.clone()?,
+            }),
             ResolvedCall::MemberExtension { .. } => None,
         }
     }
@@ -162,7 +258,7 @@ impl Checker<'_> {
             self.expr_types[expression.0 as usize],
             selected.map(|signature| (&signature.formals, signature.ret)),
             selected.map(|signature| &signature.formal_bounds),
-            self.resolved_call_type_args.get(&expression),
+            self.selected_call_type_arguments(expression),
         );
         let signature =
             selected.filter(|signature| ty_mentions_param(signature.ret, &signature.formals))?;
@@ -176,8 +272,7 @@ impl Checker<'_> {
             .cloned()
             .collect::<Vec<_>>();
         if self
-            .resolved_call_type_args
-            .get(&expression)
+            .selected_call_type_arguments(expression)
             .is_some_and(|resolved| {
                 signature
                     .formals
@@ -334,5 +429,41 @@ impl Checker<'_> {
             || ty_mentions_param(actual, &signature.formals)
             || declaration_fallback)
             .then_some(signature)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn selected_source_shape(declaration: u32) -> SelectedGenericCallShape {
+        SelectedGenericCallShape::source_for_test(
+            declaration,
+            GenericSig {
+                formals: vec!["T".to_string()],
+                formal_bounds: vec![Vec::new()],
+                receiver: None,
+                params: Vec::new(),
+                ret: Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any"))),
+                return_policy: crate::libraries::GenericReturnPolicy::Exact,
+            },
+        )
+    }
+
+    #[test]
+    fn a_recheck_cannot_commit_an_equal_shape_from_a_different_declaration() {
+        let provisional = selected_source_shape(41);
+        let selected = selected_source_shape(42);
+
+        assert!(!provisional.can_reapply_completion_to(&selected));
+        assert!(selected.can_reapply_completion_to(&selected_source_shape(42)));
+
+        let mut changed_shape = selected_source_shape(42);
+        changed_shape.signature.ret = Ty::String;
+        assert!(!selected.can_reapply_completion_to(&changed_shape));
+
+        let mut identityless = selected_source_shape(42);
+        identityless.declaration = None;
+        assert!(!identityless.can_reapply_completion_to(&identityless));
     }
 }

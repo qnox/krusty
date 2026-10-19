@@ -496,6 +496,53 @@ fn prebuilt_jvm_regressions_skip_the_runnable_target_modules() {
 
 #[cfg(unix)]
 #[test]
+fn the_cli_reference_run_compiles_missing_recordings_unless_told_otherwise() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let (temp, binary) = regression_fixture(
+        "cli-reference-recordings",
+        "#!/usr/bin/env bash\nprintf '%s compile_missing=%s\\n' \"$1\" \
+         \"${KRUSTY_CLASS_DUMP_COMPILE_MISSING:-unset}\"\n",
+    );
+    let run = |compile_missing: Option<&str>| {
+        let mut command = Command::new("bash");
+        command
+            .arg(root.join("scripts").join("conformance-regressions.sh"))
+            .arg(&binary)
+            .arg("2.4.10")
+            .env("KRUSTY_KOTLINC", "/bin/true")
+            .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
+            .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "3")
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", temp.join("bin").display()),
+            );
+        match compile_missing {
+            Some(value) => command.env("KRUSTY_CLASS_DUMP_COMPILE_MISSING", value),
+            None => command.env_remove("KRUSTY_CLASS_DUMP_COMPILE_MISSING"),
+        };
+        let output = command.output().expect("run conformance regressions");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("regressions stdout is UTF-8")
+    };
+
+    assert_eq!(
+        run(None),
+        "--skip compile_missing=unset\n--ignored compile_missing=1\n"
+    );
+    assert_eq!(
+        run(Some("0")),
+        "--skip compile_missing=0\n--ignored compile_missing=0\n"
+    );
+    fs::remove_dir_all(temp).expect("remove regressions fixture");
+}
+
+#[cfg(unix)]
+#[test]
 fn prebuilt_conformance_regressions_recipe_runs_the_script() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let (temp, binary) = regression_fixture(

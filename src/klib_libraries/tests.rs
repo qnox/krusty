@@ -27,6 +27,7 @@ fn function(name: &str, receiver: Option<KotlinType>, params: Vec<KotlinType>) -
         receiver,
         param_names: vec!["value".to_owned(); params.len()],
         param_defaults: vec![false; params.len()],
+        inline_modifiers: vec![crate::types::InlineParameterModifier::None; params.len()],
         params,
         ret: class("kotlin/Unit", false),
         formals: Vec::new(),
@@ -63,6 +64,150 @@ fn package_of(functions: Vec<KotlinFunction>) -> KotlinPackage {
         functions,
         ..KotlinPackage::default()
     }
+}
+
+#[test]
+fn prepared_inline_selection_is_exact_and_module_qualified() {
+    let parameter = KotlinTypeParameter {
+        id: KotlinTypeParameterId(1),
+        name: "T".to_owned(),
+        bounds: vec![class("kotlin/Any", true)],
+        variance: TypeVariance::Invariant,
+        only_input: false,
+        reified: true,
+    };
+    let mut selected = function("selected", None, Vec::new());
+    selected.is_inline = true;
+    selected.has_reified_type_params = true;
+    selected.formals = vec![parameter.clone()];
+    let mut ordinary_inline = function("ordinaryInline", None, Vec::new());
+    ordinary_inline.is_inline = true;
+    let mut non_inline_reified = function("nonInlineReified", None, Vec::new());
+    non_inline_reified.has_reified_type_params = true;
+    non_inline_reified.formals = vec![parameter];
+    let mut direct_lambda = function("directLambda", None, vec![class("kotlin/Function0", false)]);
+    direct_lambda.is_inline = true;
+    direct_lambda.annotations = vec![type_name("kotlin/internal/InlineOnly")];
+    let mut materialized_lambda = function(
+        "materializedLambda",
+        None,
+        vec![class("kotlin/Function0", false)],
+    );
+    materialized_lambda.is_inline = true;
+    materialized_lambda.annotations = vec![type_name("kotlin/internal/InlineOnly")];
+    materialized_lambda.inline_modifiers = vec![crate::types::InlineParameterModifier::Noinline];
+
+    let inventory = inventory::PackageInventory::from_package_inputs(vec![(
+        segments(&["fixture"]),
+        package_of(vec![
+            selected,
+            ordinary_inline,
+            non_inline_reified,
+            direct_lambda,
+            materialized_lambda,
+        ]),
+        false,
+        false,
+        Some("fixture-module".to_owned()),
+    )])
+    .expect("the fixture functions are signable");
+    let signature = |name| {
+        crate::metadata::klib_ir::KlibIrSignature::Public(
+            inventory
+                .functions(type_name("fixture"), name)
+                .next()
+                .expect("the fixture function is published")
+                .signature
+                .clone(),
+        )
+    };
+    let selected = signature("selected");
+    let ordinary_inline = signature("ordinaryInline");
+    let non_inline_reified = signature("nonInlineReified");
+    let direct_lambda = signature("directLambda");
+    let materialized_lambda = signature("materializedLambda");
+    let selection = inventory.inline_body_selection();
+
+    assert!(selection.contains("fixture-module", &selected));
+    assert!(!selection.contains("other-module", &selected));
+    assert!(!selection.contains("fixture-module", &ordinary_inline));
+    assert!(!selection.contains("fixture-module", &non_inline_reified));
+    assert!(selection.contains("fixture-module", &direct_lambda));
+    assert!(!selection.contains("fixture-module", &materialized_lambda));
+}
+
+#[test]
+fn native_prepared_with_publishes_its_exact_direct_invocation_plan() {
+    let Some(libraries) = analysis::native_stdlib() else {
+        return;
+    };
+    let function = single_function(&libraries, "kotlin", "with");
+    let Some(crate::libraries::InlineBodyPlan::InvokeLambda {
+        frame,
+        lambda_parameter: 1,
+        arguments,
+        prologue,
+        cleanup,
+        cause: None,
+        recovery: None,
+        defaults,
+        result: None,
+    }) = function.callable.inline_body_plan.as_deref()
+    else {
+        panic!("kotlin.with must publish its exact direct-lambda invocation plan")
+    };
+    assert_eq!(frame.callee.as_ref(), "with");
+    assert!(frame.inline_only);
+    assert!(frame.source.is_none());
+    assert_eq!(
+        arguments.as_slice(),
+        [crate::libraries::InlineBodyValue::Parameter(0)]
+    );
+    assert!(prologue.is_empty());
+    assert!(cleanup.is_empty());
+    assert!(defaults.is_empty());
+}
+
+#[test]
+fn native_prepared_extension_run_maps_ir_parameters_to_plan_coordinates() {
+    let Some(libraries) = analysis::native_stdlib() else {
+        return;
+    };
+    let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "run");
+    let runs = symbols
+        .callables
+        .functions()
+        .iter()
+        .filter(|function| function.kind == FnKind::Extension)
+        .collect::<Vec<_>>();
+    let [function] = runs.as_slice() else {
+        panic!("expected exactly one extension `run`, found {}", runs.len())
+    };
+    assert!(function.callable.source_receiver.is_some());
+    let Some(crate::libraries::InlineBodyPlan::InvokeLambda {
+        frame,
+        lambda_parameter: 1,
+        arguments,
+        prologue,
+        cleanup,
+        cause: None,
+        recovery: None,
+        defaults,
+        result: None,
+    }) = function.callable.inline_body_plan.as_deref()
+    else {
+        panic!("kotlin.run must publish its exact direct-lambda invocation plan")
+    };
+    assert_eq!(frame.callee.as_ref(), "run");
+    assert!(frame.inline_only);
+    assert!(frame.source.is_none());
+    assert_eq!(
+        arguments.as_slice(),
+        [crate::libraries::InlineBodyValue::Parameter(0)]
+    );
+    assert!(prologue.is_empty());
+    assert!(cleanup.is_empty());
+    assert!(defaults.is_empty());
 }
 
 #[test]
@@ -110,7 +255,10 @@ fn a_package_type_alias_is_published_from_its_metadata_declaration() {
                 target,
                 formals: vec!["T".to_string()],
                 expansion,
-                expansion_spelling: Default::default(),
+                expansion_spelling: crate::spelling::Spelled {
+                    args: vec![Default::default(), Default::default()],
+                    ..Default::default()
+                },
             }
         ))
     );
@@ -123,7 +271,10 @@ fn a_package_type_alias_is_published_from_its_metadata_declaration() {
             target,
             formals: vec!["T".to_string()],
             expansion,
-            expansion_spelling: Default::default(),
+            expansion_spelling: crate::spelling::Spelled {
+                args: vec![Default::default(), Default::default()],
+                ..Default::default()
+            },
         })
     );
 }
@@ -134,6 +285,7 @@ fn a_friend_top_level_alias_is_not_hidden_by_an_equal_nonfriend_identity() {
         name: "Alias".to_owned(),
         formals: Vec::new(),
         expansion: class(expansion, false),
+        expansion_spelling: Default::default(),
         visibility: Visibility::Internal,
     };
     let package = segments(&["shared"]);
@@ -357,6 +509,38 @@ fn a_top_level_function_publishes_its_return_value_status() {
     assert_eq!(
         answer.flags.return_value_status,
         Some(crate::types::ReturnValueStatus::MustUse)
+    );
+}
+
+#[test]
+fn a_klib_function_publishes_context_and_value_inline_modifiers() {
+    use crate::types::InlineParameterModifier::{Crossinline, Noinline, None as Plain};
+
+    let mut declaration = function(
+        "invoke",
+        None,
+        vec![
+            class("kotlin/Function0", false),
+            class("kotlin/Function0", false),
+            class("kotlin/Function0", false),
+        ],
+    );
+    declaration.is_inline = true;
+    declaration.context_count = 1;
+    declaration.context_kinds = vec![ContextParameterKind::Named];
+    declaration.inline_modifiers = vec![Crossinline, Plain, Noinline];
+    let libraries =
+        KlibLibraries::from_packages(vec![(segments(&["p"]), package_of(vec![declaration]))])
+            .expect("the function is signable");
+
+    let function = single_function(&libraries, "p", "invoke");
+    assert_eq!(
+        function.call_sig.inline_modifiers,
+        [Crossinline, Plain, Noinline]
+    );
+    assert_eq!(
+        function.callable.inline_modifiers.as_ref(),
+        [Crossinline, Plain, Noinline]
     );
 }
 

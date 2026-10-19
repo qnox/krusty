@@ -106,7 +106,6 @@ mod inline_call_outcome;
 use inline_call_outcome::InlineCallOutcome;
 mod inline_frame_marker;
 mod inline_lambda_aliases;
-mod inline_parameters;
 mod inline_return_frames;
 mod instance_field_names;
 use instance_field_names::instance_field_jvm_name;
@@ -5011,12 +5010,6 @@ fn suspend_method_sig(
     params: &[Ty],
     ret: &Ty,
 ) -> Option<String> {
-    // A type argument drops nullability (`OrganizationId?` and `String?` both sign as the bare type),
-    // so unwrap before formatting.
-    let ret = match ret {
-        Ty::Nullable(inner) => inner,
-        t => t,
-    };
     // The suspend return travels as `Continuation<-RET>`, a PARAMETER of the erased method, and
     // kotlinc wildcards inside it: `suspend fun <U> f(): Cont<U>` signs
     // `(Lkotlin/coroutines/Continuation<-LCont<+TU;>;>;)Ljava/lang/Object;`.

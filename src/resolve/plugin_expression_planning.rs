@@ -91,9 +91,8 @@ pub(super) fn plan_plugin_expressions(
                 inline,
                 implementation,
                 type_arguments: checker
-                    .resolved_call_type_args
-                    .get(&expression)
-                    .cloned()
+                    .selected_call_type_arguments(expression)
+                    .map(|arguments| arguments.to_vec())
                     .unwrap_or_default(),
                 argument_slots: checker
                     .resolved_call_arg_slots

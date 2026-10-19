@@ -20,6 +20,7 @@
 use super::super::is_suspension_point;
 use crate::fx_hash::HashSet;
 use crate::ir::{for_each_child, Callee, ExprId, IrExpr, IrFile};
+use crate::jvm::inline_parameters::is_inline_parameter;
 use crate::jvm::placed_lambda_captures::is_placed_capture;
 use crate::libraries::InlineKind;
 
@@ -125,12 +126,9 @@ pub(crate) fn spliced_return_crosses_finally(ir: &IrFile, body: ExprId) -> bool 
             }
             _ => {}
         }
-        let operands_are_spliceable = match &ir.exprs[at as usize] {
-            IrExpr::Call { .. } => calls_an_inline_function(ir, at),
-            _ => spliceable,
-        };
         for_each_child(&ir.exprs, at, &mut |child| {
-            stack.push((child, inlined, operands_are_spliceable, crosses_finally))
+            let spliceable = operand_spliceable(ir, at, child, spliceable);
+            stack.push((child, inlined, spliceable, crosses_finally))
         });
     }
     false
@@ -297,23 +295,51 @@ fn collect(
         collect(ir, *inline_body, suspend_set, false, seen, out);
         return;
     }
-    let operands_are_spliceable = match &ir.exprs[expression as usize] {
-        IrExpr::Call { .. } => calls_an_inline_function(ir, expression),
-        _ => spliceable,
-    };
     let mut children = Vec::new();
     for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
     for child in children {
-        collect(ir, child, suspend_set, operands_are_spliceable, seen, out);
+        let spliceable = operand_spliceable(ir, expression, child, spliceable);
+        collect(ir, child, suspend_set, spliceable, seen, out);
     }
 }
 
-/// The suspensions of `body` that sit in the literal lambda of a call to a classpath inline
-/// function with reified type parameters, in encounter order. kotlinc's coroutine transformer
-/// takes them once the method inliner has placed the lambda, which is the only route a reified
-/// body has: the byte splice never specializes one. `None` when a spliced body suspends anywhere
-/// else, or a placed lambda nests another spliced body, since those keep the emit-time machine.
-pub(crate) fn reified_host_lambda_suspensions(
+/// Whether `child`, an operand of `expression`, can be spliced into this frame. A call decides for
+/// its own operands: only an argument of an inline call that its declaration publishes as an inline
+/// parameter can. A `noinline` or non-function parameter, and any argument whose parameter facts are
+/// missing or misaligned, is materialized by the emitter as an ordinary function object. Anything
+/// else (a coercion, a block, an argument wrapper) passes its parent's answer on.
+fn operand_spliceable(ir: &IrFile, expression: ExprId, child: ExprId, spliceable: bool) -> bool {
+    match &ir.exprs[expression as usize] {
+        IrExpr::Call { .. } => {
+            calls_an_inline_function(ir, expression)
+                && inline_parameter_arguments(ir, expression).contains(&child)
+        }
+        _ => spliceable,
+    }
+}
+
+/// The arguments of `call` bound to an inline parameter, the only literals the method inliner
+/// expands in place; a `noinline` literal or any other operand stays an ordinary value.
+fn inline_parameter_arguments(ir: &IrFile, call: ExprId) -> Vec<ExprId> {
+    let IrExpr::Call { args, .. } = &ir.exprs[call as usize] else {
+        return Vec::new();
+    };
+    args.iter()
+        .enumerate()
+        .filter(|&(parameter, _)| is_inline_parameter(ir, call, parameter) == Some(true))
+        .map(|(_, &argument)| argument)
+        .collect()
+}
+
+/// The suspensions of `body` that sit in the literal lambda of a call whose callee the method
+/// inliner places in this frame, in encounter order: a classpath inline function with reified type
+/// parameters, or a classpath inline suspend function spliced from its `$$forInline` copy. kotlinc's
+/// coroutine transformer takes them once the method inliner has placed the lambda. A reified body
+/// has no other route, since the byte splice never specializes one; a suspend callee's copy carries
+/// its own suspension markers, so the transformer takes the suspensions of the copy and of the
+/// lambda in one machine. `None` when a spliced body suspends anywhere else, or a placed lambda
+/// nests another spliced body, since those keep the emit-time machine.
+pub(crate) fn placed_lambda_suspensions(
     ir: &IrFile,
     body: ExprId,
     suspend_set: &HashSet<u32>,
@@ -328,12 +354,12 @@ pub(crate) fn reified_host_lambda_suspensions(
     Some(search.found)
 }
 
-/// Where an expression's code runs, for [`reified_host_lambda_suspensions`].
+/// Where an expression's code runs, for [`placed_lambda_suspensions`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Frame {
     /// The function's own body.
     Own,
-    /// The body of a literal lambda the method inliner places for a reified classpath callee.
+    /// The body of a literal lambda the method inliner places in this frame.
     Placed,
     /// Any other spliced body.
     Spliced,
@@ -344,8 +370,8 @@ enum Frame {
 enum Host {
     /// A real closure: its body runs in its own method.
     None,
-    /// Placed by the method inliner for a classpath inline callee with reified type parameters.
-    Reified,
+    /// Placed by the method inliner in this frame (see [`places_literal_lambdas`]).
+    Placed,
     /// Spliced by any other route.
     Other,
 }
@@ -382,7 +408,7 @@ impl HostedSearch<'_> {
                 self.walk(capture, frame, if placed { host } else { Host::None })?;
             }
             if let (true, Some(&body)) = (host != Host::None, inline_body.as_ref()) {
-                let placed = host == Host::Reified && frame == Frame::Own;
+                let placed = host == Host::Placed && frame == Frame::Own;
                 self.walk(
                     body,
                     if placed {
@@ -397,24 +423,53 @@ impl HostedSearch<'_> {
         }
         let operands = match &ir.exprs[expression as usize] {
             IrExpr::Call { .. } if !calls_an_inline_function(ir, expression) => Host::None,
-            // An inline suspend callee is a suspension of this frame the transformer does not take
-            // inlined yet.
-            IrExpr::Call { .. }
-                if ir.reified_call_subst.contains_key(&expression)
-                    && !is_suspension_point(ir, expression, self.suspend_set) =>
-            {
-                Host::Reified
+            IrExpr::Call { .. } if places_literal_lambdas(ir, expression, self.suspend_set) => {
+                Host::Placed
             }
             IrExpr::Call { .. } => Host::Other,
             _ => host,
         };
+        // Only an argument bound to an inline parameter is placed; a `noinline` literal is a
+        // function object with its own `invoke`, and so is any receiver.
+        let placed = (operands == Host::Placed).then(|| inline_parameter_arguments(ir, expression));
         let mut children = Vec::new();
         for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
         for child in children {
-            self.walk(child, frame, operands)?;
+            let host = match &placed {
+                Some(placed) if !placed.contains(&child) => Host::None,
+                _ => operands,
+            };
+            self.walk(child, frame, host)?;
         }
         Some(())
     }
+}
+
+/// Whether the method inliner places the literal lambdas of `call`, a call to an inline function,
+/// in this frame, where kotlinc's coroutine transformer then takes their suspensions.
+///
+/// A reified callee that does not suspend is one: only the method inliner specializes it. So is a
+/// callable inline suspend callee, whose `$$forInline` copy is what the emitter splices (the same
+/// rule as `try_splice_static_inline`): the copy is the untransformed body, its call to another
+/// suspend function marked as kotlinc's codegen marks one, so the transformer builds a single
+/// machine over the copy, the placed lambda and the caller, and the call is no state of its own.
+/// A reified suspend callee is neither: it splices no `$$forInline` copy.
+fn places_literal_lambdas(ir: &IrFile, call: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    let reified = ir.reified_call_subst.contains_key(&call);
+    if is_suspension_point(ir, call, suspend_set) {
+        let can_inline = matches!(
+            &ir.exprs[call as usize],
+            IrExpr::Call {
+                callee: Callee::Static {
+                    inline: InlineKind::CanInline,
+                    ..
+                },
+                ..
+            }
+        );
+        return !reified && can_inline && ir.suspend_calls.contains_key(&call);
+    }
+    reified
 }
 
 /// One search for the suspensions a frame runs: what it counts, and what it has found so far.
@@ -476,17 +531,12 @@ impl<'a> SuspensionSearch<'a> {
             }
             return;
         }
-        // A CALL decides this for its own operands; anything else — a coercion, a block, an
-        // argument wrapper — passes the answer through, since the lambda it holds is still the
-        // operand of whatever call encloses it.
-        let operands_are_spliceable = match &ir.exprs[expression as usize] {
-            IrExpr::Call { .. } => calls_an_inline_function(ir, expression),
-            _ => spliceable,
-        };
+        // A lambda held by anything but a call is still the operand of whatever call encloses it.
         let mut children = Vec::new();
         for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
         for child in children {
-            self.walk(child, inlined, operands_are_spliceable);
+            let spliceable = operand_spliceable(ir, expression, child, spliceable);
+            self.walk(child, inlined, spliceable);
         }
     }
 }
@@ -495,7 +545,7 @@ impl<'a> SuspensionSearch<'a> {
 mod tests {
     use super::*;
     use crate::ir::IrIntrinsicSuspensionPoint;
-    use crate::types::Ty;
+    use crate::types::{InlineParameterModifier, Ty};
 
     /// Mark `point` as a suspension the way an intrinsic one is recorded, so these tests need no
     /// function table.
@@ -518,7 +568,7 @@ mod tests {
 
     /// A call to an `inline` function taking `argument` — the only position whose lambda is spliced.
     fn inline_call(ir: &mut IrFile, argument: ExprId) -> ExprId {
-        ir.add_expr(IrExpr::Call {
+        let call = ir.add_expr(IrExpr::Call {
             callee: crate::ir::Callee::Static {
                 owner: crate::types::TypeName::from("LibKt"),
                 name: "with".to_string(),
@@ -527,7 +577,18 @@ mod tests {
             },
             dispatch_receiver: None,
             args: vec![argument],
-        })
+        });
+        publish_inline_parameter(ir, call);
+        call
+    }
+
+    /// Publish the one parameter of `call` as an inline function-typed parameter, as the call
+    /// realization does for a dependency's inline function.
+    fn publish_inline_parameter(ir: &mut IrFile, call: ExprId) {
+        ir.call_inline_modifiers
+            .insert(call, Box::new([InlineParameterModifier::None]));
+        ir.call_declared_params
+            .insert(call, Box::new([Ty::fun(Vec::new(), Ty::Unit)]));
     }
 
     #[test]
@@ -599,6 +660,121 @@ mod tests {
             spliced_inline_suspensions(&ir, body, &HashSet::default()),
             [inner_point]
         );
+    }
+
+    /// A call to a callable inline suspend function, spliced from its `$$forInline` copy.
+    fn inline_suspend_call(ir: &mut IrFile, argument: ExprId, inline: InlineKind) -> ExprId {
+        let call = ir.add_expr(IrExpr::Call {
+            callee: crate::ir::Callee::Static {
+                owner: crate::types::TypeName::from("lib/LibKt"),
+                name: "get".to_string(),
+                descriptor: "(Lkotlin/jvm/functions/Function0;)Ljava/lang/Object;".to_string(),
+                inline,
+            },
+            dispatch_receiver: None,
+            args: vec![argument],
+        });
+        ir.suspend_calls.insert(call, Ty::String);
+        publish_inline_parameter(ir, call);
+        call
+    }
+
+    /// The lambda of a callable inline suspend call is placed by the method inliner, so its
+    /// suspension is a point of this frame; the call itself is one of the frame's own.
+    #[test]
+    fn a_suspension_in_the_lambda_of_an_inline_suspend_call_is_placed() {
+        let mut ir = IrFile::default();
+        let point = suspension(&mut ir);
+        let lam = lambda(&mut ir, Vec::new(), Some(point));
+        let call = inline_suspend_call(&mut ir, lam, InlineKind::CanInline);
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![call],
+            value: None,
+        });
+        let suspend_set = HashSet::default();
+        assert_eq!(
+            placed_lambda_suspensions(&ir, body, &suspend_set),
+            Some(vec![point])
+        );
+        assert_eq!(frame_suspensions(&ir, body, &suspend_set), [call, point]);
+    }
+
+    /// A `noinline` literal is an ordinary function object: its suspension is its own `invoke`'s.
+    #[test]
+    fn a_suspension_in_a_noinline_lambda_of_an_inline_suspend_call_is_not_placed() {
+        let mut ir = IrFile::default();
+        let point = suspension(&mut ir);
+        let lam = lambda(&mut ir, Vec::new(), Some(point));
+        let call = inline_suspend_call(&mut ir, lam, InlineKind::CanInline);
+        ir.call_inline_modifiers
+            .insert(call, Box::new([InlineParameterModifier::Noinline]));
+        assert_eq!(
+            placed_lambda_suspensions(&ir, call, &HashSet::default()),
+            Some(Vec::new())
+        );
+    }
+
+    /// A literal of an inline call whose parameter facts are missing or misaligned is emitted as
+    /// an ordinary function object, so nothing claims its `invoke`.
+    #[test]
+    fn a_literal_without_aligned_parameter_facts_keeps_its_invoke() {
+        for facts in [None, Some((0, 1)), Some((1, 0))] {
+            let mut ir = IrFile::default();
+            let point = suspension(&mut ir);
+            let lam = lambda(&mut ir, Vec::new(), Some(point));
+            let call = inline_suspend_call(&mut ir, lam, InlineKind::CanInline);
+            ir.call_inline_modifiers.remove(&call);
+            ir.call_declared_params.remove(&call);
+            if let Some((modifiers, declared)) = facts {
+                ir.call_inline_modifiers
+                    .insert(call, vec![InlineParameterModifier::None; modifiers].into());
+                ir.call_declared_params
+                    .insert(call, vec![Ty::fun(Vec::new(), Ty::String); declared].into());
+            }
+            let body = ir.add_expr(IrExpr::Block {
+                stmts: vec![call],
+                value: None,
+            });
+            let suspend_set = HashSet::default();
+            assert_eq!(
+                placed_lambda_suspensions(&ir, body, &suspend_set),
+                Some(Vec::new()),
+                "{facts:?}"
+            );
+            assert!(
+                spliced_suspension_lambda_impls(&ir, body, &suspend_set).is_empty(),
+                "{facts:?}"
+            );
+            assert_eq!(
+                frame_suspensions(&ir, body, &suspend_set),
+                [call],
+                "{facts:?}"
+            );
+        }
+    }
+
+    /// A must-inline suspend callee splices its only body, not a `$$forInline` copy, and a reified
+    /// one is specialized: neither places a suspending lambda for the transformer.
+    #[test]
+    fn a_suspension_in_the_lambda_of_another_inline_suspend_call_is_not_placed() {
+        for reified in [false, true] {
+            let mut ir = IrFile::default();
+            let point = suspension(&mut ir);
+            let lam = lambda(&mut ir, Vec::new(), Some(point));
+            let inline = if reified {
+                InlineKind::CanInline
+            } else {
+                InlineKind::MustInline
+            };
+            let call = inline_suspend_call(&mut ir, lam, inline);
+            if reified {
+                ir.reified_call_subst.insert(call, Vec::new());
+            }
+            assert_eq!(
+                placed_lambda_suspensions(&ir, call, &HashSet::default()),
+                None
+            );
+        }
     }
 
     #[test]

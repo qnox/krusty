@@ -64,9 +64,12 @@ fi
 [ "$status" -eq 0 ] || exit "$status"
 
 # The CLI corpus ratchet is only as sound as its runner. The reference kotlinc runs through the
-# same runner and must reproduce every case the not-applicable list does not excuse. It takes
-# minutes, so ordinary test runs ignore it and this gate runs it explicitly.
+# same runner and must reproduce every case the not-applicable list does not excuse. Its kotlinc
+# observations replay from the recorded-bytes archive; a case whose inputs changed runs kotlinc,
+# which is the only way to observe it, so a missing recording compiles here as it does in CI.
+# A cold archive takes minutes, so ordinary test runs ignore the test and this gate runs it.
 set +e
+KRUSTY_CLASS_DUMP_COMPILE_MISSING="${KRUSTY_CLASS_DUMP_COMPILE_MISSING:-1}" \
 run_with_deadline "$KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS" \
   "$bin" \
   --ignored \

@@ -201,6 +201,7 @@ fn parse_type_alias_decoded(
             let node = parse_type_node(type_body)?;
             crate::spelling::Spelled {
                 definitely_non_null: node.definitely_non_null,
+                use_site_definitely_non_null: node.definitely_non_null,
                 args: parse_type_argument_spellings(type_body, records, d2)?,
                 annotations: bind_type_annotations(&node.annotations, records, d2)?
                     .into_iter()
@@ -266,6 +267,7 @@ fn parse_argument_spelling(
                     occurrence_annotations(bind_type_annotations(&node.annotations, records, d2)?)?;
                 return Some(crate::spelling::Spelled {
                     definitely_non_null: node.definitely_non_null,
+                    use_site_definitely_non_null: node.definitely_non_null,
                     alias: parse_type_alias_name(inner, records, d2),
                     args: parse_type_argument_spellings(inner, records, d2)?,
                     annotations,

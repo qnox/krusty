@@ -238,6 +238,20 @@ impl Lane for NativeLane {
         let backend = CraneliftBackend::new(target)
             .with_entry(Entry::Box)
             .verified();
+        let features = krusty::features::LangFeatures::from_source(directive_source);
+        let metadata = match krusty::klib::backend::KlibBackend::new(
+            krusty::klib::write::KlibPlatform::Native,
+            krusty::klib::write::KlibStamp::new(
+                krusty::kotlin_version::target(),
+                features.language_version(),
+            ),
+        )
+        .with_annotations_in_metadata(features.has("AnnotationsInMetadata"))
+        .with_native_target(target)
+        {
+            Ok(metadata) => metadata,
+            Err(error) => return Outcome::Harness(error.to_string()),
+        };
         let program = match box_lane::compile_modules(
             scratch,
             stem,
@@ -246,6 +260,7 @@ impl Lane for NativeLane {
             LIBRARIES,
             TestTarget::Native,
             &backend,
+            &metadata,
             DECLINE_PREFIX,
         ) {
             Ok(program) => program,

@@ -66,6 +66,9 @@ impl WarningName {
                             .is_some()
                     })
                 }
+                krusty::diag::CompilerWarningName::TypeIntersectionAsReified
+                | krusty::diag::CompilerWarningName::TypeIntersectionAsReifiedDeprecation
+                | krusty::diag::CompilerWarningName::TypeParameterAsReifiedDeprecation => true,
                 krusty::diag::CompilerWarningName::TypeArgumentsNotAllowed => {
                     FeatureTable::for_version(release)
                         .is_some_and(|table| table.get("ForbidUselessTypeArgumentsIn25").is_some())
@@ -252,6 +255,38 @@ mod tests {
                 policy.compiler_disposition(None),
                 WarningDisposition::WarningAndFail
             );
+        }
+    }
+
+    #[test]
+    fn reified_warning_names_are_available_in_each_supported_release() {
+        for release in KotlinVersion::supported() {
+            for (name, diagnostic) in [
+                (
+                    "TYPE_INTERSECTION_AS_REIFIED_WARNING",
+                    CompilerWarningName::TypeIntersectionAsReified,
+                ),
+                (
+                    "TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING",
+                    CompilerWarningName::TypeIntersectionAsReifiedDeprecation,
+                ),
+                (
+                    "TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING",
+                    CompilerWarningName::TypeParameterAsReifiedDeprecation,
+                ),
+            ] {
+                let mut policy = WarningPolicy::default();
+                assert_eq!(
+                    policy.configure(&format!("{name}:error"), release),
+                    Ok(()),
+                    "{release}: {name}"
+                );
+                assert_eq!(
+                    policy.compiler_disposition(Some(diagnostic)),
+                    WarningDisposition::Error,
+                    "{release}: {name}"
+                );
+            }
         }
     }
 
