@@ -166,6 +166,72 @@ fn a_classpath_entry_that_declares_no_registrar_loads_no_plugin() {
 
 #[test]
 #[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn a_plugin_classpath_entry_that_does_not_exist_is_refused() {
+    let (runtime, env) = runtime();
+    let missing = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("plugin-host-missing.jar")
+        .to_string_lossy()
+        .into_owned();
+    let mut host = start(&runtime, &env);
+    assert_eq!(
+        host.load(std::slice::from_ref(&missing), &[]).unwrap_err(),
+        HostError::Plugin {
+            message: format!("plugin classpath entry {missing} does not exist")
+        }
+    );
+}
+
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn a_plugin_classpath_entry_that_is_not_a_jar_is_refused() {
+    let (runtime, env) = runtime();
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("plugin-host-not-a-jar-{}.jar", std::process::id()));
+    std::fs::write(&path, "not a jar").unwrap();
+    let entry = path.to_string_lossy().into_owned();
+    let mut host = start(&runtime, &env);
+    assert_eq!(
+        host.load(std::slice::from_ref(&entry), &[]).unwrap_err(),
+        HostError::Plugin {
+            message: format!(
+                "plugin classpath entry {entry} is not a jar: zip END header not found"
+            )
+        }
+    );
+}
+
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn a_plugin_declaring_a_legacy_component_registrar_is_refused() {
+    use std::io::Write;
+    let (runtime, env) = runtime();
+    let jar = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("plugin-host-legacy-{}.jar", std::process::id()));
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&jar).unwrap());
+    zip.start_file(
+        "META-INF/services/org.jetbrains.kotlin.compiler.plugin.ComponentRegistrar",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .unwrap();
+    zip.write_all(b"# the K1 entry point\nexample.LegacyRegistrar\n")
+        .unwrap();
+    zip.finish().unwrap();
+    let mut host = start(&runtime, &env);
+    assert_eq!(
+        host.load(&[jar.to_string_lossy().into_owned()], &[])
+            .unwrap_err(),
+        HostError::Plugin {
+            message: "the plugin classpath declares the legacy ComponentRegistrar \
+                      example.LegacyRegistrar; the plugin host loads CompilerPluginRegistrar \
+                      plugins only"
+                .into()
+        }
+    );
+    assert_eq!(host.load(&[], &[]).unwrap(), []);
+}
+
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
 fn the_adapter_is_compiled_once_and_then_reused_silently() {
     let (runtime, mut env) = runtime();
     let cache = ScratchCache::new("adapter");

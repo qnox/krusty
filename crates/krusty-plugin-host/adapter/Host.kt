@@ -16,9 +16,11 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.EOFException
 import java.io.File
+import java.io.IOException
 import java.io.PrintStream
 import java.net.URLClassLoader
 import java.util.ServiceLoader
+import java.util.zip.ZipFile
 import kotlin.system.exitProcess
 
 /**
@@ -100,9 +102,14 @@ private fun answer(request: () -> Reply): Reply = try {
     request()
 } catch (error: CliOptionProcessingException) {
     Failed(error.message ?: error.toString())
+} catch (error: Refused) {
+    Failed(error.message)
 } catch (error: Throwable) {
     Failed(describe(error))
 }
+
+/** A request the host will not carry out, for the reason given. */
+private class Refused(override val message: String) : Exception(message)
 
 private sealed interface Reply {
     fun write(out: DataOutputStream)
@@ -177,6 +184,7 @@ private var current: PluginSet? = null
  */
 private fun load(entries: List<String>, options: List<String>): Reply {
     unload()
+    for (entry in entries) checkEntry(File(entry))
     val loader = URLClassLoader(
         entries.map { File(it).toURI().toURL() }.toTypedArray(),
         CompilerPluginRegistrar::class.java.classLoader,
@@ -188,6 +196,7 @@ private fun load(entries: List<String>, options: List<String>): Reply {
         val configuration = CompilerConfiguration.create()
         val shared = configuration.extensionsStorage ?: error("kotlinc made a configuration without an extension storage")
         storage = shared
+        refuseLegacyRegistrars(loader)
         val processors = ServiceLoader.load(CommandLineProcessor::class.java, loader).toList()
         processCompilerPluginsOptions(configuration, options, processors)
         val plugins = ServiceLoader.load(CompilerPluginRegistrar::class.java, loader).map { registrar ->
@@ -214,6 +223,42 @@ private fun load(entries: List<String>, options: List<String>): Reply {
             error.addSuppressed(cleanup)
         }
         throw error
+    }
+}
+
+/**
+ * Refuses [entry] unless it is a directory or a jar. A class loader takes any path and finds nothing
+ * in one that is neither, so a missing or broken plugin jar would load as no plugin at all.
+ */
+private fun checkEntry(entry: File) {
+    if (entry.isDirectory) return
+    if (!entry.isFile) throw Refused("plugin classpath entry $entry does not exist")
+    try {
+        ZipFile(entry).close()
+    } catch (error: IOException) {
+        throw Refused("plugin classpath entry $entry is not a jar: ${error.message}")
+    }
+}
+
+/** The service through which a jar declares a plugin with the registrar kotlinc's K1 loaded. */
+private const val LEGACY_REGISTRARS = "META-INF/services/org.jetbrains.kotlin.compiler.plugin.ComponentRegistrar"
+
+/**
+ * Refuses a classpath that declares a legacy `ComponentRegistrar`, which registers into a compiler
+ * project rather than an extension storage. The host has no such project, so it would otherwise
+ * load the plugin as nothing.
+ */
+private fun refuseLegacyRegistrars(loader: URLClassLoader) {
+    val declared = loader.findResources(LEGACY_REGISTRARS).toList().flatMap { service ->
+        service.openStream().bufferedReader().useLines { lines ->
+            lines.map { it.substringBefore('#').trim() }.filter { it.isNotEmpty() }.toList()
+        }
+    }
+    if (declared.isNotEmpty()) {
+        throw Refused(
+            "the plugin classpath declares the legacy ComponentRegistrar ${declared.joinToString(", ")}; " +
+                "the plugin host loads CompilerPluginRegistrar plugins only"
+        )
     }
 }
 

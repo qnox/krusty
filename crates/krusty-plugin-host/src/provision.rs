@@ -38,6 +38,16 @@ pub struct HostRuntime {
     pub compiler_identity: String,
 }
 
+impl HostRuntime {
+    /// A command that runs this runtime's `java` as its own JDK: `JAVA_HOME` names it, whatever the
+    /// environment named, so what runs there and looks for a JDK finds the one that runs it.
+    pub(crate) fn java_command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(&self.java);
+        command.env("JAVA_HOME", &self.java_home);
+        command
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum ProvisionError {
     /// No compiler classpath is pinned for this exact Kotlin version.
@@ -443,5 +453,30 @@ fn io(path: &std::path::Path, error: std::io::Error) -> ProvisionError {
     ProvisionError::Io {
         path: path.to_path_buf(),
         detail: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn java_runs_with_its_own_home_as_java_home() {
+        let runtime = HostRuntime {
+            kotlin_version: "2.4.20".into(),
+            java: PathBuf::from("/jdks/21/bin/java"),
+            java_home: PathBuf::from("/jdks/21"),
+            compiler_classpath: Vec::new(),
+            compiler_identity: String::new(),
+        };
+        let command = runtime.java_command();
+        assert_eq!(command.get_program(), "/jdks/21/bin/java");
+        assert_eq!(
+            command.get_envs().collect::<Vec<_>>(),
+            [(
+                std::ffi::OsStr::new("JAVA_HOME"),
+                Some(std::ffi::OsStr::new("/jdks/21"))
+            )]
+        );
     }
 }

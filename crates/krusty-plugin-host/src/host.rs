@@ -121,7 +121,7 @@ impl Host {
             java: runtime.java.clone(),
             detail: format!("the classpath cannot be passed to java: {error}"),
         })?;
-        let mut command = Command::new(&runtime.java);
+        let mut command = runtime.java_command();
         command.arg("-cp").arg(classpath).arg(adapter::MAIN_CLASS);
         Host::spawn(command, &runtime.kotlin_version, EXIT_GRACE)
     }
@@ -168,8 +168,9 @@ impl Host {
     /// Loads a plugin classpath as kotlinc's `-Xplugin` does, with `options` the `-P` values
     /// (`plugin:<id>:<key>=<value>`), and returns each registrar it declares, in the order kotlinc's
     /// service loader finds them, with the extensions it added. The registrars share one extension
-    /// storage, as in kotlinc. What was loaded before is unloaded first; a failed load leaves
-    /// nothing loaded.
+    /// storage, as in kotlinc. An entry that is neither a directory nor a jar is refused, and so is a
+    /// classpath declaring a legacy `ComponentRegistrar`, rather than loading as no plugin. What was
+    /// loaded before is unloaded first; a failed load leaves nothing loaded.
     pub fn load(
         &mut self,
         entries: &[String],

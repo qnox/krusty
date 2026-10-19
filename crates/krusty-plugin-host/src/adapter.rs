@@ -5,7 +5,6 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
@@ -72,7 +71,7 @@ fn compile(runtime: &HostRuntime, dir: &Path) -> Result<(), HostError> {
         std::env::join_paths(&runtime.compiler_classpath).map_err(|error| HostError::Build {
             detail: format!("the compiler classpath cannot be passed to java: {error}"),
         })?;
-    let mut command = Command::new(&runtime.java);
+    let mut command = runtime.java_command();
     command
         .arg("-cp")
         .arg(&classpath)
