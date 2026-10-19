@@ -5170,15 +5170,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   member, which its class compiles) with no suspend function-typed parameter or receiver, no
   `crossinline` parameter, and a template without lambdas, callable references, local classes,
   nested expansions or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
-  called with every argument from any body outside a suspend state machine and an inline
-  function's template: a named function, a lambda's method, a local function, a property
-  initializer, an `init` block, a constructor or an accessor, as kotlinc inlines wherever the call
-  is written. A suspend function or suspend lambda, and a lambda written in one (whose body may be
+  called with every argument from any body outside a suspend state machine: a named function, an
+  inline function (whose compiled body then holds the nested callee's code, as kotlinc's does), a
+  lambda's method, a local function, a property initializer, an `init` block, a constructor or an
+  accessor, as kotlinc inlines wherever the call is written. A suspend function or suspend lambda, and a lambda written in one (whose body may be
   spliced into its state machine), keep their calls expanded (`SuspendCaller`), as does a default
   argument. With no literal lambda argument
   that leaves its body by a non-local `return`, `break` or `continue`. Every other call is
   expanded in IR for a named reason. The JVM compiles each such callee once per emission pass, alone, into a writer of
-  its declaring class and source file, and the inliner reads that body as it reads a dependency's;
+  its declaring class and source file, and the inliner reads that body as it reads a dependency's.
+  A callee whose body inlines another same-module callee is compiled after it, as kotlinc compiles
+  a callee's node when a call first needs it; the node carries its method's own source map (the
+  lines it inlined are numbered past its file's own line count, not the caller's), so the caller
+  maps a nested line through it back to the nested callee's source. A body bracketed for FixStack
+  over caller operands runs over an empty stack inside the bracket, so a literal it expands is
+  bracketed again only for operands of its own, and a literal that always throws leaves none open;
   a body it cannot compile or inline fails the emission, never becoming a real call. The call
   keeps its record when a value-class representation wrapper takes its place, and a call one of
   whose operands is such a call marks its line again at its invoke, as kotlinc forgets the line
@@ -5192,7 +5198,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (same-file and cross-file calls, a value-class argument, a call on an inlined result, and calls in
   a lambda, a local function, initializers, an `init` block, a secondary constructor and a getter,
   against kotlinc's bytes, and a run; same-file and cross-file enum switches, including a nullable
-  subject, and calls in a suspend lambda and in a lambda of a suspend local function, as runs) and
+  subject, and calls in a suspend lambda and in a lambda of a suspend local function, as runs;
+  inline functions inlining their own same-module calls, and a literal that always throws inside a
+  bracketed body, against kotlinc's bytes and as runs) and
   `fir_lower::source_calls::inline_route::tests` (those suspend-context calls stay expanded while
   the same call in an ordinary function's lambda is kept for the backend).
 

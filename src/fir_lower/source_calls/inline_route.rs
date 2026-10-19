@@ -27,9 +27,6 @@ pub(in super::super) enum InlineCallRoute {
 pub(in super::super) enum ExpansionReason {
     /// The backend expands every same-module inline call in IR.
     BackendExpandsInIr,
-    /// The call is in an inline function's body (or in a callable nested in one), which is itself
-    /// a template some caller may expand.
-    InlineCaller,
     /// The call is in a default-argument expression.
     DefaultArgument,
     /// The call is in a suspend function or a suspend lambda, or in a lambda written in one,
@@ -170,9 +167,6 @@ impl BodyLowering<'_> {
 
     /// What about the body being lowered keeps its same-module inline calls expanded in IR.
     fn caller_exclusion(&self) -> Option<ExpansionReason> {
-        if self.inline_declaration.is_some() {
-            return Some(ExpansionReason::InlineCaller);
-        }
         if self.in_default_argument {
             return Some(ExpansionReason::DefaultArgument);
         }
