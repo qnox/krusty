@@ -115,13 +115,15 @@ fn is_erased_value_of(node: &Node) -> bool {
     )
 }
 
-/// The concrete form of `operation` for enum `class`: its own static `valueOf(String)` and
-/// `values()`, and its entries as the call site reads them. kotlinc writes the entries operation as
-/// `aconst_null; checkcast EnumEntries`, so a mapping read replaces the `aconst_null` with the
-/// mapping field and keeps that `checkcast` out, as the getter does.
+/// The concrete form of `operation` for enum `class` (semantic identity `classifier`): its own
+/// static `valueOf(String)` and `values()`, and its entries as the call site reads them, by the
+/// declaration `classifier` names. kotlinc writes the entries operation as
+/// `aconst_null; checkcast EnumEntries`, so the accessor call or mapping read replaces the
+/// `aconst_null` and the `checkcast` goes.
 fn enum_repoint(
     operation: EnumOperation,
     class: &str,
+    classifier: Option<crate::types::TypeName>,
     enum_entries: &mut dyn EnumEntriesReads,
 ) -> Result<Repoint, InlineError> {
     let invoke =
@@ -139,11 +141,15 @@ fn enum_repoint(
         },
         EnumOperation::Entries { placeholder, cast } => Repoint::Enum {
             placeholder,
-            with: match enum_entries
-                .entries(class)
+            with: match classifier
+                .and_then(|classifier| enum_entries.entries(classifier, class))
                 .ok_or_else(|| InlineError::UnknownEnumEntries(class.to_owned()))?
             {
-                EnumEntriesRead::Getter => invoke("getEntries", format!("()L{ENUM_ENTRIES};")),
+                EnumEntriesRead::Accessor {
+                    owner,
+                    name,
+                    descriptor,
+                } => vec![Node::Insn(method(INVOKESTATIC, &owner, &name, &descriptor))],
                 EnumEntriesRead::Mapping { class, field } => vec![Node::Insn(Insn::Field {
                     op: GETSTATIC,
                     owner: class,
@@ -308,9 +314,11 @@ fn plan(
         } else if mode == ENUM_MARKER {
             let erased = enum_operation(node, call).ok_or(InlineError::MalformedReifiedMarker)?;
             match arguments.classes.get(argument) {
-                Some(ReifiedArgument::Class { internal, .. }) => {
-                    enum_repoint(erased, internal, enum_entries)?
-                }
+                Some(ReifiedArgument::Class {
+                    internal,
+                    classifier,
+                    ..
+                }) => enum_repoint(erased, internal, *classifier, enum_entries)?,
                 Some(ReifiedArgument::Forwarded { name, nullable }) => Repoint::Forwarded {
                     name_instruction,
                     name: forwarded_marker_name(name, *nullable, argument),
@@ -331,6 +339,7 @@ fn plan(
                     nullable,
                     intrinsic,
                     rendered,
+                    ..
                 }) => Repoint::Class {
                     instruction: target,
                     mode,
@@ -698,6 +707,7 @@ mod tests {
                 "T".to_owned(),
                 ReifiedArgument::Class {
                     internal: "java/lang/String".to_owned(),
+                    classifier: None,
                     nullable: false,
                     intrinsic: None,
                     rendered: String::new(),
@@ -731,6 +741,7 @@ mod tests {
                     "T".to_owned(),
                     ReifiedArgument::Class {
                         internal: "java/lang/String".to_owned(),
+                        classifier: None,
                         nullable,
                         intrinsic: None,
                         rendered: String::new(),
@@ -788,6 +799,7 @@ mod tests {
                 "T".to_owned(),
                 ReifiedArgument::Class {
                     internal: "kotlin/jvm/functions/Function1".to_owned(),
+                    classifier: None,
                     nullable: false,
                     intrinsic: Some(crate::ir::TypeCheckRole::SuspendFunctionOfArity(0)),
                     rendered: String::new(),
@@ -948,6 +960,7 @@ mod tests {
                 "T".to_owned(),
                 ReifiedArgument::Class {
                     internal: "Color".to_owned(),
+                    classifier: Some(crate::types::type_name("Color")),
                     nullable: false,
                     intrinsic: None,
                     rendered: String::new(),
@@ -1051,12 +1064,85 @@ mod tests {
         rejected_unchanged(node);
     }
 
+    /// A mode-5 marker followed by `aconst_null; checkcast class`.
+    fn enum_entries_of(class: &str) -> MethodNode {
+        let mut node = MethodNode::new(0x0008, "listed", "()Ljava/util/List;");
+        node.nodes = marker("T", ENUM_MARKER);
+        node.nodes.extend([
+            Node::Insn(Insn::Op(ACONST_NULL)),
+            Node::Insn(Insn::Type {
+                op: CHECKCAST,
+                class: class.to_owned(),
+            }),
+        ]);
+        node
+    }
+
+    #[test]
+    fn an_enum_entries_cast_to_another_class_is_malformed() {
+        rejected_unchanged(enum_entries_of("java/util/List"));
+    }
+
+    /// Answers every entries read with one accessor and records the identity it was asked about.
+    struct RecordedAccessor(Vec<(crate::types::TypeName, String)>);
+
+    impl EnumEntriesReads for RecordedAccessor {
+        fn entries(
+            &mut self,
+            classifier: crate::types::TypeName,
+            internal: &str,
+        ) -> Option<EnumEntriesRead> {
+            self.0.push((classifier, internal.to_owned()));
+            Some(EnumEntriesRead::Accessor {
+                owner: "Color".to_owned(),
+                name: "getEntries".to_owned(),
+                descriptor: format!("()L{ENUM_ENTRIES};"),
+            })
+        }
+    }
+
+    #[test]
+    fn enum_entries_call_the_accessor_the_classifier_s_declaration_publishes() {
+        let mut node = enum_entries_of(ENUM_ENTRIES);
+        let mut reads = RecordedAccessor(Vec::new());
+        specialize(&mut node, &concrete_enum(), &mut reads).expect("specializes");
+        assert_eq!(
+            reads.0,
+            [(crate::types::type_name("Color"), "Color".to_owned())]
+        );
+        assert_eq!(
+            node.nodes[3..],
+            [Node::Insn(method(
+                INVOKESTATIC,
+                "Color",
+                "getEntries",
+                &format!("()L{ENUM_ENTRIES};")
+            ))]
+        );
+    }
+
+    #[test]
+    fn enum_entries_of_an_argument_without_a_classifier_are_refused() {
+        let mut node = enum_entries_of(ENUM_ENTRIES);
+        let original = node.clone();
+        let mut arguments = concrete_enum();
+        if let Some(ReifiedArgument::Class { classifier, .. }) = arguments.classes.get_mut("T") {
+            *classifier = None;
+        }
+        assert_eq!(
+            specialize(&mut node, &arguments, &mut RecordedAccessor(Vec::new())),
+            Err(InlineError::UnknownEnumEntries("Color".to_owned())),
+        );
+        assert_eq!(node, original);
+    }
+
     fn child_failure() -> ReifiedArguments {
         ReifiedArguments {
             classes: HashMap::from_iter([(
                 "E".to_owned(),
                 ReifiedArgument::Class {
                     internal: "ChildFailure".to_owned(),
+                    classifier: None,
                     nullable: false,
                     intrinsic: None,
                     rendered: String::new(),

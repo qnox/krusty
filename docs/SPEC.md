@@ -6458,9 +6458,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   of `java/lang/Enum.valueOf(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;`,
   `anewarray java/lang/Enum`, and `checkcast kotlin/enums/EnumEntries`. A mode-5 marker followed
   by any other shape (another owner or descriptor, an interface call, an array of another class)
-  is malformed and fails the splice. Whether `E` has `getEntries()` is a fact of its declaration:
-  an enum in the module being compiled always does; a Kotlin classpath enum does when its metadata
-  class flags carry `HAS_ENUM_ENTRIES`; a Java enum (no Kotlin metadata) never does. Without it,
+  is malformed and fails the splice. The reified argument carries its semantic classifier
+  identity beside its JVM class, and `E`'s entries are read through the accessor its declaration
+  publishes, found by that identity (`enum_entries_accessor`, which every provider normalizes: an
+  enum of the module being compiled always has one; a Kotlin classpath enum has one when its class
+  file declares the static `getEntries()`; a Java enum never does). Without one,
   `enumEntries<E>()` becomes `getstatic Owner$EntriesIntrinsicMappings.entries$N`, as in kotlinc:
   the calling file's synthetic class (`ACC_PUBLIC | ACC_FINAL | ACC_SUPER | ACC_SYNTHETIC`, an
   inner class of the file facade or class) holds one `public static final synthetic` field per

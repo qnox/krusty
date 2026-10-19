@@ -87,6 +87,15 @@ fn reified_enum_operations_are_inlined_like_kotlinc() {
 /// A Java enum declares no `getEntries()`.
 const JAVA_COLOR: &str = "package j;\npublic enum JColor { RED, GREEN }\n";
 
+/// A Java enum nested in a class: semantically `j.JOuter.JInner`, physically `j/JOuter$JInner`.
+const JAVA_NESTED: &str =
+    "package j;\npublic class JOuter { public enum JInner { NORTH, SOUTH } }\n";
+
+/// A Kotlin enum nested in a class: semantically `nested.Outer.Inner`, physically
+/// `nested/Outer$Inner`, with its own `getEntries()`.
+const KOTLIN_NESTED: &str =
+    "package nested\n\nclass Outer {\n    enum class Inner { UP, DOWN }\n}\n";
+
 /// Compiled by kotlinc, then given the shape a Kotlin compiler before `EnumEntries` produced:
 /// the metadata's `HAS_ENUM_ENTRIES` class flag cleared and `getEntries()` removed (see
 /// [`legacy_enum_classes`]). kotlinc 2.4 cannot compile a pre-`EnumEntries` class itself.
@@ -123,10 +132,17 @@ fun box(): String {
 
 /// The kotlinc-built `lib` (with [`SHADE`] in its legacy shape) and the javac-built [`JAVA_COLOR`].
 fn mapped_enum_libraries() -> Vec<std::path::PathBuf> {
-    let library = common::kotlinc_libraries(&[("Lib.kt", LIB), ("Shade.kt", SHADE)])
-        .expect("reference kotlinc is provisioned");
+    let library = common::kotlinc_libraries(&[
+        ("Lib.kt", LIB),
+        ("Shade.kt", SHADE),
+        ("Nested.kt", KOTLIN_NESTED),
+    ])
+    .expect("reference kotlinc is provisioned");
     let legacy = legacy_enum_classes(&library, "legacy/Shade");
-    let sources = [("JColor.java".to_string(), JAVA_COLOR.to_string())];
+    let sources = [
+        ("JColor.java".to_string(), JAVA_COLOR.to_string()),
+        ("JOuter.java".to_string(), JAVA_NESTED.to_string()),
+    ];
     let (java, _) = common::javac_compile(&sources, &[]).expect("javac compiles the Java enum");
     vec![legacy, java]
 }
@@ -149,6 +165,51 @@ fn enum_entries_of_enums_without_get_entries_read_a_mapping_like_kotlinc() {
             "EntriesMappedKt",
             "EntriesMappedKt$EntriesIntrinsicMappings",
         ],
+        &mapped_enum_libraries(),
+    );
+}
+
+/// Nested enums are found by their semantic identity (`Outer.Inner`) and called by their JVM
+/// class (`Outer$Inner`): the Kotlin one through the `getEntries()` its declaration publishes, the
+/// Java one through a mapping field, while `valueOf` and `values` name the nested class.
+const NESTED_MAIN: &str = r#"import j.JOuter
+import lib.all
+import lib.listed
+import lib.parsed
+import nested.Outer
+
+fun kotlinEntries(): List<Outer.Inner> = listed<Outer.Inner>()
+
+fun javaEntries(): List<JOuter.JInner> = listed<JOuter.JInner>()
+
+fun kotlinParse(s: String): Outer.Inner = parsed<Outer.Inner>(s)
+
+fun javaValues(): Array<JOuter.JInner> = all<JOuter.JInner>()
+
+fun box(): String {
+    if (kotlinEntries() != listOf(Outer.Inner.UP, Outer.Inner.DOWN)) return "kotlin entries"
+    if (javaEntries() != listOf(JOuter.JInner.NORTH, JOuter.JInner.SOUTH)) return "java entries"
+    if (kotlinParse("DOWN") != Outer.Inner.DOWN) return "kotlin parse"
+    if (javaValues()[0] != JOuter.JInner.NORTH) return "java values"
+    return "OK"
+}
+"#;
+
+#[test]
+fn nested_enum_operations_run() {
+    let mut classpath = mapped_enum_libraries();
+    classpath.push(common::stdlib_jar());
+    let jdk = common::jdk_modules();
+    let output = common::expect_box_run(NESTED_MAIN, "Main", &classpath, Some(jdk.as_path()));
+    assert_eq!(output, "OK");
+}
+
+#[test]
+fn nested_enum_operations_are_inlined_like_kotlinc() {
+    common::assert_classes_identical_to_kotlinc_against(
+        "NestedEnums",
+        NESTED_MAIN,
+        &["NestedEnumsKt", "NestedEnumsKt$EntriesIntrinsicMappings"],
         &mapped_enum_libraries(),
     );
 }

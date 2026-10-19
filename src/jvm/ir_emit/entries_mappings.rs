@@ -142,33 +142,40 @@ fn write_class(
     metadata_policy::finish_public_synthetic_class(cw, env)
 }
 
-/// How one inline call of the class `owner` reads an enum's entries: through the enum's own
-/// `getEntries()` when its declaration has one, otherwise through `owner`'s mapping class. An enum
-/// declared in this module's sources, in any file, is emitted with `getEntries()`; a dependency's
-/// class file says whether it has one. The first inlining pass over a call only probes, claiming nothing.
+/// How one inline call of the class `owner` reads an enum's entries: through the static accessor
+/// the enum's declaration publishes ([`EnumEntriesAccessor`](crate::backend::EnumEntriesAccessor),
+/// which every provider normalizes the same way), otherwise through `owner`'s mapping class. The
+/// declaration is found by the argument's semantic identity, never by its JVM spelling. The first
+/// inlining pass over a call only probes, claiming nothing.
 pub(super) struct CallEnumEntries<'e> {
     pub(super) classifiers: &'e dyn crate::backend::BackendClassifierSource,
-    pub(super) bodies: &'e dyn MethodBodies,
     pub(super) run: &'e EmitRun,
     pub(super) owner: &'e str,
     pub(super) commit: bool,
 }
 
 impl EnumEntriesReads for CallEnumEntries<'_> {
-    fn entries(&mut self, enum_class: &str) -> Option<EnumEntriesRead> {
-        let source = self
-            .classifiers
-            .classifier(crate::types::type_name(enum_class))
-            .is_some_and(|fact| fact.source);
-        let declares_entries = source || self.bodies.enum_declares_entries(enum_class)?;
-        if declares_entries {
-            return Some(EnumEntriesRead::Getter);
+    fn entries(
+        &mut self,
+        classifier: crate::types::TypeName,
+        internal: &str,
+    ) -> Option<EnumEntriesRead> {
+        let declaration = self.classifiers.classifier(classifier)?;
+        if declaration.kind != crate::libraries::TypeKind::Enum {
+            return None;
         }
-        let index =
-            self.run
-                .entries_mappings
-                .borrow_mut()
-                .claim(self.owner, enum_class, self.commit);
+        if let Some(accessor) = &declaration.enum_entries_accessor {
+            return Some(EnumEntriesRead::Accessor {
+                owner: accessor.owner.render(),
+                name: accessor.name.to_string(),
+                descriptor: accessor.descriptor.to_string(),
+            });
+        }
+        let index = self
+            .run
+            .entries_mappings
+            .borrow_mut()
+            .claim(self.owner, internal, self.commit);
         Some(EnumEntriesRead::Mapping {
             class: mappings_class(self.owner),
             field: entries_field(index),
@@ -181,7 +188,6 @@ impl<'a> Emitter<'a> {
     pub(super) fn call_enum_entries(&self, commit: bool) -> CallEnumEntries<'_> {
         CallEnumEntries {
             classifiers: self.classifiers,
-            bodies: self.bodies,
             run: self.run,
             owner: &self.owner,
             commit,

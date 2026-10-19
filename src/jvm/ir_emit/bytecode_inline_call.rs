@@ -1039,7 +1039,6 @@ impl Emitter<'_> {
         );
         let mut enum_entries = entries_mappings::CallEnumEntries {
             classifiers,
-            bodies,
             run,
             owner: &owner,
             commit: true,

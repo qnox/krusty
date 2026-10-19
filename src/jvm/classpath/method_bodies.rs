@@ -83,10 +83,6 @@ impl crate::jvm::inline::MethodBodies for Classpath {
     fn singleton_storage(&self, classifier: TypeName) -> Option<(TypeName, String)> {
         Classpath::singleton_storage(self, classifier)
     }
-    fn enum_declares_entries(&self, internal: &str) -> Option<bool> {
-        let class = self.find(internal)?;
-        Some(class.meta.has_enum_entries)
-    }
     fn regenerated_class(&self, internal: &str) -> Option<crate::jvm::inline::RegeneratedClass> {
         let class = self.find(internal)?;
         let unnamed_self = class
