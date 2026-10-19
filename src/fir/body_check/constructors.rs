@@ -426,6 +426,12 @@ impl BodyFirChecker<'_> {
             .copied()
             .map(|parameter| self.resolved_type(span, parameter))
             .collect::<Result<Vec<_>, _>>()?;
+        let declared_parameters = member
+            .constructor_declaration_params()
+            .iter()
+            .copied()
+            .map(|parameter| self.resolved_type(span, parameter))
+            .collect::<Result<Box<[_]>, _>>()?;
         crate::trace_compiler!(
             "fir",
             "external constructor owner={owner} parameters={:?} identity={:?}",
@@ -449,6 +455,7 @@ impl BodyFirChecker<'_> {
                 declaration,
                 classifier: owner,
                 parameters: parameters.clone().into_boxed_slice(),
+                declared_parameters,
                 annotation: annotation
                     .map(|annotation| self.checked_annotation_construction(span, annotation))
                     .transpose()?
@@ -1019,17 +1026,20 @@ fn checked_delegation_target(
                         checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
                     });
             }
-            let parameters = params
-                .iter()
-                .copied()
-                .map(|parameter| checker.resolved_type(span, parameter))
-                .collect::<Result<Vec<_>, _>>()?;
+            let resolved = |types: &[Ty]| {
+                types
+                    .iter()
+                    .copied()
+                    .map(|parameter| checker.resolved_type(span, parameter))
+                    .collect::<Result<Box<[_]>, _>>()
+            };
             Ok(FirConstructorTarget::External {
                 declaration: external_identity.ok_or_else(|| {
                     checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
                 })?,
                 classifier: *owner,
-                parameters: parameters.into_boxed_slice(),
+                parameters: resolved(params)?,
+                declared_parameters: resolved(declaration_params)?,
                 annotation: None,
             })
         }

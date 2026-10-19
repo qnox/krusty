@@ -7,7 +7,7 @@ use crate::fir::{
 use crate::ir::{ExprId, IrExpr, IrFunction};
 use crate::types::{Ty, TypeName};
 
-use super::source_calls::ModuleConstructorRequest;
+use super::source_calls::{ExternalConstructorRequest, ModuleConstructorRequest};
 use super::{BodyLowering, FirLoweringFailure};
 
 /// A language-defined classifier callable a reference names: what the checker resolved the
@@ -363,6 +363,7 @@ impl BodyLowering<'_> {
                 declaration,
                 classifier: selected_classifier,
                 parameters: selected_parameters,
+                declared_parameters,
                 annotation,
             } => {
                 if *selected_classifier != classifier || selected_parameters.as_ref() != parameters
@@ -371,16 +372,17 @@ impl BodyLowering<'_> {
                         *declaration,
                     ));
                 }
-                self.external_constructor_call(
-                    *declaration,
+                self.external_constructor_call(ExternalConstructorRequest {
+                    declaration: *declaration,
                     classifier,
                     parameters,
-                    0,
+                    declared_parameters,
+                    context_parameter_count: 0,
                     outer_parameter,
                     outer_receiver,
                     arguments,
-                    annotation.as_deref(),
-                )
+                    annotation: annotation.as_deref(),
+                })
                 .ok_or(FirLoweringFailure::UnsupportedExternalConstructor(
                     *declaration,
                 ))

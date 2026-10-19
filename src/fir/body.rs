@@ -568,6 +568,11 @@ pub enum FirConstructorTarget {
         declaration: ExternalCallableId,
         classifier: TypeName,
         parameters: Box<[ResolvedTy]>,
+        /// The selected constructor's parameters before classifier type-argument substitution,
+        /// parallel to `parameters`. `Holder<T>(T)` selected as `Holder(Money)` keeps `T` here
+        /// while `parameters` holds `Money`; a target representing values across erasure needs
+        /// the declaration's slot, not the call site's specialization.
+        declared_parameters: Box<[ResolvedTy]>,
         annotation: Option<Box<FirAnnotationConstruction>>,
     },
 }
@@ -587,10 +592,11 @@ impl FirConstructorTarget {
             }),
             Self::External {
                 parameters,
+                declared_parameters,
                 annotation,
                 ..
             } => {
-                parameters.len() * std::mem::size_of::<ResolvedTy>()
+                (parameters.len() + declared_parameters.len()) * std::mem::size_of::<ResolvedTy>()
                     + annotation.as_ref().map_or(0, |annotation| {
                         annotation.members.len() * std::mem::size_of::<(Box<str>, ResolvedTy)>()
                             + annotation
