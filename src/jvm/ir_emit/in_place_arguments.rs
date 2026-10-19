@@ -1,6 +1,6 @@
 //! Emission-side admission for reading an `@InlineOnly` call's arguments in place.
 
-use crate::ir::{Callee, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
+use crate::ir::{Callee, IrBinOp, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
 use crate::libraries::InlineKind;
 
 use super::Emitter;
@@ -24,21 +24,33 @@ impl EmittedShape for Emitter<'_> {
     }
 
     fn plain_invoke(&self, call: u32) -> bool {
-        let IrExpr::Call { callee, .. } = self.ir.expr(call) else {
-            return false;
-        };
         if self.ir.compiled_inline_call(call).is_some()
             || self.machine_suspensions.contains_key(&call)
             || self.ir.suspend_calls.contains_key(&call)
         {
             return false;
         }
-        match callee {
-            Callee::Local(function) | Callee::ClassStatic { function, .. } => {
-                !self.ir.suspend_funs.contains(function)
+        match self.ir.expr(call) {
+            // A member of a class in this file: its receiver, arguments and one invoke. An omitted
+            // argument goes through the `$default` stub's operands and keeps the stored path.
+            IrExpr::MethodCall {
+                class, index, args, ..
+            } => {
+                let function = self.ir.classes[*class as usize].methods[*index as usize];
+                args.iter().all(Option::is_some) && !self.ir.suspend_funs.contains(&function)
             }
-            Callee::Static { inline, .. } => *inline == InlineKind::None,
-            Callee::Intrinsic { operation, .. } => straight_line_intrinsic(operation),
+            IrExpr::Call { callee, .. } => match callee {
+                Callee::Local(function) | Callee::ClassStatic { function, .. } => {
+                    !self.ir.suspend_funs.contains(function)
+                }
+                Callee::Static { inline, .. } => *inline == InlineKind::None,
+                // A sibling file's function is one `invokestatic`, and a member of a sibling-file
+                // or classpath class one `invokevirtual`/`invokeinterface` (or the `invokestatic`
+                // of a `@JvmStatic` or access bridge) over its sequenced operands.
+                Callee::CrossFile { .. } | Callee::Virtual { .. } => true,
+                Callee::Intrinsic { operation, .. } => straight_line_intrinsic(operation),
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -102,6 +114,13 @@ fn evaluates_without_local_writes(ir: &IrFile, expression: u32, shape: &dyn Emit
                 .is_none_or(|receiver| evaluates_without_local_writes(ir, receiver, shape))
                 && arguments_movable(ir, args, shape)
         }
+        IrExpr::MethodCall { receiver, args, .. } if shape.plain_invoke(expression) => {
+            evaluates_without_local_writes(ir, *receiver, shape)
+                && args.iter().all(|argument| {
+                    argument
+                        .is_some_and(|argument| evaluates_without_local_writes(ir, argument, shape))
+                })
+        }
         // A statement whose value is discarded before the block's value (`getC().x` of a `const`
         // is `invokestatic getC; pop; bipush 42`) stores nothing while the block declares nothing.
         IrExpr::Block {
@@ -110,10 +129,12 @@ fn evaluates_without_local_writes(ir: &IrFile, expression: u32, shape: &dyn Emit
         } => {
             arguments_movable(ir, stmts, shape) && evaluates_without_local_writes(ir, *value, shape)
         }
-        // A primitive operator is its operands and one instruction, or for a comparison or logical
-        // connective a jump within the argument. kotlinc refuses only a jump that leaves the
-        // argument, so `sb.appendLine(a < b)` and `sb.appendLine(if (c) x else y)` stay in place.
-        IrExpr::PrimitiveBinOp { lhs, rhs, .. } => {
+        // A primitive operator is its operands and one instruction, or for a comparison a jump
+        // within the argument. kotlinc refuses only a jump that leaves the argument, so
+        // `sb.appendLine(a < b)` and `sb.appendLine(if (c) x else y)` stay in place. An eager
+        // `And`/`Or` in value position holds its left operand in a `BooleanOperand` temporary
+        // (`binary_operation.rs`), so it keeps the stored path; source `&&`/`||` is a `When`.
+        IrExpr::PrimitiveBinOp { op, lhs, rhs } if !matches!(op, IrBinOp::And | IrBinOp::Or) => {
             evaluates_without_local_writes(ir, *lhs, shape)
                 && evaluates_without_local_writes(ir, *rhs, shape)
         }
@@ -142,5 +163,43 @@ fn evaluates_without_local_writes(ir: &IrFile, expression: u32, shape: &dyn Emit
         // An element makes the builder store the array, and that call keeps its parameter slots.
         IrExpr::Vararg { elements, .. } if elements.is_empty() => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{arguments_movable, EmittedShape};
+    use crate::ir::{IrBinOp, IrExpr, IrFile};
+
+    /// Every construction and invoke is plain: only the operator's own emission is in question.
+    struct Plain;
+
+    impl EmittedShape for Plain {
+        fn plain_construction(&self, _: u32) -> bool {
+            true
+        }
+        fn plain_invoke(&self, _: u32) -> bool {
+            true
+        }
+    }
+
+    fn operator(op: IrBinOp) -> (IrFile, u32) {
+        let mut ir = IrFile::default();
+        let lhs = ir.add_expr(IrExpr::GetValue(0));
+        let rhs = ir.add_expr(IrExpr::GetValue(1));
+        let expression = ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs });
+        (ir, expression)
+    }
+
+    /// Eager `And`/`Or` (range membership, a suspend dispatch) stores its left operand in value
+    /// position, so the call keeps its stored arguments. The bitwise `and` stores nothing.
+    #[test]
+    fn an_eager_boolean_connective_keeps_the_stored_path() {
+        for op in [IrBinOp::And, IrBinOp::Or] {
+            let (ir, expression) = operator(op);
+            assert!(!arguments_movable(&ir, &[expression], &Plain), "{op:?}");
+        }
+        let (ir, expression) = operator(IrBinOp::BitAnd);
+        assert!(arguments_movable(&ir, &[expression], &Plain));
     }
 }

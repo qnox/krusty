@@ -928,14 +928,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `jvm/ir_emit/bytecode_inline_call.rs`). kotlinc refuses the move only for an argument that
   stores a local or jumps out of itself, so a field read, a property getter's invoke and a `!!`
   check stay in place as well: `h.items += F("x")` loads the receiver, builds the element and calls
-  `add` with no temporary. So do an ordinary function or getter invoke that is neither spliced
-  from an inline body nor a suspension point, an intrinsic written as one instruction or invoke
-  (an array or string access, a primitive `compareTo`), a block whose discarded statements and
-  value qualify, and primitive operators: `sb.appendLine(word())` keeps `sb` on the stack while
+  `add` with no temporary. So do an ordinary function, member, sibling-file or getter invoke that
+  is neither spliced from an inline body nor a suspension point (`sb.appendLine(t.word())` is
+  `aload; invokevirtual word; invokevirtual append`), an intrinsic written as one instruction or
+  invoke (an array or string access, a primitive `compareTo`), a block whose discarded statements
+  and value qualify, and primitive operators: `sb.appendLine(word())` keeps `sb` on the stack while
   `word()` runs (`invokestatic word; invokevirtual append`), where a stored argument would write
   `astore; invokestatic word; aload; swap`. A jump that stays inside the argument does not refuse
-  the move, so a comparison, a logical connective and an `if` over qualifying operands stay in
-  place too (`sb.appendLine(a < b)` is `getstatic sb; iload; iload; if_icmpge; …; append`).
+  the move, so a comparison, a source `&&`/`||` and an `if` over qualifying operands stay in
+  place too (`sb.appendLine(a < b)` is `getstatic sb; iload; iload; if_icmpge; …; append`). A
+  member call that omits an argument (its `$default` operands) and a compiler-built eager
+  `And`/`Or`, which holds its left operand in a temporary, keep the stored path.
   Tests:
   `tests/inline_arguments_in_place_e2e.rs`, `tests/inline_repeat_local_e2e.rs`,
   `tests/inline_format_arguments_e2e.rs`, `tests/in_place_property_receiver_e2e.rs`,
