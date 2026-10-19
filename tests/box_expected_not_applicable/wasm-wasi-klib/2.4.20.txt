@@ -1,6 +1,7 @@
 # Kotlin 2.4.20 codegen/box files expected to be not-applicable on wasm-wasi-klib, relative to
-# compiler/testData/codegen/box. Regenerate both exact inventories with
-# KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local wasm-wasi-klib run. The lists only shrink.
+# compiler/testData/codegen/box. Later releases with no file of their own read this one.
+# Regenerate both exact inventories with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local
+# wasm-wasi-klib run. The lists only shrink.
 annotations/instances/multiplatformInstantiation.kt
 annotations/intrinsicConstEvaluationInSources.kt
 annotations/nativeThrows.kt

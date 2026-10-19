@@ -1,6 +1,7 @@
 # Kotlin 2.4.10 codegen/box files expected to fail on wasm-js-klib, relative to
-# compiler/testData/codegen/box. Regenerate both exact inventories with
-# KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local wasm-js-klib run. The lists only shrink.
+# compiler/testData/codegen/box. Later releases with no file of their own read this one.
+# Regenerate both exact inventories with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local
+# wasm-js-klib run. The lists only shrink.
 annotations/annotationWithDefaultArgInDifferentModule.kt
 annotations/annotations0.kt
 annotations/deserializedLocalClassArgument.kt
@@ -950,17 +951,12 @@ closures/captureOuterProperty/kt4176.kt
 closures/captureOuterProperty/kt4656.kt
 closures/capturedLocalGenericFun.kt
 closures/capturedVarsOptimization/capturedInCrossinline.kt
-closures/capturedVarsOptimization/capturedInInlineOnlyAssign.kt
-closures/capturedVarsOptimization/capturedInInlineOnlyCAO.kt
-closures/capturedVarsOptimization/capturedInInlineOnlyIncrDecr.kt
-closures/capturedVarsOptimization/capturedInInlineOnlyIndexedCAO.kt
 closures/capturedVarsOptimization/capturedVarsOfSize2.kt
 closures/capturedVarsOptimization/closureBoxedVarOptimizations.kt
 closures/capturedVarsOptimization/kt17200.kt
 closures/capturedVarsOptimization/kt17588.kt
 closures/capturedVarsOptimization/kt44347.kt
 closures/capturedVarsOptimization/kt45446.kt
-closures/capturedVarsOptimization/sharedSlotsWithCapturedVars.kt
 closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
 closures/closureCapturingGenericParam.kt
@@ -1124,14 +1120,11 @@ contextParameters/contextFunInSam.kt
 contextParameters/contextOnInvokeResolve.kt
 contextParameters/contextParameterToDefaultArgument.kt
 contextParameters/contextPropertyInInterface.kt
-contextParameters/contextResolveDependingOnCallSite.kt
 contextParameters/contextualAnonymousFunAsAnExpression.kt
 contextParameters/contextualAnonymousFunction.kt
 contextParameters/contextualFunctionConversion.kt
 contextParameters/contextualInlineCall.kt
 contextParameters/contextualLocalFunWithTypeParam.kt
-contextParameters/contextualLocalWithLocalExtensionAndValue.kt
-contextParameters/dispatchExtensionAndContextReceiverResolve.kt
 contextParameters/explicitPassing.kt
 contextParameters/functionalType.kt
 contextParameters/inferGenericPropertyType.kt
