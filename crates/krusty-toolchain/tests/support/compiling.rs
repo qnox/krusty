@@ -9,6 +9,13 @@
 //! `KRUSTY_RECORDER_FAIL` names. Nothing is compiled, so a `compilation-fingerprint` request fails
 //! unrecorded and the Build Tools API implementation always compiles.
 //!
+//! krusty-toolchain runs a recorder of its own ([`toolchain_recorder`]), since it runs modules
+//! together: it appends each invocation whole, under a lock, and when `KRUSTY_EVENTS` names a file
+//! it appends `start <module>` and `end <module>` lines to it around its work. When
+//! `KRUSTY_RECORDER_SLEEP` is set, a module it does not fail prints `recorder: <module> begins` on
+//! stderr, sleeps that many seconds, prints `recorder: <module> ends` on stderr and
+//! `recorder: compiled <module>` on stdout.
+//!
 //! The toolchain compiles through the Build Tools API, whose implementation it loads from its
 //! shared cache by Maven coordinates. krusty's implementation (`tools/krusty-build-tools`) is
 //! installed there ([`RecordingKrusty`]), so the toolchain hands the recorder the arguments it would
@@ -44,19 +51,63 @@ if [ -n \"${KRUSTY_RECORDER_FAIL:-}\" ] && [ \"$module\" = \"$KRUSTY_RECORDER_FA
 fi
 ";
 
-/// The recording krusty, written once per process before any test of the binary starts a process:
-/// a script written while another thread starts a process could not be executed (`ETXTBSY`).
-pub fn recorder() -> &'static Path {
-    static RECORDER_PATH: OnceLock<PathBuf> = OnceLock::new();
-    RECORDER_PATH.get_or_init(|| {
+const TOOLCHAIN_RECORDER: &str = "#!/bin/sh
+for argument in \"$@\"; do
+  case $argument in -module-name=*) module=${argument#-module-name=} ;; esac
+done
+event() {
+  if [ -n \"${KRUSTY_EVENTS:-}\" ]; then printf '%s %s\\n' \"$1\" \"$module\" >> \"$KRUSTY_EVENTS\"; fi
+}
+event start
+until mkdir \"$KRUSTY_RECORD.lock\" 2>/dev/null; do sleep 0.01; done
+{
+  for argument in \"$@\"; do printf '%s\\n' \"$argument\"; done
+  printf '%s\\n' '----'
+} >> \"$KRUSTY_RECORD\"
+rmdir \"$KRUSTY_RECORD.lock\"
+if [ -n \"${KRUSTY_RECORDER_FAIL:-}\" ] && [ \"$module\" = \"$KRUSTY_RECORDER_FAIL\" ]; then
+  echo \"recorder: failing $module\" >&2
+  event end
+  exit 3
+fi
+if [ -n \"${KRUSTY_RECORDER_SLEEP:-}\" ]; then
+  echo \"recorder: $module begins\" >&2
+  sleep \"$KRUSTY_RECORDER_SLEEP\"
+  echo \"recorder: $module ends\" >&2
+  echo \"recorder: compiled $module\"
+fi
+event end
+";
+
+/// The directory of the recording krustys, both written once per process before any test of the
+/// binary starts a process: a script written while another thread starts a process could not be
+/// executed (`ETXTBSY`).
+fn recorders() -> &'static Path {
+    static DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+    DIRECTORY.get_or_init(|| {
         let directory =
             std::env::temp_dir().join(format!("krusty-toolchain-recorder-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("krusty");
-        std::fs::write(&path, RECORDER).unwrap();
-        make_executable(&path);
-        path
+        for (name, script) in [
+            ("krusty", RECORDER),
+            ("krusty-toolchain-krusty", TOOLCHAIN_RECORDER),
+        ] {
+            let path = directory.join(name);
+            std::fs::write(&path, script).unwrap();
+            make_executable(&path);
+        }
+        directory
     })
+}
+
+/// The recording krusty the toolchain runs.
+pub fn recorder() -> PathBuf {
+    recorders().join("krusty")
+}
+
+/// The recording krusty krusty-toolchain runs.
+pub fn toolchain_recorder() -> PathBuf {
+    recorders().join("krusty-toolchain-krusty")
 }
 
 fn make_executable(path: &Path) {
@@ -82,14 +133,16 @@ pub fn lay_out(directory: &Path) {
     std::fs::create_dir_all(directory.join(Resolving::CACHE)).unwrap();
 }
 
-/// The environment a task runs in, in `directory`.
-pub fn environment(command: &mut Command, directory: &Path) {
+/// The environment a task runs in, in `directory`, with the recording krusty `krusty`.
+pub fn environment(command: &mut Command, directory: &Path, krusty: &Path) {
     command
         .env("JAVA_HOME", directory.join(JDK))
         .env("KOTLIN_SHARED_CACHE_DIR", directory.join(Resolving::CACHE))
-        .env("KRUSTY_BIN", recorder())
+        .env("KRUSTY_BIN", krusty)
         .env("KRUSTY_RECORD", directory.join(RECORD))
         .env_remove("KRUSTY_RECORDER_FAIL")
+        .env_remove("KRUSTY_RECORDER_SLEEP")
+        .env_remove("KRUSTY_EVENTS")
         .env_remove("AMPER_SHARED_CACHE_DIR")
         .env_remove("M2_HOME");
 }
@@ -192,7 +245,7 @@ impl Compiler for RecordingKrusty {
             .output()
             .expect("install the Build Tools API implementation");
         assert!(installed.status.success(), "{installed:?}");
-        environment(command, directory);
+        environment(command, directory, &recorder());
     }
 
     fn collect(&self, directory: &Path, ran: Output) -> Output {

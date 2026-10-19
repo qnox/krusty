@@ -3,6 +3,7 @@
 //! Commands read the project as JetBrains' `kotlin` command reads it and report the same problems;
 //! what krusty-toolchain does not implement is refused by name rather than approximated.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -17,7 +18,7 @@ const USAGE: &str =
     "usage: krusty-toolchain [--project-dir=<path>] show modules [--format=plain|table]
        krusty-toolchain [--project-dir=<path>] show settings [-m <module>]... [--all-modules]
        krusty-toolchain [--project-dir=<path>] show dependencies [-m <module>]... [--all-modules] [--include-tests]
-       krusty-toolchain [--project-dir=<path>] task :<module>:compileJvm";
+       krusty-toolchain [--project-dir=<path>] task :<module>:compileJvm...";
 
 #[derive(Clone, Copy)]
 enum Format {
@@ -42,8 +43,8 @@ enum Show {
 
 enum Action {
     Show(Show),
-    /// Run the task named `:<module>:<task>`.
-    Task(String),
+    /// Run the tasks named `:<module>:<task>`, together.
+    Task(Vec<String>),
 }
 
 struct Command {
@@ -126,9 +127,9 @@ fn parse(arguments: &[String]) -> Result<Command, String> {
                 include_tests,
             }),
         }),
-        ["task", task] => Ok(Command {
+        ["task", tasks @ ..] if !tasks.is_empty() => Ok(Command {
             project_dir,
-            action: Action::Task(task.to_string()),
+            action: Action::Task(tasks.iter().map(|task| task.to_string()).collect()),
         }),
         ["task"] => Err("`task` needs the task to run, such as `:<module>:compileJvm`".to_string()),
         [] => Err("no command given".to_string()),
@@ -149,8 +150,8 @@ enum Failure {
     Model,
     /// A mistake by the user that is not a problem in a file, such as an unknown module name.
     User(String),
-    /// krusty failed on a module, exiting with `code`; it reported why.
-    Compiler { task: String, code: i32 },
+    /// Modules failed, krusty on some of them: each failure, in the order the modules finished.
+    Tasks(Vec<compile::RunFailure>),
 }
 
 fn run(command: Command) -> Result<(), Failure> {
@@ -177,7 +178,7 @@ fn run(command: Command) -> Result<(), Failure> {
     let root = model.project.root.clone();
     let show = match command.action {
         Action::Show(show) => show,
-        Action::Task(task) => return run_task(&model, &task),
+        Action::Task(tasks) => return run_tasks(&model, &tasks),
     };
     match show {
         Show::Modules(Format::Table) => print!("{}", show::modules_table(&model.modules)),
@@ -218,22 +219,34 @@ fn run(command: Command) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Run the task `task` (`:<module>:compileJvm`, the only task krusty-toolchain runs) of `model`.
-fn run_task(model: &Model, task: &str) -> Result<(), Failure> {
-    let not_found = || Failure::User(format!("Task '{task}' was not found in the project"));
-    let (module, name) = task
-        .strip_prefix(':')
-        .and_then(|task| task.split_once(':'))
-        .ok_or_else(not_found)?;
-    if !model.modules.iter().any(|header| header.name == module) {
-        return Err(not_found());
+/// Run the tasks `tasks` (each `:<module>:compileJvm`, the only task krusty-toolchain runs) of
+/// `model` together: the modules they need, each compiled once.
+fn run_tasks(model: &Model, tasks: &[String]) -> Result<(), Failure> {
+    let mut named = Vec::new();
+    let mut unknown = None;
+    for task in tasks {
+        let found = task
+            .strip_prefix(':')
+            .and_then(|task| task.split_once(':'))
+            .filter(|(module, _)| model.modules.iter().any(|header| header.name == *module));
+        match found {
+            Some((module, name)) => named.push((task, module, name)),
+            // The toolchain names the last task it does not find.
+            None => unknown = Some(task),
+        }
     }
-    if name != compile::TASK {
+    if let Some(task) = unknown {
+        return Err(Failure::User(format!(
+            "Task '{task}' was not found in the project"
+        )));
+    }
+    if let Some((task, _, _)) = named.iter().find(|(_, _, name)| *name != compile::TASK) {
         return Err(Failure::User(format!(
             "krusty-toolchain does not implement the task '{task}': it runs only `:<module>:{}`",
             compile::TASK
         )));
     }
+    let modules: Vec<&str> = named.iter().map(|(_, module, _)| *module).collect();
     let environment = compile::Environment {
         java_home: std::env::var_os("JAVA_HOME")
             .filter(|value| !value.is_empty())
@@ -241,7 +254,7 @@ fn run_task(model: &Model, task: &str) -> Result<(), Failure> {
     };
     let mut diagnostics = Diagnostics::default();
     let plan =
-        compile::plan(model, module, &environment, &mut diagnostics).map_err(Failure::User)?;
+        compile::plan(model, &modules, &environment, &mut diagnostics).map_err(Failure::User)?;
     report(&diagnostics, Some(&model.project.root));
     let Some(plan) = plan else {
         return Err(Failure::Reported);
@@ -254,13 +267,13 @@ fn run_task(model: &Model, task: &str) -> Result<(), Failure> {
                 "KRUSTY_BIN is not set: krusty-toolchain compiles with the krusty binary it names, and does not search PATH for one".to_string(),
             )
         })?;
-    compile::run(&plan, &krusty).map_err(|failure| match failure {
-        compile::RunFailure::Compiler { module, code } => Failure::Compiler {
-            task: format!(":{module}:{}", compile::TASK),
-            code,
-        },
-        compile::RunFailure::Io(message) => Failure::User(message),
+    compile::run(&plan, &krusty, compile::default_jobs(), |_, printed| {
+        // Each module's output at once, so modules compiling together do not interleave.
+        let _ = std::io::stdout().lock().write_all(&printed.stdout);
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().lock().write_all(&printed.stderr);
     })
+    .map_err(Failure::Tasks)
 }
 
 /// Print problems where the toolchain prints them: errors on stderr, warnings on stdout before the
@@ -325,8 +338,25 @@ fn main() -> ExitCode {
             eprintln!("\nERROR: failed to read Kotlin project model, refer to the errors above")
         }
         Failure::User(message) => eprintln!("\nERROR: {message}"),
-        Failure::Compiler { task, code } => {
-            eprintln!("\nERROR: Task '{task}' failed: krusty exited with status {code}");
+        Failure::Tasks(failures) => {
+            // The status is the first failure's: krusty's for a compilation.
+            let mut status = None;
+            for failure in failures {
+                match failure {
+                    compile::RunFailure::Compiler { module, code } => {
+                        eprintln!(
+                            "\nERROR: Task ':{module}:{}' failed: krusty exited with status {code}",
+                            compile::TASK
+                        );
+                        status.get_or_insert(code);
+                    }
+                    compile::RunFailure::Io(message) => {
+                        eprintln!("\nERROR: {message}");
+                        status.get_or_insert(1);
+                    }
+                }
+            }
+            let code = status.unwrap_or(1);
             return ExitCode::from(u8::try_from(code).ok().filter(|&code| code != 0).unwrap_or(1));
         }
     }
