@@ -3399,17 +3399,17 @@ pub(crate) fn lower_value_classes(
             record_value_boundary(&mut ops, &ir.exprs, &repr_ctx, default, target, &under);
         }
     }
-    // A superclass invocation is not an IR `Call` node: `super_args` are emitted directly by the class
-    // constructor. Apply the same semantic boundary operation using the checker-selected parameter types
-    // retained beside those arguments.
-    for (class_index, class) in ir.classes.iter().enumerate() {
-        for (&argument, &parameter) in class.super_args.iter().zip(&class.super_ctor_params) {
+    // A constructor delegation is not an IR `Call` node: superclass and secondary `this(...)`/
+    // `super(...)` arguments are emitted directly by the constructor. Apply the same semantic boundary
+    // operation using the checker-selected parameter types retained beside those arguments.
+    for (slots, arguments, parameters) in constructor_slots.delegations(ir) {
+        for (&argument, &parameter) in arguments.iter().zip(parameters) {
             let repr_ctx = ReprCtx {
                 exprs: &ir.exprs,
                 funcs: &ir.functions,
                 rets: &orig_rets,
                 fields: &orig_fields,
-                slots: constructor_slots.super_args(class_index),
+                slots,
                 under: &under,
                 types: CallTypes::of(ir),
                 physical: &ir.physical_types,

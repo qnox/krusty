@@ -1534,10 +1534,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   common lowering records them as the construction's declared parameters with the enclosing
   instance prepended, and JVM value-class boundaries read that declaration shape instead of the
   specialized `New::ctor_params`. Reading the specialization passed the bare `int` or `String`
-  carrier into the `Object` slot. Tests: `tests/value_class_java_generic_constructor_e2e.rs` (both
-  carriers, run against kotlinc),
+  carrier into the `Object` slot. Super-constructor delegation (`class D(v: Money) :
+  Base<Money>(v)`, or a secondary `constructor(v: Money) : super(v)`) maps its arguments onto the
+  specialized parameters but stores the declared ones as `super_ctor_params` / the delegate's
+  `target_params`, and the JVM records the value-class boundary of every delegation argument,
+  secondary `this(...)`/`super(...)` included, against those declared parameters before erasure. A
+  secondary `super(m)` into a generic base's `T` previously passed `Money`'s `int` as an `Integer`,
+  for a Kotlin base as well as a Java one. Tests: `tests/value_class_java_generic_constructor_e2e.rs`
+  (constructions, primary and secondary delegations, run against kotlinc),
   `constructor_tests::java_generic_constructor_keeps_its_declared_class_formal_beside_the_specialization`
-  and `external_constructions::a_java_generic_constructor_records_its_declared_type_parameter_destination`.
+  and the `external_constructions` IR tests.
 - **A library inline call's expanded lambda yields the value class as the call's type gives it.**
   `s.let { Id(it) }`, `s.run { Id(this) }` and `with(s) { Id(this) }` are expanded in place: the
   lambda's body becomes the call's value, and the lambda's implementation loses its body. That

@@ -45,3 +45,41 @@ fn a_java_generic_constructor_records_its_declared_type_parameter_destination() 
     let formal = Ty::platform_nullable(Ty::ty_param("V", Ty::nullable(Ty::obj("kotlin/Any"))));
     assert_eq!(declared, [formal]);
 }
+
+/// A super-constructor delegation to the same Java constructor keeps the class formal as the
+/// operand destination, while its argument mapping used the specialized `Money!`.
+#[test]
+fn a_java_generic_super_delegation_records_its_declared_type_parameter_destination() {
+    let ir = lower_single_source_with_jvm_stdlib(
+        "@JvmInline value class Money(val cents: Int)\n\
+         class Primary(value: Money) : java.util.concurrent.atomic.AtomicReference<Money>(value)\n\
+         class Secondary : java.util.concurrent.atomic.AtomicReference<Money> {\n\
+             constructor(value: Money) : super(value)\n\
+         }\n",
+        "ExternalGenericSuperDelegation",
+    );
+    let formal = Ty::platform_nullable(Ty::ty_param("V", Ty::nullable(Ty::obj("kotlin/Any"))));
+    let class = |name: &str| {
+        ir.classes
+            .iter()
+            .find(|class| class.fq_name.matches(name))
+            .unwrap_or_else(|| panic!("class {name}"))
+    };
+    let primary = class("Primary");
+    assert!(primary
+        .superclass
+        .matches("java/util/concurrent/atomic/AtomicReference"));
+    assert_eq!(primary.super_ctor_params, [formal]);
+    let [argument] = primary.super_args.as_slice() else {
+        panic!("one superclass operand, got {:?}", primary.super_args)
+    };
+    assert_eq!(ir.checked_type(*argument), Some(Ty::obj("Money")));
+    let secondary = class("Secondary");
+    let [constructor] = secondary.secondary_ctors.as_slice() else {
+        panic!("one secondary constructor")
+    };
+    let crate::ir::CtorDelegateTarget::Super { target_params, .. } = &constructor.delegate else {
+        panic!("a super(...) delegation, got {:?}", constructor.delegate)
+    };
+    assert_eq!(target_params.as_slice(), [formal]);
+}

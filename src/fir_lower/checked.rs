@@ -1067,6 +1067,7 @@ impl BodyLowering<'_> {
                 declaration,
                 classifier,
                 parameters,
+                declared_parameters,
                 ..
             } => {
                 let arguments = self.external_arguments(&call.arguments, parameters)?;
@@ -1079,6 +1080,10 @@ impl BodyLowering<'_> {
                         declaration: *declaration,
                         classifier: *classifier,
                         parameters: parameter_types.clone(),
+                        declared_parameters: declared_parameters
+                            .iter()
+                            .map(|parameter| parameter.get())
+                            .collect(),
                     },
                     parameter_types,
                     arguments,

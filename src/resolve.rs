@@ -44689,7 +44689,7 @@ impl<'a> Checker<'a> {
                 target: ResolvedCtorDelegationTarget::Super {
                     owner,
                     params: params.clone(),
-                    declaration_params: constructor.params.clone(),
+                    declaration_params: constructor.constructor_declaration_params().to_vec(),
                     implicit_outer: base.outer_instance,
                     stable_declaration: constructor.stable_declaration,
                     external_identity: constructor.external_identity,
