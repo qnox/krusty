@@ -1525,6 +1525,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a custom value class through a bare-`T` box boundary; `Ok`/`Err`-style factories over a two-parameter
   value class with an `Any?` carrier), `generic_hof_vc_binding_e2e::nullable_generic_return_keeps_null`,
   and the `cross_file_*_value_class_return_*` cases in `tests/reference_adaptation_e2e.rs`.
+- **A value class passed to a dependency's generic constructor parameter crosses as its box.**
+  `Holder(Money(7))` for the Java `class Holder<T> { Holder(T value) }` selects `<init>(Object)` with
+  `T = Money`. The declaration consumes bare `T`, so the argument is `Money`'s box, as kotlinc passes
+  it, whether the carrier is a primitive (`Money(Int)`) or a reference (`Label(String)`). Checked FIR
+  keeps the selected dependency constructor's parameters before classifier type-argument
+  substitution beside the specialized ones (`FirConstructorTarget::External::declared_parameters`),
+  common lowering records them as the construction's declared parameters with the enclosing
+  instance prepended, and JVM value-class boundaries read that declaration shape instead of the
+  specialized `New::ctor_params`. Reading the specialization passed the bare `int` or `String`
+  carrier into the `Object` slot. Tests: `tests/value_class_java_generic_constructor_e2e.rs` (both
+  carriers, run against kotlinc),
+  `constructor_tests::java_generic_constructor_keeps_its_declared_class_formal_beside_the_specialization`
+  and `external_constructions::a_java_generic_constructor_records_its_declared_type_parameter_destination`.
 - **A library inline call's expanded lambda yields the value class as the call's type gives it.**
   `s.let { Id(it) }`, `s.run { Id(this) }` and `with(s) { Id(this) }` are expanded in place: the
   lambda's body becomes the call's value, and the lambda's implementation loses its body. That

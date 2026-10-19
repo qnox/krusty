@@ -1659,6 +1659,8 @@ mod value_class_inherited_default_names_e2e;
 mod value_class_interface_default_receiver_e2e;
 #[path = "value_class_interface_entry_e2e.rs"]
 mod value_class_interface_entry_e2e;
+#[path = "value_class_java_generic_constructor_e2e.rs"]
+mod value_class_java_generic_constructor_e2e;
 #[path = "value_class_java_nullable_element_e2e.rs"]
 mod value_class_java_nullable_element_e2e;
 #[path = "value_class_lambda_class_e2e.rs"]

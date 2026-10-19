@@ -1753,7 +1753,7 @@ pub(crate) fn lower_value_classes(
                     fields = orig_fields[class].clone();
                     &fields
                 }
-                _ => ctor_params.as_deref().unwrap_or(&[]),
+                _ => constructor_arguments::parameters(ir, id, ctor_params),
             };
             for (&argument, parameter) in args.iter().zip(
                 constructor_arguments::supplied_parameters(params, defaults, *default_prefix_count),
@@ -3123,7 +3123,7 @@ pub(crate) fn lower_value_classes(
                                 fields = orig_fields[c].clone();
                                 &fields
                             }
-                            _ => ctor_params.as_deref().unwrap_or(&[]),
+                            _ => constructor_arguments::parameters(ir, id, ctor_params),
                         };
                         args.iter()
                             .zip(constructor_arguments::supplied_parameters(

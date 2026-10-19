@@ -65438,11 +65438,7 @@ impl<'a> Checker<'a> {
             let mut member = declaration;
             member.generic_sig =
                 crate::libraries::constructor_generic_signature(internal, classifier, &member);
-            let declaration_parameter_shapes = member
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.params.clone())
-                .unwrap_or_else(|| member.params.clone());
+            let declaration_parameter_shapes = member.constructor_declaration_params().to_vec();
             let parameter_count = member.params.len();
             let call_sig = Self::normalized_constructor_call_sig(&member);
             let contextual = match self.contextual_call_shape_result(
