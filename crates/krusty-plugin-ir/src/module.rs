@@ -2,7 +2,7 @@
 //! IR plugins to run over. Offsets are UTF-16 code-unit offsets into the file's text, as kotlinc's
 //! are; every element carries the offsets kotlinc gives the same source.
 
-use crate::session::{CallableIdentity, TypeIdentity};
+use crate::identity::{CallableIdentity, TypeIdentity};
 
 /// Every source file of the module, in the order kotlinc reads them.
 #[derive(Clone, Debug, PartialEq, Eq)]

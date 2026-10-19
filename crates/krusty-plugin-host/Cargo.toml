@@ -7,6 +7,7 @@ license = "Apache-2.0"
 repository = "https://github.com/qnox/krusty"
 
 [dependencies]
+krusty-plugin-ir = { path = "../krusty-plugin-ir" }
 # Every jar and JDK archive the host runs on is checked against a pinned SHA-256 before use.
 sha2 = "0.11"
 # The Windows JDKs ship as zip archives; the Unix ones are tarballs that the system `tar` unpacks.
