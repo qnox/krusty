@@ -10,7 +10,7 @@ use crate::ir::{ExprId, IrExpr};
 use crate::metadata::klib_ir::tree::{KlibIrExprKind, KlibIrLoop};
 use crate::types::Ty;
 
-impl BodyLowering<'_, '_, '_> {
+impl BodyLowering<'_> {
     /// A source `while` (`post_test` false) or `do`-`while` loop. Checked FIR lowering lowers its
     /// condition, then its body block, and records no type for the loop: it is a statement. The
     /// condition is lowered first for a `do`-`while` too, so a condition that reads a variable

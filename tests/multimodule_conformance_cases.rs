@@ -266,10 +266,10 @@ pub const OVERLAPPING_BITS: Case = Case {
 };
 
 /// Every portable multimodule claim. Each backend adapter iterates this table in full.
-/// `also` and `apply` from the target stdlib expand through their declaration's direct lambda
-/// invocation plan: each answers its receiver after the lambda ran, a lambda mutates a caller
-/// `var`, and a `return` inside `also`'s lambda leaves the enclosing function. The library module
-/// calls them too, so the plan reaches a dependency's own body as well as the consumer's.
+/// `also` and `apply` from the target stdlib expand from their prepared inline bodies: each answers
+/// its receiver after the lambda ran, a lambda mutates a caller `var`, and a `return` inside
+/// `also`'s lambda leaves the enclosing function. The library module calls them too, so the
+/// expansion reaches a dependency's own body as well as the consumer's.
 pub const RECEIVER_RETURNING_SCOPE_FUNCTIONS: Case = Case {
     stem: "multimoduleReceiverReturningScopeFunctions",
     source: "// MODULE: lib\n\
@@ -297,6 +297,40 @@ pub const RECEIVER_RETURNING_SCOPE_FUNCTIONS: Case = Case {
              }\n",
 };
 
+/// Ordinary inline functions of a separately compiled library expand at the consumer's call from
+/// their serialized bodies, by the same inliner that expands a same-module inline call: a lambda is
+/// spliced with its captures and a non-local `return`, a parameter default is evaluated in the
+/// callee's scope, a member keeps its dispatch receiver, and a member extension called inside a
+/// scope function keeps both receivers.
+pub const LIBRARY_INLINE_BODIES: Case = Case {
+    stem: "multimoduleLibraryInlineBodies",
+    source: "// MODULE: lib\n\
+             inline fun twice(action: (Int) -> Unit) { action(1); action(2) }\n\
+             inline fun String.framed(left: String = \"[\", right: String = left): String = left + this + right\n\
+             class Counter(var total: Int) {\n\
+             \x20   inline fun add(step: () -> Int): Int { total += step(); return total }\n\
+             \x20   inline fun String.weighted(): Int = length * total\n\
+             }\n\
+             fun counter(): Counter = Counter(10)\n\
+             // MODULE: main(lib)\n\
+             fun firstEven(): Int {\n\
+             \x20   twice { if (it % 2 == 0) return it }\n\
+             \x20   return -1\n\
+             }\n\
+             fun box(): String {\n\
+             \x20   var sum = 0\n\
+             \x20   twice { sum += it }\n\
+             \x20   if (sum != 3) return \"twice $sum\"\n\
+             \x20   if (firstEven() != 2) return \"non-local return\"\n\
+             \x20   if (\"a\".framed() != \"[a[\") return \"defaults\"\n\
+             \x20   if (\"a\".framed(\"<\", \">\") != \"<a>\") return \"arguments\"\n\
+             \x20   val counter = counter()\n\
+             \x20   if (counter.add { sum } != 13) return \"member\"\n\
+             \x20   if (counter.run { \"ab\".weighted() } != 26) return \"member extension\"\n\
+             \x20   return \"OK\"\n\
+             }\n",
+};
+
 pub const ALL: &[Case] = &[
     TOP_LEVEL_DEPENDENCY,
     DEPENDS_ON,
@@ -318,6 +352,7 @@ pub const ALL: &[Case] = &[
     FLOATING_BIT_REFERENCES,
     OVERLAPPING_BITS,
     RECEIVER_RETURNING_SCOPE_FUNCTIONS,
+    LIBRARY_INLINE_BODIES,
 ];
 
 #[test]

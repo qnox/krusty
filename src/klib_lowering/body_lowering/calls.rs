@@ -4,6 +4,7 @@
 //! call of it; a dependency function lowers as a call of its function in the same unit.
 
 use super::super::ir_builtins::{BuiltinOperator, BuiltinRelation};
+use super::super::klib_types::function_class_member;
 use super::{mismatch, unsupported, BodyLowering, LinkedCallee, Lowered};
 use crate::ir::{ExprId, IrBinOp, IrExpr};
 use crate::metadata::id_signature::KlibPublicIdSignature;
@@ -15,7 +16,7 @@ use crate::types::{EqualityMode, Ty};
 
 use super::super::decline::KlibBodyDeclineReason;
 
-impl BodyLowering<'_, '_, '_> {
+impl BodyLowering<'_> {
     /// A call of a compiler built-in operator or of a dependency function. A built-in operator
     /// lowers as checked FIR lowers the source operator it serializes; a dependency function
     /// lowers as a call of its function in the same unit.
@@ -32,6 +33,17 @@ impl BodyLowering<'_, '_, '_> {
                 return unsupported("a call through a property accessor signature")
             }
         };
+        if let Some((function, member)) = function_class_member(callee) {
+            if member != "invoke" {
+                return unsupported("a call of a function class member other than `invoke`");
+            }
+            if !access.type_arguments.is_empty() {
+                return Err(mismatch(
+                    "a function invocation is called with type arguments",
+                ));
+            }
+            return self.function_invocation(access, function.arity(), ty);
+        }
         let operator = self.builtins.operator(callee);
         // A checked source call may select the same exact declaration that this support body
         // calls. Materialize that declaration into the closed unit so the source edge has target
@@ -231,6 +243,68 @@ impl BodyLowering<'_, '_, '_> {
             }
             Some(_) => unsupported("a negation of another form than `!`, `!=` or `!==`"),
         }
+    }
+
+    /// `f.invoke(arguments)` of a function value `f`, lowered as checked FIR lowers the source
+    /// `f(arguments)`: an invocation of the value with the parameter types its function type
+    /// declares, typed with the call's result.
+    fn function_invocation(
+        &mut self,
+        access: &KlibIrMemberAccess,
+        arity: usize,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        let arguments = arguments(access);
+        let Some((Some(function), arguments)) = arguments.split_first() else {
+            return Err(mismatch("a function invocation has no function value"));
+        };
+        if arguments.len() != arity {
+            return Err(mismatch(
+                "a function invocation passes another number of arguments than its arity",
+            ));
+        }
+        let func = self.expression(*function)?;
+        let Ty::Fun(signature) = self.lowered_type(func).non_null() else {
+            return Err(mismatch(
+                "a function invocation's value has no function type",
+            ));
+        };
+        if self.lowered_type(func) != Ty::Fun(signature) {
+            return unsupported("an invocation of a nullable function value");
+        }
+        if signature.params.len() != arity || signature.suspend || signature.context_count != 0 {
+            return Err(mismatch(
+                "a function invocation's value has another shape than its function class",
+            ));
+        }
+        // An erased body uses the erasure of the function value's result.
+        if signature.ret != ty && self.header.erased(signature.ret) != ty {
+            return Err(mismatch(
+                "a function invocation is typed apart from its result",
+            ));
+        }
+        let params = signature.params.to_vec();
+        let mut args = Vec::with_capacity(arity);
+        for (argument, parameter) in arguments.iter().zip(&params) {
+            let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a function invocation that omits an argument",
+            ))?;
+            args.push(self.declared_operand(argument, *parameter)?);
+        }
+        let invocation = self.ir.add_expr(IrExpr::InvokeFunction {
+            func,
+            args,
+            params,
+            ret: signature.ret,
+        });
+        Ok(if signature.ret == ty {
+            invocation
+        } else {
+            self.ir.logical_types.insert(invocation, signature.ret);
+            let erased = self.coercion(invocation, ty);
+            self.erasure_coercions.insert(erased);
+            erased
+        })
     }
 
     /// A call of a dependency function, which the unit lowers too.

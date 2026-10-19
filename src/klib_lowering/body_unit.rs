@@ -11,15 +11,16 @@
 use crate::fx_hash::HashMap;
 use std::collections::VecDeque;
 
-use super::body_lowering::{BodyLowering, LinkedCallee, LoweredFunction};
+use super::body_lowering::{BodyLowering, CallLinker, LinkedCallee, LoweredFunction};
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
 use super::function_lowering::{
     declare_function, function_header, function_header_with_emitted_dispatch, FunctionHeader,
 };
 use super::ir_builtins::IrBuiltinOperators;
+use super::lowering_checkpoint::LoweringCheckpoint;
 use crate::fir::ExternalCallableId;
-use crate::ir::{Callee, ExprId, FunId, IrFile};
+use crate::ir::{Callee, FunId, IrFile};
 use crate::klib_libraries::{
     KlibCalleeOrigin, KlibDeclarationBodies, KlibIntrinsicCallable, KlibIntrinsicFacts,
 };
@@ -380,7 +381,7 @@ impl DependencyBodyUnit {
 
 /// Joins the calls of the bodies being lowered to the unit's functions, declaring each callee
 /// reached for the first time and queueing its body.
-pub(super) struct Linker<'u, 's> {
+struct Linker<'u, 's> {
     functions: &'u mut HashMap<KlibDependencyCallable, FunId>,
     authenticated_singleton_dispatches: &'u mut HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: &'u mut HashMap<KlibDependencyCallable, TypeName>,
@@ -393,14 +394,8 @@ pub(super) struct Linker<'u, 's> {
     sources: Sources<'s>,
 }
 
-impl<'s> Linker<'_, 's> {
-    /// Whether a checked source edge selected this exact producer-resolved declaration. A body
-    /// call of such a declaration must remain a callable edge so the closed unit exports code for
-    /// the source call; an otherwise identical unselected compiler builtin may be folded.
-    pub(super) fn is_selected(
-        &self,
-        callee: &KlibPublicIdSignature,
-    ) -> Result<bool, KlibBodyDeclineReason> {
+impl CallLinker for Linker<'_, '_> {
+    fn is_selected(&self, callee: &KlibPublicIdSignature) -> Result<bool, KlibBodyDeclineReason> {
         let signature = KlibDeclarationSignature::Public(callee.clone());
         let identity = match self
             .sources
@@ -430,8 +425,7 @@ impl<'s> Linker<'_, 's> {
         }
     }
 
-    /// The function a call of the public declaration `callee` invokes.
-    pub(super) fn link(
+    fn link(
         &mut self,
         ir: &mut IrFile,
         callee: &KlibPublicIdSignature,
@@ -566,7 +560,9 @@ impl<'s> Linker<'_, 's> {
             singleton_dispatch: None,
         })
     }
+}
 
+impl<'s> Linker<'_, 's> {
     fn callee_identity(
         &self,
         callee: &KlibPublicIdSignature,
@@ -721,47 +717,17 @@ fn selected_callable_for_header<'callable>(
     })
 }
 
-/// What a unit held before a lowering began. Lowering appends functions and expressions and
-/// records facts keyed by them; restoring removes exactly those.
-struct UnitCheckpoint {
-    expressions: usize,
-    functions: usize,
-}
+/// What a unit held before a lowering began: its IR ([`LoweringCheckpoint`]) and the identities
+/// joined to the functions that IR declares.
+struct UnitCheckpoint(LoweringCheckpoint);
 
 impl UnitCheckpoint {
     fn of(unit: &DependencyBodyUnit) -> Self {
-        Self {
-            expressions: unit.ir.exprs.len(),
-            functions: unit.ir.functions.len(),
-        }
+        Self(LoweringCheckpoint::of(&unit.ir))
     }
 
     fn restore(self, unit: &mut DependencyBodyUnit) {
-        let first = ExprId::try_from(self.expressions).expect("an expression id fits u32");
-        let ir = &mut unit.ir;
-        ir.exprs.truncate(self.expressions);
-        ir.logical_types.retain(|expression, _| *expression < first);
-        ir.checked_return_depths
-            .retain(|expression, _| *expression < first);
-        ir.binding_read_stability
-            .retain(|expression, _| *expression < first);
-        ir.callable_scopes.retain(|expression| *expression < first);
-        ir.negations.retain(|expression| *expression < first);
-        ir.short_circuits
-            .retain(|expression, _| *expression < first);
-        ir.written_casts.retain(|expression| *expression < first);
-        ir.whens
-            .exhaustive
-            .retain(|expression, _| *expression < first);
-        let first = FunId::try_from(self.functions).expect("a function id fits u32");
-        ir.functions.truncate(self.functions);
-        ir.fn_source_names.retain(|function, _| *function < first);
-        ir.fn_params.retain(|function, _| *function < first);
-        ir.extension_receiver_fns
-            .retain(|function| *function < first);
-        ir.fn_context_counts.retain(|function, _| *function < first);
-        ir.singleton_extension_unread_receivers
-            .retain(|function, _| *function < first);
+        let first = self.0.restore(&mut unit.ir);
         unit.functions.retain(|_, function| *function < first);
         let functions = &unit.functions;
         unit.authenticated_singleton_dispatches

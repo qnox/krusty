@@ -13,7 +13,7 @@ use crate::types::Ty;
 
 use super::super::decline::KlibBodyDeclineReason;
 
-impl BodyLowering<'_, '_, '_> {
+impl BodyLowering<'_> {
     /// A `when` of the source form `origin`, typed `ty`. The branches are lowered before the
     /// shape is checked, so a body that uses an unmodelled form inside any other `when` declines
     /// by that form.
@@ -128,8 +128,7 @@ impl BodyLowering<'_, '_, '_> {
             return self.branch(result, true);
         }
         let lowered = self.branch(result, false)?;
-        self.expect_value(lowered, ty)?;
-        Ok(lowered)
+        self.branch_value(lowered, ty)
     }
 
     /// An `if`-`else if` chain. `if (a) x else if (b) y else z` is `if (a) x else (if (b) y else
@@ -183,8 +182,7 @@ impl BodyLowering<'_, '_, '_> {
     fn if_result(&mut self, result: KlibIrExprId, ty: Ty) -> Lowered<ExprId> {
         if ty != Ty::Unit {
             let lowered = self.branch(result, false)?;
-            self.expect_value(lowered, ty)?;
-            return Ok(lowered);
+            return self.branch_value(lowered, ty);
         }
         let lowered = self.branch(result, true)?;
         let converted = match self.lowered_type(lowered) {
@@ -217,11 +215,14 @@ impl BodyLowering<'_, '_, '_> {
         }
     }
 
-    /// `lowered` is a value of type `ty`, or diverges.
-    fn expect_value(&self, lowered: ExprId, ty: Ty) -> Lowered<()> {
-        match self.lowered_type(lowered) {
-            actual if actual == ty || actual == Ty::Nothing => Ok(()),
-            _ => Err(KlibBodyDeclineReason::ImplicitConversion),
+    /// `lowered` as a branch value of type `ty`: a value of `ty` or a diverging one as it is, and
+    /// a value of the non-null type `ty` widens as the checker widens it.
+    fn branch_value(&mut self, lowered: ExprId, ty: Ty) -> Lowered<ExprId> {
+        let actual = self.lowered_type(lowered);
+        if super::is_value_of(actual, ty) || actual == Ty::Nothing {
+            return Ok(lowered);
         }
+        self.nullable_widening(lowered, actual, ty)
+            .ok_or(KlibBodyDeclineReason::ImplicitConversion)
     }
 }

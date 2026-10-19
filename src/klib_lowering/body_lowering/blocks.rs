@@ -17,7 +17,7 @@ use crate::types::Ty;
 
 use super::super::decline::KlibBodyDeclineReason;
 
-impl BodyLowering<'_, '_, '_> {
+impl BodyLowering<'_> {
     /// The function's body. Checked FIR lowering lowers a block body as the source block, typed
     /// by its checked type, inside the callable's own block; both are the callable's scope. A
     /// function whose result is not `Unit` must not reach the end of its body: the body is typed
@@ -41,6 +41,16 @@ impl BodyLowering<'_, '_, '_> {
         self.ir.callable_scopes.insert(source);
         self.ir.callable_scopes.insert(body);
         Ok(body)
+    }
+
+    /// A parameter's default, lowered as checked FIR lowers the source default: a value of the
+    /// parameter's declared type, which may read the parameters before it.
+    pub(in super::super) fn default_value(
+        mut self,
+        default: KlibIrExprId,
+        declared: Ty,
+    ) -> Lowered<ExprId> {
+        self.declared_operand(default, declared)
     }
 
     /// Whether `statement` is a loop whose condition is the constant `true` and whose lowered

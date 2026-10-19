@@ -12,7 +12,7 @@ use crate::types::{Ty, TypeName};
 use super::{
     constructors::classifier_type_parameter_ordinal,
     generics::{attach_accessor_type_parameters, declaration_type_parameters},
-    lower_body_with_context, FirFileLoweringFailure, LocalCallableLoweringContext,
+    lower_body_with_context, FileLoweringContext, FirFileLoweringFailure,
 };
 
 pub(super) fn declaration_source_order(
@@ -2116,7 +2116,7 @@ pub(super) fn accept_property_body(
     body: FirBody,
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
-    local_callables: &mut LocalCallableLoweringContext,
+    local_callables: &mut FileLoweringContext,
 ) -> Result<(), FirFileLoweringFailure> {
     let anchor = index
         .declaration_anchor(declaration)
@@ -2254,7 +2254,7 @@ pub(super) fn accept_inline_accessor_template(
     body: FirBody,
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
-    local_callables: &mut LocalCallableLoweringContext,
+    local_callables: &mut FileLoweringContext,
     function: FunId,
 ) -> Result<(), FirFileLoweringFailure> {
     let anchor = index

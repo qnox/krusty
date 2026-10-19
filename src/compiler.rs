@@ -3,6 +3,7 @@
 mod backend_handoff;
 mod declaration_metadata;
 mod dependency_body_emission;
+mod dependency_inline_templates;
 mod diagnostic_recovery;
 mod emission_session;
 mod local_visibility;
@@ -187,6 +188,15 @@ fn emit_analyzed_into<B: Backend>(
             &index,
             sink.ir_mut(),
         );
+        if backend.same_module_inlining() == crate::ir::SameModuleInlining::ExpandInIr {
+            if let Some(templates) = dependency_inline_templates::KlibInlineTemplates::of(
+                symbols.shared_semantic_platform(),
+            ) {
+                sink.provide_dependency_templates(std::rc::Rc::new(templates));
+            } else {
+                crate::trace_compiler!("lower", "the platform serializes no inline templates");
+            }
+        }
         if let Err(error) = sink.accept_inline_bodies(&index, &mut inline_bodies) {
             diags.error(
                 Span::new(0, 0),

@@ -13,13 +13,15 @@
 use crate::fx_hash::HashMap;
 
 use super::decline::KlibBodyDeclineReason;
-use super::klib_types::{classifier_name, semantic_type};
+use super::klib_types::{classifier_name, semantic_type, KlibTypeParameters};
 use crate::fir::ResolvedParameterIdentity;
 use crate::ir::{FnParamInfo, FunId, IrFile, IrFunction, IrParameterIdentity};
 use crate::libraries::KlibBodyCallable;
-use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrFunction, KlibIrParameter};
+use crate::metadata::klib_ir::tree::{
+    KlibIrArena, KlibIrExprId, KlibIrFunction, KlibIrParameter, KlibIrTypeId,
+};
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
 /// One parameter as the body reads it.
 #[derive(Clone, Copy, Debug)]
@@ -28,6 +30,9 @@ pub(super) struct ParameterValue {
     /// Whether a read publishes the binding as stable. Checked FIR lowering publishes it for a
     /// read of a value or context parameter, and not for a receiver, which is read as `this`.
     pub(super) stable_read: bool,
+    /// The type the body reads the parameter at when that is the erasure of its declared type,
+    /// as in a prepared-inline copy; `None` when the body reads the declared type itself.
+    pub(super) erased: Option<Ty>,
 }
 
 /// The declaration a body is lowered into, before the body exists.
@@ -39,8 +44,19 @@ pub(super) struct FunctionHeader {
     context_count: usize,
     extension_receiver: bool,
     dispatch_receiver: Option<Ty>,
+    /// A member template's dispatch receiver, which the body reads in the value slot ahead of the
+    /// parameters, as a same-module member body reads `this`.
+    receiver_slot: Option<TypeName>,
     singleton_extension_unread_receiver: Option<Ty>,
     values: HashMap<KlibIrSymbol, ParameterValue>,
+    /// Each parameter's serialized default, aligned with [`Self::params`].
+    defaults: Vec<Option<KlibIrExprId>>,
+    type_parameters: KlibTypeParameters,
+    /// Each declared type parameter's erasure, by name, for a body serialized with its type
+    /// parameters erased; empty for one that names them.
+    erasures: HashMap<String, Ty>,
+    /// The type the body returns when that is the erasure of the declared result.
+    erased_result: Option<Ty>,
 }
 
 impl FunctionHeader {
@@ -54,7 +70,27 @@ impl FunctionHeader {
 
     /// How many value slots the parameters take; a body's local variables follow them.
     pub(super) fn parameter_count(&self) -> usize {
-        self.params.len()
+        self.params.len() + usize::from(self.receiver_slot.is_some())
+    }
+
+    /// The declared type of the value in `slot`: the dispatch receiver of a member template, then
+    /// the parameters.
+    pub(super) fn slot_type(&self, slot: u32) -> Ty {
+        match (self.receiver_slot, slot) {
+            (Some(receiver), 0) => Ty::obj_name(receiver),
+            (Some(_), slot) => self.params[slot as usize - 1],
+            (None, slot) => self.params[slot as usize],
+        }
+    }
+
+    /// The classifier whose instance a member template's body reads as its dispatch receiver.
+    pub(super) fn receiver_slot(&self) -> Option<TypeName> {
+        self.receiver_slot
+    }
+
+    /// Each parameter's serialized default, aligned with [`Self::params`].
+    pub(super) fn defaults(&self) -> &[Option<KlibIrExprId>] {
+        &self.defaults
     }
 
     pub(super) fn linked_signature(&self) -> (&[Ty], Ty, usize, bool, Option<Ty>) {
@@ -69,6 +105,35 @@ impl FunctionHeader {
 
     pub(super) fn singleton_extension_unread_receiver(&self) -> Option<Ty> {
         self.singleton_extension_unread_receiver
+    }
+
+    /// The type parameters the body may name.
+    pub(super) fn type_parameters(&self) -> &KlibTypeParameters {
+        &self.type_parameters
+    }
+
+    /// The declared parameter types, context parameters and extension receiver included.
+    pub(super) fn params(&self) -> &[Ty] {
+        &self.params
+    }
+
+    /// The position of the extension receiver among [`Self::params`], when there is one.
+    pub(super) fn extension_receiver_index(&self) -> Option<usize> {
+        self.extension_receiver.then_some(self.context_count)
+    }
+
+    /// `ty` with each declared type parameter replaced by its erasure: the type an erased body
+    /// uses for it. `ty` itself for a body that names its type parameters.
+    pub(super) fn erased(&self, ty: Ty) -> Ty {
+        if self.erasures.is_empty() {
+            return ty;
+        }
+        crate::types::ty_subst(ty, &self.erasures)
+    }
+
+    /// The type the body's own returns carry.
+    pub(super) fn body_result(&self) -> Ty {
+        self.erased_result.unwrap_or(self.ret)
     }
 }
 
@@ -90,6 +155,205 @@ pub(super) fn function_header(
     function_header_with_emitted_dispatch(selected, None, arena, function)
 }
 
+/// The declaration of `function`, the prepared-inline copy of `selected` that a call expands
+/// from, whose `i`th type parameter is the semantic type parameter `formals[i]` of the provider
+/// record. Kotlin serializes the copy with its type parameters erased and its extension receiver as
+/// a leading value parameter. The header is the selected declaration; each serialized parameter
+/// and the result must be either its selected type or that type's erasure, which the body then
+/// reads at. A function-typed parameter is read at its selected type, and its invocations convert
+/// the erased operands instead.
+pub(super) fn prepared_inline_header(
+    selected: KlibBodyCallable<'_>,
+    formals: &[Ty],
+    arena: &KlibIrArena,
+    function: &KlibIrFunction,
+) -> Result<FunctionHeader, KlibBodyDeclineReason> {
+    if function.base.symbol.kind != KlibIrSymbolKind::Function {
+        return Err(mismatch(
+            "the serialized declaration's symbol is not a function".to_owned(),
+        ));
+    }
+    if function.constructor {
+        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+            "a constructor",
+        ));
+    }
+    if function.companion_extension_class.is_some() {
+        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+            "a companion extension",
+        ));
+    }
+    match (function.dispatch_receiver.is_some(), selected.is_member()) {
+        (true, true) => {}
+        (false, false) if selected.is_top_level() => {}
+        (false, false) => {
+            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                "a declaration neither top-level nor a member",
+            ))
+        }
+        _ => {
+            return Err(mismatch(
+                "the serialized dispatch receiver disagrees with the selected declaration"
+                    .to_owned(),
+            ))
+        }
+    }
+    if selected.name() != function.name {
+        return Err(mismatch(format!(
+            "the declaration is `{}` serialized and `{}` selected",
+            function.name,
+            selected.name()
+        )));
+    }
+    if formals.len() != function.type_parameters.len() {
+        return Err(mismatch(format!(
+            "{} serialized type parameters, {} selected",
+            function.type_parameters.len(),
+            formals.len()
+        )));
+    }
+    let mut type_parameters = KlibTypeParameters::default();
+    let mut erasures = HashMap::default();
+    for (parameter, formal) in function.type_parameters.iter().zip(formals) {
+        let Ty::TyParam(name, bound) = *formal else {
+            return Err(mismatch(format!(
+                "the type parameter `{}` is selected as {formal:?}",
+                parameter.name
+            )));
+        };
+        if parameter.base.symbol.kind != KlibIrSymbolKind::TypeParameter
+            || !type_parameters.bind(&parameter.base.symbol, *formal)
+        {
+            return Err(mismatch(format!(
+                "the type parameter `{}` has no identity of its own",
+                parameter.name
+            )));
+        }
+        // A bound names only earlier formals here; a later one stays and fails the comparison.
+        let erasure = crate::types::ty_subst_keep_unbound(*bound, &erasures);
+        erasures.insert(name.to_owned(), erasure);
+    }
+    // The extension receiver is serialized either in its own slot or as the leading value
+    // parameter; both orders follow the selected declaration's.
+    let serialized = function
+        .context_parameters
+        .iter()
+        .chain(&function.extension_receiver)
+        .chain(&function.regular_parameters)
+        .collect::<Vec<_>>();
+    let declared = selected.params();
+    let identities = selected.parameter_identities();
+    if serialized.len() != declared.len() || identities.len() != declared.len() {
+        return Err(mismatch(format!(
+            "{} serialized parameters, {} selected parameters with {} identities",
+            serialized.len(),
+            declared.len(),
+            identities.len()
+        )));
+    }
+    if function.context_parameters.len() != selected.context_count() {
+        return Err(mismatch(format!(
+            "{} serialized context parameters, {} selected",
+            function.context_parameters.len(),
+            selected.context_count()
+        )));
+    }
+    let read_type = |serialized: KlibIrTypeId, declared: Ty| -> Result<Option<Ty>, _> {
+        let read = semantic_type(arena, &type_parameters, serialized)?;
+        let erased = crate::types::ty_subst(declared, &erasures);
+        match read {
+            read if read == declared => Ok(None),
+            read if read == erased => Ok(Some(read)),
+            read => Err(mismatch(format!(
+                "{read:?} is serialized for the selected {declared:?}"
+            ))),
+        }
+    };
+    let mut values = HashMap::default();
+    // A member's body reads its dispatch receiver in the slot ahead of the parameters. Its type
+    // names the selected classifier, without type arguments of its own.
+    let receiver_slot = match function.dispatch_receiver.as_ref() {
+        Some(receiver) => {
+            let Ty::Obj(classifier, &[]) = semantic_type(arena, &type_parameters, receiver.ty)?
+            else {
+                return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "a dispatch receiver of a generic or non-class type",
+                ));
+            };
+            values.insert(
+                receiver.base.symbol.clone(),
+                ParameterValue {
+                    index: 0,
+                    stable_read: false,
+                    erased: None,
+                },
+            );
+            Some(classifier)
+        }
+        None => None,
+    };
+    let first_slot = u32::from(receiver_slot.is_some());
+    let mut defaults = Vec::with_capacity(serialized.len());
+    let mut extension_receiver = false;
+    for (index, ((parameter, &ty), identity)) in
+        serialized.iter().zip(declared).zip(identities).enumerate()
+    {
+        if parameter.vararg_element_type.is_some() {
+            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                "a vararg parameter",
+            ));
+        }
+        defaults.push(parameter.default_value);
+        let receiver = matches!(identity, ResolvedParameterIdentity::ExtensionReceiver);
+        if receiver && index != selected.context_count() {
+            return Err(mismatch(format!(
+                "the extension receiver is selected at parameter {index}"
+            )));
+        }
+        extension_receiver |= receiver;
+        let erased = read_type(parameter.ty, ty)?.filter(|_| !matches!(ty, Ty::Fun(_)));
+        let stable_read = !matches!(
+            identity,
+            ResolvedParameterIdentity::ExtensionReceiver
+                | ResolvedParameterIdentity::LegacyContextReceiver { .. }
+        );
+        let index = u32::try_from(index).expect("a parameter list fits u32") + first_slot;
+        let value = ParameterValue {
+            index,
+            stable_read,
+            erased,
+        };
+        if values
+            .insert(parameter.base.symbol.clone(), value)
+            .is_some()
+        {
+            return Err(mismatch(format!(
+                "parameter {index} repeats another serialized parameter's identity"
+            )));
+        }
+    }
+    let erased_result = read_type(function.return_type, selected.ret())?;
+    Ok(FunctionHeader {
+        name: function.name.clone(),
+        params: declared.to_vec(),
+        ret: selected.ret(),
+        identities: identities
+            .iter()
+            .map(IrParameterIdentity::resolved)
+            .collect(),
+        context_count: selected.context_count(),
+        extension_receiver,
+        dispatch_receiver: None,
+        receiver_slot,
+        singleton_extension_unread_receiver: None,
+        values,
+        defaults,
+        type_parameters,
+        erasures,
+        erased_result,
+    })
+}
+
 /// Cross-check a header linked to an earlier support unit. That unit's selected singleton is part
 /// of the frozen semantic contract even when this source module did not itself select the member.
 pub(super) fn function_header_with_emitted_dispatch(
@@ -98,6 +362,28 @@ pub(super) fn function_header_with_emitted_dispatch(
     arena: &KlibIrArena,
     function: &KlibIrFunction,
 ) -> Result<FunctionHeader, KlibBodyDeclineReason> {
+    if !function.type_parameters.is_empty() {
+        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+            "type parameters",
+        ));
+    }
+    header(
+        selected,
+        emitted_singleton_dispatch,
+        KlibTypeParameters::default(),
+        arena,
+        function,
+    )
+}
+
+fn header(
+    selected: Option<KlibBodyCallable<'_>>,
+    emitted_singleton_dispatch: Option<Ty>,
+    type_parameters: KlibTypeParameters,
+    arena: &KlibIrArena,
+    function: &KlibIrFunction,
+) -> Result<FunctionHeader, KlibBodyDeclineReason> {
+    let types = &type_parameters;
     if function.base.symbol.kind != KlibIrSymbolKind::Function {
         return Err(mismatch(
             "the serialized declaration's symbol is not a function".to_owned(),
@@ -119,7 +405,7 @@ pub(super) fn function_header_with_emitted_dispatch(
                 "the serialized companion extension marker has no extension receiver".to_owned(),
             ));
         };
-        if semantic_type(arena, receiver.ty)? != Ty::obj_name(classifier) {
+        if semantic_type(arena, types, receiver.ty)? != Ty::obj_name(classifier) {
             return Err(mismatch(
                 "the serialized companion extension classifier disagrees with its receiver"
                     .to_owned(),
@@ -157,7 +443,7 @@ pub(super) fn function_header_with_emitted_dispatch(
                     "a used dispatch receiver",
                 ));
             }
-            let serialized = semantic_type(arena, receiver.ty)?;
+            let serialized = semantic_type(arena, types, receiver.ty)?;
             let selected_singleton = selected.and_then(|selected| {
                 selected
                     .is_member()
@@ -184,11 +470,6 @@ pub(super) fn function_header_with_emitted_dispatch(
         }
         (None, _) => None,
     };
-    if !function.type_parameters.is_empty() {
-        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "type parameters",
-        ));
-    }
     let serialized = function
         .context_parameters
         .iter()
@@ -213,7 +494,7 @@ pub(super) fn function_header_with_emitted_dispatch(
     // primitive `fromBits` declarations are encoded.
     let singleton_extension_unread_receiver = match function.extension_receiver.as_ref() {
         Some(receiver) if !arena.body_reads_value(function, &receiver.base.symbol) => {
-            Some(semantic_type(arena, receiver.ty)?)
+            Some(semantic_type(arena, types, receiver.ty)?)
         }
         _ => None,
     };
@@ -230,10 +511,10 @@ pub(super) fn function_header_with_emitted_dispatch(
                 "a parameter default",
             ));
         }
-        params.push(semantic_type(arena, parameter.ty)?);
+        params.push(semantic_type(arena, types, parameter.ty)?);
         identities.push(serialized_identity(*role, parameter));
     }
-    let ret = semantic_type(arena, function.return_type)?;
+    let ret = semantic_type(arena, types, function.return_type)?;
     let identities = match selected {
         None => identities.into_iter().collect::<Option<Vec<_>>>().ok_or(
             KlibBodyDeclineReason::UnsupportedDeclaration(
@@ -260,7 +541,11 @@ pub(super) fn function_header_with_emitted_dispatch(
         if values
             .insert(
                 parameter.base.symbol.clone(),
-                ParameterValue { index, stable_read },
+                ParameterValue {
+                    index,
+                    stable_read,
+                    erased: None,
+                },
             )
             .is_some()
         {
@@ -280,8 +565,13 @@ pub(super) fn function_header_with_emitted_dispatch(
         context_count: function.context_parameters.len(),
         extension_receiver: function.extension_receiver.is_some(),
         dispatch_receiver,
+        receiver_slot: None,
         singleton_extension_unread_receiver,
         values,
+        defaults: vec![None; serialized.len()],
+        type_parameters,
+        erasures: HashMap::default(),
+        erased_result: None,
     })
 }
 

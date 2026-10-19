@@ -33,6 +33,7 @@ mod construction_target_tests;
 mod constructors;
 mod data_classes;
 mod delegated_properties;
+mod dependency_templates;
 #[cfg(test)]
 mod entry_point_tests;
 mod erased_parameters;
@@ -81,6 +82,7 @@ mod when_expressions;
 mod when_result_type_tests;
 mod with_index_loops;
 
+pub use dependency_templates::{DependencyInlineTemplate, DependencyInlineTemplates};
 pub use error::*;
 pub use sink::*;
 
@@ -176,24 +178,22 @@ pub fn lower_body(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
 ) -> Result<LoweredFirBody, FirLoweringFailure> {
-    lower_body_with_context(
-        body,
-        index,
-        ir,
-        &mut LocalCallableLoweringContext::default(),
-    )
+    lower_body_with_context(body, index, ir, &mut FileLoweringContext::default())
 }
 
+/// What lowering one file's bodies carries from one body to the next: the realizations of the
+/// body-local callables lowered so far, and the inline dependency templates asked for so far.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct LocalCallableLoweringContext {
+pub(crate) struct FileLoweringContext {
     realizations: HashMap<crate::fir::BodyLocalCallableDeclarationId, LocalCallableRealization>,
+    dependency_templates: dependency_templates::DependencyTemplateCache,
 }
 
 pub(crate) fn lower_body_with_context(
     body: FirBody,
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
-    local_callables: &mut LocalCallableLoweringContext,
+    local_callables: &mut FileLoweringContext,
 ) -> Result<LoweredFirBody, FirLoweringFailure> {
     let owner = body.owner();
     ir.source_line_count = ir.source_line_count.max(body.source_line_count());
@@ -215,6 +215,7 @@ pub(crate) fn lower_body_with_context(
         HashMap::default(),
         vec![HashMap::default()],
         local_callables.realizations.clone(),
+        &mut local_callables.dependency_templates,
     );
     let root_is_default = body.is_default_fragment();
     lowering.expansion_enclosure = root_enclosure(index, lowering.ir, declaration);
@@ -348,6 +349,8 @@ struct BodyLowering<'a> {
     local_callable_scopes: Vec<HashMap<crate::fir::LocalCallableId, LocalCallableRealization>>,
     published_local_callables:
         HashMap<crate::fir::BodyLocalCallableDeclarationId, LocalCallableRealization>,
+    /// The inline dependency templates this file's calls expand.
+    dependency_templates: &'a mut dependency_templates::DependencyTemplateCache,
     control_path: Vec<crate::fir::LocalCallableId>,
     /// Nesting depth of the recursive expression funnel, used to decide when to re-check the
     /// remaining stack. See [`BodyLowering::expression`].
@@ -558,6 +561,7 @@ impl<'a> BodyLowering<'a> {
             crate::fir::BodyLocalCallableDeclarationId,
             LocalCallableRealization,
         >,
+        dependency_templates: &'a mut dependency_templates::DependencyTemplateCache,
     ) -> Self {
         let context_parameter_count = u32::try_from(body.context_receiver_types().len())
             .expect("too many FIR context parameters");
@@ -621,6 +625,7 @@ impl<'a> BodyLowering<'a> {
             local_class_captures: HashMap::default(),
             local_callable_scopes,
             published_local_callables,
+            dependency_templates,
             control_path: Vec::new(),
             enclosure: None,
             expansion_enclosure: None,
