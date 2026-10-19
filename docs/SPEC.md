@@ -5843,9 +5843,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   with no `checkcast`; a `Marker` parameter gets `checkcast Marker`; and after `x is Leaf` a `Base`
   parameter gets only `checkcast Base`, never `Leaf` first. A template part is consumed the same
   way: `String.valueOf(Object)` and an `invokedynamic` argument take it unnarrowed, and
-  `append(String)` (selected by a `String` smart cast) casts it to `String`. A written `as` keeps
-  its own cast, and a narrowing to a value class or unsigned type stays with the value-class
-  adapter that owns its carried representation.
+  `append(String)` (selected by a `String` smart cast) casts it to `String`. krusty defers the cast
+  only where the consumer itself materializes the value at its exact physical slot: a call argument
+  (cast to its parameter's descriptor type), a reference implicit coercion (cast to its target),
+  and a template part. Every other consumer keeps the narrowed value: a dispatch receiver, whose
+  slot is the member's owner, a suspend call's `$completion`, which is a `Continuation`, a local
+  initializer, and the rest. A written `as` keeps its own cast, and a narrowing to or from a value
+  class or unsigned type stays with the value-class adapter that owns its carried representation.
   Tests: `tests/smart_cast_consumer_cast_e2e.rs`.
 
 - **A captured `var` initialized to its holder's default leaves the holder unset.** A `Ref$XxxRef`

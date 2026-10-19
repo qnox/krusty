@@ -124,11 +124,6 @@ impl Emitter<'_> {
                 return physical;
             }
         }
-        // A smart cast is kotlinc's `IMPLICIT_CAST`: the operand reaches the consumer unnarrowed,
-        // and the consumer's own materialization writes the only `checkcast` (none for `Object`).
-        if let Some(operand) = self.consumed_implicit_cast_operand(expression) {
-            return self.emit_consumed_operand(operand, code);
-        }
         match self.erased_reference_result(expression) {
             Some(ErasedResult::Coerced { call, slot }) => {
                 self.emit_value(call, code);

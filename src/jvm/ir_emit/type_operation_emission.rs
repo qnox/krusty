@@ -470,14 +470,16 @@ impl Emitter<'_> {
                     Some(wrapper) => (wrapper, wrapper),
                     // A smart cast reaches this coercion unnarrowed; it materializes the value at
                     // its own type.
-                    None if self.consumed_implicit_cast_operand(arg).is_some() => {
-                        let source = self.emit_consumed_operand(arg, code);
-                        (source, source)
-                    }
-                    None => {
-                        let arg = self.unboxed_reference_source(arg, type_operand);
-                        self.emit_type_op_operand(arg, code)
-                    }
+                    None => match self.consumed_implicit_cast_operand(arg) {
+                        Some(operand) => {
+                            let source = self.emit_consumed_operand(operand, code);
+                            (source, source)
+                        }
+                        None => {
+                            let arg = self.unboxed_reference_source(arg, type_operand);
+                            self.emit_type_op_operand(arg, code)
+                        }
+                    },
                 },
             };
         }
@@ -649,15 +651,30 @@ impl Emitter<'_> {
         .then_some(arg)
     }
 
-    /// [`Self::implicit_reference_cast_operand`] for a consumer that materializes the value at its
-    /// own slot. A narrowing to a carried value class or unsigned type stays: the value-class
-    /// adapter owns that representation.
+    /// The value a consumer that materializes it at its own slot reads in place of `expression`:
+    /// the operand beneath every smart cast [`Self::implicit_reference_cast_operand`] finds. A
+    /// narrowing to or from a carried value class or unsigned type stays: the value-class adapter
+    /// owns that representation.
     pub(super) fn consumed_implicit_cast_operand(&self, expression: ExprId) -> Option<ExprId> {
-        let operand = self.implicit_reference_cast_operand(expression)?;
-        let IrExpr::TypeOp { type_operand, .. } = *self.ir.expr(expression) else {
-            return None;
-        };
-        (!self.is_carried_value(type_operand)).then_some(operand)
+        let mut uncast = None;
+        let mut current = expression;
+        while let Some(operand) = self.implicit_reference_cast_operand(current) {
+            let IrExpr::TypeOp { type_operand, .. } = *self.ir.expr(current) else {
+                break;
+            };
+            let source = self
+                .ir
+                .logical_types
+                .get(&operand)
+                .copied()
+                .unwrap_or_else(|| self.value_ty(operand));
+            if self.is_carried_value(type_operand) || self.is_carried_value(source) {
+                break;
+            }
+            uncast = Some(operand);
+            current = operand;
+        }
+        uncast
     }
 
     pub(super) fn emit_type_op_operand(

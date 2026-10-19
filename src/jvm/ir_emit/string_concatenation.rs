@@ -166,8 +166,8 @@ impl Emitter<'_> {
     /// `IMPLICIT_CAST`, so the part reaches that slot unnarrowed and the slot casts it if it must;
     /// answers the stack type left.
     fn emit_template_part(&mut self, part: u32, code: &mut CodeBuilder) -> Ty {
-        if self.consumed_implicit_cast_operand(part).is_some() {
-            return self.emit_consumed_operand(part, code);
+        if let Some(operand) = self.consumed_implicit_cast_operand(part) {
+            return self.emit_consumed_operand(operand, code);
         }
         self.emit_value(part, code);
         self.value_ty(part)
