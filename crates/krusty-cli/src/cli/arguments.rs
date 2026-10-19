@@ -10,6 +10,7 @@ use krusty::language_version::LanguageVersion;
 
 use krusty::features::{FeatureTable, LangFeatures, LanguageVersionPolicy};
 
+use super::fragments::FragmentArguments;
 use super::{
     jvm_target_to_major, language_features, supported_kotlin_versions, CliWarning, Options,
     WarningName,
@@ -196,6 +197,8 @@ pub(super) struct ParsedSettings {
     /// The last `-Werror` and `-nowarn` values, settled together by [`finish_warning_policy`].
     all_warnings_as_errors: bool,
     suppress_warnings: bool,
+    /// `-Xfragments` and `-Xfragment-sources`, checked against the free arguments once all are read.
+    pub(super) fragments: FragmentArguments,
 }
 
 /// The error for an argument krusty refuses ([`crate::kotlinc_arguments::Disposition::Unsupported`]).
@@ -249,6 +252,11 @@ pub(super) fn apply(
                 .map(PathBuf::from),
         ),
         "-module-name" => opts.module_name = text.to_string(),
+        "-Xfragments" => parsed.fragments.fragments.extend(list.iter().cloned()),
+        "-Xfragment-sources" => parsed
+            .fragments
+            .fragment_sources
+            .extend(list.iter().cloned()),
         "-language-version" => parsed.language_version = Some(text.to_string()),
         "-api-version" => parsed.api_version = Some(text.to_string()),
         "-progressive" => parsed.progressive = flag,
