@@ -62,20 +62,13 @@ impl Checker<'_> {
                     visible_type_parameters.clone()
                 })
         } else if deferred_local_header {
-            stable_declaration
-                .and_then(|declaration| {
-                    self.finalized_type_parameters(
-                        &visible_type_parameters,
-                        declaration,
-                        &f.type_params,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    if let Some(declaration) = stable_declaration {
-                        self.failed_local_declaration_bindings.insert(declaration);
-                    }
-                    visible_type_parameters.clone()
-                })
+            self.bind_deferred_type_parameters(
+                scope,
+                &f.type_params,
+                &f.type_param_bounds,
+                f.signature_span.lo,
+                true,
+            )
         } else {
             visible_type_parameters
                 .symbolic_extended_with(&f.type_params, &f.type_param_bounds, &|name| {
@@ -106,7 +99,7 @@ impl Checker<'_> {
         });
         let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
         let suppression_depth = self.check_function_annotation_applications(scope, f, "function");
-        if finalized_local_header || deferred_local_header {
+        if finalized_local_header {
             if let Some(declaration) = stable_declaration {
                 if !self.record_finalized_type_parameter_bounds(
                     scope,

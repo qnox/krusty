@@ -492,6 +492,16 @@ pub(in crate::resolve) fn finalized_compact_declared_spellings(
         let Some(declaration) = headers.syntax.declaration(stub.id) else {
             continue;
         };
+        if deferred_headers.contains(&stub.id)
+            && matches!(
+                declaration.kind,
+                HeaderDeclarationKind::Classifier { .. } | HeaderDeclarationKind::TypeAlias { .. }
+            )
+        {
+            // Active Pass 2 owns both the semantic classifier/alias header and its spelling.
+            // DeferredDeclaredSpellings models only callable, property, and constructor roles.
+            continue;
+        }
         if let Some(deferred) = deferred_roles.get(&stub.id) {
             let record = (|| -> Option<crate::spelling::DeferredDeclaredSpellings> {
                 match declaration.kind {

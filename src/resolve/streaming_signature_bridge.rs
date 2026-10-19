@@ -3809,12 +3809,18 @@ pub(crate) fn finalized_streamed_signature_index(
         {
             continue;
         }
+        let pass_one_override_contract = stub.kind == DeclarationKind::Function
+            && stub.flags.has(crate::fir::DeclarationFlags::OVERRIDE);
         if deferred_local_candidates.contains(&stub.id)
-            && deferred_local_headers::owns_written_type_occurrence(headers, stub)
+            && !deferred_local_headers::retained_inline_property(headers, stub)
+            && !pass_one_override_contract
+            && deferred_local_headers::requires_active_type_binding(headers, stub)
         {
-            // No Pass-1 graph node owns these written occurrences. Keep the declaration atomic:
-            // active Pass 2 binds them once and publishes semantics and spellings together. This
-            // decision precedes every legacy signature/provider query below.
+            // Alias-projected/generic function headers and aggregate property/accessor surfaces
+            // remain atomic with active Pass 2. A retained Pass-1 body explicitly demands its
+            // nested headers; otherwise a representable function contract publishes in Pass 1
+            // and its unselected spelling roles defer independently below. An explicit override's
+            // inherited contract is already authoritative Pass-1 input.
             deferred_local_headers.insert(stub.id);
             continue;
         }
@@ -3932,6 +3938,26 @@ pub(crate) fn finalized_streamed_signature_index(
             failed.push(stub.id);
             continue;
         };
+        if may_defer_unpublishable_signature
+            && stub.kind == DeclarationKind::Function
+            && headers
+                .syntax
+                .declaration(stub.id)
+                .is_some_and(|declaration| {
+                    matches!(
+                        declaration.kind,
+                        crate::fir::HeaderDeclarationKind::Callable {
+                            receiver: source_receiver,
+                            parameters: source_parameters,
+                            ..
+                        } if headers.syntax.parameters(source_parameters).len() != parameters.len()
+                            || source_receiver.is_some() != receiver.is_some()
+                    )
+                })
+        {
+            deferred_local_headers.insert(stub.id);
+            continue;
+        }
         if stub.kind == DeclarationKind::Constructor
             && stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
             && !deferred_local_headers::retain_source_constructor_parameters(
@@ -5828,6 +5854,10 @@ pub(crate) fn finalized_streamed_signature_index(
             is_setter,
         );
         index.publish_callable_parameters(callable, parameter_names);
+        // An accessor's source type occurrences belong to its property declaration. The
+        // synthesized callable therefore owns an explicitly empty spelling record rather than an
+        // absent sidecar, which would incorrectly transfer a complete Pass-1 accessor to Pass 2.
+        index.publish_declaration_spellings(stub.id, crate::spelling::DeclaredSpellings::default());
     }
     // The forwarding surface is a classifier-header fact, but its selected module targets are the
     // stable callable/property identities published above. Close it only now; lowering will consume

@@ -47630,6 +47630,11 @@ impl<'a> Checker<'a> {
                     .and_then(|(active, index)| active.canonical_classifier_declaration(d, index))
             })
             .flatten();
+        let stable_classifier_header = stable_local_classifier.or_else(|| {
+            current_classifier
+                .as_ref()
+                .and_then(|classifier| classifier.stable_declaration)
+        });
         let deferred_local_classifier_header =
             self.has_deferred_local_header(stable_local_classifier);
         if body_local_class {
@@ -47868,9 +47873,7 @@ impl<'a> Checker<'a> {
             }
         }
         if let Some((span, superclass)) = cl.base_class_span.zip(
-            current_classifier
-                .as_ref()
-                .and_then(|classifier| classifier.stable_declaration)
+            stable_classifier_header
                 .and_then(|declaration| {
                     self.resolved_index?
                         .classifier_header(declaration)?
@@ -47880,10 +47883,7 @@ impl<'a> Checker<'a> {
         ) {
             self.record_finalized_superclass_type(span, superclass);
         }
-        if let Some(declaration) = current_classifier
-            .as_ref()
-            .and_then(|classifier| classifier.stable_declaration)
-        {
+        if let Some(declaration) = stable_classifier_header {
             if !self.check_finalized_supertype_bounds(cl, declaration)
                 && finalized_local_classifier_header
             {
