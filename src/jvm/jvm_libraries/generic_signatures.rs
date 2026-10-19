@@ -327,6 +327,51 @@ impl JvmLibraries {
         class_formal_bounds(class.signature.as_deref(), &outer_bounds)
     }
 
+    /// The type parameters class `name` publishes, and how many of them it declares itself. A
+    /// non-static member class (one with an `outer_instance`) captures its enclosing class's formals (that class's own, then those it captures
+    /// in turn) after its own, as the common classifier model lists an inner class's:
+    /// `Outer<String>.Inner` binds `T = String` in every `Inner` member that names `Outer`'s `T`. A
+    /// captured formal the member class hides behind its own of the same spelling keeps its slot
+    /// under an identity of its own. A static nested class captures none.
+    pub(super) fn member_class_type_parameters(
+        &self,
+        outer_instance: Option<TypeName>,
+        name: TypeName,
+        own: crate::types::TypeParameters<Vec<Vec<Ty>>>,
+    ) -> (usize, crate::types::TypeParameters<Vec<Vec<Ty>>>) {
+        let own_count = own.type_params().len();
+        let Some(enclosing) = outer_instance.and_then(|outer| self.classifier_record(outer)) else {
+            return (own_count, own);
+        };
+        let mut formals = own.type_params().clone();
+        for formal in enclosing.type_params() {
+            formals.push(if formals.contains(formal) {
+                crate::types::hidden_captured_type_parameter(
+                    name,
+                    formals.len(),
+                    crate::types::type_parameter_source_name(formal),
+                )
+                .to_string()
+            } else {
+                formal.clone()
+            });
+        }
+        let parameters = crate::types::TypeParameters::new(
+            formals,
+            [
+                own.type_param_bounds().as_slice(),
+                enclosing.type_param_bounds(),
+            ]
+            .concat(),
+            [
+                own.type_param_variances().as_slice(),
+                enclosing.type_param_variances(),
+            ]
+            .concat(),
+        );
+        (own_count, parameters)
+    }
+
     /// Publish a Java method's `Signature` attribute: the declaring class's formal bounds
     /// (`class_bounds`), parameter and return nullability, then the constructor's class type
     /// parameters when `constructor` is set. The caller decides `<init>` at this provider boundary.

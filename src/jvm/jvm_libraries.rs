@@ -2396,6 +2396,15 @@ impl JvmLibraries {
                 &mut constructors,
                 constructor_outer,
             );
+            let (own_type_parameter_count, type_parameters) = self.member_class_type_parameters(
+                constructor_outer,
+                internal_name,
+                crate::types::TypeParameters::new(
+                    type_params,
+                    type_param_bounds,
+                    type_param_variances,
+                ),
+            );
             Some(LibraryType {
                 is_kotlin: has_kotlin_metadata,
                 is_data: ci.meta.is_data,
@@ -2416,11 +2425,7 @@ impl JvmLibraries {
                 source_file: None,
                 stable_declaration: None,
                 is_nested: ci.inner_class_self().is_some(),
-                outer_instance: ci.inner_class_self().and_then(|entry| {
-                    (entry.access & ACC_STATIC == 0)
-                        .then(|| entry.outer.as_deref().map(type_name))
-                        .flatten()
-                }),
+                outer_instance: constructor_outer,
                 kind,
                 inheritance,
                 supertypes,
@@ -2447,12 +2452,8 @@ impl JvmLibraries {
                 value_underlying,
                 value_declaration: value_class.and_then(|declaration| declaration.declaration),
                 alias_target: None,
-                own_type_parameter_count: type_params.len(),
-                type_parameters: crate::types::TypeParameters::new(
-                    type_params,
-                    type_param_bounds,
-                    type_param_variances,
-                ),
+                own_type_parameter_count,
+                type_parameters,
                 sealed_subclasses: metadata::class_sealed_subclasses(&ci).into(),
                 enum_entries,
                 enum_entries_accessor,

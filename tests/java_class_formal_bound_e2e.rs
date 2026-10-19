@@ -8,7 +8,8 @@
 //! the same name (`<T> T shadow(T)`) shadows the class formal. A chain of formals
 //! (`Chain<A extends CharSequence, B extends A, C extends B>`) carries the complete chain, so a
 //! `C` read through a raw `Chain` is a `CharSequence` too. A non-static member class reads its
-//! enclosing class's formals the same way (`Outer<T extends CharSequence>.Inner.get()`). The diagnostics read the fixture as
+//! enclosing class's formals the same way (`Outer<T extends CharSequence>.Inner.get()`), and an
+//! applied enclosing class binds them (`Outer<String>.Inner.get()` is a `String`). The diagnostics read the fixture as
 //! Java source (through its signature stub); the classes and the run read javac's class files, so
 //! both Java providers are covered.
 
@@ -40,7 +41,31 @@ const OUTER: &str = "public class Outer<T extends CharSequence> {\n\
     \x20       public T value = held;\n\
     \x20       public T get() { return held; }\n\
     \x20   }\n\
+    \x20   public class Shadow<T> {\n\
+    \x20       private final T own;\n\
+    \x20       public Shadow(T own) { this.own = own; }\n\
+    \x20       public T own() { return own; }\n\
+    \x20   }\n\
+    \x20   public class Mid<U> {\n\
+    \x20       public class Deep { public T get() { return held; } }\n\
+    \x20   }\n\
+    \x20   public static class Nested<T> { public T nested() { return null; } }\n\
     \x20   @SuppressWarnings(\"rawtypes\") public static Outer.Inner raw() { return new Outer<String>(\"inner\").new Inner(); }\n\
+    }\n";
+
+/// An applied enclosing class binds the formals its member classes capture: `Outer<String>.Inner`
+/// reads `T` as `String`, a `Shadow<T>` of its own hides `Outer`'s `T`, `Mid<Int>.Deep` reaches
+/// `Outer`'s `T` through two levels, and a static `Nested` captures nothing.
+const EXACT: &str = "fun exact(x: Outer<String>.Inner): String = x.get()\n\
+    fun exactField(x: Outer<String>.Inner): String = x.value\n\
+    fun innerShadow(x: Outer<String>.Shadow<Int>): Int = x.own()\n\
+    fun deep(x: Outer<String>.Mid<Int>.Deep): String = x.get()\n\
+    fun nested(x: Outer.Nested<Int>): Int? = x.nested()\n\
+    fun box(): String {\n\
+    \x20   val outer = Outer(\"exact\")\n\
+    \x20   val n = exact(outer.Inner()).length + exactField(outer.Inner()).length +\n\
+    \x20       innerShadow(outer.Shadow(4)) + deep(outer.Mid<Int>().Deep()).length\n\
+    \x20   return if (n == 19 && nested(Outer.Nested<Int>()) == null) \"OK\" else \"n $n\"\n\
     }\n";
 
 const ACCESS: &str = "fun returned(x: Box<*>): Int = x.get().length\n\
@@ -105,6 +130,7 @@ fn a_java_source_class_formal_keeps_its_declared_bound_and_a_method_formal_shado
             ("Chain.java", CHAIN),
             ("Outer.java", OUTER),
             ("main.kt", SHADOWED),
+            ("exact.kt", EXACT),
         ],
         &[],
     );
@@ -136,6 +162,28 @@ fn a_java_class_formal_member_runs_through_its_declared_bound_like_kotlinc() {
         common::kotlinc_box_files_result_with_classpath(
             &[("JavaClassFormalBound.kt", ACCESS)],
             "JavaClassFormalBoundKt",
+            &[javac_classes()],
+        ),
+        krusty
+    );
+}
+
+#[test]
+fn an_inner_java_class_member_binds_its_enclosing_type_argument_like_kotlinc() {
+    let krusty = common::java_interop_box(
+        "JavaInnerClassFormal",
+        &[
+            ("Box.java", BOX),
+            ("Chain.java", CHAIN),
+            ("Outer.java", OUTER),
+        ],
+        EXACT,
+    );
+    assert_eq!(krusty, "OK");
+    assert_eq!(
+        common::kotlinc_box_files_result_with_classpath(
+            &[("JavaInnerClassFormal.kt", EXACT)],
+            "JavaInnerClassFormalKt",
             &[javac_classes()],
         ),
         krusty
