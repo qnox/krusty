@@ -41482,11 +41482,7 @@ impl<'a> Checker<'a> {
     }
 
     fn member_name_span(&self, member: ExprId, name: &str) -> Span {
-        if let Some(span) = self.file.exact_member_name_spans.get(&member.0) {
-            return *span;
-        }
-        let span = self.span(member);
-        Span::new(span.hi.saturating_sub(name.len() as u32), span.hi)
+        self.file.member_name_span(member, name)
     }
 
     /// The literal each omitted defaulted parameter takes, or `None` when the provider cannot say.

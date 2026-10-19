@@ -825,6 +825,7 @@ dependencies = [
  "dhat",
  "flate2",
  "krusty-cli",
+ "krusty-plugin-ir",
  "libc",
  "object 0.40.0",
  "pprof",
@@ -876,6 +877,7 @@ dependencies = [
 name = "krusty-plugin-host"
 version = "0.0.1"
 dependencies = [
+ "krusty",
  "krusty-plugin-ir",
  "sha2",
  "zip",

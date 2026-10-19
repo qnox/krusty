@@ -139,6 +139,11 @@ impl ReparseSource {
         self.kind == SourceKind::KotlinScript
     }
 
+    /// The file's whole text.
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
     pub(crate) fn is_java(&self) -> bool {
         self.kind == SourceKind::Java
     }

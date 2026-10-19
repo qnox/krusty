@@ -15,6 +15,10 @@ use krusty_plugin_host::{
 mod support;
 use support::{kotlinc, runtime, start};
 
+const CALLS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/module_ir/Calls.kt"
+);
 const SAMPLE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/module_ir/Sample.kt"
@@ -72,8 +76,9 @@ fn dump_option(out: &Path) -> String {
 
 /// What the dump plugin writes when kotlinc compiles `source` itself.
 fn kotlinc_dump(runtime: &HostRuntime, source: &str) -> String {
-    let out = temporary("kotlinc-dump.txt");
-    let classes = temporary("kotlinc-dump-classes");
+    let stem = Path::new(source).file_stem().unwrap().to_string_lossy();
+    let out = temporary(&format!("kotlinc-dump-{stem}.txt"));
+    let classes = temporary(&format!("kotlinc-dump-classes-{stem}"));
     let plugin = format!("-Xplugin={}", dump_plugin(runtime).display());
     let option = dump_option(&out);
     kotlinc(
@@ -279,6 +284,82 @@ fn the_host_builds_a_modules_ir_as_kotlinc_builds_it_from_source() {
     assert_eq!(std::fs::read_to_string(out).unwrap(), expected);
 }
 
+/// `source`'s plugin IR as krusty's compiler builds it, against the stdlib and the session's JDK.
+fn krusty_ir(runtime: &HostRuntime, source: &str) -> ModuleIr {
+    let (module, diags) = krusty_ir_at(runtime, source, &[source.to_string()]);
+    let messages: Vec<String> = diags.diags.iter().map(|diag| diag.msg.clone()).collect();
+    module.unwrap_or_else(|| panic!("krusty refused {source}: {messages:?}"))
+}
+
+/// krusty's IR of `source`, analyzed alone, with `paths` as the inputs' paths.
+fn krusty_ir_at(
+    runtime: &HostRuntime,
+    source: &str,
+    paths: &[String],
+) -> (Option<ModuleIr>, krusty::diag::DiagSink) {
+    let text = std::fs::read_to_string(source).unwrap();
+    let mut diags = krusty::diag::DiagSink::new();
+    let stem = Path::new(source)
+        .file_stem()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let inputs = [krusty::source::SourceInput::kotlin(&text).with_file_stem(&stem)];
+    let stems = [stem.clone()];
+    let jdk = runtime.java_home.join("lib/modules");
+    assert!(
+        jdk.is_file(),
+        "{} is not a JDK's module image",
+        jdk.display()
+    );
+    let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+        stdlib(runtime),
+        jdk,
+    ]));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath).expect("the JVM provider"),
+    );
+    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+        &inputs,
+        krusty::frontend::PlatformProvider::jvm(platform),
+        &krusty::features::LangFeatures::from_source(&text),
+        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
+        &mut diags,
+    );
+    let module =
+        krusty::hosted_plugin_ir::plugin_module_ir(analysis, &stems, paths, "main", &mut diags);
+    (module, diags)
+}
+
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn krusty_builds_the_ir_kotlinc_builds_from_source() {
+    let (runtime, _) = runtime();
+    let module = krusty_ir(&runtime, SAMPLE);
+    assert_eq!(module, sample());
+    let expected = kotlinc_dump(&runtime, SAMPLE);
+    let out = temporary("krusty-dump.txt");
+    let mut host = host_with_dump(&runtime, &out);
+    host.generate(&module)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(std::fs::read_to_string(out).unwrap(), expected);
+}
+
+/// Visibilities, each kind of constant, an extension, a member and a generic call with an explicit
+/// type argument, and offsets past characters that take two UTF-8 bytes.
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn krusty_builds_the_ir_of_calls_and_constants_as_kotlinc_does() {
+    let (runtime, _) = runtime();
+    let module = krusty_ir(&runtime, CALLS);
+    let expected = kotlinc_dump(&runtime, CALLS);
+    let out = temporary("krusty-calls-dump.txt");
+    let mut host = host_with_dump(&runtime, &out);
+    host.generate(&module)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(std::fs::read_to_string(out).unwrap(), expected);
+}
+
 #[test]
 #[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
 fn ir_the_host_cannot_build_is_refused_and_leaves_the_session_able_to_build_its_module() {
@@ -327,5 +408,27 @@ fn a_module_is_built_only_in_an_open_session() {
         HostError::Plugin {
             message: "no session is open".into()
         }
+    );
+}
+
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn a_module_whose_paths_do_not_name_every_source_is_refused() {
+    let (runtime, _) = runtime();
+    let (module, diags) = krusty_ir_at(&runtime, SAMPLE, &[]);
+    assert_eq!(module, None);
+    let diagnostics: Vec<(u32, u32, u32, &str)> = diags
+        .diags
+        .iter()
+        .map(|diag| (diag.file, diag.span.lo, diag.span.hi, diag.msg.as_str()))
+        .collect();
+    assert_eq!(
+        diagnostics,
+        [(
+            0,
+            0,
+            0,
+            "compiler plugins need the path of every source: 0 paths were given for 1 sources"
+        )]
     );
 }
