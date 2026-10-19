@@ -64,7 +64,7 @@ pub use abi::{
 };
 pub use cache::{CacheKey, CacheKeyInputs, FileDigest};
 pub use compiler::KrustyCli;
-pub use digest::{digest_bytes, digest_file, Digest, Hasher};
+pub use digest::{digest_bytes, digest_file, digest_files, Digest, Hasher};
 pub use driver::{BuildEnvironment, BuildReport, CompiledModule, Driver, Outcome, PublishedAbi};
 pub use gradle::{repository_plugin_project, GradleBuild, GradleError};
 pub use graph::{GraphError, ModuleGraph};

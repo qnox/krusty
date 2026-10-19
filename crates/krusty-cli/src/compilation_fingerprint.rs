@@ -15,7 +15,7 @@ use std::path::Path;
 
 use krusty::jvm::compilation_inputs::JvmCompilationInputInventory;
 use krusty_build::dependency_view::directory_fingerprint;
-use krusty_build::{digest_file, Digest, Hasher};
+use krusty_build::{digest_files, Digest, Hasher};
 
 use crate::{cli, kotlinc_arguments};
 
@@ -42,20 +42,8 @@ pub fn fingerprint(argv: Vec<String>) -> Result<Digest, String> {
     let effective_classpath = options.effective_classpath()?;
     let inventory = JvmCompilationInputInventory::from_effective_classpath(&effective_classpath);
 
-    let mut hasher = Hasher::new();
-    hasher.text("format", FORMAT);
     let compiler = std::env::current_exe()
         .map_err(|error| format!("cannot locate the compiler binary: {error}"))?;
-    hasher.nested("compiler", read(&compiler, digest_file)?);
-    hasher.count("arguments", expanded.len());
-    for argument in &expanded {
-        hasher.text("argument", argument);
-    }
-    hasher.count("sources", options.sources.len());
-    for source in &options.sources {
-        hasher.text("source", source);
-        hasher.nested("contents", read(Path::new(source), digest_file)?);
-    }
     let plugins = &options.plugins;
     let entries = inventory
         .effective_classpath()
@@ -82,67 +70,86 @@ pub fn fingerprint(argv: Vec<String>) -> Result<Digest, String> {
                 .map(|jar| ("compiler-plugin", Path::new(jar))),
         )
         .collect::<Vec<_>>();
+    let mut entry_contents = entries
+        .iter()
+        .map(|(_, entry)| {
+            if entry.is_dir() {
+                Contents::Directory(None)
+            } else if entry.exists() {
+                Contents::File(None)
+            } else {
+                Contents::Missing
+            }
+        })
+        .collect::<Vec<_>>();
+
+    // One budget of threads for the whole fingerprint. Every file (the compiler, the sources, the
+    // JDK image and the jars) is one queue of pieces on it; each directory then uses it in turn.
+    let workers = std::thread::available_parallelism().map_or(1, usize::from);
+    let entry_files = entries
+        .iter()
+        .zip(&entry_contents)
+        .filter(|(_, contents)| matches!(contents, Contents::File(_)))
+        .map(|((_, entry), _)| *entry);
+    let files = std::iter::once(compiler.as_path())
+        .chain(options.sources.iter().map(Path::new))
+        .chain(entry_files)
+        .collect::<Vec<_>>();
+    let mut file_digests = files
+        .iter()
+        .zip(digest_files(&files, workers))
+        .map(|(file, digest)| {
+            digest.map_err(|error| format!("cannot read {}: {error}", file.display()))
+        });
+    let mut next_file = || file_digests.next().expect("one digest per file");
+    let compiler_digest = next_file()?;
+    let source_digests = options
+        .sources
+        .iter()
+        .map(|_| next_file())
+        .collect::<Result<Vec<_>, _>>()?;
+    for ((_, entry), contents) in entries.iter().zip(&mut entry_contents) {
+        match contents {
+            Contents::File(digest) => *digest = Some(next_file()?),
+            Contents::Directory(digest) => {
+                *digest = Some(
+                    directory_fingerprint(entry)
+                        .map_err(|error| format!("cannot read {}: {error}", entry.display()))?,
+                )
+            }
+            Contents::Missing => {}
+        }
+    }
+
+    let mut hasher = Hasher::new();
+    hasher.text("format", FORMAT);
+    hasher.nested("compiler", compiler_digest);
+    hasher.count("arguments", expanded.len());
+    for argument in &expanded {
+        hasher.text("argument", argument);
+    }
+    hasher.count("sources", options.sources.len());
+    for (source, digest) in options.sources.iter().zip(source_digests) {
+        hasher.text("source", source);
+        hasher.nested("contents", digest);
+    }
     hasher.count("entries", entries.len());
-    for ((role, entry), contents) in entries.iter().zip(entry_contents(&entries)?) {
+    for ((role, entry), contents) in entries.iter().zip(entry_contents) {
         hasher.text(role, &entry.to_string_lossy());
         match contents {
-            Contents::Directory(digest) => hasher.nested("directory", digest),
-            Contents::File(digest) => hasher.nested("file", digest),
+            Contents::Directory(digest) => hasher.nested("directory", digest.expect("read")),
+            Contents::File(digest) => hasher.nested("file", digest.expect("read")),
             Contents::Missing => hasher.text("missing", ""),
         };
     }
     Ok(hasher.finish())
 }
 
+/// How an entry enters the fingerprint, and once read, its digest.
 enum Contents {
-    Directory(Digest),
-    File(Digest),
+    Directory(Option<Digest>),
+    File(Option<Digest>),
     Missing,
-}
-
-/// Every entry's contents, in order. A classpath is dozens of jars and directories read
-/// independently, so they are read on every core.
-fn entry_contents(entries: &[(&str, &Path)]) -> Result<Vec<Contents>, String> {
-    let contents = |entry: &Path| -> Result<Contents, String> {
-        Ok(if entry.is_dir() {
-            Contents::Directory(read(entry, directory_fingerprint)?)
-        } else if entry.exists() {
-            Contents::File(read(entry, digest_file)?)
-        } else {
-            Contents::Missing
-        })
-    };
-    let workers = std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .min(entries.len())
-        .max(1);
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let worker = || -> Result<Vec<(usize, Contents)>, String> {
-        let mut read = Vec::new();
-        loop {
-            let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let Some((_, entry)) = entries.get(index) else {
-                return Ok(read);
-            };
-            read.push((index, contents(entry)?));
-        }
-    };
-    let mut read = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers).map(|_| scope.spawn(worker)).collect();
-        handles
-            .into_iter()
-            .map(|handle| handle.join().expect("a fingerprint worker panicked"))
-            .collect::<Result<Vec<_>, String>>()
-    })?
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
-    read.sort_by_key(|(index, _)| *index);
-    Ok(read.into_iter().map(|(_, contents)| contents).collect())
-}
-
-fn read(path: &Path, digest: fn(&Path) -> std::io::Result<Digest>) -> Result<Digest, String> {
-    digest(path).map_err(|error| format!("cannot read {}: {error}", path.display()))
 }
 
 #[cfg(test)]

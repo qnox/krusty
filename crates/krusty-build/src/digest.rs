@@ -120,79 +120,117 @@ pub fn digest_bytes(bytes: &[u8]) -> Digest {
 /// The size of the pieces [`digest_file`] digests independently.
 const FILE_CHUNK: u64 = 1 << 20;
 
+/// The bytes one task of [`digest_files`] reads: [`lanes::LANES`] consecutive pieces.
+const GROUP: u64 = lanes::LANES as u64 * FILE_CHUNK;
+
 /// Digest a file's contents: its length and the SHA-256 of each consecutive [`FILE_CHUNK`]-sized
-/// piece, absorbed in order. The pieces are independent, so a large file (a JDK image, the
-/// compiler binary) is digested on every core, several pieces per core at once, and no file is
-/// ever held whole. Every byte still enters the digest; only the way the bytes are grouped differs
-/// from a plain SHA-256 of the file.
+/// piece, absorbed in order. Up to [`lanes::LANES`] pieces are digested at once on the vector
+/// unit, and no file is ever held whole. Every byte still enters the digest; only the way the
+/// bytes are grouped differs from a plain SHA-256 of the file.
 pub fn digest_file(path: &std::path::Path) -> std::io::Result<Digest> {
-    let file = std::fs::File::open(path)?;
-    let length = file.metadata()?.len();
-    let chunks = length.div_ceil(FILE_CHUNK).max(1) as usize;
-    let groups = chunks.div_ceil(lanes::LANES);
-    let workers = std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .min(groups);
+    digest_files(&[path], 1).pop().expect("one digest per file")
+}
+
+/// [`digest_file`] of every path, in order, on `workers` threads in total. The pieces of all files
+/// form one queue, so a single large file (a JDK image) is spread over the workers as readily as
+/// many small ones, and no more than `workers` threads and buffers ever exist.
+pub fn digest_files(paths: &[&std::path::Path], workers: usize) -> Vec<std::io::Result<Digest>> {
+    let opened: Vec<std::io::Result<(std::fs::File, u64)>> = paths
+        .iter()
+        .map(|path| {
+            let file = std::fs::File::open(path)?;
+            let length = file.metadata()?.len();
+            Ok((file, length))
+        })
+        .collect();
+    // A task is one group of one file; an empty file is one empty group.
+    let tasks: Vec<(usize, u64)> = opened
+        .iter()
+        .enumerate()
+        .filter_map(|(index, file)| file.as_ref().ok().map(|(_, length)| (index, *length)))
+        .flat_map(|(index, length)| {
+            (0..length.div_ceil(GROUP).max(1)).map(move |group| (index, group))
+        })
+        .collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let digest_groups = || -> std::io::Result<Vec<(usize, Digest)>> {
-        let mut digests = Vec::new();
-        let mut buffer = vec![0; lanes::LANES * FILE_CHUNK as usize];
-        loop {
-            let group = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if group >= groups {
-                return Ok(digests);
-            }
-            let first = group * lanes::LANES;
-            let start = first as u64 * FILE_CHUNK;
-            let size = (length - start).min(buffer.len() as u64) as usize;
-            read_exact_at(&file, &mut buffer[..size], start)?;
-            let pieces: Vec<&[u8]> = buffer[..size].chunks(FILE_CHUNK as usize).collect();
-            let (full, partial) = match pieces.last() {
-                Some(last) if last.len() < FILE_CHUNK as usize => {
-                    (&pieces[..pieces.len() - 1], Some(*last))
-                }
-                _ => (&pieces[..], None),
-            };
-            let full_digests = if full.is_empty() {
-                Vec::new()
-            } else {
-                lanes::digest_equal(full)
-            };
-            let piece_digests = full_digests
-                .into_iter()
-                .map(Digest)
-                .chain(partial.map(digest_bytes))
-                // An empty file is one empty piece.
-                .chain((size == 0).then(|| digest_bytes(&[])));
-            digests.extend(
-                piece_digests
-                    .enumerate()
-                    .map(|(offset, digest)| (first + offset, digest)),
-            );
+    let worker = || {
+        let mut done = Vec::new();
+        let mut buffer = Vec::new();
+        while let Some(&(index, group)) =
+            tasks.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+        {
+            let (file, length) = opened[index]
+                .as_ref()
+                .expect("only opened files have tasks");
+            done.push((
+                index,
+                group,
+                group_digests(file, *length, group, &mut buffer),
+            ));
         }
+        done
     };
-    let mut digests = if workers <= 1 {
-        digest_groups()?
+    let workers = workers.clamp(1, tasks.len().max(1));
+    let mut done: Vec<_> = if workers == 1 {
+        worker()
     } else {
         std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..workers).map(|_| scope.spawn(digest_groups)).collect();
+            let handles: Vec<_> = (0..workers).map(|_| scope.spawn(worker)).collect();
             handles
                 .into_iter()
-                .map(|handle| handle.join().expect("a digest worker panicked"))
-                .collect::<std::io::Result<Vec<_>>>()
-        })?
-        .into_iter()
-        .flatten()
-        .collect()
+                .flat_map(|handle| handle.join().expect("a digest worker panicked"))
+                .collect()
+        })
     };
-    digests.sort_by_key(|(index, _)| *index);
-    let mut hasher = Hasher::new();
-    hasher.field("length", &length.to_le_bytes());
-    hasher.count("chunks", digests.len());
-    for (_, digest) in digests {
-        hasher.nested("chunk", digest);
+    done.sort_by_key(|(index, group, _)| (*index, *group));
+    let mut done = done.into_iter().peekable();
+    opened
+        .into_iter()
+        .enumerate()
+        .map(|(index, file)| {
+            let (_, length) = file?;
+            let mut hasher = Hasher::new();
+            hasher.field("length", &length.to_le_bytes());
+            hasher.count("chunks", length.div_ceil(FILE_CHUNK).max(1) as usize);
+            let mut failure = None;
+            while let Some((_, _, digests)) = done.next_if(|(task, _, _)| *task == index) {
+                match digests {
+                    Ok(digests) => digests.into_iter().for_each(|digest| {
+                        hasher.nested("chunk", digest);
+                    }),
+                    Err(error) => failure = failure.or(Some(error)),
+                }
+            }
+            match failure {
+                Some(error) => Err(error),
+                None => Ok(hasher.finish()),
+            }
+        })
+        .collect()
+}
+
+/// The digests of the pieces in group `group` of a file of `length` bytes.
+fn group_digests(
+    file: &std::fs::File,
+    length: u64,
+    group: u64,
+    buffer: &mut Vec<u8>,
+) -> std::io::Result<Vec<Digest>> {
+    let start = group * GROUP;
+    let size = (length - start.min(length)).min(GROUP) as usize;
+    buffer.resize(size, 0);
+    read_exact_at(file, buffer, start)?;
+    let chunk = FILE_CHUNK as usize;
+    let full = size / chunk * chunk;
+    let mut digests = Vec::new();
+    if full > 0 {
+        let pieces: Vec<&[u8]> = buffer[..full].chunks(chunk).collect();
+        digests.extend(lanes::digest_equal(&pieces).into_iter().map(Digest));
     }
-    Ok(hasher.finish())
+    if full < size || size == 0 {
+        digests.push(digest_bytes(&buffer[full..size]));
+    }
+    Ok(digests)
 }
 
 #[cfg(unix)]
@@ -488,5 +526,38 @@ mod tests {
         assert_ne!(digest(&contents), base, "an appended byte");
         assert_ne!(digest(&[]), digest(&[0]), "an empty file");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Digesting files together on several workers gives each file its own [`super::digest_file`],
+    /// and a file that cannot be read fails alone.
+    #[test]
+    fn files_digested_together_keep_their_own_digests() {
+        let directory =
+            std::env::temp_dir().join(format!("krusty-digest-files-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("create the directory");
+        let chunk = super::FILE_CHUNK as usize;
+        let sizes = [0, 1, chunk, 3 * super::lanes::LANES * chunk + 5, 17];
+        let paths: Vec<_> = sizes
+            .iter()
+            .enumerate()
+            .map(|(index, size)| {
+                let path = directory.join(format!("file-{index}"));
+                let contents: Vec<u8> = (0..*size).map(|byte| (byte * 13 + index) as u8).collect();
+                std::fs::write(&path, contents).expect("write a file");
+                path
+            })
+            .collect();
+        let missing = directory.join("missing");
+        let mut all: Vec<&std::path::Path> = paths.iter().map(|path| path.as_path()).collect();
+        all.insert(2, &missing);
+        let together = super::digest_files(&all, 3);
+        assert_eq!(together.len(), all.len());
+        for (path, digest) in all.iter().zip(together) {
+            match super::digest_file(path) {
+                Ok(alone) => assert_eq!(digest.expect("readable"), alone, "{}", path.display()),
+                Err(_) => assert!(digest.is_err(), "{}", path.display()),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }
