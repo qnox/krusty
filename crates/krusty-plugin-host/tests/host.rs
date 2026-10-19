@@ -312,6 +312,7 @@ fn fixture_classes() -> PathBuf {
                 &runtime.compiler_classpath,
                 &classes,
                 &[concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/Registrars.kt").as_ref()],
+                &[],
             );
             classes
         })

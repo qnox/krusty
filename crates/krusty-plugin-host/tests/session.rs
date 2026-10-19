@@ -178,7 +178,7 @@ fn inner_classes(runtime: &HostRuntime) -> PathBuf {
         let _ = std::fs::remove_dir_all(&out);
         let source =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/inner/Outer.kt");
-        kotlinc(runtime, &[stdlib(runtime)], &out, &[source.as_path()]);
+        kotlinc(runtime, &[stdlib(runtime)], &out, &[source.as_path()], &[]);
         out
     })
     .clone()
@@ -252,7 +252,7 @@ fn duplicates(runtime: &HostRuntime) -> Vec<PathBuf> {
                 let _ = std::fs::remove_dir_all(&out);
                 let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join(format!("tests/fixtures/duplicate/{name}.kt"));
-                kotlinc(runtime, &[stdlib(runtime)], &out, &[source.as_path()]);
+                kotlinc(runtime, &[stdlib(runtime)], &out, &[source.as_path()], &[]);
                 out
             })
             .collect()
