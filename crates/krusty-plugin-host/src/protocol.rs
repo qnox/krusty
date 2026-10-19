@@ -7,11 +7,12 @@
 
 use std::io::{self, Read, Write};
 
-use crate::module_ir::ModuleIr;
-use crate::session::{
-    CallableIdentity, CallableKind, ClassName, Classifier, SessionRequest, TypeArgument,
-    TypeIdentity, TypeParameterOwner,
+use krusty_plugin_ir::{
+    CallableIdentity, CallableKind, ClassName, Classifier, ModuleIr, TypeArgument, TypeIdentity,
+    TypeParameterOwner,
 };
+
+use crate::session::SessionRequest;
 
 mod module_ir;
 

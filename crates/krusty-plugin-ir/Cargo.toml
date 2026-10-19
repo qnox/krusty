@@ -1,0 +1,7 @@
+[package]
+name = "krusty-plugin-ir"
+version = "0.0.1"
+edition = "2021"
+description = "The IR krusty hands kotlinc compiler plugins: a module's declarations in kotlinc's IR shape and the identities of the dependency declarations they use"
+license = "Apache-2.0"
+repository = "https://github.com/qnox/krusty"

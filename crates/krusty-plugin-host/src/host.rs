@@ -6,12 +6,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use krusty_plugin_ir::{CallableIdentity, ModuleIr};
+
 use crate::adapter;
 use crate::environment::Environment;
-use crate::module_ir::ModuleIr;
 use crate::protocol::{self, LoadedPlugin, Reply, Request, PROTOCOL};
 use crate::provision::HostRuntime;
-use crate::session::{CallableIdentity, SessionRequest};
+use crate::session::SessionRequest;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum HostError {
