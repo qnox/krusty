@@ -10234,12 +10234,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declaration's capture, by field when it is declared inside the class and by lexical binding when
   it is declared outside), never a spelling: in
   `class R { fun b(): Int = b(); fun first() = a + b }` the self-call is not a use of a captured
-  `b`, so `R` takes `($a, $b)`. A local function takes its own captures the same way:
-  `fun helper() = b + a` is lifted as `helper(b, a)`, and a class that calls it includes them in
-  that order, not in name order. The resolver publishes that first-use order of lexical identities
-  separately; the function's own capture vector is unchanged. A class that includes a function
-  whose captured value no recorded use orders (an implicit context argument) is rejected as
-  unsupported rather than ordered by name. Field and parameter order is JVM representation, so the checker
+  `b`, so `R` takes `($a, $b)`. A class that calls a local function includes the values the
+  function captures in the function's own first-use order, found the same way: with
+  `fun helper() = b + a`, a class whose only use is `helper()` takes `($b, $a)`, not name order.
+  The resolver publishes that order of lexical identities only for the class that includes the
+  function; the function's own capture vector, and so its lifted parameters, are unchanged. A
+  class that includes a function whose captured value no recorded use orders (an implicit context
+  argument) is rejected as unsupported rather than ordered by name. Field and parameter order is JVM representation, so the checker
   publishes the order as a recorded fact (`TypeInfo::local_class_capture_orders`, carried by the
   checked local-class declaration to `IrFile::class_capture_order`). Every phase before the JVM
   backend keeps capture fields, constructor parameters and construction arguments in field order,
@@ -10255,12 +10256,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `this@Outer` both go through. It is rejected when the enclosing receiver is a `@JvmInline value
   class`: there is no instance to capture, since `this` is the bare underlying value there
   (`codegen/box/inlineClasses/initBlock.kt` fails verification otherwise).
-  Three capture shapes are NOT modelled yet and are rejected (the file skips): a local class that
+  Two capture shapes are NOT modelled yet and are rejected (the file skips): a local class that
   calls a local function capturing a value only an implicit context argument uses (no recorded use
-  orders that capture), a reassigned `var` (shared mutable state, not capturable by
-  value), and a capture read during CONSTRUCTION — an initializer, an `init` block, a
-  base-constructor argument, a secondary constructor, or a primary-constructor parameter default. The capture scan is syntactic and
-  conservative: over-reporting skips a file, under-reporting emits a class without what it needs,
+  orders that capture), and a reassigned `var` (shared mutable state, not capturable by value).
+  A capture read during construction is supported and ordered as described above. The capture
+  scan is syntactic and conservative: over-reporting skips a file, under-reporting emits a class without what it needs,
   which the box corpus caught as `NoSuchMethodError` on construction
   (`codegen/box/localClasses/capturingInDefaultConstructorParameter.kt`).
   Tests: `tests/local_class_scope_e2e.rs`.
