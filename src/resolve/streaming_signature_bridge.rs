@@ -35,6 +35,7 @@ mod integer_constants;
 mod local_declaration_spellings;
 mod local_signatures;
 mod lookups;
+mod member_property_selection;
 mod operator_conventions;
 mod postponed_argument_mapping;
 mod postponed_calls;
@@ -44,6 +45,7 @@ mod receiver_member_level;
 mod rejected_member_call;
 mod scope_resolver;
 mod selected_call_facts;
+mod selected_result_publication;
 mod selected_type_facts;
 mod semantics;
 mod source_contracts;
@@ -78,7 +80,6 @@ pub(crate) use local_signatures::{
 };
 use postponed_argument_mapping::MappedTopLevelSelection;
 pub(crate) use source_contracts::{extract_source_contract_candidates, SourceContractCandidate};
-use top_level_call::SelectedTopLevelCall;
 use type_resolution::SelectedTypeSite;
 
 struct ProductionSignatureSemantics<'a> {
@@ -1193,7 +1194,7 @@ impl ProductionSignatureSemantics<'_> {
         classifier: crate::types::TypeName,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
         trailing_lambda: bool,
-    ) -> Option<(Vec<crate::symbol_resolver::CallArgKind>, Vec<Ty>)> {
+    ) -> Option<top_level_call::MappedConstructorArguments> {
         let declaration = resolver.classifier(classifier)?;
         let source_indices = (0..arguments.len()).collect::<Vec<_>>();
         let names = arguments
@@ -1204,43 +1205,68 @@ impl ProductionSignatureSemantics<'_> {
             .constructors
             .iter()
             .filter_map(|candidate| {
-                let slots = crate::libraries::map_call_args(
+                Self::constructor_argument_mapping(
+                    candidate,
                     &source_indices,
-                    Some(&names),
-                    &candidate.call_sig.param_names,
-                    candidate.params.len(),
-                    candidate.call_sig.required,
-                    &candidate.call_sig.param_defaults,
-                    candidate.call_sig.vararg_index,
+                    &names,
                     trailing_lambda,
                 )
-                .ok()?;
-                source_indices
-                    .iter()
-                    .all(|source| slots.iter().any(|slot| slot == &Some(*source)))
-                    .then_some(slots)
             })
             .collect::<Vec<_>>();
         mappings.sort_unstable();
         mappings.dedup();
-        let [mapping] = mappings.as_slice() else {
+        let mut parameter_mappings = mappings
+            .iter()
+            .map(|(_, parameter_by_argument)| parameter_by_argument.clone())
+            .collect::<Vec<_>>();
+        parameter_mappings.sort_unstable();
+        parameter_mappings.dedup();
+        let [parameter_by_argument] = parameter_mappings.as_slice() else {
             return None;
         };
-        let reordered = mapping
-            .iter()
-            .map(|source| source.and_then(|source| arguments.get(source).copied()))
-            .collect::<Vec<_>>();
-        let kinds = reordered
-            .iter()
-            .map(|argument| match argument {
-                Some(argument) => Self::call_argument_kind(argument),
-                None => crate::symbol_resolver::CallArgKind::OmittedDefault,
-            })
-            .collect();
-        let types = reordered
-            .iter()
-            .map(|argument| {
-                argument.map_or(Ty::Error, |argument| {
+        let complete_unique_slots = match mappings.as_slice() {
+            [(source_by_parameter, _)]
+                if source_indices.iter().all(|source| {
+                    source_by_parameter
+                        .iter()
+                        .any(|slot| slot == &Some(*source))
+                }) =>
+            {
+                Some(source_by_parameter)
+            }
+            _ => None,
+        };
+        let (kinds, types) = if let Some(source_by_parameter) = complete_unique_slots {
+            let reordered = source_by_parameter
+                .iter()
+                .map(|source| source.and_then(|source| arguments.get(source).copied()))
+                .collect::<Vec<_>>();
+            let kinds = reordered
+                .iter()
+                .map(|argument| match argument {
+                    Some(argument) => Self::call_argument_kind(argument),
+                    None => crate::symbol_resolver::CallArgKind::OmittedDefault,
+                })
+                .collect();
+            let types = reordered
+                .iter()
+                .map(|argument| {
+                    argument.map_or(Ty::Error, |argument| {
+                        let ty = argument.ty.get();
+                        if argument.spread {
+                            ty.array_read_elem().unwrap_or(ty)
+                        } else {
+                            ty
+                        }
+                    })
+                })
+                .collect();
+            (kinds, types)
+        } else {
+            let kinds = arguments.iter().map(Self::call_argument_kind).collect();
+            let types = arguments
+                .iter()
+                .map(|argument| {
                     let ty = argument.ty.get();
                     if argument.spread {
                         ty.array_read_elem().unwrap_or(ty)
@@ -1248,9 +1274,22 @@ impl ProductionSignatureSemantics<'_> {
                         ty
                     }
                 })
-            })
-            .collect();
-        Some((kinds, types))
+                .collect();
+            (kinds, types)
+        };
+        Some(top_level_call::MappedConstructorArguments::mapped(
+            kinds,
+            types,
+            parameter_by_argument
+                .iter()
+                .map(|parameter| {
+                    Some(
+                        u32::try_from(*parameter)
+                            .expect("a constructor parameter ordinal must fit u32"),
+                    )
+                })
+                .collect(),
+        ))
     }
 
     /// Project a callable family to the parameter order visible at a call which explicitly names at
@@ -1762,103 +1801,6 @@ impl ProductionSignatureSemantics<'_> {
         declaration.map_or(Ok(None), |declaration| demand(declaration).map(Some))
     }
 
-    fn selected_member_property_type(
-        &self,
-        scope: crate::fir::SignatureScope,
-        receiver: Ty,
-        spelling: &str,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
-    ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
-        let implicit_receivers = self.implicit_receivers(scope);
-        let selected = self.with_resolver(scope, |resolver| {
-            resolver.select_member_property_applicable_where(receiver, spelling, |property| {
-                let context_types = property.getter.params.get(..property.context_count)?;
-                super::context_argument_types(
-                    &implicit_receivers,
-                    context_types,
-                    &crate::symbol_resolver::SourceOracle(&source),
-                )
-                .map(|_| (true, property.context_count))
-            })
-        });
-        crate::trace_compiler!(
-            "signature",
-            "member property selection receiver={receiver:?} name={spelling} result={:?}",
-            selected.as_ref().map(|selected| selected.ty),
-        );
-        let selected = match selected {
-            Ok(selected) => selected,
-            Err(_) => {
-                let extension = self.with_resolver(scope, |resolver| {
-                    resolver
-                        .select_extension_property(receiver, spelling)
-                        .ok()
-                        .flatten()
-                });
-                let Ok(extension) = extension else {
-                    return Ok(None);
-                };
-                self.commit_postponed_property_receiver(scope, &extension, receiver);
-                if let Some(source) = extension.source_key {
-                    if let Some(signature) = self.demanded_source_signature(
-                        Some(scope),
-                        extension.stable_declaration,
-                        demand,
-                    )? {
-                        return self
-                            .apply_demanded_source_property(source, receiver, &signature)
-                            .map(Some);
-                    }
-                }
-                return crate::fir::ResolvedTy::new(extension.ty)
-                    .map(Some)
-                    .map_err(|_| Self::failure());
-            }
-        };
-        if let Some(property) = selected.property.as_ref() {
-            if let Some(declaration) = property.stable_declaration {
-                if self
-                    .headers
-                    .stub(declaration)
-                    .is_some_and(|stub| stub.signature_inference.is_some())
-                {
-                    let result = self
-                        .apply_dispatch_owner(
-                            receiver,
-                            property.owner,
-                            None,
-                            demand(declaration)?.result.get(),
-                        )
-                        .projection_read_ty();
-                    return crate::fir::ResolvedTy::new(result)
-                        .map(Some)
-                        .map_err(|_| Self::failure());
-                }
-            }
-            if let Some(signature) =
-                self.demanded_member_signature(property.stable_declaration, demand)?
-            {
-                let result = self
-                    .apply_dispatch_owner(receiver, property.owner, None, signature.result.get())
-                    .projection_read_ty();
-                return crate::fir::ResolvedTy::new(result)
-                    .map(Some)
-                    .map_err(|_| Self::failure());
-            }
-        }
-        crate::fir::ResolvedTy::new(selected.ty)
-            .map(Some)
-            .map_err(|_| Self::failure())
-    }
-
     fn apply_dispatch_receiver(
         &self,
         receiver: Ty,
@@ -2335,7 +2277,7 @@ impl ProductionSignatureSemantics<'_> {
         let (class_super, interface_supers) = self.direct_super_receivers(scope, super_spelling)?;
         if let Some(receiver) = class_super {
             if let Some(result) =
-                self.selected_member_property_type(scope, receiver, member_spelling, demand)?
+                self.selected_member_property_type(scope, receiver, member_spelling, None, demand)?
             {
                 return Ok(result);
             }
@@ -2343,7 +2285,7 @@ impl ProductionSignatureSemantics<'_> {
         let mut selected = None;
         for receiver in interface_supers {
             let Some(result) =
-                self.selected_member_property_type(scope, receiver, member_spelling, demand)?
+                self.selected_member_property_type(scope, receiver, member_spelling, None, demand)?
             else {
                 continue;
             };

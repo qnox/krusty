@@ -153,6 +153,7 @@ fn project_local_alias_spelling(
                 let spelling = Spelled {
                     classifier_segment: occurrence.binding.classifier_segment,
                     definitely_non_null: source.definitely_non_null(),
+                    use_site_definitely_non_null: source.definitely_non_null(),
                     alias,
                     alias_args,
                     args: if alias.is_some() {
@@ -166,6 +167,8 @@ fn project_local_alias_spelling(
                     parameter_name: annotations
                         .parameter_name_at(source.span.lo)
                         .map(Into::into),
+                    flexible_upper_bound: None,
+                    enhanced_nullability: false,
                 };
                 let resolved = crate::symbol_resolver::ty_subst_keep_unbound(
                     occurrence.binding.resolved?,
@@ -706,6 +709,11 @@ pub(in crate::resolve) fn finalized_compact_declared_spellings(
                     let (own, scope) = declaration_scope(headers, stub.id, type_parameters)
                         .expect("compact property scope must be materializable");
                     Some(DeclaredSpellings {
+                        // An explicit getter return is the property's declared public type when
+                        // the property header itself omits one. Semantic header projection uses
+                        // this same stable pair; metadata spelling must join it to the property
+                        // declaration here instead of treating the body as inferred. Keep the
+                        // getter role as a distinct occurrence for getter-specific checks.
                         ret: match declared_type.or(getter_type) {
                             Some(ty) => {
                                 spelling(headers, semantics, stub.id, ty, &scope, &context)?

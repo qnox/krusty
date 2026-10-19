@@ -168,7 +168,9 @@ impl FunctionInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::libraries::{CompilerIntrinsic, MemberRealization};
+    use crate::libraries::{
+        CompilerIntrinsic, InlineBodyPlan, InlineBodyValue, InlineKind, MemberRealization,
+    };
 
     #[test]
     fn classifier_member_round_trip_keeps_source_and_physical_names_separate() {
@@ -217,6 +219,58 @@ mod tests {
             candidate.member_with_return(Ty::Char).realization,
             MemberRealization::Intrinsic(CompilerIntrinsic::StringGet)
         );
+    }
+
+    #[test]
+    fn classifier_member_round_trip_keeps_the_inline_body_plan() {
+        let owner = crate::types::type_name("fixture/Owner");
+        let mut declaration = LibraryMember::new(
+            "test".to_string(),
+            vec![Ty::nullable(Ty::obj("kotlin/Any"))],
+            Ty::Boolean,
+            "(Ljava/lang/Object;)Z".to_string(),
+        );
+        declaration.inline = InlineKind::MustInline;
+        declaration.reified = true;
+        declaration.inline_body_plan = Some(Box::new(InlineBodyPlan::ReifiedTypeTest {
+            value: InlineBodyValue::Parameter(0),
+            type_parameter: 1,
+            negated: true,
+            defaults: Vec::new(),
+        }));
+
+        let candidate = FunctionInfo::classifier_member(FnKind::Member, owner, declaration);
+        assert!(matches!(
+            candidate.callable.inline_body_plan.as_deref(),
+            Some(InlineBodyPlan::ReifiedTypeTest {
+                value: InlineBodyValue::Parameter(0),
+                type_parameter: 1,
+                negated: true,
+                defaults,
+            }) if defaults.is_empty()
+        ));
+
+        let selected = candidate.member_with_return(Ty::Boolean);
+        assert!(matches!(
+            selected.inline_body_plan.as_deref(),
+            Some(InlineBodyPlan::ReifiedTypeTest {
+                value: InlineBodyValue::Parameter(0),
+                type_parameter: 1,
+                negated: true,
+                defaults,
+            }) if defaults.is_empty()
+        ));
+
+        let round_trip = FunctionInfo::classifier_member(FnKind::Member, owner, selected);
+        assert!(matches!(
+            round_trip.callable.inline_body_plan.as_deref(),
+            Some(InlineBodyPlan::ReifiedTypeTest {
+                value: InlineBodyValue::Parameter(0),
+                type_parameter: 1,
+                negated: true,
+                defaults,
+            }) if defaults.is_empty()
+        ));
     }
 
     #[test]

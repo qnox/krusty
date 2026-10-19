@@ -102,6 +102,18 @@ pub(super) fn retain_selected(
     }
 }
 
+/// A formal's call-site solution, or `None` when it is still the formal itself.
+pub(super) fn solved_member_extension_type_argument(
+    bindings: &crate::symbol_resolver::GSigBinds,
+    formal: &str,
+) -> Option<Ty> {
+    let solution = bindings.get(formal).copied()?;
+    (solution != Ty::Error
+        && !solution.mentions_pending()
+        && !matches!(solution.non_null(), Ty::TyParam(identity, _) if identity == formal))
+    .then_some(solution)
+}
+
 /// Retain a declaration whose source arguments have a valid structural mapping. This runs while
 /// the normalized selection shape is still in hand, before applicability is attempted, so a later
 /// failure can diagnose the exact same provider declaration without a second lookup.
@@ -351,6 +363,19 @@ pub(super) fn candidate(
         ),
         inline_body_plan: shape.function.inline_body_plan.clone(),
         suspend: shape.function.signature.is_suspend(),
+        generic_sig: shape
+            .function
+            .signature
+            .generic_sig
+            .clone()
+            .map(|mut signature| {
+                // Member-extension selection stores its source receiver beside `Signature`; ordinary
+                // generic signatures omit it because physical member parameters begin after that
+                // receiver. Publication needs the declaration-owned receiver shape on the selected
+                // target so a generic result can bind from the exact checked receiver expression.
+                signature.receiver = Some(shape.function.receiver_ty);
+                Box::new(signature)
+            }),
         declared_params: shape
             .function
             .signature
@@ -363,6 +388,10 @@ pub(super) fn candidate(
         owner: shape.owner,
         physical_name: shape.function.physical_name.clone(),
         type_arguments: instantiated.type_arguments,
+        bindings: instantiated.bindings,
+        intersection_bindings: HashMap::default(),
+        lower_inputs: instantiated.lower_inputs,
+        parameter_indices: instantiated.parameter_indices,
     }
 }
 
@@ -370,7 +399,6 @@ impl MemberExtensionFunctionCandidate {
     pub(super) fn resolved_call(
         &self,
         dispatch_receiver: ImplicitReceiverSelection,
-        extension_receiver: Ty,
         interface: bool,
     ) -> ResolvedCall {
         ResolvedCall::MemberExtension {
@@ -379,7 +407,11 @@ impl MemberExtensionFunctionCandidate {
             external_default_provider: self.external_default_provider,
             owner: self.owner,
             dispatch_receiver,
-            extension_receiver,
+            // The receiver occupies a declaration parameter slot at the FIR/backend boundary.
+            // Retain the selected declaration type, after generic instantiation, rather than the
+            // source expression's possibly narrower type. The expression remains the receiver
+            // operand; this fact is its checked parameter contract.
+            extension_receiver: self.extension_receiver,
             physical_receiver: self.physical_receiver,
             // Selection and diagnostics used the Kotlin source name. Only the finalized emit target
             // receives this provider-owned spelling, so a mangled dependency method cannot leak back
@@ -399,6 +431,7 @@ impl MemberExtensionFunctionCandidate {
                 .clone()
                 .into_boxed_slice(),
             suspend: self.suspend,
+            generic_sig: self.generic_sig.clone(),
             declared_ret: self.declared_ret,
             overridden_results: self.overridden_results.clone(),
             interface,
@@ -408,6 +441,38 @@ impl MemberExtensionFunctionCandidate {
 }
 
 impl Checker<'_> {
+    pub(super) fn commit_member_extension_type_arguments(
+        &mut self,
+        call: ExprId,
+        explicit_type_args: &[Ty],
+        candidate: &mut MemberExtensionFunctionCandidate,
+    ) -> Ty {
+        let Some(signature) = candidate.generic_sig.clone() else {
+            self.clear_selected_generic_call(call);
+            return candidate.ret;
+        };
+        candidate.intersection_bindings =
+            self.intersection_bindings_from_lower_inputs(&candidate.lower_inputs);
+        let result = self.commit_selected_call_intersections(
+            call,
+            &signature,
+            explicit_type_args,
+            &candidate.parameter_indices,
+            &candidate.call_sig,
+            &mut candidate.bindings,
+            &mut candidate.intersection_bindings,
+            Default::default(),
+            candidate.ret,
+        );
+        candidate.ret = result;
+        candidate.type_arguments = signature
+            .formals
+            .iter()
+            .map(|formal| candidate.bindings.get(formal).copied())
+            .collect();
+        result
+    }
+
     /// Select an operator declared as a member extension of an implicit dispatch receiver. This is
     /// the same candidate engine used by explicit member-extension calls; the only syntax-specific
     /// work here is recording the selected call under the operator convention key.
@@ -435,7 +500,7 @@ impl Checker<'_> {
             trailing_lambda: false,
             inference_bindings: None,
         };
-        let candidate = match self.member_extension_function(
+        let mut candidate = match self.member_extension_function(
             scope,
             request,
             MemberExtensionSelection::Operators,
@@ -459,13 +524,33 @@ impl Checker<'_> {
                 span,
             );
         }
+        let mut validation_params = candidate.visible_params.clone();
+        if let Some(vararg) = candidate.call_sig.vararg_index {
+            if let Some(element) = validation_params.get_mut(vararg) {
+                *element = Ty::array(*element);
+            }
+        }
+        if !self.expect_selected_call_args(
+            scope,
+            CallArgs {
+                call: expression,
+                args,
+                arg_tys,
+            },
+            &validation_params,
+            &validation_params,
+            &candidate.call_sig,
+            None,
+        ) {
+            return Err(());
+        }
         let interface = self
             .resolver()
             .classifier(candidate.owner)
             .is_some_and(|shape| shape.is_interface());
         let dispatch_receiver = self.implicit_receiver_selection(candidate.dispatch_receiver);
-        let result = candidate.ret;
-        let call = candidate.resolved_call(dispatch_receiver, extension_receiver, interface);
+        let result = self.commit_member_extension_type_arguments(expression, &[], &mut candidate);
+        let call = candidate.resolved_call(dispatch_receiver, interface);
         self.mark_extension_receiver_used(expression, candidate.dispatch_receiver);
         Ok(Some((result, call)))
     }

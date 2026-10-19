@@ -24,6 +24,7 @@ mod external_modifier_targets;
 mod import_path;
 mod operators;
 mod property_initializers;
+mod property_shape;
 mod type_refs;
 pub use type_refs::{QualifierArgumentLists, QualifierSegmentArguments, TrFlags, TypeRef};
 mod use_site_annotations;
@@ -36,6 +37,11 @@ pub use destructuring::{DestructureProperty, DestructuringSyntax};
 pub use external_modifier_targets::{ExternalModifierTarget, ExternalModifierUse};
 pub use import_path::ImportPath;
 pub use operators::{BinOp, UnOp};
+pub(crate) use property_shape::setter_param_or_value;
+pub use property_shape::{
+    has_backing_field, has_instance_backing_field, is_computed_companion_prop,
+    is_computed_member_prop,
+};
 pub use use_site_annotations::UseSiteAnnotation;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -44,72 +50,6 @@ pub struct ExprId(pub u32);
 pub struct StmtId(pub u32);
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct DeclId(pub u32);
-
-/// A FIELD-LESS `companion object` property (`companion object { val ZERO: T get() = … }`): it IS
-/// its accessors, so there is no static to hoist onto the outer class — kotlinc emits only `getX`
-/// (plus `setX` for a `var`) on `C$Companion`, and that is what the companion synthesis builds.
-///
-/// A `var` requires a BODIED setter for the same reason a `val` requires a getter: with no backing
-/// field a default setter would have nothing to write. A getter that reads `field`, an initializer,
-/// an explicit backing field, a delegate, or `const` all mean a real static exists, so those keep
-/// the plain companion-property path.
-pub fn is_computed_companion_prop(p: &PropDecl) -> bool {
-    p.receiver.is_none()
-        && !p.is_lateinit
-        && !p.is_const
-        && p.init.is_none()
-        && p.delegate.is_none()
-        && p.explicit_backing_field.is_none()
-        && p.getter.is_some()
-        && !p.getter_reads_field
-        && if p.is_var {
-            // A `private set` narrows only the SETTER, and the accessor synthesis emits an
-            // unconditionally public `setX` — accepting one would let a write through that kotlinc
-            // rejects, so those keep the rejection path until the narrowed visibility is modeled.
-            p.setter.as_ref().is_some_and(|setter| {
-                setter.body.is_some() && setter.visibility != Some(Visibility::Private)
-            })
-        } else {
-            p.setter.is_none()
-        }
-}
-
-/// A field-less member property whose value is entirely supplied by its accessor body.
-///
-/// This is a source declaration shape shared by semantic checking and IR construction. Keeping it
-/// beside [`PropDecl`] prevents those phases from independently deciding which declarations own
-/// instance storage.
-pub fn is_computed_member_prop(p: &PropDecl) -> bool {
-    p.receiver.is_none()
-        && !p.is_lateinit
-        && p.init.is_none()
-        && p.getter.is_some()
-        && (!p.is_var
-            || p.setter
-                .as_ref()
-                .is_some_and(|setter| setter.body.is_some()))
-        && !p.getter_reads_field
-}
-
-/// Whether this member-property declaration contributes one instance-storage slot.
-pub fn has_instance_backing_field(p: &PropDecl) -> bool {
-    !p.is_const && has_backing_field(p)
-}
-
-/// Whether this property declaration can own the backing field selected by an explicit `@field:`
-/// annotation. Static `const` storage counts; delegates and computed/extension/context properties
-/// have other realizations and therefore do not.
-pub fn has_backing_field(p: &PropDecl) -> bool {
-    !is_computed_member_prop(p)
-        && !p.is_abstract
-        && p.delegate.is_none()
-        && p.receiver.is_none()
-        && p.context_params.is_empty()
-}
-
-pub fn setter_param_or_value(param: Option<&String>) -> String {
-    param.cloned().unwrap_or_else(|| "value".to_string())
-}
 
 #[derive(Clone, Debug)]
 pub enum Expr {
@@ -2019,6 +1959,8 @@ pub struct File {
     /// `+ReportTypeVarianceConflictsInDnnAndFlexible`: the class variance checker also walks a
     /// definitely-non-null type and a flexible (platform) type. Without it those types are skipped.
     pub report_type_variance_conflicts_in_dnn_and_flexible: bool,
+    /// The language features deciding which reified type arguments are reported, and how.
+    pub reified_type_arguments: crate::features::ReifiedTypeArgumentFeatures,
     /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
     /// parameters whose declared upper bounds contain a cycle.
     pub recursive_type_of: bool,

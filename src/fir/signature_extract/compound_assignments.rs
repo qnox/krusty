@@ -83,13 +83,23 @@ impl SignatureConstraintExtractor {
                         scope,
                         origin: statement_origin,
                     });
+                    let previous = self.lexical_values[binding.scope]
+                        .get(&binding.name)
+                        .copied()
+                        .expect("a resolved assignment binding remains in its lexical scope");
+                    let updated = self.updated_mutable_local(previous, updated);
                     self.lexical_values[binding.scope].insert(binding.name, updated);
                 }
             }
             None => {
                 self.forget_boolean_vals_depending_on(name);
                 if let Some(binding) = binding {
-                    self.lexical_values[binding.scope].insert(binding.name, effect);
+                    let previous = self.lexical_values[binding.scope]
+                        .get(&binding.name)
+                        .copied()
+                        .expect("a resolved assignment binding remains in its lexical scope");
+                    let updated = self.updated_mutable_local(previous, effect);
+                    self.lexical_values[binding.scope].insert(binding.name, updated);
                 }
             }
         }

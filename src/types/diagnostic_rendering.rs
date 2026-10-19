@@ -11,8 +11,11 @@ pub(super) fn function_type(
     context: &[Ty],
     type_parameter: &dyn Fn(&str) -> String,
     classifier: &dyn Fn(TypeName) -> Option<String>,
+    platform_upper_bound: &dyn Fn(Ty) -> Ty,
 ) -> String {
-    let render = |ty: Ty| ty.source_name_with_classifier_in(context, type_parameter, classifier);
+    let render = |ty: Ty| {
+        ty.source_name_with_classifier_in(context, type_parameter, classifier, platform_upper_bound)
+    };
     let join = |types: &[Ty]| {
         types
             .iter()
@@ -71,26 +74,34 @@ pub(super) fn qualified_type_parameter(
     }
 }
 
-/// Render a platform type, including the Java collection pair whose lower bound is its mutable
-/// face (`MutableList<E>..List<E>` -> `(Mutable)List<E!>!`).
+/// Render a platform type, including a provider-declared mutable/read-only classifier pair
+/// (`MutableList<E>..List<E>` -> `(Mutable)List<E!>!`). The provider supplies the upper identity;
+/// this diagnostic boundary only formats that already-normalized semantic relation.
 pub(super) fn platform_type(
     inner: Ty,
     context: &[Ty],
     type_parameter: &dyn Fn(&str) -> String,
     classifier: &dyn Fn(TypeName) -> Option<String>,
+    platform_upper_bound: &dyn Fn(Ty) -> Ty,
 ) -> String {
-    let Ty::Obj(name, arguments) = inner else {
-        return format!(
-            "{}!",
-            inner.source_name_with_classifier_in(context, type_parameter, classifier)
-        );
+    let render = |ty: Ty| {
+        ty.source_name_with_classifier_in(context, type_parameter, classifier, platform_upper_bound)
     };
-    let Some(face) = mutable_collection_face(name) else {
-        return format!(
-            "{}!",
-            inner.source_name_with_classifier_in(context, type_parameter, classifier)
-        );
+    let upper = platform_upper_bound(inner);
+    let (Ty::Obj(lower_owner, arguments), Ty::Obj(upper_owner, _)) = (inner, upper) else {
+        return format!("{}!", render(inner));
     };
+    if lower_owner == upper_owner {
+        return format!("{}!", render(inner));
+    }
+
+    let face = upper_owner
+        .segment_ref()
+        .replace('$', ".")
+        .split('.')
+        .map(|segment| format!("(Mutable){segment}"))
+        .collect::<Vec<_>>()
+        .join(".");
     if arguments.is_empty() {
         return format!("{face}!");
     }
@@ -101,36 +112,9 @@ pub(super) fn platform_type(
                 Ty::TyParam(..) | Ty::Obj(..) | Ty::Fun(_) => Ty::platform_nullable(*argument),
                 argument => argument,
             };
-            flexible.source_name_with_classifier_in(context, type_parameter, classifier)
+            render(flexible)
         })
         .collect::<Vec<_>>()
         .join(", ");
     format!("{face}<{arguments}>!")
-}
-
-/// kotlinc's diagnostic face for a Java collection, keyed by the selected mutable classifier
-/// identity rather than by a rendered source spelling.
-fn mutable_collection_face(name: TypeName) -> Option<&'static str> {
-    [
-        ("kotlin/collections/MutableIterable", "(Mutable)Iterable"),
-        (
-            "kotlin/collections/MutableCollection",
-            "(Mutable)Collection",
-        ),
-        ("kotlin/collections/MutableList", "(Mutable)List"),
-        ("kotlin/collections/MutableSet", "(Mutable)Set"),
-        ("kotlin/collections/MutableMap", "(Mutable)Map"),
-        (
-            "kotlin/collections/MutableMap$MutableEntry",
-            "(Mutable)Map.(Mutable)Entry",
-        ),
-        ("kotlin/collections/MutableIterator", "(Mutable)Iterator"),
-        (
-            "kotlin/collections/MutableListIterator",
-            "(Mutable)ListIterator",
-        ),
-    ]
-    .into_iter()
-    .find(|(mutable, _)| name.matches(mutable))
-    .map(|(_, face)| face)
 }

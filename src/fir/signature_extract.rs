@@ -7,6 +7,7 @@ mod compound_assignments;
 mod condition_facts;
 mod evaluated_casts;
 mod integer_literals;
+mod mutable_local_flow;
 mod qualified_calls;
 mod safe_index;
 mod try_flow;
@@ -2082,6 +2083,7 @@ impl SignatureConstraintExtractor {
                             if !is_var {
                                 self.record_boolean_val(file, name, *init, scope, origin)?;
                             }
+                            let value = self.declared_local_flow(value, *is_var);
                             self.lexical_values
                                 .last_mut()
                                 .expect("block scope must exist")
@@ -2132,6 +2134,7 @@ impl SignatureConstraintExtractor {
                                         },
                                     );
                             }
+                            let value = self.declared_local_flow(value, !stable);
                             self.lexical_values
                                 .last_mut()
                                 .expect("block scope must exist")

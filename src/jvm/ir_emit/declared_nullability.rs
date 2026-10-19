@@ -50,10 +50,23 @@ pub(super) fn declared_nullability(ir: &IrFile, fid: u32) -> DeclaredNullability
     // A suspend function returns its result or `COROUTINE_SUSPENDED` through the CPS `Object`,
     // which kotlinc annotates `@Nullable` whatever the declared result.
     let suspend = ir.suspend_funs.contains(&fid);
+    // An inferred Java result retains its flexible declaration type and therefore commits to
+    // neither nullability face.
+    let flexible_result = ir
+        .fn_declared_spellings
+        .get(&fid)
+        .is_some_and(|spellings| spellings.ret.flexible_upper_bound.is_some())
+        || matches!(
+            gsig.and_then(|signature| signature.ret)
+                .or(member_sem.map(|(_, result)| *result))
+                .unwrap_or(f.ret),
+            Ty::PlatformNullable(_)
+        );
     let ret_ann = (!lambda_impl
         && !reified_body
         && (suspend
-            || (gsig.is_none_or(|g| !g.ret.is_some_and(unannotated_type_parameter))
+            || (!flexible_result
+                && gsig.is_none_or(|g| !g.ret.is_some_and(unannotated_type_parameter))
                 && member_sem.is_none_or(|(_, r)| !unannotated_type_parameter(*r)))))
     .then(|| {
         if suspend {

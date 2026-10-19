@@ -4891,6 +4891,55 @@ class Outer {
 }
 
 #[test]
+fn explicit_getter_return_spelling_belongs_to_the_stable_property() {
+    let source = r#"
+class Payload
+typealias Alias = Payload
+class Holder {
+    val value get(): Alias = Payload()
+}
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("GetterAliasSpelling")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("the explicit getter signature must finalize in Pass 1")
+        .module
+        .index();
+    let holder = index
+        .classifier_declaration(crate::types::type_name("Holder"))
+        .expect("holder classifier declaration");
+    let value = index
+        .declarations_named("value")
+        .iter()
+        .copied()
+        .find(|declaration| {
+            index
+                .declaration_header(*declaration)
+                .is_some_and(|header| header.owner == Some(holder))
+        })
+        .expect("getter-backed property declaration");
+
+    assert_eq!(
+        index
+            .declaration_spellings(value)
+            .expect("stable property spelling")
+            .ret
+            .alias,
+        Some(crate::types::type_name("Alias"))
+    );
+}
+
+#[test]
 fn compact_inner_type_spellings_keep_definitely_non_null_outer_arguments() {
     let source = r#"
 class Outer<T> { inner class Inner<U> }

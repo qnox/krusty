@@ -159,6 +159,19 @@ pub(super) fn preserve_receiver_identity_bindings(
     }
 }
 
+/// Whether `ty` is a type parameter whose receiver binding is a nullable type argument
+/// (`V?`, `out V?`, `in V?`).
+fn nullable_binding(ty: Ty, bindings: &GSigBinds) -> bool {
+    let Ty::TyParam(name, _) = ty else {
+        return false;
+    };
+    match bindings.get(name).copied() {
+        Some(Ty::InProjection(argument) | Ty::OutProjection(argument)) => argument.is_nullable(),
+        Some(argument) => argument.is_nullable(),
+        None => false,
+    }
+}
+
 fn compose_position(position: TypePosition, variance: crate::types::TypeVariance) -> TypePosition {
     use crate::types::TypeVariance;
     match (position, variance) {
@@ -236,9 +249,25 @@ fn specialize_member_type_with_unbound(
         Ty::Nullable(inner) => Ty::nullable(specialize_member_type_with_unbound(
             source, *inner, bindings, position, unbound,
         )),
-        Ty::PlatformNullable(inner) => Ty::platform_nullable(specialize_member_type_with_unbound(
-            source, *inner, bindings, position, unbound,
-        )),
+        Ty::PlatformNullable(inner) => {
+            let declared = *inner;
+            let specialized =
+                specialize_member_type_with_unbound(source, declared, bindings, position, unbound);
+            // A flexible variable is the interval `T..T?`. A nullable binding makes both faces
+            // identical and therefore produces that rigid nullable type; every other binding
+            // retains the flexible wrapper. This belongs to selected-slot instantiation, not the
+            // general type-substitution walk used by aliases, hierarchy projection, and bounds.
+            // The binding is checked as well as the result: substitution yields the argument's
+            // non-null form when the parameter's bound rejects null, so `ArrayList<V?>.get`
+            // would otherwise stay `V!`.
+            if matches!(declared, Ty::TyParam(..))
+                && (specialized.is_nullable() || nullable_binding(declared, bindings))
+            {
+                Ty::nullable(specialized)
+            } else {
+                Ty::platform_nullable(specialized)
+            }
+        }
         Ty::InProjection(inner) => Ty::in_projection(specialize_member_type_with_unbound(
             source,
             *inner,
@@ -324,6 +353,7 @@ pub(crate) fn instantiate_slot(
     if !bindings
         .values()
         .any(|binding| binding.projection_inner().is_some())
+        && !contains_flexible_variable(ty)
     {
         return match unbound {
             UnboundSpecialization::Preserve => ty_subst_keep_unbound(ty, bindings),
@@ -344,6 +374,107 @@ pub(crate) fn instantiate_slot(
         }
     });
     specialize_member_type_with_unbound(source, ty, bindings, position, unbound)
+}
+
+/// Instantiate every value-parameter slot from one semantic declaration signature. Keeping the
+/// walk here makes projected/flexible slot policy one responsibility; candidate selection supplies
+/// bindings but does not duplicate the substitution contract.
+pub(crate) fn instantiate_signature_parameters(
+    source: &dyn SymbolSource,
+    signature: &GenericSig,
+    bindings: &GSigBinds,
+    unbound: UnboundSpecialization,
+) -> Vec<Ty> {
+    signature
+        .params
+        .iter()
+        .map(|parameter| {
+            instantiate_slot(
+                source,
+                Some(signature),
+                *parameter,
+                bindings,
+                TypePosition::In,
+                unbound,
+            )
+        })
+        .collect()
+}
+
+/// Instantiate the result slot from one semantic declaration signature under the same policy as
+/// [`instantiate_signature_parameters`].
+pub(crate) fn instantiate_signature_result(
+    source: &dyn SymbolSource,
+    signature: &GenericSig,
+    bindings: &GSigBinds,
+    unbound: UnboundSpecialization,
+) -> Ty {
+    instantiate_slot(
+        source,
+        Some(signature),
+        signature.ret,
+        bindings,
+        TypePosition::Out,
+        unbound,
+    )
+}
+
+/// Instantiate the source element type when the selected trailing array parameter is consumed as
+/// a vararg. Equal arity alone is not enough: one ordinary element and one spread array both have
+/// one argument, so the already-applied parameter and actual shapes decide which call was selected.
+pub(crate) fn instantiate_vararg_element(
+    source: &dyn SymbolSource,
+    signature: &GenericSig,
+    applied_parameters: &[Ty],
+    actual_arguments: &[CallArgKind],
+    bindings: &GSigBinds,
+) -> Option<Ty> {
+    let vararg = applied_parameters
+        .last()
+        .is_some_and(|parameter| parameter.array_elem().is_some())
+        && (applied_parameters.len() != actual_arguments.len()
+            || actual_arguments.last().is_some_and(|argument| {
+                !argument.is_spread()
+                    && applied_parameters
+                        .last()
+                        .is_some_and(|parameter| argument.ty() != *parameter)
+            }));
+    if !vararg || signature.params.is_empty() {
+        return None;
+    }
+    let inner = signature.params.last()?.array_read_elem()?;
+    Some(instantiate_slot(
+        source,
+        Some(signature),
+        inner,
+        bindings,
+        TypePosition::In,
+        UnboundSpecialization::UseUpperBound,
+    ))
+}
+
+fn contains_flexible_variable(ty: Ty) -> bool {
+    match ty {
+        Ty::PlatformNullable(inner) if matches!(*inner, Ty::TyParam(..)) => true,
+        Ty::DefinitelyNotNull(inner)
+        | Ty::Nullable(inner)
+        | Ty::PlatformNullable(inner)
+        | Ty::InProjection(inner)
+        | Ty::OutProjection(inner)
+        | Ty::StarProjection(inner) => contains_flexible_variable(*inner),
+        Ty::Obj(_, arguments) | Ty::Intersection(arguments) => {
+            arguments.iter().copied().any(contains_flexible_variable)
+        }
+        Ty::Fun(signature) => {
+            signature
+                .params
+                .iter()
+                .copied()
+                .any(contains_flexible_variable)
+                || contains_flexible_variable(signature.ret)
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn specialize_signature_input_type(
@@ -639,8 +770,11 @@ pub(super) fn specialize_call_sig(
 
 #[cfg(test)]
 mod projected_member_view_tests {
-    use super::{member_slots_are_applied, specialize_member_type, GSigBinds, TypePosition};
-    use crate::libraries::LibraryType;
+    use super::{
+        instantiate_slot, instantiate_vararg_element, member_slots_are_applied,
+        specialize_member_type, CallArgKind, GSigBinds, TypePosition, UnboundSpecialization,
+    };
+    use crate::libraries::{GenericReturnPolicy, GenericSig, LibraryType};
     use crate::symbol_source::SymbolSource;
     use crate::types::{type_name, Ty, TypeName};
 
@@ -714,5 +848,60 @@ mod projected_member_view_tests {
             provider_t,
             &provider_formals
         ));
+    }
+
+    #[test]
+    fn flexible_variable_instantiation_collapses_only_a_nullable_binding() {
+        let variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
+        let flexible = Ty::platform_nullable(variable);
+
+        assert_eq!(
+            instantiate_slot(
+                &Source,
+                None,
+                flexible,
+                &bindings(Ty::nullable(Ty::String)),
+                TypePosition::Out,
+                UnboundSpecialization::Preserve,
+            ),
+            Ty::nullable(Ty::String)
+        );
+        assert_eq!(
+            instantiate_slot(
+                &Source,
+                None,
+                flexible,
+                &bindings(Ty::String),
+                TypePosition::Out,
+                UnboundSpecialization::Preserve,
+            ),
+            Ty::platform_nullable(Ty::String)
+        );
+    }
+
+    #[test]
+    fn a_spread_array_is_not_reclassified_as_one_vararg_element() {
+        let variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
+        let signature = GenericSig {
+            formals: vec!["T".to_string()],
+            formal_bounds: vec![vec![Ty::platform_nullable(Ty::obj("kotlin/Any"))]],
+            receiver: None,
+            params: vec![Ty::platform_nullable(Ty::array(variable))],
+            ret: variable,
+            return_policy: GenericReturnPolicy::Exact,
+        };
+        let applied = [Ty::platform_nullable(Ty::array(Ty::nullable(Ty::String)))];
+        let spread = [CallArgKind::Spread(Ty::array(Ty::nullable(Ty::String)))];
+
+        assert_eq!(
+            instantiate_vararg_element(
+                &Source,
+                &signature,
+                &applied,
+                &spread,
+                &bindings(Ty::nullable(Ty::String)),
+            ),
+            None
+        );
     }
 }

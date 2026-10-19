@@ -81,6 +81,8 @@ pub(super) struct ClassSlots {
     method_starts: Vec<usize>,
     /// The position in `slots` past the methods' slots.
     methods_end: usize,
+    /// Offset of the `InnerClasses` attribute's row count, when the class has one.
+    pub(super) inner_class_rows: Option<usize>,
 }
 
 impl ClassSlots {
@@ -144,6 +146,7 @@ struct Reader<'a> {
     methods_end: usize,
     /// Each `BootstrapMethods` entry: its method handle, then its arguments.
     bootstrap_methods: Vec<Vec<u16>>,
+    inner_class_rows: Option<usize>,
 }
 
 pub(super) fn read(bytes: &[u8]) -> Result<ClassSlots, Unread> {
@@ -157,6 +160,7 @@ pub(super) fn read(bytes: &[u8]) -> Result<ClassSlots, Unread> {
         method_starts: Vec::new(),
         methods_end: 0,
         bootstrap_methods: Vec::new(),
+        inner_class_rows: None,
     };
     reader.pool()?;
     let pool_end = reader.at;
@@ -173,6 +177,7 @@ pub(super) fn read(bytes: &[u8]) -> Result<ClassSlots, Unread> {
         fields: reader.fields,
         method_starts: reader.method_starts,
         methods_end: reader.methods_end,
+        inner_class_rows: reader.inner_class_rows,
     })
 }
 
@@ -374,6 +379,7 @@ impl Reader<'_> {
             ("Exceptions", Scope::Method(_))
             | ("NestMembers" | "PermittedSubclasses", Scope::Class) => self.indices(class)?,
             ("InnerClasses", Scope::Class) => {
+                self.inner_class_rows = Some(self.at);
                 for _ in 0..self.u2()? {
                     self.index(class)?;
                     self.index(class)?;

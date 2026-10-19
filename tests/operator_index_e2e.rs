@@ -45,6 +45,25 @@ fun box(): String = if (Env()[\"OK\"] == \"OK\") \"OK\" else \"no\"\n";
 }
 
 #[test]
+fn inferred_generic_collection_property_feeds_an_index_operator() {
+    const SRC: &str = "class ArrayWrapper<T> {\n\
+    val contents = ArrayList<T>()\n\
+    fun add(item: T) { contents.add(item) }\n\
+    operator fun get(index: Int): T = contents.get(index)!!\n\
+}\n\
+fun box(): String {\n\
+    val values = ArrayWrapper<String>()\n\
+    values.add(\"OK\")\n\
+    return values[0]\n\
+}\n";
+    assert_kotlinc_accepts("InferredGenericCollectionIndex", SRC);
+    assert_eq!(
+        run(SRC).expect("inferred generic collection property compiles + runs"),
+        "OK"
+    );
+}
+
+#[test]
 fn generic_member_get_publishes_its_reified_argument() {
     const SRC: &str = "class Box {\n\
     inline operator fun <reified T : Any> get(value: T): String =\n\
