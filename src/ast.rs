@@ -547,6 +547,9 @@ pub struct AnnotatedTypeParameter {
 pub struct Param {
     pub name: String,
     pub ty: TypeRef,
+    /// The whole parameter as written: its annotations and modifiers, name, type and default. This
+    /// is the range kotlinc gives the parameter's IR.
+    pub span: Span,
     /// Exact role written in a `context(...)` clause. This distinguishes Kotlin 2.4 anonymous
     /// context parameters (`_: T`) from legacy unnamed context receivers (`T`); both lack a source
     /// binding but have different target debug/reflection conventions.
@@ -2092,6 +2095,17 @@ impl File {
             .get(id.0 as usize)
             .copied()
             .or_else(|| self.retained_expr_spans.get(&id).copied())
+    }
+
+    /// The span of the name the member access `member` (`receiver.name`, or a safe call
+    /// `receiver?.name(...)`) selects: recorded where the expression's end cannot locate it,
+    /// otherwise its last `name.len()` bytes.
+    pub fn member_name_span(&self, member: ExprId, name: &str) -> Span {
+        if let Some(span) = self.exact_member_name_spans.get(&member.0) {
+            return *span;
+        }
+        let span = self.expr_spans[member.0 as usize];
+        Span::new(span.hi.saturating_sub(name.len() as u32), span.hi)
     }
 
     pub fn is_local_declaration(&self, id: DeclId) -> bool {

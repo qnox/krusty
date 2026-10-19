@@ -1,6 +1,7 @@
 //! Compiler orchestration.
 
 mod backend_handoff;
+mod checked_body_observer;
 mod declaration_metadata;
 mod dependency_body_emission;
 mod diagnostic_recovery;
@@ -14,6 +15,9 @@ use crate::ast::File;
 pub use crate::backend::{Artifact, Backend, CheckedIrFile};
 use crate::diag::{DiagSink, Span};
 use crate::frontend::StreamingSourceSetAnalysis;
+pub(crate) use checked_body_observer::{
+    CheckedBodyObserver, NoObserver, ObservedBody, ObservedModule, ObservedSource,
+};
 use diagnostic_recovery::recover_pass_two_diagnostics;
 pub use emission_session::{EmissionSession, EmittedDependencyModule};
 
@@ -40,7 +44,10 @@ pub fn emit_analyzed<B: Backend>(
         module_name,
         diags,
         &mut dependency_support,
-        &mut |_, _| {},
+        PassTwoHooks {
+            before_target: &mut |_, _| {},
+            checked_bodies: &mut NoObserver,
+        },
     );
     if !diags.has_errors() {
         backend.check_module(&state, diags);
@@ -51,11 +58,18 @@ pub fn emit_analyzed<B: Backend>(
     outputs
 }
 
-/// Lower one separately analyzed source module into an existing backend state.
-///
-/// `before_target` observes each immutable checked file and may attach dependency-export facts
-/// before target representation consumes it. Backend validation/finalization belongs to the owner
-/// of `state`, after every source module has been supplied.
+/// What a caller of [`emit_analyzed_into`] sees of Pass 2 besides its artifacts.
+struct PassTwoHooks<'a> {
+    /// Observes each immutable checked file and may attach dependency-export facts before target
+    /// representation consumes it.
+    before_target: &'a mut dyn FnMut(&mut CheckedIrFile<'_>, &mut DiagSink),
+    /// Sees each checked body before common lowering consumes it.
+    checked_bodies: &'a mut dyn CheckedBodyObserver,
+}
+
+/// Lower one separately analyzed source module into an existing backend state. Backend
+/// validation/finalization belongs to the owner of `state`, after every source module has been
+/// supplied.
 fn emit_analyzed_into<B: Backend>(
     analysis: impl Into<StreamingSourceSetAnalysis>,
     stems: &[String],
@@ -64,8 +78,12 @@ fn emit_analyzed_into<B: Backend>(
     module_name: &str,
     diags: &mut DiagSink,
     dependency_support: &mut dependency_body_emission::DependencySupportState,
-    before_target: &mut impl FnMut(&mut CheckedIrFile<'_>, &mut DiagSink),
+    hooks: PassTwoHooks<'_>,
 ) -> Vec<Artifact> {
+    let PassTwoHooks {
+        before_target,
+        checked_bodies,
+    } = hooks;
     let _supertype_projection = crate::resolve::SupertypeProjectionCache::enter();
     let StreamingSourceSetAnalysis {
         target,
@@ -144,6 +162,20 @@ fn emit_analyzed_into<B: Backend>(
         .iter()
         .map(crate::frontend::ReparseSource::source_line_count)
         .collect::<Vec<_>>();
+    let observed_sources = reparse_sources
+        .iter()
+        .enumerate()
+        .filter(|(_, source)| !source.is_java())
+        .map(|(raw, source)| ObservedSource {
+            id: crate::fir::SourceFileId::from_raw(raw as u32),
+            text: source.text(),
+        })
+        .collect::<Vec<_>>();
+    checked_bodies.begin_module(ObservedModule {
+        index: &index,
+        source_map: &source_map,
+        sources: &observed_sources,
+    });
     let mut outputs = Vec::new();
     for (raw_source, source) in reparse_sources.iter().enumerate() {
         // Java declaration headers participated in Pass 1 through the platform provider. Java
@@ -263,6 +295,7 @@ fn emit_analyzed_into<B: Backend>(
                         inline_bodies: &mut inline_bodies,
                         session: &mut body_session,
                         sink: &mut sink,
+                        observer: &mut *checked_bodies,
                         diags,
                     },
                 ) {
@@ -352,6 +385,30 @@ fn emit_analyzed_into<B: Backend>(
     outputs
 }
 
+/// Lowers for whatever target the analysis was checked for: common IR is target-neutral.
+struct DiscardCommonIr(crate::compilation_target::CompilationTarget);
+
+impl Backend for DiscardCommonIr {
+    type State = ();
+
+    fn compilation_target(&self) -> crate::compilation_target::CompilationTarget {
+        self.0
+    }
+
+    fn lower_ir_file(
+        &self,
+        _file: crate::backend::CheckedIrFile<'_>,
+        _state: &mut Self::State,
+        _diags: &mut DiagSink,
+    ) -> Vec<Artifact> {
+        Vec::new()
+    }
+
+    fn finalize(&self, _state: Self::State, _module_name: &str) -> Vec<Artifact> {
+        Vec::new()
+    }
+}
+
 /// Stream production checked FIR through common lowering and immediately discard each completed IR
 /// file. This is the lowering-only conformance boundary: callers do not construct a target backend,
 /// and target realization or emission cannot influence the result.
@@ -361,36 +418,43 @@ pub fn lower_analyzed_to_common_ir(
     module_name: &str,
     diags: &mut DiagSink,
 ) {
-    /// Lowers for whatever target the analysis was checked for: common IR is target-neutral.
-    struct DiscardCommonIr(crate::compilation_target::CompilationTarget);
-
-    impl Backend for DiscardCommonIr {
-        type State = ();
-
-        fn compilation_target(&self) -> crate::compilation_target::CompilationTarget {
-            self.0
-        }
-
-        fn lower_ir_file(
-            &self,
-            _file: crate::backend::CheckedIrFile<'_>,
-            _state: &mut Self::State,
-            _diags: &mut DiagSink,
-        ) -> Vec<Artifact> {
-            Vec::new()
-        }
-
-        fn finalize(&self, _state: Self::State, _module_name: &str) -> Vec<Artifact> {
-            Vec::new()
-        }
-    }
-
     let analysis = analysis.into();
     let backend = DiscardCommonIr(analysis.target);
     let outputs = emit_analyzed(analysis, stems, &backend, module_name, diags);
     assert!(
         outputs.is_empty(),
         "the common-lowering census must not produce target artifacts"
+    );
+}
+
+/// Pass 2 of an analyzed source set, checked and lowered as [`lower_analyzed_to_common_ir`] does,
+/// with `observer` seeing each checked body before common lowering consumes it.
+pub(crate) fn lower_analyzed_observing(
+    analysis: impl Into<StreamingSourceSetAnalysis>,
+    stems: &[String],
+    module_name: &str,
+    observer: &mut dyn CheckedBodyObserver,
+    diags: &mut DiagSink,
+) {
+    let analysis = analysis.into();
+    let backend = DiscardCommonIr(analysis.target);
+    let mut dependency_support = dependency_body_emission::DependencySupportState::default();
+    let outputs = emit_analyzed_into(
+        analysis,
+        stems,
+        &backend,
+        &mut (),
+        module_name,
+        diags,
+        &mut dependency_support,
+        PassTwoHooks {
+            before_target: &mut |_, _| {},
+            checked_bodies: observer,
+        },
+    );
+    assert!(
+        outputs.is_empty(),
+        "lowering without a target must not produce target artifacts"
     );
 }
 
@@ -765,6 +829,7 @@ struct BodyGroupConsumers<'a, 'ir> {
     inline_bodies: &'a mut crate::fir::InlineBodyStore,
     session: &'a mut crate::fir::BodyCheckSession,
     sink: &'a mut crate::fir_lower::CommonIrBodySink<'ir>,
+    observer: &'a mut dyn CheckedBodyObserver,
     diags: &'a mut DiagSink,
 }
 
@@ -787,6 +852,7 @@ fn consume_body_group(
         inline_bodies,
         session: body_session,
         sink,
+        observer,
         diags,
     } = consumers;
     let Some(info) = check_body_group(
@@ -827,6 +893,16 @@ fn consume_body_group(
         );
         let Err(error) = result else {
             for (owner, body) in checked.0 {
+                observer.observe(ObservedBody {
+                    index,
+                    symbols,
+                    source_map,
+                    file: active_file,
+                    declarations: active,
+                    source: source_id,
+                    owner,
+                    body: &body,
+                });
                 if let Err(error) = sink.accept_streamed_body(index, inline_bodies, owner, body) {
                     diags.error(
                         Span::new(0, 0),
