@@ -5,17 +5,18 @@
 //! JDK beside the project (`jdk`: a `release` file naming `JAVA_VERSION="25.0.2"` and empty
 //! `bin/javac` and `bin/java`, which is all either reads of it) and the file the recording krusty
 //! writes (`record`). `KRUSTY_BIN` names that recorder: it appends its arguments to the record, one
-//! per line, then a `----` line, and exits 0, or with status 3 for the module
-//! `KRUSTY_RECORDER_FAIL` names. Nothing is compiled, so a `compilation-fingerprint` request fails
-//! unrecorded and the Build Tools API implementation always compiles.
+//! per line, then a `----` line, each invocation whole under a lock (a `record.lock` directory),
+//! since the toolchain compiles independent modules at the same time; it exits 0, or with status 3
+//! for the module `KRUSTY_RECORDER_FAIL` names. Nothing is compiled, so a `compilation-fingerprint`
+//! request fails unrecorded and the Build Tools API implementation always compiles.
 //!
-//! krusty-toolchain runs a recorder of its own ([`toolchain_recorder`]), since it runs modules
-//! together: it appends each invocation whole, under a lock, and when `KRUSTY_EVENTS` names a file
-//! it appends `start <module>` and `end <module>` lines to it around its work. When
-//! `KRUSTY_RECORDER_SLEEP` is set, a module it does not fail prints `recorder: <module> begins` on
-//! stderr, sleeps that many seconds, prints `recorder: <module> ends` on stderr and
-//! `recorder: compiled <module>` on stdout. The module `KRUSTY_RECORDER_FAIL_LATE` names instead
-//! prints `recorder: failing <module> late` on stderr after its sleep and exits with status 4.
+//! krusty-toolchain runs a recorder of its own ([`toolchain_recorder`]) that records the same way.
+//! When `KRUSTY_EVENTS` names a file, it appends `start <module>` and `end <module>` lines to it
+//! around its work. When `KRUSTY_RECORDER_SLEEP` is set, a module it does not fail prints
+//! `recorder: <module> begins` on stderr, sleeps that many seconds, prints
+//! `recorder: <module> ends` on stderr and `recorder: compiled <module>` on stdout. The module
+//! `KRUSTY_RECORDER_FAIL_LATE` names instead prints `recorder: failing <module> late` on stderr
+//! after its sleep and exits with status 4.
 //!
 //! The toolchain compiles through the Build Tools API, whose implementation it loads from its
 //! shared cache by Maven coordinates. krusty's implementation (`tools/krusty-build-tools`) is
@@ -42,10 +43,14 @@ const RECORDER: &str = "#!/bin/sh
 # implementation then compiles every time, and only compilations are recorded.
 if [ \"${1:-}\" = compilation-fingerprint ]; then exit 1; fi
 for argument in \"$@\"; do
-  printf '%s\\n' \"$argument\"
   case $argument in -module-name=*) module=${argument#-module-name=} ;; esac
-done >> \"$KRUSTY_RECORD\"
-printf '%s\\n' '----' >> \"$KRUSTY_RECORD\"
+done
+until mkdir \"$KRUSTY_RECORD.lock\" 2>/dev/null; do sleep 0.01; done
+{
+  for argument in \"$@\"; do printf '%s\\n' \"$argument\"; done
+  printf '%s\\n' '----'
+} >> \"$KRUSTY_RECORD\"
+rmdir \"$KRUSTY_RECORD.lock\"
 if [ -n \"${KRUSTY_RECORDER_FAIL:-}\" ] && [ \"$module\" = \"$KRUSTY_RECORDER_FAIL\" ]; then
   echo \"recorder: failing $module\" >&2
   exit 3
