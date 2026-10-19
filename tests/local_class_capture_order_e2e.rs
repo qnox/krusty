@@ -279,3 +279,65 @@ fun renderBoth(other: String): String {
         "ContextFirstShadowCaptureKt$renderBoth$C",
     );
 }
+
+/// `local` writes the shadowing `var registry` and passes the hidden context value `registry`.
+/// Only the written binding is a shared cell: the class takes `Ref$ObjectRef` for the `var` and the
+/// plain `Registry` for the context value, never a cell for both.
+fn mutable_shadow_source(body: &str) -> String {
+    format!(
+        "\
+class Registry(val value: String)
+
+context(registry: Registry)
+fun contextualValue(): String = registry.value
+
+context(registry: Registry)
+fun render(other: String): String {{
+    var registry = \"shadow\"
+    fun local(): String {{
+{body}
+    }}
+    class C {{ fun f() = local() }}
+    return C().f() + registry
+}}
+
+fun box(): String = with(Registry(\"ctx\")) {{ render(\"+\") }}
+"
+    )
+}
+
+/// The write comes first: `($registry: Ref$ObjectRef, $registry$1: Registry, $other)`. kotlinc
+/// prints `shadow!ctx+shadow!`.
+#[test]
+fn a_written_shadowing_var_is_the_only_shared_capture() {
+    let source = mutable_shadow_source(
+        "        registry += \"!\"\n        return registry + contextualValue() + other",
+    );
+    assert_same_class(
+        "MutableShadowCapture",
+        &source,
+        "MutableShadowCaptureKt$render$C",
+    );
+    assert_eq!(
+        common::expect_box_run_with_stdlib(&source, "MutableShadowCapture"),
+        "shadow!ctx+shadow!"
+    );
+}
+
+/// The context value comes first: `($registry: Registry, $registry$1: Ref$ObjectRef, $other)`.
+/// kotlinc prints `ctxshadow!+shadow!`.
+#[test]
+fn a_context_value_before_a_written_shadowing_var_stays_unshared() {
+    let source = mutable_shadow_source(
+        "        val prefix = contextualValue()\n        registry += \"!\"\n        return prefix + registry + other",
+    );
+    assert_same_class(
+        "ContextFirstMutableShadow",
+        &source,
+        "ContextFirstMutableShadowKt$render$C",
+    );
+    assert_eq!(
+        common::expect_box_run_with_stdlib(&source, "ContextFirstMutableShadow"),
+        "ctxshadow!+shadow!"
+    );
+}

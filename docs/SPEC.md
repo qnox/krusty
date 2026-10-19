@@ -10496,7 +10496,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`a_shadowing_read_and_a_context_value_of_one_name_are_two_captures`,
   `a_context_value_used_first_takes_the_plain_capture_name`). The JVM backend numbers the names
   once over the physical order, and the field table, `MethodParameters` and the constructor's
-  `LocalVariableTable` all take them from there. A capture no recorded use orders is
+  `LocalVariableTable` all take them from there. Whether a local function's capture is a shared
+  cell is decided by its binding, as for a class capture, never by its spelling: a captured source
+  `var` is one cell, as kotlinc's `SharedVariablesLowering` makes it, and a write counts only
+  when the checker resolved it to that same binding. With `var registry = "shadow"` written by
+  `local` (`registry += "!"`), the class takes `Ref$ObjectRef` for the `var` and the plain
+  `Registry` for the context value, in either first-use order
+  (`a_written_shadowing_var_is_the_only_shared_capture`,
+  `a_context_value_before_a_written_shadowing_var_stays_unshared`). A capture no recorded use orders is
   an internal error, never ordered by name. Field and parameter order is JVM representation, so the checker
   publishes the order as a recorded fact (`TypeInfo::local_class_capture_orders`, carried by the
   checked local-class declaration to `IrFile::class_capture_order`). Every phase before the JVM

@@ -413,24 +413,35 @@ impl Checker<'_> {
         });
     }
 
-    /// Whether a local function's capture of `name` must be a shared cell: its body (or a lambda in
-    /// it) writes the name, or the enclosing function reassigns a `var` the body reads.
-    pub(super) fn local_capture_needs_shared_cell(
+    /// Whether local function `f`'s capture of the binding `local` is one shared cell. The binding
+    /// decides, as for a class capture: a source `var` a closure captures is always one cell, as
+    /// kotlinc's `SharedVariablesLowering` makes it, and the writes `f` makes count only when they
+    /// are to that exact binding. Spelling is never consulted, so a shadowing `var registry` and
+    /// the context value `registry` it hides are classified apart.
+    pub(super) fn local_function_capture_is_shared_cell(
         &self,
-        scope: &CheckerScope<'_>,
-        body: ExprId,
-        name: &str,
+        f: &crate::ast::FunDecl,
+        local: Option<&Local>,
     ) -> bool {
-        let single: crate::fx_hash::HashSet<String> = std::iter::once(name.to_string()).collect();
-        let written = {
-            let mut out = crate::fx_hash::HashSet::default();
-            collect_lambda_outer_writes(self.file, body, &single, &mut out);
-            out.contains(name)
+        let Some(local) = local else {
+            return false;
         };
-        written
-            || (self.fn_reassigned.contains(name)
-                && self.lookup(scope, name).is_some_and(|local| local.is_var)
-                && local_fun_body_uses_any(self.file, body, &single))
+        let roots = match &f.body {
+            FunBody::Expr(body) | FunBody::Block(body) => Some(*body),
+            FunBody::None => None,
+        }
+        .into_iter()
+        .chain(f.params.iter().filter_map(|parameter| parameter.default));
+        CapturedBinding {
+            delegated: local.delegate_storage_ty.is_some(),
+            mutable: local.is_var,
+            already_shared: local.shared_storage_cell,
+            written_here: roots
+                .into_iter()
+                .any(|root| self.expression_writes_binding(root, local.flow_identity)),
+            source_var: self.local_properties.is_source_var(local.flow_identity),
+        }
+        .is_shared_cell()
     }
 
     /// What a statement-position local class reads from its enclosing scope.

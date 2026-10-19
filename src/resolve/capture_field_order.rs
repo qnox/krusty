@@ -299,6 +299,40 @@ impl super::Checker<'_> {
         uses
     }
 
+    /// Whether a statement anywhere in `expression` (a nested lambda's or local function's body
+    /// too) assigns the local binding whose flow identity is `identity`.
+    pub(super) fn expression_writes_binding(&self, expression: ExprId, identity: u32) -> bool {
+        let file = self.file;
+        let mut pending = vec![expression];
+        while let Some(expression) = pending.pop() {
+            let mut statements = Vec::new();
+            file.any_child_expr(
+                expression,
+                &mut |child| {
+                    pending.push(child);
+                    false
+                },
+                &mut |statement| {
+                    statements.push(statement);
+                    false
+                },
+            );
+            while let Some(statement) = statements.pop() {
+                if matches!(
+                    self.class_capture_uses.writes.get(&statement),
+                    Some(StorageUse::Binding(written)) if *written == identity
+                ) {
+                    return true;
+                }
+                file.any_child_stmt(statement, &mut |child| {
+                    pending.push(child);
+                    false
+                });
+            }
+        }
+        false
+    }
+
     /// Record an assignment to capture storage or to a local's binding.
     pub(super) fn record_class_storage_write(&mut self, statement: StmtId, target: Option<Local>) {
         let target = match target.map(|local| (local.origin, local.flow_identity)) {
