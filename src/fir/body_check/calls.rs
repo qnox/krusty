@@ -1834,12 +1834,9 @@ impl BodyFirChecker<'_> {
         };
         let selected_intrinsic = super::compiler_intrinsics::selected_top_level(
             selected.callable.compiler_intrinsic,
-            &selected.callable.params,
-            selected.callable.ret,
             assertion_mode,
             selected.callable.name.as_str(),
-        )
-        .map_err(|kind| self.failure(self.file.expr_span(expression), kind))?;
+        );
         let (target, substitutions) =
             if let Some((classifier, operation)) = selected_classifier_intrinsic {
                 if dispatch_receiver.is_some() {
@@ -2139,15 +2136,11 @@ impl BodyFirChecker<'_> {
                 crate::libraries::CompilerIntrinsic::StringPlus
                     | crate::libraries::CompilerIntrinsic::StringGet
                     | crate::libraries::CompilerIntrinsic::NullableAnyToString
-                    | crate::libraries::CompilerIntrinsic::ReinterpretBits
             )
         ) {
             let expected_arguments = usize::from(!matches!(
                 primitive_operation,
-                Some(
-                    crate::libraries::CompilerIntrinsic::NullableAnyToString
-                        | crate::libraries::CompilerIntrinsic::ReinterpretBits
-                )
+                Some(crate::libraries::CompilerIntrinsic::NullableAnyToString)
             ));
             if arguments.len() != expected_arguments {
                 return Err(self.failure(
@@ -2170,12 +2163,6 @@ impl BodyFirChecker<'_> {
                         crate::libraries::CompilerIntrinsic::StringGet => FirIntrinsic::StringGet,
                         crate::libraries::CompilerIntrinsic::NullableAnyToString => {
                             FirIntrinsic::NullableAnyToString
-                        }
-                        crate::libraries::CompilerIntrinsic::ReinterpretBits => {
-                            FirIntrinsic::ReinterpretBits {
-                                from: resolved(selected.receiver)?,
-                                to: resolved(selected.ret)?,
-                            }
                         }
                         _ => unreachable!(),
                     },

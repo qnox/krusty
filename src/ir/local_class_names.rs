@@ -401,10 +401,6 @@ fn callee(callee: &mut Callee, names: &HashMap<TypeName, TypeName>) {
         Callee::Intrinsic { operation, ret } => {
             *ret = ty(*ret, names);
             match operation {
-                super::IrIntrinsic::ReinterpretBits { from, to } => {
-                    *from = ty(*from, names);
-                    *to = ty(*to, names);
-                }
                 super::IrIntrinsic::EnumValueOf { classifier }
                 | super::IrIntrinsic::EnumEntries { classifier }
                 | super::IrIntrinsic::PrimitiveCompare {

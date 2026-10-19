@@ -4,21 +4,6 @@
 
 use super::*;
 
-/// Stable flow identities introduced by plain local-property declarations. A narrowing shadow
-/// preserves its identity, while parameters have distinct identities that are never recorded here.
-#[derive(Default)]
-pub(super) struct LocalPropertyIdentities(crate::fx_hash::HashSet<u32>);
-
-impl LocalPropertyIdentities {
-    pub(super) fn record(&mut self, identity: u32) {
-        self.0.insert(identity);
-    }
-
-    fn contains(&self, identity: &u32) -> bool {
-        self.0.contains(identity)
-    }
-}
-
 /// The diagnostic one non-constant annotation argument earns (kotlinc's `ConstantArgumentKind`).
 #[derive(Clone, Copy)]
 enum NonConstantArgument {
@@ -292,7 +277,7 @@ impl Checker<'_> {
             _ if let Some(scope::PathRoot::Value(identity)) =
                 self.read_flow_roots.get(&expression) =>
             {
-                if self.annotation_argument_locals.contains(identity)
+                if self.local_properties.contains(identity)
                     && self.expression_has_enum_type(expression)
                 {
                     Some(NonConstantArgument::NotEnumConstant)

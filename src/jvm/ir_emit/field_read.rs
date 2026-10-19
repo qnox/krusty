@@ -4,7 +4,7 @@ use super::{
     instance_field_jvm_name, jvm_value_ty, slot_words, static_accessors, static_storage,
     type_descriptor, Emitter,
 };
-use crate::ir::{ClassId, IrExpr};
+use crate::ir::ClassId;
 use crate::jvm::classfile::CodeBuilder;
 
 impl Emitter<'_> {
@@ -45,7 +45,7 @@ impl Emitter<'_> {
         } else if static_storage(self.ir, class_decl) {
             // A static-storage object field has no instance operand. Evaluate a non-trivial
             // receiver only for its effects.
-            if !matches!(self.ir.expr(receiver), IrExpr::GetValue(_)) {
+            if !self.reads_local_value(receiver) {
                 self.emit_value(receiver, code);
                 code.pop();
             }

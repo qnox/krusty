@@ -172,7 +172,14 @@ fn publish_callable(
             overridden_results,
         },
     );
-    Ok(())
+    // A member of a singleton is realized from its owner's shape (a named object or a
+    // companion), which the declaring classifier publishes with the member.
+    match owner {
+        Some(owner) if owner_kind == Some(IrClassifierKind::Object) => {
+            publish_classifier(index, ir, owner)
+        }
+        _ => Ok(()),
+    }
 }
 
 fn classifier_kind(flags: DeclarationFlags) -> IrClassifierKind {

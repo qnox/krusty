@@ -195,3 +195,75 @@ fn two_calls_on_two_lines_keep_their_own_ranges() {
     );
     assert_eq!(krusty, reference, "SourceDebugExtension");
 }
+
+/// A same-file `suspend inline` function expanded by two methods. kotlinc numbers each method's
+/// inlined lines against a map of that method's own, so both expansions take lines 16 onward
+/// there — which is what each continuation's `@DebugMetadata` records — and only writing the
+/// methods copies them into the class map, the second after the first. A synthetic line inside an
+/// expansion belongs to the call that expanded it, so each method's takes a row of its own.
+const PER_METHOD: &str = "class Sess : AutoCloseable { override fun close() {} suspend fun start() {} suspend fun add(k: String): String = k }\n\
+    class Mgr { suspend fun acquire(o: String): Sess = Sess() }\n\
+    class T(val mgr: Mgr, val org: String) {\n\
+    \x20   suspend fun a(x: String?): String = withAuth(x) { it + \"a\" }\n\
+    \x20   suspend fun b(x: String?): String = withAuth(x) { it + \"b\" }\n\
+    \x20   private suspend inline fun <R> withAuth(x: String?, crossinline block: suspend (String) -> R): R {\n\
+    \x20       val s = x ?: return block(\"none\")\n\
+    \x20       return mgr.acquire(org).use { sess ->\n\
+    \x20           sess.start()\n\
+    \x20           val k = (s as? String)?.let { sess.add(it) }\n\
+    \x20           block(s + k)\n\
+    \x20       }\n\
+    \x20   }\n\
+    }\n";
+
+#[test]
+fn each_method_numbers_its_inlined_lines_on_its_own() {
+    let Some((reference, krusty)) = source_maps("per_method", PER_METHOD, "T", &[]) else {
+        eprintln!("skip (reference toolchain unavailable)");
+        return;
+    };
+    let rows: Vec<&str> = reference
+        .iter()
+        .skip_while(|line| line.as_str() != "*L")
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            "*L",
+            "1#1,15:1",
+            "7#1,4:16",
+            "11#1:21",
+            "7#1,4:22",
+            "11#1:27",
+            "1#2:20",
+            "1#2:26",
+            "1#2:28",
+            "*S KotlinDebug",
+            "*F",
+            "+ 1 Main.kt",
+            "T",
+            "*L",
+            "4#1:16,4",
+            "4#1:21",
+            "5#1:22,4",
+            "5#1:27",
+            "4#1:20",
+            "5#1:26",
+            "*E",
+        ],
+        "the reference map, spelled out so a change on either side is visible here"
+    );
+    assert_eq!(krusty, reference, "SourceDebugExtension");
+    for continuation in ["T$a$1", "T$b$1"] {
+        common::class_bytes_diff_against_kotlinc(
+            "PerMethod",
+            &[],
+            PER_METHOD,
+            continuation,
+            "the whole continuation class",
+        )
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|difference| panic!("{difference}"));
+    }
+}

@@ -1099,6 +1099,24 @@ fn a_sam_wrapper_is_a_constructed_copy_but_not_an_anonymous_singleton() {
     ));
 }
 
+/// Only a `new` constructs: a `checkcast` to a regenerated class names it without building one.
+#[test]
+fn a_cast_to_a_regenerated_class_is_not_a_construction() {
+    const WRAPPER: &str = "lib/LibKt$sam$i$java_util_function_Supplier$0";
+    let classes = SamWrapperClasses(&[WRAPPER]);
+    let mut node = MethodNode::new(ACC_STATIC, "f", "(Ljava/lang/Object;)V");
+    node.nodes = vec![
+        Node::Insn(Insn::Var { op: 0x19, slot: 0 }),
+        Node::Insn(Insn::Type {
+            op: 0xc0,
+            class: WRAPPER.to_string(),
+        }),
+        op(0x57),
+        op(0xb1),
+    ];
+    assert!(!constructs_regenerated_object(&node, &classes));
+}
+
 fn reification_marker() -> Node {
     Node::Insn(Insn::Method {
         op: 0xb8,

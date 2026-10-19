@@ -1283,6 +1283,8 @@ mod jvm_default_mode_e2e;
 mod jvm_name_e2e;
 #[path = "jvm_name_toplevel_e2e.rs"]
 mod jvm_name_toplevel_e2e;
+#[path = "jvm_static_functions_e2e.rs"]
+mod jvm_static_functions_e2e;
 #[path = "kclass_type_e2e.rs"]
 mod kclass_type_e2e;
 #[path = "klib_class_surface_e2e.rs"]
@@ -1645,6 +1647,8 @@ mod value_class_dependency_bridge_e2e;
 mod value_class_equality_e2e;
 #[path = "value_class_equals_hash_e2e.rs"]
 mod value_class_equals_hash_e2e;
+#[path = "value_class_generic_argument_join_e2e.rs"]
+mod value_class_generic_argument_join_e2e;
 #[path = "value_class_generic_carrier_e2e.rs"]
 mod value_class_generic_carrier_e2e;
 #[path = "value_class_generic_slot_read_e2e.rs"]
@@ -2583,6 +2587,9 @@ mod toplevel_property_ref_e2e;
 
 #[path = "captured_unsigned_lines_e2e.rs"]
 mod captured_unsigned_lines_e2e;
+
+#[path = "char_code_inline_line_e2e.rs"]
+mod char_code_inline_line_e2e;
 #[path = "erased_parameter_boxing_e2e.rs"]
 mod erased_parameter_boxing_e2e;
 #[path = "function_type_parameter_name_e2e.rs"]

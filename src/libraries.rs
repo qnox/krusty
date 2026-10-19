@@ -29,6 +29,7 @@ mod platform_contract;
 mod property_producer;
 mod provider_override;
 mod result_nullability;
+mod scalar_instruction;
 mod singleton_dispatch;
 mod stdlib_klib_intrinsics;
 pub use annotation_application::{
@@ -92,6 +93,7 @@ pub(crate) use metadata_normalization::{
     FunctionParameterIdentities, PropertyAccessorNames, PropertyParameterIdentities,
     TypeParameterIdentities,
 };
+pub use scalar_instruction::{ScalarClass, ScalarComparison, ScalarInstruction};
 use std::borrow::Cow;
 
 /// Declaration-level classifier access. Unlike [`Visibility`], this preserves JVM package-private

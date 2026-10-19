@@ -628,7 +628,11 @@ impl KlibDeclarationBodies {
                 return false;
             };
             intrinsics.get(&callee).is_some_and(|callable| {
-                callable.operation() == crate::libraries::CompilerIntrinsic::ReinterpretBits
+                matches!(
+                    callable.operation(),
+                    crate::libraries::CompilerIntrinsic::ReinterpretBits
+                        | crate::libraries::CompilerIntrinsic::ScalarInstruction(_)
+                )
             })
         })
     }

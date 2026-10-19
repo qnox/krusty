@@ -14,6 +14,7 @@ use crate::fx_hash::HashMap;
 
 use super::*;
 
+mod compiled_module_callee;
 mod default_bridge;
 mod lambda_node;
 mod lambda_route;
@@ -27,6 +28,7 @@ use crate::jvm::method_node::{
     encode_instruction, is_terminal, stack_shapes, word_delta, Category, Insn, MethodNode, Node,
 };
 use crate::jvm::source_map::SourceMap;
+pub(super) use compiled_module_callee::{compile_inline_callees, CompiledInlineCallees};
 use default_bridge::CalleeNodes;
 pub(super) use lambda_route::{LambdaCallRoute, SpliceReason};
 pub(super) use regenerated_objects::{RegeneratedObjectNames, RegenerationSite};
@@ -1095,7 +1097,7 @@ impl Emitter<'_> {
     }
 
     /// Whether argument `index` of `call_expression` is a literal lambda the inline body's invokes
-    /// expand: one passed to an inline parameter ([`super::inline_parameters`]). A literal for a
+    /// expand: one passed to an inline parameter ([`crate::jvm::inline_parameters`]). A literal for a
     /// `noinline` or non-function parameter is an ordinary argument, the function object the body
     /// receives. An error is a literal the call published no parameter facts for.
     pub(super) fn is_inlined_literal(
@@ -1111,7 +1113,11 @@ impl Emitter<'_> {
         index
             .checked_sub(leading_non_argument_operands)
             .and_then(|parameter| {
-                super::inline_parameters::is_inline_parameter(self.ir, call_expression, parameter)
+                crate::jvm::inline_parameters::is_inline_parameter(
+                    self.ir,
+                    call_expression,
+                    parameter,
+                )
             })
             .ok_or("a lambda argument has no published parameter modifier and declared type")
     }
@@ -1714,7 +1720,7 @@ impl inliner::SourceLines for CallLines<'_, '_, '_, '_> {
         self.emitter
             .cw
             .source_map_for_inlining(self.claimable)
-            .and_then(|map| map.map_synthetic_line(1))
+            .and_then(|map| map.map_synthetic_line(1, None))
     }
     fn call_site(&self) -> Option<u16> {
         Some(self.call_line)

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use crate::libraries::{
     CompilerIntrinsic, ExternalCallableKind, KlibDeclarationSignature, KlibDependencyCallable,
+    ScalarClass, ScalarComparison, ScalarInstruction,
 };
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrExprKind, KlibIrFunction, KlibIrNullability, KlibIrType,
@@ -92,9 +93,12 @@ impl KlibIntrinsicFacts {
         };
         // `GCUnsafeCall` predicates are exact Native realizations, not operations shared by KLIB
         // body lowering. Keep them on the published callable fact so Native consumes them at the
-        // ordinary external-call boundary. Reinterpretation is also the common operation used
-        // while closing a serialized wrapper body.
-        if shape.operation != CompilerIntrinsic::ReinterpretBits {
+        // ordinary external-call boundary. Reinterpretation and scalar instructions are the common
+        // operations used while closing a serialized wrapper body.
+        if !matches!(
+            shape.operation,
+            CompilerIntrinsic::ReinterpretBits | CompilerIntrinsic::ScalarInstruction(_)
+        ) {
             return;
         }
         let identity = KlibDependencyCallable {
@@ -175,7 +179,9 @@ fn authenticate_ir(
         return None;
     };
     if platform != Some(TargetIntrinsicPlatform::Wasm)
-        || signature.package().segments() != ["kotlin", "wasm", "internal"]
+        || !WASM_OPERATION_PACKAGES
+            .iter()
+            .any(|package| signature.package().segments().iter().eq(package.iter()))
         || signature.declaration().segments().len() != 1
         || signature.member_id().is_none()
         || function.base.symbol.kind != KlibIrSymbolKind::Function
@@ -183,8 +189,6 @@ fn authenticate_ir(
         || !function.type_parameters.is_empty()
         || function.dispatch_receiver.is_some()
         || !function.context_parameters.is_empty()
-        || function.extension_receiver.is_some()
-        || function.regular_parameters.len() != 1
     {
         return None;
     }
@@ -194,24 +198,206 @@ fn authenticate_ir(
         &["kotlin", "wasm", "internal"],
         &["WasmOp", "<init>"],
     )?;
-    let (parameter, result) = match operation {
-        "I32_REINTERPRET_F32" => (Ty::Float, Ty::Int),
-        "I64_REINTERPRET_F64" => (Ty::Double, Ty::Long),
-        "F32_REINTERPRET_I32" => (Ty::Int, Ty::Float),
-        "F64_REINTERPRET_I64" => (Ty::Long, Ty::Double),
-        _ => return None,
+    let operands = function
+        .extension_receiver
+        .iter()
+        .chain(&function.regular_parameters)
+        .map(|parameter| ir_semantic_type(arena, parameter.ty))
+        .collect::<Option<Vec<_>>>()?;
+    wasm_shape(
+        operation,
+        function.extension_receiver.is_some(),
+        operands,
+        ir_semantic_type(arena, function.return_type)?,
+    )
+}
+
+/// The packages whose `WasmOp` declarations the Wasm stdlib realizes as one instruction: the
+/// instruction wrappers of `kotlin.wasm.internal` and the public and `@PublishedApi` declarations
+/// of `kotlin` (bit counts, unsigned arithmetic and conversions). Primitive members are the
+/// shared builtin operators and are realized there.
+const WASM_OPERATION_PACKAGES: [&[&str]; 2] = [&["kotlin"], &["kotlin", "wasm", "internal"]];
+
+/// The compiler operation a `WasmOp` names, if `operands` (an extension receiver first) and
+/// `result` are exactly the operation's shape.
+fn wasm_shape(
+    operation: &str,
+    extension: bool,
+    operands: Vec<Ty>,
+    result: Ty,
+) -> Option<KlibIntrinsicShape> {
+    let intrinsic = match operation {
+        "I32_REINTERPRET_F32"
+        | "I64_REINTERPRET_F64"
+        | "F32_REINTERPRET_I32"
+        | "F64_REINTERPRET_I64" => {
+            let (parameter, expected) = match operation {
+                "I32_REINTERPRET_F32" => (Ty::Float, Ty::Int),
+                "I64_REINTERPRET_F64" => (Ty::Double, Ty::Long),
+                "F32_REINTERPRET_I32" => (Ty::Int, Ty::Float),
+                _ => (Ty::Long, Ty::Double),
+            };
+            if extension || operands != [parameter] || result != expected {
+                return None;
+            }
+            CompilerIntrinsic::ReinterpretBits
+        }
+        _ => {
+            let (instruction, class) = wasm_scalar_instruction(operation)?;
+            let operand = *operands.first()?;
+            if operands.len() != instruction.arity()
+                || operands.iter().any(|ty| *ty != operand)
+                || ScalarClass::of(operand) != Some(class)
+                || !instruction.admits(operand, result)
+            {
+                return None;
+            }
+            CompilerIntrinsic::ScalarInstruction(instruction)
+        }
     };
-    if ir_semantic_type(arena, function.regular_parameters[0].ty) != Some(parameter)
-        || ir_semantic_type(arena, function.return_type) != Some(result)
-    {
-        return None;
-    }
     Some(KlibIntrinsicShape {
-        operation: CompilerIntrinsic::ReinterpretBits,
-        kind: ExternalCallableKind::TopLevel,
+        operation: intrinsic,
+        kind: if extension {
+            ExternalCallableKind::Extension
+        } else {
+            ExternalCallableKind::TopLevel
+        },
         receiver: None,
-        params: vec![parameter],
+        params: operands,
         ret: result,
+    })
+}
+
+/// The scalar instruction a `WasmOp` entry names, with the class of its operands. The entry
+/// spells the result's class first, as the Wasm instruction does.
+fn wasm_scalar_instruction(operation: &str) -> Option<(ScalarInstruction, ScalarClass)> {
+    use ScalarClass::{Float32, Float64, Integral32, Integral64};
+    use ScalarInstruction::*;
+    Some(match operation {
+        "I32_CLZ" => (CountLeadingZeros, Integral32),
+        "I32_CTZ" => (CountTrailingZeros, Integral32),
+        "I32_POPCNT" => (PopulationCount, Integral32),
+        "I32_ADD" => (Add, Integral32),
+        "I32_SUB" => (Subtract, Integral32),
+        "I32_MUL" => (Multiply, Integral32),
+        "I32_DIV_S" => (Divide, Integral32),
+        "I32_DIV_U" => (DivideUnsigned, Integral32),
+        "I32_REM_S" => (Remainder, Integral32),
+        "I32_REM_U" => (RemainderUnsigned, Integral32),
+        "I32_AND" => (And, Integral32),
+        "I32_OR" => (Or, Integral32),
+        "I32_XOR" => (Xor, Integral32),
+        "I32_SHL" => (ShiftLeft, Integral32),
+        "I32_SHR_S" => (ShiftRight, Integral32),
+        "I32_SHR_U" => (ShiftRightUnsigned, Integral32),
+        "I32_ROTL" => (RotateLeft, Integral32),
+        "I32_ROTR" => (RotateRight, Integral32),
+        "I32_EQ" => (Compare(ScalarComparison::Equal), Integral32),
+        "I32_NE" => (Compare(ScalarComparison::NotEqual), Integral32),
+        "I32_LT_S" => (Compare(ScalarComparison::Less), Integral32),
+        "I32_LT_U" => (Compare(ScalarComparison::LessUnsigned), Integral32),
+        "I32_GT_S" => (Compare(ScalarComparison::Greater), Integral32),
+        "I32_GT_U" => (Compare(ScalarComparison::GreaterUnsigned), Integral32),
+        "I32_LE_S" => (Compare(ScalarComparison::LessOrEqual), Integral32),
+        "I32_LE_U" => (Compare(ScalarComparison::LessOrEqualUnsigned), Integral32),
+        "I32_GE_S" => (Compare(ScalarComparison::GreaterOrEqual), Integral32),
+        "I32_GE_U" => (
+            Compare(ScalarComparison::GreaterOrEqualUnsigned),
+            Integral32,
+        ),
+        "I64_CLZ" => (CountLeadingZeros, Integral64),
+        "I64_CTZ" => (CountTrailingZeros, Integral64),
+        "I64_POPCNT" => (PopulationCount, Integral64),
+        "I64_ADD" => (Add, Integral64),
+        "I64_SUB" => (Subtract, Integral64),
+        "I64_MUL" => (Multiply, Integral64),
+        "I64_DIV_S" => (Divide, Integral64),
+        "I64_DIV_U" => (DivideUnsigned, Integral64),
+        "I64_REM_S" => (Remainder, Integral64),
+        "I64_REM_U" => (RemainderUnsigned, Integral64),
+        "I64_AND" => (And, Integral64),
+        "I64_OR" => (Or, Integral64),
+        "I64_XOR" => (Xor, Integral64),
+        "I64_SHL" => (ShiftLeft, Integral64),
+        "I64_SHR_S" => (ShiftRight, Integral64),
+        "I64_SHR_U" => (ShiftRightUnsigned, Integral64),
+        "I64_ROTL" => (RotateLeft, Integral64),
+        "I64_ROTR" => (RotateRight, Integral64),
+        "I64_EQ" => (Compare(ScalarComparison::Equal), Integral64),
+        "I64_NE" => (Compare(ScalarComparison::NotEqual), Integral64),
+        "I64_LT_S" => (Compare(ScalarComparison::Less), Integral64),
+        "I64_LT_U" => (Compare(ScalarComparison::LessUnsigned), Integral64),
+        "I64_GT_S" => (Compare(ScalarComparison::Greater), Integral64),
+        "I64_GT_U" => (Compare(ScalarComparison::GreaterUnsigned), Integral64),
+        "I64_LE_S" => (Compare(ScalarComparison::LessOrEqual), Integral64),
+        "I64_LE_U" => (Compare(ScalarComparison::LessOrEqualUnsigned), Integral64),
+        "I64_GE_S" => (Compare(ScalarComparison::GreaterOrEqual), Integral64),
+        "I64_GE_U" => (
+            Compare(ScalarComparison::GreaterOrEqualUnsigned),
+            Integral64,
+        ),
+        "F32_ABS" => (Absolute, Float32),
+        "F32_NEG" => (Negate, Float32),
+        "F32_CEIL" => (Ceiling, Float32),
+        "F32_FLOOR" => (Floor, Float32),
+        "F32_TRUNC" => (Truncate, Float32),
+        "F32_NEAREST" => (Nearest, Float32),
+        "F32_SQRT" => (SquareRoot, Float32),
+        "F32_ADD" => (Add, Float32),
+        "F32_SUB" => (Subtract, Float32),
+        "F32_MUL" => (Multiply, Float32),
+        "F32_DIV" => (Divide, Float32),
+        "F32_MIN" => (Minimum, Float32),
+        "F32_MAX" => (Maximum, Float32),
+        "F32_COPYSIGN" => (CopySign, Float32),
+        "F32_EQ" => (Compare(ScalarComparison::Equal), Float32),
+        "F32_NE" => (Compare(ScalarComparison::NotEqual), Float32),
+        "F32_LT" => (Compare(ScalarComparison::Less), Float32),
+        "F32_GT" => (Compare(ScalarComparison::Greater), Float32),
+        "F32_LE" => (Compare(ScalarComparison::LessOrEqual), Float32),
+        "F32_GE" => (Compare(ScalarComparison::GreaterOrEqual), Float32),
+        "F64_ABS" => (Absolute, Float64),
+        "F64_NEG" => (Negate, Float64),
+        "F64_CEIL" => (Ceiling, Float64),
+        "F64_FLOOR" => (Floor, Float64),
+        "F64_TRUNC" => (Truncate, Float64),
+        "F64_NEAREST" => (Nearest, Float64),
+        "F64_SQRT" => (SquareRoot, Float64),
+        "F64_ADD" => (Add, Float64),
+        "F64_SUB" => (Subtract, Float64),
+        "F64_MUL" => (Multiply, Float64),
+        "F64_DIV" => (Divide, Float64),
+        "F64_MIN" => (Minimum, Float64),
+        "F64_MAX" => (Maximum, Float64),
+        "F64_COPYSIGN" => (CopySign, Float64),
+        "F64_EQ" => (Compare(ScalarComparison::Equal), Float64),
+        "F64_NE" => (Compare(ScalarComparison::NotEqual), Float64),
+        "F64_LT" => (Compare(ScalarComparison::Less), Float64),
+        "F64_GT" => (Compare(ScalarComparison::Greater), Float64),
+        "F64_LE" => (Compare(ScalarComparison::LessOrEqual), Float64),
+        "F64_GE" => (Compare(ScalarComparison::GreaterOrEqual), Float64),
+        "I32_WRAP_I64" => (Wrap, Integral64),
+        "I64_EXTEND_I32_S" => (Extend, Integral32),
+        "I64_EXTEND_I32_U" => (ExtendUnsigned, Integral32),
+        "F32_CONVERT_I32_S" => (ConvertToFloating, Integral32),
+        "F32_CONVERT_I32_U" => (ConvertUnsignedToFloating, Integral32),
+        "F32_CONVERT_I64_S" => (ConvertToFloating, Integral64),
+        "F32_CONVERT_I64_U" => (ConvertUnsignedToFloating, Integral64),
+        "F64_CONVERT_I32_S" => (ConvertToFloating, Integral32),
+        "F64_CONVERT_I32_U" => (ConvertUnsignedToFloating, Integral32),
+        "F64_CONVERT_I64_S" => (ConvertToFloating, Integral64),
+        "F64_CONVERT_I64_U" => (ConvertUnsignedToFloating, Integral64),
+        "I32_TRUNC_SAT_F32_S" => (TruncateSaturating, Float32),
+        "I32_TRUNC_SAT_F32_U" => (TruncateSaturatingUnsigned, Float32),
+        "I32_TRUNC_SAT_F64_S" => (TruncateSaturating, Float64),
+        "I32_TRUNC_SAT_F64_U" => (TruncateSaturatingUnsigned, Float64),
+        "I64_TRUNC_SAT_F32_S" => (TruncateSaturating, Float32),
+        "I64_TRUNC_SAT_F32_U" => (TruncateSaturatingUnsigned, Float32),
+        "I64_TRUNC_SAT_F64_S" => (TruncateSaturating, Float64),
+        "I64_TRUNC_SAT_F64_U" => (TruncateSaturatingUnsigned, Float64),
+        "F32_DEMOTE_F64" => (Demote, Float64),
+        "F64_PROMOTE_F32" => (Promote, Float32),
+        _ => return None,
     })
 }
 
@@ -296,8 +482,11 @@ fn ir_semantic_type(
         return None;
     }
     match signature.declaration().segments()[0].as_str() {
+        "Boolean" => Some(Ty::Boolean),
         "Int" => Some(Ty::Int),
+        "UInt" => Some(Ty::UInt),
         "Long" => Some(Ty::Long),
+        "ULong" => Some(Ty::ULong),
         "Float" => Some(Ty::Float),
         "Double" => Some(Ty::Double),
         _ => None,
@@ -474,13 +663,11 @@ fn wasm(
     placement: crate::libraries::CallablePlacement,
     declaration: &KotlinFunction,
 ) -> Option<KlibIntrinsicShape> {
-    if declaration.receiver.is_some() {
-        return None;
-    }
     let crate::libraries::CallablePlacement::Package(package) = placement else {
         return None;
     };
-    if package != type_name("kotlin/wasm/internal") {
+    // The metadata spelling of `WASM_OPERATION_PACKAGES`.
+    if package != type_name("kotlin") && package != type_name("kotlin/wasm/internal") {
         return None;
     }
     let operation = string_annotation(
@@ -488,26 +675,18 @@ fn wasm(
         type_name("kotlin/wasm/internal/WasmOp"),
         "name",
     )?;
-    let (parameter, result) = match operation {
-        "I32_REINTERPRET_F32" => (Ty::Float, Ty::Int),
-        "I64_REINTERPRET_F64" => (Ty::Double, Ty::Long),
-        "F32_REINTERPRET_I32" => (Ty::Int, Ty::Float),
-        "F64_REINTERPRET_I64" => (Ty::Long, Ty::Double),
-        _ => return None,
-    };
-    if declaration.params.len() != 1
-        || semantic_type(&declaration.params[0]) != Some(parameter)
-        || semantic_type(&declaration.ret) != Some(result)
-    {
-        return None;
-    }
-    Some(KlibIntrinsicShape {
-        operation: CompilerIntrinsic::ReinterpretBits,
-        kind: ExternalCallableKind::TopLevel,
-        receiver: None,
-        params: vec![parameter],
-        ret: result,
-    })
+    let operands = declaration
+        .receiver
+        .iter()
+        .chain(&declaration.params)
+        .map(semantic_type)
+        .collect::<Option<Vec<_>>>()?;
+    wasm_shape(
+        operation,
+        declaration.receiver.is_some(),
+        operands,
+        semantic_type(&declaration.ret)?,
+    )
 }
 
 fn string_annotation<'a>(
@@ -564,8 +743,11 @@ fn exact_type(ty: &KotlinType, classifier: &str) -> bool {
 
 fn semantic_type(ty: &KotlinType) -> Option<Ty> {
     [
+        ("kotlin/Boolean", Ty::Boolean),
         ("kotlin/Int", Ty::Int),
+        ("kotlin/UInt", Ty::UInt),
         ("kotlin/Long", Ty::Long),
+        ("kotlin/ULong", Ty::ULong),
         ("kotlin/Float", Ty::Float),
         ("kotlin/Double", Ty::Double),
     ]
@@ -695,6 +877,153 @@ mod tests {
             authenticate(Some(TargetIntrinsicPlatform::Wasm), placement, &exact),
             "the Wasm stdlib serializes instruction wrappers with an implementedAsIntrinsic body",
         );
+    }
+
+    #[test]
+    fn wasm_scalar_instructions_require_their_operand_class_arity_and_package() {
+        let wasm = Some(TargetIntrinsicPlatform::Wasm);
+        let internal =
+            crate::libraries::CallablePlacement::Package(type_name("kotlin/wasm/internal"));
+        let kotlin = crate::libraries::CallablePlacement::Package(type_name("kotlin"));
+        let instruction = |name, params: &[&str], ret, operation| {
+            declaration(name, params, ret, wasm_annotation(operation))
+        };
+        let shape = |operation, kind, params: &[Ty], ret| {
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::ScalarInstruction(operation),
+                kind,
+                receiver: None,
+                params: params.to_vec(),
+                ret,
+            })
+        };
+
+        let divide = instruction(
+            "wasm_i32_div_u",
+            &["kotlin/Int", "kotlin/Int"],
+            "kotlin/Int",
+            "I32_DIV_U",
+        );
+        assert_eq!(
+            authenticate(wasm, internal, &divide),
+            shape(
+                ScalarInstruction::DivideUnsigned,
+                ExternalCallableKind::TopLevel,
+                &[Ty::Int, Ty::Int],
+                Ty::Int
+            )
+        );
+        assert!(authenticate(None, internal, &divide).is_none());
+        assert!(authenticate(
+            wasm,
+            crate::libraries::CallablePlacement::Package(type_name("spoof")),
+            &divide
+        )
+        .is_none());
+        let unsigned = instruction(
+            "uintDivide",
+            &["kotlin/UInt", "kotlin/UInt"],
+            "kotlin/UInt",
+            "I32_DIV_U",
+        );
+        assert_eq!(
+            authenticate(wasm, kotlin, &unsigned),
+            shape(
+                ScalarInstruction::DivideUnsigned,
+                ExternalCallableKind::TopLevel,
+                &[Ty::UInt, Ty::UInt],
+                Ty::UInt
+            )
+        );
+        let less = instruction(
+            "wasm_f64_lt",
+            &["kotlin/Double", "kotlin/Double"],
+            "kotlin/Boolean",
+            "F64_LT",
+        );
+        assert_eq!(
+            authenticate(wasm, internal, &less),
+            shape(
+                ScalarInstruction::Compare(ScalarComparison::Less),
+                ExternalCallableKind::TopLevel,
+                &[Ty::Double, Ty::Double],
+                Ty::Boolean
+            )
+        );
+        let extend = instruction(
+            "uintToULong",
+            &["kotlin/Int"],
+            "kotlin/ULong",
+            "I64_EXTEND_I32_U",
+        );
+        assert_eq!(
+            authenticate(wasm, kotlin, &extend),
+            shape(
+                ScalarInstruction::ExtendUnsigned,
+                ExternalCallableKind::TopLevel,
+                &[Ty::Int],
+                Ty::ULong
+            )
+        );
+
+        let mut leading_zeros = instruction("countLeadingZeroBits", &[], "kotlin/Int", "I32_CLZ");
+        leading_zeros.receiver = Some(KotlinType::class("kotlin/Int"));
+        assert_eq!(
+            authenticate(wasm, kotlin, &leading_zeros),
+            shape(
+                ScalarInstruction::CountLeadingZeros,
+                ExternalCallableKind::Extension,
+                &[Ty::Int],
+                Ty::Int
+            ),
+            "an extension receiver is the instruction's first operand"
+        );
+        assert!(
+            authenticate(
+                wasm,
+                crate::libraries::CallablePlacement::Member {
+                    owner: type_name("kotlin/Int"),
+                    owner_is_interface: false,
+                },
+                &instruction("countLeadingZeroBits", &[], "kotlin/Int", "I32_CLZ"),
+            )
+            .is_none(),
+            "a primitive member is the shared builtin operator, not a target instruction"
+        );
+
+        for (rejected, why) in [
+            (
+                instruction("wasm_i64_clz", &["kotlin/Int"], "kotlin/Int", "I64_CLZ"),
+                "the operand class is the instruction's",
+            ),
+            (
+                instruction("wasm_i32_add", &["kotlin/Int"], "kotlin/Int", "I32_ADD"),
+                "the arity is the instruction's",
+            ),
+            (
+                instruction(
+                    "wasm_i32_add",
+                    &["kotlin/Int", "kotlin/UInt"],
+                    "kotlin/Int",
+                    "I32_ADD",
+                ),
+                "every operand has one type",
+            ),
+            (
+                instruction("wasm_i32_clz", &["kotlin/Int"], "kotlin/Long", "I32_CLZ"),
+                "the result is the instruction's",
+            ),
+            (
+                instruction("wasm_f32_sqrt", &["kotlin/Int"], "kotlin/Int", "F32_SQRT"),
+                "a floating instruction takes floating operands",
+            ),
+            (
+                instruction("wasm_i32_eqz", &["kotlin/Int"], "kotlin/Boolean", "I32_EQZ"),
+                "an operation outside the table authenticates nothing",
+            ),
+        ] {
+            assert!(authenticate(wasm, internal, &rejected).is_none(), "{why}");
+        }
     }
 
     #[test]

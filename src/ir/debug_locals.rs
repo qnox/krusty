@@ -43,6 +43,12 @@ pub(crate) enum IrDebugLocalProvenance {
     InlineLambdaParameter {
         depth: u32,
     },
+    /// A spliced suspend lambda's continuation parameter, bound from the continuation its
+    /// invocation passes. It has no source spelling; `depth` counts enclosing expansions as an
+    /// [`Self::InlineLambdaParameter`]'s does.
+    InlineLambdaContinuation {
+        depth: u32,
+    },
     /// Invocation parameter of a callable reference consumed directly by an inline call. The
     /// ordinal is semantic provenance; each backend owns the physical `pN`-style spelling.
     InlineCallableReferenceParameter {
@@ -82,6 +88,9 @@ impl IrDebugLocalProvenance {
                 depth: depth.saturating_add(1),
             },
             Self::InlineLambdaParameter { depth } => Self::InlineLambdaParameter {
+                depth: depth.saturating_add(1),
+            },
+            Self::InlineLambdaContinuation { depth } => Self::InlineLambdaContinuation {
                 depth: depth.saturating_add(1),
             },
             Self::InlineLambdaReceiver { .. }

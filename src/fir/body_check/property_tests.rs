@@ -1,6 +1,6 @@
 use super::test_support::{
-    checked_function_body, checked_function_body_with_platform, jvm_semantics,
-    jvm_stdlib_semantics, root_expression,
+    checked_function_body, checked_function_body_rewriting, checked_function_body_with_platform,
+    jvm_semantics, jvm_stdlib_semantics, root_expression,
 };
 use super::*;
 
@@ -1341,4 +1341,43 @@ fn safe_member_property_write_wraps_the_already_selected_stable_property() {
     assert!(index
         .property_declaration(target.module().unwrap())
         .is_some());
+}
+
+/// The `inline` kind the provider published for `Char.code`'s getter, read back from the checked
+/// in-place conversion: whether it was recorded as the end of an inlined call.
+fn char_code_ends_inlined_call(getter_inline: Option<crate::libraries::InlineKind>) -> bool {
+    let (body, _) = checked_function_body_rewriting(
+        "fun read(d: Char): Int = d.code\n",
+        "read",
+        jvm_stdlib_semantics(),
+        &crate::features::LangFeatures::new(),
+        |_, info| {
+            let Some(inline) = getter_inline else { return };
+            for lowering in info.expr_lowers.values_mut() {
+                if let crate::resolve::ExprLowering::ExtensionPropertyGet { access } = lowering {
+                    access.property.getter.inline = inline;
+                }
+            }
+        },
+    );
+    let FirExprKind::ImplicitConversion { conversion, .. } = &body
+        .expr(root_expression(&body))
+        .expect("Char.code read")
+        .kind
+    else {
+        panic!("Char.code is realized in place as a conversion")
+    };
+    body.is_inlined_call_conversion(conversion.origin)
+}
+
+#[test]
+fn an_inline_char_code_getter_ends_an_inlined_call() {
+    assert!(char_code_ends_inlined_call(None));
+}
+
+#[test]
+fn the_char_code_realization_alone_does_not_end_an_inlined_call() {
+    assert!(!char_code_ends_inlined_call(Some(
+        crate::libraries::InlineKind::None
+    )));
 }

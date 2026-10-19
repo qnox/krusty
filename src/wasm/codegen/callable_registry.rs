@@ -219,6 +219,13 @@ impl CallableRegistry {
                     let callable = callables.callable(*target).ok_or_else(|| {
                         "a dependency call without frozen callable facts".to_string()
                     })?;
+                    if callable
+                        .compiler_intrinsic
+                        .is_some_and(super::lower::is_scalar_operation)
+                    {
+                        // Emission replaces the call with the instruction; there is no code to call.
+                        continue;
+                    }
                     let supported_shape = callable.matches_dependency_body_call(
                         params,
                         *extension_receiver_parameter,

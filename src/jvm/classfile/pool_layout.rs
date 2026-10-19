@@ -26,6 +26,10 @@
 //!   as it was names later, is placed where that code first names it: ASM interns it there;
 //! - every other entry keeps its relative place.
 //!
+//! kotlinc lists `InnerClasses` rows whose qualified names tie in the order its pool met their
+//! classes. The rows the writer passes as tied are therefore ordered by their classes' places in
+//! the pool laid out here.
+//!
 //! Every index in the class is then renumbered. A class whose `ldc` operand would no longer fit in
 //! one byte keeps the pool as interned: an instruction's length cannot change after its method's
 //! offsets are final. An `ldc_w` whose index comes to fit in one byte stays `ldc_w`, where ASM
@@ -77,8 +81,9 @@ pub(super) fn relayout(
     relaid: &[RelaidMethod],
     unnamed: Unnamed,
     retained: &[u16],
+    tied_rows: &[Vec<u16>],
 ) -> Vec<u8> {
-    match relaid_class(&class, relaid, unnamed, retained) {
+    match relaid_class(&class, relaid, unnamed, retained, tied_rows) {
         Ok(Some(laid_out)) => laid_out,
         Ok(None) => class,
         Err(kept) => {
@@ -94,6 +99,7 @@ fn relaid_class(
     relaid: &[RelaidMethod],
     unnamed: Unnamed,
     retained: &[u16],
+    tied_rows: &[Vec<u16>],
 ) -> Result<Option<Vec<u8>>, Kept> {
     let read = index_slots::read(class).map_err(Kept::Unread)?;
     let order = Layout::of(&read, relaid, unnamed, retained).order();
@@ -104,7 +110,7 @@ fn relaid_class(
     if unchanged {
         return Ok(None);
     }
-    rewrite(class, &read, &order).map(Some)
+    rewrite(class, &read, &order, tied_rows).map(Some)
 }
 
 /// What the class names, and where each rewritten method's constants go.
@@ -528,8 +534,14 @@ fn reach(read: &ClassSlots, index: u16, reached: &mut [bool]) {
     }
 }
 
-/// `class` with the pool entries in `order` and every index renumbered.
-fn rewrite(class: &[u8], read: &ClassSlots, order: &[u16]) -> Result<Vec<u8>, Kept> {
+/// `class` with the pool entries in `order` and every index renumbered, each group of
+/// `tied_rows` (the classes of `InnerClasses` rows, by their indices before) in pool order.
+fn rewrite(
+    class: &[u8],
+    read: &ClassSlots,
+    order: &[u16],
+    tied_rows: &[Vec<u16>],
+) -> Result<Vec<u8>, Kept> {
     let mut renumbered = vec![0u16; read.entries.len()];
     let mut next: u16 = 1;
     for &index in order {
@@ -566,7 +578,44 @@ fn rewrite(class: &[u8], read: &ClassSlots, order: &[u16]) -> Result<Vec<u8>, Ke
             out[at..at + 2].copy_from_slice(&index.to_be_bytes());
         }
     }
+    if let Some(rows) = read.inner_class_rows {
+        let rows = (rows as isize + shift) as usize;
+        for tied in tied_rows {
+            let tied: Vec<u16> = tied
+                .iter()
+                .map(|&index| renumbered[usize::from(index)])
+                .collect();
+            order_tied_rows(&mut out[rows..], &tied);
+        }
+    }
     Ok(out)
+}
+
+/// Order the rows of the `InnerClasses` table starting at `table` (its row count) whose classes
+/// are `tied` by their classes' pool indices, each row keeping one of the places they held.
+fn order_tied_rows(table: &mut [u8], tied: &[u16]) {
+    const ROW: usize = 8;
+    let count = usize::from(u16::from_be_bytes([table[0], table[1]]));
+    let inner = |row: &[u8]| u16::from_be_bytes([row[0], row[1]]);
+    let rows = &mut table[2..2 + count * ROW];
+    let places: Vec<usize> = rows
+        .chunks(ROW)
+        .enumerate()
+        .filter(|(_, row)| tied.contains(&inner(row)))
+        .map(|(place, _)| place)
+        .collect();
+    let mut tied_rows: Vec<[u8; ROW]> = places
+        .iter()
+        .map(|&place| {
+            rows[place * ROW..][..ROW]
+                .try_into()
+                .expect("a row is eight bytes")
+        })
+        .collect();
+    tied_rows.sort_by_key(|row| inner(row));
+    for (place, row) in places.into_iter().zip(tied_rows) {
+        rows[place * ROW..][..ROW].copy_from_slice(&row);
+    }
 }
 
 #[cfg(test)]

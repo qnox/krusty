@@ -108,6 +108,7 @@ pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod contract_declarations;
 mod contract_effects;
 mod declaration_rendering;
+mod declaration_rules;
 mod declaration_usage;
 mod dependency_platform;
 mod deprecation_phase;
@@ -162,6 +163,7 @@ mod local_class_scope;
 mod local_extension_applicability;
 mod local_initialization;
 mod local_method_dependencies;
+mod local_properties;
 mod loop_flow;
 mod member_extension_properties;
 mod member_extension_selection;
@@ -282,7 +284,6 @@ mod streaming_signature_tests;
 mod super_calls;
 pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
-mod tailrec_declarations;
 mod type_join;
 mod type_parameter_owners;
 mod upper_bound_violations;
@@ -16065,6 +16066,7 @@ impl<'a> Checker<'a> {
                         mutable: local.is_var,
                         already_shared: local.shared_storage_cell,
                         written_here,
+                        source_var: self.local_properties.is_source_var(local.flow_identity),
                     }
                     .is_shared_cell();
                     // A shared cell keeps the declared type so a later write of `null` into
@@ -21910,7 +21912,7 @@ impl<'a> Checker<'a> {
                 }
                 self.local_decl_types.insert(s, prop_ty);
                 let flow_identity = self.declare(scope, &name, prop_ty, true);
-                self.annotation_argument_locals.record(flow_identity);
+                self.local_properties.record(flow_identity, true);
             }
             Stmt::Destructure { entries, init } => self.stmt_destructure(scope, s, entries, init),
             Stmt::IncDec { name, dec, prefix } => self.stmt_inc_dec(scope, s, name, dec, prefix),
@@ -22124,6 +22126,9 @@ impl<'a> Checker<'a> {
                                 mutable: local.is_var,
                                 already_shared: local.shared_storage_cell,
                                 written_here: self.fn_reassigned.contains(&captured),
+                                source_var: self
+                                    .local_properties
+                                    .is_source_var(local.flow_identity),
                             }
                             .is_shared_cell(),
                             storage_ty: local.delegate_storage_ty,
@@ -22312,7 +22317,7 @@ impl<'a> Checker<'a> {
         } else {
             self.declare_inferred(scope, &name, bound_ty, is_var, error_provenance)
         };
-        self.annotation_argument_locals.record(flow_identity);
+        self.local_properties.record(flow_identity, is_var);
         if deferred {
             self.local_initialization.declare_deferred(s, flow_identity);
         }
@@ -22380,7 +22385,7 @@ impl<'a> Checker<'a> {
         }
         self.local_decl_types.insert(s, prop_ty);
         let flow_identity = self.declare(scope, &name, prop_ty, site.is_var);
-        self.annotation_argument_locals.record(flow_identity);
+        self.local_properties.record(flow_identity, site.is_var);
         let storage_ty = self
             .delegate_provide_targets
             .get(&delegate)
@@ -33087,7 +33092,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         implicit_receiver_selections: HashMap::default(),
         implicit_receiver_identities: HashMap::default(),
         read_flow_roots: HashMap::default(),
-        annotation_argument_locals: Default::default(),
+        local_properties: Default::default(),
         local_initialization: Default::default(),
         read_callable_reference_types: HashMap::default(),
         anonymous_super_read_provenance: HashMap::default(),
@@ -34352,7 +34357,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             continue;
         }
         match file.decl(d) {
-            Decl::Fun(f) => c.check_top_level_fun(scope, f, d),
+            Decl::Fun(f) => c.check_top_level_function(scope, f, d),
             Decl::Class(cl) => {
                 let policy_depth = c.push_classifier_owner_policies(scope, d);
                 c.check_class(scope, cl, d);
@@ -35785,7 +35790,7 @@ struct Checker<'a> {
     implicit_receiver_identities: HashMap<ExprId, (usize, usize)>,
     /// The flow root each checked lexical-value or `this` read resolved to.
     read_flow_roots: HashMap<ExprId, scope::PathRoot>,
-    annotation_argument_locals: annotation_argument_constness::LocalPropertyIdentities,
+    local_properties: local_properties::LocalProperties,
     local_initialization: local_initialization::InitializationRecords,
     /// The exact function shape of a callable reference a checked name read is bound to.
     read_callable_reference_types: HashMap<ExprId, Ty>,
@@ -44119,24 +44124,6 @@ impl<'a> Checker<'a> {
         scope.rebind(name, Ns::Function, ScopeBinding::Funs(entries));
     }
 
-    fn local_capture_needs_shared_cell(
-        &self,
-        scope: &CheckerScope<'_>,
-        body: ExprId,
-        name: &str,
-    ) -> bool {
-        let single: crate::fx_hash::HashSet<String> = std::iter::once(name.to_string()).collect();
-        let written = {
-            let mut out = crate::fx_hash::HashSet::default();
-            collect_lambda_outer_writes(self.file, body, &single, &mut out);
-            out.contains(name)
-        };
-        written
-            || (self.fn_reassigned.contains(name)
-                && self.lookup(scope, name).is_some_and(|local| local.is_var)
-                && local_fun_body_uses_any(self.file, body, &single))
-    }
-
     fn this_ctor_delegation_candidates(
         &self,
         scope: &CheckerScope<'_>,
@@ -48586,7 +48573,7 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
-        tailrec_declarations::check_members(self.diags, cl);
+        self.check_member_declaration_rules(scope, cl, current_owner, is_anonymous_object);
         // `@JvmField` changes only a target backend's physical property realization, but its Kotlin
         // declaration restrictions are frontend semantics. Validate them from resolved annotation
         // identities and finalized declaration types; the JVM pass may then assume a valid shape.
