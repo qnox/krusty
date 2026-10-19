@@ -99,7 +99,12 @@ impl BodyLowering<'_> {
                         external_capture_arguments: None,
                     },
                 ))?;
-            let FirStatementKind::LocalFunction { body, tailrec, .. } = &self
+            let FirStatementKind::LocalFunction {
+                body,
+                tailrec,
+                suspend,
+                ..
+            } = &self
                 .body
                 .statement(statement)
                 .ok_or(FirLoweringFailure::MissingStatement(statement))?
@@ -110,9 +115,13 @@ impl BodyLowering<'_> {
             let tailrec = *tailrec;
             // A local function is the scope of what it declares.
             let enclosure = Some(crate::ir::IrEnclosure::Function(function));
-            let lowered = self.lower_nested_function(
-                body, function, enclosure, enclosure, false, false, tailrec,
-            )?;
+            let form = NestedCallableForm {
+                unit_as_value: false,
+                retain_inline_template: false,
+                tailrec,
+                suspend_context: *suspend,
+            };
+            let lowered = self.lower_nested_function(body, function, enclosure, enclosure, form)?;
             self.ir.functions[function as usize].body = Some(lowered.callable);
         }
         Ok(())
@@ -439,14 +448,20 @@ impl BodyLowering<'_> {
         } else {
             self.enclosure
         };
+        // A lambda's body may be spliced into the body it is written in, so it runs in that body's
+        // suspend context too unless it is a suspend lambda of its own.
+        let form = NestedCallableForm {
+            unit_as_value,
+            retain_inline_template: true,
+            tailrec: false,
+            suspend_context: suspend || self.suspend_context,
+        };
         let lowered = self.lower_nested_function(
             body,
             function,
             declaration_enclosure,
             Some(crate::ir::IrEnclosure::Lambda(function)),
-            unit_as_value,
-            true,
-            false,
+            form,
         )?;
         if super::inline_returns::reachable_checked_returns(self.ir, lowered.callable)
             .iter()
@@ -1142,10 +1157,14 @@ impl BodyLowering<'_> {
         function: crate::ir::FunId,
         declaration_enclosure: Option<crate::ir::IrEnclosure>,
         expansion_enclosure: Option<crate::ir::IrEnclosure>,
-        unit_as_value: bool,
-        retain_inline_template: bool,
-        tailrec: bool,
+        form: NestedCallableForm,
     ) -> Result<NestedCallableBodies, FirLoweringFailure> {
+        let NestedCallableForm {
+            unit_as_value,
+            retain_inline_template,
+            tailrec,
+            suspend_context,
+        } = form;
         #[cfg(feature = "trace")]
         super::body_trace::trace_checked_body(body, self.index);
         let identities = self
@@ -1199,6 +1218,7 @@ impl BodyLowering<'_> {
         nested.enclosure = declaration_enclosure;
         nested.expansion_enclosure = expansion_enclosure;
         nested.inline_declaration = self.inline_declaration;
+        nested.suspend_context = suspend_context;
         nested.declaration_lambda = if body.source_lambda().is_some() {
             Some(function)
         } else {
@@ -1313,6 +1333,18 @@ impl BodyLowering<'_> {
         self.published_local_callables = published_local_callables;
         Ok(NestedCallableBodies { callable, inline })
     }
+}
+
+/// How a nested callable's body is lowered, beyond the scopes that enclose it.
+#[derive(Clone, Copy)]
+struct NestedCallableForm {
+    /// The body's `Unit` result is a value the callable returns.
+    unit_as_value: bool,
+    /// The body is also kept as the template its inline call sites splice (a lambda's).
+    retain_inline_template: bool,
+    tailrec: bool,
+    /// The body runs in a suspend function's or suspend lambda's state machine.
+    suspend_context: bool,
 }
 
 #[derive(Clone, Copy)]
