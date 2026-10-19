@@ -30,7 +30,8 @@ impl Emitter<'_> {
                     .methodref("kotlin/Unit", "toString", "()Ljava/lang/String;");
                 code.invokevirtual(method, 0, 1);
             } else {
-                self.emit_value(part, code);
+                // A reference is passed to `valueOf(Object)`, which a smart cast reaches uncast.
+                self.emit_template_part(part, code);
                 let method = self
                     .cw
                     .methodref("java/lang/String", "valueOf", valueof_desc(ty));
@@ -115,7 +116,7 @@ impl Emitter<'_> {
             self.append_top(unit, code);
             return;
         }
-        self.emit_value(expression, code);
+        let source = self.emit_template_part(expression, code);
         // An unsigned operand already rendered by its `toString-impl` is appended at the value
         // class's static type, like any other value class.
         if matches!(
@@ -152,8 +153,24 @@ impl Emitter<'_> {
                 return;
             }
         }
+        // A smart cast is materialized at the `append` overload its type selects: `String`, or
+        // `Object`, which takes it uncast.
+        if source != ty {
+            self.coerce_reference_on_stack(source, string_builder_slot(ty), code);
+        }
         self.mark_expression_start(concat, code);
         self.append_top(ty, code);
+    }
+
+    /// Emit a template part for the slot that consumes it. A smart cast is kotlinc's
+    /// `IMPLICIT_CAST`, so the part reaches that slot unnarrowed and the slot casts it if it must;
+    /// answers the stack type left.
+    fn emit_template_part(&mut self, part: u32, code: &mut CodeBuilder) -> Ty {
+        if self.consumed_implicit_cast_operand(part).is_some() {
+            return self.emit_consumed_operand(part, code);
+        }
+        self.emit_value(part, code);
+        self.value_ty(part)
     }
 
     /// Emit one `invokedynamic` argument, answering the type the recipe takes it at. The bootstrap
@@ -174,10 +191,7 @@ impl Emitter<'_> {
             IrExpr::RefGet { holder, elem } if !self.is_value_class_ty(&elem) => {
                 self.emit_shared_cell_read(holder, elem, false, code)
             }
-            _ => {
-                self.emit_value(part, code);
-                ty
-            }
+            _ => self.emit_template_part(part, code),
         }
     }
 
@@ -287,10 +301,8 @@ impl Emitter<'_> {
         // the latter when its type was parsed from a method-return descriptor (e.g. a classpath call
         // or the data-class `Arrays.toString(field)` wrapper). Both must pick the `append(String)`
         // overload kotlinc uses, not the less-specific `append(Object)`.
-        let is_string = matches!(ty, Ty::String)
-            || matches!(ty, Ty::Obj(name, _) if name == "java/lang/String" || name == "kotlin/String");
         let descriptor = match ty {
-            _ if is_string => "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+            _ if is_string(ty) => "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
             Ty::Int | Ty::Short | Ty::Byte => "(I)Ljava/lang/StringBuilder;",
             Ty::Long => "(J)Ljava/lang/StringBuilder;",
             Ty::Boolean => "(Z)Ljava/lang/StringBuilder;",
@@ -304,6 +316,21 @@ impl Emitter<'_> {
             .methodref("java/lang/StringBuilder", "append", descriptor);
         code.invokevirtual(method, slot_words(ty) as i32, 1);
     }
+}
+
+/// The parameter type of the `StringBuilder.append` overload [`Emitter::append_top`] selects for a
+/// reference of type `ty`.
+fn string_builder_slot(ty: Ty) -> Ty {
+    if is_string(ty) {
+        Ty::String
+    } else {
+        Ty::obj("java/lang/Object")
+    }
+}
+
+fn is_string(ty: Ty) -> bool {
+    matches!(ty, Ty::String)
+        || matches!(ty, Ty::Obj(name, _) if name == "java/lang/String" || name == "kotlin/String")
 }
 
 /// The `String.valueOf` overload descriptor for a single interpolated value's type (`"$x"`).

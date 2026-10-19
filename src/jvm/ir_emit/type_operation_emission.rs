@@ -468,6 +468,12 @@ impl Emitter<'_> {
                 }
                 None => match self.emit_boxed_call_reference(arg, code) {
                     Some(wrapper) => (wrapper, wrapper),
+                    // A smart cast reaches this coercion unnarrowed; it materializes the value at
+                    // its own type.
+                    None if self.consumed_implicit_cast_operand(arg).is_some() => {
+                        let source = self.emit_consumed_operand(arg, code);
+                        (source, source)
+                    }
                     None => {
                         let arg = self.unboxed_reference_source(arg, type_operand);
                         self.emit_type_op_operand(arg, code)
@@ -617,22 +623,41 @@ impl Emitter<'_> {
     /// materializes; `instanceof` accepts any reference, so kotlinc tests the value unnarrowed. A
     /// written `as` keeps its `checkcast`.
     pub(super) fn instance_check_operand(&self, mut operand: ExprId) -> ExprId {
-        while let IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg,
-            type_operand,
-        } = *self.ir.expr(operand)
-        {
-            let reference_target = !ir_ty_to_jvm(&stored_value_ty(type_operand)).is_jvm_scalar();
-            if !reference_target
-                || self.ir.written_casts.contains(&operand)
-                || self.value_ty(arg).is_jvm_scalar()
-            {
-                break;
-            }
+        while let Some(arg) = self.implicit_reference_cast_operand(operand) {
             operand = arg;
         }
         operand
+    }
+
+    /// The operand of `expression` when it is a compiler-inserted reference narrowing of a
+    /// reference (a smart cast): kotlinc's `IMPLICIT_CAST`, which its codegen emits as the operand
+    /// itself (`ExpressionCodegen.visitTypeOperator`), leaving the consumer to materialize it at its
+    /// own type. A written `as` is not one.
+    pub(super) fn implicit_reference_cast_operand(&self, expression: ExprId) -> Option<ExprId> {
+        let IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg,
+            type_operand,
+        } = *self.ir.expr(expression)
+        else {
+            return None;
+        };
+        let reference_target = !ir_ty_to_jvm(&stored_value_ty(type_operand)).is_jvm_scalar();
+        (reference_target
+            && !self.ir.written_casts.contains(&expression)
+            && !self.value_ty(arg).is_jvm_scalar())
+        .then_some(arg)
+    }
+
+    /// [`Self::implicit_reference_cast_operand`] for a consumer that materializes the value at its
+    /// own slot. A narrowing to a carried value class or unsigned type stays: the value-class
+    /// adapter owns that representation.
+    pub(super) fn consumed_implicit_cast_operand(&self, expression: ExprId) -> Option<ExprId> {
+        let operand = self.implicit_reference_cast_operand(expression)?;
+        let IrExpr::TypeOp { type_operand, .. } = *self.ir.expr(expression) else {
+            return None;
+        };
+        (!self.is_carried_value(type_operand)).then_some(operand)
     }
 
     pub(super) fn emit_type_op_operand(
