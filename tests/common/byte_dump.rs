@@ -1415,15 +1415,45 @@ fn materialize_diagnostic_sources(stderr: &str, sources: &[String]) -> String {
                 .and_then(|source| *source)
                 .map(|source| (recorded.len(), source))
         });
-        if let Some((prefix_len, source)) = replacement {
+        let message = if let Some((prefix_len, source)) = replacement {
             materialized.push_str(source);
-            materialized.push_str(&body[prefix_len..]);
+            &body[prefix_len..]
         } else {
-            materialized.push_str(body);
-        }
+            body
+        };
+        materialize_mentioned_sources(message, &by_basename, &mut materialized);
         materialized.push_str(newline);
     }
     materialized
+}
+
+/// Respell the source paths a diagnostic's message names, such as the quoted file of kotlinc's
+/// "does not belong to any module" configuration error.
+///
+/// A mention is a path token ending in a recorded source's basename; tokens end at whitespace,
+/// quotes, and the `,`, `=`, and `:` separators of an argument value. A bare word without a
+/// directory is not a path and stays as written.
+fn materialize_mentioned_sources(
+    message: &str,
+    by_basename: &BTreeMap<String, Option<&str>>,
+    materialized: &mut String,
+) {
+    let is_separator =
+        |c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '`' | ',' | '=' | ':');
+    let mut rest = message;
+    while let Some(start) = rest.find(|c: char| !is_separator(c)) {
+        materialized.push_str(&rest[..start]);
+        let token = &rest[start..];
+        let end = token.find(is_separator).unwrap_or(token.len());
+        let (token, after) = token.split_at(end);
+        let source = token
+            .contains(['/', '\\'])
+            .then(|| by_basename.get(&basename(token)).and_then(|source| *source))
+            .flatten();
+        materialized.push_str(source.unwrap_or(token));
+        rest = after;
+    }
+    materialized.push_str(rest);
 }
 
 fn located_diagnostic_source(line: &str) -> Option<&str> {

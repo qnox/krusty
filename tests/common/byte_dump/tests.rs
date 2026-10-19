@@ -373,6 +373,50 @@ fn a_published_miss_stores_the_live_invocation_and_a_private_miss_does_not() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// kotlinc's configuration errors name a source inside the message, quoted or after a fragment
+/// name, not as a `path:line:column` location; a replay spells those mentions with the current
+/// sources too.
+#[test]
+fn replayed_configuration_errors_use_the_current_source_spelling() {
+    let root = temp_root("configuration-source");
+    let recorded = root.join("recorded/F.kt");
+    let current = root.join("current/F.kt");
+    for source in [&recorded, &current] {
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(source, "fun f() = 1\n").unwrap();
+    }
+    let out = root.join("out");
+    let args = |source: &Path| {
+        vec![
+            "-d".to_string(),
+            out.display().to_string(),
+            source.display().to_string(),
+        ]
+    };
+    let stderr = |source: &Path| {
+        format!(
+            "error: passed other:{0}, but fragment `other` of source file {0} is not specified in -Xfragments\nerror: passed other:x, but fragment `other` of source file x is not specified in -Xfragments\nerror: source '{0}' does not belong to any module\n",
+            source.display()
+        )
+    };
+    let release = version("2.4.20");
+    remember_live_compile(
+        &args(&recorded),
+        1,
+        &stderr(&recorded),
+        &root,
+        Some(release),
+        true,
+    );
+
+    let replayed =
+        replay_class_dump_with_policy(&args(&current), &root, Some(release), false, false)
+            .expect("identical source bytes replay");
+    assert_eq!(replayed.code, 1);
+    assert_eq!(replayed.stderr, stderr(&current));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn replayed_diagnostics_use_the_current_source_spelling() {
     let root = temp_root("diagnostic-source");
