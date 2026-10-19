@@ -516,8 +516,15 @@ impl Emitter<'_> {
             .ir
             .construction_declared_params
             .get(&construction)
-            .and_then(|parameters| parameters.get(parameter_index))
-            .copied();
+            .and_then(|parameters| {
+                super::capture_order::physical_for(
+                    self.ir,
+                    self.constructed_class(construction),
+                    parameters.to_vec(),
+                )
+                .get(parameter_index)
+                .copied()
+            });
         self.adapt_physical_operand(source, semantic, destination_semantic, physical, code);
     }
 
@@ -526,12 +533,21 @@ impl Emitter<'_> {
         construction: crate::ir::ExprId,
         descriptor: &str,
     ) -> Vec<Ty> {
+        let owner = self.constructed_class(construction);
         let checked = self
             .ir
             .construction_declared_params
             .get(&construction)
-            .map(|params| params.as_ref());
-        crate::jvm::physical_type::constructor_operand_tys(descriptor, checked)
+            .map(|params| super::capture_order::physical_for(self.ir, owner, params.to_vec()));
+        crate::jvm::physical_type::constructor_operand_tys(descriptor, checked.as_deref())
             .expect("constructor descriptor must be valid")
+    }
+
+    /// The class a construction builds; its checked parameters lead with that class's captures.
+    fn constructed_class(&self, construction: crate::ir::ExprId) -> crate::types::TypeName {
+        let crate::ir::IrExpr::New { internal, .. } = &self.ir.exprs[construction as usize] else {
+            panic!("malformed IR: constructor operands of a non-construction expression");
+        };
+        *internal
     }
 }

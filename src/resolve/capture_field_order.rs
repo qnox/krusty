@@ -9,18 +9,20 @@
 //! body being checked again. This table crosses the retained-inline boundary and no pending
 //! semantic type may reach checked FIR.
 //!
-//! Field ordinals are identities, not the constructor layout. Once a local class's body has been
-//! checked, its lexical-value captures also get kotlinc's first-use layout, computed from the
-//! storage identities that body recorded.
+//! Field ordinals are identities, not the physical layout. Once a local class's body has been
+//! checked, its lexical-value captures also get kotlinc's first-use order, computed from the
+//! storage identities that body recorded. The order is a recorded fact the JVM backend applies;
+//! every earlier phase keeps field order.
 
 use super::scope::PathRoot;
 use super::CheckerScope;
 use super::{
     AnonymousObjectCapture, AnonymousObjectCaptureSource, ExprLowering, Local,
-    ReceiverFnValueOrigin, ResolvedCall,
+    ReceiverFnValueOrigin, ResolvedCall, Ty,
 };
 use crate::ast::{
-    ClassDecl, ClassInit, CtorDelegation, Decl, DeclId, Expr, ExprId, FunBody, Stmt, StmtId,
+    ClassDecl, ClassInit, CtorDelegation, Decl, DeclId, Expr, ExprId, FunBody, FunDecl, Stmt,
+    StmtId,
 };
 use crate::diag::Span;
 use crate::fx_hash::{HashMap, HashSet};
@@ -119,7 +121,7 @@ pub(super) fn order_receivers_by_first_use(
     }
 }
 
-/// kotlinc's constructor layout for a local class's lexical-value captures.
+/// kotlinc's first-use order of a local class's lexical-value captures.
 ///
 /// kotlinc's closure analysis lists the values a closure reads itself, in source order, and then
 /// the values of the closures it includes, in the order it meets them. A class's own code is its
@@ -138,10 +140,11 @@ pub(super) fn order_receivers_by_first_use(
 /// captured for it. Nothing is matched by spelling, so a same-named member (`fun b() = b()`) is
 /// not a use of a captured `b`.
 ///
-/// Field identities do not change: `layout[field]` is the constructor-prefix position the capture
-/// with that field takes. Receivers keep their positions. A capture without a use means the class
-/// body was not completely checked in this visit; such a visit publishes no layout, and checked FIR
-/// rejects a local class whose captures never received one.
+/// Field identities do not change: `order[position]` is the capture field kotlinc puts at that
+/// position of the constructor prefix and the field table. Receivers keep their positions. A
+/// capture without a use means the class body was not completely checked in this visit; such a
+/// visit publishes no order, and checked FIR rejects a local class whose captures never received
+/// one.
 impl super::Checker<'_> {
     pub(super) fn publish_local_class_capture_layout(
         &mut self,
@@ -173,19 +176,99 @@ impl super::Checker<'_> {
         let mut uses = FirstUses {
             checker: self,
             statement,
-            class_span: class.span,
+            owner: Owner::Class,
+            span: class.span,
             captures,
             bindings,
             delegated,
             fields: Vec::new(),
             included: HashSet::default(),
+            unordered: None,
         };
         uses.collect(Closure::Class(class, Some(declaration)));
-        // A revisit that does not check the whole body (one for signature defaults) keeps the
-        // layout of the complete check: established capture fields keep their identities.
-        if let Some(layout) = first_use_layout(captures, &uses.fields) {
-            self.class_capture_uses.layouts.insert(declaration, layout);
+        if let Some(unordered) = uses.unordered.take() {
+            let message = format!("unsupported: local class '{}': {unordered}", class.name);
+            self.diags.error(class.span, message);
+            return;
         }
+        // A revisit that does not check the whole body (one for signature defaults) keeps the
+        // order of the complete check: established capture fields keep their identities.
+        if let Some(order) = first_use_order(captures, &uses.fields) {
+            self.class_capture_uses.orders.insert(declaration, order);
+        }
+    }
+
+    /// Record the lexical identities of a local function's captured values in kotlinc's first-use
+    /// order, which a class that includes the function takes them in. The function's own capture
+    /// vector, which its lifted parameters and the capture dependencies follow, is left as it is.
+    ///
+    /// The walk is the class walk's: the function reads its values in source order (parameter
+    /// defaults, then the body) and then includes the lambdas, local functions and classifiers it
+    /// uses. Every use is the flow identity a read or write of the captured binding recorded, or
+    /// the lexical identity an included declaration captured, never a spelling. A capture with no
+    /// recorded use or no lexical identity has no first-use position; that is reported, and no
+    /// order is published, rather than placing it by name or declaration.
+    pub(super) fn record_local_function_first_use(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        statement: StmtId,
+        function: &FunDecl,
+        captured: &[(String, Ty, bool)],
+    ) {
+        let locals = captured
+            .iter()
+            .map(|(name, _, _)| self.lookup(scope, name))
+            .collect::<Vec<_>>();
+        let bindings = locals
+            .iter()
+            .map(|local| {
+                local
+                    .as_ref()
+                    .and_then(|local| local.lexical_capture_identity)
+            })
+            .collect::<Vec<_>>();
+        let delegated = locals
+            .iter()
+            .enumerate()
+            .filter_map(|(capture, local)| {
+                Some((local.as_ref()?.flow_identity, u32::try_from(capture).ok()?))
+            })
+            .collect();
+        let span = self.file.stmt_spans[statement.0 as usize];
+        let mut uses = FirstUses {
+            checker: self,
+            statement,
+            owner: Owner::Function,
+            span,
+            captures: &[],
+            bindings: &bindings,
+            delegated,
+            fields: Vec::new(),
+            included: std::iter::once(Inclusion::LocalFunction(statement)).collect(),
+            unordered: None,
+        };
+        uses.collect(Closure::Callable(callable_roots(
+            &function.params,
+            &function.body,
+        )));
+        let (first_uses, included_unordered) = (uses.fields, uses.unordered);
+        let unordered = (0..captured.len()).find(|&capture| {
+            bindings[capture].is_none() || !first_uses.contains(&(capture as u32))
+        });
+        let order = match (included_unordered, unordered) {
+            (Some(unordered), _) => Err(unordered),
+            (None, Some(capture)) => Err(UnorderedCapture {
+                function: function.name.clone(),
+                capture: Some(captured[capture].0.clone()),
+            }),
+            (None, None) => Ok(first_uses
+                .iter()
+                .filter_map(|&capture| bindings[capture as usize])
+                .collect()),
+        };
+        self.class_capture_uses
+            .function_orders
+            .insert(statement, order);
     }
 
     /// Record an assignment to capture storage or to a local's binding.
@@ -208,8 +291,38 @@ impl super::Checker<'_> {
 pub(super) struct ClassCaptureUses {
     /// Assignment statements and what each one writes.
     writes: HashMap<StmtId, StorageUse>,
-    /// Published constructor layouts, keyed by local classifier.
-    pub(super) layouts: HashMap<DeclId, Box<[u32]>>,
+    /// Published first-use orders, keyed by local classifier.
+    pub(super) orders: HashMap<DeclId, Box<[u32]>>,
+    /// Each local function's captured lexical identities in first-use order, which a class that
+    /// includes the function takes them in, or the capture no recorded use orders.
+    function_orders: HashMap<StmtId, Result<Box<[u32]>, UnorderedCapture>>,
+}
+
+/// A local function's captured value that no recorded use places: one the body consumes without a
+/// use the resolver records (an implicit context argument). Only a class that includes the
+/// function needs the order; it reports this rather than placing the value by name.
+#[derive(Clone)]
+struct UnorderedCapture {
+    function: String,
+    /// `None` when the function's order was never recorded at all.
+    capture: Option<String>,
+}
+
+impl std::fmt::Display for UnorderedCapture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.capture {
+            Some(capture) => write!(
+                f,
+                "no recorded use orders captured value '{capture}' of local function '{}'",
+                self.function
+            ),
+            None => write!(
+                f,
+                "local function '{}' has no recorded capture order",
+                self.function
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -220,7 +333,7 @@ enum StorageUse {
     Binding(u32),
 }
 
-fn first_use_layout(captures: &[AnonymousObjectCapture], uses: &[u32]) -> Option<Box<[u32]>> {
+fn first_use_order(captures: &[AnonymousObjectCapture], uses: &[u32]) -> Option<Box<[u32]>> {
     let values = captures
         .iter()
         .enumerate()
@@ -233,13 +346,13 @@ fn first_use_layout(captures: &[AnonymousObjectCapture], uses: &[u32]) -> Option
         ranked.push((first_use, field));
     }
     ranked.sort_unstable();
-    let mut layout = (0..captures.len())
+    let mut order = (0..captures.len())
         .map(|field| u32::try_from(field).expect("too many local-class captures"))
         .collect::<Box<[u32]>>();
-    for (&slot, (_, field)) in values.iter().zip(ranked) {
-        layout[field] = u32::try_from(slot).expect("too many local-class captures");
+    for (&position, (_, field)) in values.iter().zip(ranked) {
+        order[position] = u32::try_from(field).expect("too many local-class captures");
     }
-    Some(layout)
+    Some(order)
 }
 
 fn is_value_capture(capture: &AnonymousObjectCapture) -> bool {
@@ -265,12 +378,25 @@ enum Closure<'w> {
     Included(Inclusion),
 }
 
-/// The local class's capture fields in the order kotlinc's closure analysis first meets them.
+/// Whose captures a walk orders.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Owner {
+    /// A local class: its captures are its storage fields.
+    Class,
+    /// A local function: its captures are lexical bindings. Class storage it reaches belongs to
+    /// an enclosing class, not to the function.
+    Function,
+}
+
+/// The captures (local class fields or local function captures) in the order kotlinc's closure
+/// analysis first meets them.
 struct FirstUses<'w, 'c> {
     checker: &'w super::Checker<'c>,
-    /// The local class's statement, which owns its inner classes.
+    /// The local class's or function's statement, which owns a class's inner classes.
     statement: StmtId,
-    class_span: Span,
+    owner: Owner,
+    /// The declaration's source range: a declaration inside it reads the captures directly.
+    span: Span,
     captures: &'w [AnonymousObjectCapture],
     /// The lexical binding identity of each capture, parallel to `captures`.
     bindings: &'w [Option<u32>],
@@ -278,6 +404,8 @@ struct FirstUses<'w, 'c> {
     delegated: Vec<(u32, u32)>,
     fields: Vec<u32>,
     included: HashSet<Inclusion>,
+    /// An included local function whose captures have no complete first-use order.
+    unordered: Option<UnorderedCapture>,
 }
 
 /// One closure: what it reads itself, then what it includes, by source position, then the local
@@ -353,7 +481,7 @@ impl<'w> FirstUses<'w, '_> {
     }
 
     fn inside_class(&self, span: Span) -> bool {
-        self.class_span.lo <= span.lo && span.hi <= self.class_span.hi
+        self.span.lo <= span.lo && span.hi <= self.span.hi
     }
 
     /// The field of the capture whose lexical binding is `identity`.
@@ -477,19 +605,27 @@ impl<'w> FirstUses<'w, '_> {
             }
             return;
         }
-        for identity in checker
-            .local_function_capture_bindings
-            .get(&statement)
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            uses.direct.extend(self.captured_binding(*identity));
+        match checker.class_capture_uses.function_orders.get(&statement) {
+            Some(Ok(order)) => {
+                for identity in order {
+                    uses.direct.extend(self.captured_binding(*identity));
+                }
+            }
+            Some(Err(unordered)) => {
+                self.unordered.get_or_insert_with(|| unordered.clone());
+            }
+            // Not yet checked: nothing records its order, so it is reported like a missing use.
+            None => {
+                self.unordered.get_or_insert_with(|| UnorderedCapture {
+                    function: function.name.clone(),
+                    capture: None,
+                });
+            }
         }
     }
 
     /// An included classifier: an inner class's code reads this class's storage directly; any
-    /// other classifier contributes its captures, in its layout order.
+    /// other classifier contributes its captures, in its first-use order.
     fn classifier(&mut self, declaration: DeclId, uses: &mut ClosureUses<'w>) {
         let checker = self.checker;
         let file = checker.file;
@@ -515,8 +651,10 @@ impl<'w> FirstUses<'w, '_> {
             .get(&declaration)
             .map_or(&[][..], Vec::as_slice);
         let mut physical = captures.iter().enumerate().collect::<Vec<_>>();
-        if let Some(layout) = checker.class_capture_uses.layouts.get(&declaration) {
-            physical.sort_by_key(|(field, _)| layout[*field]);
+        if let Some(order) = checker.class_capture_uses.orders.get(&declaration) {
+            physical.sort_by_key(|(field, _)| {
+                order.iter().position(|ordered| *ordered as usize == *field)
+            });
         }
         let inside = file
             .anonymous_object_classes
@@ -526,7 +664,9 @@ impl<'w> FirstUses<'w, '_> {
         for (field, capture) in physical {
             let carried = if inside {
                 match capture.source {
-                    AnonymousObjectCaptureSource::ClassStorage { field } => Some(field),
+                    AnonymousObjectCaptureSource::ClassStorage { field } => {
+                        (self.owner == Owner::Class).then_some(field)
+                    }
                     // A value the class captured, which the nested classifier captures again.
                     _ => bindings
                         .get(field)
@@ -544,7 +684,7 @@ impl<'w> FirstUses<'w, '_> {
     /// The capture field a recorded use names, if it is one of this class's captures.
     fn storage_use(&self, used: StorageUse) -> Option<u32> {
         match used {
-            StorageUse::Field(field) => Some(field),
+            StorageUse::Field(field) => (self.owner == Owner::Class).then_some(field),
             StorageUse::Binding(identity) => self
                 .delegated
                 .iter()

@@ -489,75 +489,61 @@ pub fn lower_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, by: u32) 
 }
 
 fn remap_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, map: &dyn Fn(u32) -> u32) {
-    let mut visited = crate::fx_hash::HashSet::default();
-    remap_value_tree(ir, e, threshold, map, &mut visited);
-}
-
-/// Rewrite every value index `>= threshold` through `map` in the expression trees rooted at
-/// `roots`, each shared expression once, as [`shift_value_indices`] does for one tree.
-pub fn map_value_indices(
-    ir: &mut IrFile,
-    roots: &[ExprId],
-    threshold: u32,
-    map: &dyn Fn(u32) -> u32,
-) {
-    let mut visited = crate::fx_hash::HashSet::default();
-    for &root in roots {
-        remap_value_tree(ir, root, threshold, map, &mut visited);
-    }
-}
-
-fn remap_value_tree(
-    ir: &mut IrFile,
-    e: ExprId,
-    threshold: u32,
-    by: &dyn Fn(u32) -> u32,
-    visited: &mut crate::fx_hash::HashSet<ExprId>,
-) {
-    // Operands may be shared deliberately (for example, the receiver of the read and write halves
-    // of an access increment). The arena is therefore a DAG, not necessarily a tree: rewrite each
-    // expression once even when multiple parents reference it.
-    if !visited.insert(e) {
-        return;
-    }
-    match &mut ir.exprs[e as usize] {
-        IrExpr::GetValue(i) if *i >= threshold => *i = by(*i),
-        IrExpr::SetValue { var, .. } if *var >= threshold => *var = by(*var),
-        IrExpr::Variable { index, .. } if *index >= threshold => *index = by(*index),
-        // A `catch (e) { … }` variable is DECLARED by the `IrCatch.var` field (not a `Variable`
-        // node); its uses inside the catch body are shifted by the recursion below, so the field
-        // must shift too or the binding and its reads desync.
-        IrExpr::Try { catches, .. } => {
-            for c in catches.iter_mut() {
-                if c.var >= threshold {
-                    c.var = by(c.var);
+    fn shift(
+        ir: &mut IrFile,
+        e: ExprId,
+        threshold: u32,
+        by: &dyn Fn(u32) -> u32,
+        visited: &mut crate::fx_hash::HashSet<ExprId>,
+    ) {
+        // Operands may be shared deliberately (for example, the receiver of the read and write halves
+        // of an access increment). The arena is therefore a DAG, not necessarily a tree: rewrite each
+        // expression once even when multiple parents reference it.
+        if !visited.insert(e) {
+            return;
+        }
+        match &mut ir.exprs[e as usize] {
+            IrExpr::GetValue(i) if *i >= threshold => *i = by(*i),
+            IrExpr::SetValue { var, .. } if *var >= threshold => *var = by(*var),
+            IrExpr::Variable { index, .. } if *index >= threshold => *index = by(*index),
+            // A `catch (e) { … }` variable is DECLARED by the `IrCatch.var` field (not a `Variable`
+            // node); its uses inside the catch body are shifted by the recursion below, so the field
+            // must shift too or the binding and its reads desync.
+            IrExpr::Try { catches, .. } => {
+                for c in catches.iter_mut() {
+                    if c.var >= threshold {
+                        c.var = by(c.var);
+                    }
                 }
             }
+            IrExpr::Checked(IrCheckedOperation::RangeLoop { variable, .. })
+                if *variable >= threshold =>
+            {
+                *variable = by(*variable);
+            }
+            _ => {}
         }
-        IrExpr::Checked(IrCheckedOperation::RangeLoop { variable, .. })
-            if *variable >= threshold =>
-        {
-            *variable = by(*variable);
+        // A nested `Lambda`'s CAPTURES reference the ENCLOSING scope's value slots (shift them), but
+        // its `inline_body` is a copy of the lambda's own body in the lambda's OWN value numbering
+        // (captures + params) — recursing into it would corrupt those internal slots with this
+        // enclosing threshold/delta. So for a `Lambda`, shift only the captures (the impl method's
+        // body is a separate function, already untouched here).
+        if let IrExpr::Lambda { captures, .. } = &ir.exprs[e as usize] {
+            let caps = captures.clone();
+            for c in caps {
+                shift(ir, c, threshold, by, visited);
+            }
+            return;
         }
-        _ => {}
-    }
-    // A nested `Lambda`'s CAPTURES reference the ENCLOSING scope's value slots (shift them), but
-    // its `inline_body` is a copy of the lambda's own body in the lambda's OWN value numbering
-    // (captures + params) — recursing into it would corrupt those internal slots with this
-    // enclosing threshold/delta. So for a `Lambda`, shift only the captures (the impl method's
-    // body is a separate function, already untouched here).
-    if let IrExpr::Lambda { captures, .. } = &ir.exprs[e as usize] {
-        let caps = captures.clone();
-        for c in caps {
-            remap_value_tree(ir, c, threshold, by, visited);
+        let mut kids = Vec::new();
+        for_each_child(&ir.exprs, e, &mut |c| kids.push(c));
+        for c in kids {
+            shift(ir, c, threshold, by, visited);
         }
-        return;
     }
-    let mut kids = Vec::new();
-    for_each_child(&ir.exprs, e, &mut |c| kids.push(c));
-    for c in kids {
-        remap_value_tree(ir, c, threshold, by, visited);
-    }
+
+    let mut visited = crate::fx_hash::HashSet::default();
+    shift(ir, e, threshold, map, &mut visited);
 }
 
 /// The values a `when` or a `try` selects its own value from: each branch's result, or the `try`

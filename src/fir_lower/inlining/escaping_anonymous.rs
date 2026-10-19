@@ -586,6 +586,9 @@ fn copy_capture_edges(ir: &mut crate::ir::IrFile, source: ClassId, target: Class
         ir.class_capture_identities
             .insert((target, index), identity);
     }
+    if let Some(order) = ir.class_capture_order.get(&source).cloned() {
+        ir.class_capture_order.insert(target, order);
+    }
 }
 
 fn copy_override_edges(
@@ -1789,6 +1792,13 @@ fn remove_capture(
     declaration.ctor_args.remove(parameter);
     shift_capture_map(&mut ir.shared_class_capture_fields, class, field);
     shift_capture_map(&mut ir.class_capture_identities, class, field);
+    if let Some(order) = ir.class_capture_order.get_mut(&class) {
+        *order = order
+            .iter()
+            .filter(|&&capture| capture != field)
+            .map(|&capture| capture - u32::from(capture > field))
+            .collect();
+    }
     let IrExpr::New {
         args,
         ctor_params,

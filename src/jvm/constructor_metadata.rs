@@ -5,7 +5,8 @@
 //! publication from a synthetic access flag, parameter spelling, or physical constructor shape.
 
 use crate::ir::{IrClass, IrFile, IrSecondaryCtor};
-use crate::jvm::{ir_emit::jvm_tys, names::type_descriptor};
+use crate::jvm::ir_emit::{jvm_tys, secondary_prefix_jvm_tys};
+use crate::jvm::names::type_descriptor;
 use crate::metadata::class_builder::JvmConstructorSignature;
 
 /// How the JVM realizes the class's secondary constructor at `ordinal`.
@@ -26,10 +27,11 @@ pub(super) fn secondary_constructor_signature(
             desc: constructor.descriptor.clone(),
         };
     }
-    declared_constructor_signature(class, &class.secondary_ctors[ordinal])
+    declared_constructor_signature(ir, class, &class.secondary_ctors[ordinal])
 }
 
 fn declared_constructor_signature(
+    ir: &IrFile,
     class: &IrClass,
     constructor: &IrSecondaryCtor,
 ) -> JvmConstructorSignature {
@@ -41,7 +43,7 @@ fn declared_constructor_signature(
     };
     JvmConstructorSignature::init(format!(
         "({owner_prefix}{}{}{})V",
-        jvm_tys(&constructor.prefix_params)
+        secondary_prefix_jvm_tys(ir, class, constructor)
             .iter()
             .map(|&ty| type_descriptor(ty))
             .collect::<String>(),

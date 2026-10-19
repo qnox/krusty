@@ -110,3 +110,25 @@ fn constructions_pass_captures_in_each_tiers_first_use_order() {
 fn an_included_local_class_takes_its_own_capture_order() {
     assert_same_class("CaptureTiers", TIERS, "CaptureTiersKt$nested$N$m$Inner");
 }
+
+/// A local function takes its captures in first-use order, not spelling order: `helper` reads `b`
+/// before `a`, so it is lifted as `outer$helper(b, a)`, and a class that calls it from outside
+/// captures `(b, a)` for it.
+#[test]
+fn a_local_function_takes_its_captures_in_first_use_order() {
+    let source = "\
+fun outer(a: Int, b: Int): Int {
+    fun helper() = b + a
+    class C {
+        fun f() = helper()
+    }
+    return C().f() + helper()
+}
+";
+    assert_same_class("FunctionCaptureOrder", source, "FunctionCaptureOrderKt");
+    assert_same_class(
+        "FunctionCaptureOrder",
+        source,
+        "FunctionCaptureOrderKt$outer$C",
+    );
+}

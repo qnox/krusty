@@ -2082,28 +2082,11 @@ impl BodyLowering<'_> {
             .dispatch_receiver_slot()
             .map(|slot| self.ir.add_expr(IrExpr::GetValue(slot)))
             .ok_or(FirLoweringFailure::MissingLocalClass(owner))?;
-        let index = self.capture_field_index(class, field)?;
         Ok(self.ir.add_expr(IrExpr::GetField {
             receiver,
             class,
-            index,
+            index: field,
         }))
-    }
-
-    /// The field table position of a capture field of `class`. A local class lays its captures out
-    /// in the slot order its declaration published; every other class keeps field order.
-    fn capture_field_index(
-        &self,
-        class: crate::ir::ClassId,
-        field: u32,
-    ) -> Result<u32, FirLoweringFailure> {
-        match self.ir.class_capture_slots.get(&class) {
-            Some(slots) => slots
-                .get(field as usize)
-                .copied()
-                .ok_or(FirLoweringFailure::InvalidCaptureSlot { class, field }),
-            None => Ok(field),
-        }
     }
 
     pub(super) fn constructor_capture_parameter(
@@ -2131,15 +2114,7 @@ impl BodyLowering<'_> {
                 if !valid_owner || field >= self.class_constructor_capture_count {
                     return Err(FirLoweringFailure::InvalidConstructorCapture { owner, field });
                 }
-                // Slot 0 is `this`; the prefix follows in the class's layout. A default fragment
-                // lowers before its class is laid out, so it reads in field order and laying the
-                // class out places it (`constructors::place_default_capture_reads`).
-                let parameter = if self.body.is_default_fragment() {
-                    field
-                } else {
-                    self.capture_field_index(self.storage_class(owner)?, field)?
-                };
-                return Ok(self.ir.add_expr(IrExpr::GetValue(parameter + 1)));
+                return Ok(self.ir.add_expr(IrExpr::GetValue(field + 1)));
             }
         };
         let capture = self
@@ -2213,11 +2188,10 @@ impl BodyLowering<'_> {
                 ),
             });
         }
-        let index = self.capture_field_index(class, field)?;
         Ok(self.ir.add_expr(IrExpr::GetField {
             receiver,
             class,
-            index,
+            index: field,
         }))
     }
 
@@ -2263,11 +2237,10 @@ impl BodyLowering<'_> {
             return Err(FirLoweringFailure::MissingLocalClass(owner));
         }
         let class = self.storage_class(owner)?;
-        let index = self.capture_field_index(class, field)?;
         Ok(self.ir.add_expr(IrExpr::GetField {
             receiver,
             class,
-            index,
+            index: field,
         }))
     }
 

@@ -7441,8 +7441,8 @@ pub struct TypeInfo {
     /// declaration — the resolution the scope chain performed, in declaration order. What a capture
     /// costs to represent is lowering's decision, not this one's.
     pub local_class_captures_by_class: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
-    /// Each local class's constructor layout: `layout[field]` is that capture's prefix position.
-    pub local_class_capture_layouts: HashMap<DeclId, Box<[u32]>>,
+    /// Each local class's captures in first-use order: `order[position]` is a capture field.
+    pub local_class_capture_orders: HashMap<DeclId, Box<[u32]>>,
     /// Local classifiers actually entered through their lexical statement path during this
     /// bounded check. An empty capture list is still semantically meaningful, so capture maps
     /// alone cannot identify every checked local declaration that must be published to FIR.
@@ -23724,6 +23724,7 @@ impl<'a> Checker<'a> {
             }
         }
         captured_locals.sort_by(|left, right| left.0.cmp(&right.0));
+        self.record_local_function_first_use(scope, stmt_id, f, &captured_locals);
         let capture_bindings = captured_locals
             .iter()
             .map(|(name, _, _)| {
@@ -34825,7 +34826,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         anonymous_object_captures_by_construction,
         anonymous_forwarded_super_arguments: discovered_anonymous_super_forwards,
         local_class_captures_by_class: discovered_local_class_captures,
-        local_class_capture_layouts: class_capture_uses.layouts,
+        local_class_capture_orders: class_capture_uses.orders,
         checked_local_class_declarations,
         checked_local_classifier_identities,
         checked_local_classifier_type_arguments,

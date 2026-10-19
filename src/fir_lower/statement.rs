@@ -157,7 +157,8 @@ impl BodyLowering<'_> {
             FirStatementKind::LocalDeclaration {
                 declaration,
                 captures,
-            } => self.local_class_declaration(*declaration, captures)?,
+                capture_order,
+            } => self.local_class_declaration(*declaration, captures, capture_order)?,
             FirStatementKind::LocalFunction { .. } => self.ir.add_expr(IrExpr::Block {
                 stmts: Vec::new(),
                 value: None,
@@ -245,13 +246,49 @@ impl BodyLowering<'_> {
         &mut self,
         declaration: crate::fir::DeclarationId,
         captures: &[FirLocalClassCapture],
+        capture_order: &[u32],
     ) -> Result<ExprId, FirLoweringFailure> {
         let (classifier, values) = self.prepare_captured_class(declaration, captures)?;
+        self.record_capture_order(declaration, captures.len(), capture_order)?;
         self.local_class_captures.insert(classifier, values);
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: Vec::new(),
             value: None,
         }))
+    }
+
+    /// Record a local class's first-use capture order for the JVM backend. The class keeps its
+    /// fields, constructor prefix and construction arguments in field order; only an order that
+    /// differs from it is recorded. It must name every capture field exactly once.
+    fn record_capture_order(
+        &mut self,
+        declaration: crate::fir::DeclarationId,
+        captures: usize,
+        order: &[u32],
+    ) -> Result<(), FirLoweringFailure> {
+        let mut seen = vec![false; captures];
+        let permutation = order.len() == captures
+            && order.iter().all(|&field| {
+                seen.get_mut(field as usize)
+                    .is_some_and(|seen| !std::mem::replace(seen, true))
+            });
+        if !permutation {
+            return Err(FirLoweringFailure::InvalidCaptureOrder(declaration));
+        }
+        if order
+            .iter()
+            .enumerate()
+            .any(|(position, &field)| position != field as usize)
+        {
+            let class = self
+                .ir
+                .checked_classifier_classes
+                .get(&declaration)
+                .copied()
+                .ok_or(FirLoweringFailure::MissingLocalClass(declaration))?;
+            self.ir.class_capture_order.insert(class, order.into());
+        }
+        Ok(())
     }
 
     pub(super) fn prepare_captured_class(
@@ -274,42 +311,10 @@ impl BodyLowering<'_> {
             return Err(FirLoweringFailure::MissingLocalClass(declaration));
         }
         self.ir.classes[class as usize].enclosure = self.enclosure;
-        // Captures are placed by their checked slot. Each field read maps through the same slots.
-        let mut by_slot = vec![None; captures.len()];
-        for capture in captures {
-            match by_slot.get_mut(capture.slot as usize) {
-                Some(entry @ None) => *entry = Some(capture),
-                _ => return Err(FirLoweringFailure::InvalidCaptureLayout(declaration)),
-            }
-        }
-        if captures
-            .iter()
-            .enumerate()
-            .any(|(field, capture)| capture.slot as usize != field)
-        {
-            let slots = captures
-                .iter()
-                .map(|capture| capture.slot)
-                .collect::<Box<[u32]>>();
-            let defaults = self
-                .ir
-                .checked_constructor_bodies
-                .iter()
-                .filter(|(constructor, _)| {
-                    self.index
-                        .declaration_anchor(**constructor)
-                        .and_then(|anchor| anchor.owner)
-                        == Some(declaration)
-                })
-                .flat_map(|(_, constructor)| constructor.defaults.iter().flatten().copied())
-                .collect::<Vec<_>>();
-            super::constructors::place_default_capture_reads(self.ir, &defaults, &slots);
-            self.ir.class_capture_slots.insert(class, slots);
-        }
         let mut values = Vec::with_capacity(captures.len());
         let mut fields = Vec::with_capacity(captures.len());
         let mut arguments = Vec::with_capacity(captures.len());
-        for (field, capture) in by_slot.into_iter().flatten().enumerate() {
+        for (field, capture) in captures.iter().enumerate() {
             let field = u32::try_from(field).expect("too many captured class fields");
             let value = match &capture.source {
                 FirLocalClassCaptureSource::Value(source) => {

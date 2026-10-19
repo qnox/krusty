@@ -10234,11 +10234,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declaration's capture, by field when it is declared inside the class and by lexical binding when
   it is declared outside), never a spelling: in
   `class R { fun b(): Int = b(); fun first() = a + b }` the self-call is not a use of a captured
-  `b`, so `R` takes `($a, $b)`. The checker publishes the order as a layout permutation
-  (`TypeInfo::local_class_capture_layouts`); capture fields keep their identities, checked FIR
-  carries each capture's slot, and common lowering places fields, constructor parameters and
-  construction arguments by slot. A constructor default is lowered before its class is laid out
-  and is placed when the class is. A local declaration nothing uses is never included by kotlinc,
+  `b`, so `R` takes `($a, $b)`. A local function takes its own captures the same way:
+  `fun helper() = b + a` is lifted as `helper(b, a)`, and a class that calls it includes them in
+  that order, not in name order. The resolver publishes that first-use order of lexical identities
+  separately; the function's own capture vector is unchanged. A class that includes a function
+  whose captured value no recorded use orders (an implicit context argument) is rejected as
+  unsupported rather than ordered by name. Field and parameter order is JVM representation, so the checker
+  publishes the order as a recorded fact (`TypeInfo::local_class_capture_orders`, carried by the
+  checked local-class declaration to `IrFile::class_capture_order`). Every phase before the JVM
+  backend keeps capture fields, constructor parameters and construction arguments in field order,
+  which is their identity; the JVM emitter alone applies the order to the field table, every
+  constructor descriptor with its parameter slots and names, the default stubs, and every
+  construction and `super(…)` argument list. A recorded order that is not a permutation of the
+  constructor prefix is an internal error. A local declaration nothing uses is never included by kotlinc,
   which then captures nothing for it; krusty still captures what it reads and orders those values
   after everything else. Tests: `tests/local_class_capture_order_e2e.rs`.
   The enclosing INSTANCE is the second capture kind — the receiver itself rather than a binding in

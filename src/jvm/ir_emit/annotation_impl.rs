@@ -211,7 +211,7 @@ pub(super) fn emit_annotation_impl_class(
                     owner: &fq,
                     owner_identity: c.fq_name,
                     facade,
-                    physical_prefix: &[],
+                    prefix: &[],
                     logical_prefix_count: 0,
                     real_params: &param_tys,
                     defaults,

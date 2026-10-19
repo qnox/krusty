@@ -130,10 +130,6 @@ pub struct FirLocalClassCapture {
     pub source: FirLocalClassCaptureSource,
     /// `Some` exactly when the captured value is a receiver.
     pub receiver: Option<FirCapturedReceiver>,
-    /// The capture's position in the classifier's constructor prefix and field table. Its field
-    /// (its index in the capture list) stays its identity; a local class lays its captures out in
-    /// kotlinc's first-use order, an anonymous object in field order.
-    pub slot: u32,
 }
 
 impl FirLocalClassCapture {

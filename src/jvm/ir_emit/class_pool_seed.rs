@@ -42,7 +42,7 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
         ctor_signature,
         ..
     } = seed;
-    let ctor_desc = primary_ctor_descriptor(c);
+    let ctor_desc = primary_ctor_descriptor(ir, c);
     let parameters: Vec<crate::jvm::classfile::SeedCtorParameter> =
         primary_ctor_source_parameters(ir, c)
             .into_iter()
@@ -106,7 +106,7 @@ pub(super) fn seed_plain_constructor_tail(seed: PlainClassPoolSeed<'_>, cw: &mut
             let masks = "I".repeat(default_mask_count(source_parameter_count));
             format!(
                 "({}{masks}Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
-                primary_ctor_parameter_descs(c)
+                primary_ctor_parameter_descs(ir, c)
             )
         });
     cw.seed_plain_constructor_tail(default_marker_desc.as_deref());
@@ -138,11 +138,15 @@ pub(super) fn seed_enum_constructor_locals(
 /// parameter, property-backed or plain (`enum class E(value: Int)` has no field `value`, but its
 /// constructor still lists it).
 fn constructor_parameter_locals(ir: &IrFile, c: &crate::ir::IrClass) -> Vec<(String, String)> {
-    c.ctor_args
+    let arguments = c
+        .ctor_args
         .iter()
         .zip(crate::jvm::parameter_names::constructor_local_variables(
             ir, c,
         ))
+        .collect();
+    super::capture_order::physical(ir, c, arguments)
+        .into_iter()
         .filter_map(|(argument, name)| {
             Some((name?, crate::jvm::names::type_descriptor(argument.ty)))
         })
