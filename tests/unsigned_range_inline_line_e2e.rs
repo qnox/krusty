@@ -4,7 +4,8 @@
 //! again at the next instruction that marks one, such as the `astore` of `val r = a..b`. The end
 //! comes from the selected declaration's metadata `inline` flag: the non-inline `until` and the
 //! builtin `Int` range operators end no inlined call, and a `for` loop over a range literal never
-//! constructs the range.
+//! constructs the range. Membership through a user `contains` that keeps the range, and an
+//! implicit-receiver `rangeTo` call, build the same construction and end an inlined call too.
 use super::common;
 
 #[test]
@@ -54,6 +55,49 @@ fun count(r: ULongRange, s: ULongRange): Int = if (r.isEmpty()) 0 else if (s.isE
         "UnsignedRangeLines",
         source,
         "UnsignedRangeLinesKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("the reference kotlinc is provisioned")
+    .unwrap_or_else(|why| panic!("{why}"));
+}
+
+/// The two checker paths that build a range construction outside the operator form: membership
+/// through a user `contains` that keeps the range as its receiver, and an implicit-receiver
+/// `rangeTo`/`rangeUntil` call inside a lambda with a `UInt` receiver.
+#[test]
+fn a_kept_membership_range_and_an_implicit_receiver_call_end_an_inlined_call_like_kotlinc() {
+    let source = "\
+operator fun UIntRange.contains(value: Long): Boolean = value == first.toLong()
+
+fun custom(a: UInt, b: UInt, c: Long): Boolean {
+    val inside = c in a..b
+    return inside
+}
+
+fun customCondition(a: UInt, b: UInt, c: Long): Int {
+    if (c !in a..<b) return 1
+    return 2
+}
+
+fun build(a: UInt, f: UInt.() -> UIntRange): UIntRange = a.f()
+
+fun viaLambda(a: UInt, b: UInt): UIntRange = build(a) {
+    val r = rangeTo(b)
+    r
+}
+
+fun viaRun(a: UInt, b: UInt): UIntRange {
+    val r = a.run {
+        val s = rangeUntil(b)
+        s
+    }
+    return r
+}
+";
+    common::byte_diff_against_kotlinc_cp(
+        "UnsignedRangeFormsLines",
+        source,
+        "UnsignedRangeFormsLinesKt",
         &[common::stdlib_jar()],
     )
     .expect("the reference kotlinc is provisioned")
