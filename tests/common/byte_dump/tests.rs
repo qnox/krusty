@@ -391,8 +391,11 @@ fn replayed_diagnostics_use_the_current_source_spelling() {
         ]
     };
     let recorded_stderr = format!(
-        "error: warnings found and -Werror specified\n{}:1:1: warning: visibility required\nfun f() = 1\n^^^^^\n",
-        recorded.display()
+        "error: warnings found and -Werror specified\nerror: passed other:{}, but fragment `other` of source file {} is not specified in -Xfragments\nerror: source '{}' does not belong to any module\n{}:1:1: warning: visibility required\nfun f() = 1\n^^^^^\n",
+        recorded.display(),
+        recorded.display(),
+        recorded.display(),
+        recorded.display(),
     );
     let release = version("2.4.20");
     remember_live_compile(
@@ -411,11 +414,36 @@ fn replayed_diagnostics_use_the_current_source_spelling() {
     assert_eq!(
         replayed.stderr,
         format!(
-            "error: warnings found and -Werror specified\n{}:1:1: warning: visibility required\nfun f() = 1\n^^^^^\n",
-            current.display()
+            "error: warnings found and -Werror specified\nerror: passed other:{}, but fragment `other` of source file {} is not specified in -Xfragments\nerror: source '{}' does not belong to any module\n{}:1:1: warning: visibility required\nfun f() = 1\n^^^^^\n",
+            current.display(),
+            current.display(),
+            current.display(),
+            current.display(),
         )
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn only_fragment_configuration_source_paths_are_materialized() {
+    let recorded = "/old/root/F.kt";
+    let current = r"C:\new root\F.kt".to_string();
+    let stderr = format!(
+        "error: passed common:{recorded}, but fragment `common` of source file {recorded} is not specified in -Xfragments\nerror: source '{recorded}' does not belong to any module\nprintln(\"{recorded}\")\n"
+    );
+    assert_eq!(
+        materialize_diagnostic_sources(&stderr, std::slice::from_ref(&current)),
+        format!(
+            "error: passed common:{current}, but fragment `common` of source file {current} is not specified in -Xfragments\nerror: source '{current}' does not belong to any module\nprintln(\"{recorded}\")\n"
+        )
+    );
+
+    let duplicate_sources = vec!["/current/a/F.kt".to_string(), "/current/b/F.kt".to_string()];
+    assert_eq!(
+        materialize_diagnostic_sources(&stderr, &duplicate_sources),
+        stderr,
+        "an ambiguous basename is never guessed"
+    );
 }
 
 #[test]

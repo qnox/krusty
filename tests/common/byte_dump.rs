@@ -1383,15 +1383,16 @@ fn split_replay(mut files: BTreeMap<String, Vec<u8>>) -> ReplayedClasses {
     }
 }
 
-/// Replace a recorded located-diagnostic path with the current invocation's source spelling.
+/// Replace recorded diagnostic paths with the current invocation's source spelling.
 ///
 /// Invocation fingerprints deliberately identify scratch sources by basename and bytes, so a dump
 /// recorded in one process may replay in another directory. Diagnostics are part of that dump and
-/// must follow the same location-independent identity instead of leaking the recorder's path.
+/// must follow the same location-independent identity instead of leaking the recorder's path. A
+/// source path may lead a located diagnostic or appear inside a configuration-error sentence.
 fn materialize_diagnostic_sources(stderr: &str, sources: &[String]) -> String {
     let mut by_basename = BTreeMap::<String, Option<&str>>::new();
     for source in sources {
-        let entry = by_basename.entry(basename(source));
+        let entry = by_basename.entry(diagnostic_source_basename(source).to_string());
         match entry {
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(Some(source));
@@ -1409,21 +1410,69 @@ fn materialize_diagnostic_sources(stderr: &str, sources: &[String]) -> String {
         let (body, newline) = line
             .strip_suffix('\n')
             .map_or((line, ""), |body| (body, "\n"));
-        let replacement = located_diagnostic_source(body).and_then(|recorded| {
-            by_basename
-                .get(&basename(recorded))
-                .and_then(|source| *source)
-                .map(|source| (recorded.len(), source))
-        });
-        if let Some((prefix_len, source)) = replacement {
-            materialized.push_str(source);
-            materialized.push_str(&body[prefix_len..]);
-        } else {
-            materialized.push_str(body);
+        let mut ranges = fragment_diagnostic_source_ranges(body);
+        if let Some(recorded) = located_diagnostic_source(body) {
+            ranges.push(0..recorded.len());
         }
+        ranges.sort_unstable_by_key(|range| (range.start, range.end));
+
+        let mut cursor = 0;
+        for range in ranges {
+            if range.start < cursor {
+                continue;
+            }
+            let recorded = &body[range.clone()];
+            let Some(source) = by_basename
+                .get(diagnostic_source_basename(recorded))
+                .and_then(|source| *source)
+            else {
+                continue;
+            };
+            materialized.push_str(&body[cursor..range.start]);
+            materialized.push_str(source);
+            cursor = range.end;
+        }
+        materialized.push_str(&body[cursor..]);
         materialized.push_str(newline);
     }
     materialized
+}
+
+fn diagnostic_source_basename(source: &str) -> &str {
+    source.rsplit(['/', '\\']).next().unwrap_or(source)
+}
+
+fn fragment_diagnostic_source_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
+    const PASSED: &str = "error: passed ";
+    const FRAGMENT: &str = ", but fragment `";
+    const SOURCE_FILE: &str = " of source file ";
+    const NOT_SPECIFIED: &str = " is not specified in -Xfragments";
+    const SOURCE: &str = "error: source '";
+    const NO_MODULE: &str = "' does not belong to any module";
+
+    let mut ranges = Vec::new();
+    if let Some(rest) = line.strip_prefix(PASSED) {
+        if let Some(argument_end) = rest.find(FRAGMENT) {
+            let argument = &rest[..argument_end];
+            if let Some((fragment, source)) = argument.split_once(':') {
+                let start = PASSED.len() + fragment.len() + 1;
+                ranges.push(start..start + source.len());
+            }
+        }
+        if let Some(marker) = line.find(SOURCE_FILE) {
+            let start = marker + SOURCE_FILE.len();
+            if let Some(end) = line[start..].find(NOT_SPECIFIED) {
+                ranges.push(start..start + end);
+            }
+        }
+    }
+    if let Some(path) = line
+        .strip_prefix(SOURCE)
+        .and_then(|rest| rest.strip_suffix(NO_MODULE))
+    {
+        ranges.push(SOURCE.len()..SOURCE.len() + path.len());
+    }
+    ranges
 }
 
 fn located_diagnostic_source(line: &str) -> Option<&str> {
