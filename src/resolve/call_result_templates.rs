@@ -203,15 +203,28 @@ impl Checker<'_> {
         if let Some(signature) = self.contextual_constructor_signatures.get(&expression) {
             return Some(signature.clone());
         }
-        if let Some(signature) = self.selected_generic_call_signature(expression) {
-            return ty_mentions_param(signature.ret, &signature.formals)
-                .then(|| self.call_site_signature(expression, signature.clone()));
-        }
-        let owner = self.resolved_constructors.get(&expression)?.owner();
+        // The template is this call's own result shape. A formal that is lexically in scope at
+        // the call names the enclosing declaration's fixed type in the checked result, so the
+        // template carries the call's fresh variable for it, as constraint solving did.
+        self.selected_result_signature(expression)
+            .filter(|signature| ty_mentions_param(signature.ret, &signature.formals))
+            .map(|signature| self.call_site_signature(expression, signature.into_owned()))
+    }
+
+    /// The generic result signature of the callable selected at `expression`. A constructor is an
+    /// ordinary callable whose result is its classifier applied to the classifier's formals; the
+    /// template is rebuilt from the normalized class model, never from the callee spelling.
+    fn selected_result_signature(
+        &self,
+        expression: ExprId,
+    ) -> Option<std::borrow::Cow<'_, GenericSig>> {
+        let Some(constructor) = self.resolved_constructors.get(&expression) else {
+            return self
+                .selected_generic_call_signature(expression)
+                .map(std::borrow::Cow::Borrowed);
+        };
+        let owner = constructor.owner();
         let classifier = self.resolved_type_name(owner)?;
-        if classifier.type_params().is_empty() {
-            return None;
-        }
         let arguments = classifier
             .type_params()
             .iter()
@@ -226,38 +239,44 @@ impl Checker<'_> {
                 Ty::ty_param(formal, bound)
             })
             .collect::<Vec<_>>();
-        let template = GenericSig {
+        Some(std::borrow::Cow::Owned(GenericSig {
             formals: classifier.type_params().clone(),
             formal_bounds: classifier.type_param_bounds().clone(),
             receiver: None,
             params: Vec::new(),
             ret: Ty::obj_args_name(owner, &arguments),
             return_policy: GenericReturnPolicy::Exact,
-        };
-        // The template is this call's own result shape. A formal that is lexically in scope at
-        // the call names the enclosing declaration's fixed type in the checked result, so the
-        // template carries the call's fresh variable for it, as constraint solving did.
-        Some(self.call_site_signature(expression, template))
+        }))
     }
 
     /// A selected call whose generic result still contains declaration-owned variables. Expected-type
     /// inference consumes this retained declaration; it never repeats lookup from the callee syntax.
-    pub(super) fn unbound_call_result_signature(&self, expression: ExprId) -> Option<&GenericSig> {
+    pub(super) fn unbound_call_result_signature(
+        &self,
+        expression: ExprId,
+    ) -> Option<std::borrow::Cow<'_, GenericSig>> {
+        // Written type arguments fix every formal, except that a `_` placeholder (`P<String, _>`)
+        // leaves its formal to inference: the selected record then has no solution for it.
         if self
             .file
             .call_type_args
             .get(&expression.0)
             .is_some_and(|arguments| !arguments.is_empty())
+            && self
+                .selected_call_type_arguments(expression)
+                .is_none_or(|arguments| arguments.iter().all(Option::is_some))
         {
             return None;
         }
-        let selected = self.selected_generic_call_signature(expression);
+        let selected = self.selected_result_signature(expression);
         crate::trace_compiler!(
             "expected_call",
             "unbound call expression={expression:?} actual={:?} signature={:?} bounds={:?} resolved={:?}",
             self.expr_types[expression.0 as usize],
-            selected.map(|signature| (&signature.formals, signature.ret)),
-            selected.map(|signature| &signature.formal_bounds),
+            selected
+                .as_ref()
+                .map(|signature| (&signature.formals, signature.ret)),
+            selected.as_ref().map(|signature| &signature.formal_bounds),
             self.selected_call_type_arguments(expression),
         );
         let signature =
@@ -271,18 +290,43 @@ impl Checker<'_> {
             .filter(|formal| !self.lexically_fixed_at_call(expression, formal))
             .cloned()
             .collect::<Vec<_>>();
-        if self
-            .selected_call_type_arguments(expression)
-            .is_some_and(|resolved| {
-                signature
-                    .formals
+        let unresolved_lambda_result = self
+            .open_lambda_result_call_formals
+            .get(&expression)
+            .is_some_and(|unbound| {
+                unbound
                     .iter()
-                    .enumerate()
-                    .filter(|(_, formal)| {
-                        ty_mentions_param(signature.ret, std::slice::from_ref(*formal))
-                    })
-                    .all(|(index, _)| resolved.get(index).is_some_and(Option::is_some))
+                    .any(|formal| ty_mentions_param(signature.ret, std::slice::from_ref(formal)))
+            });
+        let resolved = self.selected_call_type_arguments(expression);
+        // A recorded argument that is only a lambda result's open nested-call variable
+        // (`R := T` of `Mono.empty()`) is a dependency, not completion evidence.
+        let open_lambda_dependency = resolved.is_some_and(|resolved| {
+            resolved.iter().flatten().any(|argument| {
+                self.type_argument_depends_on_open_lambda_result(expression, *argument)
             })
+        });
+        // A result formal the selected call recorded without a solution is open even when the
+        // checked result substituted a provisional completion for it (`D(1)` typed `D<Any?>`).
+        let recorded_unsolved = resolved.is_some_and(|resolved| {
+            signature
+                .formals
+                .iter()
+                .enumerate()
+                .filter(|(_, formal)| {
+                    ty_mentions_param(signature.ret, std::slice::from_ref(*formal))
+                })
+                .any(|(index, _)| resolved.get(index).is_some_and(Option::is_none))
+        });
+        if resolved.is_some_and(|resolved| {
+            signature
+                .formals
+                .iter()
+                .enumerate()
+                .filter(|(_, formal)| ty_mentions_param(signature.ret, std::slice::from_ref(*formal)))
+                .all(|(index, _)| resolved.get(index).is_some_and(Option::is_some))
+        }) && !unresolved_lambda_result
+            && !open_lambda_dependency
             // Rechecking may have replaced a formerly contextual call with an expectation-free
             // probe. A retained type-argument record is not proof of completion when the current
             // semantic result again contains this callee's declaration variables; the enclosing
@@ -295,9 +339,13 @@ impl Checker<'_> {
             signature.ret,
             &crate::symbol_resolver::GSigBinds::default(),
         );
-        (matches!(actual, Ty::Error) || ty_mentions_param(actual, &open_formals))
+        (matches!(actual, Ty::Error)
+            || ty_mentions_param(actual, &open_formals)
+            || unresolved_lambda_result
+            || open_lambda_dependency
+            || recorded_unsolved
+            || actual == provisional)
             .then_some(signature)
-            .or_else(|| (actual == provisional).then_some(signature))
     }
 
     /// A selected generic producer whose provisional result is only its declaration fallback.
@@ -314,7 +362,7 @@ impl Checker<'_> {
         expression: ExprId,
     ) -> Option<GenericSig> {
         if let Some(signature) = self.unbound_call_result_signature(expression) {
-            return Some(signature.clone());
+            return Some(signature.into_owned());
         }
         if !self.resolved_constructors.contains_key(&expression) {
             return None;

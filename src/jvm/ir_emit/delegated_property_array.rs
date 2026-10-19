@@ -57,7 +57,15 @@ impl Emitter<'_> {
         let Some(elements) = elements(env, owner) else {
             return;
         };
-        super::vararg::emit_packed_array(self, &array::array_type(), elements, code);
+        super::vararg::emit_packed_array(
+            self,
+            super::vararg::NewArray {
+                ty: &array::array_type(),
+                reified_marker: None,
+            },
+            elements,
+            code,
+        );
         let reference = self.cw.fieldref(
             internal_name,
             env.property_reference_realizations

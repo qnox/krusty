@@ -530,12 +530,8 @@ mod computed_frames_e2e;
 mod computed_prop_e2e;
 #[path = "computed_prop_generic_return_e2e.rs"]
 mod computed_prop_generic_return_e2e;
-#[path = "conditional_block_branch_rebind_e2e.rs"]
-mod conditional_block_branch_rebind_e2e;
-#[path = "conditional_branch_inference_e2e.rs"]
-mod conditional_branch_inference_e2e;
-#[path = "conditional_sibling_rebind_e2e.rs"]
-mod conditional_sibling_rebind_e2e;
+#[path = "e2e/conditional_resolution.rs"]
+mod conditional_resolution;
 #[path = "conformance_score_report_e2e.rs"]
 mod conformance_score_report_e2e;
 #[path = "consistent_copy_visibility_e2e.rs"]
@@ -995,6 +991,8 @@ mod fq_targ_trailing_lambda_e2e;
 mod fq_toplevel_call_e2e;
 #[path = "fq_vararg_call_e2e.rs"]
 mod fq_vararg_call_e2e;
+#[path = "fragment_arguments_e2e.rs"]
+mod fragment_arguments_e2e;
 #[path = "friend_internal_property_override_e2e.rs"]
 mod friend_internal_property_override_e2e;
 #[path = "friend_module_smart_cast_e2e.rs"]
@@ -1229,6 +1227,8 @@ mod java_abstract_override_e2e;
 mod java_array_covariance_e2e;
 #[path = "java_bridge_members_e2e.rs"]
 mod java_bridge_members_e2e;
+#[path = "java_class_formal_bound_e2e.rs"]
+mod java_class_formal_bound_e2e;
 #[path = "java_class_intrinsic_e2e.rs"]
 mod java_class_intrinsic_e2e;
 #[path = "java_constructor_expected_type_e2e.rs"]
@@ -1269,6 +1269,8 @@ java_static_modules::declare!();
 mod java_supertype_type_arguments_e2e;
 #[path = "java_type_use_nullability_e2e.rs"]
 mod java_type_use_nullability_e2e;
+#[path = "java_type_variable_bound_e2e.rs"]
+mod java_type_variable_bound_e2e;
 #[path = "jdk_release_e2e.rs"]
 mod jdk_release_e2e;
 #[path = "jimage_compressed_e2e.rs"]
@@ -1663,6 +1665,8 @@ mod value_class_inherited_default_names_e2e;
 mod value_class_interface_default_receiver_e2e;
 #[path = "value_class_interface_entry_e2e.rs"]
 mod value_class_interface_entry_e2e;
+#[path = "value_class_java_generic_constructor_e2e.rs"]
+mod value_class_java_generic_constructor_e2e;
 #[path = "value_class_java_nullable_element_e2e.rs"]
 mod value_class_java_nullable_element_e2e;
 #[path = "value_class_lambda_class_e2e.rs"]
@@ -2828,8 +2832,6 @@ mod reified_unit_splice_e2e;
 #[path = "reified_value_class_splice_e2e.rs"]
 mod reified_value_class_splice_e2e;
 
-#[path = "conditional_branch_expectation_e2e.rs"]
-mod conditional_branch_expectation_e2e;
 #[path = "declared_try_line_e2e.rs"]
 mod declared_try_line_e2e;
 #[path = "default_impls_forward_lines_e2e.rs"]

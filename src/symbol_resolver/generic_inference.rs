@@ -31,7 +31,8 @@ pub(crate) use call_site_variables::{CallSiteVariableMap, CallSiteVariables};
 pub(crate) use conditional_result::generic_return_expectation_from_sibling;
 pub(crate) use postponed_result::{
     completed_constructor_result_arguments, instantiate_unconstrained_result,
-    nested_result_from_concrete_parameter, unconstrained_result_bindings,
+    nested_result_from_concrete_parameter, solved_constructor_type_arguments,
+    unconstrained_result_bindings,
 };
 
 /// Whether `left` is the same callable parameter shape as `right` with a strict superset of

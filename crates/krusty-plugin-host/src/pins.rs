@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use sha2::{Digest, Sha256};
+
 use crate::environment::Platform;
 
 const JDK_TABLE: &str = include_str!("pins/jdk.tsv");
@@ -43,6 +45,23 @@ pub struct ArtifactPin {
 }
 
 impl ArtifactPin {
+    /// The pins of `classpath`, coordinates and digests in order, as one SHA-256: whatever is built
+    /// against that classpath is valid for this identity and no other.
+    pub fn identity(classpath: &[ArtifactPin]) -> String {
+        let mut digest = Sha256::new();
+        for pin in classpath {
+            digest.update(format!(
+                "{}:{}:{} {} {}\n",
+                pin.group, pin.artifact, pin.version, pin.sha256, pin.size
+            ));
+        }
+        digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
     pub fn file_name(&self) -> String {
         format!("{}-{}.jar", self.artifact, self.version)
     }

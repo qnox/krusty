@@ -5,8 +5,7 @@ use super::*;
 mod diagnostics;
 
 pub(super) use diagnostics::{
-    constructor_message, member_callable_message, owner_display, parameter_display,
-    static_callable_message,
+    member_callable_message, owner_display, parameter_display, static_callable_message,
 };
 
 /// Whether the current compilation module declares `classifier` as an ordinary classifier.
@@ -160,6 +159,31 @@ impl SourceMemberSite for Checker<'_> {
 }
 
 impl<'a> Checker<'a> {
+    /// Reject an inaccessible selected constructor after diagnosing its local inference result.
+    /// Evidence from the rejected call is never published into the committed-call sidecar.
+    pub(super) fn reject_ctor_access(
+        &mut self,
+        call: ExprId,
+        owner: TypeName,
+        classifier: &crate::libraries::LibraryType,
+        member: &crate::libraries::LibraryMember,
+        bindings: Option<&crate::symbol_resolver::GSigBinds>,
+    ) -> bool {
+        if self.callable_accessible(member.visibility, owner, member.external_identity)
+            || self.suppresses_diagnostic("INVISIBLE_REFERENCE")
+        {
+            return false;
+        }
+        if let Some(bindings) = bindings {
+            self.report_rejected_constructor_type_arguments(call, owner, classifier, bindings);
+        }
+        self.diags.error(
+            self.call_callee_name_span(call),
+            diagnostics::constructor_message(&self.fed_source(), owner, member),
+        );
+        true
+    }
+
     /// Whether one already-selected dependency callable is visible from the current site.
     pub(super) fn callable_accessible(
         &self,

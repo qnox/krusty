@@ -112,6 +112,37 @@ pub(crate) fn completed_constructor_result_arguments(
         .collect()
 }
 
+/// The selected-call type arguments of a constructor of `owner` once argument and expected-type
+/// inference are done, in `formals` order. A bound variable keeps its binding and a self type
+/// completes as [`complete_self_bounded_formals`] describes; a variable nothing constrained has no
+/// solution. Kotlin does not infer it from its declared bound: `C(1)` for
+/// `class C<T : Comparable<T>>(val n: Int)` reports `cannot infer type for type parameter 'T'`.
+pub(crate) fn solved_constructor_type_arguments(
+    owner: TypeName,
+    formals: &[String],
+    formal_bounds: &[Vec<Ty>],
+    bindings: &GSigBinds,
+) -> Vec<Option<Ty>> {
+    let completed = completed_constructor_result_arguments(owner, formals, formal_bounds, bindings);
+    formals
+        .iter()
+        .zip(
+            formal_bounds
+                .iter()
+                .map(Vec::as_slice)
+                .chain(std::iter::repeat(&[][..])),
+        )
+        .zip(completed)
+        .map(|((formal, bounds), completed)| {
+            (bindings
+                .get(formal)
+                .is_some_and(|binding| *binding != Ty::Error)
+                || self_type_bound(owner, formal, formals, bounds).is_some())
+            .then_some(completed)
+        })
+        .collect()
+}
+
 /// Instantiate a nested result-only call from the concrete parts of an enclosing parameter.
 ///
 /// The parameter may still contain the outer call's inference variables. Those variables are not

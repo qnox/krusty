@@ -31,16 +31,24 @@ pub enum ReturnTarget {
 /// answer whether it is allowed to be fixed by the body.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LambdaResultConstraint {
+    /// No enclosing callable owns completion of this lambda result.
     Open,
+    /// A selected callable parameter owns completion of this lambda result. Candidate shaping may
+    /// inspect the body before the call commits, but must not finalize a terminal branch call.
+    CallOwned,
     Fixed(Ty),
 }
 
 impl LambdaResultConstraint {
     fn expected(self) -> Option<Ty> {
         match self {
-            Self::Open => None,
+            Self::Open | Self::CallOwned => None,
             Self::Fixed(expected) => Some(expected),
         }
+    }
+
+    fn is_open(self) -> bool {
+        matches!(self, Self::Open | Self::CallOwned)
     }
 }
 
@@ -115,6 +123,20 @@ struct LambdaExitForms {
 }
 
 impl LambdaReturnScopes {
+    /// The active lambda, its root body, and selected result contract.
+    ///
+    /// A conditional at this body's value edge may be owned by an enclosing postponed inference
+    /// frame or selected callable. Callers decide from the recorded contract; nested conditionals
+    /// are not lambda completion roots.
+    pub(super) fn active_result(&self) -> Option<(ExprId, ExprId, LambdaResultConstraint)> {
+        self.active_chain
+            .last()
+            .copied()
+            .zip(self.active_bodies.last().copied())
+            .zip(self.active_constraints.last().copied())
+            .map(|((lambda, body), constraint)| (lambda, body, constraint))
+    }
+
     pub(super) fn target(&self, label: Option<&str>) -> Option<ReturnTarget> {
         match label {
             Some(label) => self
@@ -221,7 +243,10 @@ impl LambdaReturnScopes {
     fn open_body_has_only_valueless_exits(&self, body: ExprId) -> Option<ExprId> {
         let lambda = *self.active_chain.last()?;
         if self.active_bodies.last() != Some(&body)
-            || self.active_constraints.last() != Some(&LambdaResultConstraint::Open)
+            || !self
+                .active_constraints
+                .last()
+                .is_some_and(|constraint| constraint.is_open())
         {
             return None;
         }
@@ -415,7 +440,7 @@ impl Checker<'_> {
     ) -> Ty {
         let inferred = self.lambda_ret_ty(scope, lambda, tail, coerce_to_unit);
         let inferred = if !coerce_to_unit
-            && result_constraint == LambdaResultConstraint::Open
+            && result_constraint.is_open()
             && !self.file.anon_fun_ret.contains_key(&lambda.0)
         {
             let result = super::conditional_branch::branch_value_expression(self.file, body);
@@ -433,8 +458,7 @@ impl Checker<'_> {
         self.lambda_body_results.insert(lambda, inferred);
         match result_constraint {
             LambdaResultConstraint::Fixed(expected) => {
-                let result = super::conditional_branch::branch_value_expression(self.file, body);
-                self.expect_assignable(expected, inferred, self.span(result), "return");
+                self.expect_lambda_result(body, expected, inferred);
                 // A lambda whose every result is `Unit` (a statement tail such as an assignment or
                 // a declaration, an `else`-less `if`, a `Unit` call) returns `Unit` itself, a
                 // subtype of the expected function type, as kotlinc infers it.
@@ -444,8 +468,46 @@ impl Checker<'_> {
                     expected
                 }
             }
-            LambdaResultConstraint::Open => inferred,
+            LambdaResultConstraint::Open | LambdaResultConstraint::CallOwned => inferred,
         }
+    }
+
+    /// Check a lambda result at the terminal expression that semantically owns it.
+    pub(super) fn expect_lambda_result(&mut self, body: ExprId, expected: Ty, actual: Ty) {
+        let result = super::conditional_branch::branch_value_expression(self.file, body);
+        self.expect_assignable(expected, actual, self.span(result), "return");
+    }
+
+    /// Move a selected SAM's open-result mismatch from the whole argument to the lambda result
+    /// expression that semantically owns it. Inputs must already be the selected SAM shape; the
+    /// result stays open so a terminal generic producer retains its independent inference error.
+    pub(super) fn report_open_sam_lambda_result_mismatch(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        argument: ExprId,
+        function: Ty,
+        sam: &crate::symbol_resolver::SamSignature,
+    ) -> bool {
+        if Self::type_is_lexically_fixed(scope, sam.ret) {
+            return false;
+        }
+        let Ty::Fun(signature) = function else {
+            return false;
+        };
+        if signature.params != sam.params
+            || signature.context_count != sam.context_count
+            || signature.has_receiver != sam.has_receiver
+            || signature.suspend != sam.suspend
+        {
+            return false;
+        }
+        let Expr::Lambda { body, .. } = self.file.expr(argument) else {
+            return false;
+        };
+        let open_formals = self.publish_open_result_formals(scope, sam.ret);
+        self.expect_lambda_result(*body, sam.ret, signature.ret);
+        self.restore_type_parameter_owners(open_formals);
+        true
     }
 
     fn check_lambda_body(
@@ -464,7 +526,9 @@ impl Checker<'_> {
         }
         match result_constraint {
             LambdaResultConstraint::Fixed(expected) => self.expr_declared(scope, body, expected),
-            LambdaResultConstraint::Open => self.expr(scope, body),
+            LambdaResultConstraint::Open | LambdaResultConstraint::CallOwned => {
+                self.expr(scope, body)
+            }
         }
     }
 

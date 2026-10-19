@@ -192,6 +192,17 @@ pub struct CheckedBodyParameter<'a> {
     pub name_binding: CheckedBodyParameterNameBinding,
 }
 
+impl CheckedBodyParameter<'_> {
+    /// How an inline call expands this parameter, from its declared type and modifier.
+    fn inline_expansion_mode(&self) -> crate::types::InlineExpansionMode {
+        crate::types::InlineExpansionMode::declared(
+            false,
+            matches!(self.ty.get(), Ty::Fun(_)),
+            self.inline_modifier,
+        )
+    }
+}
+
 #[derive(Clone, Copy)]
 struct CheckedBodyReceiverShape<'a> {
     context_receivers: &'a [ResolvedTy],
@@ -366,13 +377,7 @@ fn check_body_unit_with_parameters_and_defaults(
         .collect::<Vec<_>>();
     let mut inline_expansion_modes = parameters
         .iter()
-        .map(|parameter| {
-            crate::types::InlineExpansionMode::declared(
-                false,
-                matches!(parameter.ty.get(), Ty::Fun(_)),
-                parameter.inline_modifier,
-            )
-        })
+        .map(CheckedBodyParameter::inline_expansion_mode)
         .collect::<Vec<_>>();
     if receiver_shape.extension_receiver.is_some() {
         let receiver_position = receiver_shape.context_receivers.len();
@@ -473,6 +478,9 @@ fn bind_parameters_and_check_defaults(
         checker
             .body
             .add_parameter(FirValueParameter::bound(origin, value, parameter.ty));
+        if parameter.inline_expansion_mode() == crate::types::InlineExpansionMode::Splice {
+            checker.body.add_spliced_inline_parameter(value);
+        }
     }
     if defaults.next().is_some() {
         return Err(checker.failure(None, BodyCheckFailureKind::UnsupportedCallShape));

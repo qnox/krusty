@@ -12,16 +12,35 @@
 //!
 //! Every downloaded or copied file is checked against a SHA-256 pinned in this crate, and every
 //! download is announced with what it is and why it is needed.
+//!
+//! [`Host::start`] then runs the host on what was provisioned: a JVM with krusty's adapter
+//! (`adapter/`, compiled once per Kotlin version by that version's compiler) in front of the
+//! compiler, which loads plugin jars the way kotlinc's `-Xplugin` does, and opens a compilation's
+//! session over the build's classpath, where IR plugins find the build's declarations.
 
+mod adapter;
 mod artifacts;
 mod download;
 mod environment;
+mod host;
 mod install;
 mod jdk;
 mod pins;
+mod protocol;
 mod provision;
+mod session;
 
 pub use download::{Curl, Fetcher};
 pub use environment::{Environment, Platform};
+pub use host::{Host, HostError};
+pub use krusty_plugin_ir::{
+    BodyIr, CallIr, CallableIdentity, CallableKind, Callee, ClassName, Classifier, Constant,
+    ExpressionIr, ExpressionKind, FileIr, FunctionIr, ModuleIr, ParameterIr, Span, StatementIr,
+    TypeArgument, TypeIdentity, TypeParameterOwner, ValueId, VariableIr, Visibility,
+};
 pub use pins::{ArtifactPin, JdkPin, Pins};
-pub use provision::{provision, HostRuntime, ProvisionError, Request, COMPILER_MIN_JAVA};
+pub use protocol::LoadedPlugin;
+pub use provision::{
+    provision, provision_artifact, HostRuntime, ProvisionError, Request, COMPILER_MIN_JAVA,
+};
+pub use session::SessionRequest;

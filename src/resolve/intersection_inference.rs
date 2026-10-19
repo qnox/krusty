@@ -280,6 +280,16 @@ impl TypeInfo {
     }
 
     #[cfg(test)]
+    pub(crate) fn selected_call_type_arguments_for_test(
+        &self,
+        expression: ExprId,
+    ) -> Option<&[Option<Ty>]> {
+        self.selected_generic_calls
+            .get(&expression)
+            .map(SelectedGenericCall::arguments)
+    }
+
+    #[cfg(test)]
     pub(crate) fn replace_selected_call_type_arguments_for_test(
         &mut self,
         expression: ExprId,

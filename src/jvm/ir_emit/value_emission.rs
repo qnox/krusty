@@ -1481,6 +1481,17 @@ impl super::Emitter<'_> {
                 erased,
             } => {
                 self.emit_value(*arg, code);
+                // The marker and its type operation take a reference: a scalar operand is boxed
+                // first, as kotlinc's `-value as T` boxes the negated `Double`.
+                let physical = self.value_ty(*arg);
+                if physical.is_jvm_scalar() {
+                    let semantic = self.ir.logical_types.get(arg).copied().unwrap_or(physical);
+                    super::box_prim_free(
+                        self.cw,
+                        code,
+                        super::semantic_scalar_adapter(semantic, physical),
+                    );
+                }
                 // kotlinc's reified is/as placeholder: marker(3) + instanceof, marker(1) + checkcast.
                 code.push_int(if *cast { 1 } else { 3 }, self.cw);
                 code.push_string(name, self.cw);
@@ -1850,7 +1861,14 @@ impl super::Emitter<'_> {
                 array_type,
                 elements,
                 spreads,
-            } => vararg::emit(self, array_type, elements, spreads, code),
+            } => {
+                let marker = self.ir.reified_markers.arrays.get(&e).cloned();
+                let array = vararg::NewArray {
+                    ty: array_type,
+                    reified_marker: marker.as_deref(),
+                };
+                vararg::emit(self, array, elements, spreads, code);
+            }
             IrExpr::NewArray { array_type, size } => {
                 let et = array_jvm_element(array_type);
                 self.emit_value(*size, code);
@@ -1859,10 +1877,8 @@ impl super::Emitter<'_> {
                 } else {
                     // Peel a nullable element's `?`: `Array<Int?>` = `Integer[]`, so the `anewarray` class
                     // is `java/lang/Integer` (the `?` only tells `Array.get`/`.set` to keep it boxed).
-                    let ci = self
-                        .cw
-                        .class_ref(&crate::jvm::names::anewarray_element_class(et));
-                    code.anewarray(ci);
+                    let marker = self.ir.reified_markers.arrays.get(&e).cloned();
+                    vararg::emit_reference_new_array(self, et, marker.as_deref(), code);
                 }
             }
             IrExpr::Try {

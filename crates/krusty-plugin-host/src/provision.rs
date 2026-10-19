@@ -27,10 +27,25 @@ pub struct Request<'a> {
 /// What a host process is started with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostRuntime {
+    /// The Kotlin version the compiler classpath is, exactly as the build configured it.
+    pub kotlin_version: String,
     pub java: PathBuf,
     pub java_home: PathBuf,
     /// `kotlin-compiler-embeddable` first, then its runtime dependencies.
     pub compiler_classpath: Vec<PathBuf>,
+    /// [`ArtifactPin::identity`] of the pins the classpath was verified against, which names what is
+    /// built against it, such as the host's adapter.
+    pub compiler_identity: String,
+}
+
+impl HostRuntime {
+    /// A command that runs this runtime's `java` as its own JDK: `JAVA_HOME` names it, whatever the
+    /// environment named, so what runs there and looks for a JDK finds the one that runs it.
+    pub(crate) fn java_command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(&self.java);
+        command.env("JAVA_HOME", &self.java_home);
+        command
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -136,13 +151,18 @@ pub fn provision(
             pinned: pins.kotlin_versions(),
         })?;
     let mut session = Session {
-        request,
+        reason: request.reason,
+        min_java: request.min_java,
         env,
         fetcher,
         report,
         missing: Vec::new(),
         missing_java: None,
-        classpath_announced: false,
+        preface: Some(format!(
+            "{} runs on kotlinc's own compiler, kotlin-compiler-embeddable {}, which krusty keeps \
+             in its cache",
+            request.reason, request.kotlin_version
+        )),
         changed: false,
     };
     let jdk = session.jdk(pins.jdk())?;
@@ -157,28 +177,63 @@ pub fn provision(
             java: session.missing_java,
         });
     }
-    if session.changed {
-        session.note(format_args!(
-            "saved in {}; later builds reuse it",
-            env.cache_dir.display()
-        ));
-    }
+    session.note_saved();
     let jdk = jdk.expect("a JDK, since nothing is missing");
     Ok(HostRuntime {
+        kotlin_version: request.kotlin_version.to_string(),
         java: jdk.java,
         java_home: jdk.home,
         compiler_classpath: classpath,
+        compiler_identity: ArtifactPin::identity(classpath_pins),
     })
 }
 
+/// Finds or fetches one pinned jar the way [`provision`] finds the compiler's: krusty's cache, else a
+/// verified copy from the Gradle or Maven local cache, else a verified download, announced on
+/// `report` with `reason`, such as `the compiler plugin power-assert`, which needs it.
+pub fn provision_artifact(
+    pin: &ArtifactPin,
+    reason: &str,
+    env: &Environment,
+    fetcher: &dyn Fetcher,
+    report: &mut dyn Write,
+) -> Result<PathBuf, ProvisionError> {
+    let mut session = Session {
+        reason,
+        min_java: COMPILER_MIN_JAVA,
+        env,
+        fetcher,
+        report,
+        missing: Vec::new(),
+        missing_java: None,
+        preface: Some(format!(
+            "{reason} needs {}, which krusty keeps in its cache",
+            pin.file_name()
+        )),
+        changed: false,
+    };
+    let Some(jar) = session.artifact(pin)? else {
+        return Err(ProvisionError::Offline {
+            reason: reason.to_string(),
+            missing: session.missing,
+            java: None,
+        });
+    };
+    session.note_saved();
+    Ok(jar)
+}
+
 struct Session<'a> {
-    request: &'a Request<'a>,
+    /// What needs the files, as the user should read it.
+    reason: &'a str,
+    min_java: u32,
     env: &'a Environment,
     fetcher: &'a dyn Fetcher,
     report: &'a mut dyn Write,
     missing: Vec<String>,
     missing_java: Option<u32>,
-    classpath_announced: bool,
+    /// Said once, before the first jar is copied or downloaded.
+    preface: Option<String>,
     changed: bool,
 }
 
@@ -187,10 +242,17 @@ impl Session<'_> {
         let _ = writeln!(self.report, "info: {message}");
     }
 
+    fn note_saved(&mut self) {
+        if self.changed {
+            let cache = self.env.cache_dir.display().to_string();
+            self.note(format_args!("saved in {cache}; later builds reuse it"));
+        }
+    }
+
     /// An installed JDK when one is new enough, else the pinned one from the cache or a download.
     /// `None` only when it is missing and downloads are off.
     fn jdk(&mut self, pin: Option<&JdkPin>) -> Result<Option<Jdk>, ProvisionError> {
-        let needed = self.request.min_java.max(COMPILER_MIN_JAVA);
+        let needed = self.min_java.max(COMPILER_MIN_JAVA);
         let platform = &self.env.platform;
         let mut rejected = Vec::new();
         let candidates = jdk::candidates(
@@ -213,7 +275,7 @@ impl Session<'_> {
         let platform_name = format!("{}-{}", platform.os, platform.arch);
         let Some(pin) = pin.filter(|pin| pin.major >= needed) else {
             return Err(ProvisionError::NoJdk {
-                reason: self.request.reason.to_string(),
+                reason: self.reason.to_string(),
                 needed,
                 rejected,
                 platform: platform_name,
@@ -239,9 +301,9 @@ impl Session<'_> {
             self.missing_java = Some(needed);
             return Ok(None);
         }
+        let reason = self.reason;
         self.note(format_args!(
-            "{} runs in a JVM, but no installed JDK is Java {needed} or newer ({}); krusty downloads one",
-            self.request.reason,
+            "{reason} runs in a JVM, but no installed JDK is Java {needed} or newer ({}); krusty downloads one",
             rejections(&rejected)
         ));
         self.note(format_args!(
@@ -298,7 +360,7 @@ impl Session<'_> {
                 install::remove(&staged);
                 continue;
             }
-            self.announce_classpath();
+            self.announce();
             self.note(format_args!(
                 "copying {} from {cache} ({})",
                 pin.file_name(),
@@ -312,7 +374,7 @@ impl Session<'_> {
             self.missing.push(pin.file_name());
             return Ok(None);
         }
-        self.announce_classpath();
+        self.announce();
         let url = artifacts::url(self.env, pin);
         self.note(format_args!(
             "downloading {} ({}) from {url}",
@@ -326,14 +388,9 @@ impl Session<'_> {
         Ok(Some(dest))
     }
 
-    fn announce_classpath(&mut self) {
-        if !self.classpath_announced {
-            self.classpath_announced = true;
-            self.note(format_args!(
-                "{} runs on kotlinc's own compiler, kotlin-compiler-embeddable {}, which krusty keeps \
-                 in its cache",
-                self.request.reason, self.request.kotlin_version
-            ));
+    fn announce(&mut self) {
+        if let Some(preface) = self.preface.take() {
+            self.note(format_args!("{preface}"));
         }
     }
 
@@ -396,5 +453,30 @@ fn io(path: &std::path::Path, error: std::io::Error) -> ProvisionError {
     ProvisionError::Io {
         path: path.to_path_buf(),
         detail: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn java_runs_with_its_own_home_as_java_home() {
+        let runtime = HostRuntime {
+            kotlin_version: "2.4.20".into(),
+            java: PathBuf::from("/jdks/21/bin/java"),
+            java_home: PathBuf::from("/jdks/21"),
+            compiler_classpath: Vec::new(),
+            compiler_identity: String::new(),
+        };
+        let command = runtime.java_command();
+        assert_eq!(command.get_program(), "/jdks/21/bin/java");
+        assert_eq!(
+            command.get_envs().collect::<Vec<_>>(),
+            [(
+                std::ffi::OsStr::new("JAVA_HOME"),
+                Some(std::ffi::OsStr::new("/jdks/21"))
+            )]
+        );
     }
 }

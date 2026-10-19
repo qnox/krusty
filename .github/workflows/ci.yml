@@ -54,9 +54,16 @@ jobs:
           tool: just
       - name: lint
         run: just lint
+      # The ignored tests start a real host: the pinned kotlinc 2.4.20 classpath from Maven Central
+      # on the runner's JDK, with the adapter compiled by it. Both stay in krusty's cache.
+      - name: cache plugin host runtime
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/krusty/plugin-host
+          key: plugin-host-${{ hashFiles('crates/krusty-plugin-host/src/pins/*.tsv', 'crates/krusty-plugin-host/adapter/*') }}
       # Outside the default members and the coverage packages, so no other job runs its tests.
       - name: plugin host tests
-        run: cargo test -p krusty-plugin-host
+        run: cargo test -p krusty-plugin-host -- --include-ignored
 
   ci:
     runs-on: ubuntu-latest

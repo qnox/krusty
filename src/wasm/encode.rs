@@ -658,6 +658,11 @@ impl Code {
         self.gc(0x00).index(ty)
     }
 
+    /// `struct.new_default`: a struct of `ty` whose every field holds its type's default.
+    pub(super) fn struct_new_default(&mut self, ty: u32) -> &mut Self {
+        self.gc(0x01).index(ty)
+    }
+
     pub(super) fn struct_get(&mut self, ty: u32, field: u32) -> &mut Self {
         self.gc(0x02).index(ty).index(field)
     }

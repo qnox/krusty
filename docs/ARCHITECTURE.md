@@ -72,7 +72,9 @@ compiler never downloads and never starts a JVM, and a driver calls the crate on
 requests such a jar. Its provisioning reuses `JAVA_HOME`, `java` on `PATH` and the Gradle or Maven
 caches before it downloads, verifies every file against a SHA-256 pinned per Kotlin version, keeps
 what it fetches in krusty's cache, announces each download with the plugin that needs it, and fails
-with the list of what is missing when `KRUSTY_OFFLINE` is set.
+with the list of what is missing when `KRUSTY_OFFLINE` is set. The host itself is a small Kotlin
+adapter, compiled once per Kotlin version by that version's compiler, that krusty drives over a
+framed stdin/stdout protocol; it loads plugin jars the way `-Xplugin` does.
 
 `crates/krusty-toolchain` reads Kotlin Toolchain projects (`project.yaml` and `module.yaml`, the
 format JetBrains' `kotlin` command builds) and is meant to build them with krusty, the way krusty

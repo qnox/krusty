@@ -90,6 +90,36 @@ pub struct SourceMap {
     keep_trivial: bool,
 }
 
+/// The state of one method's [`SourceMap::copy_method_lines`]: the lines it has mapped and the
+/// range it read last.
+#[derive(Default)]
+struct LineCopier {
+    visited: crate::fx_hash::HashMap<u16, u16>,
+    last: Option<(usize, usize)>,
+}
+
+impl LineCopier {
+    /// The class-map line of method-map line `line`, or `None` when `method` does not cover it.
+    fn map(&mut self, class: &mut SourceMap, method: &SourceMap, line: u16) -> Option<u16> {
+        if let Some(&mapped) = self.visited.get(&line) {
+            return Some(mapped);
+        }
+        let covers =
+            |(file, range): (usize, usize)| method.files[file].ranges[range].covers_dest(line);
+        let found = self
+            .last
+            .filter(|&at| covers(at))
+            .or_else(|| method.find_range(line))?;
+        self.last = Some(found);
+        let file = &method.files[found.0];
+        let range = file.ranges[found.1];
+        let source = range.source + (line - range.dest);
+        let mapped = class.map_new_line(&file.name, &file.path, source, range.call_site)?;
+        self.visited.insert(line, mapped);
+        Some(mapped)
+    }
+}
+
 impl SourceMap {
     /// Start a map for a class whose own source is `name` at `path`, spanning `lines` lines.
     ///
@@ -209,34 +239,27 @@ impl SourceMap {
     }
 
     /// Rewrite the `LineNumberTable` lines of a method generated against its own map `method` into
-    /// this class map, in table order (`SourceMapCopyingMethodVisitor`).
+    /// this class map (`SourceMapCopyingMethodVisitor`).
+    ///
+    /// kotlinc's copier reads the method before its bytecode optimizations run, so `written` holds
+    /// the method's lines in the order its unoptimized table lists them: a line those passes later
+    /// drop with dead code still claims its place in the class map. `lines` is the final table.
     ///
     /// The copier remembers each line it has mapped and the range it read last; any other line is
     /// looked up in `method`, and its source position is mapped anew with the call site of its
     /// range. A line `method` does not cover keeps its number.
-    pub fn copy_method_lines(&mut self, method: &SourceMap, lines: &mut [(u16, u16)]) {
-        let mut visited = crate::fx_hash::HashMap::<u16, u16>::default();
-        let mut last: Option<(usize, usize)> = None;
+    pub fn copy_method_lines(
+        &mut self,
+        method: &SourceMap,
+        written: &[u16],
+        lines: &mut [(u16, u16)],
+    ) {
+        let mut copier = LineCopier::default();
+        for &line in written {
+            copier.map(self, method, line);
+        }
         for (_, line) in lines {
-            if let Some(&mapped) = visited.get(line) {
-                *line = mapped;
-                continue;
-            }
-            let covers =
-                |(file, range): (usize, usize)| method.files[file].ranges[range].covers_dest(*line);
-            let Some(found) = last
-                .filter(|&at| covers(at))
-                .or_else(|| method.find_range(*line))
-            else {
-                continue;
-            };
-            last = Some(found);
-            let file = &method.files[found.0];
-            let range = file.ranges[found.1];
-            let source = range.source + (*line - range.dest);
-            if let Some(mapped) = self.map_new_line(&file.name, &file.path, source, range.call_site)
-            {
-                visited.insert(*line, mapped);
+            if let Some(mapped) = copier.map(self, method, *line) {
                 *line = mapped;
             }
         }
@@ -834,7 +857,8 @@ mod tests {
                 .enumerate()
                 .map(|(pc, &line)| (pc as u16, line))
                 .collect();
-            class.copy_method_lines(&method, &mut table);
+            let written: Vec<u16> = table.iter().map(|&(_, line)| line).collect();
+            class.copy_method_lines(&method, &written, &mut table);
             lines.push(table.iter().map(|&(_, line)| line).collect::<Vec<_>>());
             methods.push(method);
         }
@@ -849,6 +873,33 @@ mod tests {
         );
     }
 
+    /// A line the optimizer dropped from the final table still widens the class map's range, as
+    /// kotlinc copies the method before its optimization passes run; the next call's lines start
+    /// after it.
+    #[test]
+    fn the_copier_reads_lines_the_optimizer_dropped() {
+        let mut class = SourceMap::new("Main.kt", "MainKt", 8);
+        let mut tables = Vec::new();
+        for call in [4, 5] {
+            let mut method = class.for_method().expect("a started class map");
+            assert_eq!(
+                map_all(&mut method, "Lib.kt", "LibKt", &[6, 7, 8, 9], call),
+                vec![9, 10, 11, 12]
+            );
+            let mut table = vec![(0, call), (1, 9), (2, 10), (3, 9), (4, call)];
+            class.copy_method_lines(&method, &[call, 9, 10, 11, 12, 9, call], &mut table);
+            tables.push(table.iter().map(|&(_, line)| line).collect::<Vec<_>>());
+        }
+        assert_eq!(tables, vec![vec![4, 9, 10, 9, 4], vec![5, 13, 14, 13, 5]]);
+        assert_eq!(
+            class.render().expect("a map"),
+            "SMAP\nMain.kt\nKotlin\n*S Kotlin\n*F\n\
+             + 1 Main.kt\nMainKt\n+ 2 Lib.kt\nLibKt\n\
+             *L\n1#1,8:1\n6#2,4:9\n6#2,4:13\n\
+             *S KotlinDebug\n*F\n+ 1 Main.kt\nMainKt\n*L\n4#1:9,4\n5#1:13,4\n*E\n"
+        );
+    }
+
     /// The class map reuses only a file's last range, or else its first: a line a middle range
     /// covers opens a new range, unlike a method map, which keeps any covering range.
     #[test]
@@ -860,10 +911,10 @@ mod tests {
             vec![3, 4, 5]
         );
         let mut first = vec![(0, 3), (1, 4), (2, 5)];
-        class.copy_method_lines(&method, &mut first);
+        class.copy_method_lines(&method, &[3, 4, 5], &mut first);
         assert_eq!(first, vec![(0, 3), (1, 4), (2, 5)]);
         let mut second = vec![(0, 4)];
-        class.copy_method_lines(&method, &mut second);
+        class.copy_method_lines(&method, &[4], &mut second);
         assert_eq!(second, vec![(0, 6)]);
     }
 
