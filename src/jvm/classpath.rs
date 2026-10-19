@@ -22,6 +22,7 @@ mod catalog_availability;
 mod class_locations;
 pub mod content_snapshot;
 mod ct_sym_index;
+mod entry_class_reads;
 mod external_identities;
 mod inner_class_scopes;
 mod jar_package_census;
@@ -54,7 +55,8 @@ use self::ct_sym_index::cached_ct_sym_index;
 use self::external_identities::{ExternalCallableKey, ExternalPropertyKey};
 use self::jimage_catalog::{cached_jimage_index, JimageIndex};
 use self::metadata_indexes::{
-    build_entry_ext, build_entry_package_types, build_entry_types, ClassMetadataLoadError,
+    build_entry_ext, build_entry_package_types, build_entry_types, complete_entry_package_types,
+    ClassMetadataLoadError,
 };
 use self::method_body_cache::{
     global_entry_body_cache, global_entry_class_bodies_cache, BodyCache, ClassBodiesCache,
@@ -2673,31 +2675,17 @@ impl Classpath {
             }
         }
         let index = if packages.complete {
-            // Scanning one package by walking the whole jar makes N queried packages cost N full
-            // central-directory passes. Build the entry's authoritative alias table once, then project
-            // the requested package by interned identity. `EntryCache` serializes the one cold build
-            // across workers; subsequent package misses are an in-memory map filter.
-            let built = global_entry_types().get_or_try_build(&self.cache_key[entry_id], || {
-                build_entry_types(&self.entries[entry_id], &packages)
+            // The catalog names the classes that can declare the package's aliases, so only those are
+            // read, by name, through the shared class cache: the facades the same package's function
+            // lookup parses anyway. Decoding every facade of the jar to answer one package is what
+            // made the stdlib's alias table a fixed cost of every compilation.
+            let built = complete_entry_package_types(&packages, package, |internal| {
+                self.complete_entry_class(entry_id, internal)
             });
-            let Some(all) = self.accept_entry_index(built) else {
+            let Some(index) = self.accept_entry_index(built) else {
                 return std::sync::Arc::new(TypeIndex::default());
             };
-            std::sync::Arc::new(TypeIndex {
-                type_aliases: all
-                    .type_aliases
-                    .iter()
-                    .filter_map(|(&alias, &target)| {
-                        (alias.namespace() == package).then_some((alias, target))
-                    })
-                    .collect(),
-                alias_expansions: all
-                    .alias_expansions
-                    .iter()
-                    .filter(|(alias, _)| alias.namespace() == package)
-                    .map(|(&alias, expansion)| (alias, expansion.clone()))
-                    .collect(),
-            })
+            std::sync::Arc::new(index)
         } else {
             let built = build_entry_package_types(&self.entries[entry_id], &packages, package);
             let Some(index) = self.accept_entry_index(built) else {
@@ -3120,28 +3108,7 @@ impl Classpath {
                 classfile_name = Some((internal, name));
             }
             let (internal, name) = classfile_name.as_ref().expect("classfile spelling");
-            let read_and_parse = || -> Result<Option<std::sync::Arc<ClassInfo>>, ReadError> {
-                let bytes = match e {
-                    Entry::Dir(d) => std::fs::read(d.join(name)).ok(),
-                    Entry::Jar(j) => self.jar_entry(j, name),
-                    // The JDK jimage stores classes uncompressed — seek-read the class via a one-time
-                    // name→(offset,size) index so JDK type members (String, collections, …) resolve.
-                    Entry::Jimage(_) => self.jimage_bytes(internal),
-                    Entry::CtSym { path, release } => self.ct_sym_bytes(path, *release, internal),
-                };
-                // A DIRECTORY entry on a case-INSENSITIVE filesystem (macOS APFS) happily serves
-                // `java/lang/error.class` for `Error.class` — verify the parsed class IS the
-                // requested one (JVM names are case-sensitive; `error` must not resolve to `Error`).
-                let Some(bytes) = bytes else { return Ok(None) };
-                let class = match parse_class(&bytes) {
-                    Ok(class) => class,
-                    Err(error @ ReadError::BadKotlinMetadata(_)) => return Err(error),
-                    Err(_) => return Ok(None),
-                };
-                Ok(class
-                    .this_class_matches(internal)
-                    .then(|| std::sync::Arc::new(class)))
-            };
+            let read_and_parse = || self.read_entry_class(e, internal, name);
             let parsed = if incomplete {
                 let parsed = read_and_parse();
                 // Do not memoize an absence from an incomplete/recoverable entry. A successful
