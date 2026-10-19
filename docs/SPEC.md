@@ -14195,6 +14195,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   each argument of each release against its disposition; `tests/unsupported_kotlinc_arguments_e2e.rs`
   and `tests/inert_kotlinc_arguments_e2e.rs` check exit code, complete stderr and output against
   kotlinc.)
+- **One multiplatform fragment compiles as the plain module.** A build tool passes a JVM-only
+  module with several source roots as `-Xmulti-platform -Xfragments=main` plus one
+  `-Xfragment-sources=main:<file>` per source. `-Xmulti-platform` enables
+  `MultiPlatformProjects`; with a single fragment kotlinc's classes and `.kotlin_module` are the
+  plain compilation's. kotlinc 2.4.20 matches each free argument by its exact spelling (a
+  directory included, a `.java` file exempt) against the listed sources, ignores
+  `-Xfragment-sources` without `-Xfragments`, and reports, in order, each malformed value
+  (`incorrect syntax for -Xfragment-sources argument. …`), each value naming an undeclared
+  fragment (`passed <value>, but fragment … is not specified in -Xfragments`), then each unlisted free argument (`source '<arg>' does not belong to any
+  module`), exiting 1 before writing anything. krusty reproduces these as configuration errors.
+  More than one fragment (a common/platform hierarchy, with `-Xfragment-refines`) is refused.
+  (`tests/fragment_arguments_e2e.rs` compares exit code, complete stderr and the output tree with
+  kotlinc; `crates/krusty-cli/src/cli/fragments.rs` unit tests.)
 - **A supertype missing from the classpath is `MISSING_DEPENDENCY_SUPERCLASS`.** As kotlinc's
   `FirMissingDependencySupertype*` checkers, a classpath classifier naming a supertype that no
   source or classpath entry provides makes every use that depends on that hierarchy an error:

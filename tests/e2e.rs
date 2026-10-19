@@ -991,6 +991,8 @@ mod fq_targ_trailing_lambda_e2e;
 mod fq_toplevel_call_e2e;
 #[path = "fq_vararg_call_e2e.rs"]
 mod fq_vararg_call_e2e;
+#[path = "fragment_arguments_e2e.rs"]
+mod fragment_arguments_e2e;
 #[path = "friend_internal_property_override_e2e.rs"]
 mod friend_internal_property_override_e2e;
 #[path = "friend_module_smart_cast_e2e.rs"]

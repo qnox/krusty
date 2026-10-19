@@ -20,6 +20,7 @@ use krusty::plugins::registry::{Activation, NativePlugins, PluginRegistry};
 use crate::kotlinc_arguments::{self, Catalog, Disposition, Lifecycle, Origin, ValueKind};
 
 mod arguments;
+mod fragments;
 mod language_features;
 mod warning_policy;
 
@@ -350,6 +351,10 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
     for source in &tokenized.free {
         collect_sources(source, &mut opts.sources, &mut opts.ignored);
     }
+    let fragments = fragments::check(&parsed.fragments, &tokenized.free);
+    opts.errors.extend(fragments.unsupported);
+    opts.configuration_errors
+        .extend(fragments.configuration_errors);
     opts.plugins.finish();
     opts.errors.append(&mut opts.plugins.errors);
     let lifecycle = kotlinc_arguments::lifecycle_warnings(&tokenized, reference_version)
