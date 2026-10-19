@@ -1165,14 +1165,12 @@ contextParameters/contextFunInSam.kt
 contextParameters/contextOnInvokeResolve.kt
 contextParameters/contextParameterToDefaultArgument.kt
 contextParameters/contextPropertyInInterface.kt
-contextParameters/contextResolveDependingOnCallSite.kt
 contextParameters/contextualAnonymousFunAsAnExpression.kt
 contextParameters/contextualAnonymousFunction.kt
 contextParameters/contextualCallableReference.kt
 contextParameters/contextualFunctionConversion.kt
 contextParameters/contextualInlineCall.kt
 contextParameters/contextualLocalFunWithTypeParam.kt
-contextParameters/dispatchExtensionAndContextReceiverResolve.kt
 contextParameters/explicitPassing.kt
 contextParameters/functionalType.kt
 contextParameters/genericPropertyWithContextParameters.kt
@@ -4669,7 +4667,6 @@ objects/kt2719.kt
 objects/kt32351.kt
 objects/kt32749.kt
 objects/kt3684.kt
-objects/kt45170.kt
 objects/kt46136.kt
 objects/kt52540.kt
 objects/kt535.kt
