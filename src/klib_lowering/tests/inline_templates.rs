@@ -21,13 +21,29 @@ fn kotlin_function(libraries: &KlibLibraries, name: &str) -> ExternalCallableRea
         .expect("the provider realizes its own identity")
 }
 
+/// Lower the template of `selected` with the provider's own identities for its calls.
+fn template(
+    ir: &mut IrFile,
+    libraries: &KlibLibraries,
+    selected: &ExternalCallableRealization,
+) -> Result<KlibInlineTemplate, crate::klib_lowering::KlibBodyDecline> {
+    let provider = |identity: &crate::libraries::KlibDependencyCallable| {
+        libraries.external_callable_by_dependency(identity)
+    };
+    let callees = TemplateCallees {
+        declarations: libraries.declaration_bodies(),
+        provider: &provider,
+    };
+    lower_inline_template(ir, selected, libraries.inline_declaration_bodies(), callees)
+        .expect("a KLIB function")
+}
+
 #[test]
 fn a_scope_function_body_is_a_generic_template_that_splices_its_lambda() {
     let Some(root) = distribution_root() else {
         return;
     };
     let libraries = stdlib(&root);
-    let bodies = libraries.inline_declaration_bodies();
     for (name, spellings, rendered) in [
         ("let", &["T", "R"][..], "scope {scope {return@Some(0) invoke(v1!: (T) -> R, v0: T): R: Nothing}: Nothing}"),
         ("also", &["T"][..], "scope {scope {invoke(v1!: (T) -> Unit, v0: T): Unit; return@Some(0) v0: T: Nothing}: Nothing}"),
@@ -40,9 +56,7 @@ fn a_scope_function_body_is_a_generic_template_that_splices_its_lambda() {
     ] {
         let selected = kotlin_function(&libraries, name);
         let mut ir = IrFile::default();
-        let template = lower_inline_template(&mut ir, &selected, bodies)
-            .expect("a KLIB function")
-            .unwrap_or_else(|decline| panic!("{name}: {decline}"));
+        let template = template(&mut ir, &libraries, &selected).unwrap_or_else(|decline| panic!("{name}: {decline}"));
         let generic = selected.callable.generic_sig.as_deref().expect("generic");
         assert_eq!(template.type_parameters, generic.formals, "{name}");
         let function = &ir.functions[template.function as usize];
@@ -77,8 +91,7 @@ fn a_declined_body_leaves_the_file_as_it_was() {
     let libraries = stdlib(&root);
     let selected = kotlin_function(&libraries, "repeat");
     let mut ir = IrFile::default();
-    let decline = lower_inline_template(&mut ir, &selected, libraries.inline_declaration_bodies())
-        .expect("a KLIB function")
+    let decline = template(&mut ir, &libraries, &selected)
         .expect_err("`repeat` uses a form body lowering does not model");
     assert_eq!(
         decline.reason(),

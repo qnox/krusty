@@ -321,7 +321,7 @@ pub enum FirCallTarget {
         /// target keys a specially implemented language declaration on them, never on the call.
         overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
         suspend: bool,
-        can_inline: bool,
+        inline: crate::libraries::InlineKind,
         inline_plan: Option<Box<FirInlineBodyPlan>>,
         /// Parameter slot occupied by the explicit extension receiver when the selected external
         /// declaration is a member extension. Ordinary members and top-level extensions use `None`.

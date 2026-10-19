@@ -8,18 +8,24 @@
 //! parameter facts it publishes (identities and each parameter's inline expansion mode). The
 //! selected provider record describes the function, including the semantic type parameters its
 //! types name; the serialized header must agree with it, and each serialized type parameter is
-//! that record's. A template is never a target function itself, so no call in it is linked to
-//! dependency code: a body that calls a dependency function declines, as does every form body
-//! lowering declines. A declined template leaves the file as it was.
+//! that record's. A template is never a target function itself: a call it makes of an ordinary
+//! dependency function is the same external call a source call of that function is, through the
+//! identity the calling compilation's provider gives the exact serialized callee. A call of a
+//! member or of another inline function declines, as does every form body lowering declines. A
+//! declined template leaves the file as it was.
 
 use super::body_lowering::{BodyLowering, CallLinker, LinkedCallee, LoweredFunction};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
+use super::function_lowering::function_header;
 use super::function_lowering::{declare_function, prepared_inline_header};
 use super::ir_builtins::IrBuiltinOperators;
 use super::lowering_checkpoint::LoweringCheckpoint;
-use crate::ir::{FunId, IrFile};
-use crate::klib_libraries::KlibDeclarationBodies;
-use crate::libraries::{ExternalCallableRealization, KlibBodyCallable};
+use crate::fir::ExternalCallableId;
+use crate::ir::{Callee, FunId, IrFile};
+use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies};
+use crate::libraries::{
+    ExternalCallableRealization, KlibBodyCallable, KlibDeclarationSignature, KlibDependencyCallable,
+};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::KlibIrBody;
 use crate::types::{InlineExpansionMode, InlineParameterModifier, Ty};
@@ -33,12 +39,25 @@ pub struct KlibInlineTemplate {
     pub type_parameters: Vec<String>,
 }
 
-/// Lower the serialized body of the inline dependency function `selected` into `ir` as an
-/// inline-only template function. `None` when `selected` is not a KLIB declaration.
+/// The functions a template's body may call.
+#[derive(Clone, Copy)]
+pub struct TemplateCallees<'a> {
+    /// The ordinary serialized declarations of the loaded KLIBs, which resolve each call's
+    /// producer and describe its callee.
+    pub declarations: &'a KlibDeclarationBodies,
+    /// The calling compilation's provider identity of an exact serialized declaration.
+    pub provider: &'a dyn Fn(
+        &KlibDependencyCallable,
+    ) -> Option<(ExternalCallableId, ExternalCallableRealization)>,
+}
+
+/// Lower the prepared-inline body of the dependency function `selected`, from `prepared`, into
+/// `ir` as an inline-only template function. `None` when `selected` is not a KLIB declaration.
 pub fn lower_inline_template(
     ir: &mut IrFile,
     selected: &ExternalCallableRealization,
-    bodies: &KlibDeclarationBodies,
+    prepared: &KlibDeclarationBodies,
+    callees: TemplateCallees<'_>,
 ) -> Option<Result<KlibInlineTemplate, KlibBodyDecline>> {
     let callable = selected.klib_body_callable()?;
     let (type_parameters, formals) = match selected.callable.generic_sig.as_deref() {
@@ -61,7 +80,7 @@ pub fn lower_inline_template(
     };
     let checkpoint = LoweringCheckpoint::of(ir);
     Some(
-        lower(ir, declaration, bodies)
+        lower(ir, declaration, prepared, callees)
             .map(|function| KlibInlineTemplate {
                 function,
                 type_parameters,
@@ -90,8 +109,13 @@ fn lower(
     ir: &mut IrFile,
     declaration: Declaration<'_>,
     bodies: &KlibDeclarationBodies,
+    callees: TemplateCallees<'_>,
 ) -> Result<FunId, KlibBodyDeclineReason> {
     let callable = declaration.callable;
+    let mut calls = TemplateCalls {
+        module: &callable.identity().module,
+        callees,
+    };
     if declaration.suspend {
         return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
             "a suspend function",
@@ -136,7 +160,7 @@ fn lower(
         &header,
         &builtins,
         ir,
-        &mut TemplateCalls,
+        &mut calls,
     )
     .body(statements)?;
     ir.functions[template as usize].body = Some(body);
@@ -153,7 +177,7 @@ fn lower(
                     &header,
                     &builtins,
                     ir,
-                    &mut TemplateCalls,
+                    &mut calls,
                 )
                 .default_value(default, declared)?,
             ),
@@ -213,11 +237,16 @@ fn modifiers_with_receiver(
     aligned
 }
 
-/// A template's calls: it is copied into its callers rather than emitted, so none of its calls is
-/// linked to a dependency function.
-struct TemplateCalls;
+/// A template's calls. The template is copied into its callers rather than emitted, so each call
+/// is linked as its caller would link it: an external call of the provider's identity for the
+/// exact serialized callee.
+struct TemplateCalls<'a> {
+    /// The template's declaring module, whose producer graph resolves its calls.
+    module: &'a str,
+    callees: TemplateCallees<'a>,
+}
 
-impl CallLinker for TemplateCalls {
+impl CallLinker for TemplateCalls<'_> {
     fn is_selected(&self, _callee: &KlibPublicIdSignature) -> Result<bool, KlibBodyDeclineReason> {
         // No source edge needs a template's callee as target code.
         Ok(false)
@@ -226,11 +255,70 @@ impl CallLinker for TemplateCalls {
     fn link(
         &mut self,
         _ir: &mut IrFile,
-        _callee: &KlibPublicIdSignature,
+        callee: &KlibPublicIdSignature,
     ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
-        Err(KlibBodyDeclineReason::UnsupportedOperation(
-            "a call of a dependency function from an inline template",
-        ))
+        let signature = KlibDeclarationSignature::Public(callee.clone());
+        let identity = match self
+            .callees
+            .declarations
+            .callee_origin(self.module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    callee.clone(),
+                )))
+            }
+            KlibCalleeOrigin::Missing => {
+                return Err(KlibBodyDeclineReason::UndeclaredCallee(Box::new(
+                    callee.clone(),
+                )))
+            }
+        };
+        let callee_declined = |reason| {
+            KlibBodyDeclineReason::CalleeDeclined(Box::new(KlibBodyDecline::new(
+                signature.clone(),
+                reason,
+            )))
+        };
+        let (arena, declaration) = self
+            .callees
+            .declarations
+            .function(&identity)
+            .ok_or_else(|| callee_declined(KlibBodyDeclineReason::Unjoined))?;
+        if declaration.dispatch_receiver.is_some() {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call of a member function",
+            ));
+        }
+        let Some((target, realization)) = (self.callees.provider)(&identity) else {
+            return Err(callee_declined(KlibBodyDeclineReason::SignatureMismatch(
+                "the provider realizes no declaration of the exact serialized callee".to_owned(),
+            )));
+        };
+        if realization.callable.inline.can_inline() {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call of an inline dependency function from an inline template",
+            ));
+        }
+        let header = function_header(None, arena, declaration).map_err(callee_declined)?;
+        let (params, ret, context_count, extension_receiver, receiver) = header.linked_signature();
+        Ok(LinkedCallee {
+            callee: Callee::External {
+                target,
+                default_provider: None,
+                params: params.to_vec(),
+                ret,
+                substitutions: Vec::new(),
+                defaults: Vec::new(),
+                extension_receiver_parameter: extension_receiver.then_some(context_count as u32),
+            },
+            receiver,
+            params: params.to_vec(),
+            ret,
+            context_count,
+            singleton_dispatch: None,
+        })
     }
 }
 

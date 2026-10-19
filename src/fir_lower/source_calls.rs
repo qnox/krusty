@@ -108,7 +108,7 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
     pub(super) overridden_declarations: &'a [crate::types::OverriddenDeclaration],
     pub(super) suspend: bool,
-    pub(super) can_inline: bool,
+    pub(super) inline: crate::libraries::InlineKind,
     pub(super) inline_plan: Option<&'a crate::fir::FirInlineBodyPlan>,
     pub(super) substitutions: &'a [crate::fir::FirTypeSubstitution],
     pub(super) extension_receiver_parameter: Option<u32>,
@@ -359,7 +359,7 @@ impl BodyLowering<'_> {
             semantic_role,
             overridden_declarations,
             suspend,
-            can_inline,
+            inline,
             inline_plan,
             substitutions,
             extension_receiver_parameter,
@@ -400,19 +400,34 @@ impl BodyLowering<'_> {
             self.ir.inline_regions.insert(expanded);
             return Some(expanded);
         }
-        if can_inline && self.ir.same_module_inlining() == crate::ir::SameModuleInlining::ExpandInIr
+        if inline.can_inline()
+            && self.ir.same_module_inlining() == crate::ir::SameModuleInlining::ExpandInIr
         {
-            if let Some(template) = self.dependency_templates.template(self.ir, target).cloned() {
-                return self.dependency_inline_call(dependency_inline::DependencyInlineCall {
-                    target,
-                    template,
-                    parameter_types: &parameter_types,
-                    dispatch_receiver,
-                    extension_receiver,
-                    extension_receiver_parameter,
-                    arguments,
-                    substitutions,
-                });
+            match self.dependency_templates.template(self.ir, target).cloned() {
+                Some(template) => {
+                    // A selected template is an obligation: a call it cannot expand fails the
+                    // file, never retried as a call of the dependency function.
+                    return self.dependency_inline_call(dependency_inline::DependencyInlineCall {
+                        target,
+                        template,
+                        parameter_types: &parameter_types,
+                        dispatch_receiver,
+                        extension_receiver,
+                        extension_receiver_parameter,
+                        arguments,
+                        substitutions,
+                    });
+                }
+                // A declaration without a legal call has no fallback when its body cannot be
+                // expanded: the call is unsupported rather than an ordinary dependency call.
+                None if inline.must_inline() => {
+                    crate::trace_compiler!(
+                        "lower",
+                        "the must-inline dependency function {target:?} has no template"
+                    );
+                    return None;
+                }
+                None => {}
             }
         }
         let (statements, receiver, args, mut defaults) =
@@ -423,7 +438,7 @@ impl BodyLowering<'_> {
                 extension_receiver,
                 arguments,
                 defaults: SelectedDefaultMode::Omit,
-                preserve_inline_lambdas: can_inline,
+                preserve_inline_lambdas: inline.can_inline(),
                 extension_receiver_parameter,
                 mode: SelectedOperandMode::DirectWhenOrdered,
             })?;
@@ -483,7 +498,7 @@ impl BodyLowering<'_> {
         if let Some(result) = declared_result {
             self.ir.call_declared_ret.insert(call, result.get());
         }
-        if can_inline {
+        if inline.can_inline() {
             self.ir.inline_call_sites.insert(call);
         }
         if suspend {
@@ -504,7 +519,7 @@ impl BodyLowering<'_> {
             );
         }
         let region = self.wrap_call_statements(statements, call);
-        if can_inline {
+        if inline.can_inline() {
             self.ir.inline_regions.insert(region);
         }
         Some(region)

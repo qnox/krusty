@@ -10,7 +10,7 @@ use std::rc::Rc;
 use crate::fir::ExternalCallableId;
 use crate::fir_lower::{DependencyInlineTemplate, DependencyInlineTemplates};
 use crate::ir::IrFile;
-use crate::klib_lowering::lower_inline_template;
+use crate::klib_lowering::{lower_inline_template, TemplateCallees};
 use crate::libraries::SemanticPlatform;
 
 /// Templates lowered from the serialized bodies of the platform's KLIB dependencies.
@@ -34,7 +34,16 @@ impl DependencyInlineTemplates for KlibInlineTemplates {
     ) -> Option<DependencyInlineTemplate> {
         let realization = self.platform.external_callable(target)?;
         let bodies = self.platform.klib_dependency_body_facts()?;
-        let Some(template) = lower_inline_template(ir, &realization, bodies.inline_bodies()) else {
+        let provider = |identity: &crate::libraries::KlibDependencyCallable| {
+            self.platform.external_callable_by_dependency(identity)
+        };
+        let callees = TemplateCallees {
+            declarations: bodies.bodies(),
+            provider: &provider,
+        };
+        let Some(template) =
+            lower_inline_template(ir, &realization, bodies.inline_bodies(), callees)
+        else {
             crate::trace_compiler!(
                 "lower",
                 "inline dependency `{}` is not a KLIB declaration",

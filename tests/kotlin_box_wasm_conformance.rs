@@ -521,6 +521,53 @@ pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::
     }
 }
 
+/// A required inline dependency function whose body cannot become a template rejects its caller:
+/// it is never compiled as a direct call of the dependency function.
+#[test]
+fn wasm_a_declined_required_inline_body_rejects_the_caller() {
+    let case = super::multimodule_conformance_cases::DECLINED_REQUIRED_INLINE_BODY;
+    let modules = krusty::conformance::split_modules(case.source).expect("valid module test shape");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        let stem = format!("{}-{}", target.name(), case.stem);
+        if !focused_wasm_lane_available(&lane, &stem) {
+            return;
+        }
+        let outcome =
+            lane.compile_modules_and_run(&std::env::temp_dir(), &stem, &units, case.source);
+        assert!(
+            matches!(&outcome, Outcome::Frontend(message)
+                if super::multimodule_conformance_cases::required_inline_rejection(message).is_some()),
+            "{stem}: {outcome:?}"
+        );
+    }
+}
+
+/// A required stdlib inline function whose template declines rejects its caller.
+#[test]
+fn wasm_a_declined_required_stdlib_template_rejects_the_caller() {
+    let src = super::multimodule_conformance_cases::DECLINED_STDLIB_INLINE_BODY;
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        let stem = format!("{}-declinedRequiredStdlibTemplate", target.name());
+        if !focused_wasm_lane_available(&lane, &stem) {
+            return;
+        }
+        let outcome = lane.compile_and_run(
+            &std::env::temp_dir(),
+            &stem,
+            &[(format!("{stem}.kt"), src.to_string())],
+            src,
+        );
+        assert!(
+            matches!(&outcome, Outcome::Frontend(message)
+                if super::multimodule_conformance_cases::required_inline_rejection(message).is_some()),
+            "{stem}: {outcome:?}"
+        );
+    }
+}
+
 /// Run `src` directly against both Wasm targets' KLIBs and runtimes; every target must answer `OK`.
 /// Skips only where a directly invoked lane cannot run; target-owned harness passes require it.
 fn expect_wasm_box(src: &str, stem: &str) {

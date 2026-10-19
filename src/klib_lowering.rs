@@ -29,4 +29,4 @@ pub use body_unit::DependencyBodyUnit;
 pub(crate) use body_unit::EmittedDependencyCallable;
 pub use callee_facts::KlibCalleeFacts;
 pub use decline::{KlibBodyDecline, KlibBodyDeclineReason};
-pub use inline_templates::{lower_inline_template, KlibInlineTemplate};
+pub use inline_templates::{lower_inline_template, KlibInlineTemplate, TemplateCallees};
