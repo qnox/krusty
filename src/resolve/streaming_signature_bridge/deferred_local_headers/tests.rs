@@ -175,6 +175,118 @@ fun build() {
 }
 
 #[test]
+fn shape_changing_local_alias_defers_shared_constructor_property_atomically() {
+    let source = r#"// LANGUAGE: +LocalTypeAliases
+package sample
+
+class Pair<T>
+class Expanded<A, B>
+class Leaf
+fun build() {
+    typealias Pair<T> = Expanded<T, T>
+    class Local(val value: Pair<Leaf>)
+}
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("DeferredSharedLocalAlias")];
+    let mut diagnostics = DiagSink::new();
+    let mut analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        &LangFeatures::from_source(source),
+        &mut diagnostics,
+    );
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+
+    let parser_local = analysis.files[0]
+        .local_class_enclosing_declarations
+        .keys()
+        .copied()
+        .find(|declaration| {
+            matches!(
+                analysis.files[0].decl(*declaration),
+                crate::ast::Decl::Class(class)
+                    if class.name.rsplit('.').next() == Some("Local")
+            )
+        })
+        .expect("parser-hoisted Local classifier");
+    let source_id = crate::fir::SourceFileId::from_raw(0);
+    let streamed = analysis
+        .streamed
+        .take()
+        .expect("non-local module headers finalize");
+    let (mut index, _, _, _) = streamed.module.into_parts();
+    let active = crate::fir::ActiveSourceDeclarations::bind_complete_source(
+        &analysis.files[0],
+        source_id,
+        &index,
+    )
+    .expect("local declarations bind to stable inventory identities");
+    let local = active
+        .canonical_classifier_declaration(parser_local, &index)
+        .expect("stable Local classifier");
+    let constructor = index
+        .owned_declaration(local, crate::fir::DeclarationKind::Constructor, 0)
+        .expect("stable Local primary constructor");
+    let property = active
+        .constructor_property_declaration(parser_local, 0)
+        .expect("stable Local constructor property");
+    assert!(index.signature(constructor).is_none());
+    assert!(index.signature(property).is_none());
+    assert!(index.declaration_spellings_deferred(constructor));
+    assert!(index.declaration_spellings_deferred(property));
+
+    let checked = analysis.types[0]
+        .as_ref()
+        .expect("Pass 2 checked local declarations");
+    for declaration in [constructor, property] {
+        assert!(!checked
+            .failed_local_declaration_bindings
+            .contains(&declaration));
+    }
+    crate::resolve::publish_checked_local_signatures(
+        &analysis.files[0],
+        source_id,
+        &analysis.symbols,
+        checked,
+        &mut index,
+    )
+    .expect("paired deferred headers publish from one checked occurrence");
+
+    let constructor_ty = index
+        .signature(constructor)
+        .expect("constructor signature")
+        .parameters[0]
+        .get();
+    let property_ty = index
+        .signature(property)
+        .expect("property signature")
+        .result
+        .get();
+    assert_eq!(constructor_ty, property_ty);
+    assert_eq!(
+        constructor_ty.obj_internal(),
+        Some(crate::types::type_name("sample/Expanded"))
+    );
+    assert_eq!(
+        constructor_ty.type_args(),
+        [
+            crate::types::Ty::obj("sample/Leaf"),
+            crate::types::Ty::obj("sample/Leaf"),
+        ]
+    );
+    assert_eq!(
+        index
+            .declaration_spellings(constructor)
+            .expect("constructor spelling")
+            .param(0),
+        &index
+            .declaration_spellings(property)
+            .expect("property spelling")
+            .ret,
+    );
+}
+
+#[test]
 fn mandatory_local_default_reuses_selected_and_secondary_binds_active_spelling() {
     let source = r#"
 package sample

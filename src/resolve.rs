@@ -48244,26 +48244,49 @@ impl<'a> Checker<'a> {
                 .iter()
                 .enumerate()
                 .map(|(index, property)| {
-                    if let Some(&semantic) = finalized_constructor_types
+                    let constructor_semantic = finalized_constructor_types
                         .as_ref()
                         .and_then(|types| types.get(index))
+                        .copied();
+                    if finalized_primary_constructor_header && constructor_semantic.is_none() {
+                        return Ty::Error;
+                    }
+                    if let Some((property_declaration, finalized, property_semantic, spelling)) =
+                        constructor_property_facts[index].as_ref()
                     {
-                        if let Some((property_declaration, true, property_semantic, _)) =
-                            constructor_property_facts[index].as_ref()
+                        if (*finalized && property_semantic.is_none())
+                            || constructor_semantic
+                                .zip(*property_semantic)
+                                .is_some_and(|(constructor, property)| constructor != property)
                         {
-                            if *property_semantic != Some(semantic) {
-                                self.failed_local_declaration_bindings
-                                    .insert(*property_declaration);
-                                if let Some(constructor) = stable_primary_constructor {
-                                    self.failed_local_declaration_bindings.insert(constructor);
-                                }
-                                return Ty::Error;
+                            self.failed_local_declaration_bindings
+                                .insert(*property_declaration);
+                            if let Some(constructor) = stable_primary_constructor {
+                                self.failed_local_declaration_bindings.insert(constructor);
                             }
+                            return Ty::Error;
                         }
                         let Some(constructor) = stable_primary_constructor else {
                             return Ty::Error;
                         };
-                        let checked = self.record_or_bind_deferred_parameter_type(
+                        return self.record_or_bind_deferred_constructor_property_type(
+                            &classifier_header_scope,
+                            constructor,
+                            *property_declaration,
+                            &property.ty,
+                            property.is_vararg,
+                            constructor_semantic.or(*property_semantic),
+                            constructor_spellings
+                                .as_ref()
+                                .and_then(|spellings| spellings.param(index)),
+                            spelling.as_ref().map(|role| role.as_binding()),
+                        );
+                    }
+                    if let Some(semantic) = constructor_semantic {
+                        let Some(constructor) = stable_primary_constructor else {
+                            return Ty::Error;
+                        };
+                        return self.record_or_bind_deferred_parameter_type(
                             &classifier_header_scope,
                             constructor,
                             &property.ty,
@@ -48273,46 +48296,6 @@ impl<'a> Checker<'a> {
                                 .as_ref()
                                 .and_then(|spellings| spellings.param(index)),
                         );
-                        if checked == Ty::Error {
-                            return Ty::Error;
-                        }
-                        if let Some((
-                            property_declaration,
-                            true,
-                            _,
-                            Some(crate::spelling::DeferredSpellingRole::Selected {
-                                spelling: property_spelled,
-                                ..
-                            }),
-                        )) = constructor_property_facts[index].as_ref()
-                        {
-                            if self.checked_declaration_spelling(&property.ty)
-                                != Some(property_spelled)
-                            {
-                                self.failed_local_declaration_bindings
-                                    .insert(*property_declaration);
-                                self.failed_local_declaration_bindings.insert(constructor);
-                                return Ty::Error;
-                            }
-                        }
-                        return checked;
-                    }
-                    if finalized_primary_constructor_header {
-                        return Ty::Error;
-                    }
-                    if let Some((declaration, true, semantic, spelled)) =
-                        constructor_property_facts[index].as_ref()
-                    {
-                        return semantic.map_or(Ty::Error, |semantic| {
-                            self.record_or_bind_deferred_parameter_type(
-                                &classifier_header_scope,
-                                *declaration,
-                                &property.ty,
-                                property.is_vararg,
-                                semantic,
-                                spelled.as_ref().map(|role| role.as_binding()),
-                            )
-                        });
                     }
                     if deferred_primary_constructor_header {
                         let Some(constructor) = stable_primary_constructor else {
@@ -48326,17 +48309,6 @@ impl<'a> Checker<'a> {
                             constructor_spellings
                                 .as_ref()
                                 .and_then(|spellings| spellings.param(index)),
-                        );
-                    }
-                    if let Some((declaration, false, _, spelled)) =
-                        constructor_property_facts[index].as_ref()
-                    {
-                        return self.bind_active_deferred_parameter_type(
-                            &classifier_header_scope,
-                            *declaration,
-                            &property.ty,
-                            property.is_vararg,
-                            spelled.as_ref().map(|role| role.as_binding()),
                         );
                     }
                     semantic_value_parameter_ty(
@@ -50578,6 +50550,17 @@ impl<'a> Checker<'a> {
                         }
                     }
                     let extension_receiver = bp.receiver.as_ref().map(|receiver| {
+                        if deferred_property_header {
+                            return self.bind_active_deferred_declaration_type(
+                                scope,
+                                stable_property
+                                    .expect("a deferred local property retains its declaration"),
+                                receiver,
+                                property_spellings
+                                    .as_ref()
+                                    .and_then(|spellings| spellings.receiver()),
+                            );
+                        }
                         match stable_property_shape.and_then(|shape| shape.extension_receiver) {
                             Some(semantic) if finalized_local_property_header => self
                                 .record_or_bind_deferred_declaration_type(
@@ -50595,8 +50578,19 @@ impl<'a> Checker<'a> {
                             _ => self.check_declaration_type(scope, receiver),
                         }
                     });
-                    let checked_property_annotation =
-                        bp.ty.as_ref().map(|declared| match stable_result {
+                    let checked_property_annotation = bp.ty.as_ref().map(|declared| {
+                        if deferred_property_header {
+                            return self.bind_active_deferred_declaration_type(
+                                scope,
+                                stable_property
+                                    .expect("a deferred local property retains its declaration"),
+                                declared,
+                                property_spellings
+                                    .as_ref()
+                                    .and_then(|spellings| spellings.ret()),
+                            );
+                        }
+                        match stable_result {
                             Some(semantic) if finalized_local_property_header => self
                                 .record_or_bind_deferred_declaration_type(
                                     scope,
@@ -50611,9 +50605,21 @@ impl<'a> Checker<'a> {
                                 ),
                             None if finalized_local_property_header => Ty::Error,
                             _ => self.check_declaration_type(scope, declared),
-                        });
-                    let checked_getter_annotation =
-                        bp.getter_ty.as_ref().map(|declared| match stable_result {
+                        }
+                    });
+                    let checked_getter_annotation = bp.getter_ty.as_ref().map(|declared| {
+                        if deferred_property_header {
+                            return self.bind_active_deferred_declaration_type(
+                                scope,
+                                stable_property
+                                    .expect("a deferred local property retains its declaration"),
+                                declared,
+                                property_spellings
+                                    .as_ref()
+                                    .and_then(|spellings| spellings.getter_ret()),
+                            );
+                        }
+                        match stable_result {
                             Some(semantic) if finalized_local_property_header => self
                                 .record_or_bind_deferred_declaration_type(
                                     scope,
@@ -50628,7 +50634,8 @@ impl<'a> Checker<'a> {
                                 ),
                             None if finalized_local_property_header => Ty::Error,
                             _ => self.check_declaration_type(scope, declared),
-                        });
+                        }
+                    });
                     if let (Some(property), Some(getter)) =
                         (checked_property_annotation, checked_getter_annotation)
                     {
@@ -50653,6 +50660,20 @@ impl<'a> Checker<'a> {
                         .iter()
                         .enumerate()
                         .map(|(index, parameter)| {
+                            if deferred_property_header {
+                                let ty = self.bind_active_deferred_parameter_type(
+                                    scope,
+                                    stable_property.expect(
+                                        "a deferred local property retains its declaration",
+                                    ),
+                                    &parameter.ty,
+                                    parameter.is_vararg,
+                                    property_spellings
+                                        .as_ref()
+                                        .and_then(|spellings| spellings.param(index)),
+                                );
+                                return lexical_context_receiver(self.file, parameter, ty);
+                            }
                             let ty = match stable_context_types
                                 .as_ref()
                                 .and_then(|types| types.get(index))

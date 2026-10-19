@@ -3753,12 +3753,21 @@ pub(crate) fn finalized_streamed_signature_index(
         }
         let pass_one_override_contract = stub.kind == DeclarationKind::Function
             && stub.flags.has(crate::fir::DeclarationFlags::OVERRIDE);
+        let active_aggregate_role = unowned_spelling_roles.contains_key(&stub.id)
+            && matches!(
+                stub.kind,
+                DeclarationKind::Property
+                    | DeclarationKind::Constructor
+                    | DeclarationKind::Accessor
+            );
         if deferred_local_candidates.contains(&stub.id)
             && !deferred_local_headers::retained_inline_property(headers, stub)
             && !pass_one_override_contract
-            && deferred_local_headers::requires_active_type_binding(headers, stub)
+            && (active_aggregate_role
+                || deferred_local_headers::requires_active_type_binding(headers, stub))
         {
-            // Alias-projected/generic function headers and aggregate property/accessor surfaces
+            // Alias-projected/generic function headers and aggregate constructor/property/accessor
+            // surfaces
             // remain atomic with active Pass 2. A retained Pass-1 body explicitly demands its
             // nested headers; otherwise a representable function contract publishes in Pass 1
             // and its unselected spelling roles defer independently below. An explicit override's

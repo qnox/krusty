@@ -174,7 +174,7 @@ impl Checker<'_> {
             checked,
             interface,
         );
-        properties.push(ScopedProperty {
+        let checked_property = ScopedProperty {
             name: property.name.clone(),
             ty: checked,
             owner_storage_ty: None,
@@ -190,10 +190,19 @@ impl Checker<'_> {
             source_visible: true,
             source_member: Some(source_member),
             stable_declaration,
-        });
-        let checked = properties
-            .last()
-            .expect("an active explicit property was appended");
+        };
+        let index = if let Some(index) = stable_declaration.and_then(|declaration| {
+            properties
+                .iter()
+                .position(|candidate| candidate.stable_declaration == Some(declaration))
+        }) {
+            properties[index] = checked_property;
+            index
+        } else {
+            properties.push(checked_property);
+            properties.len() - 1
+        };
+        let checked = &properties[index];
         self.declare_scoped_property(scope, checked, false);
         true
     }

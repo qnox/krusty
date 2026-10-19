@@ -465,6 +465,99 @@ impl Checker<'_> {
         semantic
     }
 
+    /// Bind the single written type occurrence shared by a primary-constructor parameter and its
+    /// `val`/`var` property. Compact signature collection deliberately assigns that occurrence to
+    /// both stable declarations. Active Pass 2 must therefore select their paired spelling roles
+    /// atomically: an active role is resolved exactly once, while every selected role is checked
+    /// against that same result.
+    pub(super) fn record_or_bind_deferred_constructor_property_type(
+        &mut self,
+        scope: &super::CheckerScope<'_>,
+        constructor: crate::fir::DeclarationId,
+        property: crate::fir::DeclarationId,
+        reference: &TypeRef,
+        is_vararg: bool,
+        expected_semantic: Option<Ty>,
+        constructor_role: Option<crate::spelling::DeclaredSpellingRole<'_>>,
+        property_role: Option<crate::spelling::DeclaredSpellingRole<'_>>,
+    ) -> Ty {
+        let (Some(constructor_role), Some(property_role)) = (constructor_role, property_role)
+        else {
+            self.failed_local_declaration_bindings.insert(constructor);
+            self.failed_local_declaration_bindings.insert(property);
+            return Ty::Error;
+        };
+        if matches!(
+            (constructor_role, property_role),
+            (
+                crate::spelling::DeclaredSpellingRole::Active(left),
+                crate::spelling::DeclaredSpellingRole::Active(right),
+            ) if left != right
+        ) {
+            self.failed_local_declaration_bindings.insert(constructor);
+            self.failed_local_declaration_bindings.insert(property);
+            return Ty::Error;
+        }
+        let (binding_owner, binding_role) = match (constructor_role, property_role) {
+            (role @ crate::spelling::DeclaredSpellingRole::Active(_), _) => (constructor, role),
+            (_, role @ crate::spelling::DeclaredSpellingRole::Active(_)) => (property, role),
+            (role, _) => (constructor, role),
+        };
+        let expected_source_semantic = expected_semantic.map(|semantic| {
+            if is_vararg {
+                semantic.non_null().array_read_elem().unwrap_or(semantic)
+            } else {
+                semantic
+            }
+        });
+        let source_semantic = match binding_role {
+            crate::spelling::DeclaredSpellingRole::Active(_) => self
+                .bind_active_deferred_declaration_type(
+                    scope,
+                    binding_owner,
+                    reference,
+                    Some(binding_role),
+                ),
+            crate::spelling::DeclaredSpellingRole::Selected { semantic, spelling } => {
+                match semantic.or(expected_source_semantic) {
+                    Some(semantic) => {
+                        self.record_finalized_declaration_type(reference, semantic, spelling)
+                    }
+                    None => Ty::Error,
+                }
+            }
+        };
+        let checked = super::semantic_value_parameter_ty(source_semantic, is_vararg);
+        let selected_matches =
+            |role: crate::spelling::DeclaredSpellingRole<'_>,
+             spelling: &crate::spelling::Spelled| {
+                match role {
+                    crate::spelling::DeclaredSpellingRole::Selected {
+                        semantic,
+                        spelling: selected,
+                    } => {
+                        semantic.is_none_or(|selected| selected == source_semantic)
+                            && selected == spelling
+                    }
+                    crate::spelling::DeclaredSpellingRole::Active(_) => true,
+                }
+            };
+        let valid = checked != Ty::Error
+            && expected_semantic.is_none_or(|expected| expected == checked)
+            && self
+                .checked_declaration_spelling(reference)
+                .is_some_and(|spelling| {
+                    selected_matches(constructor_role, spelling)
+                        && selected_matches(property_role, spelling)
+                });
+        if !valid {
+            self.failed_local_declaration_bindings.insert(constructor);
+            self.failed_local_declaration_bindings.insert(property);
+            return Ty::Error;
+        }
+        checked
+    }
+
     /// Publish source occurrences for type-parameter bounds that Pass 1 already bound. Source
     /// parameter names are used only to address their declaration-owned ordinal; every semantic
     /// type and spelling comes from the stable declaration header.

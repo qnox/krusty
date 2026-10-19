@@ -371,7 +371,12 @@ impl Checker<'_> {
                 let field_ty = has_backing_field.then_some(storage_ty);
                 self.with_ret_field(prop_ty, field_ty, scope, |c| match g {
                     FunBody::Expr(e) => {
-                        c.check_expression_getter(scope, *e, prop_ty, p.ty.is_some());
+                        c.check_expression_getter(scope, *e, prop_ty, p.declared_ty().is_some());
+                        if p.declared_ty().is_none() {
+                            if let Some(declaration) = stable_property {
+                                c.record_inferred_property_publication(declaration, *e, prop_ty);
+                            }
+                        }
                     }
                     FunBody::Block(b) => {
                         c.check_executable_body(scope, *b);
@@ -458,6 +463,13 @@ impl Checker<'_> {
             };
             if p.declared_ty().is_none() {
                 self.report_unbound_call_result_type_parameter(scope, init);
+                if let Some(declaration) = stable_property {
+                    self.record_inferred_property_publication(
+                        declaration,
+                        init,
+                        resolved_property_ty,
+                    );
+                }
             }
             if let Some(declared) = declared {
                 if p.declared_ty().is_some() {
