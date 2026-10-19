@@ -320,7 +320,7 @@ impl Checker<'_> {
         lowering_mutates: bool,
     ) -> u32 {
         let flow_identity = self.declare(scope, name, ty, lowering_mutates);
-        self.annotation_argument_locals.record(flow_identity);
+        self.local_properties.record(flow_identity, false);
         flow_identity
     }
 

@@ -4595,6 +4595,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   has its own entry for the line already in effect (`line 4: 27`, then `line 4: 28` at the `dup`).
   The JVM emitter re-marks the line in effect before a named check while the line is forgotten.
   `tests/platform_null_check_line_e2e.rs` (full-byte against kotlinc).
+- **A captured source `var` local is a shared cell.** kotlinc's `SharedVariablesLowering` boxes
+  every `var`/`lateinit var` local a non-inline closure captures, written or not: a lambda, a local
+  function, a local class and an anonymous object all take the `Ref`. A destructured `var (c) = p`
+  entry is one too. A `for` loop variable and a setter's `field` are not source `var` locals and
+  stay copied. Every local-property declaration records its source mutability once with its flow
+  identity (`resolve::local_properties`), so no declaration form is missed. The resolver's
+  `CapturedBinding` decides it for local classes and anonymous objects; checked FIR already did for
+  lambdas and local functions.
+  `a_captured_var_that_is_never_written_is_a_shared_cell` and
+  `a_captured_destructured_var_is_a_shared_cell` in `tests/captured_field_storage_e2e.rs`.
 - **`Char.code` ends an inlined call.** Its getter is an inline property kotlinc inlines, so the
   rule below applies after it (`return c + d.code` writes the line again at the `iadd`). The checker
   realizes it in place as a numeric conversion and records that conversion's origin as an inlined

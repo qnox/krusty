@@ -93,3 +93,81 @@ fn field_flags(bytes: &[u8]) -> Vec<u16> {
     let class = krusty::jvm::classreader::parse_class(bytes).expect("parse class");
     class.fields.iter().map(|field| field.access).collect()
 }
+
+/// A `var` a local class or anonymous object captures is one shared cell even when nothing writes
+/// it, as it already is for a lambda or a local function: kotlinc's `SharedVariablesLowering`
+/// boxes every captured function-local `var`. The class takes the `Ref` and reads `element`.
+#[test]
+fn a_captured_var_that_is_never_written_is_a_shared_cell() {
+    let source = "\
+fun invoke(f: () -> Unit) { f() }
+
+fun lambda(): Int {
+    var c = 0
+    invoke { println(c) }
+    return c
+}
+
+fun localClass(): Int {
+    var c = 0
+    class W { fun run() = c }
+    return W().run()
+}
+
+fun anonymousObject(): Int {
+    var c = 0L
+    val o = object { fun run() = c }
+    return o.run().toInt()
+}
+
+fun nullable(s: String?): Int {
+    var t: String? = s
+    class N { fun run() = t?.length ?: 0 }
+    return N().run()
+}
+
+fun localFunction(): Int {
+    var c = 0
+    fun r() = c
+    return r()
+}
+
+";
+    for class in [
+        "ReadOnlyCapturesKt",
+        "ReadOnlyCapturesKt$localClass$W",
+        "ReadOnlyCapturesKt$anonymousObject$o$1",
+        "ReadOnlyCapturesKt$nullable$N",
+    ] {
+        common::byte_diff_against_kotlinc_cp(
+            "ReadOnlyCaptures",
+            source,
+            class,
+            &[common::stdlib_jar()],
+        )
+        .expect("the reference kotlinc is provisioned")
+        .unwrap_or_else(|why| panic!("{class}: {why}"));
+    }
+}
+
+/// A destructured `var` entry is a source `var` too, so a local class captures it as a `Ref`. Only
+/// the class is compared: the enclosing function still places the declaration's line entry at the
+/// load rather than at the cell allocation, a separate divergence lambdas share.
+#[test]
+fn a_captured_destructured_var_is_a_shared_cell() {
+    let source = "\
+fun destructured(p: Pair<Int, Int>): Int {
+    var (c, d) = p
+    class D { fun run() = c + d }
+    return D().run()
+}
+";
+    common::byte_diff_against_kotlinc_cp(
+        "DestructuredCaptures",
+        source,
+        "DestructuredCapturesKt$destructured$D",
+        &[common::stdlib_jar()],
+    )
+    .expect("the reference kotlinc is provisioned")
+    .unwrap_or_else(|why| panic!("{why}"));
+}
