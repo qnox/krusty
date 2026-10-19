@@ -9938,9 +9938,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the same completion roots the generic-call report uses (an untyped declaration initializer or a
   statement), so an enclosing call such as `use(C(7))` still completes the result first. A self
   type (`T : KB<T>` in `KB`) is exempt: Kotlin completes it to its starred bound. A recursive bound
-  that also names another formal (`SELF : MB<T, SELF>`) is not, and `MB("v")` is reported. The
-  report reads what constructor inference recorded for each formal when it selected the
-  constructor, never the selected parameters: those are already specialized, so `Seq(s)` for
+  that also names another formal (`SELF : MB<T, SELF>`) is not, and `MB("v")` is reported. A
+  constructor is an ordinary selected callable: it records its type arguments in the common
+  selected-call record, with no solution for a formal nothing constrained, and its result signature
+  is its classifier applied to the classifier's formals. The generic-call report reads that record,
+  never the selected parameters: those are already specialized, so `Seq(s)` for
   `class Seq<T : CharSequence>(val x: T)` with `s: CharSequence` would otherwise look unconstrained,
   and a named or defaulted argument (`Named(x = s)`) would be matched to the wrong parameter. A
   branch of an `if` with an `else`, a `when` with an `else` arm, an elvis or a `try` defers the report
@@ -9952,10 +9954,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`E<String>`, `"x"`) supplies no such view and constrains nothing. An open branch is never a
   sibling's evidence, so a declared-bound fallback in one bare `D()` does not fix another bare
   `D()`; when no branch constrains the formal, every remaining open call is reported at its callee. A `when` without `else` is not joined and reports immediately.
-  Evidence is published only after the selected constructor commits, so an inaccessible or rejected
+  The record is written only when the selected constructor commits, so an inaccessible or rejected
   candidate cannot add a second inference diagnostic. An inner class has no type parameter of its
   own, so `Outer(42).Inner(100)` reports nothing. Owner:
-  `src/resolve/constructor_formal_evidence.rs`. Test:
+  `src/resolve/uninferred_call_results.rs`. Test:
   `tests/uninferred_constructor_type_parameter_e2e.rs`.
 
 - **A self-bounded constructor variable with no other constraint completes to its starred bound.**
@@ -14273,6 +14275,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   each argument of each release against its disposition; `tests/unsupported_kotlinc_arguments_e2e.rs`
   and `tests/inert_kotlinc_arguments_e2e.rs` check exit code, complete stderr and output against
   kotlinc.)
+- **One multiplatform fragment compiles as the plain module.** A build tool passes a JVM-only
+  module with several source roots as `-Xmulti-platform -Xfragments=main` plus one
+  `-Xfragment-sources=main:<file>` per source. `-Xmulti-platform` enables
+  `MultiPlatformProjects`; with a single fragment kotlinc's classes and `.kotlin_module` are the
+  plain compilation's. kotlinc 2.4.20 matches each free argument by its exact spelling (a
+  directory included, a `.java` file exempt) against the listed sources, ignores
+  `-Xfragment-sources` without `-Xfragments`, and reports, in order, each malformed value
+  (`incorrect syntax for -Xfragment-sources argument. …`), each value naming an undeclared
+  fragment (`passed <value>, but fragment … is not specified in -Xfragments`), each source listed
+  for a second fragment (`file '<file>' can be a part of only one module, …`), then each unlisted
+  free argument (`source '<arg>' does not belong to any module`), exiting 1 before writing anything. krusty reproduces these as configuration errors.
+  A name declared twice (`-Xfragments=main,main`, or `-Xfragments=main` repeated) is one
+  fragment, and the empty name is a fragment. Each distinct `-Xfragment-sources` value and free
+  spelling is checked once, in first-seen order (`bad,bad` is one diagnostic, `,` one empty
+  value). These errors are reported for any number of fragments; only a well-formed structure
+  with more than one distinct fragment (a common/platform hierarchy, with `-Xfragment-refines`)
+  is refused. (`tests/fragment_arguments_e2e.rs` compares exit code, complete stderr and the
+  output tree with kotlinc; `crates/krusty-cli/src/cli/fragments.rs` unit tests; five
+  `compiler/testData/cli/jvm/hmpp` cases in the CLI corpus.)
 - **A supertype missing from the classpath is `MISSING_DEPENDENCY_SUPERCLASS`.** As kotlinc's
   `FirMissingDependencySupertype*` checkers, a classpath classifier naming a supertype that no
   source or classpath entry provides makes every use that depends on that hierarchy an error:

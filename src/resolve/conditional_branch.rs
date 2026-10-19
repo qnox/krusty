@@ -1,6 +1,6 @@
 //! Conditional-result joining and branch-value discovery.
 
-use super::{Checker, CheckerScope};
+use super::{Checker, CheckerScope, Wanted};
 use crate::ast::{Expr, ExprId, File};
 use crate::integer_constant::IntegerConstant;
 use crate::libraries::GenericSig;
@@ -306,7 +306,10 @@ impl Checker<'_> {
         }
     }
 
-    fn conditional_call_result_signature(&self, expression: ExprId) -> Option<&GenericSig> {
+    fn conditional_call_result_signature(
+        &self,
+        expression: ExprId,
+    ) -> Option<std::borrow::Cow<'_, GenericSig>> {
         let expression = branch_value_expression(self.file, expression);
         if let Some(signature) = self.unbound_call_result_signature(expression) {
             return Some(signature);
@@ -334,7 +337,65 @@ impl Checker<'_> {
                         .iter()
                         .all(|parameter| !crate::types::ty_mentions_param(*parameter, formal))
             })
-            .then_some(signature)
+            .then_some(std::borrow::Cow::Borrowed(signature))
+    }
+
+    /// Whether the call selected at `call` recorded no solution for its formal at `index`.
+    fn recorded_solution_is_absent(&self, call: ExprId, index: usize) -> bool {
+        self.selected_call_type_arguments(call)
+            .and_then(|arguments| arguments.get(index))
+            .is_some_and(Option::is_none)
+    }
+
+    /// Whether a conditional branch's selected call still has a result formal without a recorded
+    /// solution. Its checked result is only a provisional completion (`D<Any?>` for an
+    /// unconstrained `D(1)`, or a symbolic `C<Comparable<T>>`), not a constraint supplied by source.
+    pub(super) fn branch_result_is_open(&self, branch: ExprId) -> bool {
+        let call = branch_value_expression(self.file, branch);
+        self.unbound_call_result_signature(call)
+            .is_some_and(|signature| {
+                signature.formals.iter().enumerate().any(|(index, formal)| {
+                    crate::types::ty_mentions_param(signature.ret, std::slice::from_ref(formal))
+                        && self.recorded_solution_is_absent(call, index)
+                })
+            })
+    }
+
+    /// A branch's type as evidence for its siblings. An open branch offers no type to rebind a
+    /// sibling against (see [`Self::branch_result_is_open`]).
+    pub(super) fn branch_sibling_type(&self, branch: ExprId, ty: Ty) -> Ty {
+        if self.branch_result_is_open(branch) {
+            Ty::Error
+        } else {
+            ty
+        }
+    }
+
+    /// Check one branch of an `if` with an `else` or a `when` with an `else` arm. kotlinc completes
+    /// such a conditional as one synthetic call even in statement position, so a sibling branch can
+    /// fix a type parameter this branch leaves open (`when (s) { "a" -> build { set(T()) }; else ->
+    /// Buildee() }`). An open branch stays open until every branch has been checked; a sibling
+    /// rebinds it and the conditional's completion reports anything still open.
+    pub(super) fn joined_branch_result(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        branch: ExprId,
+        wanted: Wanted,
+        joined: bool,
+    ) -> Ty {
+        if !joined || wanted.expected.is_some() || wanted.value_required {
+            return self.expr_result(scope, branch, wanted.expected, wanted.value_required);
+        }
+        self.discarded_exprs.insert(branch);
+        let ty = self.expr_with_context(scope, branch, false);
+        let result = branch_value_expression(self.file, branch);
+        if !self.branch_result_is_open(branch)
+            && self.report_unbound_call_result_type_parameter(scope, result)
+        {
+            Ty::Error
+        } else {
+            ty
+        }
     }
 
     /// Complete all selected result calls owned by one conditional expression.
@@ -369,10 +430,7 @@ impl Checker<'_> {
             ConditionalCompletionOwner::BranchResults => {
                 self.report_unbound_conditional_branch(scope, branch);
             }
-            ConditionalCompletionOwner::EnclosingExpression => {
-                let branch = branch_value_expression(self.file, branch);
-                self.constructor_formal_evidence.remove(&branch);
-            }
+            ConditionalCompletionOwner::EnclosingExpression => {}
             ConditionalCompletionOwner::SelectedCall(lambda) => {
                 let branches = self
                     .call_owned_conditional_branches
@@ -412,21 +470,16 @@ impl Checker<'_> {
             }
             return;
         };
-        if Self::type_is_lexically_fixed(scope, selected_shape.ret) {
-            for branch in branches {
-                let branch = branch_value_expression(self.file, branch);
-                self.constructor_formal_evidence.remove(&branch);
-            }
-        } else {
+        if !Self::type_is_lexically_fixed(scope, selected_shape.ret) {
             for branch in branches {
                 self.report_unbound_conditional_branch(scope, branch);
             }
         }
     }
 
-    /// Report a conditional branch whose selected generic call remains symbolic after sibling
-    /// rebinding. A call defaulted to its formal's bound has no symbolic remainder and is not
-    /// diagnosed here.
+    /// Report a conditional branch whose selected call remains open after sibling rebinding: its
+    /// result is still symbolic, or a result formal has no recorded solution (`D(1)` completed to
+    /// `D<Any?>` only provisionally).
     pub(super) fn report_unbound_conditional_branch(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -436,18 +489,28 @@ impl Checker<'_> {
             return;
         }
         let branch = branch_value_expression(self.file, branch);
-        let Some(signature) = self.unbound_call_result_signature(branch).cloned() else {
-            self.report_uninferred_constructor_type_parameter(branch);
+        let Some(signature) = self
+            .unbound_call_result_signature(branch)
+            .map(std::borrow::Cow::into_owned)
+        else {
             return;
         };
         let actual = self.expr_types[branch.0 as usize];
-        if Self::type_is_lexically_fixed(scope, actual) {
-            return;
-        }
+        let symbolic = !Self::type_is_lexically_fixed(scope, actual);
         let Some(formal) = signature
             .formals
             .iter()
-            .find(|formal| crate::types::ty_mentions_param(actual, std::slice::from_ref(formal)))
+            .enumerate()
+            .find(|(index, formal)| {
+                let formal = std::slice::from_ref(*formal);
+                if crate::types::ty_mentions_param(actual, formal) {
+                    symbolic
+                } else {
+                    crate::types::ty_mentions_param(signature.ret, formal)
+                        && self.recorded_solution_is_absent(branch, *index)
+                }
+            })
+            .map(|(_, formal)| formal)
         else {
             return;
         };
@@ -533,11 +596,11 @@ impl Checker<'_> {
         {
             return current;
         }
-        let Some(signature) = self.conditional_call_result_signature(branch).cloned() else {
-            return match self.open_constructor_expectation(branch, sibling) {
-                Some(expectation) => recheck(self, expectation),
-                None => current,
-            };
+        let Some(signature) = self
+            .conditional_call_result_signature(branch)
+            .map(std::borrow::Cow::into_owned)
+        else {
+            return current;
         };
         // Equal constructors, a subtype result (`linkedSetOf()` beside `hashSetOf<T>()`), a more
         // specific sibling (`emptyList()` beside `mutableListOf("a")`), or a shared generic

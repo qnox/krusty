@@ -35,7 +35,7 @@ impl Checker<'_> {
                 // `null ?: run { statement }` must infer `run` from its lambda as `Unit`; forcing
                 // the non-null form of `Null` (`Nothing`) into the RHS instead asks the lambda to
                 // return `Nothing` and rejects every normally-completing statement.
-                None if lt == Ty::Nothing || self.constructor_branch_is_open(lhs) => {
+                None if lt == Ty::Nothing || self.branch_result_is_open(lhs) => {
                     self.expr(&rhs_scope, rhs)
                 }
                 None => self.expr_expected(&rhs_scope, rhs, lt),
