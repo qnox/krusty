@@ -78,7 +78,7 @@ impl Checker<'_> {
         self.extend_superclass_captures(scope, declaration, captures, &mut bindings);
     }
 
-    fn lexical_binding_by_identity(
+    pub(super) fn lexical_binding_by_identity(
         &self,
         scope: &CheckerScope<'_>,
         name: &str,
@@ -428,21 +428,39 @@ impl Checker<'_> {
 
     /// The discovered captures of the local classifier named `owner`, in the shape
     /// [`Self::extend_required_captures`] consumes.
+    /// The local superclass of a local class, when it is one whose captures were discovered.
+    pub(super) fn local_superclass_declaration(
+        &self,
+        declaration: DeclId,
+        class: &ClassDecl,
+    ) -> Option<DeclId> {
+        let owner = self.active_classifier_internal(declaration, class)?;
+        let superclass = self
+            .resolved_body_local_supertypes
+            .get(&owner)?
+            .first()?
+            .kotlin_class_internal()?;
+        self.discovered_local_classifier(superclass)
+    }
+
+    fn discovered_local_classifier(&self, owner: TypeName) -> Option<DeclId> {
+        self.discovered_local_class_captures
+            .keys()
+            .copied()
+            .find(|declaration| {
+                matches!(
+                    self.file.decl(*declaration),
+                    Decl::Class(class)
+                        if self.active_classifier_internal(*declaration, class) == Some(owner)
+                )
+            })
+    }
+
     fn local_classifier_captures_of(
         &self,
         owner: TypeName,
     ) -> Option<Vec<RequiredLocalClassifierCapture>> {
-        let declaration =
-            self.discovered_local_class_captures
-                .keys()
-                .copied()
-                .find(|declaration| {
-                    matches!(
-                        self.file.decl(*declaration),
-                        Decl::Class(class)
-                            if self.active_classifier_internal(*declaration, class) == Some(owner)
-                    )
-                })?;
+        let declaration = self.discovered_local_classifier(owner)?;
         let captures = self.discovered_local_class_captures.get(&declaration)?;
         let bindings = self
             .discovered_local_class_capture_bindings
@@ -470,33 +488,7 @@ impl Checker<'_> {
         &self,
         constructor: &ResolvedConstructor,
     ) -> Option<SelectedLocalClassifierCaptures> {
-        let stable_constructor = match constructor {
-            ResolvedConstructor::Source {
-                stable_declaration, ..
-            } => *stable_declaration,
-            ResolvedConstructor::Plain { member, .. }
-            | ResolvedConstructor::PlainSlots { member, .. } => member.stable_declaration,
-            ResolvedConstructor::Synthetic { ctor, .. } => ctor.declaration.stable_declaration,
-        };
-        let classifier = stable_constructor
-            .and_then(|declaration| {
-                self.active_declarations
-                    .and_then(|active| active.constructor(self.file, declaration))
-                    .map(|(classifier, _, _)| classifier)
-            })
-            .or_else(|| {
-                let owner = constructor.owner();
-                self.discovered_local_class_captures
-                    .keys()
-                    .copied()
-                    .find(|declaration| {
-                        matches!(
-                            self.file.decl(*declaration),
-                            Decl::Class(class)
-                                if self.active_classifier_internal(*declaration, class) == Some(owner)
-                        )
-                    })
-            })?;
+        let classifier = self.constructed_local_classifier(constructor)?;
         let captures = self.discovered_local_class_captures.get(&classifier)?;
         let bindings = self
             .discovered_local_class_capture_bindings
@@ -516,5 +508,39 @@ impl Checker<'_> {
                 )
                 .collect(),
         })
+    }
+
+    /// The local classifier a resolved constructor builds.
+    pub(super) fn constructed_local_classifier(
+        &self,
+        constructor: &ResolvedConstructor,
+    ) -> Option<DeclId> {
+        let stable_constructor = match constructor {
+            ResolvedConstructor::Source {
+                stable_declaration, ..
+            } => *stable_declaration,
+            ResolvedConstructor::Plain { member, .. }
+            | ResolvedConstructor::PlainSlots { member, .. } => member.stable_declaration,
+            ResolvedConstructor::Synthetic { ctor, .. } => ctor.declaration.stable_declaration,
+        };
+        stable_constructor
+            .and_then(|declaration| {
+                self.active_declarations
+                    .and_then(|active| active.constructor(self.file, declaration))
+                    .map(|(classifier, _, _)| classifier)
+            })
+            .or_else(|| {
+                let owner = constructor.owner();
+                self.discovered_local_class_captures
+                    .keys()
+                    .copied()
+                    .find(|declaration| {
+                        matches!(
+                            self.file.decl(*declaration),
+                            Decl::Class(class)
+                                if self.active_classifier_internal(*declaration, class) == Some(owner)
+                        )
+                    })
+            })
     }
 }

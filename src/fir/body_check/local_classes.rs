@@ -1566,10 +1566,22 @@ impl BodyFirChecker<'_> {
             "fir",
             "local class body captures declaration={declaration:?} statement={statement:?} captures={captures:?}",
         );
+        // A local class records the first-use order its checked body published.
+        let capture_order = match self.info.local_class_capture_orders.get(&transient) {
+            Some(order) if order.len() == captures.len() => order.clone(),
+            None if captures.is_empty() => Box::default(),
+            _ => {
+                return Err(self.failure(
+                    Some(class.span),
+                    BodyCheckFailureKind::MissingStableCallTarget,
+                ))
+            }
+        };
         let captures = self.checked_class_captures(declaration, class.span, origin, &captures)?;
         Ok(self.body.add_statement(FirStatement {
             origin,
             kind: FirStatementKind::LocalDeclaration {
+                capture_order,
                 declaration,
                 captures,
             },

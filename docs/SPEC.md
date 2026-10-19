@@ -10386,17 +10386,48 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Lower::emit_new` supplies them ahead of the source arguments at every construction, so no
   argument-mapping arm can forget them. `ClassSig::ctor_params` stays the SOURCE signature and is
   indexed by source position — captures are not in it.
+  The captured values come in kotlinc's first-use order, not spelling order. A closure lists the
+  values it reads itself, in source order, then the values of the closures it includes, in the
+  order it meets them. A class reads in its construction code (property initializers and `init`
+  blocks in source order, then delegate values) and includes its primary constructor (parameter
+  defaults, then super-constructor arguments, then a local superclass) and then its members in
+  source order. Inside a body,
+  a lambda (an inline-call lambda too) or an anonymous object is included where it is written, a
+  local function where it is called or referenced, and a local or inner class where it is
+  constructed. `class W { fun run() = d + b; val g get() = c + a }` takes `($d, $b, $c, $a)`, and
+  `fun m(): Int { val l = { d }; fun f() = c; return f() + a }` reads `a`, then `d`, then `c`.
+  Every use is a resolved identity the checked class body recorded (a read or write bound to the
+  capture's field or, for a captured delegated local, to its lexical binding; an included
+  declaration's capture, by field when it is declared inside the class and by lexical binding when
+  it is declared outside), never a spelling: in
+  `class R { fun b(): Int = b(); fun first() = a + b }` the self-call is not a use of a captured
+  `b`, so `R` takes `($a, $b)`. A class that calls a local function includes the values the
+  function captures in the function's own first-use order, found the same way: with
+  `fun helper() = b + a`, a class whose only use is `helper()` takes `($b, $a)`, not name order.
+  The resolver publishes that order of lexical identities only for the class that includes the
+  function; the function's own capture vector, and so its lifted parameters, are unchanged. A
+  class that includes a function whose captured value no recorded use orders (an implicit context
+  argument) is rejected as unsupported rather than ordered by name. Field and parameter order is JVM representation, so the checker
+  publishes the order as a recorded fact (`TypeInfo::local_class_capture_orders`, carried by the
+  checked local-class declaration to `IrFile::class_capture_order`). Every phase before the JVM
+  backend keeps capture fields, constructor parameters and construction arguments in field order,
+  which is their identity; the JVM emitter alone applies the order to the field table, every
+  constructor descriptor with its parameter slots and names, the default stubs, and every
+  construction and `super(…)` argument list. A recorded order that is not a permutation of the
+  constructor prefix is an internal error. A local declaration nothing uses is never included by kotlinc,
+  which then captures nothing for it; krusty still captures what it reads and orders those values
+  after everything else. Tests: `tests/local_class_capture_order_e2e.rs`.
   The enclosing INSTANCE is the second capture kind — the receiver itself rather than a binding in
   the chain — and is carried as ONE capture however many of its members are read, placed FIRST
   because lowering identifies it by position (field 0), which is what an outer member read and a
   `this@Outer` both go through. It is rejected when the enclosing receiver is a `@JvmInline value
   class`: there is no instance to capture, since `this` is the bare underlying value there
   (`codegen/box/inlineClasses/initBlock.kt` fails verification otherwise).
-  Three capture shapes are NOT modelled yet and are rejected (the file skips): a local function
-  (which carries captures of its own), a reassigned `var` (shared mutable state, not capturable by
-  value), and a capture read during CONSTRUCTION — an initializer, an `init` block, a
-  base-constructor argument, a secondary constructor, or a primary-constructor parameter default. The capture scan is syntactic and
-  conservative: over-reporting skips a file, under-reporting emits a class without what it needs,
+  Two capture shapes are NOT modelled yet and are rejected (the file skips): a local class that
+  calls a local function capturing a value only an implicit context argument uses (no recorded use
+  orders that capture), and a reassigned `var` (shared mutable state, not capturable by value).
+  A capture read during construction is supported and ordered as described above. The capture
+  scan is syntactic and conservative: over-reporting skips a file, under-reporting emits a class without what it needs,
   which the box corpus caught as `NoSuchMethodError` on construction
   (`codegen/box/localClasses/capturingInDefaultConstructorParameter.kt`).
   Tests: `tests/local_class_scope_e2e.rs`.

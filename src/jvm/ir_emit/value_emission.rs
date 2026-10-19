@@ -8,7 +8,7 @@ use crate::types::Ty;
 
 use super::{
     access_bridges, array_jvm_element, bottom_values, boxed_descriptor, bytecode_inline_call,
-    captured_storage, class_ctor_jvm_tys, constant_emission, constructor_accessors,
+    capture_order, captured_storage, class_ctor_jvm_tys, constant_emission, constructor_accessors,
     declared_jvm_interface, default_mask_count, emit_constructor_default_arguments,
     instance_field_jvm_name, ir_ty_to_jvm, jvm_declared_ty, jvm_function_interface,
     jvm_function_invoke_descriptor, jvm_function_params, jvm_static_members, jvm_tys, jvm_value_ty,
@@ -214,7 +214,8 @@ impl super::Emitter<'_> {
                 defaults: default_parameters,
                 default_prefix_count,
             } => {
-                let args = args.clone();
+                // A local class takes its captures, which lead its arguments, in its physical order.
+                let args = capture_order::physical_for(self.ir, *internal, args.clone());
                 if self.emit_nullable_sam_wrapper_new(e, *internal, &args, code) {
                     return;
                 }
@@ -231,11 +232,15 @@ impl super::Emitter<'_> {
                         (d.clone(), false, args.len(), args.len())
                     } else {
                         let mut field_tys: Vec<Ty> = match ctor_params {
-                            Some(ps) => jvm_tys(ps),
+                            Some(ps) => jvm_tys(&capture_order::physical_for(
+                                self.ir,
+                                *internal,
+                                ps.clone(),
+                            )),
                             None => self
                                 .ir
                                 .class_id_by_name(*internal)
-                                .map(|c| class_ctor_jvm_tys(&self.ir.classes[c as usize]))
+                                .map(|c| class_ctor_jvm_tys(self.ir, &self.ir.classes[c as usize]))
                                 .unwrap_or_default(),
                         };
                         // A class whose primary ctor takes a value-class param has a PRIVATE primary + a
