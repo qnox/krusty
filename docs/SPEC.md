@@ -1121,6 +1121,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `diagnostics_language_parity_e2e::inherited_override_visibility_access_matches_kotlinc`, and
   `diagnostics_language_parity_e2e::internal_override_visibility_access_matches_kotlinc_across_modules`,
   and `diagnostics_language_parity_e2e::local_override_visibility_access_matches_kotlinc`.
+- **Body-local declaration groups publish one complete semantic owner before retained bodies are
+  lowered.** A representable explicit property and its accessors remain Pass-1 contracts; only a
+  genuinely unpublishable signature (including an atomic vararg constructor/property pair) waits
+  for the active Pass-2 group. Retained inline bodies and parameter defaults whose classifier owner
+  is still deferred wait for that exact owner-completion publication instead of constructing a
+  partial common-IR callable. Checked direct supertypes also retain their semantic roles: an
+  interface edge is never reinterpreted as the superclass merely because it is first in the local
+  overlay. Tests: `local_class_e2e::a_body_local_interface_is_not_validated_as_a_superclass`,
+  `local_class_e2e::an_explicit_body_local_property_contract_precedes_its_member_bodies`,
+  `local_class_e2e::a_retained_inline_body_waits_for_its_body_local_owner`,
+  `local_class_e2e::a_retained_default_waits_for_its_body_local_owner`, and
+  `local_class_e2e::a_body_local_extension_property_keeps_its_receiver`.
 - **Companion member properties — accessors + records.** A companion property's backing field is a
   static on the OUTER class; kotlinc realizes the property as `public final` INSTANCE accessors on
   `C$Companion` (via `access$…$cp` bridges over its private fields) and records it on the
@@ -14286,6 +14298,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
       solving follows the same rule for an implicitly typed property
       (`TrFlags::CLASS_LITERAL_LHS`).
       (`tests/class_literal_type_arguments_e2e.rs`.)
+    - Package segments (`TypeArgumentsInPackagesTypeRefChecker`): a `<…>` list written on a package
+      segment of a qualified type or annotation reference (`part1<Int>.part2.part3.Cls`,
+      `@part1.part2<Int>.part3.Anno`) reports "type arguments are not allowed for packages." on the
+      list. The parser records each list written before the last segment
+      (`TypeRef::qualifier_arguments`, `File::annotation_qualifier_arguments` for an annotation);
+      the segments before the resolved classifier's outermost enclosing classifier are packages.
+      A list on the last package segment was always the error; an earlier one is a deprecation
+      warning until the feature. The package arguments are dropped before the classifier is
+      applied, by the checker and by signature solving alike, so `part1<Int>.part2.part3.Cls`
+      types as `Cls` and `part1<Int>.part2.part3.Outer<String>.Inner` keeps its captured
+      `String`. A declaration type finalized in Pass 1 is checked where its occurrence is
+      published. (`tests/package_qualifier_type_arguments_e2e.rs`.)
   - Reified type arguments (`FirReifiedChecker`), with `ProhibitIntersectionReifiedTypeParameter`,
     `ReportReificationProblemsInDnnAndFlexible` and `NullableNothingInReifiedPosition`. A type
     argument for a `reified` type parameter, or for the `T` of `kotlin.Array`'s constructor and of
@@ -14586,7 +14610,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `companion object Companion : I`, `class G<in T, out R : Any> : Any`. The checked annotations of
   top-level functions and properties, body properties, accessors and constructors are folded and
   published on their stable declarations in Pass 1, like those of classifiers and methods. Not yet
-  modeled: imports, `@get:`/`@set:` use-site targets, constructor-property parameters, type aliases,
+  modeled: `@get:`/`@set:` use-site targets, constructor-property parameters, type aliases,
   enum entries, operator conventions, `this(...)` delegation, annotation uses, the deprecation of
   an `expect` header itself, and the `actual` of a primary constructor in its rendering.
   Test: `tests/deprecation_usage_e2e.rs`.
@@ -14610,6 +14634,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   top-level `const` properties; Java platform-type and substituted renderings; companion-block
   properties; and `hiddenSince` removing the candidate.
   Test: `tests/deprecation_classpath_e2e.rs`.
+- **Deprecated classifiers on imports and migrating use positions.** Import validation retains the
+  selected classifier identities for each valid occurrence in a resolver-owned inventory. After
+  checked declaration and file annotations are published, the deprecation checker consumes those
+  identities without resolving the written path again. An import does not report the declaration
+  it imports: it reports that declaration's classifier container, then each enclosing classifier
+  innermost first. Enclosing classifiers use
+  `ReportDeprecationsOfOuterImportedClasses`. The checker also reports a deprecated object called
+  through implicit `invoke` (`ReportDeprecationsOfClassifiersInImplicitInvokes`) and a deprecated
+  companion selected through its class as a delegated-property expression or augmented-assignment
+  target (`ReportDeprecatedCompanionInDelegation`). A companion used as a callable-reference
+  qualifier keeps its ordinary deprecation level in the released 2.4 compilers. Every decision
+  consumes the resolver's selected singleton identity and provenance. The 2.4.0 and 2.4.10
+  references predate these migrating checkers, so
+  neither a `WARNING` nor an `ERROR` deprecation reports in these positions. Starting in 2.4.20, a
+  `WARNING` reports as an ordinary deprecation; while one of the migrations remains disabled, an
+  `ERROR` warns with the selected reference release's future-error suffix and is not hidden by
+  `@Suppress`. It retains the `DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING` identity, so an explicit
+  `-Xwarning-level` for that diagnostic overrides `-Werror` or `-nowarn`. Enabling the feature
+  restores the declaration's error level.
+  Test: `tests/deprecation_migration_e2e.rs`.
 - **An abstract member's metadata and nullability match a concrete one's, without the field.** An
   abstract property has no backing field, so kotlinc writes no field entry in its
   `JvmPropertySignature` and interns none of the field's strings: `interface Holder { val count:

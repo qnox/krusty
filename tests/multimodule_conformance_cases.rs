@@ -151,6 +151,38 @@ pub const MEMBER_EXTENSION_RECEIVERS: Case = Case {
              }\n",
 };
 
+/// A local class inherits and overrides a member-extension property whose expect receiver must
+/// remain a semantic identity when the platform module provides it through an actual typealias.
+/// Every backend consumes this exact source through the common matrix inventory.
+pub const LOCAL_MEMBER_EXTENSION_EXPECT_RECEIVER: Case = Case {
+    stem: "multimoduleLocalMemberExtensionExpectReceiver",
+    source: "// MODULE: common\n\
+             expect class Receiver {\n\
+             \x20   val prefix: String\n\
+             }\n\
+             interface Left {\n\
+             \x20   fun read(receiver: Receiver): String\n\
+             \x20   val Receiver.suffix: String\n\
+             }\n\
+             interface Right {\n\
+             \x20   fun read(receiver: Receiver): String\n\
+             \x20   val Receiver.suffix: String\n\
+             }\n\
+             interface Both : Left, Right\n\
+             fun exercise(receiver: Receiver): String {\n\
+             \x20   class Local : Both {\n\
+             \x20       override fun read(receiver: Receiver): String = receiver.prefix\n\
+             \x20       override val Receiver.suffix: String get() = \"K\"\n\
+             \x20   }\n\
+             \x20   val local = Local()\n\
+             \x20   return with(local) { local.read(receiver) + receiver.suffix }\n\
+             }\n\
+             // MODULE: main()()(common)\n\
+             class ActualReceiver(val prefix: String)\n\
+             actual typealias Receiver = ActualReceiver\n\
+             fun box(): String = exercise(ActualReceiver(\"O\"))\n",
+};
+
 /// Reified substitutions cross a real separately compiled KLIB for every callable origin. All
 /// arguments are inferred at the consumer call site, so success requires the selected call—not
 /// source spelling or an origin-specific lowering path—to publish the runtime type identity. The
@@ -311,6 +343,7 @@ pub const ALL: &[Case] = &[
     LOCAL_INCREMENT_SHAPES,
     INNER_CLASS_OUTER_TYPE,
     MEMBER_EXTENSION_RECEIVERS,
+    LOCAL_MEMBER_EXTENSION_EXPECT_RECEIVER,
     REIFIED_CALLABLE_ORIGINS,
     DEPENDENCY_FUNCTION_IMPLEMENTATION_MARKERS,
     NATIVE_ABI_SYMBOLS,

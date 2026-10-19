@@ -52,15 +52,23 @@ fn lower_single_source_into(
     let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
     let ordinary =
         streamed.ordinary_body_work(&analysis.files[0], crate::fir::SourceFileId::from_raw(0));
-    let (index, mut inline_bodies, mut default_arguments, mut sources) =
+    let (mut index, mut inline_bodies, mut default_arguments, mut sources) =
         streamed.module.into_parts();
     let retained_inline_count = inline_bodies.len();
+    crate::resolve::publish_checked_local_signatures(
+        &analysis.files[0],
+        crate::fir::SourceFileId::from_raw(0),
+        &analysis.symbols,
+        analysis.types[0].as_ref().expect("checked type info"),
+        &mut index,
+    )
+    .expect("checked local signatures");
     let mut sink =
         super::super::CommonIrBodySink::new(&index, crate::fir::SourceFileId::from_raw(0), &mut ir)
             .unwrap();
-    sink.accept_default_arguments(&index, &mut default_arguments)
-        .unwrap();
     sink.accept_inline_bodies(&index, &mut inline_bodies)
+        .unwrap();
+    sink.accept_default_arguments(&index, &inline_bodies, &mut default_arguments)
         .unwrap();
     for work in ordinary {
         let mut indexed_sink = sink.indexed(&index);
@@ -78,6 +86,9 @@ fn lower_single_source_into(
         )
         .unwrap();
     }
+    sink.accept_inline_bodies(&index, &inline_bodies).unwrap();
+    sink.accept_default_arguments(&index, &inline_bodies, &mut default_arguments)
+        .unwrap();
     if let Err(error) = sink.finish(&index) {
         panic!(
             "common FIR sink failed: {error:?}; callable realizations={:?}; declarations={:?}",
@@ -124,15 +135,31 @@ pub(crate) fn lower_source_from_set(sources: &[(&str, &str)], active_source: usi
     );
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
-    let source_id = crate::fir::SourceFileId::from_raw(active_source as u32);
+    let source_id = crate::fir::SourceFileId::from_raw(
+        u32::try_from(active_source).expect("source-set test source index fits u32"),
+    );
     let ordinary = streamed.ordinary_body_work(&analysis.files[active_source], source_id);
-    let (index, inline_bodies, mut default_arguments, mut source_map) =
+    let (mut index, inline_bodies, mut default_arguments, mut source_map) =
         streamed.module.into_parts();
+    for (source_index, (file, info)) in analysis.files.iter().zip(analysis.types.iter()).enumerate()
+    {
+        let source = crate::fir::SourceFileId::from_raw(
+            u32::try_from(source_index).expect("source-set test source index fits u32"),
+        );
+        crate::resolve::publish_checked_local_signatures(
+            file,
+            source,
+            &analysis.symbols,
+            info.as_ref().expect("checked type info"),
+            &mut index,
+        )
+        .expect("checked local signatures");
+    }
     let mut ir = IrFile::default();
     let mut sink = super::super::CommonIrBodySink::new(&index, source_id, &mut ir).unwrap();
-    sink.accept_default_arguments(&index, &mut default_arguments)
-        .unwrap();
     sink.accept_inline_bodies(&index, &inline_bodies).unwrap();
+    sink.accept_default_arguments(&index, &inline_bodies, &mut default_arguments)
+        .unwrap();
     for work in ordinary {
         let mut deferred = DeferredBodies::default();
         crate::fir::check_and_dispatch_body(
@@ -155,6 +182,9 @@ pub(crate) fn lower_source_from_set(sources: &[(&str, &str)], active_source: usi
                 .unwrap();
         }
     }
+    sink.accept_inline_bodies(&index, &inline_bodies).unwrap();
+    sink.accept_default_arguments(&index, &inline_bodies, &mut default_arguments)
+        .unwrap();
     sink.finish(&index).unwrap();
     ir
 }

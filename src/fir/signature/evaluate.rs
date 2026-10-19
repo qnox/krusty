@@ -1291,6 +1291,15 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             // Every `?` inside the arms must still leave the guard: a failed node is dropped by a
             // sequence effect and may be read again by the block's result.
             let ty = (|| -> Result<ResolvedTy, DiagnosticId> {
+                if graph.written_type_application(expression).is_some() {
+                    return semantics.resolve_written_type_application(
+                        expression,
+                        graph,
+                        &mut |argument| {
+                            evaluate_expression(semantics, argument, graph, demand, memo, computing)
+                        },
+                    );
+                }
                 match node {
                     SigExpr::Known(ty) => Ok(ty),
                     SigExpr::IntegerLiteral(_) => Ok(ResolvedTy::new(Ty::Int)

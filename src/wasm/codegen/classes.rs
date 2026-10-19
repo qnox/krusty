@@ -561,33 +561,62 @@ fn key_type(
     objects: &ObjectRoot,
     key: &SlotKey,
 ) -> Result<u32, Unsupported> {
-    let accessor = |target: &ResolvedPropertyOverrideTarget| match target {
-        ResolvedPropertyOverrideTarget::Module(property) => {
-            match ir.local_property_layouts.get(property) {
-                Some(IrLocalPropertyLayout::Member { ty, .. }) => Ok(*ty),
-                _ => ir
-                    .checked_properties
-                    .get(property)
-                    .map(|property| property.ty)
-                    .ok_or_else(|| "a property member with no recorded type".to_string()),
-            }
-        }
-        ResolvedPropertyOverrideTarget::External(_) => {
-            Err("a member overriding a library property".to_string())
-        }
-    };
     match key {
         SlotKey::Any(slot) => Ok(objects.any_slot_types[*slot as usize % ANY_SLOTS as usize]),
         SlotKey::Function(function) => method_type(module, ir, *function),
-        SlotKey::Getter(target) => {
-            let value = carrier(accessor(target)?)?.ok_or("a `Unit` property")?;
-            Ok(module.func_type(vec![REFERENCE], vec![value]))
-        }
-        SlotKey::Setter(target) => {
-            let value = carrier(accessor(target)?)?.ok_or("a `Unit` property")?;
-            Ok(module.func_type(vec![REFERENCE, value], Vec::new()))
-        }
+        SlotKey::Getter(target) => property_key_type(ir, module, target, false),
+        SlotKey::Setter(target) => property_key_type(ir, module, target, true),
     }
+}
+
+/// The type of one property-accessor slot. A materialized accessor is authoritative for its
+/// complete parameter list; only a plain field accessor has no function and uses the property's
+/// checked value type to choose its representation signature.
+fn property_key_type(
+    ir: &IrFile,
+    module: &mut Module,
+    target: &ResolvedPropertyOverrideTarget,
+    setter: bool,
+) -> Result<u32, Unsupported> {
+    let ResolvedPropertyOverrideTarget::Module(property) = target else {
+        return Err("a member overriding a library property".to_string());
+    };
+    let function = match ir.local_property_layouts.get(property) {
+        Some(IrLocalPropertyLayout::Member {
+            getter,
+            setter: property_setter,
+            ty,
+            ..
+        }) => {
+            let function = if setter { *property_setter } else { *getter };
+            if let Some(function) = function {
+                return method_type(module, ir, function);
+            }
+            let value = carrier(*ty)?.ok_or_else(|| "a `Unit` property".to_string())?;
+            let mut params = vec![REFERENCE];
+            let results = if setter {
+                params.push(value);
+                Vec::new()
+            } else {
+                vec![value]
+            };
+            return Ok(module.func_type(params, results));
+        }
+        Some(IrLocalPropertyLayout::MemberExtension {
+            getter,
+            setter: property_setter,
+            ..
+        }) => {
+            if setter {
+                *property_setter
+            } else {
+                Some(*getter)
+            }
+        }
+        _ => None,
+    }
+    .ok_or_else(|| "a property table slot with no recorded accessor".to_string())?;
+    method_type(module, ir, function)
 }
 
 /// How field `field` of `class` is carried.

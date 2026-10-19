@@ -1127,7 +1127,9 @@ fn add_constructor_delegation(
         let outer_receiver = resolved
             .outer_receiver
             .as_ref()
-            .map(|selected| checker.materialize_implicit_receiver(origin, Some(span), selected))
+            .map(|selected| {
+                checker.materialize_constructor_prefix_receiver(origin, Some(span), selected)
+            })
             .transpose()?
             .flatten();
         Ok::<_, BodyCheckFailure>((arguments, outer_receiver))

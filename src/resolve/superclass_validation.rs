@@ -14,19 +14,15 @@ impl Checker<'_> {
     ) {
         let Some((owner, superclass, separate_emission)) = current_owner.and_then(|owner| {
             class.base_class.as_ref()?;
-            self.resolved_body_local_supertypes
-                .get(&owner)
-                .and_then(|supertypes| supertypes.first())
-                .and_then(|supertype| supertype.kotlin_class_internal())
-                .or_else(|| self.direct_superclass_name(owner))
-                .map(|superclass| {
-                    (
-                        owner,
-                        superclass,
-                        self.resolved_type_name(superclass)
-                            .is_none_or(|shape| shape.source_file != Some(self.file_index)),
-                    )
-                })
+            let superclass = self
+                .applied_declared_supertype(owner)?
+                .kotlin_class_internal()?;
+            Some((
+                owner,
+                superclass,
+                self.resolved_type_name(superclass)
+                    .is_none_or(|shape| shape.source_file != Some(self.file_index)),
+            ))
         }) else {
             return;
         };
