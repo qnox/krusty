@@ -209,8 +209,12 @@ impl Checker<'_> {
                 owner_is_interface,
             ),
         };
-        let policy_depth =
-            self.push_declaration_policies(scope, &property.annotations, &property.annotation_args);
+        let policy_depth = self.push_selected_declaration_policies(
+            scope,
+            &property.annotations,
+            &property.annotation_args,
+            include,
+        );
         // The parser hoists a `companion { ... }` property as a classifier-associated extension,
         // but an initialized/lateinit/explicit-field declaration still owns static storage on the
         // declaring classifier. Validate its `@field:` site from that semantic storage shape, not
@@ -272,10 +276,11 @@ impl Checker<'_> {
         owner_is_annotation: bool,
         include: &dyn Fn(&AnnotationRef) -> bool,
     ) {
-        let policy_depth = self.push_declaration_policies(
+        let policy_depth = self.push_selected_declaration_policies(
             scope,
             &parameter.annotations,
             &parameter.annotation_args,
+            include,
         );
         for (annotation, arguments) in parameter.annotations.iter().zip(&parameter.annotation_args)
         {
