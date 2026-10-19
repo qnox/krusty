@@ -391,6 +391,30 @@ fun box(): String {
 }
 
 #[test]
+fn wasm_a_scope_function_lambda_mutates_a_caller_var_through_its_shared_cell() {
+    expect_wasm_box(
+        r#"
+fun box(): String {
+    var count = 0
+    var last = "none"
+    val size = "abc".let {
+        count += it.length
+        last = it
+        it.length
+    }
+    run { count++ }
+    with("de") { count += length }
+    if (size != 3) return "result $size"
+    if (count != 6) return "count $count"
+    if (last != "abc") return "last $last"
+    return "OK"
+}
+"#,
+        "wasmScopeFunctionSharedCell",
+    );
+}
+
+#[test]
 fn wasm_declines_an_instruction_wrapper_whose_body_lowering_does_not_model() {
     // `pow` reaches fdlibm's `__ieee754_pow`, whose locals have no initializer: the wrapper is not
     // support code, so its call declines instead of failing compilation.

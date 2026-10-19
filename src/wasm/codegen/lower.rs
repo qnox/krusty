@@ -22,6 +22,7 @@ mod default_arguments;
 mod intrinsic_operations;
 mod objects;
 mod scalar_instructions;
+mod shared_cells;
 
 pub(super) use scalar_instructions::is_scalar_operation;
 
@@ -372,6 +373,13 @@ fn expression_type(
             ir.functions[function as usize].ret
         }
         IrExpr::PropertyRead { ty, .. } if ir.checked_type(id).is_none() => *ty,
+        // A shared cell's element is read, and a write evaluates to what it stored, at the
+        // element's declared type.
+        IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. }
+            if ir.checked_type(id).is_none() =>
+        {
+            *elem
+        }
         node => ir
             .checked_type(id)
             .ok_or_else(|| format!("{} without a checked type", describe_node(node)))?,
@@ -444,6 +452,8 @@ struct Body<'a> {
     values: HashMap<u32, (u32, Ty)>,
     /// Slots of `Unit`-typed variables, which have no local.
     unit_values: HashSet<u32>,
+    /// Slots whose local holds a shared cell rather than the value: slot → the cell's struct type.
+    cells: HashMap<u32, u32>,
     /// The declared type of every variable in the body, read before the code that declares it
     /// is emitted: a block's type is its value's, and that value can be a variable the block
     /// itself declares (`n++` is `{ val old = n; n = old + 1; old }`).
@@ -515,6 +525,7 @@ impl<'a> Body<'a> {
                 .map(|(slot, ty)| (slot as u32, (slot as u32, *ty)))
                 .collect(),
             unit_values: HashSet::default(),
+            cells: HashMap::default(),
             declared,
             result,
             depth: 0,
@@ -717,12 +728,22 @@ impl<'a> Body<'a> {
         match node {
             IrExpr::Const(constant) => self.constant(&constant)?,
             IrExpr::UnitInstance | IrExpr::InlineFrameMarker => {}
+            IrExpr::GetValue(slot) if self.cells.contains_key(&slot) => {
+                return Err("a shared cell read as a value".to_string());
+            }
             IrExpr::GetValue(slot) => {
                 if let Some((local, _)) = self.values.get(&slot) {
                     self.code.local_get(*local);
                 } else if !self.unit_values.contains(&slot) {
                     return Err(format!("a read of value {slot} before its declaration"));
                 }
+            }
+            IrExpr::Variable {
+                index,
+                init: Some(init),
+                ..
+            } if matches!(self.ir.expr(init), IrExpr::RefNew { .. }) => {
+                self.shared_cell_variable(index, init)?
             }
             IrExpr::Variable {
                 index, ty, init, ..
@@ -746,6 +767,9 @@ impl<'a> Body<'a> {
                     }
                 }
             },
+            IrExpr::SetValue { var, .. } if self.cells.contains_key(&var) => {
+                return Err("an assignment replacing a shared cell".to_string());
+            }
             IrExpr::SetValue { var, value } => match self.values.get(&var).copied() {
                 Some((local, ty)) => {
                     self.value(value, ty)?;
@@ -801,6 +825,12 @@ impl<'a> Body<'a> {
             }
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(id, op, lhs, rhs)?,
             IrExpr::Equality { op, mode, lhs, rhs } => self.equality(op, mode, lhs, rhs)?,
+            IrExpr::RefGet { holder, elem } => self.shared_cell_read(holder, elem)?,
+            IrExpr::RefSet {
+                holder,
+                elem,
+                value,
+            } => self.shared_cell_write(holder, elem, value)?,
             IrExpr::PrimitiveNeg { operand, ty } => match carrier(ty)? {
                 Some(ValType::I32) => {
                     self.code.i32_const(0);
