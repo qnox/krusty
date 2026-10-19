@@ -211,6 +211,40 @@ fn native_prepared_extension_run_maps_ir_parameters_to_plan_coordinates() {
 }
 
 #[test]
+fn native_prepared_also_and_apply_return_their_receiver_after_the_invocation() {
+    let Some(libraries) = analysis::native_stdlib() else {
+        return;
+    };
+    for name in ["also", "apply"] {
+        let function = single_function(&libraries, "kotlin", name);
+        let Some(crate::libraries::InlineBodyPlan::InvokeLambda {
+            frame,
+            lambda_parameter: 1,
+            arguments,
+            prologue,
+            cleanup,
+            cause: None,
+            recovery: None,
+            defaults,
+            result: Some(crate::libraries::InlineBodyValue::Parameter(0)),
+        }) = function.callable.inline_body_plan.as_deref()
+        else {
+            panic!("kotlin.{name} must invoke its lambda and then return its receiver")
+        };
+        assert_eq!(frame.callee.as_ref(), name);
+        assert!(frame.inline_only);
+        assert!(frame.source.is_none());
+        assert_eq!(
+            arguments.as_slice(),
+            [crate::libraries::InlineBodyValue::Parameter(0)]
+        );
+        assert!(prologue.is_empty());
+        assert!(cleanup.is_empty());
+        assert!(defaults.is_empty());
+    }
+}
+
+#[test]
 fn a_package_type_alias_is_published_from_its_metadata_declaration() {
     let upper = Ty::nullable(Ty::obj("kotlin/Any"));
     let parameter = Ty::ty_param("T", upper);

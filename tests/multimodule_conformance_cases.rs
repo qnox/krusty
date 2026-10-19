@@ -266,6 +266,37 @@ pub const OVERLAPPING_BITS: Case = Case {
 };
 
 /// Every portable multimodule claim. Each backend adapter iterates this table in full.
+/// `also` and `apply` from the target stdlib expand through their declaration's direct lambda
+/// invocation plan: each answers its receiver after the lambda ran, a lambda mutates a caller
+/// `var`, and a `return` inside `also`'s lambda leaves the enclosing function. The library module
+/// calls them too, so the plan reaches a dependency's own body as well as the consumer's.
+pub const RECEIVER_RETURNING_SCOPE_FUNCTIONS: Case = Case {
+    stem: "multimoduleReceiverReturningScopeFunctions",
+    source: "// MODULE: lib\n\
+             fun tagged(value: String): String = value.also { }\n\
+             fun appliedLength(value: String): Int {\n\
+             \x20   var total = 0\n\
+             \x20   value.apply { total += length }\n\
+             \x20   return total\n\
+             }\n\
+             // MODULE: main(lib)\n\
+             fun early(value: String): String {\n\
+             \x20   value.also { return \"OK\" }\n\
+             \x20   return \"no non-local return\"\n\
+             }\n\
+             fun box(): String {\n\
+             \x20   if (tagged(\"lib\") != \"lib\") return \"library also\"\n\
+             \x20   if (appliedLength(\"abc\") != 3) return \"library apply\"\n\
+             \x20   var seen = \"\"\n\
+             \x20   val kept = \"K\".also { seen = it }\n\
+             \x20   if (kept != \"K\" || seen != \"K\") return \"also\"\n\
+             \x20   var count = 0\n\
+             \x20   val applied = \"ab\".apply { count += length }\n\
+             \x20   if (applied != \"ab\" || count != 2) return \"apply\"\n\
+             \x20   return early(\"unused\")\n\
+             }\n",
+};
+
 pub const ALL: &[Case] = &[
     TOP_LEVEL_DEPENDENCY,
     DEPENDS_ON,
@@ -286,6 +317,7 @@ pub const ALL: &[Case] = &[
     FLOATING_BITS,
     FLOATING_BIT_REFERENCES,
     OVERLAPPING_BITS,
+    RECEIVER_RETURNING_SCOPE_FUNCTIONS,
 ];
 
 #[test]

@@ -17153,6 +17153,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   it. A `null` of another type is an inconsistency. Test:
   `control_forms::a_nullability_smart_cast_lowers_as_the_source_smart_cast_does`.
 
+- **A KLIB `also`/`apply` call expands as an invocation that answers the receiver.** The direct
+  lambda invocation plan of an exact `@InlineOnly` prepared-inline body accepts, besides one
+  `return` of the invocation (`let`, `run`, `with`), the two statements `block(...)` and
+  `return <parameter>`: the invocation runs for its effect and the call answers the returned
+  parameter (`InvokeLambda { result: Some(..) }`, as the JVM provider decodes the same
+  declarations). Every existing guard stays: the compiler-owned `INVOKE` origin, operands and the
+  returned value read only declaration-owned parameter symbols, the lambda parameter is a non-null,
+  non-suspend `FunctionN` of matching arity whose metadata modifier runs it in the caller's frame,
+  and a body returning the lambda parameter itself publishes no plan. Tests:
+  `klib_libraries::tests::native_prepared_also_and_apply_return_their_receiver_after_the_invocation`,
+  `multimodule_conformance_cases::RECEIVER_RETURNING_SCOPE_FUNCTIONS` (JVM, Native and Wasm,
+  including a taken non-local `return` out of `also`).
+
 - **A KLIB `when` keeps its source form.** A `when` with an `else` (a final branch whose condition
   is the constant `true`) of origin `WHEN` lowers to one flat `when` recorded as exhaustive at its
   type; one of origin `IF` is an `if`-`else if` chain and lowers to nested two-branch `when`s, each
