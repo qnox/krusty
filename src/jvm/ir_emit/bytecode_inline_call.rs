@@ -314,12 +314,31 @@ impl Emitter<'_> {
             reified,
             defaults: defaults.as_ref(),
         };
+        self.inline_call_with_body(&inline_call, base, code)
+    }
+
+    /// Inline `inline_call`, whose callee body is in hand: through the ported inliner, or, for a
+    /// call whose literal lambdas route planning keeps on the byte splice, that splice above the
+    /// frame `base`. [`InlineCallOutcome::NotApplicable`] only before any literal is selected.
+    pub(super) fn inline_call_with_body(
+        &mut self,
+        inline_call: &ClasspathInlineCall<'_, '_>,
+        base: u16,
+        code: &mut CodeBuilder,
+    ) -> InlineCallOutcome {
+        let ClasspathInlineCall {
+            call_expression,
+            args,
+            leading_non_argument_operands,
+            body,
+            ..
+        } = *inline_call;
         let has_lambda_arg = args
             .iter()
             .any(|&argument| self.is_inline_lambda_shape(argument));
         if !has_lambda_arg {
             return InlineCallOutcome::declined_or_handled(
-                self.try_inline_classpath_body(&inline_call, code),
+                self.try_inline_classpath_body(inline_call, code),
             );
         }
         // kotlinc expands every literal whose parameter is not `noinline`; a `noinline` literal is
@@ -335,7 +354,7 @@ impl Emitter<'_> {
         ) {
             Ok(positions) if positions.is_empty() => {
                 return InlineCallOutcome::declined_or_handled(
-                    self.try_inline_classpath_body(&inline_call, code),
+                    self.try_inline_classpath_body(inline_call, code),
                 );
             }
             Ok(positions) => positions,
@@ -356,12 +375,12 @@ impl Emitter<'_> {
                 !crate::jvm::inline::function_invoke_sites(&insns, &body.source_cp).is_empty()
             });
         if !body_invokes_lambda {
-            return self.inline_value_used_lambda_call(&inline_call, code);
+            return self.inline_value_used_lambda_call(inline_call, code);
         }
-        let reason = match self.lambda_call_route(&inline_call, code) {
+        let reason = match self.lambda_call_route(inline_call) {
             Ok(LambdaCallRoute::MethodInliner(callee, default_lambdas)) => {
                 return match self.inline_classpath_lambda_call(
-                    &inline_call,
+                    inline_call,
                     &callee,
                     &default_lambdas,
                     LambdaPlacement::Invokes,
@@ -381,7 +400,7 @@ impl Emitter<'_> {
             }
         };
         crate::trace_compiler!("splice", "literal-lambda call spliced: {reason:?}");
-        self.splice_selected_literals(&inline_call, &positions, reason, base, code)
+        self.splice_selected_literals(inline_call, &positions, reason, base, code)
     }
 
     /// A call whose literal lambdas the callee's body uses only as values: each is passed to the
@@ -396,9 +415,10 @@ impl Emitter<'_> {
         // A shape the port does not own yet stays on the byte bridge. A body that constructs no
         // anonymous object takes the literal as an ordinary value (one passed where the parameter
         // is not function-typed, as `map[key] = { … }`).
-        match self.lambda_call_route(inline_call, code) {
+        match self.lambda_call_route(inline_call) {
             Ok(LambdaCallRoute::MethodInliner(callee, default_lambdas))
-                if crate::jvm::inliner::constructs_regenerated_object(&callee, &self.bodies) =>
+                if crate::jvm::inliner::constructs_regenerated_object(&callee, &self.bodies)
+                    || self.inlined_literals_unread(inline_call, &callee) =>
             {
                 return match self.inline_classpath_lambda_call(
                     inline_call,
@@ -925,6 +945,8 @@ impl Emitter<'_> {
                     let operand_frame = self.frame.mark();
                     let lines = code.line_entry_count();
                     self.emit_value(value, code);
+                    let evaluated = self.value_ty(value);
+                    self.unbox_captured_value_class(evaluated, ty, code);
                     code.withdraw_lines_since(lines);
                     self.frame.rewind_to(operand_frame);
                     let entered = self.frame.enter_temp(TempRole::InlineArgument, ty);
@@ -1057,9 +1079,15 @@ impl Emitter<'_> {
             );
             code.inline_call_marker(true);
         }
+        // Inside the bracket the body runs over the empty stack FixStack leaves.
+        let saved = code.stack_height();
+        if spills_operands {
+            code.set_stack_height(0);
+        }
         self.write_inlined_node(&inlined, placement, code);
         if spills_operands {
             code.inline_call_marker(false);
+            code.set_stack_height(saved + code.stack_height());
         }
         // kotlinc's `markLineNumberAfterInlineIfNeeded`: inside a condition the caller's line is
         // marked again for the jump that follows; elsewhere it is forgotten, so the next mark of
@@ -1258,10 +1286,6 @@ impl Emitter<'_> {
                 supplies.push(evaluated);
                 continue;
             }
-            if !target.inline_only {
-                supplies.push(evaluated);
-                continue;
-            }
             let extension_receiver = self
                 .ir
                 .static_extension_receivers
@@ -1273,21 +1297,21 @@ impl Emitter<'_> {
                 supplies.push(evaluated);
                 continue;
             }
+            // A function value for an inline parameter is read from its local by every inline
+            // callee: the body's invokes load it where it lives (`genOrGetLocal`).
             if function_typed(operand) {
                 let parameter = index.checked_sub(leading_non_argument_operands)?;
-                let inlining = self
-                    .ir
-                    .call_inline_modifiers
-                    .get(&call_expression)?
-                    .get(parameter)
-                    .copied()?;
-                supplies.push(
-                    if inlining == crate::types::InlineParameterModifier::Noinline {
-                        evaluated
-                    } else {
-                        Supply::CallerLocal
-                    },
-                );
+                if crate::jvm::inline_parameters::is_inline_parameter(
+                    self.ir,
+                    call_expression,
+                    parameter,
+                )? {
+                    supplies.push(Supply::CallerLocal);
+                    continue;
+                }
+            }
+            if !target.inline_only {
+                supplies.push(evaluated);
                 continue;
             }
             supplies.push(Supply::CallerLocal);
@@ -1759,7 +1783,8 @@ impl inliner::SourceLines for CallLines<'_, '_, '_, '_> {
 pub(super) enum LambdaPlacement {
     /// The body invokes some of them, so their code lands in the caller.
     Invokes,
-    /// The body only passes them to the anonymous objects it constructs, whose copies inline them.
+    /// The body only passes them to the anonymous objects it constructs, whose copies inline them,
+    /// or never reads them at all.
     Objects,
 }
 

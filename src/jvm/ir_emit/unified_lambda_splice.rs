@@ -918,6 +918,8 @@ mod tests {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
+        // Finishing common lowering records each inline lambda's non-local exit.
+        ir.record_lambda_exits();
         let run = EmitRun::default();
         let emitted = crate::jvm::ir_emit::invariant_tests::emit_for_test_with_bodies(
             &ir,

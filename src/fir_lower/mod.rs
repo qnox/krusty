@@ -225,6 +225,10 @@ pub(crate) fn lower_body_with_context(
             declaration,
             visibility: header.visibility,
         });
+    if lowering.inline_declaration.is_some() {
+        lowering.inline_parameter_values =
+            source_calls::InlineParameterValues::of_inline_function(&body);
+    }
     if !root_is_default {
         lowering.enclosure = lowering.expansion_enclosure;
     }
@@ -359,7 +363,15 @@ struct BodyLowering<'a> {
     expansion_enclosure: Option<crate::ir::IrEnclosure>,
     /// Checked source inline declaration whose body copies this nested callable and its locals.
     inline_declaration: Option<crate::ir::IrInlineDeclaration>,
+    /// The values of this body that hold an inline parameter of that declaration.
+    inline_parameter_values: source_calls::InlineParameterValues,
+    /// The lambdas and local functions written in this body that read one of those values.
+    callables_reading_inline_parameters: crate::fx_hash::HashSet<crate::ir::FunId>,
     declaration_lambda: Option<crate::ir::FunId>,
+    /// Whether this body is a suspend local function or lambda, or a lambda written in one, whose
+    /// code may run in that callable's state machine. A named function's own `suspend` modifier is
+    /// read from its declaration instead.
+    suspend_context: bool,
     /// Whether the expression currently being lowered belongs to a default-argument fragment.
     in_default_argument: bool,
     /// The checked block this body's root evaluates, when it is one, and the block it lowered to.
@@ -621,7 +633,10 @@ impl<'a> BodyLowering<'a> {
             enclosure: None,
             expansion_enclosure: None,
             inline_declaration: None,
+            inline_parameter_values: Default::default(),
+            callables_reading_inline_parameters: Default::default(),
             declaration_lambda: None,
+            suspend_context: false,
             in_default_argument: body.is_default_fragment(),
             expression_depth: 0,
             root_block: root_scope_block(body),

@@ -2,6 +2,7 @@
 
 package krusty.pluginhost
 
+import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
 import org.jetbrains.kotlin.cli.create
 import org.jetbrains.kotlin.cli.extensionsStorage
 import org.jetbrains.kotlin.cli.plugins.processCompilerPluginsOptions
@@ -31,7 +32,7 @@ import kotlin.system.exitProcess
  * the real stdout for frames. The protocol is `crates/krusty-plugin-host/src/protocol.rs`; keep the
  * two in step and bump [PROTOCOL] on any change.
  */
-const val PROTOCOL = 1
+const val PROTOCOL = 4
 
 private const val HELLO = 0
 private const val LOAD = 1
@@ -40,6 +41,14 @@ private const val FAILED = 3
 private const val SHUTDOWN = 4
 private const val UNLOAD = 5
 private const val UNLOADED = 6
+private const val OPEN_SESSION = 7
+private const val SESSION_OPENED = 8
+private const val CLOSE_SESSION = 9
+private const val SESSION_CLOSED = 10
+private const val RESOLVE = 11
+private const val RESOLVED = 12
+private const val GENERATE = 13
+private const val GENERATED = 14
 
 /**
  * Serves requests until krusty asks it to stop or closes stdin. Either way the JVM exits at once:
@@ -49,7 +58,13 @@ fun main() {
     try {
         serve()
     } finally {
-        // Ending the host ends the loaded plugins' lifetime, as the end of a compilation does.
+        // Ending the host ends the session and the loaded plugins' lifetime, as the end of a
+        // compilation does.
+        try {
+            closeSession()
+        } catch (error: Throwable) {
+            System.err.println("krusty plugin host: closing the session failed: ${describe(error)}")
+        }
         try {
             unload()
         } catch (error: Throwable) {
@@ -88,6 +103,32 @@ private fun serve() {
                 }
                 send(frames) { reply.write(this) }
             }
+            OPEN_SESSION -> {
+                val reply = answer {
+                    openSession(request.readSessionRequest())
+                    SessionOpened
+                }
+                send(frames) { reply.write(this) }
+            }
+            CLOSE_SESSION -> {
+                val reply = answer {
+                    closeSession()
+                    SessionClosed
+                }
+                send(frames) { reply.write(this) }
+            }
+            RESOLVE -> {
+                val identities = request.readList { readCallable() }
+                val reply = answer { Resolved(resolve(identities)) }
+                send(frames) { reply.write(this) }
+            }
+            GENERATE -> {
+                val reply = answer {
+                    generate(request, current?.irGenerationExtensions ?: emptyList())
+                    Generated
+                }
+                send(frames) { reply.write(this) }
+            }
             SHUTDOWN -> return
             else -> {
                 send(frames) { Failed("unknown request $tag").write(this) }
@@ -109,15 +150,42 @@ private fun answer(request: () -> Reply): Reply = try {
 }
 
 /** A request the host will not carry out, for the reason given. */
-private class Refused(override val message: String) : Exception(message)
+internal class Refused(override val message: String) : Exception(message)
 
-private sealed interface Reply {
+internal sealed interface Reply {
     fun write(out: DataOutputStream)
 }
 
 private object Unloaded : Reply {
     override fun write(out: DataOutputStream) {
         out.writeByte(UNLOADED)
+    }
+}
+
+private object SessionOpened : Reply {
+    override fun write(out: DataOutputStream) {
+        out.writeByte(SESSION_OPENED)
+    }
+}
+
+private object SessionClosed : Reply {
+    override fun write(out: DataOutputStream) {
+        out.writeByte(SESSION_CLOSED)
+    }
+}
+
+private object Generated : Reply {
+    override fun write(out: DataOutputStream) {
+        out.writeByte(GENERATED)
+    }
+}
+
+/** Each requested declaration, rendered as kotlinc renders IR, in request order. */
+private class Resolved(val declarations: List<String>) : Reply {
+    override fun write(out: DataOutputStream) {
+        out.writeByte(RESOLVED)
+        out.writeInt(declarations.size)
+        for (declaration in declarations) out.writeString(declaration)
     }
 }
 
@@ -158,6 +226,9 @@ private class LoadedPlugin(
  * registrars registered, as a compilation's project owns them in kotlinc.
  */
 private class PluginSet(private val loader: URLClassLoader, private val resources: Disposable) {
+    /** The IR generation extensions the registrars registered, in registration order. */
+    var irGenerationExtensions: List<IrGenerationExtension> = emptyList()
+
     /** Disposes the registrars' resources the way kotlinc's `Disposer` does, then closes the jars. */
     fun close() {
         try {
@@ -213,6 +284,8 @@ private fun load(entries: List<String>, options: List<String>): Reply {
             )
         }
         own(resources, shared)
+        set.irGenerationExtensions =
+            shared.registeredExtensions[IrGenerationExtension].orEmpty().map { it as IrGenerationExtension }
         current = set
         return Loaded(plugins)
     } catch (error: Throwable) {
@@ -284,35 +357,4 @@ private fun describe(error: Throwable): String {
     val causes = generateSequence(error) { it.cause }.joinToString(": caused by ") { it.toString() }
     val at = error.stackTrace.firstOrNull()?.let { " (at $it)" } ?: ""
     return causes + at
-}
-
-private class Frame(bytes: ByteArray) : DataInputStream(bytes.inputStream())
-
-private fun DataInputStream.readFrame(): ByteArray {
-    val bytes = ByteArray(readInt())
-    readFully(bytes)
-    return bytes
-}
-
-private fun DataInputStream.readString(): String {
-    val bytes = ByteArray(readInt())
-    readFully(bytes)
-    return String(bytes, Charsets.UTF_8)
-}
-
-private fun <T> DataInputStream.readList(element: DataInputStream.() -> T): List<T> =
-    List(readInt()) { element() }
-
-private fun DataOutputStream.writeString(value: String) {
-    val bytes = value.toByteArray(Charsets.UTF_8)
-    writeInt(bytes.size)
-    write(bytes)
-}
-
-private fun send(frames: DataOutputStream, body: DataOutputStream.() -> Unit) {
-    val payload = java.io.ByteArrayOutputStream()
-    DataOutputStream(payload).apply(body).flush()
-    frames.writeInt(payload.size())
-    payload.writeTo(frames)
-    frames.flush()
 }

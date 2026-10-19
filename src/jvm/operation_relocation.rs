@@ -94,7 +94,11 @@ mod tests {
     #[test]
     fn selected_call_facts_move_exclusively_to_the_cloned_operation() {
         let mut ir = IrFile::default();
-        let source = ir.add_expr(IrExpr::UnitInstance);
+        let source = ir.add_expr(IrExpr::Call {
+            callee: crate::ir::Callee::Local(7),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
         let unbox_receiver = ir.add_expr(IrExpr::UnitInstance);
         ir.ext_call_source_receiver.insert(source, Ty::String);
         ir.semantic_call_roles

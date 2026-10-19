@@ -6,10 +6,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use krusty_plugin_ir::{CallableIdentity, ModuleIr};
+
 use crate::adapter;
 use crate::environment::Environment;
 use crate::protocol::{self, LoadedPlugin, Reply, Request, PROTOCOL};
 use crate::provision::HostRuntime;
+use crate::session::SessionRequest;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum HostError {
@@ -180,7 +183,7 @@ impl Host {
         match self.exchange(&request)? {
             Reply::Loaded(plugins) => Ok(plugins),
             Reply::Failed(message) => Err(HostError::Plugin { message }),
-            Reply::Unloaded => Err(unexpected("load")),
+            _ => Err(unexpected("load")),
         }
     }
 
@@ -190,7 +193,52 @@ impl Host {
         match self.exchange(&Request::Unload)? {
             Reply::Unloaded => Ok(()),
             Reply::Failed(message) => Err(HostError::Plugin { message }),
-            Reply::Loaded(_) => Err(unexpected("unload")),
+            _ => Err(unexpected("unload")),
+        }
+    }
+
+    /// Opens the compilation's session: kotlinc's JVM frontend and fir2ir run over `request`'s
+    /// classpath with no sources, as kotlinc starts a compilation, so IR plugins find the build's
+    /// declarations. The session open before is closed first. kotlinc's errors refuse the session,
+    /// in kotlinc's words; its warnings go to stderr.
+    pub fn open_session(&mut self, request: &SessionRequest) -> Result<(), HostError> {
+        match self.exchange(&Request::OpenSession(request))? {
+            Reply::SessionOpened => Ok(()),
+            Reply::Failed(message) => Err(HostError::Plugin { message }),
+            _ => Err(unexpected("open-session")),
+        }
+    }
+
+    /// Closes the open session, if any, disposing what kotlinc holds for it. Stopping the host does
+    /// the same.
+    pub fn close_session(&mut self) -> Result<(), HostError> {
+        match self.exchange(&Request::CloseSession)? {
+            Reply::SessionClosed => Ok(()),
+            Reply::Failed(message) => Err(HostError::Plugin { message }),
+            _ => Err(unexpected("close-session")),
+        }
+    }
+
+    /// Finds each of `identities` on the session's classpath through the plugin context IR plugins
+    /// use, and returns it rendered as kotlinc renders IR. An identity that names no declaration, or
+    /// more than one, fails the request by name.
+    pub fn resolve(&mut self, identities: &[CallableIdentity]) -> Result<Vec<String>, HostError> {
+        match self.exchange(&Request::Resolve(identities))? {
+            Reply::Resolved(declarations) => Ok(declarations),
+            Reply::Failed(message) => Err(HostError::Plugin { message }),
+            _ => Err(unexpected("resolve")),
+        }
+    }
+
+    /// Builds `module`'s IR in the open session, as kotlinc's fir2ir builds a module's sources, and
+    /// runs the loaded plugins' IR generation extensions over it, in registration order, with the
+    /// session's plugin context. A session builds one module: a second one in the same session is
+    /// refused, and so is IR the host cannot build, by what it is.
+    pub fn generate(&mut self, module: &ModuleIr) -> Result<(), HostError> {
+        match self.exchange(&Request::Generate(module))? {
+            Reply::Generated => Ok(()),
+            Reply::Failed(message) => Err(HostError::Plugin { message }),
+            _ => Err(unexpected("generate")),
         }
     }
 
@@ -266,8 +314,8 @@ impl Drop for Host {
 mod tests {
     use super::*;
 
-    /// The host's greeting for protocol 1 and kotlinc 2.4.20, as `printf` octal escapes.
-    const HELLO: &str = r"\000\000\000\017\000\000\000\000\001\000\000\000\0062.4.20";
+    /// The host's greeting for protocol 4 and kotlinc 2.4.20, as `printf` octal escapes.
+    const HELLO: &str = r"\000\000\000\017\000\000\000\000\004\000\000\000\0062.4.20";
     const GRACE: Duration = Duration::from_millis(300);
 
     /// A host that writes its pid to `pid_file`, greets, then runs `then` in the same process.

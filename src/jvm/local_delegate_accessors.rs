@@ -244,7 +244,8 @@ pub(crate) fn realize(
 }
 
 /// Expressions reachable from emitted code, independent of the caller's physical owner.
-/// Inline-only templates are deliberately not roots; their call-site copies are.
+/// Inline-only templates are deliberately not roots; their call-site copies are, and so is the
+/// template of a call inlined from its compiled body.
 fn emitted_expressions(ir: &IrFile) -> HashSet<ExprId> {
     let mut roots = Vec::new();
     for (function, declaration) in ir.functions.iter().enumerate() {
@@ -302,6 +303,15 @@ fn emitted_expressions(ir: &IrFile) -> HashSet<ExprId> {
         while let Some(expression) = pending.pop() {
             if !visited.insert(expression) {
                 continue;
+            }
+            // A call inlined from its callee's compiled body emits that callee's template, even an
+            // inline-only one or another file's, as the body compiled for the call.
+            if let Some(callee) = ir.compiled_inline_call(expression) {
+                pending.extend(
+                    ir.functions
+                        .get(callee as usize)
+                        .and_then(|function| function.body),
+                );
             }
             match ir.expr(expression) {
                 // A lambda's own body is emitted where its implementation lands, and its inline

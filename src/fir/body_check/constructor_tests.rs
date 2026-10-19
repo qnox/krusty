@@ -1225,3 +1225,47 @@ fn dependency_constructor_keeps_backend_neutral_external_identity() {
     assert_eq!(parameters.len(), 2);
     assert_eq!(call.arguments.len(), 2);
 }
+
+#[test]
+fn java_generic_constructor_keeps_its_declared_class_formal_beside_the_specialization() {
+    let platform = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
+                "// WITH_STDLIB",
+            )),
+        ))
+        .expect("JVM provider initialization"),
+    );
+    let (body, _) = checked_function_body_with_platform(
+        "@JvmInline value class Money(val cents: Int)\n\
+         fun make() = java.util.concurrent.atomic.AtomicReference(Money(7))\n",
+        "make",
+        platform,
+    );
+    let FirExprKind::ConstructorCall(call) = &body
+        .expr(root_expression(&body))
+        .expect("constructor call")
+        .kind
+    else {
+        panic!("dependency construction must become checked constructor-call FIR")
+    };
+    let FirConstructorTarget::External {
+        classifier,
+        parameters,
+        declared_parameters,
+        ..
+    } = &call.target
+    else {
+        panic!("a Java constructor is a dependency constructor")
+    };
+    assert!(classifier.matches("java/util/concurrent/atomic/AtomicReference"));
+    let specialized = parameters.iter().map(|ty| ty.get()).collect::<Vec<_>>();
+    assert_eq!(specialized, [Ty::platform_nullable(Ty::obj("Money"))]);
+    let declared = declared_parameters
+        .iter()
+        .map(|ty| ty.get())
+        .collect::<Vec<_>>();
+    // Java's unannotated class formal `V` is the platform `V!` with Kotlin's implicit `Any?` bound.
+    let formal = Ty::platform_nullable(Ty::ty_param("V", Ty::nullable(Ty::obj("kotlin/Any"))));
+    assert_eq!(declared.as_slice(), [formal]);
+}

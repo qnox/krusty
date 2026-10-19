@@ -137,15 +137,10 @@ headerMode.args
 help.args
 hmpp/commaInFragmentDependency.args
 hmpp/cycleInDependencies.args
-hmpp/duplicatedFragments.args
-hmpp/fragmentSourcesIncorrectSyntax.args
-hmpp/fragmentWithoutSources.args
 hmpp/missingFragment.args
 hmpp/refinesSingleModule.args
 hmpp/refinesWithoutFragments.args
-hmpp/sameSourceInDifferentFragments.args
 hmpp/scriptInCommonFragment.args
-hmpp/sourceNotInAnyFragment.args
 hmpp/successfulCompilation.args
 hmpp/successfulCompilation2.args
 hmpp/successfulCompilationWithScript.args

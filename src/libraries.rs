@@ -690,6 +690,18 @@ impl LibraryMember {
         }
     }
 
+    /// The selected constructor's parameter types before classifier type-argument substitution,
+    /// aligned with [`Self::params`]. Constructor selection specializes `params` from the generic
+    /// signature exactly when that signature has the same arity, so the same rule names the
+    /// declaration shape a specialized `params` came from (`Holder(T)` selected as `Holder(Money)`).
+    pub fn constructor_declaration_params(&self) -> &[Ty] {
+        self.generic_sig
+            .as_ref()
+            .map(|signature| signature.params.as_slice())
+            .filter(|params| params.len() == self.params.len())
+            .unwrap_or(&self.params)
+    }
+
     #[inline]
     pub fn ret_nullable(&self) -> bool {
         self.flags.has(LmFlags::RET_NULLABLE)

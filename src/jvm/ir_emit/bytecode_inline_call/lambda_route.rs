@@ -29,10 +29,6 @@ pub(in crate::jvm::ir_emit) enum SpliceReason {
     ValueClassAdapter,
     /// The callee needs a later stage of the port.
     CalleeShape(UnsupportedShape),
-    /// The callee has a try/catch or a backward jump, and a value that this call does not store
-    /// is already on the stack. The method inliner does not yet spill that prefix, so the call
-    /// stays on the byte splice.
-    OperandsAcrossCallee,
     /// An `@InlineOnly` callee takes its arguments in place, beside a lambda.
     InPlaceArguments,
     /// A lambda captures a caller local whose type is not the captured value's.
@@ -50,7 +46,6 @@ impl Emitter<'_> {
     pub(in crate::jvm::ir_emit) fn lambda_call_route(
         &mut self,
         call: &ClasspathInlineCall<'_, '_>,
-        code: &CodeBuilder,
     ) -> Result<LambdaCallRoute, &'static str> {
         let ClasspathInlineCall {
             call_expression,
@@ -98,14 +93,6 @@ impl Emitter<'_> {
         let supplies = self
             .parameter_supplies(call, &physical, &callee, &declared)
             .ok_or("a function-typed argument has no published crossinline/noinline modifier")?;
-        // Argument stores run before the body. A duplicated safe-call receiver is one of those
-        // arguments, already on the stack, so the body still starts empty and the MethodInliner
-        // can place the callee. A value underneath that argument is not consumed here.
-        let consumed =
-            stored_stack_resident_words(self.ir, self.stack_resident_value, args, &supplies);
-        if inliner::requires_empty_stack_on_entry(&callee) && code.stack_height() != consumed {
-            return splice(SpliceReason::OperandsAcrossCallee);
-        }
         if supplies.contains(&Supply::InPlace) {
             return splice(SpliceReason::InPlaceArguments);
         }
@@ -187,126 +174,37 @@ impl Emitter<'_> {
         }
         Ok(LambdaCallRoute::MethodInliner(callee, default_lambdas))
     }
-}
 
-/// Words of a stack-resident value that a stored argument will pop before the inline body.
-///
-/// A one-word safe call leaves its receiver on the stack. That receiver is the call's argument,
-/// not an operand the body has to jump over.
-fn stored_stack_resident_words(
-    ir: &crate::ir::IrFile,
-    resident: Option<u32>,
-    args: &[u32],
-    supplies: &[Supply],
-) -> i32 {
-    let Some(resident) = resident else {
-        return 0;
-    };
-    let stored = args.iter().zip(supplies).any(|(&argument, supply)| {
-        *supply == Supply::Stored && argument_reads_resident(ir, argument, resident)
-    });
-    i32::from(stored)
-}
-
-/// Whether evaluating `argument` reads the stack-resident value, through coercions that emit no
-/// bytecode of their own.
-fn argument_reads_resident(ir: &crate::ir::IrFile, mut argument: u32, resident: u32) -> bool {
-    loop {
-        match ir.expr(argument) {
-            crate::ir::IrExpr::GetValue(value) => return *value == resident,
-            crate::ir::IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::ImplicitCoercion,
-                arg,
-                ..
-            } => argument = *arg,
-            _ => return false,
-        }
-    }
-}
-
-/// Whether `body` leaves itself by a `return` (every `return` in a lambda's inline body is
-/// non-local: a local return is lowered to the body's value) or by a `break`/`continue` whose loop
-/// is outside `body`.
-pub(super) fn leaves_by_non_local_jump(ir: &IrFile, body: u32) -> bool {
-    fn escapes(ir: &IrFile, expression: u32, loops: &mut Vec<Option<String>>) -> bool {
-        match ir.expr(expression) {
-            IrExpr::Return(_) => true,
-            IrExpr::Break { label } | IrExpr::Continue { label } => match label {
-                None => loops.is_empty(),
-                Some(label) => !loops
-                    .iter()
-                    .any(|enclosing| enclosing.as_ref() == Some(label)),
-            },
-            IrExpr::While { label, .. } => {
-                loops.push(label.clone());
-                let mut escaped = false;
-                crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                    escaped = escaped || escapes(ir, child, loops);
-                });
-                loops.pop();
-                escaped
-            }
-            _ => {
-                let mut escaped = false;
-                crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                    escaped = escaped || escapes(ir, child, loops);
-                });
-                escaped
-            }
-        }
-    }
-    escapes(ir, body, &mut Vec::new())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::leaves_by_non_local_jump;
-    use crate::ir::{IrExpr, IrFile};
-
-    fn block(ir: &mut IrFile, stmts: Vec<u32>) -> u32 {
-        ir.add_expr(IrExpr::Block { stmts, value: None })
-    }
-
-    fn looping(ir: &mut IrFile, body: u32, label: Option<&str>) -> u32 {
-        let cond = ir.add_expr(IrExpr::UnitInstance);
-        ir.add_expr(IrExpr::While {
-            cond,
-            body,
-            update: None,
-            post_test: false,
-            label: label.map(str::to_string),
+    /// Whether `callee`, the body of `inline_call`, never loads a parameter that takes one of the
+    /// call's inlined literals. kotlinc drops such a literal with the parameter: nothing of it
+    /// reaches the caller.
+    pub(super) fn inlined_literals_unread(
+        &self,
+        inline_call: &ClasspathInlineCall<'_, '_>,
+        callee: &MethodNode,
+    ) -> bool {
+        let ClasspathInlineCall {
+            call_expression,
+            target,
+            args,
+            leading_non_argument_operands,
+            ..
+        } = *inline_call;
+        let Some(physical) = parse_descriptor_params(target.splice_desc) else {
+            return false;
+        };
+        let Ok(positions) =
+            self.inlined_literal_positions(call_expression, leading_non_argument_operands, args)
+        else {
+            return false;
+        };
+        positions.iter().all(|&position| {
+            let slot = physical
+                .iter()
+                .take(position)
+                .map(|&ty| slot_words(ty))
+                .sum();
+            !inliner::reads_local(callee, slot)
         })
-    }
-
-    #[test]
-    fn a_return_leaves_the_lambda() {
-        let mut ir = IrFile::default();
-        let exit = ir.add_expr(IrExpr::Return(None));
-        let body = block(&mut ir, vec![exit]);
-        assert!(leaves_by_non_local_jump(&ir, body));
-    }
-
-    #[test]
-    fn a_break_of_a_loop_inside_the_lambda_stays_in_it() {
-        let mut ir = IrFile::default();
-        let exit = ir.add_expr(IrExpr::Break { label: None });
-        let inner = looping(&mut ir, exit, None);
-        let body = block(&mut ir, vec![inner]);
-        assert!(!leaves_by_non_local_jump(&ir, body));
-    }
-
-    #[test]
-    fn a_break_or_continue_of_a_loop_outside_the_lambda_leaves_it() {
-        let mut ir = IrFile::default();
-        let exit = ir.add_expr(IrExpr::Break { label: None });
-        let body = block(&mut ir, vec![exit]);
-        assert!(leaves_by_non_local_jump(&ir, body));
-
-        let next = ir.add_expr(IrExpr::Continue {
-            label: Some("outer".to_string()),
-        });
-        let inner = looping(&mut ir, next, Some("inner"));
-        let body = block(&mut ir, vec![inner]);
-        assert!(leaves_by_non_local_jump(&ir, body));
     }
 }

@@ -47,14 +47,61 @@ pub(in crate::jvm::ir_emit) fn compile_inline_callees(
     }
     functions.sort_unstable();
     functions.dedup();
-    let compiled = functions
+    env.run.compiled_inline_callees.0.borrow_mut().clear();
+    // kotlinc compiles a callee's node when a call first needs it, so a callee whose body inlines
+    // another same-module callee reads that one's node, compiled first.
+    for function in callees_before_callers(ir, &functions) {
+        let callee = compile_callee(ir, function, facade, env, opts).map(Rc::new);
+        env.run
+            .compiled_inline_callees
+            .0
+            .borrow_mut()
+            .insert(function, callee);
+    }
+}
+
+/// `functions` ordered so each comes after every same-module callee its own body inlines from a
+/// compiled body, in the order the bodies are first reached.
+fn callees_before_callers(ir: &IrFile, functions: &[u32]) -> Vec<u32> {
+    let mut ordered = Vec::with_capacity(functions.len());
+    let mut visited = std::collections::HashSet::new();
+    for &function in functions {
+        visit_callee(ir, function, &mut visited, &mut ordered);
+    }
+    ordered
+}
+
+fn visit_callee(
+    ir: &IrFile,
+    function: u32,
+    visited: &mut std::collections::HashSet<u32>,
+    ordered: &mut Vec<u32>,
+) {
+    if !visited.insert(function) {
+        return;
+    }
+    let mut nested = Vec::new();
+    let mut pending = ir
+        .functions
+        .get(function as usize)
+        .and_then(|function| function.body)
         .into_iter()
-        .map(|function| {
-            let callee = compile_callee(ir, function, facade, env, opts).map(Rc::new);
-            (function, callee)
-        })
-        .collect();
-    *env.run.compiled_inline_callees.0.borrow_mut() = compiled;
+        .collect::<Vec<_>>();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let Some(callee) = ir.compiled_inline_call(expression) {
+            nested.push(callee);
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    nested.sort_unstable();
+    for callee in nested {
+        visit_callee(ir, callee, visited, ordered);
+    }
+    ordered.push(function);
 }
 
 /// Whether `call` is a call of `function`: a same-file call names it, a call realized onto
@@ -114,6 +161,8 @@ fn compile_callee(
         .ok_or("a compiled inline callee's source file is not in the module")?;
     let mut cw = new_writer(&owner, "java/lang/Object", opts);
     cw.set_source_file(Some(file.name.to_string()));
+    // A callee of another file numbers what it inlines past that file's lines, not the caller's.
+    cw.start_source_map(u16::try_from(file.line_count).unwrap_or(u16::MAX).max(1));
     emit_method_inner(
         ir,
         function,
@@ -132,7 +181,7 @@ fn compile_callee(
         &mut cw,
     );
     let method = cw
-        .sole_emitted_method()
+        .sole_emitted_method_for_inlining()
         .ok_or("a compiled inline callee's body does not read back as one method")?;
     Ok(CompiledInlineCallee {
         owner,
@@ -181,7 +230,13 @@ impl Emitter<'_> {
             allow_owner_bridge: true,
             for_inline_copy: false,
         };
-        let reified = crate::jvm::reified_arguments::ReifiedArguments::default();
+        let reified = crate::jvm::reified_operations::splice_arguments(
+            self.ir,
+            call_expression,
+            &self.facade,
+            self.ir.recursive_type_of,
+            &|ty| self.rendered_inlined_cast_target(ty),
+        );
         let call = ClasspathInlineCall {
             call_expression,
             target: &target,
@@ -192,12 +247,15 @@ impl Emitter<'_> {
             defaults: None,
         };
         let call_frame = self.frame.mark();
-        let inlined = self.try_inline_classpath_body(&call, code);
+        let base = self.frame.size().max(code.max_locals);
+        let inlined = self.inline_call_with_body(&call, base, code);
         // The call's temporaries go with its frame, as kotlinc's `leaveTemps` does.
         self.frame.drop_to(call_frame);
-        if inlined.is_none() {
-            self.run
-                .set_inline_bail("the inliner does not cover a compiled same-module inline body");
+        match inlined {
+            InlineCallOutcome::Handled | InlineCallOutcome::HandledWithError => {}
+            InlineCallOutcome::NotApplicable => self
+                .run
+                .set_inline_bail("the inliner does not cover a compiled same-module inline body"),
         }
     }
 }

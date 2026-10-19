@@ -4,15 +4,49 @@ use super::frame_map::TempRole;
 use super::*;
 use crate::jvm::array_representation::array_store_op;
 
+/// An array value to create: its type, and the reification argument kotlinc marks its creation
+/// with when a reified body creates it of its own type parameter (`ReifiedMarkers::arrays`).
+#[derive(Clone, Copy)]
+pub(super) struct NewArray<'a> {
+    pub(super) ty: &'a Ty,
+    pub(super) reified_marker: Option<&'a str>,
+}
+
+/// `anewarray` of `element_type`'s class over the length on the stack, preceded by kotlinc's
+/// `reifiedOperationMarker(0, argument)` (`NEW_ARRAY`) when `reified_marker` names one
+/// (`ExpressionCodegen.newArrayInstruction`).
+pub(super) fn emit_reference_new_array(
+    emitter: &mut Emitter<'_>,
+    element_type: Ty,
+    reified_marker: Option<&str>,
+    code: &mut CodeBuilder,
+) {
+    if let Some(argument) = reified_marker {
+        code.push_int(0, emitter.cw);
+        code.push_string(argument, emitter.cw);
+        let marker = emitter.cw.methodref(
+            "kotlin/jvm/internal/Intrinsics",
+            "reifiedOperationMarker",
+            "(ILjava/lang/String;)V",
+        );
+        code.invokestatic(marker, 2, 0);
+    }
+    let class = emitter
+        .cw
+        .class_ref(&crate::jvm::names::anewarray_element_class(element_type));
+    code.anewarray(class);
+}
+
 /// Emit one checked vararg value. Spread validation and both physical array-building strategies
 /// live here so frame-recording elements cannot accidentally be handled by only one call shape.
 pub(super) fn emit(
     emitter: &mut Emitter<'_>,
-    array_type: &Ty,
+    array: NewArray<'_>,
     elements: &[u32],
     spreads: &[bool],
     code: &mut CodeBuilder,
 ) {
+    let array_type = array.ty;
     if spreads.len() != elements.len() {
         emitter
             .run
@@ -20,7 +54,7 @@ pub(super) fn emit(
         return;
     }
     if !spreads.iter().any(|&spread| spread) {
-        emit_packed_array(emitter, array_type, elements, code);
+        emit_packed_array(emitter, array, elements, code);
         return;
     }
 
@@ -63,7 +97,7 @@ pub(super) fn emit(
     } else {
         emit_reference_spread(
             emitter,
-            array_type,
+            array,
             element_type,
             elements,
             spreads,
@@ -248,7 +282,7 @@ fn place_array_and_length(
 
 fn emit_reference_spread(
     emitter: &mut Emitter<'_>,
-    array_type: &Ty,
+    array: NewArray<'_>,
     element_type: Ty,
     elements: &[u32],
     spreads: &[bool],
@@ -286,10 +320,7 @@ fn emit_reference_spread(
         code.invokevirtual(method, 1, 0);
     }
     code.push_int(0, emitter.cw);
-    let element_class = emitter
-        .cw
-        .class_ref(&crate::jvm::names::anewarray_element_class(element_type));
-    code.anewarray(element_class);
+    emit_reference_new_array(emitter, element_type, array.reified_marker, code);
     let to_array = emitter.cw.methodref(
         builder,
         "toArray",
@@ -298,17 +329,18 @@ fn emit_reference_spread(
     code.invokevirtual(to_array, 1, 1);
     let array_class = emitter
         .cw
-        .class_ref(&type_descriptor(ir_ty_to_jvm(array_type)));
+        .class_ref(&type_descriptor(ir_ty_to_jvm(array.ty)));
     code.checkcast(array_class);
 }
 
 /// Build a packed array through the next local slot, matching kotlinc's evaluation and frame shape.
 pub(super) fn emit_packed_array(
     emitter: &mut Emitter<'_>,
-    array_type: &Ty,
+    array: NewArray<'_>,
     elements: &[u32],
     code: &mut CodeBuilder,
 ) {
+    let array_type = array.ty;
     let element_type = array_jvm_element(array_type);
     let reference_array = array_type.is_reference_array();
     // An element that cannot carry `[array, index]` on the stack (see `spills_operand_prefix`),
@@ -319,7 +351,7 @@ pub(super) fn emit_packed_array(
         .iter()
         .any(|&element| emitter.spills_operand_prefix(element))
     {
-        emit_packed_array_through_temps(emitter, array_type, elements, code);
+        emit_packed_array_through_temps(emitter, array, elements, code);
         return;
     }
     code.push_int(elements.len() as i32, emitter.cw);
@@ -327,10 +359,7 @@ pub(super) fn emit_packed_array(
         code.newarray(prim_newarray_atype(element_type));
     } else {
         // Nullability does not change the reference array class.
-        let class = emitter
-            .cw
-            .class_ref(&crate::jvm::names::anewarray_element_class(element_type));
-        code.anewarray(class);
+        emit_reference_new_array(emitter, element_type, array.reified_marker, code);
     }
     // No element is stored, so the fresh array stays on the stack. An `@InlineOnly` spread then
     // duplicates it (`aload; aload; arraylength`) instead of parking an empty array in a local.
@@ -366,10 +395,11 @@ pub(super) fn emit_packed_array(
 /// introduces control flow; see the caller for why the stack must be clean at that point.
 fn emit_packed_array_through_temps(
     emitter: &mut Emitter<'_>,
-    array_type: &Ty,
+    array: NewArray<'_>,
     elements: &[u32],
     code: &mut CodeBuilder,
 ) {
+    let array_type = array.ty;
     let element_type = array_jvm_element(array_type);
     let reference_array = array_type.is_reference_array();
     let temps = emitter.spill_to_temps(elements, code);
@@ -378,10 +408,7 @@ fn emit_packed_array_through_temps(
     if element_type.is_jvm_scalar() && !reference_array {
         code.newarray(prim_newarray_atype(element_type));
     } else {
-        let class = emitter
-            .cw
-            .class_ref(&crate::jvm::names::anewarray_element_class(element_type));
-        code.anewarray(class);
+        emit_reference_new_array(emitter, element_type, array.reified_marker, code);
     }
 
     let jvm_array_type = ir_ty_to_jvm(array_type);

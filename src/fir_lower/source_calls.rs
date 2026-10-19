@@ -4,6 +4,8 @@ pub(super) mod argument_boundaries;
 mod inline_route;
 mod reordered_operands;
 
+pub(super) use inline_route::InlineParameterValues;
+
 use crate::fir::{
     CallableId, DeclarationKind, ExternalCallableId, ExternalPropertyId, FirAnnotationConstruction,
     FirAnnotationDefaultValue, FirConstant, ResolvedTy,
@@ -119,6 +121,20 @@ pub(super) struct ExternalCallRequest<'a> {
     /// Source line of the call, when the lowering site carries one. An inline-body expansion
     /// attributes its frame to it; an ordinary dependency call does not consume it.
     pub(super) source_line: Option<u32>,
+}
+
+/// A checked construction of a dependency constructor. `parameters` are the selected specialized
+/// types; `declared_parameters` are the same slots before classifier type-argument substitution.
+pub(super) struct ExternalConstructorRequest<'a> {
+    pub(super) declaration: ExternalCallableId,
+    pub(super) classifier: crate::types::TypeName,
+    pub(super) parameters: &'a [ResolvedTy],
+    pub(super) declared_parameters: &'a [ResolvedTy],
+    pub(super) context_parameter_count: u32,
+    pub(super) outer_parameter: Option<ResolvedTy>,
+    pub(super) outer_receiver: Option<ExprId>,
+    pub(super) arguments: &'a [IrCheckedArgument],
+    pub(super) annotation: Option<&'a FirAnnotationConstruction>,
 }
 
 pub(super) struct ModuleConstructorRequest<'a> {
@@ -1236,15 +1252,22 @@ impl BodyLowering<'_> {
 
     pub(super) fn external_constructor_call(
         &mut self,
-        declaration: ExternalCallableId,
-        classifier: crate::types::TypeName,
-        parameters: &[ResolvedTy],
-        context_parameter_count: u32,
-        outer_parameter: Option<ResolvedTy>,
-        outer_receiver: Option<ExprId>,
-        arguments: &[IrCheckedArgument],
-        annotation: Option<&FirAnnotationConstruction>,
+        request: ExternalConstructorRequest<'_>,
     ) -> Option<ExprId> {
+        let ExternalConstructorRequest {
+            declaration,
+            classifier,
+            parameters,
+            declared_parameters,
+            context_parameter_count,
+            outer_parameter,
+            outer_receiver,
+            arguments,
+            annotation,
+        } = request;
+        if declared_parameters.len() != parameters.len() {
+            return None;
+        }
         let parameter_types = parameters
             .iter()
             .map(|parameter| parameter.get())
@@ -1276,10 +1299,17 @@ impl BodyLowering<'_> {
             return None;
         }
         let mut physical_parameter_types = parameter_types;
+        // The declaration shape is aligned operand for operand: leading contexts are already in
+        // both lists, and the enclosing instance is prepended to both.
+        let mut declared_parameter_types = declared_parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>();
         let mut default_prefix_count = context_parameter_count;
         if let Some((outer_receiver, outer_parameter)) = outer_receiver.zip(outer_parameter) {
             args.insert(0, outer_receiver);
             physical_parameter_types.insert(0, outer_parameter.get());
+            declared_parameter_types.insert(0, outer_parameter.get());
             default_prefix_count = default_prefix_count.checked_add(1)?;
         }
         let construction = self.ir.add_expr(IrExpr::New {
@@ -1291,6 +1321,9 @@ impl BodyLowering<'_> {
             defaults: defaults.into_boxed_slice(),
             default_prefix_count,
         });
+        self.ir
+            .construction_declared_params
+            .insert(construction, declared_parameter_types.into_boxed_slice());
         self.record_annotation_construction(construction, classifier, annotation)?;
         Some(self.wrap_call_statements(statements, construction))
     }
@@ -1904,6 +1937,7 @@ impl BodyLowering<'_> {
         if route == Some(inline_route::InlineCallRoute::CompiledBody) {
             let function = function.expect("a compiled-body route names the callee's template");
             self.ir.record_compiled_inline_call(call, function);
+            self.record_compiled_reified_arguments(call, function, substitutions);
         }
         argument_boundaries::record(
             self.ir,

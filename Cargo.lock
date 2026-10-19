@@ -877,9 +877,14 @@ dependencies = [
 name = "krusty-plugin-host"
 version = "0.0.1"
 dependencies = [
+ "krusty-plugin-ir",
  "sha2",
  "zip",
 ]
+
+[[package]]
+name = "krusty-plugin-ir"
+version = "0.0.1"
 
 [[package]]
 name = "krusty-toolchain"

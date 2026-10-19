@@ -14,8 +14,9 @@
 //! download is announced with what it is and why it is needed.
 //!
 //! [`Host::start`] then runs the host on what was provisioned: a JVM with krusty's adapter
-//! (`adapter/Host.kt`, compiled once per Kotlin version by that version's compiler) in front of the
-//! compiler, which loads plugin jars the way kotlinc's `-Xplugin` does.
+//! (`adapter/`, compiled once per Kotlin version by that version's compiler) in front of the
+//! compiler, which loads plugin jars the way kotlinc's `-Xplugin` does, and opens a compilation's
+//! session over the build's classpath, where IR plugins find the build's declarations.
 
 mod adapter;
 mod artifacts;
@@ -27,12 +28,19 @@ mod jdk;
 mod pins;
 mod protocol;
 mod provision;
+mod session;
 
 pub use download::{Curl, Fetcher};
 pub use environment::{Environment, Platform};
 pub use host::{Host, HostError};
+pub use krusty_plugin_ir::{
+    BodyIr, CallIr, CallableIdentity, CallableKind, Callee, ClassName, Classifier, Constant,
+    ExpressionIr, ExpressionKind, FileIr, FunctionIr, ModuleIr, ParameterIr, Span, StatementIr,
+    TypeArgument, TypeIdentity, TypeParameterOwner, ValueId, VariableIr, Visibility,
+};
 pub use pins::{ArtifactPin, JdkPin, Pins};
 pub use protocol::LoadedPlugin;
 pub use provision::{
     provision, provision_artifact, HostRuntime, ProvisionError, Request, COMPILER_MIN_JAVA,
 };
+pub use session::SessionRequest;
