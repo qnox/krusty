@@ -47280,9 +47280,9 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Retry unresolved local-property signatures after direct nested classifiers have published
-    /// their own checked members. A property such as `val value = Inner().x` cannot be inferred on
-    /// the first local-class sweep when `Inner.x` is itself body-local. This bounded fixpoint keeps
+    /// Retry unresolved inferred local-property signatures after direct nested classifiers publish
+    /// their checked members. It owns receiver-less properties such as `val value = Inner().x`,
+    /// which cannot be inferred on the first sweep when `Inner.x` is body-local. This fixpoint keeps
     /// every result in the active checker's stable declaration overlay; no syntax or side table
     /// survives the unit.
     fn retry_body_local_properties_after_nested(
@@ -47315,15 +47315,15 @@ impl<'a> Checker<'a> {
         loop {
             let mut progressed = false;
             for (property_index, property) in class.body_props.iter().enumerate() {
+                if property.declared_ty().is_some() || property.receiver.is_some() {
+                    continue;
+                }
                 let source_member = crate::libraries::SourceMember::ClassProperty {
                     file: self.file_index,
                     owner: declaration.0,
                     property: (class.props.len() + property_index) as u32,
                 };
-                // Prefer the exact declaration coordinate. A same-named inherited property may
-                // remain `Error` because it is abstract or independently body-local; it must not
-                // make an already-resolved override look unresolved. The name fallback exists only
-                // for a transient local-class view that has no source-member coordinate at all.
+                // Prefer the exact coordinate; the name fallback is only for a transient view.
                 let exact = properties
                     .iter()
                     .position(|candidate| candidate.source_member == Some(source_member));
