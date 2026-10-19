@@ -129,7 +129,9 @@ fn implementation_sources() -> Vec<(String, Vec<u8>)> {
 }
 
 /// The Build Tools API implementation jar, built once per process from its sources in a scratch
-/// copy.
+/// copy. The Gradle wrapper runs with a user home of its own in the workspace's target cache
+/// (`krusty-build-tools-gradle`), never `~/.gradle`: the distribution it unpacks there ships
+/// kotlinx.serialization jars, which other tests of the workspace look for below `~/.gradle`.
 fn implementation_jar() -> &'static Path {
     static JAR: OnceLock<PathBuf> = OnceLock::new();
     JAR.get_or_init(|| {
@@ -140,7 +142,13 @@ fn implementation_jar() -> &'static Path {
             std::fs::write(path, bytes).unwrap();
         }
         let mut command = Command::new("sh");
-        command.args(["./gradlew", "-q", "jar"]).current_dir(&copy);
+        command
+            .args(["./gradlew", "-q", "jar"])
+            .current_dir(&copy)
+            .env(
+                "GRADLE_USER_HOME",
+                implementation_directory().join("../../target/cache/krusty-build-tools-gradle"),
+            );
         if let Some(java_home) = std::env::var_os("KRUSTY_BUILD_TOOLS_JAVA_HOME") {
             command.env("JAVA_HOME", java_home);
         }
