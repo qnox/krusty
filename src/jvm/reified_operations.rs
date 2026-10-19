@@ -136,13 +136,16 @@ pub(super) fn splice_type_map(
 }
 
 /// The JVM class a reified argument's type-bearing instruction names: a function type's
-/// `FunctionN` (`Function{N+1}` when it suspends), an array's descriptor, otherwise the stored
-/// classifier's mapped class.
+/// `FunctionN` (`Function{N+1}` when it suspends), an array's descriptor, `Void` for Kotlin's
+/// bottom/null-only types, otherwise the stored classifier's mapped class.
 fn reified_class_internal(ty: Ty) -> Option<String> {
     if let Some(function) = jvm_function_erasure(ty) {
         return Some(function);
     }
     let value = ty.non_null();
+    if matches!(value, Ty::Nothing | Ty::Null) {
+        return Some("java/lang/Void".to_owned());
+    }
     if value.is_array() {
         return Some(super::names::instanceof_internal_name(value));
     }
@@ -705,6 +708,43 @@ mod tests {
                         intrinsic: None,
                         rendered: String::new(),
                     }
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn splice_type_map_maps_nullable_nothing_and_null_to_void() {
+        let expression = 7;
+        let mut ir = IrFile::default();
+        ir.reified_call_subst.insert(
+            expression,
+            vec![
+                ("N".to_owned(), Ty::nullable(Ty::Nothing)),
+                ("Z".to_owned(), Ty::Null),
+            ],
+        );
+
+        assert_eq!(
+            splice_type_map(&ir, expression, &|ty| format!("{ty:?}")),
+            HashMap::from_iter([
+                (
+                    "N".to_owned(),
+                    ReifiedArgument::Class {
+                        internal: "java/lang/Void".to_owned(),
+                        nullable: true,
+                        intrinsic: None,
+                        rendered: "Nothing".to_owned(),
+                    },
+                ),
+                (
+                    "Z".to_owned(),
+                    ReifiedArgument::Class {
+                        internal: "java/lang/Void".to_owned(),
+                        nullable: false,
+                        intrinsic: None,
+                        rendered: "Null".to_owned(),
+                    },
                 ),
             ])
         );
