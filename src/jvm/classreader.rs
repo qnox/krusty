@@ -118,8 +118,9 @@ impl FieldSig {
     }
 }
 
-/// A field's compile-time constant value (from the `ConstantValue` attribute).
-#[derive(Clone, Debug, PartialEq)]
+/// A field's compile-time constant value (from the `ConstantValue` attribute). Its `Debug` form
+/// distinguishes every floating value, NaN payloads included.
+#[derive(Clone, PartialEq)]
 pub enum ConstVal {
     Int(i32),
     Long(i64),
@@ -128,6 +129,25 @@ pub enum ConstVal {
     /// A JVM string constant is a UTF-16 code-unit sequence. Keeping [`KtString`] here is essential:
     /// `CONSTANT_Utf8` can encode an unpaired surrogate even though Rust `String` cannot.
     Str(KtString),
+}
+
+impl std::fmt::Debug for ConstVal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::types::ExactFloat;
+        match self {
+            Self::Int(value) => f.debug_tuple("Int").field(value).finish(),
+            Self::Long(value) => f.debug_tuple("Long").field(value).finish(),
+            Self::Float(value) => f
+                .debug_tuple("Float")
+                .field(&ExactFloat::from(*value))
+                .finish(),
+            Self::Double(value) => f
+                .debug_tuple("Double")
+                .field(&ExactFloat::from(*value))
+                .finish(),
+            Self::Str(value) => f.debug_tuple("Str").field(value).finish(),
+        }
+    }
 }
 
 struct RawMember {
