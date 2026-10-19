@@ -421,14 +421,9 @@ fn check_body_unit_with_parameters_and_defaults(
     // Convert transient parser coordinates into line-only output facts before this bounded syntax
     // unit is released. Checked/default/inline FIR may carry the resulting numbers, but never a
     // file offset or AST identity.
-    let (expression_lines, statement_lines) = crate::fir::body::debug_lines::of_file(file);
-    checker.body.attach_debug_lines(
-        source,
-        file.source_line_count,
-        checker.origins,
-        &expression_lines,
-        &statement_lines,
-    );
+    checker
+        .body
+        .attach_debug_lines(source, file, checker.origins);
     Ok(checker.body)
 }
 
