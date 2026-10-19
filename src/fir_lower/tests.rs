@@ -1176,6 +1176,35 @@ fn abstract_member_extension_property_keeps_bodyless_accessors_and_override_disp
 }
 
 #[test]
+fn member_extension_generic_signatures_keep_the_extension_receiver_parameter() {
+    let ir = lower_single_source(
+        "class Scope<T>(private val value: T) {\n\
+             fun String.forwardedFunction(): T = value\n\
+             val String.forwardedProperty: T get() = value\n\
+         }\n",
+        "MemberExtensionGenericSignature",
+    );
+
+    let function = ir
+        .functions
+        .iter()
+        .position(|function| function.name == "forwardedFunction")
+        .expect("member extension function") as u32;
+    assert_eq!(
+        ir.member_semantic_sigs.get(&function),
+        Some(&(vec![Ty::String], ir.functions[function as usize].ret)),
+    );
+
+    let owner = crate::types::type_name("Scope");
+    let property = &ir.member_ext_props[&owner][0];
+    assert_eq!(property.receiver, Ty::String);
+    assert_eq!(
+        ir.member_semantic_sigs.get(&property.getter),
+        Some(&(vec![Ty::String], property.ty)),
+    );
+}
+
+#[test]
 fn extension_access_lowers_to_a_bound_function_wrapper_without_lookup() {
     let ir = lower_single_source(
         "class A\n\

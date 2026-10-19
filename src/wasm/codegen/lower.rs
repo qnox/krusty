@@ -182,16 +182,44 @@ pub(super) fn lower_file(
             ir.declared_value_slot_types(root),
             function.ret,
         );
-        body.function_body(root, function.ret)?;
-        let Body { code, locals, .. } = body;
-        module.define(
-            index,
-            Function {
-                ty: signature,
-                locals,
-                code,
-            },
-        );
+        match body.function_body(root, function.ret) {
+            Ok(()) => {
+                let Body { code, locals, .. } = body;
+                module.define(
+                    index,
+                    Function {
+                        ty: signature,
+                        locals,
+                        code,
+                    },
+                );
+            }
+            Err(_reason)
+                if ir.signatures.get(&(id as FunId)).is_some_and(|signature| {
+                    signature
+                        .type_params
+                        .iter()
+                        .any(|parameter| parameter.reified)
+                }) =>
+            {
+                // Match Native's boundary: keep a reified declaration that lowers normally, but
+                // replace only an unlowerable standalone template body by a loud trap. Checked
+                // call sites must have specialized the body before either backend sees it.
+                module.define(
+                    index,
+                    Function {
+                        ty: signature,
+                        locals: Vec::new(),
+                        code: {
+                            let mut code = Code::default();
+                            code.unreachable();
+                            code
+                        },
+                    },
+                );
+            }
+            Err(reason) => return Err(reason),
+        }
     }
     default_arguments::define(&context, module, runtime)?;
     if let Some(classes) = &classes {

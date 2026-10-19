@@ -240,7 +240,7 @@ impl Checker<'_> {
             return ty;
         }
         let mut binds: crate::fx_hash::HashMap<String, Ty> = crate::fx_hash::HashMap::default();
-        if let Some(targs) = self.resolved_call_type_args.get(&call) {
+        if let Some(targs) = self.selected_call_type_arguments(call) {
             for (name, t) in formals.iter().zip(targs.iter()) {
                 if let Some(t) = t {
                     binds.insert(name.clone(), *t);

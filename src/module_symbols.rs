@@ -7,6 +7,8 @@
 //! scattered "user-first, else library" branching. Every callable is stamped [`Origin::Module`] so the
 //! lowerer can pick the same-file / cross-file / library emit form from resolution alone.
 
+mod classifier_member_signatures;
+
 use crate::frontend::{FrontendClassSig, FrontendDeclaredPropertySig, FrontendSymbols, Signature};
 use crate::fx_hash::HashMap;
 use crate::libraries::{
@@ -18,6 +20,10 @@ use crate::symbol_source::{SymbolNamespace, SymbolSource};
 #[cfg(test)]
 use crate::types::Visibility;
 use crate::types::{stored_value_ty, type_name, Ty, TypeName};
+
+use classifier_member_signatures::{
+    classifier_member_generic_signature, normalize_classifier_property_generic_signature,
+};
 
 /// The current module's declarations as a [`SymbolSource`]. Borrows the frontend symbols; cheap.
 pub struct ModuleSymbols<'a> {
@@ -158,8 +164,17 @@ impl<'a> ModuleSymbols<'a> {
             .methods
             .iter()
             .flat_map(|(n, sigs)| {
-                sigs.iter()
-                    .map(move |s| lib_member(n, s, c.internal_name(), c.is_interface()))
+                sigs.iter().map(move |s| {
+                    let mut member = lib_member(n, s, c.internal_name(), c.is_interface());
+                    member.generic_sig = classifier_member_generic_signature(
+                        c,
+                        member.generic_sig.take(),
+                        None,
+                        &member.params,
+                        member.ret,
+                    );
+                    member
+                })
             })
             .collect();
         // Class-body extensions are declarations of the classifier just like ordinary methods, even
@@ -183,6 +198,15 @@ impl<'a> ModuleSymbols<'a> {
                     signature.context_count.min(member.params.len()),
                     extension.receiver_ty(),
                 );
+                if member.generic_sig.is_none() {
+                    member.generic_sig = classifier_member_generic_signature(
+                        c,
+                        None,
+                        Some(extension.receiver_ty()),
+                        &signature.params,
+                        signature.ret,
+                    );
+                }
                 member.set_is_member_extension(true);
                 member.set_is_operator(extension.signature().is_operator());
                 member.set_is_infix(extension.signature().is_infix());
@@ -642,7 +666,15 @@ impl<'a> ModuleSymbols<'a> {
             return; // a classpath supertype — not owned by the module source
         };
         for sig in c.methods_named(name) {
-            out.push(lib_member(name, sig, c.internal_name(), c.is_interface()));
+            let mut member = lib_member(name, sig, c.internal_name(), c.is_interface());
+            member.generic_sig = classifier_member_generic_signature(
+                c,
+                member.generic_sig.take(),
+                None,
+                &member.params,
+                member.ret,
+            );
+            out.push(member);
         }
         for i in c.interfaces.iter_ids() {
             self.collect_member_libs(i, name, out, seen);
@@ -682,22 +714,6 @@ impl<'a> ModuleSymbols<'a> {
         name: &str,
     ) -> crate::libraries::Callables {
         let internal = class.internal_name();
-        let declared_receiver = Ty::obj_args_name(
-            internal,
-            &class
-                .type_params
-                .iter()
-                .zip(&class.type_param_bounds)
-                .chain(
-                    class
-                        .captured_type_parameters
-                        .type_params
-                        .iter()
-                        .zip(&class.captured_type_parameters.type_param_bounds),
-                )
-                .map(|(name, bound)| Ty::ty_param(name, *bound))
-                .collect::<Vec<_>>(),
-        );
         let mut functions = class
             .methods_named(name)
             .iter()
@@ -714,8 +730,14 @@ impl<'a> ModuleSymbols<'a> {
                     0,
                     Origin::Module { facade: internal },
                 );
+                function.generic_sig = classifier_member_generic_signature(
+                    class,
+                    function.generic_sig.take(),
+                    None,
+                    &function.callable.params,
+                    function.callable.ret,
+                );
                 if let Some(generic) = function.generic_sig.as_mut() {
-                    generic.receiver.get_or_insert(declared_receiver);
                     function.callable.generic_sig = Some(Box::new(generic.clone()));
                 }
                 function
@@ -734,6 +756,17 @@ impl<'a> ModuleSymbols<'a> {
                 0,
                 Origin::Module { facade: internal },
             );
+            if function.generic_sig.is_none() {
+                let signature = declaration.signature();
+                function.generic_sig = classifier_member_generic_signature(
+                    class,
+                    None,
+                    Some(declaration.receiver_ty()),
+                    &signature.params,
+                    signature.ret,
+                );
+            }
+            function.callable.generic_sig = function.generic_sig.clone().map(Box::new);
             function.source_key = None;
             function
         }));
@@ -793,6 +826,7 @@ impl<'a> ModuleSymbols<'a> {
                         *parameter = template;
                     }
                 }
+                normalize_classifier_property_generic_signature(class, &mut declaration);
                 // A singleton `const val` publishes its folded payload on the classifier, the same
                 // channel a top-level `const val` uses for `compile_time_constant`. Member lookup
                 // has to carry that payload or a later constant (`FULL = FATAL + " now"`) and an
@@ -803,13 +837,15 @@ impl<'a> ModuleSymbols<'a> {
             .into_iter()
             .collect::<Vec<_>>();
         properties.extend(class.contextual_props(name).iter().map(|property| {
-            source_property(
+            let mut declaration = source_property(
                 internal,
                 name,
                 property,
                 class.is_interface() || class.is_annotation(),
                 0,
-            )
+            );
+            normalize_classifier_property_generic_signature(class, &mut declaration);
+            declaration
         }));
         properties.extend(class.member_ext_props(name).iter().map(|declaration| {
             let mut getter_params = declaration.context_params().to_vec();
@@ -837,10 +873,18 @@ impl<'a> ModuleSymbols<'a> {
                 setter.context_count = declaration.context_params().len();
                 setter
             });
-            if let Some(generic) = declaration.generic_signature() {
-                getter.generic_sig = Some(Box::new(generic.clone()));
-                if let Some(setter) = &mut setter {
-                    let mut setter_generic = generic;
+            let getter_generic = declaration.generic_signature().or_else(|| {
+                classifier_member_generic_signature(
+                    class,
+                    None,
+                    Some(declaration.receiver_ty()),
+                    declaration.context_params(),
+                    declaration.ret(),
+                )
+            });
+            getter.generic_sig = getter_generic.clone().map(Box::new);
+            if let Some(setter) = &mut setter {
+                if let Some(mut setter_generic) = getter_generic {
                     setter_generic.params.push(declaration.ret());
                     setter_generic.ret = Ty::Unit;
                     setter.generic_sig = Some(Box::new(setter_generic));
@@ -2380,6 +2424,88 @@ mod tests {
         assert_eq!(overloads.overloads.len(), 1);
         assert!(overloads.overloads[0].flags.inline.can_inline());
         assert!(overloads.overloads[0].callable.inline.can_inline());
+    }
+
+    #[test]
+    fn classifier_parameter_member_has_provider_normalized_generic_shape() {
+        let mut symbols = FrontendSymbols::default();
+        let mut carrier = class("demo/Carrier");
+        let bound = Ty::nullable(Ty::obj("kotlin/Any"));
+        carrier.type_parameters = crate::types::TypeParameters::new(
+            vec!["T".to_string()],
+            vec![bound],
+            vec![crate::types::TypeVariance::Invariant],
+        );
+        let parameter = Ty::ty_param("T", bound);
+        carrier.declared_callable_order.push("take".to_string());
+        carrier
+            .methods
+            .insert("take".into(), vec![sig(Vec::new(), parameter)]);
+        symbols.insert_class(carrier);
+        let source = ModuleSymbols::new(&symbols);
+        let receiver = Ty::obj_args("demo/Carrier", &[Ty::String]);
+
+        let member = source
+            .instance_members(receiver, "take")
+            .into_iter()
+            .next()
+            .expect("member declaration");
+        let member_signature = member.generic_sig.expect("classifier generic signature");
+        assert!(member_signature.formals.is_empty());
+        assert_eq!(member_signature.params, Vec::<Ty>::new());
+        assert_eq!(member_signature.ret, parameter);
+
+        let callable = declared(&source, receiver, "take")
+            .into_parts()
+            .0
+            .overloads
+            .into_iter()
+            .next()
+            .expect("callable declaration");
+        let callable_signature = callable.generic_sig.expect("classifier generic signature");
+        assert!(callable_signature.formals.is_empty());
+        assert_eq!(callable_signature.params, Vec::<Ty>::new());
+        assert_eq!(callable_signature.ret, parameter);
+        assert_eq!(callable_signature.receiver, None);
+    }
+
+    #[test]
+    fn receiver_only_member_extensions_have_provider_normalized_generic_shapes() {
+        let mut scope = class("demo/Scope");
+        let bound = Ty::nullable(Ty::obj("kotlin/Any"));
+        scope.type_parameters = crate::types::TypeParameters::new(
+            vec!["T".to_string()],
+            vec![bound],
+            vec![crate::types::TypeVariance::Invariant],
+        );
+        let receiver = Ty::ty_param("T", bound);
+
+        let function =
+            classifier_member_generic_signature(&scope, None, Some(receiver), &[], Ty::String)
+                .expect("receiver-owned function signature");
+        assert!(function.formals.is_empty());
+        assert_eq!(function.receiver, Some(receiver));
+        assert_eq!(function.params, Vec::<Ty>::new());
+        assert_eq!(function.ret, Ty::String);
+
+        let getter =
+            classifier_member_generic_signature(&scope, None, Some(receiver), &[], Ty::String)
+                .expect("receiver-owned getter signature");
+        assert_eq!(getter.receiver, Some(receiver));
+        assert_eq!(getter.params, Vec::<Ty>::new());
+        assert_eq!(getter.ret, Ty::String);
+
+        let setter = classifier_member_generic_signature(
+            &scope,
+            None,
+            Some(receiver),
+            &[Ty::String],
+            Ty::Unit,
+        )
+        .expect("receiver-owned setter signature");
+        assert_eq!(setter.receiver, Some(receiver));
+        assert_eq!(setter.params, vec![Ty::String]);
+        assert_eq!(setter.ret, Ty::Unit);
     }
 
     #[test]

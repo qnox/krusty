@@ -142,6 +142,7 @@ pub(crate) fn declared_function(
     callable.source_receiver = generic_sig.receiver;
     callable.generic_sig = Some(Box::new(generic_sig.clone()));
     callable.reified_type_parameter_ordinals = reified.clone().into_boxed_slice();
+    callable.inline_modifiers = function.inline_modifiers.clone().into_boxed_slice();
     callable.context_count = function.context_count;
     callable.annotations = function.annotations.clone();
     callable.contract = function
@@ -161,6 +162,7 @@ pub(crate) fn declared_function(
         function.vararg,
     );
     normalized.call_sig.parameter_identities = parameters.arguments.clone();
+    normalized.call_sig.inline_modifiers = function.inline_modifiers.clone();
     normalized.call_sig.only_input_type_formals =
         only_input_type_formals_with_identities(&function.formals, type_parameters);
     normalized.call_sig.reified_type_parameter_ordinals = reified;

@@ -6,6 +6,7 @@
 
 use crate::fx_hash::HashSet;
 
+use crate::diag::Span;
 use crate::types::Ty;
 
 use super::lexical_bindings::BindingIdentity;
@@ -30,6 +31,28 @@ impl TryBodyWrites {
 }
 
 impl Checker<'_> {
+    /// The exact read type a completed assignment leaves behind, when Kotlin flow permits that
+    /// narrowing. A missing result means the binding must be read through its declared storage
+    /// type instead.
+    pub(super) fn assignment_narrowing(
+        &self,
+        name: &str,
+        storage: Ty,
+        actual: Ty,
+        site: Span,
+    ) -> Option<Ty> {
+        let flow = if actual == Ty::Null {
+            Ty::nullable(Ty::Nothing)
+        } else {
+            actual
+        };
+        (flow != storage
+            && !matches!(actual, Ty::Error | Ty::Nothing)
+            && !self.closure_reassigned_before(name, site)
+            && self.receiver_is_assignable(flow, storage))
+        .then_some(flow)
+    }
+
     /// Record the flow-narrowed read type a write leaves on the innermost `name` binding, and note
     /// that binding as written by every try body being checked. The write replaces the value, so
     /// every path fact rooted at the old one goes.

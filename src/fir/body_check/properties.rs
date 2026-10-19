@@ -1108,12 +1108,15 @@ impl BodyFirChecker<'_> {
                 if access.property.getter.compiler_intrinsic
                     == Some(crate::libraries::CompilerIntrinsic::CharCode)
                 {
-                    // kotlinc inlines the getter; its result ends an inlined call.
-                    let cause = self.expression_origin(expression)?;
-                    let cause = self
-                        .origins
-                        .synthetic(cause, SyntheticOriginKind::InlinedCall);
-                    self.body.record_inlined_call_conversion(cause);
+                    // A getter declared `inline` is realized here in place of the call kotlinc
+                    // inlines, so its result ends an inlined call.
+                    let mut cause = self.expression_origin(expression)?;
+                    if access.property.getter.inline != crate::libraries::InlineKind::None {
+                        cause = self
+                            .origins
+                            .synthetic(cause, SyntheticOriginKind::InlinedCall);
+                        self.body.record_inlined_call_conversion(cause);
+                    }
                     let target = ResolvedTy::new(access.property.ty).map_err(|error| {
                         self.failure(
                             self.file.expr_span(expression),
@@ -1384,8 +1387,8 @@ impl BodyFirChecker<'_> {
     }
 
     /// Type arguments of a selected getter, recovered from its generic signature and the receiver
-    /// and result the reference or read already specialized. A callable reference does not carry
-    /// `resolved_call_type_args`, so this is the same record a property read publishes.
+    /// and result the reference or read already specialized. A callable reference has no selected
+    /// generic-call record, so this reconstructs the same substitutions a property read publishes.
     pub(super) fn selected_getter_substitutions(
         &self,
         expression: ExprId,

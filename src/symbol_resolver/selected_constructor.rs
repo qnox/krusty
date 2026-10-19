@@ -38,15 +38,6 @@ pub(crate) fn capture(
     }
 }
 
-/// Both constructor realizations already carry the classifier facts captured at selection.
-pub(crate) fn from_selected_call(call: &SelectedConstructorCall) -> SelectedConstructorDeclaration {
-    match call {
-        SelectedConstructorCall::Direct(selected) | SelectedConstructorCall::Platform(selected) => {
-            selected.as_ref().clone()
-        }
-    }
-}
-
 /// Result of a constructor whose classifier is not in the frontend class table. Explicit type
 /// arguments stay on the selected declaration. An empty application takes its arguments from the
 /// expected type, including when that type is a direct supertype (`HashMap()` as `MutableMap<K, V>`).

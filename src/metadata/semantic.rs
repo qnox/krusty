@@ -181,6 +181,9 @@ pub struct KotlinFunction {
     pub formals: Vec<KotlinTypeParameter>,
     pub param_names: Vec<String>,
     pub param_defaults: Vec<bool>,
+    /// The exact `crossinline`/`noinline` modifier of each leading context and regular value
+    /// parameter. An extension receiver is not a value parameter and has no entry here.
+    pub inline_modifiers: Vec<crate::types::InlineParameterModifier>,
     pub vararg: Option<usize>,
     pub visibility: Visibility,
     /// Always [`KotlinModality::Final`] for a top-level function.
@@ -223,11 +226,13 @@ pub struct KotlinPackage {
 }
 
 /// One Kotlin type-alias declaration, before a provider publishes its qualified identity.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct KotlinTypeAlias {
     pub name: String,
     pub formals: Vec<KotlinTypeParameter>,
     pub expansion: KotlinType,
+    /// Occurrence facts parallel to the expanded type. They are not part of type equality.
+    pub expansion_spelling: crate::spelling::Spelled,
     pub visibility: Visibility,
 }
 

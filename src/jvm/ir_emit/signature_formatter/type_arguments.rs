@@ -70,21 +70,27 @@ impl JvmSignatureFormatter<'_> {
             .iter()
             .flat_map(|(_, variances)| variances.iter().copied());
         for (variance, argument) in variances.zip(arguments) {
-            let argument = match *argument {
-                Ty::StarProjection(_) => continue,
-                Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
-                argument => argument,
-            };
-            let nullable_nothing = matches!(
-                argument,
-                Ty::Nullable(inner) | Ty::PlatformNullable(inner) if *inner == Ty::Nothing
-            );
-            if nullable_nothing || (argument == Ty::Nothing && variance != TypeVariance::In) {
+            if makes_raw(variance, *argument) {
                 return Some(true);
             }
         }
         Some(false)
     }
+}
+
+/// Whether an argument for a parameter declared with `variance` leaves its type written raw:
+/// kotlinc's `hasNothingInNonContravariantPosition`.
+pub(super) fn makes_raw(variance: TypeVariance, argument: Ty) -> bool {
+    let argument = match argument {
+        Ty::StarProjection(_) => return false,
+        Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
+        argument => argument,
+    };
+    let nullable_nothing = matches!(
+        argument,
+        Ty::Nullable(inner) | Ty::PlatformNullable(inner) if *inner == Ty::Nothing
+    );
+    nullable_nothing || (argument == Ty::Nothing && variance != TypeVariance::In)
 }
 
 /// Whether an argument for a parameter declared with `variance` is written as a star.

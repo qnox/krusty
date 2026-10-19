@@ -927,6 +927,7 @@ fn a_friend_classifier_is_not_hidden_by_an_equal_nonfriend_signature() {
         name: "Alias".to_owned(),
         formals: Vec::new(),
         expansion: class("kotlin/Int", false),
+        expansion_spelling: Default::default(),
         visibility: Visibility::Public,
     });
     let mut friend = in_memory_class(1);
@@ -935,6 +936,7 @@ fn a_friend_classifier_is_not_hidden_by_an_equal_nonfriend_signature() {
         name: "Alias".to_owned(),
         formals: Vec::new(),
         expansion: class("kotlin/String", false),
+        expansion_spelling: Default::default(),
         visibility: Visibility::Public,
     });
     let package = segments(&["shared"]);

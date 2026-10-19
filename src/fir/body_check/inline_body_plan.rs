@@ -157,6 +157,31 @@ pub(super) fn publish(
         return Ok(None);
     };
     Ok(Some(Box::new(match plan {
+        crate::libraries::InlineBodyPlan::ReifiedTypeTest {
+            value,
+            type_parameter,
+            negated,
+            defaults,
+        } => crate::fir::FirInlineBodyPlan::ReifiedTypeTest {
+            value: map_value(*value, receiver_parameter)?,
+            type_parameter: *type_parameter,
+            negated: *negated,
+            defaults: defaults
+                .iter()
+                .map(|default| {
+                    Ok(crate::fir::FirInlineDefault {
+                        parameter: map_parameter(default.parameter, receiver_parameter)?,
+                        value: match default.value {
+                            crate::libraries::DefaultValue::Null => {
+                                crate::fir::FirInlineDefaultValue::Null
+                            }
+                            _ => return Err(MappingFailure::UnsupportedPlan),
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_boxed_slice(),
+        },
         crate::libraries::InlineBodyPlan::InvokeLambda {
             frame,
             lambda_parameter,
@@ -598,7 +623,11 @@ pub(super) fn finalize(
     let Some(plan) = inline_plan.as_deref() else {
         return Ok(());
     };
+    if matches!(plan, crate::fir::FirInlineBodyPlan::ReifiedTypeTest { .. }) {
+        return Ok(());
+    }
     let lambda_parameter = match plan {
+        crate::fir::FirInlineBodyPlan::ReifiedTypeTest { .. } => unreachable!(),
         crate::fir::FirInlineBodyPlan::InvokeLambda {
             lambda_parameter, ..
         }
@@ -661,6 +690,34 @@ mod tests {
     use super::*;
     use crate::fir::{FirCallTarget, FirExprId, FirExprKind, FirInlineBodyPlan};
     use crate::types::Ty;
+
+    #[test]
+    fn reified_type_test_maps_extension_receiver_and_default_ordinals_once() {
+        let plan = crate::libraries::InlineBodyPlan::ReifiedTypeTest {
+            value: crate::libraries::InlineBodyValue::Parameter(0),
+            type_parameter: 1,
+            negated: false,
+            defaults: vec![crate::libraries::InlineBodyDefault {
+                parameter: 1,
+                value: crate::libraries::DefaultValue::Null,
+            }],
+        };
+        let published = publish(Some(&plan), Some(0), None)
+            .expect("the exact plan maps")
+            .expect("the exact plan is published");
+        assert_eq!(
+            published.as_ref(),
+            &FirInlineBodyPlan::ReifiedTypeTest {
+                value: crate::fir::FirInlineValue::Receiver,
+                type_parameter: 1,
+                negated: false,
+                defaults: Box::new([crate::fir::FirInlineDefault {
+                    parameter: 0,
+                    value: crate::fir::FirInlineDefaultValue::Null,
+                }]),
+            }
+        );
+    }
 
     #[test]
     fn function_value_keeps_the_selected_external_call_and_provider_plan() {

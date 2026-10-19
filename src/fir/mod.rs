@@ -73,6 +73,8 @@ mod entry_point_tests;
 #[cfg(test)]
 mod index_tests;
 #[cfg(test)]
+mod signature_publication_tests;
+#[cfg(test)]
 mod signature_tests;
 #[cfg(test)]
 mod tests;
