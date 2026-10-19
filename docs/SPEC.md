@@ -9842,6 +9842,35 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   use-site projection is reported on that keyword, for that application only:
   `conflicting projection in type alias expansion in intermediate type 'Box<CONFLICTING-PROJECTION String>?'`.
   Tests: `tests/typealias_projection_e2e.rs`. Corpus: `reflection/typeOf/typeAliasedType.kt`.
+- **A constructor type parameter that nothing constrains cannot be inferred.** `C(1)` for
+  `class C<T : Comparable<T>>(val n: Int)`, `D(2)` for `class D<T>(val n: Int)`, and the `B` of
+  `P(3)` for `class P<A, B>(val a: A)` have no argument, written type argument, expected type or
+  enclosing call that fixes the parameter. kotlinc reports `cannot infer type for type parameter`
+  at the callee, as it does for `val x = make()` with `fun <T> make(): List<T>`. krusty completed
+  the parameter to its declared bound and accepted the call. It now reports the same diagnostic at
+  the same completion roots the generic-call report uses (an untyped declaration initializer or a
+  statement), so an enclosing call such as `use(C(7))` still completes the result first. A self
+  type (`T : KB<T>` in `KB`) is exempt: Kotlin completes it to its starred bound. A recursive bound
+  that also names another formal (`SELF : MB<T, SELF>`) is not, and `MB("v")` is reported. The
+  report reads what constructor inference recorded for each formal when it selected the
+  constructor, never the selected parameters: those are already specialized, so `Seq(s)` for
+  `class Seq<T : CharSequence>(val x: T)` with `s: CharSequence` would otherwise look unconstrained,
+  and a named or defaulted argument (`Named(x = s)`) would be matched to the wrong parameter. A
+  branch of an `if` with an `else`, a `when` with an `else` arm, an elvis or a `try` defers the report
+  until the branch results are joined: kotlinc completes the conditional as one call, so a sibling
+  branch can fix the parameter (`else -> Buildee()` beside
+  `build { setTypeVariable(TargetType()) }`, KT-60291). An open branch is re-selected under its
+  sibling's type viewed as the constructor's class (`if (c) D(1) else D<String>(2)` checks `D(1)`
+  against `D<String>`), the same rebinding a generic call branch gets; a sibling of another class
+  (`E<String>`, `"x"`) supplies no such view and constrains nothing. An open branch is never a
+  sibling's evidence, so a declared-bound fallback in one bare `D()` does not fix another bare
+  `D()`; when no branch constrains the formal, every remaining open call is reported at its callee. A `when` without `else` is not joined and reports immediately.
+  Evidence is published only after the selected constructor commits, so an inaccessible or rejected
+  candidate cannot add a second inference diagnostic. An inner class has no type parameter of its
+  own, so `Outer(42).Inner(100)` reports nothing. Owner:
+  `src/resolve/constructor_formal_evidence.rs`. Test:
+  `tests/uninferred_constructor_type_parameter_e2e.rs`.
+
 - **A self-bounded constructor variable with no other constraint completes to its starred bound.**
   `Builder("x")` for Java `class Builder<SELF extends Builder<SELF>>` has no argument or expected
   type evidence for `SELF`. kotlinc completes it to the declared bound with the recursive occurrence
@@ -9850,8 +9879,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Builder<SELF>`, so the second fluent call returned the bare `SELF` and the third failed as an
   unresolved member. Only a bound that is the constructed classifier itself is such a self type: for
   `C<T : Comparable<T>>`, `C(1)` has no completion in kotlinc (`cannot infer type for type
-  parameter 'T'`), and krusty keeps its existing bound completion there. Nor is a bound that also
-  names another formal: for `MB<T, SELF : MB<T, SELF>>`, kotlinc reports `cannot infer type for
+  parameter 'T'`), and krusty reports the same error (see the entry above). Nor is a bound that
+  also names another formal: for `MB<T, SELF : MB<T, SELF>>`, kotlinc reports `cannot infer type for
   type parameter 'SELF'` for `MB("v")` even with `T` inferred. Owner:
   `src/symbol_resolver/generic_inference/postponed_result.rs`. Test:
   `tests/java_self_bounded_constructor_e2e.rs::a_self_bounded_constructor_result_keeps_a_fluent_chain_typed`.
@@ -17213,6 +17242,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   formal not in scope keeps its identity, where `T` against `T` still marks a postponed
   expression and contributes nothing. Tests: `tests/self_call_type_variables_e2e.rs`,
   `symbol_resolver::generic_inference::call_site_variables::tests`.
+
+- **A postponed solution that depends on another call's open result remains uninferred.** If a
+  selected generic call's lambda result relates its `R` to the still-open `T` of a terminal generic
+  producer, `R = T` is a dependency between inference variables, not a solution. Completing the
+  enclosing expression reports `R` at the selected call and `T` at the terminal producer, including
+  when the producer is the value branch of an `if`, `when`, elvis, or `try`. A type parameter from
+  the enclosing lexical declaration is fixed and remains a valid solution. Test:
+  `conditional_block_branch_rebind_e2e::open_selected_lambda_results_preserve_terminal_branch_diagnostics`.
 
 - **An anonymous function's `return` targets the anonymous function, everywhere.** `fun (…): T { …
   return e … }` is a LOCAL return — unlike a lambda's bare `return`, which is a non-local return from
