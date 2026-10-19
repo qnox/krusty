@@ -1227,6 +1227,8 @@ mod java_abstract_override_e2e;
 mod java_array_covariance_e2e;
 #[path = "java_bridge_members_e2e.rs"]
 mod java_bridge_members_e2e;
+#[path = "java_class_formal_bound_e2e.rs"]
+mod java_class_formal_bound_e2e;
 #[path = "java_class_intrinsic_e2e.rs"]
 mod java_class_intrinsic_e2e;
 #[path = "java_constructor_expected_type_e2e.rs"]
