@@ -17161,10 +17161,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `CallableId` or the dependency's `ExternalCallableId` with its template, and nothing else about
   the expansion differs. The template keeps the declaration's parameter order (dispatch receiver,
   context parameters, extension receiver, value parameters) and its parameter defaults, lowered in
-  the callee's scope. A call the template makes of an ordinary (non-member, non-inline) dependency
-  function is the external call a source call of it is, by the calling compilation's provider
-  identity for the exact serialized callee; a call of a member or of another inline function
-  declines the template for now. A KLIB `inline` declaration is `MustInline`: it has no legal
+  the callee's scope. kotlinc's prepared copy of a member carries its dispatch receiver as the
+  leading regular parameter; the template reads it back as the dispatch receiver, and the
+  receiver's classifier must be the provider-normalized declaration owner the KLIB body contract
+  carries, or the template declines. A call the template makes of a non-inline dependency function
+  is the external call a source call of it is, by the calling compilation's provider identity for
+  the exact serialized callee; a member call keeps its dispatch receiver, and its serialized owner
+  must be the provider's declaration owner. A call of another inline function, or of a generic
+  member or member extension, declines the template for now. A call has function-value invocation
+  semantics only when the provider normalizes the callee as a declared `FunctionN` invocation
+  (`SemanticCallRole::KotlinFunctionInvoke`), never by the `invoke` spelling; prepared copies erase
+  function-type context and receiver markers, so the invocation's context and receiver arguments
+  lead its value arguments, and a plain `FunctionN` read matches a declared context or receiver
+  function type of the same arity. A KLIB `inline` declaration is `MustInline`: it has no legal
   direct call, and checked FIR keeps the callee's whole `InlineKind`. A must-inline call whose
   template is missing or declined is rejected, never compiled as a call of the dependency
   function; a `CanInline` callee without a template stays an ordinary call. A call that selected a
@@ -17173,6 +17182,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   extension keeps its declaration's `inline`/`reified` flags through the checker's member-extension
   view, as a top-level or member function does. Tests:
   `klib_lowering::tests::inline_templates::*`,
+  `klib_lowering::tests::only_a_declared_function_invocation_has_invocation_semantics`,
+  `multimodule_conformance_cases::FLOATING_BITS` (Native, a member call from a template),
   `klib_libraries::tests::prepared_inline_selection_takes_every_inline_declaration_of_its_module`,
   `multimodule_conformance_cases::RECEIVER_RETURNING_SCOPE_FUNCTIONS` and
   `multimodule_conformance_cases::REIFIED_CALLABLE_ORIGINS` (JVM, Native and Wasm), and
