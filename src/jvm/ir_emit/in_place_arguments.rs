@@ -14,6 +14,8 @@ pub(super) trait EmittedShape {
     /// A call is written as its operands and one invoke or instruction: it is not spliced from an
     /// inline body and is not a suspension point.
     fn plain_invoke(&self, call: u32) -> bool;
+    /// A source `==`/`!=` keeps both operands on the stack: its realization stores neither.
+    fn plain_equality(&self, equality: u32) -> bool;
 }
 
 impl EmittedShape for Emitter<'_> {
@@ -21,6 +23,10 @@ impl EmittedShape for Emitter<'_> {
         !self
             .sam_wrapper_realizations
             .is_nullable_construction(construction)
+    }
+
+    fn plain_equality(&self, equality: u32) -> bool {
+        !self.equality_stores_operand(equality)
     }
 
     fn plain_invoke(&self, call: u32) -> bool {
@@ -58,9 +64,9 @@ impl EmittedShape for Emitter<'_> {
 
 /// An intrinsic the backend writes as its operands and an instruction or invoke, with no
 /// temporary: an array or string access, a comparison's `compare`, an enum's `name()`, a
-/// `toString` of a nullable or unsigned value, a primitive array's `newarray`. An intrinsic that
-/// splices an inline template (`enumValueOf`, `enumEntries`), throws (`assert`), builds a type
-/// (`typeOf`) or tests nullable floating-point equality keeps the stored path.
+/// `toString` of a nullable or unsigned value, a primitive array's `newarray`, a nullable
+/// floating-point `areEqual`. An intrinsic that splices an inline template (`enumValueOf`,
+/// `enumEntries`), throws (`assert`) or builds a type (`typeOf`) keeps the stored path.
 fn straight_line_intrinsic(operation: &IrIntrinsic) -> bool {
     matches!(
         operation,
@@ -75,6 +81,7 @@ fn straight_line_intrinsic(operation: &IrIntrinsic) -> bool {
             | IrIntrinsic::UnsignedCompare { .. }
             | IrIntrinsic::UnsignedToString { .. }
             | IrIntrinsic::PrimitiveArrayNew { .. }
+            | IrIntrinsic::Ieee754Equals { .. }
     )
 }
 
@@ -138,6 +145,16 @@ fn evaluates_without_local_writes(ir: &IrFile, expression: u32, shape: &dyn Emit
             evaluates_without_local_writes(ir, *lhs, shape)
                 && evaluates_without_local_writes(ir, *rhs, shape)
         }
+        // A source `==` is its operands and an `areEqual`, `equals-impl` or a jump within the
+        // argument, unless its realization stores an operand: `Int? == Int` keeps the `Int` in a
+        // temporary, so kotlinc stores the whole argument as well.
+        IrExpr::Equality { lhs, rhs, .. } if shape.plain_equality(expression) => {
+            evaluates_without_local_writes(ir, *lhs, shape)
+                && evaluates_without_local_writes(ir, *rhs, shape)
+        }
+        // A template is `String.valueOf`, a `StringBuilder` chain or one `invokedynamic` over
+        // its parts.
+        IrExpr::StringConcat(parts) => arguments_movable(ir, parts, shape),
         IrExpr::PrimitiveNeg { operand, .. } => evaluates_without_local_writes(ir, *operand, shape),
         IrExpr::When { branches } => branches.iter().all(|&(condition, result)| {
             condition.is_none_or(|condition| evaluates_without_local_writes(ir, condition, shape))
@@ -171,7 +188,8 @@ mod tests {
     use super::{arguments_movable, EmittedShape};
     use crate::ir::{IrBinOp, IrExpr, IrFile};
 
-    /// Every construction and invoke is plain: only the operator's own emission is in question.
+    /// Every construction, invoke and equality is plain: only the operator's own emission is in
+    /// question.
     struct Plain;
 
     impl EmittedShape for Plain {
@@ -179,6 +197,9 @@ mod tests {
             true
         }
         fn plain_invoke(&self, _: u32) -> bool {
+            true
+        }
+        fn plain_equality(&self, _: u32) -> bool {
             true
         }
     }
