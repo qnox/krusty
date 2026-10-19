@@ -17,7 +17,7 @@ mod refusals;
 mod run;
 mod sources;
 
-pub use plan::{plan, Environment, Plan, Resources, Step};
+pub use plan::{plan, Environment, Plan, Step};
 pub use run::{run, RunFailure};
 
 /// The only task krusty-toolchain runs, as the toolchain names it after the module.

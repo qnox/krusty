@@ -1,12 +1,13 @@
 //! Carrying out a plan: each module in order, its output directory cleared, krusty run with the
 //! module's arguments and its output streamed as it comes, then its resources copied; the first
-//! module krusty fails on stops the task.
+//! module krusty fails on stops the task. Both output directories are reconciled on every run, so
+//! a module whose last source or resources directory is gone keeps no output from an earlier run.
 
 use std::io;
 use std::path::Path;
 use std::process::Command;
 
-use super::plan::{Plan, Resources};
+use super::plan::Plan;
 
 /// Why a plan stopped.
 #[derive(Debug)]
@@ -20,41 +21,49 @@ pub enum RunFailure {
 /// Run `plan` with the krusty binary `krusty`.
 pub fn run(plan: &Plan, krusty: &Path) -> Result<(), RunFailure> {
     for step in &plan.steps {
-        if let Some(arguments) = &step.arguments {
-            clear(&step.output).map_err(|error| {
-                RunFailure::Io(format!(
-                    "cannot clear {} for module `{}`: {error}",
-                    step.output.display(),
-                    step.module
-                ))
-            })?;
-            let status = Command::new(krusty)
-                .args(arguments)
-                .status()
+        let output = |action: &str, directory: &Path, error: io::Error| {
+            RunFailure::Io(format!(
+                "cannot {action} {} for module `{}`: {error}",
+                directory.display(),
+                step.module
+            ))
+        };
+        match &step.arguments {
+            Some(arguments) => {
+                clear(&step.output).map_err(|error| output("clear", &step.output, error))?;
+                let status = Command::new(krusty)
+                    .args(arguments)
+                    .status()
+                    .map_err(|error| {
+                        RunFailure::Io(format!(
+                            "cannot run krusty ({}) for module `{}`: {error}",
+                            krusty.display(),
+                            step.module
+                        ))
+                    })?;
+                if !status.success() {
+                    return Err(RunFailure::Compiler {
+                        module: step.module.clone(),
+                        // A krusty killed by a signal has no exit code of its own.
+                        code: status.code().unwrap_or(1),
+                    });
+                }
+            }
+            None => remove(&step.output).map_err(|error| output("remove", &step.output, error))?,
+        }
+        match &step.resources {
+            Some(resources) => clear(&step.resources_output)
+                .and_then(|()| copy_tree(resources, &step.resources_output))
                 .map_err(|error| {
                     RunFailure::Io(format!(
-                        "cannot run krusty ({}) for module `{}`: {error}",
-                        krusty.display(),
-                        step.module
+                        "cannot copy the resources of module `{}` from {} to {}: {error}",
+                        step.module,
+                        resources.display(),
+                        step.resources_output.display()
                     ))
-                })?;
-            if !status.success() {
-                return Err(RunFailure::Compiler {
-                    module: step.module.clone(),
-                    // A krusty killed by a signal has no exit code of its own.
-                    code: status.code().unwrap_or(1),
-                });
-            }
-        }
-        if let Some(resources) = &step.resources {
-            copy_resources(resources).map_err(|error| {
-                RunFailure::Io(format!(
-                    "cannot copy the resources of module `{}` from {} to {}: {error}",
-                    step.module,
-                    resources.from.display(),
-                    resources.to.display()
-                ))
-            })?;
+                })?,
+            None => remove(&step.resources_output)
+                .map_err(|error| output("remove", &step.resources_output, error))?,
         }
     }
     Ok(())
@@ -62,18 +71,16 @@ pub fn run(plan: &Plan, krusty: &Path) -> Result<(), RunFailure> {
 
 /// Make `directory` an empty directory.
 fn clear(directory: &Path) -> io::Result<()> {
-    match std::fs::remove_dir_all(directory) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
+    remove(directory)?;
     std::fs::create_dir_all(directory)
 }
 
-/// Replace the copied resources with the resources directory's contents.
-fn copy_resources(resources: &Resources) -> io::Result<()> {
-    clear(&resources.to)?;
-    copy_tree(&resources.from, &resources.to)
+/// Remove `directory` and everything in it, if it exists.
+fn remove(directory: &Path) -> io::Result<()> {
+    match std::fs::remove_dir_all(directory) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
 }
 
 fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {

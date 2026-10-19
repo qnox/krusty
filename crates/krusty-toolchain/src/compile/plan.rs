@@ -21,22 +21,20 @@ pub struct Environment {
     pub java_home: Option<PathBuf>,
 }
 
-/// A directory of resources and where the toolchain copies it.
-pub struct Resources {
-    pub from: PathBuf,
-    pub to: PathBuf,
-}
-
 /// One module's main fragment.
 pub struct Step {
     pub module: String,
-    /// Where the compiled classes go (`-d`), cleared before krusty runs.
+    /// Where the compiled classes go (`-d`). It holds exactly this run's classes, and nothing
+    /// when the fragment has no Kotlin sources.
     pub output: PathBuf,
     /// krusty's arguments; `None` when the fragment has no Kotlin sources, which the toolchain
     /// does not compile.
     pub arguments: Option<Vec<OsString>>,
-    /// The fragment's resources, when it has a resources directory.
-    pub resources: Option<Resources>,
+    /// Where the resources are copied. It holds exactly the resources directory's contents, and
+    /// nothing when the fragment has no resources directory.
+    pub resources_output: PathBuf,
+    /// The fragment's resources directory, when it has one.
+    pub resources: Option<PathBuf>,
 }
 
 /// The modules to compile, each after the modules it compiles against.
@@ -149,15 +147,13 @@ pub fn plan(
         };
         let artifacts = artifact_directory(root, name);
         let output = artifacts.join("kotlin-output");
-        let resources = layout.resources.is_dir().then(|| Resources {
-            from: layout.resources.clone(),
-            to: artifacts.join("resources-output"),
-        });
+        let resources_output = artifacts.join("resources-output");
+        let resources = layout.resources.is_dir().then(|| layout.resources.clone());
         outputs.insert(
             name,
             [
                 (!found.kotlin.is_empty()).then(|| output.clone()),
-                resources.as_ref().map(|resources| resources.to.clone()),
+                resources.as_ref().map(|_| resources_output.clone()),
             ]
             .into_iter()
             .flatten()
@@ -226,6 +222,7 @@ pub fn plan(
             module: name.to_string(),
             output,
             arguments,
+            resources_output,
             resources,
         });
     }

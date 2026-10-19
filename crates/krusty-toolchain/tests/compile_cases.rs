@@ -124,28 +124,34 @@ fn krusty_toolchain(
     let root = support::materialize(&temp, &case.project);
     Resolving::write_repository(&directory, &case.repository);
     compiling::lay_out(&directory);
+    let output = run_task(&directory, &root, task, configure);
+    let record = std::fs::read_to_string(directory.join(compiling::RECORD)).unwrap_or_default();
+    Ran {
+        output,
+        record: placed(&directory.display().to_string(), record.as_bytes()),
+        directory,
+        _temp: temp,
+    }
+}
+
+/// Runs krusty-toolchain's `task` in the project at `root`, laid out in `directory`.
+fn run_task(directory: &Path, root: &Path, task: &str, configure: impl Fn(&mut Command)) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_krusty-toolchain"));
     command
         .args(["task", task])
         .current_dir(root)
         .env("HOME", directory.join(Resolving::HOME));
-    compiling::environment(&mut command, &directory);
+    compiling::environment(&mut command, directory);
     configure(&mut command);
     let ran = command.output().expect("run krusty-toolchain");
-    let record = std::fs::read_to_string(directory.join(compiling::RECORD)).unwrap_or_default();
-    Ran {
-        output: Output {
-            root: directory.display().to_string(),
-            code: ran
-                .status
-                .code()
-                .expect("krusty-toolchain exits with a code"),
-            stdout: ran.stdout,
-            stderr: ran.stderr,
-        },
-        record: placed(&directory.display().to_string(), record.as_bytes()),
-        directory,
-        _temp: temp,
+    Output {
+        root: directory.display().to_string(),
+        code: ran
+            .status
+            .code()
+            .expect("krusty-toolchain exits with a code"),
+        stdout: ran.stdout,
+        stderr: ran.stderr,
     }
 }
 
@@ -339,6 +345,49 @@ fn outputs_are_cleared_and_resources_copied() {
             "{module}"
         );
     }
+}
+
+/// A module whose last source and resources directory are gone keeps nothing an earlier run put in
+/// its output directories.
+#[test]
+fn a_rerun_leaves_no_output_of_removed_sources_or_resources() {
+    compiling::recorder();
+    let case = case("lib-and-app");
+    let quiet = |command: &mut Command| {
+        command.env("KRUSTY_RECORDER_FAIL", "none");
+    };
+    let first = krusty_toolchain("stale", &case, ":app:compileJvm", quiet);
+    assert_eq!(
+        first.output.code,
+        0,
+        "{}",
+        placed(&first.output.root, &first.output.stderr)
+    );
+    let project = first.directory.join(Resolving::PROJECT);
+    let artifacts = project.join("build/artifacts/CompiledJvmArtifact");
+    // What krusty would have emitted for the library on the first run.
+    std::fs::write(
+        artifacts.join("libjvm/kotlin-output/Greeting.class"),
+        b"class",
+    )
+    .unwrap();
+    std::fs::write(
+        artifacts.join("appjvm/kotlin-output/MainKt.class"),
+        b"class",
+    )
+    .unwrap();
+    std::fs::remove_file(project.join("lib/src/Greeting.kt")).unwrap();
+    std::fs::remove_dir_all(project.join("lib/resources")).unwrap();
+
+    let second = run_task(&first.directory, &project, ":app:compileJvm", quiet);
+    assert_eq!(second.code, 0, "{}", placed(&second.root, &second.stderr));
+    let mut found = Vec::new();
+    files_below(&artifacts, "", &mut found);
+    assert_eq!(found, Files::new(), "no stale classes or resources");
+    for gone in ["libjvm/kotlin-output", "libjvm/resources-output"] {
+        assert!(!artifacts.join(gone).exists(), "{gone}");
+    }
+    assert!(artifacts.join("appjvm/kotlin-output").is_dir());
 }
 
 #[test]
