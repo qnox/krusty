@@ -20,6 +20,7 @@ use krusty::plugins::registry::{Activation, NativePlugins, PluginRegistry};
 use crate::kotlinc_arguments::{self, Catalog, Disposition, Lifecycle, Origin, ValueKind};
 
 mod arguments;
+mod fragments;
 mod language_features;
 mod warning_policy;
 
@@ -350,6 +351,10 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
     for source in &tokenized.free {
         collect_sources(source, &mut opts.sources, &mut opts.ignored);
     }
+    let fragments = fragments::check(&parsed.fragments, &tokenized.free);
+    opts.errors.extend(fragments.unsupported);
+    opts.configuration_errors
+        .extend(fragments.configuration_errors);
     opts.plugins.finish();
     opts.errors.append(&mut opts.plugins.errors);
     let lifecycle = kotlinc_arguments::lifecycle_warnings(&tokenized, reference_version)
@@ -1161,6 +1166,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A fragment name declared twice, in one `-Xfragments` list or in repeated arguments, is
+    /// one fragment, as in kotlinc; a second distinct name is refused.
+    #[test]
+    fn a_repeated_fragment_name_is_one_fragment() {
+        for fragments in [
+            &["-Xfragments=main,main"][..],
+            &["-Xfragments=main", "-Xfragments=main"],
+        ] {
+            let mut args = fragments.to_vec();
+            args.extend(["-Xfragment-sources=main:f.kt", "f.kt"]);
+            let parsed = parse_args(&args);
+            assert_eq!(parsed.errors, Vec::<String>::new(), "{fragments:?}");
+            assert_eq!(
+                parsed.configuration_errors,
+                Vec::<String>::new(),
+                "{fragments:?}"
+            );
+            assert_eq!(parsed.sources, vec!["f.kt".to_string()], "{fragments:?}");
+        }
+        let parsed = parse_args(&[
+            "-Xfragments=main",
+            "-Xfragments=other,main",
+            "-Xfragment-sources=main:f.kt",
+            "f.kt",
+        ]);
+        assert_eq!(
+            parsed.errors,
+            vec!["krusty compiles a single fragment, but -Xfragments declares 2: main,other"]
+        );
+        assert_eq!(parsed.configuration_errors, Vec::<String>::new());
     }
 
     /// A kotlinc argument krusty does not implement is an error; a `-X` flag kotlinc does not

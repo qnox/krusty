@@ -238,8 +238,8 @@ pub(super) fn normalize_invocation_flag(arg: &str) -> Result<String, String> {
     // A flag whose value is a scratch path names the same inputs wherever the files or output
     // directories were written, so the fingerprint must be their CONTENT, never the path. The two
     // kotlinc multiplatform flags carry different value shapes: `-Xcommon-sources` is a
-    // comma-separated list of common-module source FILES; `-Xfragment-sources` is one stable
-    // fragment identity plus one scratch source FILE; and `-Xfriend-paths` is a
+    // comma-separated list of common-module source FILES; `-Xfragment-sources` is a list of stable
+    // fragment identities, each with one scratch source FILE; and `-Xfriend-paths` is a
     // path-separator-joined list of friend-module class roots (as emitted by
     // `std::env::join_paths`), each either an output DIRECTORY or a JAR FILE such as
     // `kotlin-stdlib.jar`. Reading a directory as a file (or a jar as a directory) would error and
@@ -255,18 +255,23 @@ pub(super) fn normalize_invocation_flag(arg: &str) -> Result<String, String> {
         return Ok(format!("-Xcommon-sources={}", hashed.join(",")));
     }
     if let Some(value) = arg.strip_prefix("-Xfragment-sources=") {
-        let (fragment, file) = value
-            .split_once(':')
-            .ok_or_else(|| format!("invalid fragment source flag: {arg}"))?;
-        if fragment.is_empty() || file.is_empty() {
-            return Err(format!("invalid fragment source flag: {arg}"));
+        // A comma-separated list of `<fragment>:<file>` values. A value naming a source file keys
+        // by its content; any other value (malformed, or naming no file) is literal and stable.
+        let mut normalized = Vec::new();
+        for part in value.split(',') {
+            match part.split_once(':') {
+                Some((fragment, file)) if std::path::Path::new(file).is_file() => {
+                    let bytes = std::fs::read(file)
+                        .map_err(|err| format!("unreadable fragment source {file}: {err}"))?;
+                    normalized.push(format!(
+                        "{fragment}:{}",
+                        hex128(fingerprint_parts(&[&bytes]))
+                    ));
+                }
+                _ => normalized.push(part.to_string()),
+            }
         }
-        let bytes = std::fs::read(file)
-            .map_err(|err| format!("unreadable fragment source {file}: {err}"))?;
-        return Ok(format!(
-            "-Xfragment-sources={fragment}:{}",
-            hex128(fingerprint_parts(&[&bytes]))
-        ));
+        return Ok(format!("-Xfragment-sources={}", normalized.join(",")));
     }
     if let Some(value) = arg.strip_prefix("-Xfriend-paths=") {
         let mut hashed = Vec::new();
