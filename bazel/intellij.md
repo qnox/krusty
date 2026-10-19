@@ -33,7 +33,7 @@ them into worker flags, and krusty's `--persistent_worker` parses exactly those:
 | `x_sam_conversions = "indy"` | `--x_sam_conversions indy` | likewise |
 | `jvm_target = "25"` | `--jvm_target 25` | `-jvm-target 25` (class file v69) |
 | `api_version` / `language_version = "2.4"` | `--api_version` / `--language_version` | accepted current mode and reported as a no-op; other versions are refused |
-| `progressive = True` | `--progressive` | reported as a diagnostics-only no-op |
+| `progressive = True` | `--progressive` | honored as `-progressive`: turns on the selected release's progressive language features, all of which krusty models, as kotlinc does |
 | `x_x_language = ["+…"]` | `--x_xlanguage +…` | supported language features are forwarded; the project's eager-accessibility check is reported as a no-op |
 | `opt_in = [...]` | `--opt_in …` | reported as a no-op because krusty does not enforce opt-in requirements |
 

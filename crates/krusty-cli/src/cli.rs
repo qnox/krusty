@@ -708,7 +708,8 @@ mod tests {
     /// them on; every supported release's are.
     #[test]
     fn progressive_turns_on_every_modeled_progressive_feature() {
-        for release in ["2.4.0", "2.4.10", "2.4.20"] {
+        for release in KotlinVersion::supported() {
+            let release = release.to_string();
             let o = parse_args(&[
                 &format!("-Xkotlin-reference-version={release}"),
                 "-progressive",
