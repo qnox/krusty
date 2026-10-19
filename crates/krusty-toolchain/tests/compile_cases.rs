@@ -11,6 +11,9 @@
 //! all it prints. Both ledgers are checked without the oracle. Where the oracle runs, the
 //! toolchain's recorded invocations must be the `krusty-argv` ledger's, compared module by module
 //! (the toolchain may compile independent modules in either order), the sources of each as a set.
+//!
+//! One test compiles with the real krusty instead of the recorder: a library and an application
+//! that uses it, whose outputs are listed and whose program is run on the JDK it compiled against.
 
 mod support;
 
@@ -461,4 +464,175 @@ fn a_task_needs_krusty_and_a_task_krusty_toolchain_runs() {
             "{run}"
         );
     }
+}
+
+/// What the end-to-end compile needs beyond krusty-toolchain: the krusty binary (`KRUSTY_BIN`, as
+/// `run-tests.sh` exports it, else a built one in the workspace's target directory), a JDK
+/// (`JAVA_HOME`) and its major version, and the Kotlin distribution's standard library and
+/// annotations jars (beside `KRUSTY_KOTLINC`'s `bin`, else in the workspace's provisioned reference
+/// compiler).
+struct RealCompile {
+    krusty: PathBuf,
+    java_home: PathBuf,
+    jdk_major: u32,
+    kotlin_lib: PathBuf,
+}
+
+impl RealCompile {
+    fn find() -> Option<Self> {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let krusty = std::env::var_os("KRUSTY_BIN")
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+            .or_else(|| {
+                ["gate", "debug", "release"]
+                    .iter()
+                    .map(|profile| workspace.join("target").join(profile).join("krusty"))
+                    .find(|path| path.is_file())
+            })?;
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME")?);
+        let release = std::fs::read_to_string(java_home.join("release")).ok()?;
+        let version = release
+            .lines()
+            .find_map(|line| line.strip_prefix("JAVA_VERSION=\""))?;
+        let jdk_major = version.split(['.', '"']).next()?.parse().ok()?;
+        let kotlin_lib = std::env::var_os("KRUSTY_KOTLINC")
+            .and_then(|kotlinc| Some(Path::new(&kotlinc).parent()?.parent()?.join("lib")))
+            .into_iter()
+            .chain(
+                std::fs::read_dir(workspace.join("target/cache/kotlinc"))
+                    .into_iter()
+                    .flatten()
+                    .map(|entry| entry.unwrap().path().join("kotlinc/lib")),
+            )
+            .find(|lib| lib.join("kotlin-stdlib.jar").is_file())?;
+        Some(Self {
+            krusty,
+            java_home,
+            jdk_major,
+            kotlin_lib,
+        })
+    }
+}
+
+/// The files below `directory`, by `/`-separated path, sorted.
+fn listing(directory: &Path) -> Vec<String> {
+    fn walk(directory: &Path, prefix: &str, names: &mut Vec<String>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let name = format!("{prefix}{}", entry.file_name().to_string_lossy());
+            if entry.file_type().unwrap().is_dir() {
+                walk(&entry.path(), &format!("{name}/"), names);
+            } else {
+                names.push(name);
+            }
+        }
+    }
+    let mut names = Vec::new();
+    walk(directory, "", &mut names);
+    names.sort();
+    names
+}
+
+#[test]
+fn the_real_krusty_compiles_a_library_and_the_application_that_uses_it() {
+    let Some(real) = RealCompile::find() else {
+        eprintln!(
+            "skipping the end-to-end compile: needs the krusty binary, a JDK and the Kotlin standard library"
+        );
+        return;
+    };
+    let settings = format!(
+        "settings:\n  jvm:\n    jdk:\n      version: {}\n",
+        real.jdk_major
+    );
+    let project: Files = vec![
+        ("project.yaml".into(), "modules:\n  - app\n  - lib\n".into()),
+        (
+            "app/module.yaml".into(),
+            format!("product: jvm/app\nrepositories:\n  - mavenLocal\ndependencies:\n  - ../lib\n{settings}"),
+        ),
+        (
+            "app/src/main.kt".into(),
+            "import greeting.Greeter\n\nfun main() = println(Greeter(\"world\").greet() + \"!\")\n"
+                .into(),
+        ),
+        (
+            "lib/module.yaml".into(),
+            format!("product: jvm/lib\nrepositories:\n  - mavenLocal\n{settings}"),
+        ),
+        (
+            "lib/src/Greeter.kt".into(),
+            "package greeting\n\nclass Greeter(private val name: String) {\n    fun greet() = \"hello, $name\"\n}\n"
+                .into(),
+        ),
+    ];
+    let mut repository = Vec::new();
+    files_below(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases/dependencies/repository"),
+        "",
+        &mut repository,
+    );
+    let temp = support::TempDir::new("compile-real-krusty");
+    let directory = temp.0.clone();
+    let root = support::materialize(&temp, &project);
+    Resolving::write_repository(&directory, &repository);
+    let local = directory.join(Resolving::HOME).join(".m2/repository");
+    let stdlib = local.join("org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar");
+    let annotations = local.join("org/jetbrains/annotations/13.0/annotations-13.0.jar");
+    std::fs::copy(real.kotlin_lib.join("kotlin-stdlib.jar"), &stdlib).unwrap();
+    std::fs::copy(real.kotlin_lib.join("annotations-13.0.jar"), &annotations).unwrap();
+    compiling::lay_out(&directory);
+
+    let ran = run_task(&directory, &root, ":app:compileJvm", |command| {
+        command
+            .env("JAVA_HOME", &real.java_home)
+            .env("KRUSTY_BIN", &real.krusty);
+    });
+    assert_eq!(
+        (ran.code, placed(&ran.root, &ran.stdout), placed(&ran.root, &ran.stderr)),
+        (
+            0,
+            format!(
+                "ok: emitted 1 class file(s) to {PLACEHOLDER}/project/build/artifacts/CompiledJvmArtifact/libjvm/kotlin-output\n\
+                 ok: emitted 1 class file(s) to {PLACEHOLDER}/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output\n"
+            ),
+            String::new()
+        ),
+        "krusty-toolchain compiles the library, then the application, printing what krusty prints"
+    );
+    let artifacts = root.join("build/artifacts/CompiledJvmArtifact");
+    let lib = artifacts.join("libjvm/kotlin-output");
+    let app = artifacts.join("appjvm/kotlin-output");
+    assert_eq!(
+        listing(&lib),
+        ["META-INF/lib.kotlin_module", "greeting/Greeter.class"]
+    );
+    assert_eq!(
+        listing(&app),
+        ["META-INF/app.kotlin_module", "MainKt.class"]
+    );
+
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    let classpath = [&app, &lib, &stdlib]
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(separator);
+    let executed = Command::new(real.java_home.join("bin/java"))
+        .args(["-cp", &classpath, "MainKt"])
+        .env_remove("JAVA_TOOL_OPTIONS")
+        .env_remove("JDK_JAVA_OPTIONS")
+        .env_remove("_JAVA_OPTIONS")
+        .output()
+        .expect("run the application");
+    assert_eq!(
+        (
+            executed.status.code(),
+            String::from_utf8_lossy(&executed.stdout).into_owned(),
+            String::from_utf8_lossy(&executed.stderr).into_owned()
+        ),
+        (Some(0), "hello, world!\n".to_string(), String::new()),
+        "the application runs with the library's behavior"
+    );
 }
