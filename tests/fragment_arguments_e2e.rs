@@ -102,6 +102,28 @@ fn one_fragment_with_every_source_compiles_as_kotlinc_does() {
     assert_eq!(compiled.krusty, compiled.kotlinc);
 }
 
+/// kotlinc 2.4.20 treats a fragment name declared twice as one fragment, whether the list repeats
+/// it or the argument does.
+#[test]
+fn a_fragment_declared_twice_compiles_as_kotlinc_does() {
+    for fragments in [
+        &["-Xfragments=main,main"][..],
+        &["-Xfragments=main", "-Xfragments=main"],
+    ] {
+        let compiled = compile(|first, second| {
+            let mut arguments = vec!["-Xmulti-platform".to_string()];
+            arguments.extend(fragments.iter().map(ToString::to_string));
+            arguments.push(format!("-Xfragment-sources=main:{first}"));
+            arguments.push(format!("-Xfragment-sources=main:{second}"));
+            arguments
+        });
+        let (code, stderr, output) = &compiled.kotlinc;
+        assert_eq!((*code, stderr.as_str()), (0, ""), "kotlinc {fragments:?}");
+        assert_eq!(output.len(), 4, "kotlinc {fragments:?}: {output:?}");
+        assert_eq!(compiled.krusty, compiled.kotlinc, "{fragments:?}");
+    }
+}
+
 #[test]
 fn a_source_outside_every_fragment_is_kotlincs_configuration_error() {
     let compiled = compile(|first, _| {

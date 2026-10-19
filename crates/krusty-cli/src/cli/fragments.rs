@@ -25,13 +25,21 @@ pub(super) fn check(arguments: &FragmentArguments, free: &[String]) -> FragmentC
     if arguments.fragments.is_empty() {
         return FragmentCheck::default();
     }
-    if arguments.fragments.len() > 1 {
+    // A fragment is its name: kotlinc accepts a name declared twice, in one list or in repeated
+    // arguments, as one fragment.
+    let mut fragments: Vec<&str> = Vec::new();
+    for fragment in &arguments.fragments {
+        if !fragments.contains(&fragment.as_str()) {
+            fragments.push(fragment);
+        }
+    }
+    if fragments.len() > 1 {
         return FragmentCheck {
             configuration_errors: Vec::new(),
             unsupported: Some(format!(
                 "krusty compiles a single fragment, but -Xfragments declares {}: {}",
-                arguments.fragments.len(),
-                arguments.fragments.join(",")
+                fragments.len(),
+                fragments.join(",")
             )),
         };
     }
@@ -43,12 +51,11 @@ pub(super) fn check(arguments: &FragmentArguments, free: &[String]) -> FragmentC
                 "incorrect syntax for -Xfragment-sources argument. `<module name>:<source file>` \
                  expected but got `{value}`"
             )),
-            Some((fragment, source)) if !arguments.fragments.iter().any(|f| f == fragment) => {
-                configuration_errors.push(format!(
+            Some((fragment, source)) if !fragments.contains(&fragment) => configuration_errors
+                .push(format!(
                     "passed {value}, but fragment `{fragment}` of source file {source} is not \
                      specified in -Xfragments"
-                ))
-            }
+                )),
             Some((_, source)) => listed.push(source),
         }
     }
@@ -123,6 +130,29 @@ mod tests {
                 ]),
                 unsupported: None,
             }
+        );
+    }
+
+    /// kotlinc 2.4.20 compiles `-Xfragments=main,main` like `-Xfragments=main`.
+    #[test]
+    fn a_fragment_declared_twice_is_one_fragment() {
+        assert_eq!(
+            checked(&["main", "main"], &["main:A.kt"], &["A.kt"]),
+            FragmentCheck::default()
+        );
+    }
+
+    #[test]
+    fn more_than_one_distinct_fragment_is_refused_in_first_seen_order() {
+        assert_eq!(
+            checked(
+                &["jvm", "common", "jvm"],
+                &["common:A.kt", "jvm:B.kt"],
+                &["A.kt", "B.kt"]
+            )
+            .unsupported
+            .as_deref(),
+            Some("krusty compiles a single fragment, but -Xfragments declares 2: jvm,common")
         );
     }
 
