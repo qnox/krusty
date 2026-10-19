@@ -92,3 +92,94 @@ fn only_what_a_dependent_observes_moves_the_fingerprint() {
     }
     let _ = std::fs::remove_dir_all(&scratch);
 }
+
+/// Replaces the one occurrence of `from` in the single class file under `classes` with `to`.
+fn patch_class(classes: &Path, from: &[u8], to: &[u8]) {
+    let mut files = Vec::new();
+    let mut pending = vec![classes.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("list the classes") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "class")
+            {
+                files.push(path);
+            }
+        }
+    }
+    let mut patched = 0;
+    for file in files {
+        let mut bytes = std::fs::read(&file).expect("read a class");
+        let positions: Vec<_> = bytes
+            .windows(from.len())
+            .enumerate()
+            .filter(|(_, window)| *window == from)
+            .map(|(position, _)| position)
+            .collect();
+        for position in positions {
+            bytes[position..position + to.len()].copy_from_slice(to);
+            patched += 1;
+        }
+        std::fs::write(&file, bytes).expect("write a class");
+    }
+    assert_eq!(patched, 1, "{from:02x?} occurs once");
+}
+
+/// A constant's NaN payload is part of what a dependent folds into its own bytecode, so two
+/// declaration models that differ only there have different fingerprints.
+#[test]
+fn a_nan_payload_moves_the_fingerprint() {
+    let Some(krusty) = krusty_binary() else {
+        eprintln!("skipping dependency_view: needs the krusty binary");
+        return;
+    };
+    let scratch =
+        std::env::temp_dir().join(format!("krusty-dependency-nan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let source = "package library\nconst val SINGLE = 1.5f\nconst val DOUBLE = 2.5\n";
+    // CONSTANT_Float 1.5f and CONSTANT_Double 2.5, as their constant-pool entries.
+    let single = [4u8, 0x3f, 0xc0, 0, 0];
+    let double = [6u8, 0x40, 0x04, 0, 0, 0, 0, 0, 0];
+    let nan = |tag: &str, single_nan: [u8; 5], double_nan: [u8; 9]| {
+        fingerprint(&krusty, &scratch, tag, source);
+        let classes = scratch.join(tag).join("classes");
+        patch_class(&classes, &single, &single_nan);
+        patch_class(&classes, &double, &double_nan);
+        directory_fingerprint(&classes).expect("fingerprint the classes")
+    };
+    let quiet = nan(
+        "quiet",
+        [4, 0x7f, 0xc0, 0, 0],
+        [6, 0x7f, 0xf8, 0, 0, 0, 0, 0, 0],
+    );
+    assert_eq!(
+        nan(
+            "quiet-again",
+            [4, 0x7f, 0xc0, 0, 0],
+            [6, 0x7f, 0xf8, 0, 0, 0, 0, 0, 0]
+        ),
+        quiet
+    );
+    assert_ne!(
+        nan(
+            "single-payload",
+            [4, 0x7f, 0xc0, 0, 1],
+            [6, 0x7f, 0xf8, 0, 0, 0, 0, 0, 0]
+        ),
+        quiet,
+        "the float's payload"
+    );
+    assert_ne!(
+        nan(
+            "double-payload",
+            [4, 0x7f, 0xc0, 0, 0],
+            [6, 0x7f, 0xf8, 0, 0, 0, 0, 0, 1]
+        ),
+        quiet,
+        "the double's payload"
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+}
