@@ -2937,6 +2937,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/value_class_java_nullable_element_e2e.rs`, `tests/java_type_variable_bound_e2e.rs`
   (Java-source and javac class-file declarations, an unbounded and a `Number`-bounded variable),
   `reified_type_arguments_e2e::reified_type_argument_shapes_match_kotlinc`.
+- **A Java member's class-formal occurrence carries the class's declared bound.** In
+  `class Box<T extends CharSequence>`, every `T` a member mentions without declaring it (a return,
+  a parameter, a field, a generic argument, a method bound `<U extends T>`) is the class formal,
+  bounded by `CharSequence!` as the class `Signature` declares; the provider hydrates those
+  occurrences before Java nullability applies. A method formal of the same name (`<T> T shadow(T)`)
+  is a different variable and shadows the class formal. Where no type argument replaces `T` (a raw
+  `Box` a Java method returns), `get().length` therefore resolves on `CharSequence`, as kotlinc does;
+  the parser's `Any` placeholder rejected it.
+  Tests: `tests/java_class_formal_bound_e2e.rs` (Java-source and javac class-file declarations,
+  `Box<*>` and raw access), `generic_signatures::class_formal_bound_tests`.
 - **A PLATFORM value narrowed to a declared non-null type is guarded where it enters.** A Java value
   arrives as `T!` (`Ty::PlatformNullable`), usable as both `T` and `T?`. Where the source commits it to
   a declared non-null type, kotlinc emits `dup` + `ldc "<expression>"` +
