@@ -241,6 +241,7 @@ impl BackendCallableFact {
             singleton_dispatch.map(SingletonDispatch::ty),
             singleton_dispatch.map(|dispatch| dispatch.classifier),
             self.klib_body_companion_receiver.as_ref(),
+            self.declaration_owner,
             self.dependency_callable.as_ref(),
         )
     }

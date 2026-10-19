@@ -195,15 +195,29 @@ fn annotation_classifier(annotation: &KlibIrAnnotation) -> Option<TypeName> {
     declaration_name(constructor.package().segments(), class).ok()
 }
 
-/// The function class whose member the public declaration `member` is, when it is one of the
-/// non-suspend, non-reflective `kotlin.FunctionN` classes, with the member's name.
-pub(super) fn function_class_member(
-    member: &KlibPublicIdSignature,
-) -> Option<(function_classifiers::FunctionClassifier, &str)> {
+/// The arity of the invocation the public declaration `member` is, when the function classifier
+/// that owns it declares it with the Kotlin function invocation role. The member is joined to the
+/// builtins provider's declaration of its exact classifier by its serialized name; that
+/// declaration's role, not the name, decides. Suspend and reflective classifiers are not invoked
+/// here.
+pub(super) fn function_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
     let (name, class) = member.declaration().segments().split_last()?;
     let owner = declaration_name(member.package().segments(), class).ok()?;
     let function = function_classifiers::classifier(owner)?;
-    (!function.is_suspend() && !function.is_reflective()).then_some((function, name.as_str()))
+    if function.is_suspend() || function.is_reflective() {
+        return None;
+    }
+    let declaration = function_classifiers::synthetic(function);
+    let (functions, _) = declaration
+        .declared_callables
+        .get(name)?
+        .clone()
+        .into_parts();
+    let [declared] = functions.overloads.as_slice() else {
+        return None;
+    };
+    (declared.callable.semantic_role == Some(crate::types::SemanticCallRole::KotlinFunctionInvoke))
+        .then(|| declared.semantic_params().len())
 }
 
 /// Intern a classifier identity one signature segment at a time. Package segments are namespace

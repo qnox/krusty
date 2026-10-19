@@ -117,6 +117,9 @@ pub struct KlibBodyCallable<'a> {
     /// primitive, so later phases cannot reconstruct the classifier from the type.
     singleton_classifier: Option<TypeName>,
     companion_receiver: Option<&'a KlibBodyCompanionReceiver>,
+    /// The provider-normalized namespace that declares the callable. Metadata is authoritative
+    /// for it: a serialized body must name the same owner.
+    declaration_owner: Option<crate::types::SemanticCallableOwner>,
     identity: &'a KlibDependencyCallable,
 }
 
@@ -132,6 +135,7 @@ impl<'a> KlibBodyCallable<'a> {
         singleton_dispatch: Option<Ty>,
         singleton_classifier: Option<TypeName>,
         companion_receiver: Option<&'a KlibBodyCompanionReceiver>,
+        declaration_owner: Option<crate::types::SemanticCallableOwner>,
         identity: Option<&'a KlibDependencyCallable>,
     ) -> Option<Self> {
         Some(Self {
@@ -145,6 +149,7 @@ impl<'a> KlibBodyCallable<'a> {
             singleton_dispatch,
             singleton_classifier,
             companion_receiver,
+            declaration_owner,
             identity: identity?,
         })
     }
@@ -208,11 +213,16 @@ impl<'a> KlibBodyCallable<'a> {
             && self.context_count == other.context_count
             && self.compiler_intrinsic == other.compiler_intrinsic
             && self.companion_receiver == other.companion_receiver
+            && self.declaration_owner == other.declaration_owner
             && self.identity == other.identity
     }
 
     pub(crate) fn companion_receiver(self) -> Option<&'a KlibBodyCompanionReceiver> {
         self.companion_receiver
+    }
+
+    pub(crate) fn declaration_owner(self) -> Option<crate::types::SemanticCallableOwner> {
+        self.declaration_owner
     }
 
     pub(crate) fn signature(self) -> &'a KlibDeclarationSignature {
@@ -269,6 +279,7 @@ impl ExternalCallableRealization {
             singleton.map(SingletonDispatch::ty),
             singleton.map(|dispatch| dispatch.classifier),
             self.klib_body_companion_receiver.as_ref(),
+            self.declaration_owner,
             self.dependency_callable.as_ref(),
         )
     }

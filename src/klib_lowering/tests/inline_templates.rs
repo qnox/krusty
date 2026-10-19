@@ -102,3 +102,48 @@ fn a_declined_body_leaves_the_file_as_it_was() {
     assert!(ir.fn_params.is_empty());
     assert!(ir.inline_only_fns.is_empty());
 }
+
+#[test]
+fn a_member_copy_of_another_class_than_its_selected_owner_declines() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(
+        SymbolNamespace::Classifier(type_name("kotlin/UInt")),
+        "toInt",
+    );
+    let [function] = symbols.callables.functions() else {
+        panic!("expected one `kotlin.UInt.toInt`");
+    };
+    let target = function
+        .callable
+        .external_identity
+        .expect("a KLIB member carries its provider identity");
+    let mut selected = libraries
+        .external_callable(target)
+        .expect("the provider realizes its own identity");
+    assert_eq!(
+        selected.declaration_owner,
+        Some(crate::types::SemanticCallableOwner::Classifier(type_name(
+            "kotlin/UInt"
+        )))
+    );
+    selected.declaration_owner = Some(crate::types::SemanticCallableOwner::Classifier(type_name(
+        "kotlin/Int",
+    )));
+    let mut ir = IrFile::default();
+    let decline = template(&mut ir, &libraries, &selected)
+        .expect_err("the serialized copy is a member of another class");
+    assert_eq!(
+        decline.reason(),
+        &KlibBodyDeclineReason::SignatureMismatch(format!(
+            "a prepared inline copy is a member of {:?}, selected as one of {:?}",
+            type_name("kotlin/UInt"),
+            Some(crate::types::SemanticCallableOwner::Classifier(type_name(
+                "kotlin/Int"
+            )))
+        ))
+    );
+    assert!(ir.functions.is_empty());
+}
