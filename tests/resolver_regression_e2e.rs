@@ -2346,6 +2346,53 @@ fun box(): String {
     assert_accepted_and_runs(src, "ResolverQualifiedNestedAliasConstructors");
 }
 
+/// A callable reference or class literal whose left-hand side names a typealias declared in a
+/// classifier's body continues that classifier through the same qualifier step as an expression,
+/// for a nested and for a local owner.
+#[test]
+fn nested_and_local_alias_references_continue_their_owner() {
+    let src = r#"
+class Item(val value: String)
+
+class Outer {
+    class Mid {
+        class Leaf(val value: String)
+        typealias LeafAlias = Leaf
+    }
+    typealias ItemAlias = Item
+}
+
+fun nested(): String {
+    val a = Outer.Mid.LeafAlias::class.simpleName
+    val b = Outer.ItemAlias::class.simpleName
+    val c = Outer.Mid::LeafAlias
+    val d = Outer::ItemAlias
+    val e = Outer.Mid.LeafAlias::value
+    return "$a $b ${c("C").value} ${d("D").value} ${e(Outer.Mid.Leaf("E"))}"
+}
+
+fun local(): String {
+    class Local {
+        typealias ItemAlias = Item
+    }
+    val a = Local.ItemAlias::class.simpleName
+    val b = Local::ItemAlias
+    val c = Local.ItemAlias::value
+    return "$a ${b("B").value} ${c(Item("C"))}"
+}
+
+fun box(): String {
+    val result = nested() + "|" + local()
+    return if (result == "Leaf Item C D E|Item B C") "OK" else result
+}
+"#;
+    common::expect_box_same_as_kotlinc_with_args(
+        src,
+        "ResolverNestedAndLocalAliasReferences",
+        &["-XXLanguage:+LocalTypeAliases"],
+    );
+}
+
 #[test]
 fn a_package_qualified_property_value_is_invoked() {
     let src = r#"

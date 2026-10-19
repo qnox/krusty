@@ -14214,8 +14214,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     names a typealias). The member segment of an access continues that walk by one step; a
     typealias it names, top-level or declared in the owner classifier's body (including a local
     class's), is carried as the selected alias declaration together with the classifier it
-    expands to, and a constructor call through it applies that declaration. The qualifier checks
-    above build their tree from those records and never resolve a prefix again.
+    expands to, and a constructor call through it applies that declaration. A callable reference
+    or class literal walks its left-hand side through the same root and segment steps, carrying the
+    applied type of each classifier beside them, so `Outer.Mid.LeafAlias::class`,
+    `Local.ItemAlias::value` and the constructor references `Outer.Mid::LeafAlias` and
+    `Local::ItemAlias` select an alias declared in a nested or local classifier's body; a
+    constructor reference constructs the alias's expansion, with the bound owner as its outer only
+    when the expansion is inner. A nested alias's qualified identity is recorded where its
+    declaration is published, keyed by its owner classifier, and is never rebuilt from spellings.
+    The qualifier checks above build their tree from those records and never resolve a prefix
+    again. (`tests/resolver_regression_e2e.rs`.)
   - Reified type arguments (`FirReifiedChecker`), with `ProhibitIntersectionReifiedTypeParameter`,
     `ReportReificationProblemsInDnnAndFlexible` and `NullableNothingInReifiedPosition`. A type
     argument for a `reified` type parameter, or for the `T` of `kotlin.Array`'s constructor and of

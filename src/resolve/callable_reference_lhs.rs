@@ -136,36 +136,8 @@ impl Checker<'_> {
             Expr::CallableRef { name, .. } if name == "class"
         );
 
-        let (root_selection, _, root_alias, _) = self.select_classifier_binding(scope, root_name);
-        let mut prefix = match root_selection {
-            InheritedNestedClassifier::Found(classifier) => {
-                ResolvedQualifier::Classifier(classifier)
-            }
-            InheritedNestedClassifier::Ambiguous => {
-                return Err(QualifierError::AmbiguousRoot {
-                    expression: Some(*root_expression),
-                    name: root_name.clone(),
-                });
-            }
-            InheritedNestedClassifier::NotFound => {
-                if !package_qualifier_forms::segment_cannot_name_a_package(
-                    self.file,
-                    *root_expression,
-                ) && self.fed_source().package_exists(TypeName::ROOT, root_name)
-                {
-                    ResolvedQualifier::Package(crate::types::type_name_child(
-                        TypeName::ROOT,
-                        root_name,
-                    ))
-                } else {
-                    return Err(QualifierError::UnresolvedSegment {
-                        expression: Some(*root_expression),
-                        name: root_name.clone(),
-                    });
-                }
-            }
-        };
-
+        let root = self.qualifier_root_step(scope, Some(*root_expression), root_name)?;
+        let (mut prefix, root_alias) = (root.resolved, root.alias);
         if let Some(binding) = QualifierBinding::of(prefix) {
             bound.push((*root_expression, binding, root_alias.is_some()));
         }
@@ -188,66 +160,16 @@ impl Checker<'_> {
             };
 
         for (segment_expression, segment) in segments.iter().skip(1) {
-            let (next_prefix, selected_alias) = match prefix {
-                ResolvedQualifier::Value => return Ok(None),
-                ResolvedQualifier::Package(package) => {
-                    let source = self.fed_source();
-                    let record = source.symbols(
-                        crate::symbol_source::SymbolNamespace::Package(package),
-                        segment,
-                    );
-                    if let Some(classifier) = record.classifier_name {
-                        let classifier = self.libraries.canonical_source_type_name(classifier);
-                        let alias = self
-                            .selected_provider_alias(
-                                classifier,
-                                record.classifier_declaration.as_ref(),
-                            )
-                            .map_err(|()| QualifierError::AmbiguousRoot {
-                                expression: Some(*segment_expression),
-                                name: segment.clone(),
-                            })?;
-                        (ResolvedQualifier::Classifier(classifier), alias)
-                    } else if !package_qualifier_forms::segment_cannot_name_a_package(
-                        self.file,
-                        *segment_expression,
-                    ) && source.package_exists(package, segment)
-                    {
-                        (
-                            ResolvedQualifier::Package(crate::types::type_name_child(
-                                package, segment,
-                            )),
-                            None,
-                        )
-                    } else {
-                        return Err(QualifierError::UnresolvedSegment {
-                            expression: Some(*segment_expression),
-                            name: segment.clone(),
-                        });
-                    }
-                }
-                ResolvedQualifier::Classifier(owner) => {
-                    let source = self.fed_source();
-                    let record = source.symbols(
-                        crate::symbol_source::SymbolNamespace::Classifier(owner),
-                        segment,
-                    );
-                    let Some(classifier) = record.classifier_name else {
-                        return Err(QualifierError::UnresolvedSegment {
-                            expression: Some(*segment_expression),
-                            name: segment.clone(),
-                        });
-                    };
-                    let classifier = self.libraries.canonical_source_type_name(classifier);
-                    let alias = self
-                        .selected_provider_alias(classifier, record.classifier_declaration.as_ref())
-                        .map_err(|()| QualifierError::AmbiguousRoot {
-                            expression: Some(*segment_expression),
-                            name: segment.clone(),
-                        })?;
-                    (ResolvedQualifier::Classifier(classifier), alias)
-                }
+            // The ordinary qualifier step continues the chain; the type position reads the
+            // Kotlin declaration of a classifier it reaches through its JVM realization.
+            let step = self.qualifier_step(prefix, Some(*segment_expression), segment)?;
+            let next_prefix = match step.resolved {
+                ResolvedQualifier::Classifier(classifier) => ResolvedQualifier::Classifier(
+                    self.libraries.canonical_source_type_name(classifier),
+                ),
+                resolved => resolved,
             };
+            let selected_alias = step.alias;
             prefix = next_prefix;
             if let Some(binding) = QualifierBinding::of(prefix) {
                 bound.push((*segment_expression, binding, selected_alias.is_some()));

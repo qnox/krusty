@@ -237,37 +237,8 @@ impl Checker<'_> {
             return Ok(ResolvedQualifier::Value);
         }
 
-        let (mut prefix, root_alias) = match self.select_classifier(scope, root_name) {
-            InheritedNestedClassifier::Found(classifier) => {
-                (ResolvedQualifier::Classifier(classifier), false)
-            }
-            InheritedNestedClassifier::Ambiguous => {
-                return Err(QualifierError::AmbiguousRoot {
-                    expression: *root_expression,
-                    name: root_name.clone(),
-                });
-            }
-            InheritedNestedClassifier::NotFound => {
-                if let Some(classifier) = self.scoped_source_alias_classifier(scope, root_name) {
-                    (ResolvedQualifier::Classifier(classifier), true)
-                } else if !self.segment_cannot_name_a_package(*root_expression)
-                    && self.fed_source().package_exists(TypeName::ROOT, root_name)
-                {
-                    (
-                        ResolvedQualifier::Package(crate::types::type_name_child(
-                            TypeName::ROOT,
-                            root_name,
-                        )),
-                        false,
-                    )
-                } else {
-                    return Err(QualifierError::UnresolvedSegment {
-                        expression: *root_expression,
-                        name: root_name.clone(),
-                    });
-                }
-            }
-        };
+        let root = self.qualifier_root_step(scope, *root_expression, root_name)?;
+        let (mut prefix, root_alias) = (root.resolved, root.alias.is_some());
         if let (Some(expression), Some(binding)) = (*root_expression, QualifierBinding::of(prefix))
         {
             on_segment(expression, binding, root_alias);
@@ -283,6 +254,75 @@ impl Checker<'_> {
             }
         }
         Ok(prefix)
+    }
+
+    /// The root segment `name` of a qualifier chain, at scope-tower priority: a classifier, with the
+    /// typealias declaration that named it; else a typealias in scope; else a root package, unless
+    /// the segment cannot name one.
+    pub(super) fn qualifier_root_step(
+        &self,
+        scope: &CheckerScope<'_>,
+        expression: Option<ExprId>,
+        name: &str,
+    ) -> Result<QualifierStep, QualifierError> {
+        let (selection, _, alias, _) = self.select_classifier_binding(scope, name);
+        let unresolved = || QualifierError::UnresolvedSegment {
+            expression,
+            name: name.to_string(),
+        };
+        match selection {
+            InheritedNestedClassifier::Found(classifier) => Ok(QualifierStep {
+                resolved: ResolvedQualifier::Classifier(classifier),
+                alias,
+            }),
+            InheritedNestedClassifier::Ambiguous => Err(QualifierError::AmbiguousRoot {
+                expression,
+                name: name.to_string(),
+            }),
+            InheritedNestedClassifier::NotFound => {
+                if let Some(alias) = self.scoped_type_alias(scope, name) {
+                    let classifier =
+                        alias_expansion_classifier(alias.expansion).ok_or_else(unresolved)?;
+                    return Ok(QualifierStep {
+                        resolved: ResolvedQualifier::Classifier(classifier),
+                        alias: Some(alias),
+                    });
+                }
+                if self.segment_cannot_name_a_package(expression)
+                    || !self.fed_source().package_exists(TypeName::ROOT, name)
+                {
+                    return Err(unresolved());
+                }
+                Ok(QualifierStep {
+                    resolved: ResolvedQualifier::Package(crate::types::type_name_child(
+                        TypeName::ROOT,
+                        name,
+                    )),
+                    alias: None,
+                })
+            }
+        }
+    }
+
+    /// The typealias declaration the simple name `name` selects in `scope`: a lexical one, else a
+    /// module one.
+    fn scoped_type_alias(&self, scope: &CheckerScope<'_>, name: &str) -> Option<SelectedTypeAlias> {
+        if let Some(alias) = scope.type_alias(name) {
+            return Some(SelectedTypeAlias {
+                identity: None,
+                formals: alias.formals,
+                expansion: alias.expansion,
+                expansion_spelling: alias.expansion_spelling,
+            });
+        }
+        let identity = self.scoped_source_alias_identity(scope, name)?;
+        let binding = self.source_alias_binding(identity)?;
+        Some(SelectedTypeAlias {
+            identity: Some(identity),
+            formals: binding.formals,
+            expansion: binding.expansion,
+            expansion_spelling: binding.expansion_spelling,
+        })
     }
 
     /// Continue `prefix` by the written segment `name`.

@@ -5,7 +5,8 @@
 //! appending the alias spelling to the owner's runtime internal name. The three stores below own
 //! disjoint declaration lifetimes: a body-local class's aliases are bound on its class rung and
 //! absent from the module index, and a module is checked either over its resolved index or over
-//! the legacy pass-one symbols.
+//! the legacy pass-one symbols. Each store keeps the qualified identity the alias's declaration
+//! was published under, keyed by its owner classifier.
 
 use super::classifier_binding::SelectedTypeAlias;
 use super::*;
@@ -46,47 +47,10 @@ impl Checker<'_> {
                 .type_alias_in_classifier(owner, alias)
                 .map(|header| header.identity);
         }
-        let signature = self.module.legacy_symbols()?.class_by_type_name(owner)?;
-        let declaration = if signature.source_file == self.file_index {
-            match self.active_declarations {
-                Some(active) => active.class(self.file, signature.stable_declaration?)?.1,
-                None => match self.file.decl(signature.source_decl?) {
-                    Decl::Class(declaration) => declaration,
-                    Decl::Fun(_) | Decl::Property(_) => return None,
-                },
-            }
-        } else {
-            let source = self
-                .source_files
-                .and_then(|files| files.get(signature.source_file as usize))?;
-            match source.decl(signature.source_decl?) {
-                Decl::Class(declaration) => declaration,
-                Decl::Fun(_) | Decl::Property(_) => return None,
-            }
-        };
-        if !declaration
-            .type_aliases
-            .iter()
-            .any(|candidate| candidate.name == alias)
-        {
-            return None;
-        }
-        let package = if signature.source_file == self.file_index {
-            self.file.package.as_deref()
-        } else {
-            self.source_files
-                .and_then(|files| files.get(signature.source_file as usize))?
-                .package
-                .as_deref()
-        }
-        .unwrap_or("")
-        .replace('.', "/");
-        let declaration_owner = declaration.name.replace('.', "/");
-        let identity = type_name(&if package.is_empty() {
-            format!("{declaration_owner}/{alias}")
-        } else {
-            format!("{package}/{declaration_owner}/{alias}")
-        });
-        self.source_alias_declared(identity).then_some(identity)
+        self.module
+            .legacy_symbols()?
+            .nested_type_aliases
+            .get(&(owner, alias.to_owned()))
+            .copied()
     }
 }

@@ -54,11 +54,11 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         features.has("ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier");
     file.parenthesized_package_qualifier_warning = features.deprecation_warning_message(
         "ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier",
-        crate::resolve::package_qualifier_forms::PARENTHESIZED,
+        crate::features::deprecation_cycle_messages::PARENTHESIZED_PACKAGE_QUALIFIER,
     );
     file.package_qualifier_type_arguments_warning = features.deprecation_warning_message(
         "ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier",
-        crate::resolve::package_qualifier_forms::TYPE_ARGUMENTS,
+        crate::features::deprecation_cycle_messages::PACKAGE_QUALIFIER_TYPE_ARGUMENTS,
     );
     file.type_arguments_not_allowed_warning = features.deprecation_warning_message(
         "ForbidUselessTypeArgumentsIn25",
@@ -72,11 +72,11 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         features.has("ErrorAboutDataClassCopyVisibilityChange");
     file.data_class_copy_visibility_change_warning = features.deprecation_warning_message(
         "ErrorAboutDataClassCopyVisibilityChange",
-        crate::resolve::data_class_copy_visibility::DECLARATION,
+        crate::features::deprecation_cycle_messages::DATA_CLASS_COPY_VISIBILITY,
     );
     file.data_class_invisible_copy_usage_warning = features.deprecation_warning_message(
         "ErrorAboutDataClassCopyVisibilityChange",
-        crate::resolve::data_class_copy_visibility::USAGE,
+        crate::features::deprecation_cycle_messages::DATA_CLASS_INVISIBLE_COPY_USAGE,
     );
     file.report_type_variance_conflicts_in_dnn_and_flexible =
         features.has("ReportTypeVarianceConflictsInDnnAndFlexible");

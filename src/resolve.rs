@@ -54,7 +54,7 @@ mod anonymous_receiver_labels;
 mod applied_hierarchy;
 mod checked_annotation_publication;
 mod checked_constant_publication;
-pub(crate) mod data_class_copy_visibility;
+mod data_class_copy_visibility;
 pub(crate) mod operator_override_relations;
 pub(crate) use actualization_names::actualization_type_bindings;
 #[cfg(test)]
@@ -214,7 +214,7 @@ mod receiver_flow;
 use receiver_flow::CompletedFlow;
 mod receiver_function_values;
 use receiver_function_values::ImplicitReceiverFunctionInvoke;
-pub(crate) mod package_qualifier_forms;
+mod package_qualifier_forms;
 mod package_qualifier_type_arguments;
 mod receiver_tower;
 mod receiver_uses;
@@ -2633,6 +2633,9 @@ pub struct SymbolTable {
     /// file's package is folded into the key here. Kept beside the per-file map rather than in
     /// [`Self::classes`], whose keys must stay real classifier identities.
     pub source_alias_fqns: HashMap<TypeName, TypeName>,
+    /// `(owner classifier, alias name)` → the qualified identity of a typealias declared in that
+    /// classifier's body, as its publication assigned it.
+    pub nested_type_aliases: HashMap<(TypeName, String), TypeName>,
     /// Source `typealias` EXPANSIONS by fully-qualified alias name: the alias's own formal names
     /// and its target applied to its own arguments, with those formals as `Ty::TyParam`
     /// (`typealias Box<S, A> = PBox<S, S, A, A>`). The name edge above records only the target
@@ -2808,6 +2811,7 @@ impl Default for SymbolTable {
             stable_parser_classifier_identities: HashMap::default(),
             source_class_aliases: HashMap::default(),
             source_alias_fqns: HashMap::default(),
+            nested_type_aliases: HashMap::default(),
             source_alias_expansions: HashMap::default(),
             stable_declared_spellings: HashMap::default(),
             type_use_annotation_spans: HashMap::default(),
@@ -60342,34 +60346,21 @@ impl<'a> Checker<'a> {
         applied_owner: Ty,
         name: &str,
     ) -> NestedConstructorRefSelection {
-        // A nested typealias occupies this classifier's Kotlin type namespace, but its semantic
-        // target is the expanded classifier rather than a synthetic `$Alias` classifier. Consume
-        // the provider-published declaration facet directly so the alias's fixed arguments and
-        // declaration identity stay attached to the constructor selection. In particular,
-        // `Foo<String>::ToInner` must not fall through to an import-spelling lookup for
-        // `ToInner`: the already-bound `Foo` owner is the namespace authority.
-        let nested_alias = {
-            let source = self.fed_source();
-            let record = source.symbols(
-                crate::symbol_source::SymbolNamespace::Classifier(owner),
-                name,
-            );
-            match record.classifier_declaration.as_ref() {
-                Some(crate::libraries::ClassifierDeclaration::TypeAlias(alias)) => {
-                    Some(alias.clone())
-                }
-                Some(crate::libraries::ClassifierDeclaration::Ordinary(_)) | None => None,
-            }
-        };
-        if let Some(alias) = nested_alias {
+        // A typealias declared in this classifier's Kotlin type namespace (provider-published, or
+        // in a source or local classifier's body) is selected by the same qualifier step as an
+        // expression; its expansion, not a synthetic `$Alias` classifier, is constructed. An inner
+        // expansion takes the already-bound owner as its outer (`Foo<String>::ToInner`); any other
+        // is constructed as it stands (`Outer::ItemAlias`).
+        if let Ok(expression_qualifiers::QualifierStep {
+            alias: Some(alias), ..
+        }) = self.qualifier_step(ResolvedQualifier::Classifier(owner), None, name)
+        {
             let target = match self.apply_inner_alias_outer(alias.expansion, applied_owner) {
                 inner_constructor_calls::InnerAliasOuterApplication::Applied(target) => target,
                 inner_constructor_calls::InnerAliasOuterApplication::ReceiverMismatch => {
                     return NestedConstructorRefSelection::ReceiverMismatch(alias.expansion);
                 }
-                inner_constructor_calls::InnerAliasOuterApplication::NotInner => {
-                    return NestedConstructorRefSelection::Missing;
-                }
+                inner_constructor_calls::InnerAliasOuterApplication::NotInner => alias.expansion,
             };
             return self
                 .constructor_reference(

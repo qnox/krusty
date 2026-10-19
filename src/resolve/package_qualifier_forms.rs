@@ -19,8 +19,7 @@
 use super::expression_qualifier_tree::{QualifierBinding, QualifierTree};
 use super::*;
 
-pub(crate) const PARENTHESIZED: &str = "wrapping package qualifiers in parentheses is not allowed.";
-pub(crate) const TYPE_ARGUMENTS: &str = "type arguments are not allowed for packages.";
+use crate::features::deprecation_cycle_messages::PARENTHESIZED_PACKAGE_QUALIFIER;
 
 /// Whether the written qualifier segment `expression` may not bind as a package under the current
 /// language settings.
@@ -62,7 +61,8 @@ impl Checker<'_> {
                 }
             });
             if let Some(span) = span {
-                self.diags.error(span, PARENTHESIZED.to_string());
+                self.diags
+                    .error(span, PARENTHESIZED_PACKAGE_QUALIFIER.to_string());
             }
         }
     }

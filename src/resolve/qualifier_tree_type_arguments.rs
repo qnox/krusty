@@ -111,8 +111,11 @@ impl Checker<'_> {
             return;
         }
         let span = self.qualifier_node_span(last.expression);
-        self.diags
-            .error(span, package_qualifier_forms::TYPE_ARGUMENTS.to_string());
+        self.diags.error(
+            span,
+            crate::features::deprecation_cycle_messages::PACKAGE_QUALIFIER_TYPE_ARGUMENTS
+                .to_string(),
+        );
     }
 
     /// kotlinc's class-or-object word for a classifier selected through `owner`.
