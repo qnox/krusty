@@ -14785,6 +14785,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   without a receiver: `pick { length }` over `String.() -> Unit` and `Int.() -> Unit` also reports
   `unresolved reference 'length'`. Verified against kotlinc 2.4.20.
   (`tests/default_argument_overload_tie_e2e.rs`.)
+- **Plugin IR offsets are measured in the text kotlinc reads.** kotlinc reads each `\r\n` and each
+  lone `\r` of a source file as `\n`, and every IR offset, and the line and column a plugin reads
+  from the file entry, is measured in that text. krusty's plugin IR sends that text as the file's
+  and maps each source span into it, so a file written with carriage returns gives plugins the same
+  offsets, lines and columns as kotlinc. Verified against kotlinc 2.4.20.
+  (`crates/krusty-plugin-host/tests/module_ir.rs`,
+  `krusty_measures_a_file_with_carriage_returns_as_kotlinc_reads_it`.)
 
 ## 8. Success criteria for the PoC
 
