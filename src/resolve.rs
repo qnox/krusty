@@ -98,6 +98,7 @@ mod condition_exclusions;
 mod conditional_branch;
 mod constant_evaluation;
 mod constructor_commitment;
+mod constructor_formal_evidence;
 mod context_capture;
 mod context_receiver_priority;
 mod context_sensitive_resolution;
@@ -116,6 +117,7 @@ mod deprecation_usage;
 mod destructuring;
 mod diagnostic_selection;
 mod eager_lambda_analysis;
+mod elvis_expression;
 mod enum_entries;
 mod enum_entry_method_owner;
 mod explicit_backing_fields;
@@ -177,7 +179,6 @@ mod operator_declarations;
 mod opt_in_usage;
 use operator_calls::{range_operator, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess};
 mod declaration_publication;
-mod elvis_expression;
 mod enhanced_values;
 use declaration_publication::inferred_declaration_ty;
 mod overload_diagnostics;
@@ -16004,7 +16005,9 @@ impl<'a> Checker<'a> {
         // semantic handoff from this check.
         self.resolved_calls.remove(&call);
         self.unbound_value_lambda_call_formals.remove(&call);
+        self.open_lambda_result_call_formals.remove(&call);
         self.discard_constructor_commitment(call);
+        self.constructor_formal_evidence.remove(&call);
         self.record_call_site_lexical_formals(scope, call);
         if expected.is_some() {
             self.postponed_diagnostics.discard(call);
@@ -20641,31 +20644,21 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     .and_then(|signature| signature.generic_sig.as_ref())
                 {
-                    let unresolved = generic
-                        .formals
-                        .iter()
-                        .filter(|formal| {
-                            postponed_constraints.formals.contains(formal)
-                                && !postponed_solutions.contains_key(*formal)
-                                && known_generic_bindings.get(*formal).is_none_or(|binding| {
-                                    ty_mentions_param(*binding, std::slice::from_ref(*formal))
-                                })
-                                && generic.params.iter().any(|parameter| {
-                                    matches!(parameter.non_null(), Ty::Fun(function)
-                                    if !function.has_receiver
-                                        && function.params.iter().any(|input| {
-                                            ty_mentions_param(
-                                                *input,
-                                                std::slice::from_ref(*formal),
-                                            )
-                                        }))
-                                })
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if !unresolved.is_empty() {
+                    let unresolved = self.unresolved_value_lambda_formals(
+                        scope,
+                        args,
+                        generic,
+                        &postponed_solutions,
+                        &known_generic_bindings,
+                        &postponed_constraints,
+                    );
+                    if !unresolved.open_result_formals.is_empty() {
+                        self.open_lambda_result_call_formals
+                            .insert(call, unresolved.open_result_formals);
+                    }
+                    if !unresolved.formals.is_empty() {
                         self.unbound_value_lambda_call_formals
-                            .insert(call, unresolved);
+                            .insert(call, unresolved.formals);
                     }
                 }
                 // Without an expectation this check is a probe: an enclosing call may still bind
@@ -23670,7 +23663,7 @@ impl<'a> Checker<'a> {
                 c.this_labels.pop();
             }
             c.this_extension_receiver = previous_extension_receiver;
-            c.retire_type_parameter_owners(&owned_type_parameters);
+            c.restore_type_parameter_owners(owned_type_parameters);
         });
 
         // A statement-position local class is emitted as its own body unit, so the generic AST child
@@ -33022,6 +33015,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         bound_annotation_identities: HashMap::default(),
         ret_ty: Ty::Unit,
         type_parameter_owners: HashMap::default(),
+        uninferred_type_parameters: HashMap::default(),
         upper_bound_violations: Default::default(),
         expected: None,
         callable_reference_literal_constraints: HashMap::default(),
@@ -33087,6 +33081,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         narrowed_this_member: HashMap::default(),
         resolved_calls: HashMap::default(),
         unbound_value_lambda_call_formals: HashMap::default(),
+        open_lambda_result_call_formals: HashMap::default(),
         postponed_diagnostics: PostponedDiagnostics::default(),
         eager_eliminated_members: HashMap::default(),
         implicit_receiver_selections: HashMap::default(),
@@ -33115,6 +33110,8 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         for_range_iterator_protocols: HashMap::default(),
         iteration_plans: IterationPlans::default(),
         resolved_constructors: HashMap::default(),
+        constructor_formal_evidence: HashMap::default(),
+        call_owned_conditional_branches: HashMap::default(),
         resolved_enum_entry_constructors: HashMap::default(),
         resolved_ctor_delegations: HashMap::default(),
         resolved_primary_ctor_delegations: HashMap::default(),
@@ -35593,6 +35590,9 @@ struct Checker<'a> {
     /// kotlinc's owner wording (`fun <T : B> f`) of each declaration-owned type parameter checked
     /// so far, keyed by semantic identity, solely for diagnostics.
     type_parameter_owners: HashMap<&'static str, String>,
+    /// Selected call formals that remain unresolved, plus whether their provider declaration is a
+    /// platform type parameter. This is diagnostic state scoped with [`Self::type_parameter_owners`].
+    uninferred_type_parameters: HashMap<&'static str, bool>,
     upper_bound_violations: upper_bound_violations::UpperBoundViolationState,
     /// Expected type for the next expression. Consumed by [`Self::expr`]; result-position
     /// propagation must re-arm it through [`Self::expr_expected`].
@@ -35771,9 +35771,14 @@ struct Checker<'a> {
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
-    /// Unsolved callee-owned formals used as ordinary lambda inputs. Receiver-lambda builder
+    /// Unsolved callee-owned formals used as ordinary lambda inputs, or whose provisional lambda
+    /// result solution still depends on another call's open variable. Receiver-lambda builder
     /// inference has separate body-constraint semantics and is deliberately absent here.
     unbound_value_lambda_call_formals: HashMap<ExprId, Vec<String>>,
+    /// The subset of [`Self::unbound_value_lambda_call_formals`] whose provisional lambda result
+    /// solution depends on another call's open variable; its resolved type argument is not
+    /// completion evidence.
+    open_lambda_result_call_formals: HashMap<ExprId, Vec<String>>,
     /// Diagnostics produced while a lambda input still contains a callee-owned type parameter.
     /// They remain outside the shared sink until the surrounding statement either rechecks the
     /// expression with closed inputs or commits the open probe as its final verdict. A vector keeps
@@ -35825,6 +35830,12 @@ struct Checker<'a> {
     for_range_iterator_protocols: HashMap<StmtId, ForRangeIteratorTarget>,
     iteration_plans: IterationPlans,
     resolved_constructors: HashMap<ExprId, ResolvedConstructor>,
+    /// How each constructor call's inference fixed its classifier's own type parameters.
+    constructor_formal_evidence: HashMap<ExprId, constructor_formal_evidence::CallEvidence>,
+    /// Conditional branches whose terminal selected call stayed open while a callable candidate
+    /// shaped its lambda argument. Selection consumes each obligation exactly once after its
+    /// functional result is fixed or remains call-owned.
+    call_owned_conditional_branches: HashMap<ExprId, Vec<ExprId>>,
     resolved_enum_entry_constructors: HashMap<(u32, u32), ResolvedConstructor>,
     resolved_ctor_delegations: HashMap<(DeclId, usize), ResolvedCtorDelegation>,
     resolved_primary_ctor_delegations: HashMap<DeclId, ResolvedCtorDelegation>,
@@ -37687,7 +37698,7 @@ impl<'a> Checker<'a> {
         call: ExprId,
     ) -> bool {
         let Some(signature) = self.unbound_call_result_signature(call).cloned() else {
-            return false;
+            return self.report_uninferred_constructor_type_parameter(call);
         };
         let actual = self.expr_types[call.0 as usize];
         let resolved = self.selected_call_type_arguments(call);
@@ -37701,6 +37712,7 @@ impl<'a> Checker<'a> {
             .cloned()
             .collect::<Vec<_>>();
         let unbound_value_lambda_formals = self.unbound_value_lambda_call_formals.get(&call);
+        let open_lambda_result_formals = self.open_lambda_result_call_formals.get(&call);
         let call_arguments = match self.file.expr(call) {
             Expr::Call { args, .. } => args.as_slice(),
             _ => &[],
@@ -37722,10 +37734,20 @@ impl<'a> Checker<'a> {
             .iter()
             .enumerate()
             .find(|(index, formal)| {
+                // A recorded argument that is only a lambda result's open nested-call variable
+                // (`R := T` of `Mono.empty()`) leaves this formal uninferred along with it.
+                let open_dependency = resolved
+                    .and_then(|arguments| arguments.get(*index))
+                    .copied()
+                    .flatten()
+                    .is_some_and(|argument| {
+                        self.type_argument_depends_on_open_lambda_result(call, argument)
+                    });
                 (ty_mentions_param(actual, std::slice::from_ref(*formal))
                     || ty_mentions_param(signature.ret, std::slice::from_ref(*formal)))
                     && (unbound_value_lambda_formals
                         .is_some_and(|formals| formals.contains(formal))
+                        || open_dependency
                         || had_postponed_argument_diagnostic
                         || has_nested_diagnostic
                         || !signature
@@ -37734,11 +37756,14 @@ impl<'a> Checker<'a> {
                             .any(|parameter| {
                                 ty_mentions_param(*parameter, std::slice::from_ref(*formal))
                             }))
-                    && resolved
-                        .and_then(|arguments| arguments.get(*index))
-                        .copied()
-                        .flatten()
-                        .is_none_or(|argument| ty_mentions_param(argument, &open_formals))
+                    && (open_lambda_result_formals
+                        .is_some_and(|formals| formals.contains(formal))
+                        || open_dependency
+                        || resolved
+                            .and_then(|arguments| arguments.get(*index))
+                            .copied()
+                            .flatten()
+                            .is_none_or(|argument| ty_mentions_param(argument, &open_formals)))
                     // A star-projected receiver can leave the selected method result bounded by a
                     // non-lexical classifier parameter. That stable symbolic bound is the captured
                     // result Kotlin chooses; it is neither an uninferred method formal nor a
@@ -47648,7 +47673,7 @@ impl<'a> Checker<'a> {
         self.leave_public_api_inline(public_api_inline);
         self.leave_block_body(block);
         self.lambda_returns.leave_function(enclosing_return_frame);
-        self.retire_type_parameter_owners(&owned_type_parameters);
+        self.restore_type_parameter_owners(owned_type_parameters);
         self.active_lexical_policies.truncate(suppression_depth);
     }
 
@@ -48128,7 +48153,7 @@ impl<'a> Checker<'a> {
             );
         }
         self.leave_block_body(block);
-        self.retire_type_parameter_owners(&owned_type_parameters);
+        self.restore_type_parameter_owners(owned_type_parameters);
         self.active_lexical_policies.truncate(suppression_depth);
     }
 
@@ -51490,7 +51515,7 @@ impl<'a> Checker<'a> {
                     }
                     self.this_extension_receiver = dispatch_extension_receiver;
                     self.symbolic_signature_inference = outer_symbolic_signature_inference;
-                    self.retire_type_parameter_owners(&owned_type_parameters);
+                    self.restore_type_parameter_owners(owned_type_parameters);
                     self.active_lexical_policies
                         .truncate(property_suppression_depth);
                 }
@@ -52106,7 +52131,7 @@ impl<'a> Checker<'a> {
         self.this_extension_receiver = dispatch_extension_receiver;
         self.leave_public_api_inline(public_api_inline);
         self.lambda_returns.leave_function(enclosing_return_frame);
-        self.retire_type_parameter_owners(&owned_type_parameters);
+        self.restore_type_parameter_owners(owned_type_parameters);
         self.active_lexical_policies.truncate(suppression_depth);
     }
 
@@ -52576,6 +52601,7 @@ impl<'a> Checker<'a> {
             self.file.expr(argument),
         );
         let unbound_result = self.unbound_contextual_result_signature(argument);
+        self.commit_call_owned_conditional_branches(scope, argument, expected);
         // An argument whose recorded type already EQUALS the selected parameter has nothing left
         // for the expectation to bind: re-entering it recomputes the same type. Nested generic
         // literals (`mapOf("k" to mapOf("k" to …))`) infer each level from their arguments, so
@@ -53124,6 +53150,9 @@ impl<'a> Checker<'a> {
                     }
                     return;
                 }
+                if self.report_open_sam_lambda_result_mismatch(scope, argument, function, &sam) {
+                    return;
+                }
             } else if conversion_matches
                 && !self.sam_argument_already_implements(argument, actual, expected)
             {
@@ -53626,6 +53655,7 @@ impl<'a> Checker<'a> {
             }
             bindings[type_parameter] = candidate;
         }
+        self.record_source_constructor_evidence(call, class, &bindings);
         for (type_parameter, binding) in bindings.iter_mut().enumerate() {
             if explicitly_bound[type_parameter] {
                 continue;
@@ -53806,19 +53836,7 @@ impl<'a> Checker<'a> {
                 None,
             );
         }
-        for (index, binding) in bindings.iter_mut().enumerate() {
-            if *binding == Ty::Null {
-                *binding = Ty::nullable(Ty::Nothing);
-            } else if *binding == Ty::Error {
-                *binding = class
-                    .type_param_bounds
-                    .get(index)
-                    .copied()
-                    .filter(|bound| *bound != Ty::Error)
-                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-            }
-        }
-        bindings
+        constructor_formal_evidence::complete_source_constructor_bindings(class, bindings)
     }
 
     /// Bind the declaration identities captured by an inner/local classifier to this construction
@@ -55615,9 +55633,10 @@ impl<'a> Checker<'a> {
         // (`m.onErrorResume { Mono.empty() }` takes its element type from the SAM's own result).
         // A result that still mentions a callee formal is not fixed yet and must not be pushed —
         // overload inference owns it until it is.
-        let result_constraint = expectation
-            .fixed_result()
-            .map_or(LambdaResultConstraint::Open, LambdaResultConstraint::Fixed);
+        let result_constraint = expectation.fixed_result().map_or(
+            LambdaResultConstraint::CallOwned,
+            LambdaResultConstraint::Fixed,
+        );
         if !expectation.context_types.is_empty() || expectation.receiver.is_some() {
             self.check_lambda_with_implicit_receivers_and_return_labeled(
                 scope,
@@ -57298,12 +57317,13 @@ impl<'a> Checker<'a> {
         finally: Option<ExprId>,
     ) -> Ty {
         let t = {
+            let joined = !catches.is_empty();
             // A catch begins on an exceptional edge from any point of the try body: it gets the
             // entry facts minus every narrowing the body writes. Normal exits keep only the facts
             // common to all of them. No syntax coordinate or body survives FIR.
             let entry_flow = scope.flow_snapshot();
             let (bt, written) = self.try_body_written_bindings(|checker| {
-                checker.expr_result(scope, body, wanted.expected, wanted.value_required)
+                checker.joined_branch_result(scope, body, wanted, joined)
             });
             let mut all_exit_writes = catch_flow::TryBodyWrites::default();
             let mut exit_flows = self
@@ -57353,7 +57373,7 @@ impl<'a> Checker<'a> {
                     let catch_scope = scope.child(ScopeKind::Block);
                     let scope = &catch_scope;
                     checker.declare(scope, &c.name, cty, false);
-                    checker.expr_result(scope, c.body, wanted.expected, wanted.value_required)
+                    checker.joined_branch_result(scope, c.body, wanted, joined)
                 });
                 all_exit_writes.extend(catch_writes);
                 if self.normal_completion(c.body) {
@@ -57387,6 +57407,13 @@ impl<'a> Checker<'a> {
                 wanted.value_required,
                 &branch_types,
                 result,
+            );
+            self.complete_conditional_branches(
+                scope,
+                e,
+                wanted.expected,
+                result,
+                branch_types.iter().copied(),
             );
             self.record_flexible_join(
                 e,
@@ -60469,6 +60496,10 @@ impl<'a> Checker<'a> {
         arms: Vec<WhenArm>,
     ) -> Ty {
         let t = {
+            let branch_wanted = Wanted {
+                expected,
+                value_required,
+            };
             let subj_ty = subject.map(|s| self.expr(scope, s));
             struct ArmResult {
                 body: ExprId,
@@ -60480,7 +60511,7 @@ impl<'a> Checker<'a> {
                 this_narrow: Option<Ty>,
             }
             let mut arm_results = Vec::with_capacity(arms.len());
-            let mut has_else = false;
+            let has_else = arms.iter().any(|arm| arm.conditions.is_empty());
             // A `when` may have at most one `else` branch (kotlinc rejects a second one).
             if arms.iter().filter(|a| a.conditions.is_empty()).count() > 1 {
                 self.diags.error(
@@ -60505,9 +60536,6 @@ impl<'a> Checker<'a> {
             let mut fallthrough_declined: Vec<(String, Ty)> = Vec::new();
             let mut completing_flows = Vec::new();
             for arm in &arms {
-                if arm.conditions.is_empty() {
-                    has_else = true;
-                }
                 let incoming_fallthrough_casts = fallthrough_casts.clone();
                 let incoming_fallthrough_declined = fallthrough_declined.clone();
                 // Keep accumulated false-branch facts in the arm's child scope. Subject-form
@@ -60601,7 +60629,7 @@ impl<'a> Checker<'a> {
                             let guard_ty = c.expr(scope, guard);
                             c.expect_assignable(Ty::Boolean, guard_ty, c.span(guard), "when guard");
                         }
-                        c.expr_result(scope, arm.body, expected, value_required)
+                        c.joined_branch_result(scope, arm.body, branch_wanted, has_else)
                     })
                 };
                 if self.completed_normally(arm.body) {
@@ -60626,8 +60654,7 @@ impl<'a> Checker<'a> {
                     self.normal_completion(arm.body),
                 ));
             }
-            // Recheck a symbolic generic call against the other arms' common result type. Conditions
-            // and guards are not rechecked.
+            // Recheck a symbolic generic call against the other arms; conditions and guards stay fixed.
             let fixed = self.expectation_fixes_branches(scope, e, expected);
             if arm_results.len() >= 2 {
                 for i in 0..arm_results.len() {
@@ -60635,7 +60662,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .enumerate()
                         .filter(|(j, _)| *j != i)
-                        .map(|(_, record)| record.ty)
+                        .map(|(_, record)| self.branch_sibling_type(record.body, record.ty))
                         .filter(|ty| *ty != Ty::Error && !ty.mentions_pending())
                         .fold(None, |acc: Option<Ty>, ty| {
                             Some(match acc {
@@ -60686,14 +60713,18 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            for record in &arm_results {
-                self.report_unbound_conditional_branch(scope, record.body);
-            }
             let result = conditional_branch::join_results(
                 self,
                 scope,
                 expected,
                 arm_results.iter().map(|record| (record.ty, record.body)),
+            );
+            self.complete_conditional_branches(
+                scope,
+                e,
+                expected,
+                result.unwrap_or(Ty::Unit),
+                arm_results.iter().map(|record| (record.body, record.ty)),
             );
             let missing = if has_else {
                 None
@@ -63788,7 +63819,9 @@ impl<'a> Checker<'a> {
         }
         let declared_params =
             self.declared_member_params(&selected, &shape.parameter_indices, &visible_params);
-        if !self.expect_selected_call_args(
+        let owned_type_parameters =
+            self.publish_selected_member_type_parameter_owner(call, &selected.member);
+        let arguments_valid = self.expect_selected_call_args(
             scope,
             CallArgs {
                 call,
@@ -63799,7 +63832,9 @@ impl<'a> Checker<'a> {
             &declared_params,
             &shape.call_sig,
             None,
-        ) {
+        );
+        self.restore_type_parameter_owners(owned_type_parameters);
+        if !arguments_valid {
             return Some(Ty::Error);
         }
         if matches!(selected.origin, Origin::Library)
@@ -65347,6 +65382,7 @@ impl<'a> Checker<'a> {
         let expected_classifier =
             Self::alias_constructor_result_constraint(applied_classifier, expected);
         let mut members = Vec::new();
+        let mut member_bindings = Vec::new();
         let mut candidates = Vec::new();
         let mut mapping_failures = Vec::new();
         let mut bound_failures = Vec::new();
@@ -65436,7 +65472,7 @@ impl<'a> Checker<'a> {
                 .into_iter()
                 .map(|slot| contextual.parameter_indices[slot])
                 .collect::<Vec<_>>();
-
+            let mut inferred = None;
             if let Some(signature) = member
                 .generic_sig
                 .as_ref()
@@ -65835,6 +65871,7 @@ impl<'a> Checker<'a> {
                         crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &bindings)
                     })
                     .collect();
+                inferred = Some(bindings);
             }
             member.call_sig = call_sig;
             candidates.push(CtorDelegationCandidate {
@@ -65868,6 +65905,7 @@ impl<'a> Checker<'a> {
                 },
             });
             members.push(member);
+            member_bindings.push(inferred);
         }
 
         let (candidate_index, selected) =
@@ -65946,13 +65984,8 @@ impl<'a> Checker<'a> {
         } else {
             None
         };
-        if !self.callable_accessible(member.visibility, internal, member.external_identity)
-            && !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
-        {
-            self.diags.error(
-                self.call_callee_name_span(call),
-                access_control::constructor_message(internal, &member),
-            );
+        let bindings = &member_bindings[candidate_index];
+        if self.reject_ctor_access(call, internal, classifier, &member, bindings.as_ref()) {
             return Ok(LibraryConstructorSelection::Rejected);
         }
         let mut slots = vec![None; member.params.len()];
@@ -66013,6 +66046,9 @@ impl<'a> Checker<'a> {
         let publication =
             constructor_commitment::ConstructorDeclarationShape::provider(classifier, &member);
         self.commit_constructor(call, target.clone(), publication);
+        if let Some(Some(bindings)) = member_bindings.get(candidate_index) {
+            self.record_library_constructor_evidence(call, internal, classifier, bindings);
+        }
         Ok(LibraryConstructorSelection::Selected)
     }
 

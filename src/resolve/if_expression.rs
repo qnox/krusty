@@ -19,6 +19,7 @@ impl Checker<'_> {
         branch: ExprId,
         then: bool,
         wanted: Wanted,
+        joined: bool,
     ) -> (Ty, Vec<Ty>, Vec<Vec<Ty>>, CompletedFlow) {
         let locals = self.stable_local_vars(scope);
         let declared = locals
@@ -35,7 +36,7 @@ impl Checker<'_> {
         self.apply_condition_exclusions(scope, cond, then);
         // `if (this is B)` narrows the implicit receiver to `B` for the branch body.
         let ty = self.with_this_narrow(self.this_is_narrowing(scope, cond, !then), |c| {
-            let actual = c.expr_result(scope, branch, wanted.expected, wanted.value_required);
+            let actual = c.joined_branch_result(scope, branch, wanted, joined);
             let Some(expected) = wanted.expected else {
                 return actual;
             };
@@ -89,8 +90,14 @@ impl Checker<'_> {
                 .map(|local| local.declared)
                 .collect::<Vec<_>>();
             let entry_reads = self.local_edge_reads(scope, &locals, &declared);
-            let (tt, then_reads, then_intersections, mut then_flow) =
-                self.if_branch_ty(scope, cond, then_branch, true, wanted);
+            let (tt, then_reads, then_intersections, mut then_flow) = self.if_branch_ty(
+                scope,
+                cond,
+                then_branch,
+                true,
+                wanted,
+                else_branch.is_some(),
+            );
             let mut then_exit = self.take_local_flow_exit(
                 scope,
                 &entry,
@@ -101,7 +108,7 @@ impl Checker<'_> {
             match else_branch {
                 Some(eb) => {
                     let (et, else_reads, else_intersections, mut else_flow) =
-                        self.if_branch_ty(scope, cond, eb, false, wanted);
+                        self.if_branch_ty(scope, cond, eb, false, wanted, true);
                     let mut else_exit = self.take_local_flow_exit(
                         scope,
                         &entry,
@@ -110,8 +117,13 @@ impl Checker<'_> {
                         self.normal_completion(eb),
                     );
                     let fixed = self.expectation_fixes_branches(scope, e, wanted.expected);
-                    let tt =
-                        self.rebind_conditional_branch(then_branch, et, tt, fixed, |c, exp| {
+                    let else_evidence = self.branch_sibling_type(eb, et);
+                    let tt = self.rebind_conditional_branch(
+                        then_branch,
+                        else_evidence,
+                        tt,
+                        fixed,
+                        |c, exp| {
                             let (ty, reads, intersections, flow) = c.if_branch_ty(
                                 scope,
                                 cond,
@@ -121,6 +133,7 @@ impl Checker<'_> {
                                     expected: Some(exp),
                                     value_required: wanted.value_required,
                                 },
+                                true,
                             );
                             then_exit = c.take_local_flow_exit(
                                 scope,
@@ -131,30 +144,50 @@ impl Checker<'_> {
                             );
                             then_flow = flow;
                             ty
+                        },
+                    );
+                    let then_evidence = self.branch_sibling_type(then_branch, tt);
+                    let et =
+                        self.rebind_conditional_branch(eb, then_evidence, et, fixed, |c, exp| {
+                            let (ty, reads, intersections, flow) = c.if_branch_ty(
+                                scope,
+                                cond,
+                                eb,
+                                false,
+                                Wanted {
+                                    expected: Some(exp),
+                                    value_required: wanted.value_required,
+                                },
+                                true,
+                            );
+                            else_exit = c.take_local_flow_exit(
+                                scope,
+                                &entry,
+                                reads,
+                                intersections,
+                                c.normal_completion(eb),
+                            );
+                            else_flow = flow;
+                            ty
                         });
-                    let et = self.rebind_conditional_branch(eb, tt, et, fixed, |c, exp| {
-                        let (ty, reads, intersections, flow) = c.if_branch_ty(
-                            scope,
-                            cond,
-                            eb,
-                            false,
-                            Wanted {
-                                expected: Some(exp),
-                                value_required: wanted.value_required,
-                            },
-                        );
-                        else_exit = c.take_local_flow_exit(
-                            scope,
-                            &entry,
-                            reads,
-                            intersections,
-                            c.normal_completion(eb),
-                        );
-                        else_flow = flow;
-                        ty
-                    });
-                    self.report_unbound_conditional_branch(scope, then_branch);
-                    self.report_unbound_conditional_branch(scope, eb);
+                    let result = conditional_branch::join_adapted_branches(
+                        self,
+                        scope,
+                        wanted.expected,
+                        then_branch,
+                        tt,
+                        eb,
+                        et,
+                        e,
+                    );
+                    self.record_flexible_join(e, [then_branch, eb], result, false);
+                    self.complete_conditional_branches(
+                        scope,
+                        e,
+                        wanted.expected,
+                        result,
+                        [(then_branch, tt), (eb, et)],
+                    );
                     self.publish_joined_local_flow(
                         scope,
                         &locals,
@@ -169,18 +202,7 @@ impl Checker<'_> {
                         flows.push(else_flow);
                     }
                     CompletedFlow::publish_common(self, scope, &flows);
-                    let joined = conditional_branch::join_adapted_branches(
-                        self,
-                        scope,
-                        wanted.expected,
-                        then_branch,
-                        tt,
-                        eb,
-                        et,
-                        e,
-                    );
-                    self.record_flexible_join(e, [then_branch, eb], joined, false);
-                    joined
+                    result
                 }
                 None => {
                     self.record_flexible_join(e, std::iter::empty(), Ty::Unit, false);

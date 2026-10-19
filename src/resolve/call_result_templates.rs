@@ -271,18 +271,31 @@ impl Checker<'_> {
             .filter(|formal| !self.lexically_fixed_at_call(expression, formal))
             .cloned()
             .collect::<Vec<_>>();
-        if self
-            .selected_call_type_arguments(expression)
-            .is_some_and(|resolved| {
-                signature
-                    .formals
+        let unresolved_lambda_result = self
+            .open_lambda_result_call_formals
+            .get(&expression)
+            .is_some_and(|unbound| {
+                unbound
                     .iter()
-                    .enumerate()
-                    .filter(|(_, formal)| {
-                        ty_mentions_param(signature.ret, std::slice::from_ref(*formal))
-                    })
-                    .all(|(index, _)| resolved.get(index).is_some_and(Option::is_some))
+                    .any(|formal| ty_mentions_param(signature.ret, std::slice::from_ref(formal)))
+            });
+        let resolved = self.selected_call_type_arguments(expression);
+        // A recorded argument that is only a lambda result's open nested-call variable
+        // (`R := T` of `Mono.empty()`) is a dependency, not completion evidence.
+        let open_lambda_dependency = resolved.is_some_and(|resolved| {
+            resolved.iter().flatten().any(|argument| {
+                self.type_argument_depends_on_open_lambda_result(expression, *argument)
             })
+        });
+        if resolved.is_some_and(|resolved| {
+            signature
+                .formals
+                .iter()
+                .enumerate()
+                .filter(|(_, formal)| ty_mentions_param(signature.ret, std::slice::from_ref(*formal)))
+                .all(|(index, _)| resolved.get(index).is_some_and(Option::is_some))
+        }) && !unresolved_lambda_result
+            && !open_lambda_dependency
             // Rechecking may have replaced a formerly contextual call with an expectation-free
             // probe. A retained type-argument record is not proof of completion when the current
             // semantic result again contains this callee's declaration variables; the enclosing
@@ -295,7 +308,10 @@ impl Checker<'_> {
             signature.ret,
             &crate::symbol_resolver::GSigBinds::default(),
         );
-        (matches!(actual, Ty::Error) || ty_mentions_param(actual, &open_formals))
+        (matches!(actual, Ty::Error)
+            || ty_mentions_param(actual, &open_formals)
+            || unresolved_lambda_result
+            || open_lambda_dependency)
             .then_some(signature)
             .or_else(|| (actual == provisional).then_some(signature))
     }

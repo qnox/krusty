@@ -352,7 +352,7 @@ impl Checker<'_> {
         let policy_depth =
             self.push_declaration_policies(scope, &method.annotations, &method.annotation_args);
         self.report_variance_conflicts(&walk, occurrences);
-        self.retire_type_parameter_owners(&owned);
+        self.restore_type_parameter_owners(owned);
         self.active_lexical_policies.truncate(policy_depth);
     }
 
@@ -431,7 +431,7 @@ impl Checker<'_> {
         let policy_depth =
             self.push_declaration_policies(scope, &property.annotations, &property.annotation_args);
         self.report_variance_conflicts(&walk, occurrences);
-        self.retire_type_parameter_owners(&owned);
+        self.restore_type_parameter_owners(owned);
         self.active_lexical_policies.truncate(policy_depth);
     }
 
