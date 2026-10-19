@@ -55483,14 +55483,13 @@ impl<'a> Checker<'a> {
                 // Reconstructing the result from operand classes duplicates that metadata and was the
                 // reason UByte/UShort ranges degraded to `ClosedRange<T>` or were rejected outright.
                 let convention = range_operator(kind);
-                if let Some((range_ty, range_call)) = self.operator_call_ret(
+                if let Some((range_ty, range_call)) = self.operator_expression_call_ret(
                     scope,
                     e,
                     lt,
                     convention.name,
                     &[rt],
                     &[hi],
-                    self.span(e),
                     None,
                 ) {
                     self.resolved_operator_calls
@@ -58469,14 +58468,13 @@ impl<'a> Checker<'a> {
             // exact callable and may still realize it with primitive operations where appropriate.
             if lt.is_unsigned() {
                 if let Some(name) = op.arith_operator_name() {
-                    if let Some((ret, target)) = self.operator_call_ret(
+                    if let Some((ret, target)) = self.operator_expression_call_ret(
                         scope,
                         e,
                         lt,
                         name,
                         &[rt],
                         &[rhs],
-                        self.span(e),
                         expected,
                     ) {
                         self.resolved_operator_calls.insert(
@@ -58542,14 +58540,13 @@ impl<'a> Checker<'a> {
                         Err(()) => return self.set(e, Ty::Error),
                         Ok(None) => {}
                     }
-                    if let Some((ret, target)) = self.operator_call_ret(
+                    if let Some((ret, target)) = self.operator_expression_call_ret(
                         scope,
                         e,
                         lt,
                         fname,
                         &[rt],
                         &[rhs],
-                        self.span(e),
                         expected,
                     ) {
                         self.resolved_operator_calls.insert(
@@ -58580,14 +58577,13 @@ impl<'a> Checker<'a> {
             if lt.is_reference() && lt.scalar_value_repr().is_none() {
                 let op_name = op.arith_operator_name();
                 if let Some(fname) = op_name {
-                    if let Some((ret, target)) = self.operator_call_ret(
+                    if let Some((ret, target)) = self.operator_expression_call_ret(
                         scope,
                         e,
                         lt,
                         fname,
                         &[rt],
                         &[rhs],
-                        self.span(e),
                         expected,
                     ) {
                         self.resolved_operator_calls.insert(
@@ -58674,14 +58670,13 @@ impl<'a> Checker<'a> {
                 && lt != Ty::Error
                 && rt != Ty::Error
             {
-                if let Some((ret, target)) = self.operator_call_ret(
+                if let Some((ret, target)) = self.operator_expression_call_ret(
                     scope,
                     e,
                     lt,
                     "compareTo",
                     &[rt],
                     &[rhs],
-                    self.span(e),
                     None,
                 ) {
                     if ret == Ty::Int {

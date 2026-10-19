@@ -64,8 +64,6 @@ pub(in super::super) enum ExpansionReason {
     LambdaInBody,
     /// The callee's body creates an object of a local or anonymous class.
     LocalClassInBody,
-    /// The callee's body expands another same-module inline call.
-    NestedInlineExpansion,
     /// The callee's body holds a subject `when` that switches on an enum's keys. The keys are
     /// read from a table of the callee's own class (the JVM's `$WhenMappings`), numbered as that
     /// class's emission claims them, which a body compiled for the call site cannot reproduce.
@@ -203,9 +201,6 @@ impl BodyLowering<'_> {
         while let Some(expression) = pending.pop() {
             if !seen.insert(expression) {
                 continue;
-            }
-            if self.ir.inline_regions.contains(&expression) {
-                return Some(ExpansionReason::NestedInlineExpansion);
             }
             if self.ir.enum_switch_when(expression).is_some() {
                 return Some(ExpansionReason::EnumSwitchInBody);
