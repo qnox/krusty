@@ -14,7 +14,7 @@ mod rewrite;
 #[cfg(test)]
 mod tests;
 
-use super::analysis::{analyze, opcode, AnalyzerError};
+use super::analysis::{analyze_kept, opcode, AnalyzerError, AnalyzerOptions, PlainFrames};
 use super::opcodes::*;
 use super::redundant_boxing::ValueClasses;
 use crate::jvm::method_node::{Insn, MethodNode, Node};
@@ -200,13 +200,10 @@ fn analyze_nullabilities(
         return Ok(Vec::new());
     }
     let mut interpreter = NullabilityInterpreter::new(value_classes, assumed.placements);
-    let frames = analyze(&assumed.method, owner, &mut interpreter)?;
-    let mut known = Vec::new();
+    // The operand depth of each check the analysis decides, at its node in the analyzed body.
+    let mut depths = vec![None; assumed.method.nodes.len()];
     for (at, node) in method.nodes.iter().enumerate() {
         let Node::Insn(insn) = node else {
-            continue;
-        };
-        let Some(frame) = frames.get(assumed.moved_to[at]) else {
             continue;
         };
         let depth = if is_instance_of_or_null_check(insn) {
@@ -217,6 +214,24 @@ fn analyze_nullabilities(
                 Some(Check::NotNullWithMessage | Check::ExpressionValue) => 1,
                 Some(Check::Parameter) | None => continue,
             }
+        };
+        depths[assumed.moved_to[at]] = Some(depth);
+    }
+    let frames = analyze_kept(
+        &assumed.method,
+        owner,
+        &mut interpreter,
+        &mut PlainFrames,
+        AnalyzerOptions::default(),
+        |index, _| depths[index].is_some(),
+    )?;
+    let mut known = Vec::new();
+    for at in 0..method.nodes.len() {
+        let Some(depth) = depths[assumed.moved_to[at]] else {
+            continue;
+        };
+        let Some(frame) = frames.get(assumed.moved_to[at]) else {
+            continue;
         };
         let Some(value) = frame
             .stack
