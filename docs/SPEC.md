@@ -838,6 +838,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `jvm/ir_emit/bytecode_inline_call/lambda_node.rs`). The machine opens on the declaration's own
   line, which an expression body on a later line does not move. Tests:
   `tests/suspend_reified_inline_lambda_e2e.rs`, `tests/suspend_result_operands_e2e.rs`.
+- **A suspension in the lambda of an inline suspend call is a point of kotlinc's transformer.**
+  A dependency's callable inline suspend function is spliced from its `$$forInline` copy, whose
+  call to another suspend function already carries kotlinc's markers. When the literal lambda it
+  takes suspends (`c.get { token = tok() }`), the transformer builds one machine over the caller,
+  the copy and the placed lambda, as kotlinc's does: the copy's marked call and the lambda's
+  suspensions are the machine's points in the order the frame runs them, the inline call itself is
+  no state, and the copy's continuation parameter reads the caller's continuation. The placed
+  lambda captures that continuation as it does for a reified callee, and its standalone `invoke`
+  is not written, since every call to it is placed. A reified inline suspend callee splices no copy
+  and still declines, as does a suspension in a body spliced inside the placed lambda
+  (`jvm/suspend/cps/inline_suspension.rs`, `jvm/suspend/bytecode_machine.rs`). Test:
+  `tests/suspend_inline_lambda_placement_e2e.rs`.
 - **An inlined lambda's captured value that is not a caller local goes to a temporary.** kotlinc
   binds a captured local to its own slot; any other captured value, such as a member lambda's
   outer instance read from `this$0`, is evaluated into a temporary of the inline frame where its
