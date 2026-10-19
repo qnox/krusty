@@ -466,8 +466,8 @@ fn a_task_needs_krusty_and_a_task_krusty_toolchain_runs() {
     }
 }
 
-/// What the end-to-end compile needs beyond krusty-toolchain: the krusty binary (`KRUSTY_BIN`, as
-/// `run-tests.sh` exports it, else a built one in the workspace's target directory), a JDK
+/// What the end-to-end compile needs beyond krusty-toolchain: the krusty binary the harness built
+/// for this checkout (`KRUSTY_BIN`, as `run-tests.sh` and the coverage script export it), a JDK
 /// (`JAVA_HOME`) and its major version, and the Kotlin distribution's standard library and
 /// annotations jars (beside `KRUSTY_KOTLINC`'s `bin`, else in the workspace's provisioned reference
 /// compiler).
@@ -485,13 +485,7 @@ impl RealCompile {
         // coverage harness exports one) is made absolute here.
         let krusty = std::env::var_os("KRUSTY_BIN")
             .and_then(|path| std::fs::canonicalize(path).ok())
-            .filter(|path| path.is_file())
-            .or_else(|| {
-                ["gate", "debug", "release"]
-                    .iter()
-                    .map(|profile| workspace.join("target").join(profile).join("krusty"))
-                    .find(|path| path.is_file())
-            })?;
+            .filter(|path| path.is_file())?;
         let java_home = PathBuf::from(std::env::var_os("JAVA_HOME")?);
         let release = std::fs::read_to_string(java_home.join("release")).ok()?;
         let version = release
@@ -540,7 +534,7 @@ fn listing(directory: &Path) -> Vec<String> {
 fn the_real_krusty_compiles_a_library_and_the_application_that_uses_it() {
     let Some(real) = RealCompile::find() else {
         eprintln!(
-            "skipping the end-to-end compile: needs the krusty binary, a JDK and the Kotlin standard library"
+            "skipping the end-to-end compile: needs the krusty binary (`KRUSTY_BIN`), a JDK and the Kotlin standard library"
         );
         return;
     };
