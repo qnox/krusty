@@ -414,6 +414,49 @@ fun box(): String {
     );
 }
 
+/// A same-module `@InlineOnly` wrapper is never emitted, so its function-typed parameter reaches no
+/// Wasm signature while its lambda expands through common IR. The lambda's ordinary assignments to
+/// a captured `var` are checked as `Unit` statements and must leave nothing on the stack: inside an
+/// `if` branch of the lambda, a leftover value would not validate.
+#[test]
+fn wasm_a_same_module_inline_only_lambda_assigns_a_captured_var_as_a_unit_statement() {
+    expect_wasm_box(
+        r#"
+@file:Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
+
+@kotlin.internal.InlineOnly
+inline fun twice(block: () -> Unit) {
+    block()
+    block()
+}
+
+fun box(): String {
+    var count = 0
+    var last = "none"
+    var round = 0
+    while (round < 2) {
+        twice {
+            if (count < 100) {
+                count = count + 1
+            }
+        }
+        round = round + 1
+    }
+    twice {
+        if (round == 2) {
+            last = "set"
+            count = count + 2
+        }
+    }
+    if (count != 8) return "count"
+    if (last != "set") return "last"
+    return "OK"
+}
+"#,
+        "wasmSameModuleInlineOnlyCapturedAssignment",
+    );
+}
+
 #[test]
 fn wasm_declines_an_instruction_wrapper_whose_body_lowering_does_not_model() {
     // `pow` reaches fdlibm's `__ieee754_pow`, whose locals have no initializer: the wrapper is not
