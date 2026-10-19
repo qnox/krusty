@@ -31,6 +31,7 @@ pub mod fir;
 pub mod fir_lower;
 pub mod frontend;
 pub mod fx_hash;
+pub mod hosted_plugin_ir;
 mod inline_parameter_modifier;
 pub mod integer_constant;
 pub mod ir;
