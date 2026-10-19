@@ -73,6 +73,8 @@ pub(crate) mod property_flags {
     pub const IS_EXPECT: u64 = 1 << 16;
     /// Accessor flag word bit 6: the accessor is not the compiler default.
     pub const ACCESSOR_IS_NOT_DEFAULT: u64 = 1 << 6;
+    /// Accessor flag word bit 8: the accessor is declared `inline`.
+    pub const ACCESSOR_IS_INLINE: u64 = 1 << 8;
     /// Both modality bits (4-5). Shared by the property word and the accessor word, which is how an
     /// accessor's default is derived from its property.
     pub const MODALITY_MASK: u64 = 0b11_0000;
