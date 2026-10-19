@@ -53,19 +53,38 @@ const OUTER: &str = "public class Outer<T extends CharSequence> {\n\
     \x20   @SuppressWarnings(\"rawtypes\") public static Outer.Inner raw() { return new Outer<String>(\"inner\").new Inner(); }\n\
     }\n";
 
+const BOUNDED: &str = "public class Bounded<T extends Comparable<T>, U extends T> {\n\
+    \x20   private final U u;\n\
+    \x20   public Bounded(U u) { this.u = u; }\n\
+    \x20   public class Shadow<T> {\n\
+    \x20       private final T own;\n\
+    \x20       public Shadow(T own) { this.own = own; }\n\
+    \x20       public T own() { return own; }\n\
+    \x20       public U outer() { return u; }\n\
+    \x20   }\n\
+    }\n";
+
 /// An applied enclosing class binds the formals its member classes capture: `Outer<String>.Inner`
 /// reads `T` as `String`, a `Shadow<T>` of its own hides `Outer`'s `T`, `Mid<Int>.Deep` reaches
-/// `Outer`'s `T` through two levels, and a static `Nested` captures nothing.
+/// `Outer`'s `T` through two levels, and a static `Nested` captures nothing. `Bounded`'s hidden
+/// `T` keeps its own `Comparable<T>` bound and `U`'s bound on it.
 const EXACT: &str = "fun exact(x: Outer<String>.Inner): String = x.get()\n\
     fun exactField(x: Outer<String>.Inner): String = x.value\n\
     fun innerShadow(x: Outer<String>.Shadow<Int>): Int = x.own()\n\
     fun deep(x: Outer<String>.Mid<Int>.Deep): String = x.get()\n\
     fun nested(x: Outer.Nested<Int>): Int? = x.nested()\n\
+    fun boundedSelf(x: Bounded<String, String>.Shadow<Int>): Int = x.own()\n\
+    fun boundedCross(x: Bounded<String, String>.Shadow<Int>): String = x.outer()\n\
+    fun boundedStar(x: Bounded<*, *>.Shadow<Int>): Comparable<*> = x.outer()\n\
     fun box(): String {\n\
     \x20   val outer = Outer(\"exact\")\n\
     \x20   val n = exact(outer.Inner()).length + exactField(outer.Inner()).length +\n\
     \x20       innerShadow(outer.Shadow(4)) + deep(outer.Mid<Int>().Deep()).length\n\
-    \x20   return if (n == 19 && nested(Outer.Nested<Int>()) == null) \"OK\" else \"n $n\"\n\
+    \x20   val bounded = Bounded<String, String>(\"abc\").Shadow(4)\n\
+    \x20   val b = boundedSelf(bounded) + boundedCross(bounded).length +\n\
+    \x20       (boundedStar(bounded) as String).length\n\
+    \x20   return if (n == 19 && b == 10 && nested(Outer.Nested<Int>()) == null) \"OK\"\n\
+    \x20   else \"n $n b $b\"\n\
     }\n";
 
 const ACCESS: &str = "fun returned(x: Box<*>): Int = x.get().length\n\
@@ -115,6 +134,7 @@ fn javac_classes() -> std::path::PathBuf {
             ("Box.java".to_string(), BOX.to_string()),
             ("Chain.java".to_string(), CHAIN.to_string()),
             ("Outer.java".to_string(), OUTER.to_string()),
+            ("Bounded.java".to_string(), BOUNDED.to_string()),
         ],
         &[],
     )
@@ -129,6 +149,7 @@ fn a_java_source_class_formal_keeps_its_declared_bound_and_a_method_formal_shado
             ("Box.java", BOX),
             ("Chain.java", CHAIN),
             ("Outer.java", OUTER),
+            ("Bounded.java", BOUNDED),
             ("main.kt", SHADOWED),
             ("exact.kt", EXACT),
         ],
@@ -176,6 +197,7 @@ fn an_inner_java_class_member_binds_its_enclosing_type_argument_like_kotlinc() {
             ("Box.java", BOX),
             ("Chain.java", CHAIN),
             ("Outer.java", OUTER),
+            ("Bounded.java", BOUNDED),
         ],
         EXACT,
     );

@@ -6,6 +6,7 @@
 //! function's pre-CPS result, and a class's parameters with their bounds.
 
 use super::*;
+use crate::types::TypeParameters;
 
 /// Decode the source type of a field while verifying that it erases to the classfile descriptor.
 /// Unlike the constant-field helper, this retains type variables: the shared resolver substitutes
@@ -295,6 +296,54 @@ pub(super) fn constructor_inference_signature(
     }
 }
 
+/// A member class's type parameters: its `own`, then the formals of its `enclosing` class (that
+/// class's own, then those it captures in turn), as the common classifier model lists an inner
+/// class's: `Outer<String>.Inner` binds `T = String` in every `Inner` member that names `Outer`'s
+/// `T`. A captured formal the member class hides behind its own of the same spelling keeps its
+/// slot under an identity of its own, and every captured bound names it by that identity:
+/// `Outer<T : Comparable<T>, U : T>.Inner<T>` keeps `Comparable<T>` and `U : T` on the captured
+/// `T`, not on `Inner`'s.
+fn capture_enclosing_type_parameters(
+    name: TypeName,
+    own: &TypeParameters<Vec<Vec<Ty>>>,
+    enclosing: &TypeParameters<Vec<Vec<Ty>>>,
+) -> TypeParameters<Vec<Vec<Ty>>> {
+    let mut formals = own.type_params().clone();
+    let mut hidden = crate::fx_hash::HashMap::<&str, &'static str>::default();
+    for formal in enclosing.type_params() {
+        if formals.contains(formal) {
+            let identity = crate::types::hidden_captured_type_parameter(
+                name,
+                formals.len(),
+                crate::types::type_parameter_source_name(formal),
+            );
+            hidden.insert(formal, identity);
+            formals.push(identity.to_string());
+        } else {
+            formals.push(formal.clone());
+        }
+    }
+    let captured_bounds = enclosing.type_param_bounds().iter().map(|bounds| {
+        bounds
+            .iter()
+            .map(|bound| crate::types::ty_rename_params(*bound, &hidden))
+            .collect::<Vec<_>>()
+    });
+    TypeParameters::new(
+        formals,
+        own.type_param_bounds()
+            .iter()
+            .cloned()
+            .chain(captured_bounds)
+            .collect(),
+        [
+            own.type_param_variances().as_slice(),
+            enclosing.type_param_variances(),
+        ]
+        .concat(),
+    )
+}
+
 impl JvmLibraries {
     /// The bound of every class formal a member of `class` may name without declaring it. A Java
     /// member's free type variables are its class's formals and, for a non-static member class
@@ -328,48 +377,23 @@ impl JvmLibraries {
     }
 
     /// The type parameters class `name` publishes, and how many of them it declares itself. A
-    /// non-static member class (one with an `outer_instance`) captures its enclosing class's formals (that class's own, then those it captures
-    /// in turn) after its own, as the common classifier model lists an inner class's:
-    /// `Outer<String>.Inner` binds `T = String` in every `Inner` member that names `Outer`'s `T`. A
-    /// captured formal the member class hides behind its own of the same spelling keeps its slot
-    /// under an identity of its own. A static nested class captures none.
+    /// non-static member class (one with an `outer_instance`) captures its enclosing class's
+    /// formals after its own ([`capture_enclosing_type_parameters`]); a static nested class
+    /// captures none.
     pub(super) fn member_class_type_parameters(
         &self,
         outer_instance: Option<TypeName>,
         name: TypeName,
-        own: crate::types::TypeParameters<Vec<Vec<Ty>>>,
-    ) -> (usize, crate::types::TypeParameters<Vec<Vec<Ty>>>) {
+        own: TypeParameters<Vec<Vec<Ty>>>,
+    ) -> (usize, TypeParameters<Vec<Vec<Ty>>>) {
         let own_count = own.type_params().len();
-        let Some(enclosing) = outer_instance.and_then(|outer| self.classifier_record(outer)) else {
-            return (own_count, own);
-        };
-        let mut formals = own.type_params().clone();
-        for formal in enclosing.type_params() {
-            formals.push(if formals.contains(formal) {
-                crate::types::hidden_captured_type_parameter(
-                    name,
-                    formals.len(),
-                    crate::types::type_parameter_source_name(formal),
-                )
-                .to_string()
-            } else {
-                formal.clone()
-            });
+        match outer_instance.and_then(|outer| self.classifier_record(outer)) {
+            Some(enclosing) => (
+                own_count,
+                capture_enclosing_type_parameters(name, &own, &enclosing.type_parameters),
+            ),
+            None => (own_count, own),
         }
-        let parameters = crate::types::TypeParameters::new(
-            formals,
-            [
-                own.type_param_bounds().as_slice(),
-                enclosing.type_param_bounds(),
-            ]
-            .concat(),
-            [
-                own.type_param_variances().as_slice(),
-                enclosing.type_param_variances(),
-            ]
-            .concat(),
-        );
-        (own_count, parameters)
     }
 
     /// Publish a Java method's `Signature` attribute: the declaring class's formal bounds
@@ -515,6 +539,38 @@ mod class_formal_bound_tests {
                 .ret,
             Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")))
         );
+    }
+
+    #[test]
+    fn a_hidden_captured_formal_keeps_its_self_and_cross_formal_bounds() {
+        let comparable = |argument| Ty::obj_args("kotlin/Comparable", &[argument]);
+        let outer_t = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+        let enclosing = TypeParameters::new(
+            vec!["T".to_string(), "U".to_string()],
+            vec![vec![comparable(outer_t)], vec![outer_t]],
+            vec![crate::types::TypeVariance::Invariant; 2],
+        );
+        let own = TypeParameters::new(
+            vec!["T".to_string()],
+            vec![vec![Ty::obj("kotlin/Any")]],
+            vec![crate::types::TypeVariance::Invariant],
+        );
+        let inner = crate::types::type_name("Outer$Inner");
+
+        let captured = capture_enclosing_type_parameters(inner, &own, &enclosing);
+        let hidden = crate::types::hidden_captured_type_parameter(inner, 1, "T");
+        let hidden_t = Ty::ty_param(hidden, Ty::obj("kotlin/Any"));
+
+        assert_eq!(captured.type_params(), &["T", hidden, "U"]);
+        assert_eq!(
+            captured.type_param_bounds(),
+            &vec![
+                vec![Ty::obj("kotlin/Any")],
+                vec![comparable(hidden_t)],
+                vec![hidden_t],
+            ]
+        );
+        assert_eq!(crate::types::type_parameter_source_name(hidden), "T");
     }
 
     #[test]
