@@ -432,3 +432,67 @@ fn a_module_whose_paths_do_not_name_every_source_is_refused() {
         )]
     );
 }
+
+/// A function or parameter with something kotlinc's IR records that krusty's plugin IR does not
+/// carry yet is refused where it is written, not built without it.
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn a_function_with_what_the_plugin_ir_does_not_carry_is_refused_where_it_is_written() {
+    let (runtime, _) = runtime();
+    // Each source, the text the refusal spans and what it names.
+    let cases = [
+        (
+            "@Deprecated(\"old\") fun f() {}\n",
+            "fun f() {}",
+            "the annotations of `f`",
+        ),
+        (
+            "suspend fun f() {}\n",
+            "fun f() {}",
+            "the `suspend` modifier of `f`",
+        ),
+        (
+            "tailrec fun f(n: Int): Int { return n }\n",
+            "fun f(n: Int): Int { return n }",
+            "the `tailrec` modifier of `f`",
+        ),
+        (
+            "fun f(vararg xs: Int) {}\n",
+            "vararg xs: Int",
+            "the `vararg` modifier of the parameter `xs` of `f`",
+        ),
+        (
+            "fun f(@Suppress(\"x\") n: Int) {}\n",
+            "@Suppress(\"x\") n: Int",
+            "the annotations of the parameter `n` of `f`",
+        ),
+        (
+            "fun f(n: Int = 1) {}\n",
+            "n: Int = 1",
+            "the default value of the parameter `n` of `f`",
+        ),
+    ];
+    let directory = temporary("refused-shapes");
+    std::fs::create_dir_all(&directory).unwrap();
+    let source = directory.join("Refused.kt");
+    let source_path = source.to_str().unwrap().to_string();
+    for (text, spanned, what) in cases {
+        std::fs::write(&source, text).unwrap();
+        let (module, diags) = krusty_ir_at(&runtime, &source_path, &[source_path.clone()]);
+        assert_eq!(module, None, "{text}");
+        let lo = text.find(spanned).unwrap() as u32;
+        let diagnostics: Vec<(u32, u32, u32, &str)> = diags
+            .diags
+            .iter()
+            .map(|diag| (diag.file, diag.span.lo, diag.span.hi, diag.msg.as_str()))
+            .collect();
+        let message = format!(
+            "compiler plugins cannot run on this code yet: krusty's plugin IR does not cover {what}"
+        );
+        assert_eq!(
+            diagnostics,
+            [(0, lo, lo + spanned.len() as u32, message.as_str())],
+            "{text}"
+        );
+    }
+}

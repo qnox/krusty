@@ -6,7 +6,7 @@ use krusty_plugin_ir::{
     FunctionIr, ParameterIr, StatementIr, ValueId, VariableIr, Visibility,
 };
 
-use crate::ast::FunBody;
+use crate::ast::{FunBody, FunDecl, Param};
 use crate::compiler::ObservedBody;
 use crate::diag::Span;
 use crate::fir::{
@@ -53,6 +53,15 @@ pub(super) fn encode_function(
             format!("the type parameters of `{name}`"),
         ));
     }
+    if !syntax.annotations.is_empty() {
+        return Err(refuse(syntax.span, format!("the annotations of `{name}`")));
+    }
+    if let Some(modifier) = modifier(syntax) {
+        return Err(refuse(
+            syntax.span,
+            format!("the `{modifier}` modifier of `{name}`"),
+        ));
+    }
     let visibility = match index
         .declaration_header(declaration)
         .map(|header| header.visibility)
@@ -83,6 +92,12 @@ pub(super) fn encode_function(
     };
     let mut parameters = Vec::new();
     for (parameter, written) in body.parameters().iter().zip(&syntax.params) {
+        if let Some(what) = parameter_shape(written) {
+            return Err(refuse(
+                written.span,
+                format!("{what} of the parameter `{}` of `{name}`", written.name),
+            ));
+        }
         encoder
             .values
             .insert(parameter.value, encoder.values.len() as u32);
@@ -113,6 +128,35 @@ pub(super) fn encode_function(
             statements,
         },
     })
+}
+
+/// The first modifier of `function` that [`FunctionIr`] does not carry, which kotlinc's IR records.
+/// The others it could write are refused before this: `operator` and `infix` need a receiver,
+/// `external` has no body, `inline` is not checked as an ordinary body, and `actual` needs a
+/// multiplatform module.
+fn modifier(function: &FunDecl) -> Option<&'static str> {
+    if function.is_suspend() {
+        Some("suspend")
+    } else if function.is_tailrec() {
+        Some("tailrec")
+    } else {
+        None
+    }
+}
+
+/// What `parameter` has that [`ParameterIr`] does not carry, which kotlinc's IR records. Its
+/// `crossinline` and `noinline` modifiers belong to an `inline` function, which is refused before
+/// this.
+fn parameter_shape(parameter: &Param) -> Option<&'static str> {
+    if !parameter.annotations.is_empty() {
+        Some("the annotations")
+    } else if parameter.is_vararg {
+        Some("the `vararg` modifier")
+    } else if parameter.default.is_some() {
+        Some("the default value")
+    } else {
+        None
+    }
 }
 
 struct BodyEncoder<'a, 'o> {
