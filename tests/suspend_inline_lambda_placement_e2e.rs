@@ -151,13 +151,13 @@ fn a_noinline_suspending_lambda_of_an_inline_suspend_dependency_call_keeps_its_o
     );
 }
 
-/// The caller's continuation and the `noinline` literal's class are the reference compiler's.
+/// The caller, its continuation and the `noinline` literal's class are the reference compiler's.
 #[test]
 fn a_noinline_suspending_lambda_of_an_inline_suspend_dependency_call_matches_kotlinc() {
     let library = common::compile_lib("inline_suspend_noinline_lambda", NOINLINE_LIB)
         .expect("krusty builds the library");
     let classpath = [library, common::stdlib_jar()];
-    for class in ["Late$go$1", "Late$go$3"] {
+    for class in ["Late", "Late$go$1", "Late$go$3"] {
         let compared = common::compare_with_kotlinc_plugin(
             "Main",
             NOINLINE_MAIN,
