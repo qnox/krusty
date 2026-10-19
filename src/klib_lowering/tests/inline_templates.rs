@@ -109,11 +109,18 @@ fn a_member_copy_of_another_class_than_its_selected_owner_declines() {
         return;
     };
     let libraries = stdlib(&root);
-    let symbols = libraries.symbols(
-        SymbolNamespace::Classifier(type_name("kotlin/UInt")),
-        "toInt",
-    );
-    let [function] = symbols.callables.functions() else {
+    let class = libraries
+        .symbols(SymbolNamespace::Package(type_name("kotlin")), "UInt")
+        .classifier
+        .clone()
+        .expect("`kotlin.UInt` is declared");
+    let (functions, _) = class
+        .declared_callables
+        .get("toInt")
+        .expect("`UInt` declares `toInt`")
+        .clone()
+        .into_parts();
+    let [function] = functions.overloads.as_slice() else {
         panic!("expected one `kotlin.UInt.toInt`");
     };
     let target = function
@@ -123,6 +130,7 @@ fn a_member_copy_of_another_class_than_its_selected_owner_declines() {
     let mut selected = libraries
         .external_callable(target)
         .expect("the provider realizes its own identity");
+    assert_eq!(selected.kind, crate::libraries::ExternalCallableKind::Member);
     assert_eq!(
         selected.declaration_owner,
         Some(crate::types::SemanticCallableOwner::Classifier(type_name(
@@ -147,3 +155,5 @@ fn a_member_copy_of_another_class_than_its_selected_owner_declines() {
     );
     assert!(ir.functions.is_empty());
 }
+
+

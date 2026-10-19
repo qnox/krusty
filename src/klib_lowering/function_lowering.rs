@@ -183,7 +183,20 @@ pub(super) fn prepared_inline_header(
             "a companion extension",
         ));
     }
-    match (function.dispatch_receiver.is_some(), selected.is_member()) {
+    // Kotlin's prepared copy of a member declares the dispatch receiver as its leading value
+    // parameter, ahead of the selected declaration's parameters; a copy may instead keep it in
+    // its own slot.
+    let flattened_dispatch = selected.is_member()
+        && function.dispatch_receiver.is_none()
+        && function.context_parameters.is_empty()
+        && function.extension_receiver.is_none()
+        && function.regular_parameters.len() == selected.params().len() + 1;
+    let dispatch_receiver = if flattened_dispatch {
+        function.regular_parameters.first()
+    } else {
+        function.dispatch_receiver.as_ref()
+    };
+    match (dispatch_receiver.is_some(), selected.is_member()) {
         (true, true) => {}
         (false, false) if selected.is_top_level() => {}
         (false, false) => {
@@ -235,11 +248,12 @@ pub(super) fn prepared_inline_header(
     }
     // The extension receiver is serialized either in its own slot or as the leading value
     // parameter; both orders follow the selected declaration's.
+    let regular = &function.regular_parameters[usize::from(flattened_dispatch)..];
     let serialized = function
         .context_parameters
         .iter()
         .chain(&function.extension_receiver)
-        .chain(&function.regular_parameters)
+        .chain(regular)
         .collect::<Vec<_>>();
     let declared = selected.params();
     let identities = selected.parameter_identities();
@@ -272,7 +286,7 @@ pub(super) fn prepared_inline_header(
     let mut values = HashMap::default();
     // A member's body reads its dispatch receiver in the slot ahead of the parameters. Its type
     // names the selected classifier, without type arguments of its own.
-    let receiver_slot = match function.dispatch_receiver.as_ref() {
+    let receiver_slot = match dispatch_receiver {
         Some(receiver) => {
             let Ty::Obj(classifier, &[]) = semantic_type(arena, &type_parameters, receiver.ty)?
             else {
