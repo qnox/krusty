@@ -481,8 +481,10 @@ struct RealCompile {
 impl RealCompile {
     fn find() -> Option<Self> {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // The toolchain runs krusty from each module's directory, so a relative `KRUSTY_BIN` (the
+        // coverage harness exports one) is made absolute here.
         let krusty = std::env::var_os("KRUSTY_BIN")
-            .map(PathBuf::from)
+            .and_then(|path| std::fs::canonicalize(path).ok())
             .filter(|path| path.is_file())
             .or_else(|| {
                 ["gate", "debug", "release"]
