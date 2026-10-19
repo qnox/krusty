@@ -4655,6 +4655,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `toInt()` is not an inlined call. `arrayOf` and `emptyArray` are declared `inline` too, but kotlinc
   realizes them as its own intrinsics instead of inlining them, so they end no inlined call.
   `tests/char_code_inline_line_e2e.rs` (full-byte against kotlinc).
+- **An unsigned range operator ends an inlined call.** `UInt.rangeTo`/`rangeUntil` and the `ULong`
+  ones are `@InlineOnly` functions kotlinc inlines (their bodies are `UIntRange(this, other)` and
+  `this until other`), so the rule below applies after them: `val r = a..<b` writes the `val` line
+  again at the `astore` that follows the `until` call. The checker realizes such a call in place as a
+  range construction and records on the checked range whether the selected declaration is `inline`,
+  from its metadata flag; common lowering marks that node `SyntheticOriginKind::InlinedCall`. The
+  builtin `Int`/`Long`/`Char` range operators are not inline (kotlinc intrinsifies them), and the
+  infix `until`/`downTo` are ordinary calls, so neither ends an inlined call. A `for` loop over a
+  range literal never constructs the range. `tests/unsigned_range_inline_line_e2e.rs` (full-byte
+  against kotlinc).
 - **The line after a call kotlinc inlines.** After an inlined call, kotlinc's
   `markLineNumberAfterInlineIfNeeded` re-emits the line in effect when the call sits inside a
   condition and otherwise forgets it, so the next expression's mark is written even on the same
