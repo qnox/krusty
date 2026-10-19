@@ -601,8 +601,8 @@ mod tests {
             "only the zero-argument declaration is the intrinsic; signatures: {described:?}"
         );
         assert!(
-            !crate::libraries::StdlibKlibIntrinsic::EnumEntries.accepts_source(realized[0]),
-            "the paired JVM declaration has crossed its stable provider-identity boundary"
+            crate::libraries::StdlibKlibIntrinsic::EnumEntries.accepts_source(realized[0]),
+            "the paired JVM declaration keeps the exact source-shaped common signature"
         );
         assert!(
             !crate::libraries::StdlibKlibIntrinsic::EnumEntries
@@ -614,11 +614,7 @@ mod tests {
             .as_ref()
             .expect("the realized declaration has a generic signature");
         assert!(signature.params.is_empty());
-        let [formal] = signature.formals.as_slice() else {
-            panic!("enumEntries must declare exactly one type parameter")
-        };
-        assert_ne!(formal, "T", "semantic identity is not source spelling");
-        assert_eq!(crate::types::type_parameter_source_name(formal), "T");
+        assert_eq!(signature.formals, ["T"]);
         let ordinary_one_argument = functions
             .overloads
             .iter()

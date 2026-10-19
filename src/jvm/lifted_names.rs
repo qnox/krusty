@@ -27,6 +27,7 @@
 //! block. The sequence is that name's, so `o(Tag)` numbers apart from an overload `o(Int)`.
 
 use crate::fx_hash::{HashMap, HashSet};
+use unicode_general_category::{get_general_category, GeneralCategory};
 
 use crate::ir::{IrEnclosure, IrFile, IrLiftingRoot, IrLiftingSequence};
 
@@ -163,10 +164,11 @@ pub(super) fn number(
                         .name
                         .as_deref()
                         .expect("a source local function retains its spelling");
+                    let spelled = segment_spelling(name);
                     if !used.insert(name) {
-                        format!("{name}${}", take(next))
+                        format!("{spelled}${}", take(next))
                     } else {
-                        name.to_string()
+                        spelled
                     }
                 }
             };
@@ -230,7 +232,8 @@ pub(super) fn number(
 /// Rename every function [`number`] named to its lifted name, once the functions are placed. One
 /// whose lifted name and descriptor another method of the same class already has keeps its name:
 /// kotlinc's names are distinct within the class it places them in, and a callable placed
-/// elsewhere must not collide. A callable a suspend lambda declares takes the name its class gives
+/// elsewhere must not collide. Local functions that collide only with each other are the
+/// exception, and keep the clash kotlinc reports. A callable a suspend lambda declares takes the name its class gives
 /// it when it is a method of that class, the lambda realized as kotlinc's `SuspendLambda`.
 pub(crate) fn realize(
     ir: &mut IrFile,
@@ -286,9 +289,17 @@ pub(crate) fn realize(
                 .or_default()
                 .push(id);
         }
+        // Local functions whose lifted names coincide (`my local` and `my-local` both spell
+        // `my_local`) keep them: kotlinc reports that platform declaration clash at each
+        // declaration, which the declaration-collision validation does.
         let clashing = holders
             .into_values()
             .filter(|holders| holders.len() > 1)
+            .filter(|holders| {
+                !holders.iter().all(|function| {
+                    renames.contains_key(function) && ir.local_function_spans.contains_key(function)
+                })
+            })
             .flatten()
             .filter(|function| renames.contains_key(function))
             .collect::<Vec<_>>();
@@ -430,16 +441,27 @@ fn generated_class_enclosure(ir: &IrFile, function: crate::ir::FunId) -> Option<
     }
 }
 
-/// kotlinc replaces the characters a special or mangled name carries (`<init>`, `<get-x>`,
-/// `x$delegate`, `f-txdesME`) with `_`.
+/// kotlinc's `NameUtils.sanitizeAsJavaIdentifier`: every character that is not a Unicode letter or
+/// an ASCII digit becomes `_`, so a special or mangled name (`<init>`, `<get-x>`, `x$delegate`,
+/// `f-txdesME`) and a backticked one (`my test`) both name their lifted callables with identifier
+/// characters.
 fn segment_spelling(container: &str) -> String {
     container
         .chars()
-        .map(|c| {
-            if matches!(c, '<' | '>' | '-' | '$') {
-                '_'
+        .map(|character| {
+            if character.is_ascii_digit()
+                || matches!(
+                    get_general_category(character),
+                    GeneralCategory::UppercaseLetter
+                        | GeneralCategory::LowercaseLetter
+                        | GeneralCategory::TitlecaseLetter
+                        | GeneralCategory::ModifierLetter
+                        | GeneralCategory::OtherLetter
+                )
+            {
+                character
             } else {
-                c
+                '_'
             }
         })
         .collect()
@@ -483,5 +505,7 @@ mod tests {
         assert_eq!(segment_spelling("lz$delegate"), "lz_delegate");
         assert_eq!(segment_spelling("sus-47cE-Rs"), "sus_47cE_Rs");
         assert_eq!(segment_spelling("outer"), "outer");
+        assert_eq!(segment_spelling("a b!c-é9_x"), "a_b_c_é9_x");
+        assert_eq!(segment_spelling("Kǅʰ中²Ⅷ٢"), "Kǅʰ中___");
     }
 }

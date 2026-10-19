@@ -38,6 +38,11 @@ grep -q '<groupId>dev.krusty</groupId>' "$marker"
 grep -q '<artifactId>krusty-gradle-plugin</artifactId>' "$marker"
 grep -q "<version>$version</version>" "$marker"
 
+# The repository's kotlin-versions manifest is the only list of supported Kotlin releases.
+kotlin_versions=$(sed 's/#.*//' "$repo/kotlin-versions" | awk 'NF { print $1 }' | sort -V)
+newest_kotlin=$(tail -n 1 <<<"$kotlin_versions")
+supported_kotlin=$(paste -sd, <<<"$kotlin_versions" | sed 's/,/, /g')
+
 root=$stage/krusty-gradle-plugin-$version
 mkdir -p "$root/repository"
 cp -R "$project/build/release-repository/." "$root/repository/"
@@ -63,7 +68,7 @@ pluginManagement {
 \`\`\`kotlin
 // build.gradle.kts
 plugins {
-    kotlin("jvm") version "2.4.20" // supported: 2.4.0, 2.4.10, 2.4.20
+    kotlin("jvm") version "$newest_kotlin" // supported: $supported_kotlin
     id("krusty") version "$version"
 }
 \`\`\`
@@ -92,7 +97,7 @@ plugin-id=krusty
 plugin-version=$version
 implementation=dev.krusty:krusty-gradle-plugin:$version
 marker=krusty:krusty.gradle.plugin:$version
-kotlin-gradle-plugin=2.4.0,2.4.10,2.4.20
+kotlin-gradle-plugin=$(paste -sd, <<<"$kotlin_versions")
 gradle=7.6.3,8.14.3,9.5.0,9.7.0
 EOF
 

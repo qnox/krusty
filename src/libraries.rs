@@ -14,7 +14,6 @@ mod classifier_declaration;
 mod classifier_kind;
 mod classifier_role;
 mod compiler_intrinsic;
-mod constructor_type_parameter_coordinates;
 mod core_builtins;
 mod default_value;
 mod dependency_access_policy;
@@ -30,6 +29,7 @@ mod platform_contract;
 mod property_producer;
 mod provider_override;
 mod result_nullability;
+mod scalar_instruction;
 mod singleton_dispatch;
 mod stdlib_klib_intrinsics;
 pub use annotation_application::{
@@ -46,7 +46,6 @@ pub use call_realization::{
 };
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::constructor_generic_signature;
-pub(crate) use classifier_callables::constructor_generic_signature_from_classifier_parameters;
 pub use classifier_callables::BoundInnerConstructor;
 pub(crate) use classifier_declaration::type_alias_target_classifier;
 pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
@@ -74,9 +73,7 @@ pub use crate::types::Visibility;
 use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
 pub use compiler_intrinsic::CompilerIntrinsic;
-pub(crate) use constructor_type_parameter_coordinates::ConstructorTypeParameterCoordinates;
 pub(crate) use core_builtins::add_core_builtin_declarations;
-pub(crate) use generic_signature::normalize_contract_type_parameters;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};
 pub use inline_body::{
     InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyFrame, InlineBodyPlan,
@@ -96,6 +93,7 @@ pub(crate) use metadata_normalization::{
     FunctionParameterIdentities, PropertyAccessorNames, PropertyParameterIdentities,
     TypeParameterIdentities,
 };
+pub use scalar_instruction::{ScalarClass, ScalarComparison, ScalarInstruction};
 use std::borrow::Cow;
 
 /// Declaration-level classifier access. Unlike [`Visibility`], this preserves JVM package-private
@@ -2463,22 +2461,6 @@ impl LibraryType {
 
     pub fn type_param_variances(&self) -> &Vec<TypeVariance> {
         &self.type_parameters.type_param_variances
-    }
-
-    /// Type parameters declared by this classifier, excluding parameters captured from an
-    /// enclosing declaration. Constructor inference owns exactly this declaration-order prefix;
-    /// captured parameters are supplied by the enclosing receiver or lexical context.
-    pub fn own_type_params(&self) -> &[String] {
-        self.type_params()
-            .get(..self.own_type_parameter_count)
-            .expect("classifier own-type-parameter count must fit its complete parameter list")
-    }
-
-    /// Bounds parallel to [`Self::own_type_params`].
-    pub fn own_type_param_bounds(&self) -> &[Vec<Ty>] {
-        self.type_param_bounds()
-            .get(..self.own_type_parameter_count)
-            .expect("classifier own-type-parameter count must fit its complete bound list")
     }
 }
 

@@ -166,6 +166,14 @@ pub(super) fn emission_contexts(
                 roots.extend(defaults.iter().flatten().copied());
             }
         }
+        // The primary constructor's defaults run in this class's `$default` stub.
+        roots.extend(
+            ir.class_ctor_defaults_name(class.fq_name)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .copied(),
+        );
         roots.extend(class.init_body);
         roots.extend(ir.companion_clinit_body(class.fq_name));
         roots.extend(class.super_arg_prelude.iter().copied());
@@ -1706,7 +1714,9 @@ impl Accessor<'_> {
     fn private_member(&self, function: u32, cw: &mut ClassWriter) {
         let owner = self.owner.internal_name(self.facade);
         let interface = self.owner.is_interface(self.ir);
-        if self.ir.functions[function as usize].is_static {
+        if self.ir.functions[function as usize].is_static
+            || super::jvm_static_members::singleton_static_owner(self.ir, function).is_some()
+        {
             super::access_bridges::emit_function_reference_access_bridge(
                 self.ir,
                 function,

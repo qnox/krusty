@@ -153,6 +153,7 @@ fn marker_name(ir: &IrFile, declaration: ExprId) -> Option<String> {
         IrDebugLocalProvenance::InlineValue { .. }
         | IrDebugLocalProvenance::InlineLambdaReceiver { .. }
         | IrDebugLocalProvenance::InlineLambdaParameter { .. }
+        | IrDebugLocalProvenance::InlineLambdaContinuation { .. }
         | IrDebugLocalProvenance::InlineCallableReferenceParameter { .. } => None,
     }
 }
@@ -222,6 +223,14 @@ pub(super) fn render(
         // into a further expansion suffixes it, one `$iv` per enclosing expansion.
         Some(IrDebugLocalProvenance::InlineLambdaParameter { depth }) => {
             let mut rendered = escaped(source?);
+            for _ in 0..depth {
+                rendered.push_str("$iv");
+            }
+            Some(rendered)
+        }
+        // kotlinc names it as it names every suspend function's continuation parameter.
+        Some(IrDebugLocalProvenance::InlineLambdaContinuation { depth }) => {
+            let mut rendered = "$completion".to_string();
             for _ in 0..depth {
                 rendered.push_str("$iv");
             }

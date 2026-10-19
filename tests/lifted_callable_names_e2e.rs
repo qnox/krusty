@@ -310,3 +310,79 @@ fn each_local_class_numbers_its_own_lambdas_across_top_level_declarations() {
         assert_eq!(krusty, reference, "{class}: kotlinc's methods");
     }
 }
+
+/// kotlinc spells every segment of a lifted name as a Java identifier: a backticked function's
+/// lambdas and a backticked local function replace each character that is not a Unicode letter or
+/// an ASCII digit with `_`, while the declared function keeps its name. The Arabic-Indic digit and
+/// Roman numeral distinguish kotlinc's predicate from Rust's broader `char::is_alphanumeric`.
+#[test]
+fn backticked_names_lift_with_identifier_characters() {
+    let source = "fun `my test-é9٢Ⅷ`(): Int {\n\
+            \x20   val first = { 1 }\n\
+            \x20   fun `my local٢Ⅷ`() = 2\n\
+            \x20   return first() + `my local٢Ⅷ`()\n\
+            }\n\
+            class Spec {\n\
+            \x20   fun `reads a value`(): Int {\n\
+            \x20       val read = { 3 }\n\
+            \x20       return read()\n\
+            \x20   }\n\
+            }\n";
+    for class in ["BacktickedKt", "Spec"] {
+        let compared = common::compare_with_kotlinc_plugin(
+            "Backticked",
+            source,
+            class,
+            &[common::stdlib_jar()],
+            "1.8",
+            &[],
+        )
+        .expect("reference kotlinc and javap must be available");
+        assert!(
+            compared.krusty_bytes == compared.reference_bytes,
+            "{class} differs\n--- kotlinc ---\n{}\n--- krusty ---\n{}",
+            compared.reference,
+            compared.krusty
+        );
+    }
+}
+
+/// Local-function numbering keys on the raw Kotlin name, before sanitizing the emitted segment.
+/// These distinct raw names therefore remain unnumbered even though both spell `my_local`, and
+/// kotlinc reports the methods they lift to as a platform declaration clash at each declaration:
+/// on a file facade, on a class, with a captured parameter or local, and after an annotation.
+#[test]
+fn sanitized_local_function_names_clash_like_kotlinc() {
+    let source = "fun collision(): Int {\n\
+            \x20   fun `my local`() = 1\n\
+            \x20   fun `my-local`() = 2\n\
+            \x20   return `my local`() + `my-local`()\n\
+            }\n\
+            class Spec {\n\
+            \x20   fun member(): Int {\n\
+            \x20       fun `a b`() = 1\n\
+            \x20       fun `a-b`() = 2\n\
+            \x20       return `a b`() + `a-b`()\n\
+            \x20   }\n\
+            }\n\
+            fun captured(y: String): Int {\n\
+            \x20   @Suppress(\"UNUSED\") fun `p q`(x: Int) = x + y.length\n\
+            \x20   fun `p-q`(x: Int) = x - y.length\n\
+            \x20   return `p q`(1) + `p-q`(2)\n\
+            }\n\
+            fun capturedLocal(): Int {\n\
+            \x20   val v = 3\n\
+            \x20   fun `r s`(x: Int) = x + v\n\
+            \x20   fun `r-s`(x: Int) = x - v\n\
+            \x20   return `r s`(1) + `r-s`(2)\n\
+            }\n";
+    let result = common::compiler_diagnostics(
+        &[("SanitizedCollision.kt", source)],
+        &[common::stdlib_jar()],
+    );
+    common::expect_identical_rejection(&result, "sanitized local-function clash");
+    assert_eq!(
+        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.reference_stderr, true)
+    );
+}

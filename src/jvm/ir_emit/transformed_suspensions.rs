@@ -31,6 +31,9 @@ pub(super) struct TransformedSuspensions {
     /// The value class and carrier of each point whose resumption delivers the box.
     resumed_boxes: HashMap<ExprId, (TypeName, Ty)>,
     fake_continuations: HashSet<ExprId>,
+    /// Points a body kept for inlining writes without markers: invokes of an inline lambda
+    /// parameter, which the inlining caller replaces with the lambda's body.
+    inlined: HashSet<ExprId>,
     /// The suspension point a local declaration's initializer is, while that initializer is
     /// emitted: kotlinc's `visitVariable` marks the initializer's line before casting its value.
     initializer: Option<ExprId>,
@@ -49,6 +52,12 @@ pub(super) enum SuspensionResult {
 
 impl Emitter<'_> {
     /// The declared result of `e` when it is a suspension point the transformer takes.
+    /// Whether kotlinc's coroutine transformer builds this method's machine: its suspension
+    /// markers are then the transformer's stand-in instructions.
+    pub(super) fn transformer_owns_method(&self) -> bool {
+        !self.transformed_suspensions.results.is_empty()
+    }
+
     pub(super) fn transformed_result(&self, e: ExprId) -> Option<Ty> {
         self.transformed_suspensions.results.get(&e).copied()
     }
@@ -166,7 +175,7 @@ impl Emitter<'_> {
     /// kotlinc's codegen writes right before the invoke, after the arguments.
     pub(super) fn mark_call_start(&mut self, e: ExprId, code: &mut CodeBuilder) {
         self.mark_dispatch_line(e, code);
-        let Some(result) = self.transformed_result(e) else {
+        let Some(result) = self.transformed_result(e).filter(|_| self.is_marked(e)) else {
             return;
         };
         code.suspend_marker(SuspendMarker::BeforeSuspend as i32, self.cw);
@@ -178,7 +187,7 @@ impl Emitter<'_> {
     /// Open suspension point `e`, before its arguments. A block has no invoke to mark: it is the
     /// point from its first instruction.
     pub(super) fn open_transformed_suspension(&mut self, e: ExprId, code: &mut CodeBuilder) {
-        if self.transformed_suspensions.results.contains_key(&e) {
+        if self.transformed_suspensions.results.contains_key(&e) && self.is_marked(e) {
             code.inline_call_marker(true);
         }
         if self.is_transformed_block(e) {
@@ -205,11 +214,15 @@ impl Emitter<'_> {
         let Some(result) = self.transformed_result(e) else {
             return;
         };
-        code.suspend_marker(SuspendMarker::AfterSuspend as i32, self.cw);
-        if let Some(&(value_class, carrier)) = self.transformed_suspensions.resumed_boxes.get(&e) {
-            self.unbox_on_resume(value_class, carrier, code);
+        if self.is_marked(e) {
+            code.suspend_marker(SuspendMarker::AfterSuspend as i32, self.cw);
+            if let Some(&(value_class, carrier)) =
+                self.transformed_suspensions.resumed_boxes.get(&e)
+            {
+                self.unbox_on_resume(value_class, carrier, code);
+            }
+            code.inline_call_marker(false);
         }
-        code.inline_call_marker(false);
         let block = self.is_transformed_block(e);
         if block {
             // The block was an inlined body: the line is written afresh after it.
@@ -272,14 +285,16 @@ impl Emitter<'_> {
         machine: &TransformedMachine,
         completion: Option<u32>,
     ) -> u16 {
+        // A suspend lambda is its own continuation, in slot 0: a lambda the method inliner places
+        // in its body captures it from there.
         let slot = completion.map_or(0, |completion| {
             let (slot, _) = *self
                 .slots
                 .get(&completion)
                 .expect("a transformed suspend function retains its completion identity");
-            self.continuation_slot = Some(slot);
             slot
         });
+        self.continuation_slot = Some(slot);
         self.transformed_suspensions = TransformedSuspensions {
             results: machine
                 .suspensions
@@ -292,6 +307,7 @@ impl Emitter<'_> {
                 .filter_map(|suspension| Some((suspension.call, suspension.resumed_box?)))
                 .collect(),
             fake_continuations: machine.fake_continuations.iter().copied().collect(),
+            inlined: HashSet::default(),
             initializer: None,
         };
         self.suspend_lambda_parameter_reads = machine
@@ -300,6 +316,17 @@ impl Emitter<'_> {
             .map(|lambda| lambda.parameter_reads.iter().copied().collect())
             .unwrap_or_default();
         slot
+    }
+
+    /// Leave `calls`, points of the machine just armed, unmarked: the body is kept for inlining
+    /// and they are invokes of inline lambda parameters.
+    pub(super) fn leave_inlined_invokes_unmarked(&mut self, calls: Vec<ExprId>) {
+        self.transformed_suspensions.inlined = calls.into_iter().collect();
+    }
+
+    /// Whether suspension point `e` is written between its markers.
+    fn is_marked(&self, e: ExprId) -> bool {
+        !self.transformed_suspensions.inlined.contains(&e)
     }
 
     /// Mark the read of a suspend lambda's parameter from its field, just stored by declaration
@@ -326,9 +353,12 @@ pub(super) fn request_transform(
         desc,
         CoroutineRequest {
             continuation_class: machine.continuation_class.clone(),
+            // kotlinc's transformer opens the machine on the declaration's own line, which an
+            // expression body on a later line does not move.
             line_number: ir
-                .fn_decl_lines
+                .fn_sig_lines
                 .get(&fid)
+                .or_else(|| ir.fn_decl_lines.get(&fid))
                 .map(|&line| line.min(u16::MAX as u32) as u16),
             completion_slot,
             dispatch_receiver: dispatch_receiver(ir, fid).filter(|_| machine.lambda.is_none()),
@@ -341,12 +371,14 @@ pub(super) fn request_transform(
 }
 
 /// The class a member function's continuation captures as `this$0`, by internal name: a member's
-/// own, or, for the `$suspendImpl` a member's body moved to, the receiver it takes first.
+/// own, or, for the `$suspendImpl` a member's body moved to, the receiver it takes first. A named
+/// object's `@JvmStatic` member is static and captures none.
 fn dispatch_receiver(ir: &IrFile, fid: u32) -> Option<String> {
     let function = &ir.functions[fid as usize];
+    let jvm_static = super::jvm_static_members::singleton_static_owner(ir, fid).is_some();
     function
         .dispatch_receiver
-        .filter(|_| !function.is_static)
+        .filter(|_| !function.is_static && !jvm_static)
         .or_else(|| {
             ir.jvm_suspend_impl_bodies
                 .get(&fid)

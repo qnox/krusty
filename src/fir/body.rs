@@ -237,10 +237,6 @@ pub enum FirCallArgument {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirIntrinsic {
-    ReinterpretBits {
-        from: ResolvedTy,
-        to: ResolvedTy,
-    },
     /// The exact `kotlin.assert` declaration selected by resolution. Its operands remain lazy until
     /// target realization: a disabled assertion evaluates neither the condition nor its message.
     Assert {
@@ -1836,8 +1832,13 @@ pub struct FirBody {
     /// Local-storage blocks originating from postfix `++`/`--`, whose checked shape snapshots the
     /// old value.
     postfix_updates: HashSet<FirExprId>,
+    /// Conversion origins that realize, in place, a call of an inline function kotlinc inlines
+    /// (`Char.code`'s getter): the conversion is the end of an inlined call.
+    inlined_call_conversions: HashSet<OriginId>,
     /// This callable's own lifting site, for a lambda or local function body.
     lifting_site: Option<FirLiftingSite>,
+    /// A local function's declaration span, for a target diagnostic about its realization.
+    declaration_span: Option<crate::diag::Span>,
     /// Target-realized callables declared in this body that have no common FIR body: the accessors
     /// of a local delegated property.
     bodiless_lifting_sites: Vec<FirLiftingSite>,
@@ -1903,7 +1904,9 @@ impl FirBody {
             generated_class_provenance: HashMap::default(),
             constant_reads: HashSet::default(),
             postfix_updates: HashSet::default(),
+            inlined_call_conversions: HashSet::default(),
             lifting_site: None,
+            declaration_span: None,
             bodiless_lifting_sites: Vec::new(),
             local_delegate_plans: Vec::new(),
             interface_delegate_calls: Vec::new(),
@@ -2578,6 +2581,14 @@ impl FirBody {
 
     pub(crate) fn is_postfix_update(&self, block: FirExprId) -> bool {
         self.postfix_updates.contains(&block)
+    }
+
+    pub(crate) fn record_inlined_call_conversion(&mut self, origin: OriginId) {
+        self.inlined_call_conversions.insert(origin);
+    }
+
+    pub(crate) fn is_inlined_call_conversion(&self, origin: OriginId) -> bool {
+        self.inlined_call_conversions.contains(&origin)
     }
 
     pub(crate) fn set_generated_class_provenance(

@@ -148,9 +148,11 @@ fn generated_property_hash_owner(ir: &IrFile, bodies: &dyn MethodBodies, ty: Ty)
     } else {
         crate::jvm::names::instanceof_internal_name(runtime_ty)
     };
-    let source_interface = semantic_owner
-        .and_then(|name| ir.class_id_by_name(name))
-        .is_some_and(|class| ir.classes[class as usize].is_interface);
+    // A module interface declared in another file is an interface too: its `hashCode` is
+    // `Object`'s, which `invokevirtual` must name.
+    let source_interface = semantic_owner.is_some_and(|name| {
+        ir.source_classifier_kind(name) == Some(crate::ir::IrClassifierKind::Interface)
+    });
     let is_interface = matches!(runtime_ty, Ty::Fun(_))
         || source_interface
         || semantic_owner.is_some_and(|owner| bodies.owner_is_interface_name(owner));

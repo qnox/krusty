@@ -387,9 +387,9 @@ fn pair_constructions(
         lambdas: HashMap::default(),
     };
     let constructs = node.instructions().any(|insn| {
-        matches!(insn, Insn::Type { op: NEW, class } if classes.is_anonymous_object(class))
+        matches!(insn, Insn::Type { op: NEW, class } if classes.is_regenerated(class))
             || matches!(insn, Insn::Method { op: INVOKESPECIAL, owner, name, .. }
-                if name == "<init>" && classes.is_anonymous_object(owner))
+                if name == "<init>" && classes.is_regenerated(owner))
     });
     if !constructs {
         return Ok(constructions);
@@ -417,7 +417,7 @@ fn pair_constructions(
             continue;
         };
         match entry {
-            Node::Insn(Insn::Type { op: NEW, class }) if classes.is_anonymous_object(class) => {
+            Node::Insn(Insn::Type { op: NEW, class }) if classes.is_regenerated(class) => {
                 news.push(at);
             }
             Node::Insn(Insn::Method {
@@ -426,7 +426,7 @@ fn pair_constructions(
                 name,
                 desc,
                 ..
-            }) if name == "<init>" && classes.is_anonymous_object(owner) => {
+            }) if name == "<init>" && classes.is_regenerated(owner) => {
                 let arguments = descriptors::argument_types(desc)
                     .ok_or_else(|| malformed(MalformedType(desc.clone())))?
                     .len();
@@ -521,7 +521,7 @@ impl Interpreter for ConstructionInterpreter<'_> {
     fn new_operation(&mut self, at: &At) -> Result<ConstructionValue, AnalyzerError> {
         let value = BasicInterpreter.new_operation(at)?;
         Ok(match at.insn {
-            Insn::Type { op: NEW, class } if self.classes.is_anonymous_object(class) => {
+            Insn::Type { op: NEW, class } if self.classes.is_regenerated(class) => {
                 ConstructionValue::Uninitialized(BTreeSet::from([at.index]), value)
             }
             _ => ConstructionValue::Basic(value),

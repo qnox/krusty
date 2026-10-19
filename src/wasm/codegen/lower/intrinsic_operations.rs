@@ -13,29 +13,6 @@ impl Body<'_> {
         args: &[u32],
     ) -> Result<(), Unsupported> {
         match operation {
-            IrIntrinsic::ReinterpretBits { from, to } => {
-                let operand = match (receiver, args) {
-                    (Some(receiver), []) => receiver,
-                    (None, [argument]) => *argument,
-                    _ => return Err("a malformed scalar reinterpretation".to_string()),
-                };
-                let opcode = match (from, to) {
-                    (Ty::Float, Ty::Int) => 0xbc,
-                    (Ty::Double, Ty::Long) => 0xbd,
-                    (Ty::Int, Ty::Float) => 0xbe,
-                    (Ty::Long, Ty::Double) => 0xbf,
-                    _ => {
-                        return Err(format!(
-                            "a scalar reinterpretation from {} to {}",
-                            describe(from),
-                            describe(to)
-                        ))
-                    }
-                };
-                self.value(operand, from)?;
-                self.code.op(opcode);
-                Ok(())
-            }
             IrIntrinsic::PrimitiveCompare { operand, .. } => {
                 let (lhs, rhs) = match (receiver, args) {
                     (None, [lhs, rhs]) => (*lhs, *rhs),

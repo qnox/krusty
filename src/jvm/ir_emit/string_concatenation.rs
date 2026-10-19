@@ -156,6 +156,31 @@ impl Emitter<'_> {
         self.append_top(ty, code);
     }
 
+    /// Emit one `invokedynamic` argument, answering the type the recipe takes it at. The bootstrap
+    /// takes a reference argument in the slot that produced it: a suspension point's result stays
+    /// the erased `Object` the call returns, and a captured `var` its `ObjectRef.element`. The
+    /// `StringBuilder` form instead narrows both to the `append` overload of the declared type.
+    fn emit_indy_concat_operand(&mut self, part: u32, code: &mut CodeBuilder) -> Ty {
+        let ty = self.value_ty(part);
+        let object = Ty::obj("java/lang/Object");
+        if !ty.is_reference() {
+            self.emit_value(part, code);
+            return ty;
+        }
+        if self.emit_erased_suspension_result(part, object, code) {
+            return object;
+        }
+        match *self.ir.expr(part) {
+            IrExpr::RefGet { holder, elem } if !self.is_value_class_ty(&elem) => {
+                self.emit_shared_cell_read(holder, elem, false, code)
+            }
+            _ => {
+                self.emit_value(part, code);
+                ty
+            }
+        }
+    }
+
     /// kotlinc compiles a multi-part string template (and a synthesized `toString`) to a single
     /// `invokedynamic makeConcatWithConstants` when targeting JVM 9+ — a `StringConcatFactory`
     /// bootstrap with a recipe string, `` marking each dynamic argument and literal text inline.
@@ -208,17 +233,14 @@ impl Emitter<'_> {
             }
         }
         let recipe = recipe.finish();
-        let arg_descs: String = arg_parts
-            .iter()
-            .map(|&part| type_descriptor(self.value_ty(part)))
-            .collect();
         // kotlinc interns constants in instruction order: the operands' entries first, then the
         // call site's, with the recipe (the bootstrap's static argument) before the bootstrap
         // method handle.
+        let mut arg_descs = String::new();
         let mut arg_words = 0i32;
         for &part in &arg_parts {
-            let ty = self.value_ty(part);
-            self.emit_value(part, code);
+            let ty = self.emit_indy_concat_operand(part, code);
+            arg_descs.push_str(&type_descriptor(ty));
             arg_words += slot_words(ty) as i32;
         }
         let recipe_const = self.cw.const_string_kt(&recipe);

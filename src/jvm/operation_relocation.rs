@@ -56,6 +56,7 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     move_fact!(call_inline_modifiers);
     move_fact!(value_class_unbox_type_operation_edges);
     ir.move_generated_operand_start(source, target);
+    ir.move_compiled_inline_call(source, target);
 
     target
 }
@@ -109,6 +110,8 @@ mod tests {
         ir.value_class_unbox_type_operation_edges
             .insert(source, unbox_receiver);
         ir.mark_generated_operand_start(source);
+        ir.set_same_module_inlining(crate::ir::SameModuleInlining::CompiledBodies);
+        ir.record_compiled_inline_call(source, 7);
 
         let target = clone_below_representation_wrapper(&mut ir, source);
 
@@ -142,5 +145,7 @@ mod tests {
             .contains_key(&source));
         assert!(!ir.starts_at_generated_operand(source));
         assert!(ir.starts_at_generated_operand(target));
+        assert_eq!(ir.compiled_inline_call(source), None);
+        assert_eq!(ir.compiled_inline_call(target), Some(7));
     }
 }

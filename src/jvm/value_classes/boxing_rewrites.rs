@@ -99,6 +99,7 @@ pub(super) fn box_wrap_nullable(
         branches: vec![(Some(is_null), null2), (None, boxed)],
     });
     ir.null_guards.insert(when);
+    ir.jvm_value_class_null_guards.insert(when);
     ir.exprs[id as usize] = IrExpr::Block {
         stmts: vec![var],
         value: Some(when),

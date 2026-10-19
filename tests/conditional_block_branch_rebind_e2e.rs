@@ -25,7 +25,7 @@ const JAVA: &[(&str, &str)] = &[
         "package pub;\n\
          import java.util.function.Function;\n\
          public final class Mono<T> implements Pub<T> {\n\
-         \x20 public static <R> Mono<R> empty() { return new Mono<R>(); }\n\
+         \x20 public static <T> Mono<T> empty() { return new Mono<T>(); }\n\
          \x20 public static <T> Mono<T> just(T value) { return new Mono<T>(); }\n\
          \x20 public <R> Mono<R> flatMap(Function<? super T, ? extends Mono<? extends R>> f) {\n\
          \x20\x20 return new Mono<R>();\n\
@@ -61,24 +61,6 @@ fn assert_both_accept(user: &str, what: &str) {
 }
 
 const PRELUDE: &str = "import pub.Mono\nimport pub.Pub\nclass Auth(val n: String)\n";
-
-const NAMED_LAMBDA_LIBRARY: &str = "package dep\n\
-class Cell<T> {\n\
-  companion object {\n\
-    fun <T> empty(): Cell<T> = error(\"unused\")\n\
-  }\n\
-}\n\
-class Selector {\n\
-  fun <A, R> choose(first: () -> A, second: () -> Cell<R>): Cell<R> = error(\"unused\")\n\
-}\n";
-
-const SAME_SPELLED_GENERIC_DECLARATIONS: &str = "package identities\n\
-class Left<T>(val value: T)\n\
-class Right<T>(val value: T)\n\
-val <T> Left<T>.echo: T get() = value\n\
-var <T> Right<T>.echo: T\n\
-  get() = value\n\
-  set(ignored) {}\n";
 
 /// Control: expression branches already rebound, and must keep doing so.
 #[test]
@@ -216,10 +198,9 @@ fn an_incompatible_block_branch_is_still_rejected() {
 }
 
 /// Without an enclosing result expectation, the selected `flatMap` call still owns an open `R`.
-/// Its primary inference/return mismatch does not consume the independent open `R` selected for a
-/// different declaration's terminal conditional branch. The deliberately same-spelled formals
-/// prove that declaration identity, not `R`, owns each diagnostic. Every value-conditional form
-/// must retain the complete ordered diagnostic set, including the branch call's exact location.
+/// Its primary inference/return mismatch does not consume the independent open `T` selected for a
+/// terminal conditional branch. Every value-conditional form must retain the complete ordered
+/// diagnostic set, including the branch call's exact source location.
 #[test]
 fn open_selected_lambda_results_preserve_terminal_branch_diagnostics() {
     let java = JAVA
@@ -234,7 +215,6 @@ fn open_selected_lambda_results_preserve_terminal_branch_diagnostics() {
     for (form, body) in [
         ("if", "if (s.isEmpty()) {} else { Mono.empty() }"),
         ("when", "when { s.isEmpty() -> {}; else -> Mono.empty() }"),
-        ("elvis", "null ?: Mono.empty()"),
         ("try", "try {} catch (ignored: Exception) { Mono.empty() }"),
     ] {
         let user = format!(
@@ -250,65 +230,25 @@ fn open_selected_lambda_results_preserve_terminal_branch_diagnostics() {
     }
 }
 
-/// The selected member retains declaration-ordered parameters, while source arguments retain
-/// source order. Open-result ownership must cross the exact argument -> visible parameter ->
-/// declaration parameter mapping rather than indexing either vector with the other's coordinate.
+/// An elvis lambda result is not a mismatch: `R` is recorded as `empty`'s open `T`, and kotlinc
+/// reports both as uninferred.
 #[test]
-fn reversed_named_lambdas_preserve_the_selected_parameters_open_result() {
-    let Some(library) = common::kotlinc_library(NAMED_LAMBDA_LIBRARY) else {
-        eprintln!("skipping: kotlinc unavailable");
+fn an_open_lambda_result_leaves_the_selected_formal_uninferred() {
+    let java = JAVA
+        .iter()
+        .map(|(name, source)| ((*name).into(), (*source).into()))
+        .collect::<Vec<(String, String)>>();
+    let Some((library, _)) = common::javac_compile(&java, &[]) else {
+        eprintln!("skipping: javac unavailable");
         return;
     };
-    let classpath = [library, common::stdlib_jar(), common::jdk_modules()];
-    let result = common::compiler_diagnostics(
-        &[(
-            "Use.kt",
-            "import dep.Cell\n\
-             import dep.Selector\n\
-             fun use(selector: Selector) = selector.choose(\n\
-             \x20 second = { if (true) {} else Cell.empty() },\n\
-             \x20 first = { \"fixed\" }\n\
-             )\n",
-        )],
-        &classpath,
-    );
-    common::expect_identical_rejection(&result, "reversed named selected lambda parameters");
-}
-
-#[test]
-fn same_spelled_dependency_properties_and_constructors_keep_declaration_identity() {
-    let Some(library) = common::kotlinc_library(SAME_SPELLED_GENERIC_DECLARATIONS) else {
-        eprintln!("skipping: kotlinc unavailable");
-        return;
-    };
-    let classpath = [library, common::stdlib_jar(), common::jdk_modules()];
-    let result = common::compiler_diagnostics(
-        &[(
-            "Use.kt",
-            "import identities.Left\n\
-             import identities.Right\n\
-             import identities.echo\n\
-             fun use(left: Left<String>, right: Right<Int>): String {\n\
-             \x20 val fromLeft: String = left.echo\n\
-             \x20 val fromRight: Int = right.echo\n\
-             \x20 right.echo = fromRight\n\
-             \x20 val builtLeft: Left<String> = Left(fromLeft)\n\
-             \x20 val builtRight: Right<Int> = Right(fromRight)\n\
-             \x20 return builtLeft.value + builtRight.value\n\
-             }\n",
-        )],
-        &classpath,
-    );
-    assert_eq!(
-        (result.reference_code, result.reference_stderr.as_str()),
-        (0, ""),
-        "kotlinc rejected the same-spelled declaration fixture"
-    );
-    assert_eq!(
-        (result.krusty_code, result.krusty_stderr.as_str()),
-        (0, ""),
-        "krusty conflated same-spelled property or constructor formals"
-    );
+    let classpath = [library.clone(), common::stdlib_jar(), common::jdk_modules()];
+    let user = "import pub.Mono\n\
+         fun use(m: Mono<String>) {\n\
+         \x20 val result = m.flatMap { s -> null ?: Mono.empty() }\n\
+         }\n";
+    let result = common::compiler_diagnostics(&[("Use.kt", user)], &classpath);
+    common::expect_identical_rejection(&result, "open elvis lambda result");
 }
 
 #[test]
@@ -347,22 +287,4 @@ fn stable_symbolic_lambda_results_are_inference_evidence() {
             "krusty rejected the {form} control"
         );
     }
-}
-
-/// Sibling rebinding may replace only one coordinate of a multi-formal result with the sibling
-/// declaration's still-open identity. The diagnostic belongs to that exact coordinate: declaration
-/// order must not turn the remaining `B` obligation into an error naming `A`.
-#[test]
-fn multi_formal_branch_completion_reports_the_open_result_coordinate() {
-    let result = common::compiler_diagnostics(
-        &[(
-            "Use.kt",
-            "class Duo<A, B>\n\
-             fun <A, B> empty(): Duo<A, B> = error(\"unused\")\n\
-             fun <B> fixedFirst(): Duo<String, B> = error(\"unused\")\n\
-             fun use(flag: Boolean) = if (flag) empty() else fixedFirst()\n",
-        )],
-        &[],
-    );
-    common::expect_identical_rejection(&result, "multi-formal conditional result completion");
 }

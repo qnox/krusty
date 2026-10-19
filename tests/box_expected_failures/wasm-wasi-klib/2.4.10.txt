@@ -1114,7 +1114,6 @@ constants/doNotTriggerInit.kt
 constants/float.kt
 constants/foldingBinaryOpsUnsigned.kt
 constants/kt9532.kt
-constants/literalToLongConversion.kt
 constants/privateConst.kt
 contextParameters/ImplicitReceiverWithTheSameContextAndExtension.kt
 contextParameters/arrayAccessCompositveOperators.kt
@@ -4301,7 +4300,6 @@ mangling/multipleConstructors.kt
 mangling/parentheses.kt
 mangling/publicOverrideSuperCall.kt
 mixedNamedPosition/defaults.kt
-mixedNamedPosition/simple.kt
 mixedNamedPosition/varargs.kt
 mixedNamedPosition/varargsEvaluationOrder.kt
 multiDecl/ValCapturedInFunctionLiteral.kt
@@ -4847,7 +4845,6 @@ properties/kt4252_2.kt
 properties/kt4340.kt
 properties/kt4373.kt
 properties/kt4383.kt
-properties/kt613.kt
 properties/kt78962.kt
 properties/kt8928.kt
 properties/kt9603.kt

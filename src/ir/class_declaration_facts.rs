@@ -72,6 +72,19 @@ impl IrFile {
         self.class_signatures.get(&internal)
     }
 
+    /// Record the signature a plugin's IR lowering gives a class it generated, when it differs from
+    /// the declared one (kotlinx.serialization's bounded `$serializer` type parameters).
+    pub(crate) fn insert_lowered_class_signature(&mut self, internal: TypeName, sig: IrGenericSig) {
+        self.lowered_class_signatures.insert(internal, sig);
+    }
+
+    /// The signature the class's classfile is written from: its lowered one, else its declaration.
+    pub(crate) fn lowered_class_signature(&self, internal: TypeName) -> Option<&IrGenericSig> {
+        self.lowered_class_signatures
+            .get(&internal)
+            .or_else(|| self.class_signatures.get(&internal))
+    }
+
     /// `class` applied to its own type parameters (`C<T>`): the type of its `this`.
     pub(crate) fn class_type(&self, class: &IrClass) -> Ty {
         let arguments: Vec<Ty> = self

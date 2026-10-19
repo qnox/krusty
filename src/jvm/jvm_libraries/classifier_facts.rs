@@ -11,12 +11,31 @@ pub(super) fn classifier_constructor_generic_sig(
     owner: TypeName,
     value_parameters: &[Ty],
 ) -> Option<GenericSig> {
-    crate::libraries::constructor_generic_signature_from_classifier_parameters(
-        owner,
-        &parameters.type_params,
-        &parameters.type_param_bounds,
-        value_parameters.to_vec(),
-    )
+    if parameters.type_params.is_empty() {
+        return None;
+    }
+    let arguments = parameters
+        .type_params
+        .iter()
+        .enumerate()
+        .map(|(index, formal)| {
+            let bound = parameters
+                .type_param_bounds
+                .get(index)
+                .and_then(|bounds| bounds.first())
+                .copied()
+                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+            Ty::ty_param(formal, bound)
+        })
+        .collect::<Vec<_>>();
+    Some(GenericSig {
+        formals: parameters.type_params.clone(),
+        formal_bounds: parameters.type_param_bounds.clone(),
+        receiver: None,
+        params: value_parameters.to_vec(),
+        ret: Ty::obj_args_name(owner, &arguments),
+        return_policy: GenericReturnPolicy::Exact,
+    })
 }
 
 /// A mapped Kotlin classifier and its JVM realization may use different source names for the same

@@ -350,6 +350,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     }
     ir.copy_generated_line_marks(source, target);
     ir.copy_inline_copy_mark(source, target);
+    ir.copy_compiled_inline_call(source, target);
     copy_map!(fir_origins);
     copy_map!(expression_owners);
     copy_map!(callable_reference_provenance);
@@ -402,6 +403,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(value_class_suspend_calls);
     copy_map!(intrinsic_suspension_points);
     copy_map!(erased_value_constructions);
+    if ir.has_value_class_parameter_construction(source) {
+        ir.mark_value_class_parameter_construction(target);
+    }
     if let Some(provenance) = ir.debug_local_provenance(source) {
         ir.set_debug_local_provenance(target, provenance);
     }
@@ -416,6 +420,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     }
     if ir.call_operand_bindings.contains(&source) {
         ir.call_operand_bindings.insert(target);
+    }
+    if ir.invocation_operand_bindings.contains(&source) {
+        ir.invocation_operand_bindings.insert(target);
     }
     if ir.destructuring_containers.contains(&source) {
         ir.destructuring_containers.insert(target);
@@ -490,6 +497,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     }
     if ir.elvis_safe_call_guards.contains(&source) {
         ir.elvis_safe_call_guards.insert(target);
+    }
+    if ir.jvm_value_class_null_guards.contains(&source) {
+        ir.jvm_value_class_null_guards.insert(target);
     }
     if ir.inline_call_sites.contains(&source) {
         ir.inline_call_sites.insert(target);

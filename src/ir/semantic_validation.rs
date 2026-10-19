@@ -65,7 +65,6 @@ fn reject_all(
 
 fn validate_intrinsic(operation: &IrIntrinsic) -> Result<(), UndeterminedIrType> {
     match operation {
-        IrIntrinsic::ReinterpretBits { from, to } => reject_all("reinterpretation", [*from, *to]),
         IrIntrinsic::PrimitiveCompare { operand, .. }
         | IrIntrinsic::UnsignedCompare { operand }
         | IrIntrinsic::Ieee754Equals { operand } => reject("intrinsic operand", *operand),

@@ -12,6 +12,10 @@ use krusty::jvm::classreader::parse_class;
 /// exact rather than a per-field probe — a blanket "statics follow the source" would pass every
 /// individual assertion about `const` and still get the plain `val` wrong.
 fn reference_facade_fields(src: &str, stem: &str) -> Vec<(u16, String, String)> {
+    field_table(&reference_facade(src, stem))
+}
+
+fn reference_facade(src: &str, stem: &str) -> krusty::jvm::classreader::ClassInfo {
     let work = common::scratch_dir()
         .unwrap_or_else(|| panic!("{stem}: cannot allocate a scratch directory"))
         .join(format!("{stem}-const-reference"));
@@ -32,7 +36,7 @@ fn reference_facade_fields(src: &str, stem: &str) -> Vec<(u16, String, String)> 
         "{stem}: kotlinc rejected the fixture: {diagnostics}"
     );
     let bytes = std::fs::read(out.join("MainKt.class")).expect("read the reference facade");
-    field_table(&parse_class(&bytes).expect("the reference facade parses"))
+    parse_class(&bytes).expect("the reference facade parses")
 }
 
 fn field_table(ci: &krusty::jvm::classreader::ClassInfo) -> Vec<(u16, String, String)> {
@@ -136,5 +140,47 @@ fn the_facade_field_table_matches_the_reference_compiler() {
         field_table(&facade(SRC)),
         reference,
         "the facade's field table must match kotlinc's exactly"
+    );
+}
+
+/// An integer literal takes a `const val`'s declared `Long` type, so its `ConstantValue` is a long.
+///
+/// krusty wrote `const val TIMEOUT: Long = 60` as an int constant on a `J` field, which the JVM
+/// rejects when it loads the class ("Inconsistent constant value type"). The negated literal and the
+/// folded arithmetic beside it are the other source forms that reach the same field, and the
+/// `Short`/`Byte` constants pin that a narrower declared type still stores an int.
+#[test]
+fn an_integer_literal_declared_long_is_stored_as_a_long_constant() {
+    const SRC: &str = "const val A: Long = 60\n\
+         const val B: Long = -60\n\
+         const val C: Long = 60 + 1\n\
+         const val D: Short = 7\n\
+         const val E: Byte = -3\n\
+         const val F: Long = A * 2\n\
+         const val G: Long = -(60 + 1)\n\
+         const val H: Long = +(2 * 3)\n\
+         const val I: Long = -(1 shl 31)\n\
+         fun box() = if (A + B + C + F + D + E + G + H + I == 130L - 2147483648L) \"OK\" else \"fail\"\n";
+    let constants = |ci: &krusty::jvm::classreader::ClassInfo| {
+        ci.fields
+            .iter()
+            .map(|field| {
+                (
+                    field.name.clone(),
+                    field.descriptor.clone(),
+                    field.const_value.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let reference = reference_facade(SRC, "long_constants");
+    assert_eq!(
+        constants(&facade(SRC)),
+        constants(&reference),
+        "the facade's constants must match kotlinc's exactly"
+    );
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SRC, "Main").as_deref(),
+        Some("OK")
     );
 }

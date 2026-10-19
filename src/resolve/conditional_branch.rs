@@ -224,8 +224,40 @@ pub(super) fn branch_value_expression(file: &File, expression: ExprId) -> ExprId
     }
 }
 
-fn unique_formal(mut formals: Vec<&String>) -> Option<&String> {
-    (formals.len() == 1).then(|| formals.pop().expect("one formal"))
+/// The expressions whose values `expression` can produce: a block's trailing value, each branch of
+/// an `if` with an `else` or a `when` with an `else` arm, both sides of an elvis, and a `try`'s body
+/// and catches, recursively. Any other expression is its own value.
+pub(super) fn terminal_value_expressions(file: &File, expression: ExprId, out: &mut Vec<ExprId>) {
+    match file.expr(expression) {
+        Expr::Block {
+            trailing: Some(trailing),
+            ..
+        } => terminal_value_expressions(file, *trailing, out),
+        Expr::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => {
+            terminal_value_expressions(file, *then_branch, out);
+            terminal_value_expressions(file, *else_branch, out);
+        }
+        Expr::When { arms, .. } if arms.iter().any(|arm| arm.conditions.is_empty()) => {
+            for arm in arms {
+                terminal_value_expressions(file, arm.body, out);
+            }
+        }
+        Expr::Elvis { lhs, rhs } => {
+            terminal_value_expressions(file, *lhs, out);
+            terminal_value_expressions(file, *rhs, out);
+        }
+        Expr::Try { body, catches, .. } => {
+            terminal_value_expressions(file, *body, out);
+            for catch in catches {
+                terminal_value_expressions(file, catch.body, out);
+            }
+        }
+        _ => out.push(expression),
+    }
 }
 
 impl Checker<'_> {
@@ -307,10 +339,9 @@ impl Checker<'_> {
 
     /// Complete all selected result calls owned by one conditional expression.
     ///
-    /// Sibling provenance is joined before any diagnostic consumes a call's retained constructor
-    /// evidence. The completion boundary is shared by value and statement positions; an enclosing
-    /// postponed argument keeps ownership because [`Self::report_unbound_conditional_branch`]
-    /// declines while that argument is still being probed.
+    /// Siblings have already rebound each other's open calls. The completion boundary is shared by
+    /// value and statement positions; an enclosing postponed argument keeps ownership because
+    /// [`Self::report_unbound_conditional_branch`] declines while that argument is still probed.
     pub(super) fn complete_conditional_branches(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -319,8 +350,6 @@ impl Checker<'_> {
         result: Ty,
         branches: impl IntoIterator<Item = (ExprId, Ty)>,
     ) {
-        let branches = branches.into_iter().collect::<Vec<_>>();
-        self.join_constructor_branches(scope, branches.iter().copied());
         let owner = self.conditional_completion_owner(scope, conditional, expected, result);
         for (branch, _) in branches {
             self.complete_conditional_branch(scope, branch, owner);
@@ -407,7 +436,7 @@ impl Checker<'_> {
             return;
         }
         let branch = branch_value_expression(self.file, branch);
-        let Some(signature) = self.conditional_call_result_signature(branch).cloned() else {
+        let Some(signature) = self.unbound_call_result_signature(branch).cloned() else {
             self.report_uninferred_constructor_type_parameter(branch);
             return;
         };
@@ -415,61 +444,11 @@ impl Checker<'_> {
         if Self::type_is_lexically_fixed(scope, actual) {
             return;
         }
-        let result_formal = |formal: &&String| {
-            crate::types::ty_mentions_param(signature.ret, std::slice::from_ref(*formal))
-        };
-        let direct = unique_formal(
-            signature
-                .formals
-                .iter()
-                .filter(result_formal)
-                .filter(|formal| {
-                    crate::types::ty_mentions_param(actual, std::slice::from_ref(formal))
-                })
-                .collect(),
-        );
-        // Rechecking one open branch against another can replace this call's variable with the
-        // sibling declaration's variable. Recover the exact result coordinate from the retained
-        // declaration shape: `Pair<String, sibling.B>` constrains only this call's second formal.
-        // A multi-formal relation that still leaves more than one coordinate open is ambiguous and
-        // deliberately reports nothing here instead of naming the first declaration formal.
-        let attributed = direct.or_else(|| {
-            let source = self.fed_source();
-            let constraints =
-                crate::symbol_resolver::collect_assignability_constraints_from_symbols(
-                    &source,
-                    signature.ret,
-                    actual,
-                );
-            unique_formal(
-                signature
-                    .formals
-                    .iter()
-                    .filter(result_formal)
-                    .filter(|formal| {
-                        constraints
-                            .lower
-                            .get(*formal)
-                            .copied()
-                            .into_iter()
-                            .chain(
-                                constraints
-                                    .upper
-                                    .get(*formal)
-                                    .into_iter()
-                                    .flatten()
-                                    .copied(),
-                            )
-                            .any(|bound| {
-                                bound != Ty::Error
-                                    && !bound.mentions_pending()
-                                    && !Self::type_is_lexically_fixed(scope, bound)
-                            })
-                    })
-                    .collect(),
-            )
-        });
-        let Some(formal) = attributed else {
+        let Some(formal) = signature
+            .formals
+            .iter()
+            .find(|formal| crate::types::ty_mentions_param(actual, std::slice::from_ref(formal)))
+        else {
             return;
         };
         self.diags.error(
@@ -555,7 +534,10 @@ impl Checker<'_> {
             return current;
         }
         let Some(signature) = self.conditional_call_result_signature(branch).cloned() else {
-            return current;
+            return match self.open_constructor_expectation(branch, sibling) {
+                Some(expectation) => recheck(self, expectation),
+                None => current,
+            };
         };
         // Equal constructors, a subtype result (`linkedSetOf()` beside `hashSetOf<T>()`), a more
         // specific sibling (`emptyList()` beside `mutableListOf("a")`), or a shared generic

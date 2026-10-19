@@ -44,6 +44,8 @@ mod suspend_in_spliced_inline_e2e;
 mod suspend_in_try_body_hoist_e2e;
 #[path = "../suspend_inline_collection_spill_e2e.rs"]
 mod suspend_inline_collection_spill_e2e;
+#[path = "../suspend_inline_for_inline_e2e.rs"]
+mod suspend_inline_for_inline_e2e;
 #[path = "../suspend_inline_hof_suspending_lambda_reject_e2e.rs"]
 mod suspend_inline_hof_suspending_lambda_reject_e2e;
 #[path = "../suspend_inline_splice_names_e2e.rs"]
@@ -88,12 +90,18 @@ mod suspend_member_call_points_e2e;
 mod suspend_normalization_e2e;
 #[path = "../suspend_operator_convention_cross_file_e2e.rs"]
 mod suspend_operator_convention_cross_file_e2e;
+#[path = "../suspend_private_function_e2e.rs"]
+mod suspend_private_function_e2e;
 #[path = "../suspend_prologue_cast_e2e.rs"]
 mod suspend_prologue_cast_e2e;
 #[path = "../suspend_receiver_lambda_e2e.rs"]
 mod suspend_receiver_lambda_e2e;
+#[path = "../suspend_reified_inline_lambda_e2e.rs"]
+mod suspend_reified_inline_lambda_e2e;
 #[path = "../suspend_result_nullability_e2e.rs"]
 mod suspend_result_nullability_e2e;
+#[path = "../suspend_result_operands_e2e.rs"]
+mod suspend_result_operands_e2e;
 #[path = "../suspend_return_type_recovery_e2e.rs"]
 mod suspend_return_type_recovery_e2e;
 #[path = "../suspend_safe_call_receiver_e2e.rs"]

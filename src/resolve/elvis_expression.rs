@@ -41,11 +41,13 @@ impl Checker<'_> {
                 None => self.expr_expected(&rhs_scope, rhs, lt),
             };
             let fixed = self.expectation_fixes_branches(scope, e, conditional_expected);
-            let lt0 = self.rebind_conditional_branch(lhs, rt, lt0, fixed, |c, exp| {
+            let rhs_evidence = self.branch_sibling_type(rhs, rt);
+            let lt0 = self.rebind_conditional_branch(lhs, rhs_evidence, lt0, fixed, |c, exp| {
                 c.expr_expected(scope, lhs, exp)
             });
             lt = definitely_non_null_ty(lt0);
-            let rt = self.rebind_conditional_branch(rhs, lt, rt, fixed, |c, exp| {
+            let lhs_evidence = self.branch_sibling_type(lhs, lt);
+            let rt = self.rebind_conditional_branch(rhs, lhs_evidence, rt, fixed, |c, exp| {
                 c.expr_expected(&rhs_scope, rhs, exp)
             });
             // The elvis value when lhs is non-null: a nullable-primitive lhs (`Int?`) unwraps to its

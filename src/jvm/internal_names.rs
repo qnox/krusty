@@ -300,7 +300,11 @@ fn rewrite_property_references(
 /// constructors and `@PublishedApi` members (another module's public inline function links the
 /// Kotlin name). A value-class `-impl` is static and still takes the suffix (`m-impl$lib1`).
 fn declares_mangled_member(ir: &IrFile, function: FunId, facade: TypeName) -> bool {
-    if ir.method_visibility(function) != Visibility::Internal || publishes_api(ir, function) {
+    // An explicit `@JvmName` is the whole JVM name: kotlinc appends no module suffix to it.
+    if ir.method_visibility(function) != Visibility::Internal
+        || publishes_api(ir, function)
+        || declares_jvm_name(ir.function_annotations.get(&function))
+    {
         return false;
     }
     let name = ir.functions[function as usize].name.as_str();
@@ -310,6 +314,13 @@ fn declares_mangled_member(ir: &IrFile, function: FunId, facade: TypeName) -> bo
     ir.classes
         .iter()
         .any(|class| class.fq_name != facade && class.methods.contains(&function))
+}
+
+fn declares_jvm_name(annotations: Option<&crate::ir::DeclarationAnnotations>) -> bool {
+    !matches!(
+        crate::jvm::module_calls::applied_jvm_name(annotations),
+        Ok(None)
+    )
 }
 
 /// `@PublishedApi` on the function, or on the property whose accessor it is. The annotation is
@@ -388,22 +399,26 @@ fn synthesized_internal_accessors(ir: &IrFile, facade: TypeName) -> Vec<Synthesi
         let fresh = |current: &Option<String>, convention: String| {
             Some(current.clone().unwrap_or(convention))
         };
-        let getter =
-            (member.visibility == Visibility::Internal && member.getter.is_none()).then(|| {
-                fresh(
-                    &member.getter_jvm_name,
-                    crate::names::property_getter_name(&member.name),
-                )
-            });
+        let annotations = &member.accessor_annotations;
+        let getter = (member.visibility == Visibility::Internal
+            && member.getter.is_none()
+            && !declares_jvm_name(Some(&annotations.getter)))
+        .then(|| {
+            fresh(
+                &member.getter_jvm_name,
+                crate::names::property_getter_name(&member.name),
+            )
+        });
         let setter = (member.is_var
             && member.setter.is_none()
-            && member.setter_visibility == Visibility::Internal)
-            .then(|| {
-                fresh(
-                    &member.setter_jvm_name,
-                    crate::names::property_setter_name(&member.name),
-                )
-            });
+            && member.setter_visibility == Visibility::Internal
+            && !declares_jvm_name(Some(&annotations.setter)))
+        .then(|| {
+            fresh(
+                &member.setter_jvm_name,
+                crate::names::property_setter_name(&member.name),
+            )
+        });
         let getter = getter.flatten();
         let setter = setter.flatten();
         if getter.is_none() && setter.is_none() {
@@ -825,10 +840,10 @@ fn is_class_member(owner: Option<TypeName>, placement: IrStaticPlacement) -> boo
 pub(super) fn module_callable_is_mangled(callable: &crate::ir::IrModuleCallable) -> bool {
     is_class_member(callable.owner, callable.placement)
         && callable.visibility == Visibility::Internal
-        && !callable
-            .annotations
-            .iter()
-            .any(|annotation| annotation.identity == crate::types::wk::published_api())
+        && !callable.annotations.iter().any(|annotation| {
+            annotation.identity == crate::types::wk::published_api()
+                || annotation.identity.matches("kotlin/jvm/JvmName")
+        })
 }
 
 pub(super) fn module_getter_is_mangled(property: &crate::ir::IrModuleProperty) -> bool {

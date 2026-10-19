@@ -401,9 +401,16 @@ impl Emitter<'_> {
                 // generated property-reference value is the exception: kotlinc's StackValue
                 // boundary coerces its concrete carrier to the selected KProperty interface before
                 // `invokeinterface`. The IR class identity supplies that fact; the member spelling
-                // does not.
+                // does not. A generic call's result still in its declaration's erased bound
+                // (`T : Throwable` read as `Throwable`) is not the receiver's own class yet:
+                // kotlinc coerces it to the substituted type the call names.
                 let property_reference = this.property_ref_class_and_captures(operand).is_some();
+                let erased_bound = matches!(
+                    this.erased_reference_result(operand),
+                    Some(super::operand_representation::ErasedResult::Coerced { .. })
+                );
                 let target = if !property_reference
+                    && !erased_bound
                     && source.is_reference()
                     && !super::jvm_is_erased_top(super::ir_ty_to_jvm(&source))
                 {

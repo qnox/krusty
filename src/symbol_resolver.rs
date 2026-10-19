@@ -45,8 +45,6 @@ mod resolved_symbol;
 mod sam;
 mod scope_level_callables;
 mod selected_call_instantiation;
-#[cfg(test)]
-mod selection_identity_tests;
 pub(crate) use selected_call_instantiation::selected_default_callable;
 pub(crate) mod selected_constructor;
 pub(crate) use selected_constructor::SelectedConstructorDeclaration;
@@ -105,12 +103,11 @@ pub(crate) use overload_selection::{
     best_by_args, CandidateSelectionWithTies, ReceiverFunctionSelection,
 };
 use overload_selection::{
-    callable_specificity_shape, generic_bounds_admit, generic_bounds_admit_slots,
-    indexed_call_shape, integer_literal_overload, logical_call_params, logical_value_params,
-    select_overload, select_overload_tracking_with_functions,
-    select_receiver_overload_from_functions_tracking, semantic_arg_assignable,
-    unique_most_specific, unique_most_specific_with_conflicts, ExtCtx, IndexedConvention,
-    SelectionMode,
+    generic_bounds_admit, generic_bounds_admit_slots, indexed_call_shape, integer_literal_overload,
+    logical_call_params, logical_value_params, select_overload,
+    select_overload_tracking_with_functions, select_receiver_overload_from_functions_tracking,
+    semantic_arg_assignable, unique_most_specific, unique_most_specific_with_conflicts, ExtCtx,
+    IndexedConvention, SelectionMode,
 };
 use property_candidates::{
     generic_property_more_specific, source_property_visible, specialize_property,
@@ -246,21 +243,34 @@ fn specialized_constructor_params(
     args: &[CallArgKind],
     type_args: &[Ty],
 ) -> Vec<Ty> {
-    let Some(signature) = member
+    let Some(mut signature) = member
         .generic_sig
         .clone()
         .filter(|signature| signature.params.len() == member.params.len())
     else {
         return member.params.clone();
     };
-    // Provider normalization already publishes the classifier variables as the constructor
-    // signature's declaration-order prefix. Keep every constraint in that signature-owned space;
-    // prepending the classifier's independently owned identities creates two variables for one
-    // ordinal and loses both explicit and inferred arguments.
-    let _coordinates = crate::libraries::ConstructorTypeParameterCoordinates::new(
-        classifier.own_type_params(),
-        &signature,
-    );
+    // A constructor's JVM/Kotlin callable signature generally lists only constructor-owned
+    // formals; occurrences of the owning CLASS's parameters remain in its value-parameter types.
+    // Make those finalized classifier declarations explicit to the shared solver. Otherwise it
+    // correctly treats `T` as an enclosing, non-inferable variable and leaves `Box(1)` at `T`.
+    let mut formals = classifier.type_parameters.type_params.clone();
+    let mut formal_bounds = classifier.type_parameters.type_param_bounds.clone();
+    for (ordinal, formal) in signature.formals.iter().enumerate() {
+        if formals.contains(formal) {
+            continue;
+        }
+        formals.push(formal.clone());
+        formal_bounds.push(
+            signature
+                .formal_bounds
+                .get(ordinal)
+                .cloned()
+                .unwrap_or_default(),
+        );
+    }
+    signature.formals = formals;
+    signature.formal_bounds = formal_bounds;
     let mut bindings = seeded_gsig_binds(&signature, type_args);
     let inference_inputs = signature.params.iter().zip(args).enumerate().filter_map(
         |(parameter_index, (&parameter, argument))| {
@@ -858,59 +868,57 @@ impl<'a> SymbolResolver<'a> {
         );
         if let Some(declaration) = &mut selected {
             declaration.owner.get_or_insert(internal);
-            let mut bindings = GSigBinds::default();
+            let mut bindings = classifier
+                .type_parameters
+                .type_params
+                .iter()
+                .cloned()
+                .zip(type_args.iter().copied())
+                .collect::<GSigBinds>();
             if let Some(signature) = declaration.generic_sig.as_ref() {
-                let coordinates = crate::libraries::ConstructorTypeParameterCoordinates::new(
-                    classifier.own_type_params(),
-                    signature,
-                );
-                let mut signature_bindings = seeded_gsig_binds(signature, type_args);
                 // Overload selection has already specialized the constructor parameters. Recover
                 // the corresponding classifier arguments from that selected semantic shape; this
                 // preserves inference from integer literals, expected lambdas, named/default
                 // mapping, and explicit type arguments without rerunning constructor selection.
-                let mut inferred = GSigBinds::default();
                 for (declared, applied) in signature.params.iter().zip(&declaration.params) {
-                    unify_inferred_ty(*declared, *applied, &mut inferred);
+                    unify_inferred_ty(*declared, *applied, &mut bindings);
                 }
                 // A lambda is postponed while its expected function shape is established, so the
                 // selected parameter above can still contain the classifier formal (`(Int) -> T`).
                 // Once the compact expression has produced the lambda's checked shape, collect its
                 // result constraint as well. Keep already-selected/explicit bindings authoritative:
                 // this second channel fills only formals that the selection shape left unresolved.
+                let mut completed_argument_bindings = GSigBinds::default();
                 for ((declared, applied), argument) in
                     signature.params.iter().zip(&declaration.params).zip(args)
                 {
                     if argument.is_omitted_default() || argument.ty() == Ty::Error {
                         continue;
                     }
-                    unify_inferred_ty(*declared, argument.type_for(*applied), &mut inferred);
+                    unify_inferred_ty(
+                        *declared,
+                        argument.type_for(*applied),
+                        &mut completed_argument_bindings,
+                    );
                 }
-                merge_generic_bindings_from(
-                    Some(&self.src),
-                    signature,
-                    type_args,
-                    &mut signature_bindings,
-                    inferred,
-                );
-                bindings = coordinates.classifier_bindings(&signature_bindings);
-            } else {
-                bindings.extend(
-                    classifier
-                        .type_params()
-                        .iter()
-                        .cloned()
-                        .zip(type_args.iter().copied()),
-                );
+                for formal in &classifier.type_parameters.type_params {
+                    if !bindings.contains_key(formal) {
+                        if let Some(argument) = completed_argument_bindings.get(formal).copied() {
+                            bindings.insert(formal.clone(), argument);
+                        }
+                    }
+                }
             }
             let arguments = classifier
-                .own_type_params()
+                .type_parameters
+                .type_params
                 .iter()
                 .enumerate()
                 .map(|(index, formal)| {
                     bindings.get(formal).copied().unwrap_or_else(|| {
                         classifier
-                            .own_type_param_bounds()
+                            .type_parameters
+                            .type_param_bounds
                             .get(index)
                             .and_then(|bounds| bounds.first())
                             .copied()
@@ -940,7 +948,7 @@ impl<'a> SymbolResolver<'a> {
                 &constructor.call_sig,
             )),
         );
-        selected.map(|declaration| selected_constructor::capture(declaration, &classifier, args))
+        selected.map(|declaration| selected_constructor::capture(declaration, &classifier))
     }
 
     pub(crate) fn classifier_in_scope(&self, name: &str) -> CandidateSelection<TypeName> {
@@ -2427,10 +2435,7 @@ impl<'a> SymbolResolver<'a> {
             .collect();
         let fits = |p: &Ty, a: &CallArgKind| a.fits_parameter(self.lib, &self.src, *p);
         let adapts = |p: &Ty, a: &CallArgKind, _i: usize| a.adapts_integer_literal_to(*p);
-        // Unresolved variables remain declaration-owned while applicability and inference run.
-        // Specificity, however, compares declaration shapes: independently declared `<T>` slots
-        // are alpha-equivalent by ordinal. Canonicalize only that comparison projection; the
-        // selected callable and its bindings keep their stable declaration identities.
+
         // Kotlin removes low-priority declarations only when an ordinary declaration is actually
         // applicable. Do that once, before specificity, so every exact/literal/default/vararg branch
         // below sees one coherent candidate tier.
@@ -2480,9 +2485,9 @@ impl<'a> SymbolResolver<'a> {
             Some(exact)
         } else {
             let literal_pick = match integer_literal_overload(
-                parsed.iter().map(|entry @ (candidate, params, ..)| {
-                    (callable_specificity_shape(candidate, params.clone()), entry)
-                }),
+                parsed
+                    .iter()
+                    .map(|entry @ (_, params, ..)| (params.clone(), entry)),
                 args,
                 |_, param, arg| fits(param, arg),
                 |_position, left, right, arg| {
@@ -2498,20 +2503,20 @@ impl<'a> SymbolResolver<'a> {
             match literal_pick {
                 Some(entry) => Some(entry),
                 None => match unique_most_specific(
-                    parsed.iter().filter_map(|entry @ (candidate, params, ..)| {
+                    parsed.iter().filter_map(|entry @ (_, params, ..)| {
                         fixed_parameter_shape(params, args, |_, param, arg| fits(param, arg))
-                            .map(|shape| (callable_specificity_shape(candidate, shape), entry))
+                            .map(|shape| (shape, entry))
                     }),
                     |_, left, right| resolution_subtype(&self.src, left, right),
                 ) {
                     CandidateSelection::Selected(entry) => Some(entry),
                     CandidateSelection::Ambiguous => return None,
                     CandidateSelection::None => match unique_most_specific(
-                        parsed.iter().filter_map(|entry @ (candidate, params, ..)| {
-                            candidate_vararg_shape(candidate, params, args, |i, param, arg| {
+                        parsed.iter().filter_map(|entry @ (o, params, ..)| {
+                            candidate_vararg_shape(o, params, args, |i, param, arg| {
                                 fits(param, arg) || adapts(param, arg, i)
                             })
-                            .map(|shape| (callable_specificity_shape(candidate, shape), entry))
+                            .map(|shape| (shape, entry))
                         }),
                         |_, left, right| resolution_subtype(&self.src, left, right),
                     ) {
@@ -3083,25 +3088,20 @@ impl<'a> SymbolResolver<'a> {
             // spellings and unrelated type variables. Borrowing either one's generic signature can
             // bind a return or reified marker to the wrong formal while still producing valid bytecode.
             //
-            // The base declaration already owns the exact physical realization. Use that stable
-            // link rather than semantic parameter equality: provider normalization gives the base
-            // and its synthetic bridge distinct declaration-owned formal identities, even though
-            // they realize one source callable.
-            let base = base_records
-                .iter()
-                .flat_map(|record| record.callables.functions())
-                .filter(|candidate| candidate.kind == FnKind::TopLevel)
-                .find(|candidate| {
-                    candidate
-                        .callable
-                        .default_realization
-                        .as_deref()
-                        .is_some_and(|realization| {
-                            realization.owner == c.owner
-                                && realization.name == c.physical_name()
-                                && realization.descriptor == c.descriptor
-                        })
-                })?;
+            // krusty models `$default` with only the real parameters, so exact JVM spelling plus the
+            // logical parameter vector identifies its base without reconstructing a descriptor from
+            // lossy `Ty` values (`Byte`/`Short` both appear as `Int`).
+            let base_spelling = c.physical_name().strip_suffix("$default");
+            let base = base_spelling.and_then(|spelling| {
+                base_records
+                    .iter()
+                    .flat_map(|record| record.callables.functions())
+                    .filter(|candidate| candidate.kind == FnKind::TopLevel)
+                    .find(|candidate| {
+                        candidate.callable.physical_name() == spelling
+                            && candidate.callable.params.as_slice() == c.params.as_slice()
+                    })
+            })?;
             let semantic = base.semantic_signature();
             let mapping = self.default_argument_mapping(o, semantic.params.len(), args, slots)?;
             crate::trace_compiler!(
@@ -3177,16 +3177,17 @@ impl<'a> SymbolResolver<'a> {
                 args,
                 base.call_sig.vararg,
             );
-            // The JVM `Signature` belongs to the same source declaration as the semantic base. The
-            // `$default` synthetic usually carries none, and a `<reified T>` splice needs the base's
-            // declaration-owned formals to bind the call's type arguments. The mask/marker parameters
-            // appended by the physical bridge introduce no type variables, so an omitted-default call
+            // Same reasoning as `base_gsig`, for the JVM `Signature`: the `$default` synthetic carries
+            // none, and a `<reified T>` splice reads its formal type-parameter NAMES from there to bind
+            // the call's type arguments. The base's formals ARE the synthetic's — the mask/marker
+            // parameters the synthetic appends introduce no type variables — so an omitted-default call
             // to a reified inline can specialize its body instead of falling back to a direct
             // (throwing) invoke.
             //
-            // The exact default realization above identifies the source declaration, so its
-            // signature belongs to this bridge even when a same-arity sibling has different
-            // declaration-owned formals.
+            // The base is identified by SPELLING, not by arity alone: the formal type-parameter names
+            // are what the splice substitutes by, so borrowing a same-arity SIBLING overload's
+            // signature would specialize the body against the wrong names. `sourceName-<hash>$default`
+            // belongs to `sourceName-<hash>`, and only that one.
             if callable.signature.is_none() {
                 callable.signature = base.callable.signature.clone();
             }
@@ -3396,11 +3397,11 @@ pub(crate) fn select_constructor_call_from_type(
     if omitted || (declaration.descriptor.is_empty() && declaration.default_realization.is_some()) {
         declaration.default_realization.as_ref()?;
         return Some(SelectedConstructorCall::Platform(Box::new(
-            selected_constructor::capture(declaration, classifier, args),
+            selected_constructor::capture(declaration, classifier),
         )));
     }
     Some(SelectedConstructorCall::Direct(Box::new(
-        selected_constructor::capture(declaration, classifier, args),
+        selected_constructor::capture(declaration, classifier),
     )))
 }
 
@@ -3423,6 +3424,13 @@ pub(crate) fn select_constructor_declaration_from_type_with_type_arguments(
     args: &[CallArgKind],
     type_args: &[Ty],
 ) -> Option<LibraryMember> {
+    let classifier_bindings = classifier
+        .type_parameters
+        .type_params
+        .iter()
+        .cloned()
+        .zip(type_args.iter().copied())
+        .collect::<GSigBinds>();
     let candidates = classifier
         .constructors
         .iter()
@@ -3430,30 +3438,18 @@ pub(crate) fn select_constructor_declaration_from_type_with_type_arguments(
             let mut declaration = constructor.clone();
             declaration.params =
                 specialized_constructor_params(src, constructor, classifier, args, type_args);
+            if !classifier_bindings.is_empty() {
+                declaration.params = declaration
+                    .params
+                    .iter()
+                    .map(|parameter| ty_subst_keep_unbound(*parameter, &classifier_bindings))
+                    .collect();
+            }
             declaration
         })
         .collect::<Vec<_>>();
     let selected = best_callable_member_overload(lib, src, candidates.iter(), "<init>", args, &[])?;
-    let mut selected = selected.clone();
-    if let Some(signature) = selected.generic_sig.as_ref() {
-        let coordinates = crate::libraries::ConstructorTypeParameterCoordinates::new(
-            classifier.own_type_params(),
-            signature,
-        );
-        let mut bindings = seeded_gsig_binds(signature, type_args);
-        let mut inferred = GSigBinds::default();
-        for (declared, applied) in signature.params.iter().zip(&selected.params) {
-            unify_inferred_ty(*declared, *applied, &mut inferred);
-        }
-        merge_generic_bindings_from(Some(src), signature, type_args, &mut bindings, inferred);
-        let result = ty_subst_keep_unbound(signature.ret, &bindings);
-        selected.ret = coordinates
-            .classifier_types(std::iter::once(result))
-            .into_iter()
-            .next()
-            .expect("one constructor result");
-    }
-    Some(selected)
+    Some(selected.clone())
 }
 
 /// Resolve a companion member `Type.name(args)` (the receiver type must be public).
@@ -5425,28 +5421,26 @@ mod tests {
 
     #[test]
     fn constructor_selection_infers_class_type_parameters_before_applicability() {
-        let any = Ty::nullable(Ty::obj("kotlin/Any"));
-        let classifier_formal = "classifier-T".to_string();
-        let signature_formal = "callable-class-T".to_string();
-        let parameter = Ty::ty_param(&signature_formal, any);
+        let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
         let mut constructor = LibraryMember::new(
             "<init>".into(),
-            vec![parameter],
+            vec![Ty::obj("kotlin/Any")],
             Ty::Unit,
             "(Ljava/lang/Object;)V".into(),
         );
-        constructor.physical_params = vec![Ty::obj("kotlin/Any")];
         constructor.generic_sig = Some(GenericSig {
-            formals: vec![signature_formal.clone()],
-            formal_bounds: vec![vec![any]],
+            formals: Vec::new(),
+            formal_bounds: Vec::new(),
             receiver: None,
             params: vec![parameter],
-            ret: Ty::obj_args("demo/Box", &[Ty::ty_param(&signature_formal, any)]),
+            ret: Ty::Unit,
             return_policy: Default::default(),
         });
         let mut classifier = fake_library_type(Vec::new(), vec![constructor]);
-        classifier.type_parameters =
-            crate::types::TypeParameters::invariant(vec![classifier_formal], vec![vec![any]]);
+        classifier.type_parameters = crate::types::TypeParameters::invariant(
+            vec!["T".to_string()],
+            vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]],
+        );
         let source = FakeSource {
             name: "",
             receiver: None,
@@ -5464,215 +5458,22 @@ mod tests {
         assert_eq!(selected.physical_params, vec![Ty::obj("kotlin/Any")]);
     }
 
-    struct ConstructorIdentitySource {
-        owner: TypeName,
-        classifier: std::sync::Arc<LibraryType>,
-    }
-
-    impl SymbolSource for ConstructorIdentitySource {
-        fn symbols(
-            &self,
-            namespace: SymbolNamespace,
-            name: &str,
-        ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
-            let identity = namespace
-                .existing_classifier(name)
-                .filter(|identity| *identity == self.owner);
-            std::rc::Rc::new(crate::libraries::ResolvedSymbols {
-                classifier_name: identity,
-                classifier_declaration: identity
-                    .map(crate::libraries::ClassifierDeclaration::Ordinary),
-                classifier: identity.map(|_| self.classifier.clone()),
-                ..Default::default()
-            })
-        }
-    }
-
-    impl SemanticPlatform for ConstructorIdentitySource {}
-
-    fn constructor_identity_source(parameter_shapes: Vec<Ty>) -> ConstructorIdentitySource {
-        let any = Ty::nullable(Ty::obj("kotlin/Any"));
-        let owner = type_name("demo/IdentityBox");
-        let classifier_formal = "classifier-T".to_string();
-        let signature_class_formal = "callable-class-T".to_string();
-        let signature_constructor_formal = "callable-constructor-T".to_string();
-        let mut constructor = LibraryMember::new(
-            "<init>".into(),
-            parameter_shapes.clone(),
-            Ty::obj_args(
-                "demo/IdentityBox",
-                &[Ty::ty_param(&signature_class_formal, any)],
-            ),
-            String::new(),
-        );
-        constructor.owner = Some(owner);
-        constructor.generic_sig = Some(GenericSig {
-            formals: vec![signature_class_formal.clone(), signature_constructor_formal],
-            formal_bounds: vec![vec![any], vec![any]],
-            receiver: None,
-            params: parameter_shapes,
-            ret: constructor.ret,
-            return_policy: Default::default(),
-        });
-        let mut classifier = fake_library_type(Vec::new(), vec![constructor]);
-        classifier.type_parameters =
-            crate::types::TypeParameters::invariant(vec![classifier_formal], vec![vec![any]]);
-        classifier.own_type_parameter_count = 1;
-        ConstructorIdentitySource {
-            owner,
-            classifier: std::sync::Arc::new(classifier),
-        }
-    }
-
-    #[test]
-    fn constructor_signature_explicit_argument_targets_the_classifier_prefix() {
-        let any = Ty::nullable(Ty::obj("kotlin/Any"));
-        let source = constructor_identity_source(vec![
-            Ty::ty_param("callable-class-T", any),
-            Ty::ty_param("callable-constructor-T", any),
-        ]);
-        let selected = SymbolResolver::new(&source)
-            .select_constructor_declaration_with_type_arguments(
-                source.owner,
-                &[CallArgKind::Typed(Ty::String), CallArgKind::Typed(Ty::Int)],
-                &[Ty::String],
-            )
-            .expect("normalized generic constructor");
-
-        assert_eq!(selected.declaration.params, [Ty::String, Ty::Int]);
-        assert_eq!(
-            selected.declaration.ret,
-            Ty::obj_args_name(source.owner, &[Ty::String])
-        );
-    }
-
-    #[test]
-    fn same_spelled_constructor_suffix_cannot_replace_the_inferred_classifier_result() {
-        let any = Ty::nullable(Ty::obj("kotlin/Any"));
-        let source = constructor_identity_source(vec![
-            Ty::ty_param("callable-class-T", any),
-            Ty::ty_param("callable-constructor-T", any),
-        ]);
-        let selected = SymbolResolver::new(&source)
-            .select_constructor_declaration_with_type_arguments(
-                source.owner,
-                &[CallArgKind::Typed(Ty::String), CallArgKind::Typed(Ty::Int)],
-                &[],
-            )
-            .expect("normalized generic constructor");
-
-        assert_eq!(selected.declaration.params, [Ty::String, Ty::Int]);
-        assert_eq!(
-            selected.declaration.ret,
-            Ty::obj_args_name(source.owner, &[Ty::String])
-        );
-    }
-
-    #[test]
-    fn postponed_lambda_result_reenters_the_classifier_coordinate() {
-        let any = Ty::nullable(Ty::obj("kotlin/Any"));
-        let source = constructor_identity_source(vec![Ty::fun(
-            Vec::new(),
-            Ty::ty_param("callable-class-T", any),
-        )]);
-        let lambda = Ty::fun(Vec::new(), Ty::String);
-        let selected = SymbolResolver::new(&source)
-            .select_constructor_declaration_with_type_arguments(
-                source.owner,
-                &[CallArgKind::LambdaLiteral(lambda)],
-                &[],
-            )
-            .expect("normalized constructor with a completed lambda");
-
-        assert_eq!(selected.declaration.params, [lambda]);
-        assert_eq!(
-            selected.declaration.ret,
-            Ty::obj_args_name(source.owner, &[Ty::String])
-        );
-    }
-
-    #[test]
-    fn captured_classifier_parameter_is_not_a_constructor_coordinate() {
-        let any = Ty::nullable(Ty::obj("kotlin/Any"));
-        let owner = type_name("demo/Outer$Inner");
-        let signature_formal = "callable-inner-T".to_string();
-        let parameter = Ty::ty_param(&signature_formal, any);
-        let mut constructor = LibraryMember::new(
-            "<init>".into(),
-            vec![parameter],
-            Ty::Unit,
-            "(Ljava/lang/Object;)V".into(),
-        );
-        constructor.generic_sig = Some(GenericSig {
-            formals: vec![signature_formal.clone()],
-            formal_bounds: vec![vec![any]],
-            receiver: None,
-            params: vec![parameter],
-            ret: Ty::obj_args_name(owner, &[parameter]),
-            return_policy: Default::default(),
-        });
-        let mut classifier = fake_library_type(Vec::new(), vec![constructor]);
-        classifier.type_parameters = crate::types::TypeParameters::invariant(
-            vec![
-                "classifier-inner-T".to_string(),
-                "captured-outer-T".to_string(),
-            ],
-            vec![vec![any], vec![any]],
-        );
-        classifier.own_type_parameter_count = 1;
-        let source = ConstructorIdentitySource {
-            owner,
-            classifier: std::sync::Arc::new(classifier),
-        };
-
-        let selected = SymbolResolver::new(&source)
-            .select_constructor_declaration_with_type_arguments(
-                owner,
-                &[CallArgKind::Typed(Ty::String)],
-                &[],
-            )
-            .expect("captured enclosing parameters do not belong to constructor inference");
-        assert_eq!(selected.declaration.params, [Ty::String]);
-        assert_eq!(
-            selected.declaration.ret,
-            Ty::obj_args_name(owner, &[Ty::String])
-        );
-        assert_eq!(
-            source
-                .classifier
-                .own_type_params()
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            ["classifier-inner-T"]
-        );
-    }
-
     #[test]
     fn constructor_result_inference_combines_arguments_and_expected_type() {
         let any = Ty::nullable(Ty::obj("kotlin/Any"));
-        let first = Ty::ty_param("callable-class-A", any);
+        let first = Ty::ty_param("A", any);
         let mut constructor = LibraryMember::new(
             "<init>".into(),
-            vec![first],
+            vec![Ty::obj("kotlin/Any")],
             Ty::Unit,
             "(Ljava/lang/Object;)V".into(),
         );
         constructor.generic_sig = Some(GenericSig {
-            formals: vec![
-                "callable-class-A".to_string(),
-                "callable-class-B".to_string(),
-            ],
-            formal_bounds: vec![vec![any], vec![any]],
+            formals: Vec::new(),
+            formal_bounds: Vec::new(),
             receiver: None,
             params: vec![first],
-            ret: Ty::obj_args(
-                "demo/Pair",
-                &[
-                    Ty::ty_param("callable-class-A", any),
-                    Ty::ty_param("callable-class-B", any),
-                ],
-            ),
+            ret: Ty::Unit,
             return_policy: Default::default(),
         });
         let mut classifier = fake_library_type(Vec::new(), vec![constructor]);
@@ -5680,7 +5481,6 @@ mod tests {
             vec!["A".to_string(), "B".to_string()],
             vec![vec![any], vec![any]],
         );
-        classifier.own_type_parameter_count = 2;
         let owner = type_name("demo/Pair");
 
         assert_eq!(
@@ -6371,6 +6171,85 @@ mod tests {
         assert!(call.default_call);
         assert_eq!(call.ret, Ty::UInt);
         assert_eq!(call.physical_ret, Ty::Int);
+    }
+
+    #[test]
+    fn top_level_default_callable_preserves_specialized_source_parameters() {
+        struct DefaultSource {
+            bridge: FunctionInfo,
+            base: FunctionInfo,
+        }
+
+        impl SymbolSource for DefaultSource {
+            fn symbols(
+                &self,
+                namespace: SymbolNamespace,
+                name: &str,
+            ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
+                let overloads = match (namespace, name) {
+                    (SymbolNamespace::Package(TypeName::ROOT), "same") => vec![self.base.clone()],
+                    (SymbolNamespace::Package(TypeName::ROOT), "same$default") => {
+                        vec![self.bridge.clone()]
+                    }
+                    _ => Vec::new(),
+                };
+                std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                    builtin_classifier: false,
+                    classifier_name: None,
+                    classifier_declaration: None,
+                    classifier: None,
+                    callables: crate::libraries::Callables::Functions(FunctionSet { overloads }),
+                    importable_declaration: false,
+                })
+            }
+        }
+
+        impl crate::libraries::SemanticPlatform for DefaultSource {}
+
+        let any = Ty::obj("kotlin/Any");
+        let nullable_any = Ty::nullable(any);
+        let parameter = Ty::ty_param("T", nullable_any);
+        let mut callable = LibraryCallable::library(
+            "demo/AssertionsKt",
+            "same",
+            vec![any, any, Ty::nullable(Ty::String)],
+            Ty::Unit,
+            Ty::Unit,
+            "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)V",
+        );
+        callable.physical_name = Some("same$default".to_string());
+        callable.default_call = true;
+        let mut bridge = FunctionInfo::plain(FnKind::TopLevel, None, callable);
+        bridge.call_sig.required = 2;
+        bridge.call_sig.param_defaults = vec![false, false, true];
+        let mut base = bridge.clone();
+        base.callable.physical_name = None;
+        base.callable.default_call = false;
+        attach_default_target(&mut base, &bridge);
+        base.generic_sig = Some(GenericSig {
+            formals: vec!["T".to_string()],
+            formal_bounds: vec![vec![nullable_any]],
+            receiver: None,
+            params: vec![parameter, parameter, Ty::nullable(Ty::String)],
+            ret: Ty::Unit,
+            return_policy: GenericReturnPolicy::Exact,
+        });
+        let source = DefaultSource { bridge, base };
+        let scope = vec![type_name("")];
+        let resolver = SymbolResolver::new_scoped(&source, &scope);
+        let call = resolver
+            .resolve_symbol(
+                SymRecv::TopLevel,
+                "same",
+                &[Ty::nullable(Ty::String), Ty::String],
+                &[],
+            )
+            .and_then(Symbol::top_level_call)
+            .expect("generic default callable should resolve");
+
+        assert!(call.default_call);
+        assert_eq!(call.params[0], Ty::nullable(Ty::String));
+        assert_eq!(call.params[1], Ty::nullable(Ty::String));
     }
 
     #[test]

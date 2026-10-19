@@ -165,14 +165,7 @@ pub(crate) fn infer_constructor_type_args(
     arg_tys: &[Ty],
     expected: Option<Ty>,
 ) -> Option<Vec<Ty>> {
-    infer_constructor_type_args_for_formals(
-        source,
-        owner,
-        ty,
-        ty.own_type_params(),
-        arg_tys,
-        expected,
-    )
+    infer_constructor_type_args_for_formals(source, owner, ty, &ty.type_params, arg_tys, expected)
 }
 
 /// Constructor inference for the classifier's own declared formals. Provider-normalized source
@@ -190,6 +183,7 @@ pub(crate) fn infer_constructor_type_args_for_formals(
     if type_params.is_empty() {
         return None;
     }
+    let mut binds = GSigBinds::default();
     for ctor in &ty.constructors {
         let Some(gsig) = &ctor.generic_sig else {
             continue;
@@ -197,9 +191,6 @@ pub(crate) fn infer_constructor_type_args_for_formals(
         if gsig.params.len() != arg_tys.len() {
             continue;
         }
-        let coordinates =
-            crate::libraries::ConstructorTypeParameterCoordinates::new(type_params, gsig);
-        let mut binds = GSigBinds::default();
         for (p, a) in gsig.params.iter().zip(arg_tys) {
             // Keep this unification source-free. Passing the hierarchy in here would pin a
             // constructor variable to the argument's own element (`ArrayList(listOf(s))` ->
@@ -208,27 +199,31 @@ pub(crate) fn infer_constructor_type_args_for_formals(
             // `Map` parameter published as `MutableMap!` still matches a Kotlin `Map` by owner.
             unify_inferred_ty(platform_argument_shape(source, *p, *a), *a, &mut binds);
         }
-        constrain_constructor_result(owner, coordinates.signature_formals(), expected, &mut binds);
-        seed_unbound_constructor_result_from_symbols(
-            source,
-            owner,
-            coordinates.signature_formals(),
-            coordinates.signature_bounds(),
-            expected,
-            &mut binds,
-        );
-        if binds.is_empty() {
-            return None;
-        }
-        let signature_arguments = coordinates.signature_formals().iter().map(|formal| {
-            binds
-                .get(formal)
-                .copied()
-                .unwrap_or_else(|| Ty::obj("kotlin/Any"))
-        });
-        return Some(coordinates.classifier_types(signature_arguments));
+        break;
     }
-    None
+    constrain_constructor_result(owner, type_params, expected, &mut binds);
+    seed_unbound_constructor_result_from_symbols(
+        source,
+        owner,
+        type_params,
+        ty.type_param_bounds(),
+        expected,
+        &mut binds,
+    );
+    if binds.is_empty() {
+        return None;
+    }
+    Some(
+        type_params
+            .iter()
+            .map(|f| {
+                binds
+                    .get(f)
+                    .copied()
+                    .unwrap_or_else(|| Ty::obj("kotlin/Any"))
+            })
+            .collect(),
+    )
 }
 
 /// Seed every unbound constructor formal from an expected applied supertype, or none of them.

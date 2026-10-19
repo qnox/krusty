@@ -152,6 +152,7 @@ fn method_parameters(
         Parameters {
             parameters: own,
             captured,
+            capture_owners: Vec::new(),
         },
         placed,
     ))

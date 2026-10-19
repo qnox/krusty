@@ -83,4 +83,13 @@ pub(super) fn emit(
             writer,
         );
     }
+    if class.is_companion {
+        super::jvm_static_members::emit_private_bridge_accessors(
+            ir,
+            class,
+            fq_name,
+            static_accessors::class_declaration_line(class),
+            writer,
+        );
+    }
 }

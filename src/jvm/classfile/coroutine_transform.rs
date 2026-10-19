@@ -10,7 +10,7 @@
 //! writes that class afterwards.
 
 use super::constant_pool_queries::PoolLookup;
-use super::method_rewrite::MethodIdentity;
+use super::method_rewrite::{BodyStage, MethodIdentity};
 use super::ClassWriter;
 use crate::jvm::bytecode_passes::coroutines::{
     transform_named_function, transform_suspend_lambda, CoroutineError, DebugMetadata,
@@ -263,8 +263,14 @@ impl ClassWriter {
             name: method_name,
             desc: method_desc,
         };
+        // A body kept for inlining only had its inline calls' stacks saved: it stays unoptimized.
+        let stage = match &source {
+            Some(source) if source.builder.kept_for_inlining => BodyStage::KeptForInlining,
+            _ => BodyStage::Transformed,
+        };
         let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
-        let optimized = self.optimized(&self.methods[index], identity, node, None, true, &mut pool);
+        let method = &self.methods[index];
+        let optimized = self.optimized(method, identity, node, None, stage, &mut pool);
         if let Some(optimized) = optimized {
             self.methods[index].take_rewritten(optimized);
         }

@@ -19,6 +19,7 @@ mod coroutine_markers;
 mod coroutine_transform;
 mod debug_metadata;
 mod descriptor_mentions;
+mod emitted_method_code;
 mod enclosing_method;
 mod exception_tables;
 mod field_annotations;
@@ -388,6 +389,9 @@ struct MethodInfo {
     /// this for every method; krusty currently fills it only for synthesized members (one entry at
     /// pc 0 → the class declaration line).
     lnt: Vec<(u16, u16)>,
+    /// The method's own source map, which its `lnt` lines are numbered against until the class map
+    /// takes them in (`None` when nothing was inlined into it). See [`ClassWriter::copy_method_source_maps`].
+    source_map: Option<crate::jvm::source_map::SourceMap>,
     /// `LocalVariableTable` entries `(name_index, descriptor_index, slot, start_pc)`. `start_pc` is
     /// `None` for a local live for the whole method (the shape of every synthesized member's `this` +
     /// params) — written as `start_pc=0, length=code_len`. `Some(pc)` is a local that becomes live
@@ -526,6 +530,8 @@ pub struct ClassWriter {
     /// body is spliced and rendered into `SourceDebugExtension` at the end. A class with nothing
     /// inlined carries no attribute. See [`crate::jvm::source_map`].
     source_map: crate::jvm::source_map::SourceMap,
+    /// The source map of the method being emitted, which every inlined line is numbered against.
+    method_source_map: crate::jvm::source_map::SourceMap,
     /// The methods the coroutine transformer rewrites when the class is written, and its results.
     coroutines: coroutine_transform::Coroutines,
     enclosing_method: enclosing_method::EnclosingMethodState,
@@ -582,6 +588,7 @@ impl ClassWriter {
             major: MAJOR_JAVA8,
             source_file: None,
             source_map: crate::jvm::source_map::SourceMap::default(),
+            method_source_map: crate::jvm::source_map::SourceMap::default(),
             coroutines: coroutine_transform::Coroutines::default(),
             enclosing_method: enclosing_method::EnclosingMethodState::default(),
             internal_name: internal_name.to_string(),
@@ -598,31 +605,13 @@ impl ClassWriter {
         self.major
     }
 
-    /// Set the source-file simple name for the `SourceFile` attribute (e.g. `Foo.kt`). `None` (the
-    /// default) emits no attribute.
-    /// The class's source map, started from the class's own source file the first time an inline
-    /// body is spliced into it. Splicing a dependency's `inline fun` puts that dependency's source
-    /// into this class, and the map is what tells a debugger which file an inlined line belongs to.
-    ///
-    /// `lines` is the highest line the class's own code can claim. `None` when the class has no
-    /// `SourceFile` to map against, in which case its inlined lines cannot be described at all.
-    pub fn source_map_for_inlining(
-        &mut self,
-        lines: u16,
-    ) -> Option<&mut crate::jvm::source_map::SourceMap> {
-        if self.source_map.is_unstarted() {
-            let source_file = self.source_file.clone()?;
-            let path = self.internal_name.clone();
-            self.source_map = crate::jvm::source_map::SourceMap::new(&source_file, &path, lines);
-        }
-        Some(&mut self.source_map)
-    }
-
     /// The class's own source file, for a synthesized class that belongs to it.
     pub fn source_file_name(&self) -> Option<String> {
         self.source_file.clone()
     }
 
+    /// Set the source-file simple name for the `SourceFile` attribute (e.g. `Foo.kt`). `None` (the
+    /// default) emits no attribute.
     pub fn set_source_file(&mut self, name: Option<String>) {
         self.source_file = name;
     }
@@ -751,6 +740,7 @@ impl ClassWriter {
             stackmap: None,
             signature: sig,
             lnt: Vec::new(),
+            source_map: None,
             lvt: Vec::new(),
             visible_anns: Vec::new(),
             invisible_anns: Vec::new(),
@@ -1182,6 +1172,7 @@ impl ClassWriter {
         } else {
             self.local_table(code)
         };
+        let source_map = self.take_method_source_map();
         self.methods.push(MethodInfo {
             access,
             name: n,
@@ -1208,6 +1199,7 @@ impl ClassWriter {
             } else {
                 code.line_marks().to_vec()
             },
+            source_map,
             lvt,
             visible_anns: Vec::new(),
             invisible_anns: Vec::new(),
@@ -1288,10 +1280,10 @@ impl ClassWriter {
 
     fn write(mut self) -> Vec<u8> {
         let relaid = self.rewrite_methods();
+        self.copy_method_source_maps();
         // Every body is final now: write the frames it implies.
         self.compute_stack_maps();
-        // A class that never attached `@Metadata` still realizes its deferred fields first —
-        // kotlinc's field visit precedes every class-attribute window.
+        // A class without `@Metadata` realizes its deferred fields first: fields precede attributes.
         self.intern_late_fields();
         self.resolve_inner_classes();
         self.intern_enclosing_method_refs();
@@ -1877,6 +1869,7 @@ impl ClassWriter {
             &relaid,
             self.unnamed_entries(),
             self.enclosing_method.retained_header_entries(),
+            &self.tied_inner_rows(),
         )
     }
 }
@@ -1976,6 +1969,9 @@ pub struct CodeBuilder {
     /// (operand-height tracking, `max_stack`, `max_locals`) runs unchanged while dead, so a revival
     /// point sees exactly the state it saw before this suppression existed.
     dead: bool,
+    /// The body is kept for an inlining caller, suspension markers and all; kotlinc's optimizer
+    /// leaves it as written.
+    kept_for_inlining: bool,
     /// Whether a dropped dead instruction named a constant. The constant stays interned, where
     /// kotlinc's writer, which never sees the instruction, interns nothing; the method's pool
     /// entries are then laid out again like a rewritten method's.
@@ -2018,6 +2014,7 @@ impl CodeBuilder {
             implicit_void_return_pc: None,
             suppress_entry_line: false,
             dead: false,
+            kept_for_inlining: false,
             dropped_constant: false,
             dead_bound: Vec::new(),
             bind_sequence: Vec::new(),

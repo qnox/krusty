@@ -51,7 +51,11 @@ pub(super) fn source_literal_constant(
         };
     }
     let value = match file.expr(expression) {
-        Expr::IntLit(value) => LibConst::Int(*value as i32),
+        // An integer literal takes the declared type, so `const val x: Long = 60` is a Long.
+        Expr::IntLit(value) => match ty {
+            Ty::Long => LibConst::Long(*value),
+            _ => LibConst::Int(*value as i32),
+        },
         Expr::LongLit(value) => LibConst::Long(*value),
         Expr::UIntLit(value) => match ty {
             Ty::ULong => LibConst::Long(*value),
@@ -360,6 +364,12 @@ fn evaluate_unary(operation: UnOp, operand: LibraryConst, ty: Ty) -> Option<Libr
         }
         _ => return None,
     };
+    // An integer operand is negated at its own width, then widened to a Long result type: kotlinc
+    // folds `-(1 shl 31)` declared Long to -2147483648.
+    let value = match (value, ty.non_null()) {
+        (LibConst::Int(value), Ty::Long) => LibConst::Long(i64::from(value)),
+        (value, _) => value,
+    };
     Some(LibraryConst { ty, value })
 }
 
@@ -614,6 +624,52 @@ mod tests {
             panic!("property declaration")
         };
         assert!(source_literal_constant(&file, property.init.unwrap(), Ty::Int).is_none());
+    }
+
+    #[test]
+    fn an_integer_literal_declared_long_is_a_long_constant() {
+        let file = crate::frontend::parse_source(
+            "const val a: Long = 60\nconst val b: Long = -60",
+            &crate::features::LangFeatures::new(),
+            &mut crate::diag::DiagSink::new(),
+        );
+        let values: Vec<_> = file
+            .decls
+            .iter()
+            .map(|&decl| {
+                let crate::ast::Decl::Property(property) = file.decl(decl) else {
+                    panic!("property declaration")
+                };
+                source_literal_constant(&file, property.init.unwrap(), Ty::Long)
+            })
+            .collect();
+        let long = |value| {
+            Some(LibraryConst {
+                ty: Ty::Long,
+                value: LibConst::Long(value),
+            })
+        };
+        assert_eq!(values, vec![long(60), long(-60)]);
+    }
+
+    #[test]
+    fn a_unary_operator_widens_its_integer_result_to_a_long() {
+        let int = |value| LibraryConst {
+            ty: Ty::Int,
+            value: LibConst::Int(value),
+        };
+        let long = |value| {
+            Some(LibraryConst {
+                ty: Ty::Long,
+                value: LibConst::Long(value),
+            })
+        };
+        assert_eq!(evaluate_unary(UnOp::Neg, int(61), Ty::Long), long(-61));
+        assert_eq!(evaluate_unary(UnOp::Plus, int(6), Ty::Long), long(6));
+        assert_eq!(
+            evaluate_unary(UnOp::Neg, int(i32::MIN), Ty::Long),
+            long(i64::from(i32::MIN))
+        );
     }
 
     #[test]

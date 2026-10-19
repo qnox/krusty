@@ -117,8 +117,13 @@ impl Checker<'_> {
                         self.normal_completion(eb),
                     );
                     let fixed = self.expectation_fixes_branches(scope, e, wanted.expected);
-                    let tt =
-                        self.rebind_conditional_branch(then_branch, et, tt, fixed, |c, exp| {
+                    let else_evidence = self.branch_sibling_type(eb, et);
+                    let tt = self.rebind_conditional_branch(
+                        then_branch,
+                        else_evidence,
+                        tt,
+                        fixed,
+                        |c, exp| {
                             let (ty, reads, intersections, flow) = c.if_branch_ty(
                                 scope,
                                 cond,
@@ -139,29 +144,32 @@ impl Checker<'_> {
                             );
                             then_flow = flow;
                             ty
+                        },
+                    );
+                    let then_evidence = self.branch_sibling_type(then_branch, tt);
+                    let et =
+                        self.rebind_conditional_branch(eb, then_evidence, et, fixed, |c, exp| {
+                            let (ty, reads, intersections, flow) = c.if_branch_ty(
+                                scope,
+                                cond,
+                                eb,
+                                false,
+                                Wanted {
+                                    expected: Some(exp),
+                                    value_required: wanted.value_required,
+                                },
+                                true,
+                            );
+                            else_exit = c.take_local_flow_exit(
+                                scope,
+                                &entry,
+                                reads,
+                                intersections,
+                                c.normal_completion(eb),
+                            );
+                            else_flow = flow;
+                            ty
                         });
-                    let et = self.rebind_conditional_branch(eb, tt, et, fixed, |c, exp| {
-                        let (ty, reads, intersections, flow) = c.if_branch_ty(
-                            scope,
-                            cond,
-                            eb,
-                            false,
-                            Wanted {
-                                expected: Some(exp),
-                                value_required: wanted.value_required,
-                            },
-                            true,
-                        );
-                        else_exit = c.take_local_flow_exit(
-                            scope,
-                            &entry,
-                            reads,
-                            intersections,
-                            c.normal_completion(eb),
-                        );
-                        else_flow = flow;
-                        ty
-                    });
                     let result = conditional_branch::join_adapted_branches(
                         self,
                         scope,

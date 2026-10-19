@@ -108,6 +108,7 @@ pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod contract_declarations;
 mod contract_effects;
 mod declaration_rendering;
+mod declaration_rules;
 mod declaration_usage;
 mod dependency_platform;
 mod deprecation_phase;
@@ -277,7 +278,6 @@ mod streaming_signature_tests;
 mod super_calls;
 pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
-mod tailrec_declarations;
 mod type_join;
 mod type_parameter_owners;
 mod upper_bound_violations;
@@ -16026,7 +16026,8 @@ impl<'a> Checker<'a> {
         // check is a discarded probe, not a second overload result; rebuild the call's exclusive
         // semantic handoff from this check.
         self.resolved_calls.remove(&call);
-        self.value_lambda_formal_states.remove(&call);
+        self.unbound_value_lambda_call_formals.remove(&call);
+        self.open_lambda_result_call_formals.remove(&call);
         self.resolved_constructors.remove(&call);
         self.constructor_formal_evidence.remove(&call);
         self.record_call_site_lexical_formals(scope, call);
@@ -20626,7 +20627,7 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     .and_then(|signature| signature.generic_sig.as_ref())
                 {
-                    let state = self.classify_unresolved_value_lambda_formals(
+                    let unresolved = self.unresolved_value_lambda_formals(
                         scope,
                         args,
                         generic,
@@ -20634,8 +20635,13 @@ impl<'a> Checker<'a> {
                         &known_generic_bindings,
                         &postponed_constraints,
                     );
-                    if !state.is_empty() {
-                        self.value_lambda_formal_states.insert(call, state);
+                    if !unresolved.open_result_formals.is_empty() {
+                        self.open_lambda_result_call_formals
+                            .insert(call, unresolved.open_result_formals);
+                    }
+                    if !unresolved.formals.is_empty() {
+                        self.unbound_value_lambda_call_formals
+                            .insert(call, unresolved.formals);
                     }
                 }
                 // Without an expectation this check is a probe: an enclosing call may still bind
@@ -33035,7 +33041,8 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         selected_function_value_conversions: HashMap::default(),
         narrowed_this_member: HashMap::default(),
         resolved_calls: HashMap::default(),
-        value_lambda_formal_states: HashMap::default(),
+        unbound_value_lambda_call_formals: HashMap::default(),
+        open_lambda_result_call_formals: HashMap::default(),
         postponed_diagnostics: PostponedDiagnostics::default(),
         eager_eliminated_members: HashMap::default(),
         implicit_receiver_selections: HashMap::default(),
@@ -34307,7 +34314,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             continue;
         }
         match file.decl(d) {
-            Decl::Fun(f) => c.check_top_level_fun(scope, f, d),
+            Decl::Fun(f) => c.check_top_level_function(scope, f, d),
             Decl::Class(cl) => {
                 let policy_depth = c.push_classifier_owner_policies(scope, d);
                 c.check_class(scope, cl, d);
@@ -35703,9 +35710,14 @@ struct Checker<'a> {
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
-    /// Ownership facts for callee-owned postponed value-lambda formals. Receiver-lambda builder
+    /// Unsolved callee-owned formals used as ordinary lambda inputs, or whose provisional lambda
+    /// result solution still depends on another call's open variable. Receiver-lambda builder
     /// inference has separate body-constraint semantics and is deliberately absent here.
-    value_lambda_formal_states: HashMap<ExprId, postponed_constraints::ValueLambdaFormalState>,
+    unbound_value_lambda_call_formals: HashMap<ExprId, Vec<String>>,
+    /// The subset of [`Self::unbound_value_lambda_call_formals`] whose provisional lambda result
+    /// solution depends on another call's open variable; its resolved type argument is not
+    /// completion evidence.
+    open_lambda_result_call_formals: HashMap<ExprId, Vec<String>>,
     /// Diagnostics produced while a lambda input still contains a callee-owned type parameter.
     /// They remain outside the shared sink until the surrounding statement either rechecks the
     /// expression with closed inputs or commits the open probe as its final verdict. A vector keeps
@@ -37659,7 +37671,8 @@ impl<'a> Checker<'a> {
             .filter(|formal| !lexical_formals.contains(formal))
             .cloned()
             .collect::<Vec<_>>();
-        let value_lambda_formals = self.value_lambda_formal_states.get(&call);
+        let unbound_value_lambda_formals = self.unbound_value_lambda_call_formals.get(&call);
+        let open_lambda_result_formals = self.open_lambda_result_call_formals.get(&call);
         let call_arguments = match self.file.expr(call) {
             Expr::Call { args, .. } => args.as_slice(),
             _ => &[],
@@ -37681,12 +37694,20 @@ impl<'a> Checker<'a> {
             .iter()
             .enumerate()
             .find(|(index, formal)| {
+                // A recorded argument that is only a lambda result's open nested-call variable
+                // (`R := T` of `Mono.empty()`) leaves this formal uninferred along with it.
+                let open_dependency = resolved
+                    .and_then(|arguments| arguments.get(*index))
+                    .copied()
+                    .flatten()
+                    .is_some_and(|argument| {
+                        self.type_argument_depends_on_open_lambda_result(call, argument)
+                    });
                 (ty_mentions_param(actual, std::slice::from_ref(*formal))
                     || ty_mentions_param(signature.ret, std::slice::from_ref(*formal)))
-                    && (value_lambda_formals.is_some_and(|state| {
-                        state.has_unresolved_input(formal)
-                            || state.has_open_result_dependency(formal)
-                    })
+                    && (unbound_value_lambda_formals
+                        .is_some_and(|formals| formals.contains(formal))
+                        || open_dependency
                         || had_postponed_argument_diagnostic
                         || has_nested_diagnostic
                         || !signature
@@ -37695,8 +37716,9 @@ impl<'a> Checker<'a> {
                             .any(|parameter| {
                                 ty_mentions_param(*parameter, std::slice::from_ref(*formal))
                             }))
-                    && (value_lambda_formals
-                        .is_some_and(|state| state.has_open_result_dependency(formal))
+                    && (open_lambda_result_formals
+                        .is_some_and(|formals| formals.contains(formal))
+                        || open_dependency
                         || resolved
                             .and_then(|arguments| arguments.get(*index))
                             .copied()
@@ -48624,7 +48646,7 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
-        tailrec_declarations::check_members(self.diags, cl);
+        self.check_member_declaration_rules(scope, cl, current_owner, is_anonymous_object);
         // `@JvmField` changes only a target backend's physical property realization, but its Kotlin
         // declaration restrictions are frontend semantics. Validate them from resolved annotation
         // identities and finalized declaration types; the JVM pass may then assume a valid shape.
@@ -60615,7 +60637,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .enumerate()
                         .filter(|(j, _)| *j != i)
-                        .map(|(_, record)| record.ty)
+                        .map(|(_, record)| self.branch_sibling_type(record.body, record.ty))
                         .filter(|ty| *ty != Ty::Error && !ty.mentions_pending())
                         .fold(None, |acc: Option<Ty>, ty| {
                             Some(match acc {
@@ -61020,12 +61042,11 @@ impl<'a> Checker<'a> {
                 .copied()
                 .map(crate::symbol_resolver::CallArgKind::Typed)
                 .collect::<Vec<_>>();
-            let direct = crate::symbol_resolver::select_constructor_declaration_from_type_with_type_arguments(
+            let direct = crate::symbol_resolver::select_constructor_declaration_from_type(
                 self.libraries,
                 &source,
                 &classifier,
                 &arguments,
-                target.type_args(),
             );
             let direct = direct.and_then(|constructor| {
                 let plan = self.callable_ref_parameter_plan(
@@ -61041,20 +61062,12 @@ impl<'a> Checker<'a> {
                     .constructors
                     .iter()
                     .filter_map(|constructor| {
-                        let mut constructor = constructor.clone();
-                        constructor.params =
-                            self.resolver().specialized_constructor_parameter_types(
-                                internal,
-                                &constructor,
-                                &arguments,
-                                target.type_args(),
-                            );
                         let plan = self.callable_ref_parameter_plan(
                             &constructor.params,
                             &constructor.call_sig,
                             parameters,
                         )?;
-                        Some((constructor, plan))
+                        Some((constructor.clone(), plan))
                     })
                     .collect::<Vec<_>>();
                 let specificity = candidates
@@ -61102,18 +61115,8 @@ impl<'a> Checker<'a> {
             }
             selected
         } else {
-            let resolver = self.resolver();
-            let mut constructors = classifier.constructors.iter().map(|constructor| {
-                let mut constructor = constructor.clone();
-                constructor.params = resolver.specialized_constructor_parameter_types(
-                    internal,
-                    &constructor,
-                    &[],
-                    target.type_args(),
-                );
-                constructor
-            });
-            let selected = constructors.next();
+            let mut constructors = classifier.constructors.iter();
+            let selected = constructors.next().cloned();
             selected.and_then(|selected| {
                 constructors
                     .all(|constructor| constructor.params == selected.params)
@@ -61168,12 +61171,22 @@ impl<'a> Checker<'a> {
                 Ty::obj_args_name(internal, &arguments)
             })
         } else {
-            // Constructor selection already specialized these parameters in the callable-owned
-            // signature coordinate. Substituting classifier-owned keys into the raw signature is
-            // a no-op after dependency normalization and discards the selected application.
-            let declared_parameters = selected.params.as_slice();
+            let class_bindings = classifier
+                .type_params
+                .iter()
+                .cloned()
+                .zip(target.type_args().iter().copied())
+                .collect::<crate::symbol_resolver::GSigBinds>();
+            let declared_parameters = selected
+                .generic_sig
+                .as_ref()
+                .map_or(selected.params.as_slice(), |signature| {
+                    signature.params.as_slice()
+                });
             let mut alias_bindings = crate::symbol_resolver::GSigBinds::default();
             for (&declared, &actual) in declared_parameters.iter().zip(inference_parameters) {
+                let declared =
+                    crate::symbol_resolver::ty_subst_keep_unbound(declared, &class_bindings);
                 crate::symbol_resolver::unify_inferred_ty(declared, actual, &mut alias_bindings);
             }
             crate::symbol_resolver::ty_subst_keep_unbound(target, &alias_bindings)
@@ -63734,23 +63747,8 @@ impl<'a> Checker<'a> {
         }
         let declared_params =
             self.declared_member_params(&selected, &shape.parameter_indices, &visible_params);
-        if let Some(signature) = selected.member.generic_sig.as_ref() {
-            self.record_open_selected_value_lambda_results(
-                scope,
-                call,
-                args,
-                &shape.parameter_indices,
-                &shape.call_sig,
-                signature,
-                &visible_params,
-            );
-        }
-        let owned_type_parameters = self.publish_selected_member_type_parameter_owner(
-            call,
-            &selected.member,
-            &visible_params,
-            selected.ret,
-        );
+        let owned_type_parameters =
+            self.publish_selected_member_type_parameter_owner(call, &selected.member);
         let arguments_valid = self.expect_selected_call_args(
             scope,
             CallArgs {
@@ -65466,15 +65464,10 @@ impl<'a> Checker<'a> {
                 .as_ref()
                 .filter(|signature| signature.params.len() == parameter_count)
             {
-                let constructor_type_parameters =
-                    crate::libraries::ConstructorTypeParameterCoordinates::new(
-                        classifier.own_type_params(),
-                        signature,
-                    );
                 // Explicit type arguments are fixed before any argument is inferred: one outside
                 // its bound rejects the constructor whatever its arguments are (`Box<String>("")`).
                 if let Some(failure) = self.explicit_constructor_bound_violation(
-                    constructor_type_parameters.signature_formals(),
+                    classifier.type_params(),
                     signature,
                     &explicit_type_arguments,
                 ) {
@@ -65668,8 +65661,8 @@ impl<'a> Checker<'a> {
                 crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
                     &source,
                     internal,
-                    constructor_type_parameters.signature_formals(),
-                    constructor_type_parameters.signature_bounds(),
+                    classifier.type_params(),
+                    classifier.type_param_bounds(),
                     expected_classifier,
                     &mut bindings,
                 );
@@ -65773,8 +65766,39 @@ impl<'a> Checker<'a> {
                 // Without independent evidence, a constructor variable that supplies context to a
                 // postponed producer completes from its declared upper bound. Substitute preceding
                 // solutions so dependent bounds (`U : Base<T>`) retain their semantic application.
-                constructor_type_parameters
-                    .complete_enclosing_context(&enclosing_context_formals, &mut bindings);
+                for (index, formal) in classifier.type_params().iter().enumerate() {
+                    if !enclosing_context_formals.contains(formal)
+                        || bindings
+                            .get(formal)
+                            .is_some_and(|binding| *binding != Ty::Error)
+                    {
+                        continue;
+                    }
+                    let known = classifier
+                        .type_params()
+                        .iter()
+                        .take(index)
+                        .filter_map(|known_formal| {
+                            bindings
+                                .get(known_formal)
+                                .copied()
+                                .filter(|binding| *binding != Ty::Error)
+                                .map(|binding| (known_formal.clone(), binding))
+                        })
+                        .collect::<HashMap<_, _>>();
+                    if let Some(bound) = classifier
+                        .type_param_bounds()
+                        .get(index)
+                        .and_then(|bounds| bounds.first())
+                        .copied()
+                        .filter(|bound| *bound != Ty::Error)
+                    {
+                        bindings.insert(
+                            formal.clone(),
+                            crate::symbol_resolver::ty_subst_keep_unbound(bound, &known),
+                        );
+                    }
+                }
                 crate::trace_compiler!(
                     "expected_call",
                     "provider constructor={} expected={expected_classifier:?} generic_params={:?} actuals={actuals:?} upper_only={:?} upper_bounds={:?} bindings={bindings:?}",
@@ -65785,11 +65809,19 @@ impl<'a> Checker<'a> {
                 );
                 // Constructor type arguments belong to the classifier. They are fixed before
                 // ordinary argument constraints participate (`Foo<String>(42.0)` cannot infer the
-                // classifier's `T` as `Double`). The classifier's declaration-order prefix is the
-                // exact binding target; any constructor-only suffix stays inferred solely inside
-                // the signature. An underscore remains unbound and is completed by the
-                // argument/expected-type constraints above.
-                constructor_type_parameters.bind_explicit(&explicit_type_arguments, &mut bindings);
+                // primary constructor's `T` as `Double`). Kotlin constructors introduce no
+                // independent function type parameters, so the classifier's declaration-order
+                // formal prefix is the exact binding target. An underscore remains unbound and is
+                // completed by the argument/expected-type constraints above.
+                for (formal, explicit) in classifier
+                    .type_params
+                    .iter()
+                    .zip(explicit_type_arguments.iter().copied())
+                {
+                    if !explicit.mentions_error() && !explicit.mentions_pending() {
+                        bindings.insert(formal.clone(), explicit);
+                    }
+                }
                 // Expected-result inference runs after argument inference and may replace a class
                 // binding (`C<T : Bound>` expected as `I<Unrelated>` through `C<T> : I<T>`).
                 // Revalidate the completed classifier bindings here; validating only the earlier
@@ -65811,12 +65843,10 @@ impl<'a> Checker<'a> {
                 let result_arguments =
                     crate::symbol_resolver::completed_constructor_result_arguments(
                         internal,
-                        constructor_type_parameters.signature_formals(),
-                        constructor_type_parameters.signature_bounds(),
+                        classifier.type_params(),
+                        classifier.type_param_bounds(),
                         &bindings,
                     );
-                let result_arguments =
-                    constructor_type_parameters.classifier_types(result_arguments);
                 member.ret = Ty::obj_args_name(internal, &result_arguments);
                 member.params = signature
                     .params
@@ -65825,7 +65855,7 @@ impl<'a> Checker<'a> {
                         crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &bindings)
                     })
                     .collect();
-                inferred = Some(constructor_type_parameters.classifier_bindings(&bindings));
+                inferred = Some(bindings);
             }
             member.call_sig = call_sig;
             candidates.push(CtorDelegationCandidate {

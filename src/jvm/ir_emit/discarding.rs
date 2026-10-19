@@ -168,6 +168,12 @@ impl Emitter<'_> {
                     arg,
                     ..
                 } if self.is_call_result_boundary(expression, *arg) && !self.diverges(*arg) => {
+                    // A suspension point the coroutine transformer closes discards its erased
+                    // result at the resumption join, as a discarded suspending call does.
+                    if self.transformed_result(*arg).is_some() {
+                        self.emit_discarding(*arg, code);
+                        return;
+                    }
                     let before = code.stack_height();
                     self.emit_value(*arg, code);
                     match code.stack_height() - before {
@@ -215,6 +221,8 @@ impl Emitter<'_> {
         let suspension = self.machine_before(expression, code);
         self.open_transformed_suspension(expression, code);
         self.emit_value_node(expression, node, code);
+        // A discarded root that ends an inlined call forgets the caller's line like a used one.
+        self.mark_after_inlined_call(expression, code);
         // `emit_value_node` normally consumes this marker at the invocation. Remove it defensively
         // for aliases whose emission bypasses the ordinary `InvokeFunction` result path.
         self.erased_invocations.remove(&expression);

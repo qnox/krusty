@@ -10,7 +10,7 @@ use crate::ast::{ClassDecl, ClassKind, DeclId, FunDecl, PropDecl, TypeRef};
 use crate::fx_hash::HashMap;
 use crate::libraries::LibraryType;
 use crate::symbol_source::SymbolSource;
-use crate::types::{ty_mentions_param, Ty, TypeName, TypeVariance};
+use crate::types::{Ty, TypeName, TypeVariance};
 
 /// kotlinc's disambiguation of same-named type parameters within one diagnostic: when two distinct
 /// parameters share a source name, each is written `T#N`, numbered in the order the diagnostic's
@@ -348,39 +348,60 @@ impl Checker<'_> {
         scope
     }
 
-    /// Publish a provider-normalized generic member while its selected arguments are committed.
-    /// A formal that remains in the selected parameter or result shapes is still owned by this
-    /// call and receives kotlinc's `uninferred` marker. A captured classifier parameter has a
-    /// different semantic identity; a recursive call may reuse its declaration's identity, so the
-    /// call site's recorded lexical identities exclude that fixed use without any spelling- or
-    /// origin-based special case.
+    /// Mark the published callable formals that `ty` still carries as kotlinc's `uninferred` while
+    /// a postponed lambda result is checked against it. A formal lexically in scope is a fixed
+    /// solution and keeps its plain owner wording.
+    pub(super) fn publish_open_result_formals(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        ty: Ty,
+    ) -> TypeParameterOwnerScope {
+        let lexical = scope.lexical_tparam_identities();
+        let mut formals = Vec::new();
+        super::ty_param_names_into(ty, &mut formals);
+        let mut published = TypeParameterOwnerScope::default();
+        for formal in formals {
+            if lexical.iter().any(|fixed| fixed == formal)
+                || self.uninferred_type_parameters.contains_key(formal)
+            {
+                continue;
+            }
+            let Some(owner) = self.type_parameter_owners.get(formal).cloned() else {
+                continue;
+            };
+            let platform = ty
+                .type_parameter_occurrence_bound(formal)
+                .is_some_and(|bound| matches!(bound, Ty::PlatformNullable(_)));
+            published.publish(
+                &mut self.type_parameter_owners,
+                &mut self.uninferred_type_parameters,
+                formal,
+                owner,
+                Some(platform),
+            );
+        }
+        published
+    }
+
+    /// Publish the provider-normalized generic member selected at `call` while its arguments are
+    /// committed. Only formals retained as open by postponed inference receive kotlinc's
+    /// `uninferred` marker; a stable symbolic solution is still rendered with its declaration owner.
     pub(super) fn publish_selected_member_type_parameter_owner(
         &mut self,
         call: crate::ast::ExprId,
         member: &crate::libraries::LibraryMember,
-        selected_params: &[Ty],
-        selected_ret: Ty,
     ) -> TypeParameterOwnerScope {
         let Some((owner, signature)) = Self::generic_library_member_header(&member.name, member)
             .zip(member.generic_sig.as_ref())
         else {
             return TypeParameterOwnerScope::default();
         };
-        let unresolved = signature
-            .formals
-            .iter()
-            .filter(|formal| {
-                if self.lexically_fixed_at_call(call, formal) {
-                    return false;
-                }
-                let formal = std::slice::from_ref(*formal);
-                ty_mentions_param(selected_ret, formal)
-                    || selected_params
-                        .iter()
-                        .any(|parameter| ty_mentions_param(*parameter, formal))
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+        let unresolved = self
+            .unbound_value_lambda_call_formals
+            .get(&call)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .to_vec();
         self.publish_generic_signature_owner(signature, owner, &unresolved)
     }
 

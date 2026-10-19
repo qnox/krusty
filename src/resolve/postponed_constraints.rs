@@ -5,40 +5,6 @@ use super::*;
 
 pub(super) type PostponedLambdaTypes = (Vec<Ty>, Option<Ty>, Option<Ty>, Option<Ty>, bool);
 
-/// Ownership of a selected call's still-open postponed lambda formals.
-///
-/// Input and result openness have different completion rules: an unresolved input may coexist with
-/// a subsequently selected type argument, while a result dependency on another open call makes a
-/// provisional selected argument incomplete. Carrying both facts behind one boundary prevents a
-/// consumer from treating either vector as the other kind of evidence.
-#[derive(Default)]
-pub(super) struct ValueLambdaFormalState {
-    unresolved_inputs: Vec<String>,
-    open_result_dependencies: Vec<String>,
-}
-
-impl ValueLambdaFormalState {
-    pub(super) fn is_empty(&self) -> bool {
-        self.unresolved_inputs.is_empty() && self.open_result_dependencies.is_empty()
-    }
-
-    pub(super) fn has_unresolved_input(&self, formal: &str) -> bool {
-        self.unresolved_inputs.iter().any(|owned| owned == formal)
-    }
-
-    pub(super) fn has_open_result_dependency(&self, formal: &str) -> bool {
-        self.open_result_dependencies
-            .iter()
-            .any(|owned| owned == formal)
-    }
-
-    pub(super) fn open_result_occurs_in(&self, ty: Ty) -> bool {
-        self.open_result_dependencies
-            .iter()
-            .any(|formal| ty_mentions_param(ty, std::slice::from_ref(formal)))
-    }
-}
-
 pub(super) struct PostponedRefinementSite<'a, 'scope> {
     pub(super) scope: &'a CheckerScope<'scope>,
     pub(super) call_name: &'a str,
@@ -488,16 +454,24 @@ impl PostponedCallConstraints {
     }
 }
 
+/// The callee formals a value-lambda call leaves unsolved after its postponed arguments settle.
+#[derive(Default)]
+pub(super) struct UnresolvedLambdaFormals {
+    /// Formals used as ordinary lambda inputs with no solution, or whose provisional lambda result
+    /// solution still depends on another call's open variable.
+    pub(super) formals: Vec<String>,
+    /// The subset whose lambda result depends on another call's open variable. Its resolved type
+    /// argument is a provisional record, not completion evidence.
+    pub(super) open_result_formals: Vec<String>,
+}
+
 impl Checker<'_> {
-    /// Classify the callee formals that remain open after postponed lambda inference.
-    ///
-    /// An input formal with no solution is the pre-existing unresolved-input case. A result formal
-    /// whose provisional solution depends on a nested call's open result is a different ownership
-    /// fact: even if selection recorded a provisional type argument, that argument is not a
-    /// completed solution. Keeping those categories separate prevents a solved written lambda
-    /// input (`{ a: Left, b: Right -> }`) from being reopened as though its intersection result
-    /// depended on another call.
-    pub(super) fn classify_unresolved_value_lambda_formals(
+    /// The callee formals whose postponed lambda result is still only a dependency on a nested
+    /// call's open result. A symbolic type is not sufficient evidence: captured classifier
+    /// parameters and enclosing declaration parameters are stable solutions even though they are
+    /// represented by [`Ty::TyParam`]. The retained selected-call signature is the ownership fact
+    /// that distinguishes an inference variable from either stable kind.
+    pub(super) fn unresolved_value_lambda_formals(
         &self,
         scope: &CheckerScope<'_>,
         arguments: &[ExprId],
@@ -505,185 +479,77 @@ impl Checker<'_> {
         postponed_solutions: &crate::symbol_resolver::GSigBinds,
         known_bindings: &crate::symbol_resolver::GSigBinds,
         constraints: &PostponedCallConstraints,
-    ) -> ValueLambdaFormalState {
-        let mut state = ValueLambdaFormalState::default();
+    ) -> UnresolvedLambdaFormals {
+        let mut unresolved = UnresolvedLambdaFormals::default();
         for formal in &generic.formals {
-            if !constraints.formals.contains(formal) {
-                continue;
-            }
             let postponed_solution = postponed_solutions.get(formal).copied();
-            if let Some(solution) = postponed_solution {
-                // A symbolic type by itself is not evidence of an open result: captured classifier
-                // parameters and enclosing declaration parameters are stable solutions too. Read
-                // the exact per-argument result constraint instead: it records which selected
-                // lambda contributed which nested call-owned identity to this formal. A merged
-                // solution can lose that provenance after another bound is joined.
-                if self.lambda_arguments_have_open_result(arguments, formal, constraints)
-                    && !Self::type_is_lexically_fixed(scope, solution)
-                {
-                    state.open_result_dependencies.push(formal.clone());
-                }
-            } else if known_bindings
-                .get(formal)
-                .is_none_or(|binding| ty_mentions_param(*binding, std::slice::from_ref(formal)))
-                && generic.params.iter().any(|parameter| {
-                    matches!(parameter.non_null(), Ty::Fun(function)
-                    if !function.has_receiver
-                        && function.params.iter().any(|input| {
-                            ty_mentions_param(*input, std::slice::from_ref(formal))
+            let depends_on_open_result = postponed_solution.is_some_and(|solution| {
+                self.lambda_arguments_have_open_result(arguments, solution)
+            });
+            let included = constraints.formals.contains(formal)
+                    && (postponed_solution.is_none() || depends_on_open_result)
+                    && (depends_on_open_result
+                        || known_bindings.get(formal).is_none_or(|binding| {
+                            ty_mentions_param(*binding, std::slice::from_ref(formal))
                         }))
-                })
-            {
-                state.unresolved_inputs.push(formal.clone());
-            }
-        }
-        state
-    }
-
-    /// Classify only open value-lambda results at a selected-call commit seam.
-    ///
-    /// Qualified member selection does not run the earlier unqualified-call constraint round, but
-    /// it retains the same declaration signature and exact source-to-parameter mapping. Publishing
-    /// this subset before argument commitment gives both diagnostic ownership and type-parameter
-    /// rendering the same semantic fact without repeating overload selection.
-    pub(super) fn record_open_selected_value_lambda_results(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        arguments: &[ExprId],
-        declaration_parameter_by_visible: &[usize],
-        call_sig: &CallSig,
-        generic: &crate::libraries::GenericSig,
-        applied_parameters: &[Ty],
-    ) {
-        let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
-        let Some(visible_parameter_by_argument) = call_argument_parameter_indices(
-            arguments.len(),
-            applied_parameters.len(),
-            argument_names,
-            self.file.call_has_trailing_lambda.contains(&call.0),
-            call_sig,
-        ) else {
-            return;
-        };
-        let state = self.classify_open_value_lambda_results(
-            scope,
-            arguments,
-            &visible_parameter_by_argument,
-            declaration_parameter_by_visible,
-            generic,
-            applied_parameters,
-        );
-        if !state.is_empty() {
-            self.value_lambda_formal_states.insert(call, state);
-        }
-    }
-
-    fn classify_open_value_lambda_results(
-        &self,
-        scope: &CheckerScope<'_>,
-        arguments: &[ExprId],
-        visible_parameter_by_argument: &[usize],
-        declaration_parameter_by_visible: &[usize],
-        generic: &crate::libraries::GenericSig,
-        applied_parameters: &[Ty],
-    ) -> ValueLambdaFormalState {
-        let mut state = ValueLambdaFormalState::default();
-        for (argument_index, argument) in arguments.iter().copied().enumerate() {
-            if !matches!(self.file.expr(argument), Expr::Lambda { .. }) {
-                continue;
-            }
-            let Some(visible_parameter) =
-                visible_parameter_by_argument.get(argument_index).copied()
-            else {
-                continue;
-            };
-            let Some(declaration_parameter) = declaration_parameter_by_visible
-                .get(visible_parameter)
-                .copied()
-            else {
-                continue;
-            };
-            let Some((Ty::Fun(declared), Ty::Fun(applied))) = generic
-                .params
-                .get(declaration_parameter)
-                .copied()
-                .and_then(|parameter| self.functional_parameter_shape(parameter))
-                .zip(
-                    applied_parameters
-                        .get(visible_parameter)
-                        .copied()
-                        .and_then(|parameter| self.functional_parameter_shape(parameter)),
-                )
-                .map(|(declared, applied)| (declared.non_null(), applied.non_null()))
-            else {
-                continue;
-            };
-            if !applied.ret.mentions_ty_param() || Self::type_is_lexically_fixed(scope, applied.ret)
-            {
-                continue;
-            }
-            for formal in &generic.formals {
-                if ty_mentions_param(declared.ret, std::slice::from_ref(formal))
-                    && !state.open_result_dependencies.contains(formal)
-                {
-                    state.open_result_dependencies.push(formal.clone());
+                    && (depends_on_open_result
+                        || generic.params.iter().any(|parameter| {
+                            matches!(parameter.non_null(), Ty::Fun(function)
+                                if !function.has_receiver
+                                    && function.params.iter().any(|input| {
+                                        ty_mentions_param(
+                                            *input,
+                                            std::slice::from_ref(formal),
+                                        )
+                                    }))
+                        }))
+                    // A declaration-owned parameter in the surrounding lexical scope is a fixed
+                    // solution even when a retained nested-call signature happens to reuse it.
+                    && postponed_solution
+                        .is_none_or(|solution| !Self::type_is_lexically_fixed(scope, solution)
+                            || !depends_on_open_result);
+            if included {
+                unresolved.formals.push(formal.clone());
+                if depends_on_open_result {
+                    unresolved.open_result_formals.push(formal.clone());
                 }
             }
         }
-        state
+        unresolved
     }
 
-    fn lambda_arguments_have_open_result(
+    /// Whether a type argument recorded for `call` is only another call's open variable, returned
+    /// from one of `call`'s lambda arguments (`flatMap { null ?: Mono.empty() }` records `R := T` of
+    /// `empty`). Such a record is a dependency, not completion evidence.
+    pub(super) fn type_argument_depends_on_open_lambda_result(
         &self,
-        arguments: &[ExprId],
-        formal: &str,
-        constraints: &PostponedCallConstraints,
+        call: ExprId,
+        argument: Ty,
     ) -> bool {
-        arguments.iter().copied().any(|argument| {
-            let Expr::Lambda { body, .. } = self.file.expr(argument) else {
-                return false;
-            };
-            let constrained_types = constraints
-                .function_result_lower
-                .get(&argument)
-                .and_then(|lower| lower.get(formal))
-                .copied()
-                .into_iter()
-                .chain(
-                    constraints
-                        .function_result_upper
-                        .get(&argument)
-                        .and_then(|upper| upper.get(formal))
-                        .into_iter()
-                        .flatten()
-                        .copied(),
-                )
-                .collect::<Vec<_>>();
-            if constrained_types.is_empty() {
-                return false;
+        let Expr::Call { args, .. } = self.file.expr(call) else {
+            return false;
+        };
+        self.lambda_arguments_have_open_result(args, argument)
+    }
+
+    fn lambda_arguments_have_open_result(&self, arguments: &[ExprId], solution: Ty) -> bool {
+        let mut values = Vec::new();
+        for argument in arguments {
+            if let Expr::Lambda { body, .. } = self.file.expr(*argument) {
+                super::conditional_branch::terminal_value_expressions(
+                    self.file,
+                    *body,
+                    &mut values,
+                );
             }
-            let direct = super::conditional_branch::branch_value_expression(self.file, *body);
-            std::iter::once(direct)
-                .chain(
-                    self.call_owned_conditional_branches
-                        .get(&argument)
-                        .into_iter()
-                        .flatten()
-                        .copied()
-                        .map(|branch| {
-                            super::conditional_branch::branch_value_expression(self.file, branch)
-                        }),
-                )
-                .any(|call| {
-                    self.unbound_call_result_signature(call)
-                        .is_some_and(|signature| {
-                            signature.formals.iter().any(|formal| {
-                                constrained_types.iter().any(|constrained| {
-                                    ty_mentions_param(*constrained, std::slice::from_ref(formal))
-                                })
-                            })
-                        })
+        }
+        values.into_iter().any(|call| {
+            self.unbound_call_result_signature(call)
+                .is_some_and(|signature| {
+                    signature
+                        .formals
+                        .iter()
+                        .any(|formal| ty_mentions_param(solution, std::slice::from_ref(formal)))
                 })
         })
     }

@@ -210,7 +210,7 @@ fn an_orphaned_descriptor_keeps_name_and_type_component_order() {
         leading: Vec::new(),
         interned: after + 1..after + 1,
     }];
-    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped, &[])
+    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped, &[], &[])
         .expect("the class reads")
         .expect("the orphan moves to EnclosingMethod");
     let entries = pool(&laid_out);
@@ -308,7 +308,7 @@ fn a_rewritten_method_s_entries_are_placed_in_asm_order() {
         leading: Vec::new(),
         interned: after_g + 1..after_g + 1,
     }];
-    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped, &[])
+    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped, &[], &[])
         .expect("the class reads")
         .expect("the pool changes");
     let mut expected = emitted.to_vec();
@@ -352,7 +352,7 @@ fn transformation_class_entries_lead_the_rewritten_body() {
         leading,
         interned: after + 1..after + 1,
     }];
-    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped, &[])
+    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped, &[], &[])
         .expect("the class reads")
         .expect("the transformer's field moves ahead of the body");
     let entries = pool(&laid_out);
@@ -384,7 +384,10 @@ fn an_ldc_whose_entry_would_move_past_one_byte_keeps_the_pool() {
     let mut order: Vec<u16> = (1..read.entries.len() as u16).collect();
     order.retain(|&index| index != loaded);
     order.push(loaded);
-    assert_eq!(rewrite(&class, &read, &order), Err(Kept::NarrowOperand));
+    assert_eq!(
+        rewrite(&class, &read, &order, &[]),
+        Err(Kept::NarrowOperand)
+    );
 }
 
 /// `class` with `count` distinct integers appended to its pool.
@@ -420,7 +423,10 @@ fn a_class_with_an_attribute_the_reader_does_not_know_is_not_read() {
         Some(Unread::UnknownAttribute("Cxde".to_string()))
     );
     // The unreferenced integer stays: nothing in the class was renumbered.
-    assert_eq!(relayout(class.clone(), &[], Unnamed::Dropped, &[]), class);
+    assert_eq!(
+        relayout(class.clone(), &[], Unnamed::Dropped, &[], &[]),
+        class
+    );
 }
 
 #[test]
@@ -432,7 +438,7 @@ fn an_entry_nothing_names_is_dropped() {
     });
     let class = writer.finish();
     let padded = with_integers(&class, 2);
-    assert_eq!(relayout(padded, &[], Unnamed::Dropped, &[]), class);
+    assert_eq!(relayout(padded, &[], Unnamed::Dropped, &[], &[]), class);
 }
 
 /// A copied class keeps what its visits interned, named or not.
@@ -445,7 +451,10 @@ fn a_copied_class_keeps_an_entry_nothing_names() {
     });
     let class = writer.finish();
     let padded = with_integers(&class, 2);
-    assert_eq!(relayout(padded.clone(), &[], Unnamed::Kept, &[]), padded);
+    assert_eq!(
+        relayout(padded.clone(), &[], Unnamed::Kept, &[], &[]),
+        padded
+    );
 }
 
 #[test]
@@ -505,7 +514,7 @@ fn a_rewritten_call_site_follows_its_bootstrap_arguments_and_method() {
         interned: after_g + 1..after_g + 1,
     }];
     let laid_out =
-        match relaid_class(&class, &relaid, Unnamed::Dropped, &[]).expect("the class reads") {
+        match relaid_class(&class, &relaid, Unnamed::Dropped, &[], &[]).expect("the class reads") {
             Some(laid_out) => laid_out,
             None => class,
         };
@@ -518,4 +527,25 @@ fn a_rewritten_call_site_follows_its_bootstrap_arguments_and_method() {
     };
     let (argument, handle, site) = (position("tag 16"), position("tag 15"), position("tag 18"));
     assert!(argument < handle && handle < site, "{entries:?}");
+}
+
+/// Tied rows take their places in their classes' pool order; a row outside the group stays put.
+#[test]
+fn tied_inner_class_rows_follow_their_classes_pool_order() {
+    let row = |inner: u16, access: u16| {
+        let mut row = inner.to_be_bytes().to_vec();
+        row.extend([0, 0, 0, 0]);
+        row.extend(access.to_be_bytes());
+        row
+    };
+    let table = |rows: &[(u16, u16)]| {
+        let mut table = (rows.len() as u16).to_be_bytes().to_vec();
+        for &(inner, access) in rows {
+            table.extend(row(inner, access));
+        }
+        table
+    };
+    let mut laid_out = table(&[(9, 1), (4, 2), (7, 3), (5, 4)]);
+    order_tied_rows(&mut laid_out, &[9, 7, 5]);
+    assert_eq!(laid_out, table(&[(5, 4), (4, 2), (7, 3), (9, 1)]));
 }

@@ -10,6 +10,10 @@ pub enum CompilerIntrinsic {
     /// Reinterpret one scalar's bits as the equal-width floating or integral scalar selected by
     /// the authenticated declaration. Checked FIR/IR records both semantic endpoint types.
     ReinterpretBits,
+    /// One scalar instruction the target stdlib declares as the callable's implementation. The
+    /// authenticated declaration fixes its operand and result types. Checked FIR and common IR
+    /// keep its call an ordinary call; only the target emitter replaces it with the instruction.
+    ScalarInstruction(super::ScalarInstruction),
     /// Native's exact `GCUnsafeCall` floating-point predicate declaration. The provider
     /// authenticates the runtime entry and complete extension-receiver shape while it still owns
     /// the platform KLIB; target lowering consumes only this operation and scalar type.

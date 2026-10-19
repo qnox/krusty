@@ -3092,8 +3092,7 @@ impl JvmLibraries {
             // realization consumed after checked FIR has supplied both receivers.
             self.register_external_callable(&mut callable, FnKind::Member, declaration_owner);
             member.external_identity = callable.external_identity;
-            member.inline_body_plan = callable.inline_body_plan.clone();
-            Self::retain_normalized_member_generic_signature(member, &callable);
+            member.inline_body_plan = callable.inline_body_plan;
         }
         for member in &mut classifier.companion {
             let mut callable = crate::libraries::FunctionInfo::classifier_member(
@@ -3114,8 +3113,7 @@ impl JvmLibraries {
             callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
             self.register_external_callable(&mut callable, FnKind::TopLevel, declaration_owner);
             member.external_identity = callable.external_identity;
-            member.inline_body_plan = callable.inline_body_plan.clone();
-            Self::retain_normalized_member_generic_signature(member, &callable);
+            member.inline_body_plan = callable.inline_body_plan;
         }
         for declarations in classifier.declared_callables.values_mut() {
             *declarations =
@@ -5461,7 +5459,8 @@ mod tests {
     use crate::libraries::CollectionBarrierOutcome;
     use crate::libraries::{GenericReturnPolicy, SemanticPlatform};
     use crate::symbol_source::SymbolNamespace;
-    use crate::types::{type_name, type_parameter_source_name, Ty, Visibility};
+    use crate::types::type_name;
+    use crate::types::{Ty, Visibility};
 
     fn initialized_libraries(classpath: std::rc::Rc<super::Classpath>) -> super::JvmLibraries {
         super::JvmLibraries::new(classpath).expect("JVM provider initialization")
@@ -5892,10 +5891,13 @@ mod tests {
         assert!(type_of.callable.params.is_empty());
         assert_eq!(type_of.callable.ret, Ty::obj("kotlin/reflect/KType"));
         assert!(type_of.flags.inline.can_inline());
-        let signature = type_of.generic_sig.as_ref().unwrap();
-        assert_eq!(signature.formals.len(), 1);
-        assert_ne!(signature.formals[0], "T", "semantic identity is opaque");
-        assert_eq!(type_parameter_source_name(&signature.formals[0]), "T");
+        assert_eq!(
+            type_of
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.formals.as_slice()),
+            Some(["T".to_string()].as_slice())
+        );
         let scope = [type_name("kotlin/reflect")];
         let selected = crate::symbol_resolver::SymbolResolver::new_scoped(&libraries, &scope)
             .resolve_symbol(
@@ -6094,10 +6096,9 @@ mod tests {
                         receiver
                             .obj_internal()
                             .is_some_and(|owner| owner.matches("kotlin/collections/Iterable"))
-                    }) && signature.params.len() == 1
-                        && only_input == &signature.formals
-                        && signature.formals.len() == 1
-                        && type_parameter_source_name(&signature.formals[0]) == "T"
+                    }) && signature.formals == ["T"]
+                        && signature.params.len() == 1
+                        && only_input == &["T"]
                 }),
             "decoded contains overloads: {shapes:?}"
         );
@@ -6169,39 +6170,14 @@ mod tests {
             "decoded Array.iterator return: {:?}",
             iterator.callable.ret
         );
-        let constructor = classifier
-            .constructors
-            .iter()
-            .find(|constructor| {
+        assert!(
+            classifier.constructors.iter().any(|constructor| {
                 constructor.params.len() == 2
                     && constructor.params[0] == Ty::Int
                     && constructor.params[1].fun_arity() == Some(1)
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "Array's builtins record must publish its (size, init) constructor: {:?}",
-                    classifier.constructors
-                )
-            });
-        let signature = constructor
-            .generic_sig
-            .as_ref()
-            .expect("Array's constructor must retain its classifier-formal prefix");
-        assert_eq!(classifier.own_type_params().len(), 1);
-        assert_eq!(signature.formals.len(), 1);
-        assert_eq!(signature.formal_bounds.len(), 1);
-        assert_eq!(
-            signature.ret.obj_internal(),
-            Some(type_name("kotlin/Array"))
-        );
-        assert_eq!(signature.ret.type_args().len(), 1);
-        assert_eq!(
-            signature.ret.type_args()[0].ty_param_name(),
-            Some(signature.formals[0].as_str())
-        );
-        crate::libraries::ConstructorTypeParameterCoordinates::new(
-            classifier.own_type_params(),
-            signature,
+            }),
+            "Array's builtins record must publish its (size, init) constructor: {:?}",
+            classifier.constructors
         );
 
         assert!(classifier.supertypes.contains("kotlin/Cloneable"));

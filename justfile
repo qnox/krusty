@@ -246,17 +246,25 @@ kotlinc VERSION=`just max-version`:
 # Regenerate krusty's copy of one kotlinc release's argument table and language feature table from
 # that release's compiler jar (crates/krusty-cli/src/kotlinc_arguments/releases/<ver>.tsv and
 # src/features/releases/<ver>.{features,language-versions}.tsv). The conformance e2e test fails
-# until the vendored tables equal what the provisioned compiler declares.
-# Every release keeps its own files even when they equal another release's, so a later refresh can
-# never silently apply one release's policy to another.
+# until the table each release reads equals what the provisioned compiler declares. A release keeps a
+# file only where it differs from the newest recorded release below it, which it otherwise reads.
 kotlinc-arguments VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail
     lib="$(dirname "$(dirname "$(just kotlinc "{{VERSION}}")")")/lib"
+    # A release records a table only where it differs from the one it would otherwise inherit:
+    # the newest recorded release below it.
     dump() {
-        local main="$1" releases="$2" suffix="$3"
+        local main="$1" releases="$2" suffix="$3" own previous
+        own="$releases/{{VERSION}}$suffix"
         java -cp "$lib/kotlin-compiler.jar:$lib/kotlin-stdlib.jar" \
-            "scripts/kotlinc-arguments/$main.java" > "$releases/{{VERSION}}$suffix"
+            "scripts/kotlinc-arguments/$main.java" > "$own"
+        previous=$(find "$releases" -maxdepth 1 -name "*$suffix" -printf '%f\n' |
+            sed -n "s/^\([0-9]*\.[0-9]*\.[0-9]*\)${suffix//./\\.}\$/\1/p" |
+            { cat; echo "{{VERSION}}"; } | sort -uV | sed -n '/^{{VERSION}}$/{x;p;q};h')
+        if [ -n "$previous" ] && cmp -s "$own" "$releases/$previous$suffix"; then
+            rm "$own"
+        fi
     }
     dump DumpKotlincArguments crates/krusty-cli/src/kotlinc_arguments/releases .tsv
     dump DumpLanguageFeatures src/features/releases .features.tsv

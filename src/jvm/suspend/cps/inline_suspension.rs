@@ -308,6 +308,115 @@ fn collect(
     }
 }
 
+/// The suspensions of `body` that sit in the literal lambda of a call to a classpath inline
+/// function with reified type parameters, in encounter order. kotlinc's coroutine transformer
+/// takes them once the method inliner has placed the lambda, which is the only route a reified
+/// body has: the byte splice never specializes one. `None` when a spliced body suspends anywhere
+/// else, or a placed lambda nests another spliced body, since those keep the emit-time machine.
+pub(crate) fn reified_host_lambda_suspensions(
+    ir: &IrFile,
+    body: ExprId,
+    suspend_set: &HashSet<u32>,
+) -> Option<Vec<ExprId>> {
+    let mut search = HostedSearch {
+        ir,
+        suspend_set,
+        seen: HashSet::default(),
+        found: Vec::new(),
+    };
+    search.walk(body, Frame::Own, Host::None)?;
+    Some(search.found)
+}
+
+/// Where an expression's code runs, for [`reified_host_lambda_suspensions`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Frame {
+    /// The function's own body.
+    Own,
+    /// The body of a literal lambda the method inliner places for a reified classpath callee.
+    Placed,
+    /// Any other spliced body.
+    Spliced,
+}
+
+/// What a lambda operand of the enclosing call becomes.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Host {
+    /// A real closure: its body runs in its own method.
+    None,
+    /// Placed by the method inliner for a classpath inline callee with reified type parameters.
+    Reified,
+    /// Spliced by any other route.
+    Other,
+}
+
+struct HostedSearch<'a> {
+    ir: &'a IrFile,
+    suspend_set: &'a HashSet<u32>,
+    seen: HashSet<(ExprId, Frame, Host)>,
+    found: Vec<ExprId>,
+}
+
+impl HostedSearch<'_> {
+    fn walk(&mut self, expression: ExprId, frame: Frame, host: Host) -> Option<()> {
+        let ir = self.ir;
+        if !self.seen.insert((expression, frame, host)) {
+            return Some(());
+        }
+        if frame != Frame::Own && is_suspension_point(ir, expression, self.suspend_set) {
+            if frame == Frame::Spliced {
+                return None;
+            }
+            if !self.found.contains(&expression) {
+                self.found.push(expression);
+            }
+        }
+        if let IrExpr::Lambda {
+            captures,
+            inline_body,
+            ..
+        } = &ir.exprs[expression as usize]
+        {
+            for (position, &capture) in captures.iter().enumerate() {
+                let placed = host != Host::None && is_placed_capture(ir, expression, position);
+                self.walk(capture, frame, if placed { host } else { Host::None })?;
+            }
+            if let (true, Some(&body)) = (host != Host::None, inline_body.as_ref()) {
+                let placed = host == Host::Reified && frame == Frame::Own;
+                self.walk(
+                    body,
+                    if placed {
+                        Frame::Placed
+                    } else {
+                        Frame::Spliced
+                    },
+                    Host::None,
+                )?;
+            }
+            return Some(());
+        }
+        let operands = match &ir.exprs[expression as usize] {
+            IrExpr::Call { .. } if !calls_an_inline_function(ir, expression) => Host::None,
+            // An inline suspend callee is a suspension of this frame the transformer does not take
+            // inlined yet.
+            IrExpr::Call { .. }
+                if ir.reified_call_subst.contains_key(&expression)
+                    && !is_suspension_point(ir, expression, self.suspend_set) =>
+            {
+                Host::Reified
+            }
+            IrExpr::Call { .. } => Host::Other,
+            _ => host,
+        };
+        let mut children = Vec::new();
+        for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+        for child in children {
+            self.walk(child, frame, operands)?;
+        }
+        Some(())
+    }
+}
+
 /// One search for the suspensions a frame runs: what it counts, and what it has found so far.
 struct SuspensionSearch<'a> {
     ir: &'a IrFile,

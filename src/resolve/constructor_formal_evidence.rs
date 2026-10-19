@@ -128,8 +128,8 @@ impl Checker<'_> {
     /// such a conditional as one synthetic call even in statement position, so a sibling branch can
     /// fix a constructor type parameter this branch leaves open (`when (s) { "a" -> build {
     /// set(T()) }; else -> Buildee() }`). Retain that open evidence until every branch has been
-    /// checked; [`Self::join_constructor_branches`] consumes only a sibling's proven
-    /// application and the normal completion-root report handles anything still open.
+    /// checked; a sibling rebinds it (see [`Self::open_constructor_expectation`]) and the normal
+    /// completion-root report handles anything still open.
     pub(super) fn joined_branch_result(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -152,77 +152,40 @@ impl Checker<'_> {
         }
     }
 
-    /// Join the fixed classifier arguments established by sibling branches into constructor
-    /// evidence before the completion-root diagnostic runs.
+    /// The expectation under which a sibling branch fixes this branch constructor's open formals.
     ///
-    /// Constructor result completion substitutes a declared bound for an unconstrained formal, so
-    /// the resulting `D<Any?>` is not itself evidence for another bare `D()` branch. A sibling
-    /// constructor can contribute an argument only when its record says that ordinal was actually
-    /// fixed. A non-constructor branch contributes its selected semantic result application. This
-    /// is deliberately a provenance join, not another lookup or overload-selection path.
-    pub(super) fn join_constructor_branches(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        branches: impl IntoIterator<Item = (ExprId, Ty)>,
-    ) {
-        let branches = branches.into_iter().collect::<Vec<_>>();
-        let mut newly_bound = Vec::new();
-        for (target_branch, _) in &branches {
-            let target_call =
-                conditional_branch::branch_value_expression(self.file, *target_branch);
-            let Some(target) = self.constructor_formal_evidence.get(&target_call).cloned() else {
-                continue;
-            };
-            for (ordinal, (_, evidence)) in target.formals.iter().enumerate() {
-                if *evidence != ConstructorFormalEvidence::Unconstrained {
-                    continue;
-                }
-                let sibling_bound = branches.iter().any(|(sibling_branch, sibling_ty)| {
-                    let sibling_call =
-                        conditional_branch::branch_value_expression(self.file, *sibling_branch);
-                    if sibling_call == target_call {
-                        return false;
-                    }
-                    let sibling_evidence = self.constructor_formal_evidence.get(&sibling_call);
-                    if sibling_evidence.is_some_and(|sibling| {
-                        if sibling.owner == target.owner {
-                            sibling.formals.get(ordinal).is_some_and(|(_, evidence)| {
-                                *evidence == ConstructorFormalEvidence::Unconstrained
-                            })
-                        } else {
-                            // Without the derived classifier's declaration substitution, an open
-                            // formal cannot be mapped soundly onto the target owner's ordinal.
-                            sibling.formals.iter().any(|(_, evidence)| {
-                                *evidence == ConstructorFormalEvidence::Unconstrained
-                            })
-                        }
-                    }) {
-                        return false;
-                    }
-                    let source = self.fed_source();
-                    crate::symbol_resolver::applied_hierarchy(&source, *sibling_ty)
-                        .into_iter()
-                        .find(|(owner, _, _)| *owner == target.owner)
-                        .and_then(|(_, applied, _)| applied.type_args().get(ordinal).copied())
-                        .is_some_and(|argument| {
-                            argument != Ty::Error
-                                && !argument.mentions_pending()
-                                && Self::type_is_lexically_fixed(scope, argument)
-                        })
-                });
-                if sibling_bound {
-                    newly_bound.push((target_call, ordinal));
-                }
-            }
+    /// kotlinc completes an `if`/`when` with an `else`, or an elvis, as one synthetic call, so
+    /// `if (c) D(1) else D<String>(2)` constrains the first `D`'s `T` through the sibling. The
+    /// branch is checked again with the sibling's face of the constructed classifier as its
+    /// expectation, exactly as a generic call result is rebound, and that check's own selection
+    /// records the evidence. A sibling that is itself an open constructor supplies nothing (see
+    /// [`Self::branch_sibling_type`]).
+    pub(super) fn open_constructor_expectation(&self, branch: ExprId, sibling: Ty) -> Option<Ty> {
+        let call = conditional_branch::branch_value_expression(self.file, branch);
+        let evidence = self.constructor_formal_evidence.get(&call)?;
+        if !evidence
+            .formals
+            .iter()
+            .any(|(_, evidence)| *evidence == ConstructorFormalEvidence::Unconstrained)
+        {
+            return None;
         }
-        for (call, ordinal) in newly_bound {
-            if let Some((_, evidence)) = self
-                .constructor_formal_evidence
-                .get_mut(&call)
-                .and_then(|evidence| evidence.formals.get_mut(ordinal))
-            {
-                *evidence = ConstructorFormalEvidence::Bound;
-            }
+        let source = self.fed_source();
+        let (_, applied, _) =
+            crate::symbol_resolver::applied_hierarchy(&source, sibling.non_null())
+                .into_iter()
+                .find(|(owner, _, _)| *owner == evidence.owner)?;
+        (!applied.mentions_pending()).then_some(applied)
+    }
+
+    /// A branch's type as evidence for its siblings. An open constructor's completed result
+    /// substitutes declared bounds for the formals nothing constrained; that substitute is not a
+    /// constraint, so such a branch offers no type to rebind a sibling against.
+    pub(super) fn branch_sibling_type(&self, branch: ExprId, ty: Ty) -> Ty {
+        if self.constructor_branch_is_open(branch) {
+            Ty::Error
+        } else {
+            ty
         }
     }
 

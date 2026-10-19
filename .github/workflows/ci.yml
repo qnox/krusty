@@ -54,6 +54,9 @@ jobs:
           tool: just
       - name: lint
         run: just lint
+      # Outside the default members and the coverage packages, so no other job runs its tests.
+      - name: plugin host tests
+        run: cargo test -p krusty-plugin-host
 
   ci:
     runs-on: ubuntu-latest
@@ -734,6 +737,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Every release in the kotlin-versions manifest runs on the newest validated Gradle; the
+        # rows below add the older Gradle boundaries.
+        kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
+        gradle: [9.7.0]
+        ksp: [true]
         include:
           # KSP's Gradle plugin does not load on Gradle 7.6 (its build-script metadata is newer than
           # Gradle 7.6's embedded Kotlin compiler reads), so the KSP2 test runs on the other lanes.
@@ -741,7 +749,6 @@ jobs:
           - { kotlin: 2.4.0,  gradle: 9.5.0,  ksp: true }
           - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true }
           - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false }
-          - { kotlin: 2.4.20, gradle: 9.7.0,  ksp: true }
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

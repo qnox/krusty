@@ -15,9 +15,6 @@ pub struct SelectedConstructorDeclaration {
     pub(crate) type_parameters: crate::types::TypeParameters<Vec<Vec<Ty>>>,
     /// Direct supertypes with this classifier's formals still symbolic.
     pub(crate) supertype_templates: Vec<Ty>,
-    /// Arguments in the mapped order that selected this declaration. Compact signature evaluation
-    /// may replace their provisional types, while spread/default provenance stays authoritative.
-    pub(crate) arguments: Vec<super::CallArgKind>,
 }
 
 pub(super) fn select_constructor_call(
@@ -33,13 +30,11 @@ pub(super) fn select_constructor_call(
 pub(crate) fn capture(
     declaration: LibraryMember,
     classifier: &LibraryType,
-    arguments: &[super::CallArgKind],
 ) -> SelectedConstructorDeclaration {
     SelectedConstructorDeclaration {
         declaration,
         type_parameters: classifier.type_parameters.clone(),
         supertype_templates: classifier.supertype_templates.clone(),
-        arguments: arguments.to_vec(),
     }
 }
 
@@ -167,7 +162,6 @@ mod tests {
                 map,
                 &[Ty::ty_param("K", any), Ty::ty_param("V", any)],
             )],
-            arguments: Vec::new(),
         };
         assert_eq!(
             unlisted_constructor_type(

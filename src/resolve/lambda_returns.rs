@@ -499,7 +499,9 @@ impl Checker<'_> {
         let Expr::Lambda { body, .. } = self.file.expr(argument) else {
             return false;
         };
+        let open_formals = self.publish_open_result_formals(scope, sam.ret);
         self.expect_lambda_result(*body, sam.ret, signature.ret);
+        self.restore_type_parameter_owners(open_formals);
         true
     }
 

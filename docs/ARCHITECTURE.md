@@ -65,6 +65,15 @@ sources, module name, processor inputs, per-module JDK selection, friend paths, 
 because silently ignoring any of those can cache a short or semantically different artifact. An
 environment that cannot honor a recorded input must refuse the unit before computing a cache key.
 
+`crates/krusty-plugin-host` runs kotlinc compiler-plugin jars that krusty does not implement
+natively (Compose, Metro, power-assert, third-party plugins) in a JVM that loads
+`kotlin-compiler-embeddable` at the build's exact Kotlin version. It is a process adapter: the
+compiler never downloads and never starts a JVM, and a driver calls the crate only once a compilation
+requests such a jar. Its provisioning reuses `JAVA_HOME`, `java` on `PATH` and the Gradle or Maven
+caches before it downloads, verifies every file against a SHA-256 pinned per Kotlin version, keeps
+what it fetches in krusty's cache, announces each download with the plugin that needs it, and fails
+with the list of what is missing when `KRUSTY_OFFLINE` is set.
+
 `crates/krusty-toolchain` reads Kotlin Toolchain projects (`project.yaml` and `module.yaml`, the
 format JetBrains' `kotlin` command builds) and is meant to build them with krusty, the way krusty
 stands in for `kotlinc`. It reports the toolchain's own diagnostics, checked against output recorded

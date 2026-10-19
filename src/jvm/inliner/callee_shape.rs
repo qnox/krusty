@@ -4,7 +4,7 @@ use crate::fx_hash::HashSet;
 
 use crate::jvm::method_node::{Category, Insn, MethodNode, Node};
 
-use super::class_roles::{ClassRoles, RegeneratedClass};
+use super::class_roles::ClassRoles;
 use super::preparation::label_positions;
 
 const ACC_STATIC: u16 = 0x0008;
@@ -16,9 +16,7 @@ const NEW: u8 = 0xbb;
 /// A body shape the ported stages do not inline yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UnsupportedShape {
-    /// It constructs a SAM wrapper, which kotlinc regenerates as a `$$inlined$` class for the call
-    /// site (`AnonymousObjectTransformer`). An anonymous object is regenerated instead, including
-    /// one a `getstatic INSTANCE` loads.
+    /// An anonymous object could not be regenerated for the call site.
     AnonymousObject,
     /// It reads a `$WhenMappings` table, which kotlinc regenerates for the call site.
     WhenMappings,
@@ -26,21 +24,10 @@ pub(crate) enum UnsupportedShape {
     AssertionsStatus,
 }
 
-/// The first shape in `callee` that needs a later stage of the port, if any. The anonymous objects
-/// the body constructs are regenerated for the call site; a SAM wrapper is not yet.
-pub(crate) fn unsupported_shape(
-    callee: &MethodNode,
-    classes: &dyn ClassRoles,
-) -> Option<UnsupportedShape> {
-    let sam_wrapper =
-        |internal: &str| classes.regenerated_class(internal) == Some(RegeneratedClass::SamWrapper);
+/// The first shape in `callee` that needs a later stage of the port, if any. Anonymous objects and
+/// SAM wrappers are regenerated for the call site by the method inliner.
+pub(crate) fn unsupported_shape(callee: &MethodNode) -> Option<UnsupportedShape> {
     callee.instructions().find_map(|insn| match insn {
-        Insn::Type { op: NEW, class } if sam_wrapper(class) => {
-            Some(UnsupportedShape::AnonymousObject)
-        }
-        Insn::Method { name, owner, .. } if name == "<init>" && sam_wrapper(owner) => {
-            Some(UnsupportedShape::AnonymousObject)
-        }
         Insn::Field {
             op: GETSTATIC,
             owner,
@@ -62,11 +49,11 @@ pub(crate) fn unsupported_shape(
     })
 }
 
-/// Whether `callee` constructs an anonymous object, which the call site regenerates.
-pub(crate) fn constructs_anonymous_object(callee: &MethodNode, classes: &dyn ClassRoles) -> bool {
-    callee.instructions().any(
-        |insn| matches!(insn, Insn::Type { op: NEW, class } if classes.is_anonymous_object(class)),
-    )
+/// Whether `callee` constructs an object that the call site regenerates.
+pub(crate) fn constructs_regenerated_object(callee: &MethodNode, classes: &dyn ClassRoles) -> bool {
+    callee
+        .instructions()
+        .any(|insn| matches!(insn, Insn::Type { op: NEW, class } if classes.is_regenerated(class)))
 }
 
 /// `requiresEmptyStackOnEntry` (`IrInlineCodegen`): a body with try/catch blocks, a suspension

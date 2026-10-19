@@ -21,6 +21,9 @@ use crate::fx_hash::{HashMap, HashSet};
 mod default_arguments;
 mod intrinsic_operations;
 mod objects;
+mod scalar_instructions;
+
+pub(super) use scalar_instructions::is_scalar_operation;
 
 use crate::backend::{BackendCallableFact, CheckedBackendCallables, DependencyExportSignatures};
 use crate::ir::{
@@ -543,6 +546,60 @@ impl<'a> Body<'a> {
         expression_type(self.ir, &self.declared, id)
     }
 
+    /// Kotlin's narrowing numeric conversion of `arg` to `target_ty` (`Long.toInt()`,
+    /// `Double.toLong()`, `Double.toFloat()`, `Long.toByte()`): an integral value keeps its low
+    /// bits, a floating value rounds towards zero saturating at the result's bounds with NaN as
+    /// zero, and a `Double` becomes the nearest `Float`. Widening is the operand coercion above.
+    fn numeric_narrowing(&mut self, arg: u32, target_ty: Ty) -> Result<(), Unsupported> {
+        let signed = |ty| {
+            matches!(
+                ty,
+                Ty::Byte | Ty::Short | Ty::Char | Ty::Int | Ty::Long | Ty::Float | Ty::Double
+            )
+        };
+        let unsupported = || format!("a coercion to `{}`", describe(target_ty));
+        let source_ty = self
+            .type_of(arg)?
+            .filter(|ty| signed(*ty))
+            .ok_or_else(unsupported)?;
+        if !signed(target_ty) {
+            return Err(unsupported());
+        }
+        let (Some(source), Some(target)) = (carrier(source_ty)?, carrier(target_ty)?) else {
+            return Err(unsupported());
+        };
+        self.expression(arg)?;
+        let carried = match (source, target) {
+            (ValType::I64, ValType::I32) => {
+                self.code.op(0xa7);
+                Ty::Int
+            }
+            (ValType::F32, ValType::I32) => {
+                self.code.trunc_sat(0);
+                Ty::Int
+            }
+            (ValType::F64, ValType::I32) => {
+                self.code.trunc_sat(2);
+                Ty::Int
+            }
+            (ValType::F32, ValType::I64) => {
+                self.code.trunc_sat(4);
+                Ty::Long
+            }
+            (ValType::F64, ValType::I64) => {
+                self.code.trunc_sat(6);
+                Ty::Long
+            }
+            (ValType::F64, ValType::F32) => {
+                self.code.op(0xb6);
+                Ty::Float
+            }
+            _ => return Err(unsupported()),
+        };
+        // A `Byte`, `Short` or `Char` result narrows the `Int` it came through.
+        self.coerce_emitted_value(carried, target_ty)
+    }
+
     fn carrier_of(&self, id: u32) -> Result<Option<ValType>, Unsupported> {
         match self.type_of(id)? {
             Some(ty) => carrier(ty),
@@ -806,6 +863,21 @@ impl<'a> Body<'a> {
                     .module_default(provider)
                     .ok_or_else(|| "an unregistered source default entry".to_string())?;
                 self.defaulted_call(function, &params, &defaults, &args)?;
+            }
+            IrExpr::Call {
+                callee:
+                    Callee::External {
+                        target,
+                        params,
+                        ret,
+                        defaults,
+                        extension_receiver_parameter: None,
+                        ..
+                    },
+                dispatch_receiver,
+                args,
+            } if defaults.is_empty() && self.scalar_operation_of(target).is_some() => {
+                self.scalar_operation_call(target, dispatch_receiver, &params, ret, &args)?;
             }
             IrExpr::Call {
                 callee:
@@ -1181,7 +1253,10 @@ impl<'a> Body<'a> {
                                 )
                         }) =>
                     {
-                        return Err(format!("a coercion to `{}`", describe(type_operand)));
+                        if op != IrTypeOp::ImplicitCoercion {
+                            return Err(format!("a coercion to `{}`", describe(type_operand)));
+                        }
+                        self.numeric_narrowing(arg, type_operand)?;
                     }
                     Some(_) => self.value(arg, type_operand)?,
                 }

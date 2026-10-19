@@ -322,12 +322,14 @@ mod tests {
             .collect()
     }
 
-    const NEWEST: KotlinVersion = KotlinVersion::V2_4_20;
-
-    /// Measured on kotlinc 2.4.20: each line of the expected output is what kotlinc printed.
+    /// Measured on the newest kotlinc when it was added: each line of the expected output is what
+    /// kotlinc printed.
     #[test]
     fn unknown_tokens_follow_kotlincs_three_way_split() {
-        let parsed = parse(NEWEST, &["A.kt", "-foo", "-Xfoo=1", "-Xbar"]);
+        let parsed = parse(
+            KotlinVersion::newest(),
+            &["A.kt", "-foo", "-Xfoo=1", "-Xbar"],
+        );
         assert_eq!(parsed.free, vec!["A.kt"]);
         assert_eq!(parsed.errors(), vec!["Invalid argument: -foo"]);
         assert_eq!(
@@ -342,7 +344,7 @@ mod tests {
     #[test]
     fn every_value_form_kotlinc_accepts() {
         let parsed = parse(
-            NEWEST,
+            KotlinVersion::newest(),
             &[
                 "-module-name=m1",
                 "-module-name",
@@ -388,7 +390,7 @@ mod tests {
     #[test]
     fn syntax_errors_use_kotlincs_words_and_order() {
         let parsed = parse(
-            NEWEST,
+            KotlinVersion::newest(),
             &[
                 "-cp=x",
                 "-Werror=maybe",
@@ -411,7 +413,7 @@ mod tests {
 
     #[test]
     fn deprecated_names_map_to_the_current_argument_with_a_warning() {
-        let parsed = parse(NEWEST, &["-Xopt-in=a.B", "-Xopt-in=c.D"]);
+        let parsed = parse(KotlinVersion::newest(), &["-Xopt-in=a.B", "-Xopt-in=c.D"]);
         assert_eq!(
             values(&parsed),
             vec![
@@ -427,14 +429,14 @@ mod tests {
 
     #[test]
     fn everything_after_the_separator_is_a_source() {
-        let parsed = parse(NEWEST, &["--", "-d", "-x.kt"]);
+        let parsed = parse(KotlinVersion::newest(), &["--", "-d", "-x.kt"]);
         assert_eq!(parsed.free, vec!["-d", "-x.kt"]);
         assert!(parsed.occurrences.is_empty());
     }
 
     #[test]
     fn language_feature_arguments_split_on_the_colon_and_keep_the_value_whole() {
-        let parsed = parse(NEWEST, &["-XXLanguage:+A,-B"]);
+        let parsed = parse(KotlinVersion::newest(), &["-XXLanguage:+A,-B"]);
         assert_eq!(
             values(&parsed),
             vec![("-XXLanguage".into(), Value::List(vec!["+A,-B".into()]))]
@@ -446,7 +448,7 @@ mod tests {
     fn removed_arguments_follow_the_reference_release() {
         let old = parse(KotlinVersion::V2_4_0, &["-Xuse-k2"]);
         assert_eq!(old.errors(), vec!["Invalid argument: -Xuse-k2"]);
-        let new = parse(NEWEST, &["-Xuse-k2"]);
+        let new = parse(KotlinVersion::newest(), &["-Xuse-k2"]);
         assert_eq!(new.errors(), Vec::<String>::new());
         assert_eq!(new.occurrences.len(), 1);
     }

@@ -29,6 +29,12 @@ impl CodeBuilder {
     /// `InlineMarker.mark(id)`: the id as an ordinary constant, then the call that takes it.
     pub fn suspend_marker(&mut self, id: i32, cw: &mut ClassWriter) {
         self.push_int(id, cw);
+        self.suspend_marker_call();
+    }
+
+    /// The `InlineMarker.mark` call alone, taking the id already on the stack: a marker an inlined
+    /// method node carries as the call it was decoded to.
+    pub fn suspend_marker_call(&mut self) {
         self.op_u1(CODEGEN_MARKER_OP, CodegenMarker::Mark as u8, -1);
     }
 }

@@ -172,7 +172,14 @@ fn publish_callable(
             overridden_results,
         },
     );
-    Ok(())
+    // A member of a singleton is realized from its owner's shape (a named object or a
+    // companion), which the declaring classifier publishes with the member.
+    match owner {
+        Some(owner) if owner_kind == Some(IrClassifierKind::Object) => {
+            publish_classifier(index, ir, owner)
+        }
+        _ => Ok(()),
+    }
 }
 
 fn classifier_kind(flags: DeclarationFlags) -> IrClassifierKind {
@@ -473,6 +480,22 @@ pub(super) fn publish_referenced(
                 if index.classifier_declaration(*classifier).is_some() =>
             {
                 classifiers.insert(*classifier);
+            }
+            // A generated `hashCode` dispatches on the property's classifier, an interface's
+            // through `Object`, wherever in the module it is declared.
+            IrExpr::Call {
+                callee:
+                    Callee::Intrinsic {
+                        operation: crate::ir::IrIntrinsic::GeneratedPropertyHash { ty },
+                        ..
+                    },
+                ..
+            } => {
+                if let Some(classifier) = ty.non_null().obj_internal() {
+                    if index.classifier_declaration(classifier).is_some() {
+                        classifiers.insert(classifier);
+                    }
+                }
             }
             _ => {}
         }

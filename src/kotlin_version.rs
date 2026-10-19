@@ -12,6 +12,7 @@
 //! therefore serves one reference version for its lifetime.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 /// A full Kotlin release version, `major.minor.patch`, ordered numerically.
@@ -26,6 +27,7 @@ impl KotlinVersion {
     pub const V2_4_0: Self = Self::new(2, 4, 0);
     pub const V2_4_10: Self = Self::new(2, 4, 10);
     pub const V2_4_20: Self = Self::new(2, 4, 20);
+    pub const V2_4_21: Self = Self::new(2, 4, 21);
 
     pub const fn new(major: u16, minor: u16, patch: u16) -> Self {
         Self {
@@ -74,6 +76,105 @@ fn manifest_versions(manifest: &str) -> Vec<KotlinVersion> {
             })
         })
         .collect()
+}
+
+/// Data recorded from kotlinc releases (an argument table, a feature table), kept only where it
+/// changes. Each record applies from its own release up to the next record, so a supported release
+/// with nothing new reads its predecessor's record and adding a release to the manifest needs no
+/// copy of unchanged data. The conformance tests compare every supported release's live kotlinc
+/// output with the record it reads, so an inherited record cannot hide a change.
+pub struct ReleaseRecords<T: 'static> {
+    records: &'static [(KotlinVersion, T)],
+}
+
+impl<T> ReleaseRecords<T> {
+    /// `records` in ascending release order.
+    pub const fn new(records: &'static [(KotlinVersion, T)]) -> Self {
+        Self { records }
+    }
+
+    /// The record a supported release reads; `None` for a release the manifest does not list.
+    pub fn get(&self, version: KotlinVersion) -> Option<&'static T> {
+        let records = self.records;
+        if !KotlinVersion::supported().contains(&version) {
+            return None;
+        }
+        records
+            .iter()
+            .rev()
+            .find(|(release, _)| *release <= version)
+            .map(|(_, record)| record)
+    }
+
+    /// The release whose record `version` reads.
+    pub fn recorded_release(&self, version: KotlinVersion) -> Option<KotlinVersion> {
+        let records = self.records;
+        self.get(version)?;
+        records
+            .iter()
+            .rev()
+            .map(|&(release, _)| release)
+            .find(|release| *release <= version)
+    }
+
+    pub fn records(&self) -> &'static [(KotlinVersion, T)] {
+        self.records
+    }
+
+    /// Every supported release reads a record, and every record belongs to a supported release, in
+    /// ascending order.
+    pub fn check(&self) -> Result<(), String> {
+        let supported = KotlinVersion::supported();
+        if self.records.first().map(|&(release, _)| release) != supported.first().copied() {
+            return Err(format!(
+                "the first record must be the oldest supported release {}",
+                supported[0]
+            ));
+        }
+        if !self.records.windows(2).all(|pair| pair[0].0 < pair[1].0) {
+            return Err("records are not in ascending release order".to_string());
+        }
+        match self
+            .records
+            .iter()
+            .find(|(release, _)| !supported.contains(release))
+        {
+            Some((release, _)) => Err(format!("{release} is not in the kotlin-versions manifest")),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The committed per-release file `version` reads, with the inheritance of [`ReleaseRecords`]: its
+/// own file when it has one, else the newest supported release below it that has one. `path_of`
+/// names a release's file. `None` when no release at or below `version` has a file.
+pub fn recorded_file(
+    version: KotlinVersion,
+    path_of: impl Fn(KotlinVersion) -> PathBuf,
+) -> Option<PathBuf> {
+    newest_file(version, true, path_of)
+}
+
+/// The file `version` would read if it had none of its own: the newest supported release below it
+/// that has one. A release records its own file only where it differs from this one.
+pub fn inherited_file(
+    version: KotlinVersion,
+    path_of: impl Fn(KotlinVersion) -> PathBuf,
+) -> Option<PathBuf> {
+    newest_file(version, false, path_of)
+}
+
+fn newest_file(
+    version: KotlinVersion,
+    inclusive: bool,
+    path_of: impl Fn(KotlinVersion) -> PathBuf,
+) -> Option<PathBuf> {
+    KotlinVersion::supported()
+        .into_iter()
+        .rev()
+        .filter(|release| *release < version || (inclusive && *release == version))
+        .map(path_of)
+        .find(|path| path.exists())
 }
 
 static TARGET: OnceLock<KotlinVersion> = OnceLock::new();
@@ -176,6 +277,25 @@ mod tests {
             manifest_versions("# c\n2.4.0 a\n\n2.4.10 b # note\n"),
             [KotlinVersion::V2_4_0, KotlinVersion::V2_4_10]
         );
+    }
+
+    #[test]
+    fn a_release_reads_the_newest_record_at_or_below_it() {
+        static RECORDS: ReleaseRecords<&str> = ReleaseRecords::new(&[
+            (KotlinVersion::V2_4_0, "first"),
+            (KotlinVersion::V2_4_20, "second"),
+        ]);
+        assert_eq!(RECORDS.check(), Ok(()));
+        assert_eq!(RECORDS.get(KotlinVersion::V2_4_0), Some(&"first"));
+        assert_eq!(RECORDS.get(KotlinVersion::V2_4_10), Some(&"first"));
+        assert_eq!(RECORDS.get(KotlinVersion::V2_4_20), Some(&"second"));
+        assert_eq!(RECORDS.get(KotlinVersion::newest()), Some(&"second"));
+        assert_eq!(
+            RECORDS.recorded_release(KotlinVersion::V2_4_10),
+            Some(KotlinVersion::V2_4_0)
+        );
+        assert_eq!(RECORDS.get(KotlinVersion::new(2, 4, 99)), None);
+        assert_eq!(RECORDS.get(KotlinVersion::new(2, 3, 0)), None);
     }
 
     #[test]

@@ -55,7 +55,7 @@ impl Checker<'_> {
 
     /// Whether callee formal `formal` is lexically in scope at `call`, and therefore names the
     /// enclosing declaration's fixed type in that call's checked types.
-    pub(super) fn lexically_fixed_at_call(&self, call: ExprId, formal: &str) -> bool {
+    fn lexically_fixed_at_call(&self, call: ExprId, formal: &str) -> bool {
         self.call_site_lexical_formals
             .get(&call)
             .is_some_and(|lexical| lexical.iter().any(|identity| identity == formal))
@@ -176,23 +176,30 @@ impl Checker<'_> {
             .cloned()
             .collect::<Vec<_>>();
         let unresolved_lambda_result = self
-            .value_lambda_formal_states
+            .open_lambda_result_call_formals
             .get(&expression)
-            .is_some_and(|state| state.open_result_occurs_in(signature.ret));
-        if self
-            .resolved_call_type_args
-            .get(&expression)
-            .is_some_and(|resolved| {
-                signature
-                    .formals
+            .is_some_and(|unbound| {
+                unbound
                     .iter()
-                    .enumerate()
-                    .filter(|(_, formal)| {
-                        ty_mentions_param(signature.ret, std::slice::from_ref(*formal))
-                    })
-                    .all(|(index, _)| resolved.get(index).is_some_and(Option::is_some))
+                    .any(|formal| ty_mentions_param(signature.ret, std::slice::from_ref(formal)))
+            });
+        let resolved = self.resolved_call_type_args.get(&expression);
+        // A recorded argument that is only a lambda result's open nested-call variable
+        // (`R := T` of `Mono.empty()`) is a dependency, not completion evidence.
+        let open_lambda_dependency = resolved.is_some_and(|resolved| {
+            resolved.iter().flatten().any(|argument| {
+                self.type_argument_depends_on_open_lambda_result(expression, *argument)
             })
-            && !unresolved_lambda_result
+        });
+        if resolved.is_some_and(|resolved| {
+            signature
+                .formals
+                .iter()
+                .enumerate()
+                .filter(|(_, formal)| ty_mentions_param(signature.ret, std::slice::from_ref(*formal)))
+                .all(|(index, _)| resolved.get(index).is_some_and(Option::is_some))
+        }) && !unresolved_lambda_result
+            && !open_lambda_dependency
             // Rechecking may have replaced a formerly contextual call with an expectation-free
             // probe. A retained type-argument record is not proof of completion when the current
             // semantic result again contains this callee's declaration variables; the enclosing
@@ -207,7 +214,8 @@ impl Checker<'_> {
         );
         (matches!(actual, Ty::Error)
             || ty_mentions_param(actual, &open_formals)
-            || unresolved_lambda_result)
+            || unresolved_lambda_result
+            || open_lambda_dependency)
             .then_some(signature)
             .or_else(|| (actual == provisional).then_some(signature))
     }

@@ -1,0 +1,13 @@
+[package]
+name = "krusty-plugin-host"
+version = "0.0.1"
+edition = "2021"
+description = "Runs kotlinc compiler-plugin jars for krusty in a JVM host, provisioning that JVM and kotlinc's jars on demand"
+license = "Apache-2.0"
+repository = "https://github.com/qnox/krusty"
+
+[dependencies]
+# Every jar and JDK archive the host runs on is checked against a pinned SHA-256 before use.
+sha2 = "0.11"
+# The Windows JDKs ship as zip archives; the Unix ones are tarballs that the system `tar` unpacks.
+zip = { version = "9", default-features = false, features = ["deflate"] }

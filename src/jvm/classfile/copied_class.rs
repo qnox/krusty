@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use super::constant_pool_queries::PoolLookup;
 use super::inner_classes::InnerClassTable;
-use super::method_rewrite::MethodIdentity;
+use super::method_rewrite::{BodyStage, MethodIdentity};
 use super::pool_layout::Unnamed;
 use super::{u2, ClassWriter, FieldInfo, MethodInfo};
 use crate::jvm::bytecode_passes::descriptors;
@@ -135,6 +135,7 @@ impl ClassWriter {
             stackmap: None,
             signature,
             lnt: Vec::new(),
+            source_map: None,
             lvt: Vec::new(),
             visible_anns,
             invisible_anns,
@@ -184,7 +185,7 @@ impl ClassWriter {
             identity,
             node.clone(),
             None,
-            false,
+            BodyStage::Emitted,
             &mut pool,
         );
         if let Some(optimized) = optimized {
@@ -209,6 +210,7 @@ impl ClassWriter {
             value_classes: &*self.value_classes,
             parameter_slots,
             post_coroutine: false,
+            kept_for_inlining: false,
         };
         let mut optimized = node.clone();
         match pipeline::optimize(&mut optimized, &context) {

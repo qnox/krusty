@@ -3,26 +3,24 @@
 //!
 //! Each `releases/<version>.language-versions.tsv` is the output of
 //! `scripts/kotlinc-arguments/DumpLanguageVersions.java` run against that release's
-//! `kotlin-compiler.jar`, in declaration order. Like the feature tables, every release has its own
-//! file, even when it equals another release's. Regenerate it with
+//! `kotlin-compiler.jar`, in declaration order. Like the feature tables, a release has a file only
+//! where its policy differs from the previous release's ([`ReleaseRecords`]). Regenerate one with
 //! `just kotlinc-arguments <version>`.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use crate::kotlin_version::KotlinVersion;
+use crate::kotlin_version::{KotlinVersion, ReleaseRecords};
 use crate::language_version::LanguageVersion;
 
-/// The version policies, by reference version.
-/// `every_supported_release_has_a_version_policy` keeps this list equal to the
-/// `kotlin-versions` manifest, and `every_release_reads_its_own_file` keeps each entry on the file
-/// named after its release.
+/// The version policies, by the release that first has each. `every_record_reads_its_own_file`
+/// keeps each entry on the file named after its release.
 macro_rules! releases {
     ($($version:ident => $file:literal),+ $(,)?) => {
-        const RELEASES: &[(KotlinVersion, &str)] = &[$((
+        static RELEASES: ReleaseRecords<&str> = ReleaseRecords::new(&[$((
             KotlinVersion::$version,
             include_str!(concat!("releases/", $file, ".language-versions.tsv")),
-        )),+];
+        )),+]);
         #[cfg(test)]
         const RELEASE_FILES: &[(KotlinVersion, &str)] = &[$((KotlinVersion::$version, $file)),+];
     };
@@ -30,15 +28,12 @@ macro_rules! releases {
 
 releases! {
     V2_4_0 => "2.4.0",
-    V2_4_10 => "2.4.10",
     V2_4_20 => "2.4.20",
 }
 
-/// The vendored policy text of one release, for comparison with a fresh dump.
+/// The vendored policy text a supported release reads, for comparison with a fresh dump.
 pub fn vendored_language_versions(version: KotlinVersion) -> Option<&'static str> {
-    RELEASES
-        .iter()
-        .find_map(|&(release, table)| (release == version).then_some(table))
+    RELEASES.get(version).copied()
 }
 
 /// What kotlinc says about one level, as a language version or as an API version.
@@ -113,9 +108,11 @@ impl LanguageVersionPolicy {
     /// The policy of one supported reference release.
     pub fn for_release(version: KotlinVersion) -> Option<&'static LanguageVersionPolicy> {
         static POLICIES: OnceLock<BTreeMap<KotlinVersion, LanguageVersionPolicy>> = OnceLock::new();
+        let recorded = RELEASES.recorded_release(version)?;
         POLICIES
             .get_or_init(|| {
                 RELEASES
+                    .records()
                     .iter()
                     .map(|&(version, table)| {
                         let parsed = Self::parse(table).unwrap_or_else(|error| {
@@ -125,7 +122,7 @@ impl LanguageVersionPolicy {
                     })
                     .collect()
             })
-            .get(&version)
+            .get(&recorded)
     }
 
     fn level(&self, version: LanguageVersion) -> Option<&Level> {
@@ -184,13 +181,7 @@ mod tests {
 
     #[test]
     fn every_supported_release_has_a_version_policy() {
-        assert_eq!(
-            RELEASES
-                .iter()
-                .map(|&(version, _)| version)
-                .collect::<Vec<_>>(),
-            KotlinVersion::supported()
-        );
+        assert_eq!(RELEASES.check(), Ok(()));
         for version in KotlinVersion::supported() {
             assert!(
                 LanguageVersionPolicy::for_release(version).is_some(),
@@ -223,10 +214,8 @@ mod tests {
         assert_eq!(older.language(LanguageVersion::V2_6), None);
     }
 
-    /// A release never reads another release's file, even one with the same bytes: a later refresh
-    /// of one release must not silently change another's policy.
     #[test]
-    fn every_release_reads_its_own_file() {
+    fn every_record_reads_its_own_file() {
         for &(version, file) in RELEASE_FILES {
             assert_eq!(file, version.to_string());
         }
@@ -234,7 +223,7 @@ mod tests {
 
     #[test]
     fn no_vendored_row_ends_in_whitespace() {
-        for &(version, table) in RELEASES {
+        for &(version, table) in RELEASES.records() {
             assert!(
                 table.lines().all(|line| line.trim_end() == line),
                 "kotlinc {version}"

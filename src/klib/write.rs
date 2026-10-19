@@ -413,11 +413,7 @@ mod tests {
     /// `-language-version <level> -Xmetadata-klib`, for every supported release and language level.
     #[test]
     fn the_stamp_follows_the_language_level_as_each_release_does() {
-        let releases = [
-            KotlinVersion::V2_4_0,
-            KotlinVersion::V2_4_10,
-            KotlinVersion::V2_4_20,
-        ];
+        let releases = KotlinVersion::supported();
         let languages = [
             LanguageVersion::V2_0,
             LanguageVersion::V2_1,
@@ -446,26 +442,42 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            stamps,
-            [
-                "2.4.0 2.0: abi_version=2.4.0 metadata_version=1.4.1",
-                "2.4.0 2.1: abi_version=2.4.0 metadata_version=1.4.1",
-                "2.4.0 2.2: abi_version=2.4.0 metadata_version=1.4.1",
-                "2.4.0 2.3: abi_version=2.4.0 metadata_version=2.3.0",
-                "2.4.0 2.4: abi_version=2.4.0 metadata_version=2.4.0",
-                "2.4.10 2.0: abi_version=2.4.0 metadata_version=1.4.1",
-                "2.4.10 2.1: abi_version=2.4.0 metadata_version=1.4.1",
-                "2.4.10 2.2: abi_version=2.4.0 metadata_version=1.4.1",
-                "2.4.10 2.3: abi_version=2.4.0 metadata_version=2.3.0",
-                "2.4.10 2.4: abi_version=2.4.0 metadata_version=2.4.0",
-                "2.4.20 2.0: abi_version=2.4.0 metadata_version=2.0.0",
-                "2.4.20 2.1: abi_version=2.4.0 metadata_version=2.1.0",
-                "2.4.20 2.2: abi_version=2.4.0 metadata_version=2.2.0",
-                "2.4.20 2.3: abi_version=2.4.0 metadata_version=2.3.0",
-                "2.4.20 2.4: abi_version=2.4.0 metadata_version=2.4.0",
-            ]
-        );
+        // Measured with kotlinc-native, recorded at the release where they change; a later release
+        // writes the stamps of the newest record at or below it.
+        let recorded: &[(KotlinVersion, [&str; 5])] = &[
+            (
+                KotlinVersion::V2_4_0,
+                [
+                    "2.0: abi_version=2.4.0 metadata_version=1.4.1",
+                    "2.1: abi_version=2.4.0 metadata_version=1.4.1",
+                    "2.2: abi_version=2.4.0 metadata_version=1.4.1",
+                    "2.3: abi_version=2.4.0 metadata_version=2.3.0",
+                    "2.4: abi_version=2.4.0 metadata_version=2.4.0",
+                ],
+            ),
+            (
+                KotlinVersion::V2_4_20,
+                [
+                    "2.0: abi_version=2.4.0 metadata_version=2.0.0",
+                    "2.1: abi_version=2.4.0 metadata_version=2.1.0",
+                    "2.2: abi_version=2.4.0 metadata_version=2.2.0",
+                    "2.3: abi_version=2.4.0 metadata_version=2.3.0",
+                    "2.4: abi_version=2.4.0 metadata_version=2.4.0",
+                ],
+            ),
+        ];
+        let expected = releases
+            .iter()
+            .flat_map(|&compiler| {
+                let (_, rows) = recorded
+                    .iter()
+                    .rev()
+                    .find(|(release, _)| *release <= compiler)
+                    .expect("a stamp record at or below every supported release");
+                rows.iter().map(move |row| format!("{compiler} {row}"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stamps, expected);
     }
 
     #[test]

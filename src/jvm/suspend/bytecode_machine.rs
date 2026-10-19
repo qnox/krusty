@@ -18,7 +18,10 @@
 
 use crate::fx_hash::HashSet;
 
-use super::cps::{spliced_inline_suspensions, TransformedMachine, TransformedSuspension};
+use super::cps::{
+    frame_suspensions, reified_host_lambda_suspensions, spliced_inline_suspensions,
+    TransformedMachine, TransformedSuspension,
+};
 use super::emission_facts::{ContinuationMetadata, MachineOutputs};
 use super::spill_layout::{suspension_points_in_order, SpillLayout};
 use super::{
@@ -71,10 +74,10 @@ pub(super) fn route(
     };
     let function = &ir.functions[fid as usize];
     let name = function.name.clone();
-    let declared_params = function.params.clone();
+    let declared_params = super::physical_parameters(ir, fid, &function.params);
     let unit_return = route.context.orig_rets[fid as usize] == Ty::Unit;
 
-    let fake_continuations = unintercepted_continuation_reads(ir, body);
+    let fake_continuations = fake_continuation_reads(ir, body, true);
     let completion = adopt_cps_signature(ir, fid);
     shift_locals(ir, body, completion);
     // `coroutineContext` is the context of the continuation kotlinc's transformer puts in place
@@ -118,6 +121,17 @@ pub(super) fn route(
     let class_owner = semantic_owner.or(static_owner);
     let owner = class_owner.map_or_else(|| route.facade.to_string(), |owner| owner.render());
     let continuation_class = name_continuation(ir, fid, &owner, class_owner, route.facade);
+    let machine = |suspensions| TransformedMachine {
+        continuation_class: continuation_class.clone(),
+        suspensions,
+        lambda: None,
+        fake_continuations: fake_continuations.clone(),
+    };
+    // A function only ever inlined is never called: no continuation class re-enters it.
+    if crate::jvm::suspend_inline_functions::keeps_marked_body(ir, fid) {
+        route.machines.record_transformed(fid, machine(suspensions));
+        return Routed::Taken;
+    }
     build_continuation_class(
         ir,
         &continuation_class,
@@ -128,18 +142,19 @@ pub(super) fn route(
         static_owner,
         &declared_params,
     );
+    // The continuation belongs to the method that carries the machine, `$completion` included: an
+    // overridable member's is the `$suspendImpl` its body moves to, which takes the receiver first.
     let function = &ir.functions[fid as usize];
-    // The continuation belongs to the method that carries the machine: an overridable member's is
-    // the `$suspendImpl` its body moves to, which takes the receiver first.
+    let cps_params = super::physical_parameters(ir, fid, &function.params);
     let (method, method_params) =
         match receiver.filter(|_| crate::jvm::suspend_impls::moves_to_suspend_impl(ir, fid)) {
             Some(owner) => (
                 crate::jvm::suspend_impls::suspend_impl_name(&name),
                 std::iter::once(Ty::obj_name(owner))
-                    .chain(function.params.iter().copied())
+                    .chain(cps_params)
                     .collect(),
             ),
-            None => (name, function.params.clone()),
+            None => (name, cps_params),
         };
     // The arrays the transformer computes replace these when the continuation class is written.
     route.outputs.continuation_metadata.insert(
@@ -157,15 +172,7 @@ pub(super) fn route(
             ..ContinuationMetadata::default()
         },
     );
-    route.machines.record_transformed(
-        fid,
-        TransformedMachine {
-            continuation_class,
-            suspensions,
-            lambda: None,
-            fake_continuations,
-        },
-    );
+    route.machines.record_transformed(fid, machine(suspensions));
     Routed::Taken
 }
 
@@ -228,7 +235,20 @@ pub(super) fn eligible_points(
     let function = &ir.functions[fid as usize];
     let top_level = function.is_static && function.dispatch_receiver.is_none();
     let suspend_set = route.suspend_set;
-    let points = suspension_points_in_order(ir, body, suspend_set);
+    // A suspension in a lambda the method inliner places for a reified classpath callee is one of
+    // this method's points once the lambda is inlined, in the order the frame runs them; any other
+    // spliced suspension declines below.
+    let placed = reified_host_lambda_suspensions(ir, body, suspend_set);
+    let points = match &placed {
+        Some(placed) if !placed.is_empty() => {
+            let own = suspension_points_in_order(ir, body, suspend_set);
+            frame_suspensions(ir, body, suspend_set)
+                .into_iter()
+                .filter(|point| own.contains(point) || placed.contains(point))
+                .collect()
+        }
+        _ => suspension_points_in_order(ir, body, suspend_set),
+    };
     // A class member: its machine stays in the member, or, for an overridable one, moves with its
     // body to `$suspendImpl`. An interface default is the same machine when one of its own
     // suspension points is a `super` call; the IR machine declines that invokespecial.
@@ -252,13 +272,13 @@ pub(super) fn eligible_points(
     // `suspendCoroutineUninterceptedOrReturn` block, which kotlinc realizes through a fake one.
     let body_declines: [(&dyn Fn() -> bool, &str); 2] = [
         (
-            &|| !spliced_inline_suspensions(ir, body, suspend_set).is_empty(),
+            &|| placed.is_none() && !spliced_inline_suspensions(ir, body, suspend_set).is_empty(),
             "suspends in a spliced inline body",
         ),
         (
             &|| match subject {
-                Subject::NamedFunction => reads_continuation_outside_unintercepted_blocks(ir, body),
-                Subject::SuspendLambda => reads_current_continuation(ir, body),
+                Subject::NamedFunction => reads_continuation_outside_fake_reads(ir, body, true),
+                Subject::SuspendLambda => reads_continuation_outside_fake_reads(ir, body, false),
             },
             "reads its own continuation",
         ),
@@ -267,7 +287,7 @@ pub(super) fn eligible_points(
     // `@DebugMetadata`. A named function with no suspension point has none of them, as kotlinc's
     // transformer returns before building them; a suspend lambda's `invokeSuspend` always has its
     // machine.
-    let machine_declines: [(&dyn Fn() -> bool, &str); 5] = [
+    let machine_declines: [(&dyn Fn() -> bool, &str); 4] = [
         (
             &|| !route.context.null_out_dead_spills,
             "no spill clean-up in the runtime",
@@ -275,10 +295,6 @@ pub(super) fn eligible_points(
         (
             &|| subject == Subject::NamedFunction && !(top_level || class_member),
             "not top-level or a class member",
-        ),
-        (
-            &|| subject == Subject::NamedFunction && ir.method_visibility(fid).is_private(),
-            "private",
         ),
         (
             &|| !ir.fn_decl_lines.contains_key(&fid),
@@ -289,8 +305,11 @@ pub(super) fn eligible_points(
             "an interface body",
         ),
     ];
+    // A function only ever inlined keeps its marked body and gets no machine at all.
+    let machineless =
+        points.is_empty() || crate::jvm::suspend_inline_functions::keeps_marked_body(ir, fid);
     let machine_declines: &[(&dyn Fn() -> bool, &str)] =
-        if points.is_empty() && subject == Subject::NamedFunction {
+        if machineless && subject == Subject::NamedFunction {
             &[]
         } else {
             &machine_declines
@@ -331,10 +350,24 @@ pub(super) fn eligible_points(
     Some(points)
 }
 
-/// Whether the body reads its own continuation outside a `suspendCoroutineUninterceptedOrReturn`
-/// block, the one read the transformer takes.
-fn reads_continuation_outside_unintercepted_blocks(ir: &IrFile, expression: ExprId) -> bool {
-    if ir.is_unintercepted_suspension(expression) {
+/// Whether `declaration` binds an inline suspend lambda's continuation operand to its
+/// `$completion`. kotlinc's inliner finds the fake continuation there, and its transformer puts the
+/// real one in its place.
+fn binds_inline_continuation_operand(ir: &IrFile, declaration: ExprId) -> bool {
+    ir.invocation_operand_bindings.contains(&declaration)
+        && matches!(
+            ir.exprs[declaration as usize],
+            IrExpr::Variable { init: Some(init), .. }
+                if matches!(ir.exprs[init as usize], IrExpr::CurrentContinuation)
+        )
+}
+
+/// Whether the body reads its own continuation where kotlinc has no fake one in its place: outside
+/// a `suspendCoroutineUninterceptedOrReturn` block and an inline suspend lambda's operands.
+fn reads_continuation_outside_fake_reads(ir: &IrFile, expression: ExprId, blocks: bool) -> bool {
+    if blocks && ir.is_unintercepted_suspension(expression)
+        || binds_inline_continuation_operand(ir, expression)
+    {
         return false;
     }
     if let IrExpr::CurrentContinuation = ir.exprs[expression as usize] {
@@ -342,36 +375,40 @@ fn reads_continuation_outside_unintercepted_blocks(ir: &IrFile, expression: Expr
     }
     let mut found = false;
     for_each_child(&ir.exprs, expression, &mut |child| {
-        found = found || reads_continuation_outside_unintercepted_blocks(ir, child);
+        found = found || reads_continuation_outside_fake_reads(ir, child, blocks);
     });
     found
 }
 
-/// The continuation reads inside the body's `suspendCoroutineUninterceptedOrReturn` blocks.
-fn unintercepted_continuation_reads(ir: &IrFile, body: ExprId) -> Vec<ExprId> {
-    fn collect(ir: &IrFile, expression: ExprId, inside: bool, reads: &mut Vec<ExprId>) {
-        let inside = inside || ir.is_unintercepted_suspension(expression);
+/// The continuation reads kotlinc realizes through a fake continuation: those inside the body's
+/// `suspendCoroutineUninterceptedOrReturn` blocks (`blocks`) and its inline suspend lambdas'
+/// continuation operands.
+pub(super) fn fake_continuation_reads(ir: &IrFile, body: ExprId, blocks: bool) -> Vec<ExprId> {
+    fn collect(
+        ir: &IrFile,
+        expression: ExprId,
+        inside: bool,
+        blocks: bool,
+        reads: &mut Vec<ExprId>,
+    ) {
+        let inside = inside || blocks && ir.is_unintercepted_suspension(expression);
         if inside && matches!(ir.exprs[expression as usize], IrExpr::CurrentContinuation) {
             reads.push(expression);
         }
+        if binds_inline_continuation_operand(ir, expression) {
+            if let IrExpr::Variable {
+                init: Some(init), ..
+            } = ir.exprs[expression as usize]
+            {
+                reads.push(init);
+            }
+            return;
+        }
         for_each_child(&ir.exprs, expression, &mut |child| {
-            collect(ir, child, inside, reads)
+            collect(ir, child, inside, blocks, reads)
         });
     }
     let mut reads = Vec::new();
-    collect(ir, body, false, &mut reads);
+    collect(ir, body, false, blocks, &mut reads);
     reads
-}
-
-/// Whether the body reads its own continuation (`suspendCoroutineUninterceptedOrReturn`), which
-/// kotlinc's transformer realizes through a fake continuation marker.
-fn reads_current_continuation(ir: &IrFile, expression: ExprId) -> bool {
-    if let IrExpr::CurrentContinuation = ir.exprs[expression as usize] {
-        return true;
-    }
-    let mut found = false;
-    for_each_child(&ir.exprs, expression, &mut |child| {
-        found = found || reads_current_continuation(ir, child);
-    });
-    found
 }

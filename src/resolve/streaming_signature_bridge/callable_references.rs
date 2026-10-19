@@ -342,12 +342,25 @@ impl ProductionSignatureSemantics<'_> {
                     )
                 })
                 .ok()?;
-            // Constructor selection has already specialized these parameters in the constructor
-            // signature's own identity space and published the classifier result through its
-            // positional coordinate boundary. Reopening the raw signature here and substituting
-            // classifier-owned keys cannot affect callable-owned formals and discards exactly that
-            // selection decision.
-            let declared = selected.declaration.params.clone();
+            let class = self.table.class_by_type_name(classifier)?;
+            let class_bindings = class
+                .type_params
+                .iter()
+                .cloned()
+                .zip(expansion.type_args().iter().copied())
+                .collect::<crate::symbol_resolver::GSigBinds>();
+            let declared = selected
+                .declaration
+                .generic_sig
+                .as_ref()
+                .map_or(selected.declaration.params.as_slice(), |signature| {
+                    signature.params.as_slice()
+                })
+                .iter()
+                .map(|parameter| {
+                    crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &class_bindings)
+                })
+                .collect::<Vec<_>>();
             (declared, selected.declaration.call_sig.clone())
         };
 

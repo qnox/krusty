@@ -86,7 +86,7 @@ pluginManagement {
 ```kotlin
 // build.gradle.kts
 plugins {
-    kotlin("jvm") version "2.4.20" // also supported: 2.4.0 and 2.4.10
+    kotlin("jvm") version "<kotlin>" // any release listed in kotlin-versions
     id("krusty") version "<version>"
 }
 ```

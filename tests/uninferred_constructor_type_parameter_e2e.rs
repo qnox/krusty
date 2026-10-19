@@ -120,6 +120,41 @@ fn a_rejected_dependency_constructor_does_not_publish_inference_evidence() {
     common::expect_identical_rejection(&result, "rejected dependency constructor evidence");
 }
 
+/// A sibling whose type argument is written fixes the open constructor's formal through the
+/// conditional's common supertype, as a statement and as a value, for `if` and `when`.
+#[test]
+fn a_written_sibling_completes_an_open_constructor_branch() {
+    common::expect_box_same_as_kotlinc(
+        r#"
+class D<T>(val n: Int)
+
+fun box(): String {
+    val flag = "".isEmpty()
+    if (flag) D(1) else D<String>(2)
+    val fromIf = if (flag) D(3) else D<String>(4)
+    val fromWhen = when (flag) { true -> D<String>(5); else -> D(6) }
+    return if (fromIf.n == 3 && fromWhen.n == 5) "OK" else "FAIL"
+}
+"#,
+        "WrittenSiblingConstructor",
+    );
+}
+
+/// A sibling that is not the constructor's class constrains nothing: kotlinc reports the open
+/// constructor branch alone.
+#[test]
+fn an_unrelated_sibling_leaves_the_constructor_branch_uninferred() {
+    let main = "class D<T>(val n: Int)\n\
+        class E<T>(val n: Int)\n\
+        fun box(flag: Boolean): String {\n\
+            val other = if (flag) D(1) else E<String>(2)\n\
+            val text = if (flag) D(3) else \"x\"\n\
+            return \"OK\"\n\
+        }\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", main)], &[]);
+    common::expect_identical_rejection(&result, "unrelated joined sibling");
+}
+
 /// A branch of a `when` with an `else` arm joins its siblings' inference even as a statement: the
 /// first arm fixes `TV`, so the bare `Buildee()` arm is accepted. An inner class of a generic class
 /// has no type parameter of its own to infer.
