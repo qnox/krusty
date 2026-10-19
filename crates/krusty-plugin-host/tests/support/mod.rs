@@ -28,8 +28,15 @@ pub fn start(runtime: &HostRuntime, env: &Environment) -> Host {
     Host::start(runtime, env, &mut std::io::stderr()).unwrap_or_else(|error| panic!("{error}"))
 }
 
-/// Compiles `sources` against `classpath` into `out` with the runtime's own kotlinc.
-pub fn kotlinc(runtime: &HostRuntime, classpath: &[PathBuf], out: &Path, sources: &[&Path]) {
+/// Compiles `sources` against `classpath` into `out` with the runtime's own kotlinc, passing it
+/// `arguments` too, such as `-Xplugin`.
+pub fn kotlinc(
+    runtime: &HostRuntime,
+    classpath: &[PathBuf],
+    out: &Path,
+    sources: &[&Path],
+    arguments: &[&std::ffi::OsStr],
+) {
     let compiler = std::env::join_paths(&runtime.compiler_classpath).unwrap();
     let output = std::process::Command::new(&runtime.java)
         .arg("-cp")
@@ -45,6 +52,7 @@ pub fn kotlinc(runtime: &HostRuntime, classpath: &[PathBuf], out: &Path, sources
         .arg(std::env::join_paths(classpath).unwrap())
         .arg("-d")
         .arg(out)
+        .args(arguments)
         .args(sources)
         .output()
         .unwrap();
