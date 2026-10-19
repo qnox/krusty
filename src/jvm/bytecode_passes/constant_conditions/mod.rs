@@ -22,7 +22,9 @@ mod interpreter;
 #[cfg(test)]
 mod tests;
 
-use super::analysis::{analyze, opcode, AnalyzerError, FrameView};
+use super::analysis::{
+    analyze_kept, opcode, AnalyzerError, AnalyzerOptions, FrameView, PlainFrames,
+};
 use super::opcodes::*;
 use crate::jvm::method_node::{Insn, LabelId, MethodNode, Node};
 use interpreter::{int_constant, ConstValue, ConstantPropagationInterpreter};
@@ -136,11 +138,19 @@ fn round(
     owner: &str,
     preserved_unreachable_labels: &mut BTreeSet<LabelId>,
 ) -> Result<bool, AnalyzerError> {
-    let frames = analyze(method, owner, &mut ConstantPropagationInterpreter)?;
+    // Only a jump's frame decides anything; every other node needs only to be known reached.
+    let frames = analyze_kept(
+        method,
+        owner,
+        &mut ConstantPropagationInterpreter,
+        &mut PlainFrames,
+        AnalyzerOptions::default(),
+        |_, node| matches!(node, Node::Insn(Insn::Jump { .. })),
+    )?;
     let mut changed = false;
     let mut nodes = Vec::with_capacity(method.nodes.len());
-    for (node, frame) in std::mem::take(&mut method.nodes).into_iter().zip(&frames) {
-        let Some(frame) = frame else {
+    for (at, node) in std::mem::take(&mut method.nodes).into_iter().enumerate() {
+        if !frames.is_reached(at) {
             if let Node::Label(label) = node {
                 preserved_unreachable_labels.insert(label);
                 nodes.push(node);
@@ -148,11 +158,12 @@ fn round(
                 changed = true;
             }
             continue;
-        };
+        }
         let Node::Insn(Insn::Jump { op, target }) = node else {
             nodes.push(node);
             continue;
         };
+        let frame = frames.get(at).expect("a reached jump keeps its frame");
         let Some(action) = rewrite(op, frame) else {
             nodes.push(node);
             continue;

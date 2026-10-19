@@ -14,7 +14,7 @@
 use crate::fx_hash::HashMap;
 
 use super::analysis::{
-    analyze_with, AnalyzerError, AnalyzerOptions, At, BasicInterpreter, BasicValue, Interpreter,
+    analyze_kept, AnalyzerError, AnalyzerOptions, At, BasicInterpreter, BasicValue, Interpreter,
     PlainFrames,
 };
 use super::dead_code;
@@ -161,22 +161,30 @@ pub(crate) fn eliminate(method: &mut MethodNode, owner: &str) -> Result<bool, An
         prune_exception_edges: true,
         ..AnalyzerOptions::default()
     };
-    let frames = analyze_with(method, owner, &mut interpreter, &mut PlainFrames, options)?;
+    let is_cast =
+        |_: usize, node: &Node| matches!(node, Node::Insn(Insn::Type { op: CHECKCAST, .. }));
+    let frames = analyze_kept(
+        method,
+        owner,
+        &mut interpreter,
+        &mut PlainFrames,
+        options,
+        is_cast,
+    )?;
     let redundant: Vec<bool> = method
         .nodes
         .iter()
-        .zip(&frames)
-        .map(|(node, frame)| match (node, frame) {
-            (
-                Node::Insn(Insn::Type {
-                    op: CHECKCAST,
-                    class,
-                }),
-                Some(frame),
-            ) => frame
-                .stack
-                .last()
-                .is_some_and(|top| is_redundant(class, top)),
+        .enumerate()
+        .map(|(at, node)| match node {
+            Node::Insn(Insn::Type {
+                op: CHECKCAST,
+                class,
+            }) => frames.get(at).is_some_and(|frame| {
+                frame
+                    .stack
+                    .last()
+                    .is_some_and(|top| is_redundant(class, top))
+            }),
             _ => false,
         })
         .collect();

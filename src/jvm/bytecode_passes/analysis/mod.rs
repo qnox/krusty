@@ -12,7 +12,7 @@ mod liveness;
 pub(crate) use basic_values::{intern_descriptor, merge_references, BasicInterpreter, BasicValue};
 pub(crate) use control_flow::ControlFlowGraph;
 pub(crate) use fast_analyzer::{
-    analyze, analyze_with, AnalyzerError, AnalyzerOptions, Executor, PlainFrames,
+    analyze, analyze_kept, analyze_with, AnalyzerError, AnalyzerOptions, Executor, PlainFrames,
 };
 pub(crate) use frame::{At, Frame, Interpreter, Value};
 pub(crate) use frame_store::{FrameView, Frames};
