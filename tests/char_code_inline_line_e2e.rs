@@ -80,3 +80,23 @@ fun captured(): Int {
     .expect("the reference kotlinc is provisioned")
     .unwrap_or_else(|why| panic!("{why}"));
 }
+
+/// A dependency's public `inline val` getter is inline only by its metadata accessor flag: its
+/// classfile method is public, so nothing but the decoded flag makes the provider publish it as
+/// inline. The call is then inlined like kotlinc's, and its end writes the line again, instead of
+/// an `invokestatic` of the getter.
+#[test]
+fn a_public_inline_getter_is_inlined_from_its_metadata_flag() {
+    common::class_bytes_diff_against_kotlinc(
+        "PublicInlineGetter",
+        &[(
+            "Lib.kt",
+            "package lib\n\npublic inline val Int.twice: Int get() = this * 2\n",
+        )],
+        "import lib.twice\n\nfun sum(c: Int, d: Int): Int {\n    return c + d.twice + 1\n}\n",
+        "PublicInlineGetterKt",
+        "sum",
+    )
+    .expect("the reference kotlinc is provisioned")
+    .unwrap_or_else(|why| panic!("{why}"));
+}

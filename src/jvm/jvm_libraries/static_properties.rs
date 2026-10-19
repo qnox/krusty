@@ -538,7 +538,7 @@ impl JvmLibraries {
         // compiler intrinsic may also have no callable public accessor (`coroutineContext`'s
         // private getter throws); the provider still publishes the semantic declaration and the
         // checker uses the realization.
-        let getter_inline = super::inline_capability::property_accessor_inline(
+        let getter_inline = super::inline_capability::property_getter_inline(
             mp.getter_inline,
             getter_method.public,
         );

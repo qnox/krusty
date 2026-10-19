@@ -15,10 +15,15 @@ pub(super) fn metadata_inline(
     )
 }
 
-/// A property accessor's inline-ness: its metadata `inline` flag, and a semantically visible Kotlin
-/// property whose exact classfile accessor is non-public is an inline body container, not a
-/// callable fallback.
-pub(super) fn property_accessor_inline(declared_inline: bool, bytecode_public: bool) -> InlineKind {
+/// A semantically visible Kotlin property whose exact classfile accessor is non-public is an inline
+/// body container, not a callable fallback.
+pub(super) fn property_accessor_inline(bytecode_public: bool) -> InlineKind {
+    InlineKind::from_flags(!bytecode_public, !bytecode_public)
+}
+
+/// A property getter's inline-ness: the metadata `inline` flag of its accessor word, which a
+/// public getter alone can carry, and the non-public accessor rule above.
+pub(super) fn property_getter_inline(declared_inline: bool, bytecode_public: bool) -> InlineKind {
     InlineKind::from_flags(declared_inline || !bytecode_public, !bytecode_public)
 }
 
@@ -41,16 +46,10 @@ mod tests {
     }
 
     #[test]
-    fn an_accessor_is_inline_by_its_metadata_flag_or_its_hidden_method() {
-        assert_eq!(property_accessor_inline(false, true), InlineKind::None);
-        assert_eq!(property_accessor_inline(true, true), InlineKind::CanInline);
-        assert_eq!(
-            property_accessor_inline(false, false),
-            InlineKind::MustInline
-        );
-        assert_eq!(
-            property_accessor_inline(true, false),
-            InlineKind::MustInline
-        );
+    fn a_getter_is_inline_by_its_metadata_flag_or_its_hidden_method() {
+        assert_eq!(property_getter_inline(false, true), InlineKind::None);
+        assert_eq!(property_getter_inline(true, true), InlineKind::CanInline);
+        assert_eq!(property_getter_inline(false, false), InlineKind::MustInline);
+        assert_eq!(property_getter_inline(true, false), InlineKind::MustInline);
     }
 }
