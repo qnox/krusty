@@ -16,7 +16,7 @@
 //! * [`abi`] — an ABI model carrying no method bodies, and its fingerprint. This is the artifact a
 //!   dependent compiles against and the hash every dependent's cache key folds in.
 //! * [`dependency_view`] — what a dependent compilation observes of a compiled class directory:
-//!   the conservative fingerprint the Build Tools API implementation keys a module's compile on.
+//!   the conservative fingerprint a dependent's compilation fingerprint takes of a class directory.
 //! * [`cache`] — the cache key. Every input that can change emitted bytes is in it by default.
 //! * [`store`] — the content-addressed artifact store. Its one job beyond lookup is integrity: a
 //!   partially written entry must never read as a hit.
@@ -37,8 +37,8 @@
 //! a process pool with crash isolation and interleaved diagnostics, and the sequential driver is
 //! its oracle: the same graph must produce the same artifacts either way.
 //!
-//! Only [`dependency_view`] is wired into the shipped CLI (`krusty dependency-fingerprint`); the
-//! rest builds and tests standalone.
+//! Only [`dependency_view`] and [`digest`] are wired into the shipped CLI (`krusty
+//! compilation-fingerprint`); the rest builds and tests standalone.
 //!
 //! # The property this all rests on
 //!
@@ -64,7 +64,7 @@ pub use abi::{
 };
 pub use cache::{CacheKey, CacheKeyInputs, FileDigest};
 pub use compiler::KrustyCli;
-pub use digest::{digest_bytes, Digest, Hasher};
+pub use digest::{digest_bytes, digest_file, Digest, Hasher};
 pub use driver::{BuildEnvironment, BuildReport, CompiledModule, Driver, Outcome, PublishedAbi};
 pub use gradle::{repository_plugin_project, GradleBuild, GradleError};
 pub use graph::{GraphError, ModuleGraph};

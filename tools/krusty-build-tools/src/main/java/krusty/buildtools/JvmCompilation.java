@@ -100,37 +100,31 @@ final class JvmCompilation implements JvmCompilationOperation, KrustyOperation<C
 
     @Override
     public CompilationResult execute(KotlinLogger logger) {
-        Path binary = configuration.binary();
+        List<String> command = command(configuration.binary());
         CompileAvoidance avoidance = null;
         String inputs = null;
         if (options.get(JvmCompilationOperation.INCREMENTAL_COMPILATION)
             instanceof JvmSnapshotBasedIncrementalCompilationConfiguration incremental) {
             avoidance = new CompileAvoidance(incremental.getWorkingDirectory(), destinationDirectory);
-            inputs = avoidance
-                .inputs(binary, configuration.kotlinVersion(), arguments.toArgumentStrings(), sources)
-                .orElse(null);
+            inputs = CompileAvoidance.inputs(command).orElse(null);
             if (inputs != null && avoidance.upToDate(inputs)) {
                 logger.info("krusty: inputs of " + destinationDirectory + " are unchanged; keeping its classes");
                 return CompilationResult.COMPILATION_SUCCESS;
             }
             avoidance.forget();
         }
-        CompilationResult result = compile(binary, logger);
+        CompilationResult result = compile(command, logger);
         // Recorded only when the inputs still match: one edited while krusty ran may or may not be
         // in its output, so that output must not stand for either version.
-        if (result == CompilationResult.COMPILATION_SUCCESS && inputs != null && inputs.equals(avoidance
-            .inputs(binary, configuration.kotlinVersion(), arguments.toArgumentStrings(), sources)
-            .orElse(null))) {
+        if (result == CompilationResult.COMPILATION_SUCCESS && inputs != null
+            && inputs.equals(CompileAvoidance.inputs(command).orElse(null))) {
             avoidance.record(inputs);
         }
         return result;
     }
 
-    private CompilationResult compile(Path binary, KotlinLogger logger) {
-        clearDestination();
-        if (sources.isEmpty()) {
-            return CompilationResult.COMPILATION_SUCCESS;
-        }
+    /** The krusty command line that compiles this source set. */
+    private List<String> command(Path binary) {
         List<String> command = new ArrayList<>();
         command.add(binary.toString());
         command.addAll(arguments.toArgumentStrings());
@@ -139,6 +133,14 @@ final class JvmCompilation implements JvmCompilationOperation, KrustyOperation<C
         command.add(destinationDirectory.toString());
         for (Path source : sources) {
             command.add(source.toString());
+        }
+        return command;
+    }
+
+    private CompilationResult compile(List<String> command, KotlinLogger logger) {
+        clearDestination();
+        if (sources.isEmpty()) {
+            return CompilationResult.COMPILATION_SUCCESS;
         }
         if (logger.isDebugEnabled()) {
             logger.debug("krusty command: " + String.join(" ", command));

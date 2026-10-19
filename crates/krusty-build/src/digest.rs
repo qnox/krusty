@@ -115,6 +115,21 @@ pub fn digest_bytes(bytes: &[u8]) -> Digest {
     Digest(state.finalize())
 }
 
+/// Digest a file's contents, read in bounded chunks so a large JDK image is never held whole.
+pub fn digest_file(path: &std::path::Path) -> std::io::Result<Digest> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut state = Sha256::default();
+    let mut buffer = vec![0; 1 << 16];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(Digest(state.finalize()));
+        }
+        state.update(&buffer[..read]);
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // SHA-256 (FIPS 180-4). Straightforward reference implementation; correctness is pinned by the
 // standard test vectors in this module's tests.

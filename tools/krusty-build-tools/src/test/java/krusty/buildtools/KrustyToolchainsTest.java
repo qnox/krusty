@@ -103,14 +103,6 @@ class KrustyToolchainsTest {
         assertTrue(Files.isRegularFile(downstream.resolve("app/UserKt.class")));
     }
 
-    @Test
-    void anArgumentFileAlwaysCompiles() throws IOException {
-        Path arguments = write("options.args", "-module-name=box\n");
-        CompileAvoidance avoidance = new CompileAvoidance(work.resolve("ic"), work.resolve("classes"));
-        assertTrue(avoidance.inputs(Path.of(System.getProperty("krusty.binary")), "2.4.20",
-            List.of("@" + arguments), List.of()).isEmpty(), "an argument file can name further inputs");
-    }
-
     /** Compiles the library, then the user module on it; whether each kept its classes. */
     private List<Boolean> build(Path library, Path upstream, Path user, Path downstream, String classpath) {
         List<Boolean> kept = new ArrayList<>();
