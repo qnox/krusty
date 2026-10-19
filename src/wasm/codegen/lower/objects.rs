@@ -1036,9 +1036,8 @@ pub(super) fn define_module_property_functions(
             ));
         }
 
-        let value = carrier(definition.entry.ty)?
-            .ok_or_else(|| "a `Unit` module member property".to_string())?;
-        let getter_ty = module.func_type(vec![REFERENCE], vec![value]);
+        let value = carrier(definition.entry.ty)?;
+        let getter_ty = module.func_type(vec![REFERENCE], value.into_iter().collect());
         let mut getter = Code::default();
         emit_module_property_getter(context, classes, runtime, *class, *property, &mut getter)?;
         module.define(
@@ -1051,6 +1050,8 @@ pub(super) fn define_module_property_functions(
         );
 
         if let Some(setter) = definition.entry.setter {
+            let value = value
+                .ok_or_else(|| "a mutable module member property with no Wasm value".to_string())?;
             let setter_ty = module.func_type(vec![REFERENCE, value], Vec::new());
             let mut body = Code::default();
             emit_module_property_setter(context, classes, runtime, *class, *property, &mut body)?;

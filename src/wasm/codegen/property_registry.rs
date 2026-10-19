@@ -114,6 +114,13 @@ impl PropertyRegistry {
         let mut referenced = ir.referenced_module_properties.iter().collect::<Vec<_>>();
         referenced.sort_by_key(|(property, _)| **property);
         for (&property, declaration) in referenced {
+            // Common IR may publish a module record for a same-file use too. Its local layout is
+            // authoritative here: only a property absent from that inventory needs a cross-file
+            // entry. In particular, local and anonymous classes cannot publish an entry another
+            // file can call, and the local-definition pass above deliberately skips them.
+            if ir.local_property_layouts.contains_key(&property) {
+                continue;
+            }
             let Some(owner) = declaration.owner else {
                 continue;
             };
