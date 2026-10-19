@@ -269,7 +269,9 @@ impl BodyLowering<'_> {
         if self.lowered_type(func) != Ty::Fun(signature) {
             return unsupported("an invocation of a nullable function value");
         }
-        if signature.params.len() != arity || signature.suspend || signature.context_count != 0 {
+        // A context or extension function type's parameters lead with its context parameters and
+        // receiver, as the function class's invocation takes them.
+        if signature.params.len() != arity || signature.suspend {
             return Err(mismatch(
                 "a function invocation's value has another shape than its function class",
             ));

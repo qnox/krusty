@@ -130,7 +130,10 @@ fn a_member_copy_of_another_class_than_its_selected_owner_declines() {
     let mut selected = libraries
         .external_callable(target)
         .expect("the provider realizes its own identity");
-    assert_eq!(selected.kind, crate::libraries::ExternalCallableKind::Member);
+    assert_eq!(
+        selected.kind,
+        crate::libraries::ExternalCallableKind::Member
+    );
     assert_eq!(
         selected.declaration_owner,
         Some(crate::types::SemanticCallableOwner::Classifier(type_name(
@@ -156,4 +159,34 @@ fn a_member_copy_of_another_class_than_its_selected_owner_declines() {
     assert!(ir.functions.is_empty());
 }
 
-
+#[test]
+fn a_context_function_value_is_invoked_with_its_context_arguments() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "context");
+    assert!(!symbols.callables.functions().is_empty());
+    for function in symbols.callables.functions() {
+        let target = function
+            .callable
+            .external_identity
+            .expect("a KLIB function carries its provider identity");
+        let selected = libraries
+            .external_callable(target)
+            .expect("the provider realizes its own identity");
+        let mut ir = IrFile::default();
+        let template = template(&mut ir, &libraries, &selected).unwrap_or_else(|decline| {
+            panic!("`context`/{}: {decline}", selected.callable.params.len())
+        });
+        let body = ir.functions[template.function as usize]
+            .body
+            .expect("a template has a body");
+        let invocations = ir
+            .exprs
+            .iter()
+            .filter(|expression| matches!(expression, IrExpr::InvokeFunction { .. }))
+            .count();
+        assert_eq!(invocations, 1, "{}", render(&ir, body));
+    }
+}
