@@ -125,6 +125,7 @@ mod explicit_property_write;
 mod explicit_receiver_levels;
 mod expression_qualifier_tree;
 mod expression_qualifiers;
+mod nested_type_aliases;
 use explicit_receiver_levels::{FunctionValueLevel, FunctionValueRungs};
 mod expression_getter;
 mod extension_receiver_uses;
@@ -13096,6 +13097,11 @@ impl<'a> Checker<'a> {
         if self.classifier_is_object(owner) {
             return None;
         }
+        let value_hidden = matches!(
+            self.file.expr(expression),
+            Expr::Member { receiver, .. }
+                if self.qualifier_value_is_hidden_by_type_arguments(*receiver)
+        );
         let is_entry = self.classifier_has_enum_entry(owner, name);
         if is_entry {
             self.record_enum_entry(expression, owner, name);
@@ -13132,6 +13138,8 @@ impl<'a> Checker<'a> {
                 property.kind == crate::libraries::PropKind::TopLevel && property.context_count == 0
             })
             .filter(|property| property.readable())
+            // A property read through the companion value needs that value as its receiver.
+            .filter(|property| !value_hidden || property.getter.singleton_dispatch.is_none())
             .cloned()
             .collect::<Vec<_>>();
         if properties
@@ -16252,38 +16260,29 @@ impl<'a> Checker<'a> {
                 // interpretation below (package callable, nested constructor, singleton member,
                 // classifier callable) consumes that same result; none may reopen the receiver AST
                 // or retry its root in another namespace.
-                let receiver_qualifier =
-                    self.qualifier(scope, QualifierInput::Expression(receiver));
-                let mut member_qualifier = receiver_qualifier.clone().and_then(|prefix| {
-                    let source = self.fed_source();
-                    walk_qualifier(&source, prefix, &[(Some(callee), name.clone())])
-                });
-                // A nested typealias is a declaration in the resolved classifier's TYPE namespace,
-                // but it is not itself a classifier edge for `walk_qualifier` to traverse. Apply the
-                // alias through the same semantic expansion used by type syntax, then feed its final
-                // classifier into the ordinary constructor selector. This is especially important
-                // for local classes: their runtime-hoisted identity cannot be reconstructed by
-                // appending the source alias spelling (`Local.Alias`). Only a receiver that the
-                // qualifier walk resolved to a package or classifier can own the alias: a receiver
-                // segment that cannot name a package keeps its unresolved-reference error.
-                let qualified_alias_target = if matches!(
-                    &receiver_qualifier,
-                    Ok(ResolvedQualifier::Package(_) | ResolvedQualifier::Classifier(_))
-                ) {
-                    let mut segments = Vec::new();
-                    qualifier_expression_segments(self.file, callee, &mut segments)
-                        .ok()
-                        .and_then(|()| {
-                            let qualified_name = segments
-                                .iter()
-                                .map(|(_, segment)| segment.as_str())
-                                .collect::<Vec<_>>()
-                                .join(".");
-                            self.scoped_source_alias_call_ty(scope, call, &qualified_name, expected)
-                        })
-                } else {
-                    None
+                let receiver_qualifier = self.resolve_recorded_qualifier(scope, receiver);
+                // The callee segment continues that receiver once. When it names a typealias (a
+                // top-level alias of a package, or one declared in the classifier's body), the step
+                // carries the selected alias declaration with the classifier it expands to; apply
+                // that declaration as the constructor call's type, then feed its classifier into
+                // the ordinary constructor selector.
+                let member_step = receiver_qualifier
+                    .clone()
+                    .and_then(|prefix| self.qualifier_step(prefix, Some(callee), &name));
+                let qualified_alias_target = match &member_step {
+                    Ok(expression_qualifiers::QualifierStep {
+                        alias: Some(alias), ..
+                    }) => Some(self.alias_constructor_call_ty(
+                        scope,
+                        call,
+                        &name,
+                        &alias.formals,
+                        alias.expansion,
+                        expected,
+                    )),
+                    _ => None,
                 };
+                let mut member_qualifier = member_step.map(|step| step.resolved);
                 if qualified_alias_target == Some(Ty::Error) {
                     return Ty::Error;
                 }
@@ -16803,12 +16802,16 @@ impl<'a> Checker<'a> {
                     }
                     // A classifier that denotes an object or companion is a VALUE receiver. Commit
                     // that identity and use the ordinary member/extension tower; a failed member is
-                    // final and cannot reinterpret the same classifier as a static namespace.
-                    match self.check_classifier_value_call(
-                        scope, call, callee, receiver, classifier, &name, args, expected,
-                    ) {
-                        ClassifierValueCall::Checked(ret) => return ret,
-                        ClassifierValueCall::NoValue => {}
+                    // final and cannot reinterpret the same classifier as a static namespace. A
+                    // qualifier with type arguments has no value receiver.
+                    let value_hidden = self.qualifier_value_is_hidden_by_type_arguments(receiver);
+                    if !value_hidden {
+                        match self.check_classifier_value_call(
+                            scope, call, callee, receiver, classifier, &name, args, expected,
+                        ) {
+                            ClassifierValueCall::Checked(ret) => return ret,
+                            ClassifierValueCall::NoValue => {}
+                        }
                     }
 
                     let explicit_type_args = self.explicit_call_type_args(scope, call);
@@ -16825,11 +16828,15 @@ impl<'a> Checker<'a> {
                         .iter()
                         .map(CallArgKind::ty)
                         .collect::<Vec<_>>();
-                    let candidates = self
-                        .resolver()
-                        .classifier_call_candidates(classifier, &name)
-                        .map(|(_, candidates)| candidates)
-                        .unwrap_or_default();
+                    let candidates = if value_hidden {
+                        self.resolver()
+                            .classifier_static_call_candidates(classifier, &name)
+                    } else {
+                        self.resolver()
+                            .classifier_call_candidates(classifier, &name)
+                            .map(|(_, candidates)| candidates)
+                    }
+                    .unwrap_or_default();
                     let rejected_candidates = candidates.clone();
                     if let Some(selected) = self
                         .select_callable_candidate(
@@ -22673,8 +22680,8 @@ impl<'a> Checker<'a> {
         // package, so there is no value to evaluate: the write is the declaring facade's `setX`
         // accessor, selected in that package's scope alone (a fully-qualified reference names one
         // declaration, so this file's imports must neither shadow nor widen it).
-        self.check_assignment_receiver_qualifier_tree(scope, receiver);
-        let receiver_qualifier = self.qualifier(scope, QualifierInput::Expression(receiver));
+        let receiver_qualifier = self.resolve_recorded_qualifier(scope, receiver);
+        self.check_assignment_receiver_qualifier_tree(receiver);
         if let Ok(ResolvedQualifier::Classifier(owner)) = receiver_qualifier {
             // Associated properties precede the members of the companion-object value.
             let associated =
@@ -23597,13 +23604,14 @@ mod tests {
 
     #[test]
     fn package_only_qualified_classifier_failure_reports_the_missing_tail() {
-        let result = walk_qualifier_namespace_facets(
+        let result = walk_qualifier_namespace_facets_with_binding_identity(
             &EmptySymbolSource,
             None,
             None,
             "kotlin",
             &[(None, "Missing".to_string())],
-        );
+        )
+        .map(|(resolved, _, _)| resolved);
 
         assert_eq!(
             result,
@@ -32920,6 +32928,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         discover_anonymous_captures: false,
         selected_qualifier_accesses: HashMap::default(),
         selector_operands: None,
+        bound_qualifier_segments: HashMap::default(),
         discovers_captures_at_construction: false,
         finalized_anonymous_captures: crate::fx_hash::HashSet::default(),
         discovered_anonymous_captures: HashMap::default(),
@@ -35683,6 +35692,9 @@ struct Checker<'a> {
         HashMap<ExprId, static_access_type_arguments::SelectedQualifierAccess>,
     /// How each expression of this file is used by its parent selector, indexed on first need.
     selector_operands: Option<expression_qualifier_tree::SelectorOperands>,
+    /// What each written segment of a resolved access receiver chain bound, recorded by the one
+    /// left-to-right walk of that chain for the checks and selections that consume it.
+    bound_qualifier_segments: HashMap<ExprId, expression_qualifiers::BoundQualifierSegment>,
     /// This authoritative check finds each anonymous object's captures where the object is
     /// constructed: its body is checked once for the captures, then again with them.
     discovers_captures_at_construction: bool,
@@ -45925,61 +45937,11 @@ impl<'a> Checker<'a> {
             }
         }
         // A qualified nested alias is selected from the SOURCE declaration of its already-resolved
-        // owner. The owner may be a hoisted local classifier whose runtime name bears no relation to
-        // the source path, so derive the alias identity from `ClassDecl::name`, never by appending to
-        // the runtime internal. Package-qualified and multiply nested owners use the same classifier
-        // walk; if the prefix is merely a package this branch declines to the file-scope logic below.
+        // owner; if the prefix is merely a package this declines to the file-scope logic below.
         if let Some(split) = name.rfind(['.', '/']) {
             let (owner_name, alias_tail) = name.split_at(split);
-            let alias = &alias_tail[1..];
             let owner = self.select_classifier(scope, owner_name).found()?;
-            if let Some(index) = self.resolved_index {
-                return index
-                    .type_alias_in_classifier(owner, alias)
-                    .map(|header| header.identity);
-            }
-            let signature = self.module.legacy_symbols()?.class_by_type_name(owner)?;
-            let declaration = if signature.source_file == self.file_index {
-                match self.active_declarations {
-                    Some(active) => active.class(self.file, signature.stable_declaration?)?.1,
-                    None => match self.file.decl(signature.source_decl?) {
-                        Decl::Class(declaration) => declaration,
-                        Decl::Fun(_) | Decl::Property(_) => return None,
-                    },
-                }
-            } else {
-                let source = self
-                    .source_files
-                    .and_then(|files| files.get(signature.source_file as usize))?;
-                match source.decl(signature.source_decl?) {
-                    Decl::Class(declaration) => declaration,
-                    Decl::Fun(_) | Decl::Property(_) => return None,
-                }
-            };
-            if !declaration
-                .type_aliases
-                .iter()
-                .any(|candidate| candidate.name == alias)
-            {
-                return None;
-            }
-            let package = if signature.source_file == self.file_index {
-                self.file.package.as_deref()
-            } else {
-                self.source_files
-                    .and_then(|files| files.get(signature.source_file as usize))?
-                    .package
-                    .as_deref()
-            }
-            .unwrap_or("")
-            .replace('.', "/");
-            let declaration_owner = declaration.name.replace('.', "/");
-            let identity = type_name(&if package.is_empty() {
-                format!("{declaration_owner}/{alias}")
-            } else {
-                format!("{package}/{declaration_owner}/{alias}")
-            });
-            return self.source_alias_declared(identity).then_some(identity);
+            return self.nested_source_alias_identity(owner, &alias_tail[1..]);
         }
         // Nested aliases occupy a lexical classifier rung, ahead of every package/import level.
         if let Some(identity) = self.lexical_source_alias_identity(name) {
@@ -46034,14 +45996,7 @@ impl<'a> Checker<'a> {
         name: &str,
     ) -> Option<TypeName> {
         self.scoped_source_alias_target(scope, name)
-            .and_then(|expansion| match expansion.non_null() {
-                // `Unit` has a distinct semantic expression-result representation, but it is still
-                // the `kotlin.Unit` object classifier in qualifier/value position. Preserve that
-                // classifier facet so an alias to Unit denotes the ordinary singleton value rather
-                // than becoming an unresolved bare name.
-                Ty::Unit => Some(type_name("kotlin/Unit")),
-                expansion => expansion.obj_internal(),
-            })
+            .and_then(expression_qualifiers::alias_expansion_classifier)
     }
 
     fn scoped_source_alias_target(&self, scope: &CheckerScope<'_>, name: &str) -> Option<Ty> {
@@ -53550,7 +53505,7 @@ impl<'a> Checker<'a> {
         });
         self.check_expression_usage(scope, e);
         self.check_static_access_type_arguments(e);
-        self.check_expression_qualifier_tree(scope, e);
+        self.check_expression_qualifier_tree(e);
         self.check_expression_missing_supertypes(e);
         self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();
@@ -58561,6 +58516,12 @@ impl<'a> Checker<'a> {
                     // declaration it names has not been typed YET — ask for it rather than reporting
                     // it unresolved.
                     ty
+                } else if self.names_root_package(e, &n) {
+                    self.diags.error(
+                        self.span(e),
+                        expression_qualifiers::EXPRESSION_EXPECTED_PACKAGE_FOUND.to_string(),
+                    );
+                    Ty::Error
                 } else {
                     self.diags
                         .error(self.span(e), format!("unresolved reference '{n}'."));
@@ -59064,7 +59025,13 @@ impl<'a> Checker<'a> {
             // The receiver prefix has one meaning for the complete member read. Classifier/static,
             // package-property and ordinary value handling below all consume this one scope-tower
             // decision instead of reopening the receiver expression for each possible terminal facet.
-            let receiver_qualifier = self.qualifier(scope, QualifierInput::Expression(receiver));
+            // The member segment continues it once; when that binds a qualifier too, the whole chain
+            // is a fully-qualified classifier path and the record keeps it for the chain's checks.
+            let receiver_qualifier = self.resolve_recorded_qualifier(scope, receiver);
+            let member_step = receiver_qualifier
+                .clone()
+                .and_then(|prefix| self.qualifier_step(prefix, Some(e), &name));
+            self.record_qualifier_continuation(e, receiver, member_step.as_ref().ok());
             // Library companion constants: `Int.MAX_VALUE`, `Double.NaN`, etc.
             if let Expr::Name(type_name) = self.file.expr(receiver).clone() {
                 if !matches!(receiver_qualifier, Ok(ResolvedQualifier::Value)) {
@@ -59181,28 +59148,16 @@ impl<'a> Checker<'a> {
             // enclosing position. This comes after the prefix-member lookup above because Kotlin has
             // separate classifier and value facets at a segment, with expression position choosing the
             // latter when both exist.
-            let member_qualifier = receiver_qualifier.clone().and_then(|prefix| {
-                let source = self.fed_source();
-                walk_qualifier_with_declaration_identity(
-                    &source,
-                    prefix,
-                    &[(Some(e), name.clone())],
-                )
-            });
-            if let Ok((ResolvedQualifier::Classifier(internal), declaration)) = member_qualifier {
+            if let Ok(expression_qualifiers::QualifierStep {
+                resolved: ResolvedQualifier::Classifier(internal),
+                alias,
+            }) = &member_step
+            {
+                let (internal, alias) = (*internal, alias.is_some());
                 if self.reject_inaccessible_classifier_expression(e, internal) {
                     return self.set(e, Ty::Error);
                 }
-                let Ok(selected_alias) =
-                    self.selected_provider_alias(internal, declaration.as_ref())
-                else {
-                    self.diags.error(
-                        self.member_name_span(e, &name),
-                        crate::diagnostic_wording::unresolved_reference_on(&name, None),
-                    );
-                    return self.set(e, Ty::Error);
-                };
-                if let Some(ty) = self.classifier_value_ty(e, internal, selected_alias.is_some()) {
+                if let Some(ty) = self.classifier_value_ty(e, internal, alias) {
                     return self.set(e, ty);
                 }
             }
@@ -59210,18 +59165,28 @@ impl<'a> Checker<'a> {
             // facet: the prefix is a pure qualifier, so the miss is this segment's. kotlinc reports
             // the segment (`Thread.Missing.x` is unresolved at `Missing`); reading the qualifier as
             // a value would instead blame its root, which did resolve.
+            // A classifier qualifier with type arguments has no value facet either.
             let pure_qualifier = match receiver_qualifier {
                 Ok(ResolvedQualifier::Package(_)) => true,
                 Ok(ResolvedQualifier::Classifier(owner)) => {
                     self.classifier_singleton_value(owner).is_none()
+                        || self.qualifier_value_is_hidden_by_type_arguments(receiver)
                 }
                 Ok(ResolvedQualifier::Value) | Err(_) => false,
             };
             if pure_qualifier {
-                self.diags.error(
-                    self.member_name_span(e, &name),
-                    crate::diagnostic_wording::unresolved_reference_on(&name, None),
-                );
+                let message = if matches!(
+                    member_step,
+                    Ok(expression_qualifiers::QualifierStep {
+                        resolved: ResolvedQualifier::Package(_),
+                        ..
+                    })
+                ) {
+                    expression_qualifiers::EXPRESSION_EXPECTED_PACKAGE_FOUND.to_string()
+                } else {
+                    crate::diagnostic_wording::unresolved_reference_on(&name, None)
+                };
+                self.diags.error(self.member_name_span(e, &name), message);
                 return self.set(e, Ty::Error);
             }
             let diag_mark = self.diags.diags.len();
@@ -61373,7 +61338,9 @@ impl<'a> Checker<'a> {
                     // the member name. Or the expression is valid but its TYPE could not be
                     // resolved (a parameter declared with an unresolved classifier): the member
                     // cannot be looked up, so kotlinc reports the NAME as unresolved.
-                    if !self.error_receiver_expression_flavored(scope, r, diag_mark) {
+                    if !self.error_receiver_expression_flavored(scope, r, diag_mark)
+                        || self.package_lhs_lacks_callable(r, &name)
+                    {
                         self.report_unresolved_callable_reference(e, &name);
                     }
                     return self.set(e, Ty::Error);

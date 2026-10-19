@@ -14079,10 +14079,39 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
       parentheses) reports "type arguments are not allowed for packages." on that receiver
       (`FirTypeArgumentsNotAllowedExpressionChecker`); a class literal is not a qualified access.
       With the feature no package carries type arguments.
-    - Not modelled yet: a classifier qualifier with inherited type arguments used as a value
-      receiver (`pkg.Outer<Int>.O.z` leaves `z` unresolved in kotlinc), a callable reference whose
-      package receiver has type arguments ("expression expected, but package name found."), and
-      the constructor-call deprecation for a qualifier with type arguments.
+    - A classifier qualifier whose FIR type arguments are non-empty (its own list, or one inherited
+      from an outer classifier) supplies no object or companion VALUE receiver
+      (`FirTowerResolveTask.runResolverForQualifierReceiver` resolves through the qualifier's value
+      only when `typeArguments` is empty): `pkg.Outer<Int>.O.z`, `pkg.Outer<Int>.O.f()` and
+      `pkg.Outer<Int>.Nested.w` (a companion member) report "unresolved reference '<name>'." at
+      the member, while the static scope still answers (`pkg.Outer<Int>.En.A`, `En.values()`).
+      The resolver reads the type-argument fact from the receiver chain's recorded segments.
+    - `FirGenericQualifierOnConstructorCallChecker`: a call that selected the constructor of a
+      class that is not `inner` through an explicit receiver qualifier with FIR type arguments
+      (`pkg.sub<Int>.Cls()`, `pkg.sub<Int>.Alias()`, `pkg.Outer<Int>.Nested.Deep()`) reports
+      "usage of a qualifier with type arguments to call nested class constructor is deprecated. The
+      type arguments must be removed." (an error in every 2.4 release) at the qualifier's own
+      type-argument list, or at the qualifier when its arguments are inherited. A package that
+      continues a package with type arguments carries none (`pkg<Int>.sub.Cls()`).
+  - A package qualifier used as an expression reports "expression expected, but package name
+    found." at its last segment (`FirStandaloneQualifierChecker`, in every release): `val p =
+    pkg.sub`, `val k = kotlin`, `(pkg.sub)`, an argument `f(pkg.sub)`, and the left-hand side of a
+    callable reference (`pkg.sub::f`, `pkg.sub<Int>::f`), which is standalone because kotlinc's
+    checker context does not visit a callable reference as a qualified access
+    (`AbstractDiagnosticCollectorVisitor` has no `visitCallableReferenceAccess`). The reference is
+    still resolved in the package's callable scope (`PackageQualifierReceiver`), so a name with no
+    top-level function or property and no class constructor there is also "unresolved reference
+    '<name>'." (`pkg<Int>::sub`, `pkg.sub::Obj`). A segment that cannot name a package keeps its
+    unresolved-reference error instead.
+    (`tests/package_qualifier_forms_e2e.rs`.)
+  - The receiver chain of a call, property access, assignment, callable reference or class literal
+    is resolved by one left-to-right walk (`src/resolve/expression_qualifiers.rs`), which records
+    what each written segment bound (package or classifier, its FIR type-argument fact, whether it
+    names a typealias). The member segment of an access continues that walk by one step; a
+    typealias it names, top-level or declared in the owner classifier's body (including a local
+    class's), is carried as the selected alias declaration together with the classifier it
+    expands to, and a constructor call through it applies that declaration. The qualifier checks
+    above build their tree from those records and never resolve a prefix again.
   - `ErrorAboutDataClassCopyVisibilityChange`: a `data class` whose primary constructor is not
     public is reported at the constructor's visibility modifier unless it is annotated
     `@ConsistentCopyVisibility` or `@ExposedCopyVisibility`, and a call or callable reference to its

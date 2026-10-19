@@ -1,6 +1,7 @@
 //! The classifier type named by a callable-reference or class-literal LHS (`Outer<A>.Inner<B>::m`),
 //! with the applied type preserved at every nested edge.
 
+use super::expression_qualifiers::QualifierBinding;
 use super::*;
 
 impl Checker<'_> {
@@ -101,11 +102,26 @@ impl Checker<'_> {
     /// at every nested edge. Unlike the general qualifier probe, this understands `::` as an inner
     /// classifier separator, but only while the enclosing callable-reference/class-literal syntax
     /// owns the interpretation.
+    ///
+    /// The walk records what each written segment bound, for the checks of the qualifier chain.
     pub(super) fn callable_ref_lhs_classifier_type(
         &mut self,
         scope: &CheckerScope<'_>,
         expression: ExprId,
         diagnostic_site: ExprId,
+    ) -> Result<Option<(TypeName, Ty, bool)>, QualifierError> {
+        let mut bound = Vec::new();
+        let resolved = self.walk_callable_ref_lhs(scope, expression, diagnostic_site, &mut bound);
+        self.record_qualifier_chain(expression, bound);
+        resolved
+    }
+
+    fn walk_callable_ref_lhs(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        diagnostic_site: ExprId,
+        bound: &mut Vec<(ExprId, QualifierBinding, bool)>,
     ) -> Result<Option<(TypeName, Ty, bool)>, QualifierError> {
         let mut segments = Vec::new();
         callable_ref_lhs_classifier_segments(self.file, expression, &mut segments)?;
@@ -150,6 +166,9 @@ impl Checker<'_> {
             }
         };
 
+        if let Some(binding) = QualifierBinding::of(prefix) {
+            bound.push((*root_expression, binding, root_alias.is_some()));
+        }
         let (mut applied_parent, mut final_class_literal_arguments_checked) =
             match (prefix, root_alias) {
                 (ResolvedQualifier::Classifier(internal), alias) => {
@@ -230,6 +249,9 @@ impl Checker<'_> {
                 }
             };
             prefix = next_prefix;
+            if let Some(binding) = QualifierBinding::of(prefix) {
+                bound.push((*segment_expression, binding, selected_alias.is_some()));
+            }
             let (next_applied, checked) = match prefix {
                 ResolvedQualifier::Classifier(internal) => {
                     let (applied, checked) = self.applied_callable_ref_classifier(
@@ -387,6 +409,34 @@ impl Checker<'_> {
             ),
             class_literal_arguments_checked,
         )
+    }
+
+    /// Whether the left-hand side `lhs`, which the walk bound to a package, has no callable named
+    /// `name`. kotlinc reports the package used as an expression and still resolves the reference
+    /// in the package's callable scope (`PackageQualifierReceiver`): a top-level function or
+    /// property, or the constructor of a class.
+    pub(super) fn package_lhs_lacks_callable(&self, lhs: ExprId, name: &str) -> bool {
+        let Some(QualifierBinding::Package(package)) = self
+            .bound_qualifier_segment(lhs)
+            .map(|segment| segment.binding)
+        else {
+            return false;
+        };
+        let resolver = self.resolver_in_scope(std::slice::from_ref(&package));
+        if !resolver.top_level_candidates(name).is_empty()
+            || !resolver.top_level_properties(name).is_empty()
+        {
+            return false;
+        }
+        let record = self.fed_source().symbols(
+            crate::symbol_source::SymbolNamespace::Package(package),
+            name,
+        );
+        !record.classifier_name.is_some_and(|classifier| {
+            self.resolver()
+                .classifier(classifier)
+                .is_some_and(|classifier| !classifier.constructors.is_empty())
+        })
     }
 
     pub(super) fn has_type_arguments(&self, expression: ExprId) -> bool {

@@ -21,6 +21,7 @@ mod callable_shapes;
 mod candidate_access;
 mod classifier_associated;
 mod classifier_scope;
+mod classifier_static_scope;
 
 pub(crate) use classifier_scope::{
     classifier_candidates_at_import_level, classifier_precedence_levels,
@@ -1791,57 +1792,7 @@ impl<'a> SymbolResolver<'a> {
                 candidates.extend(self.implicit_classifier_callable_candidates(internal, name));
                 candidates
             }
-            None => {
-                let classifier = self.src.classifier(internal)?;
-                // Associated declarations are an earlier rung of their own; see
-                // `classifier_associated_callables`.
-                let mut candidates = classifier
-                    .classifier_callables(internal)
-                    .into_iter()
-                    .filter(|member| member.name == name && member.associated_classifier.is_none())
-                    .map(|member| FunctionInfo::classifier_member(FnKind::Member, internal, member))
-                    .collect::<Vec<_>>();
-                if candidates.is_empty() && self.lib.inherits_classifier_callables(internal) {
-                    let mut seen = crate::fx_hash::HashSet::from_iter([internal]);
-                    let mut frontier = direct_supertypes(&self.src, Ty::obj_name(internal));
-                    let mut rank = 1;
-                    while !frontier.is_empty() {
-                        let mut next = Vec::new();
-                        for current in frontier {
-                            let Some(owner) = current.kotlin_class_internal() else {
-                                continue;
-                            };
-                            if !seen.insert(owner) {
-                                continue;
-                            }
-                            if let Some(classifier) = self.src.classifier(owner) {
-                                candidates.extend(
-                                    classifier
-                                        .classifier_callables(owner)
-                                        .into_iter()
-                                        .filter(|member| member.name == name)
-                                        .map(|member| {
-                                            let mut candidate = FunctionInfo::classifier_member(
-                                                FnKind::Member,
-                                                owner,
-                                                member,
-                                            );
-                                            candidate.receiver_rank = rank;
-                                            candidate
-                                        }),
-                                );
-                                next.extend(direct_supertypes(&self.src, current));
-                            }
-                        }
-                        if !candidates.is_empty() {
-                            break;
-                        }
-                        frontier = next;
-                        rank += 1;
-                    }
-                }
-                candidates
-            }
+            None => self.classifier_static_call_candidates(internal, name)?,
         };
         Some((
             receiver.unwrap_or_else(|| Ty::obj_name(internal)),

@@ -2299,3 +2299,26 @@ fn a_pure_qualifier_prefix_reports_its_missing_segment() {
         &[],
     );
 }
+
+#[test]
+fn qualified_nested_alias_constructors_continue_their_resolved_owner() {
+    let src = r#"
+package nested.aliases
+
+class Outer {
+    class Mid {
+        class Leaf(val value: String)
+        typealias LeafAlias = Leaf
+    }
+    class Box<T>(val value: T)
+    typealias BoxAlias<T> = Box<T>
+}
+
+fun box(): String {
+    val a = Outer.Mid.LeafAlias("O").value
+    val b = nested.aliases.Outer.BoxAlias<String>("K").value
+    return a + b
+}
+"#;
+    assert_accepted_and_runs(src, "ResolverQualifiedNestedAliasConstructors");
+}

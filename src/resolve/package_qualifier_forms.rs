@@ -30,44 +30,6 @@ pub(super) fn segment_cannot_name_a_package(file: &File, expression: ExprId) -> 
             || file.call_type_args.contains_key(&expression.0))
 }
 
-/// The first written segment that may not bind as a package.
-pub(super) fn first_segment_that_cannot_name_a_package(
-    file: &File,
-    segments: &[(Option<ExprId>, String)],
-) -> Option<usize> {
-    segments.iter().position(|(expression, _)| {
-        expression.is_some_and(|expression| segment_cannot_name_a_package(file, expression))
-    })
-}
-
-/// Walk the segments after a package root, failing at `barrier` (an index into the complete
-/// `segments`, root included) when that segment would bind a package. The walk is the ordinary
-/// left-to-right one; the barrier only removes the package facet of one written segment.
-pub(super) fn walk_package_root_with_barrier<S: crate::symbol_source::SymbolSource + ?Sized>(
-    source: &S,
-    root_expression: Option<ExprId>,
-    root_name: &str,
-    segments: &[(Option<ExprId>, String)],
-    barrier: usize,
-) -> Result<ResolvedQualifier, QualifierError> {
-    debug_assert!(barrier >= 1, "a root barrier is applied before the walk");
-    let prefix = walk_qualifier_namespace_facets(
-        source,
-        None,
-        root_expression,
-        root_name,
-        &segments[1..=barrier],
-    )?;
-    if let ResolvedQualifier::Package(_) = prefix {
-        let (expression, name) = &segments[barrier];
-        return Err(QualifierError::UnresolvedSegment {
-            expression: *expression,
-            name: name.clone(),
-        });
-    }
-    walk_qualifier(source, prefix, &segments[barrier + 1..])
-}
-
 /// A written form that the checker reports on a package qualifier.
 #[derive(Clone, Copy)]
 enum PackageForm {

@@ -17,24 +17,12 @@
 //!
 //! Only the last qualifier and its chain of explicit parents stay in the checked tree. The tree is
 //! built once, at the expression that consumes the chain: the access whose explicit receiver it
-//! is, or the chain itself when it is a value.
+//! is, or the chain itself when it is a value. It is built from what the resolution of that access
+//! recorded for each written segment ([`BoundQualifierSegment`]); it never walks the chain again.
 
+use super::expression_qualifiers::BoundQualifierSegment;
+pub(super) use super::expression_qualifiers::QualifierBinding;
 use super::*;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum QualifierBinding {
-    Package(TypeName),
-    Classifier(TypeName),
-}
-
-impl QualifierBinding {
-    fn resolved(self) -> ResolvedQualifier {
-        match self {
-            Self::Package(package) => ResolvedQualifier::Package(package),
-            Self::Classifier(internal) => ResolvedQualifier::Classifier(internal),
-        }
-    }
-}
 
 /// One FIR resolved qualifier.
 #[derive(Clone, Copy, Debug)]
@@ -73,8 +61,8 @@ pub(super) struct QualifierTree {
 /// A classifier that the last segment selects as a value.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct SelectedQualifierValue {
-    /// The typealias the segment names, when it names one.
-    pub(super) alias: Option<TypeName>,
+    /// The segment names a typealias.
+    pub(super) alias: bool,
 }
 
 impl QualifierTree {
@@ -155,15 +143,11 @@ impl SelectorOperands {
 
 impl Checker<'_> {
     /// Check the qualifier chain that `expression` consumes, or that `expression` is.
-    pub(super) fn check_expression_qualifier_tree(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-    ) {
-        let (chain, consumer) = match self.file.expr(expression) {
-            Expr::Member { .. } => (expression, None),
+    pub(super) fn check_expression_qualifier_tree(&mut self, expression: ExprId) {
+        let (chain, consumer, call) = match self.file.expr(expression) {
+            Expr::Member { .. } => (expression, None, None),
             Expr::SafeCall { receiver, .. } => {
-                (*receiver, Some(QualifierConsumer::QualifiedAccess))
+                (*receiver, Some(QualifierConsumer::QualifiedAccess), None)
             }
             Expr::CallableRef {
                 receiver: Some(receiver),
@@ -174,12 +158,14 @@ impl Checker<'_> {
                 } else {
                     QualifierConsumer::QualifiedAccess
                 };
-                (*receiver, Some(consumer))
+                (*receiver, Some(consumer), None)
             }
             Expr::Call { callee, .. } => match self.file.expr(*callee) {
-                Expr::Member { receiver, .. } => {
-                    (*receiver, Some(QualifierConsumer::QualifiedAccess))
-                }
+                Expr::Member { receiver, .. } => (
+                    *receiver,
+                    Some(QualifierConsumer::QualifiedAccess),
+                    Some(expression),
+                ),
                 _ => return,
             },
             _ => return,
@@ -201,10 +187,7 @@ impl Checker<'_> {
                     return;
                 }
                 let is_receiver = operands.receivers.contains(&expression);
-                if matches!(
-                    self.qualifier(scope, QualifierInput::Expression(expression)),
-                    Ok(ResolvedQualifier::Package(_) | ResolvedQualifier::Classifier(_))
-                ) {
+                if self.bound_qualifier_segment(expression).is_some() {
                     if is_receiver {
                         // The access through this qualifier builds its tree.
                         return;
@@ -215,30 +198,30 @@ impl Checker<'_> {
                 }
             }
         };
-        self.check_qualifier_chain(scope, chain, consumer);
+        self.check_qualifier_chain(chain, consumer, call);
     }
 
     /// The receiver of `receiver.name = value`, when it is a qualifier.
-    pub(super) fn check_assignment_receiver_qualifier_tree(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        receiver: ExprId,
-    ) {
+    pub(super) fn check_assignment_receiver_qualifier_tree(&mut self, receiver: ExprId) {
         if self.discover_anonymous_captures || !self.chain_has_qualifier_syntax(receiver) {
             return;
         }
-        self.check_qualifier_chain(scope, receiver, QualifierConsumer::QualifiedAccess);
+        self.check_qualifier_chain(receiver, QualifierConsumer::QualifiedAccess, None);
     }
 
+    /// `call` is the function call whose explicit receiver the chain is.
     fn check_qualifier_chain(
         &mut self,
-        scope: &CheckerScope<'_>,
         chain: ExprId,
         consumer: QualifierConsumer,
+        call: Option<ExprId>,
     ) {
-        let Some(tree) = self.qualifier_tree(scope, chain, consumer) else {
+        let Some(tree) = self.qualifier_tree(chain, consumer) else {
             return;
         };
+        if let Some(call) = call {
+            self.check_generic_qualifier_on_constructor_call(&tree, call);
+        }
         self.check_outer_class_type_arguments(&tree);
         if consumer == QualifierConsumer::QualifiedAccess {
             self.check_package_receiver_type_arguments(&tree);
@@ -270,32 +253,21 @@ impl Checker<'_> {
             .get_or_insert_with(|| SelectorOperands::of(file))
     }
 
-    /// The FIR qualifiers of `chain`, or `None` when one of its prefixes is not a package or a
-    /// classifier (a value, or an error the walk reports elsewhere).
-    fn qualifier_tree(
-        &self,
-        scope: &CheckerScope<'_>,
-        chain: ExprId,
-        consumer: QualifierConsumer,
-    ) -> Option<QualifierTree> {
+    /// The FIR qualifiers of `chain`, from the qualifier its resolution recorded for each written
+    /// segment, or `None` when a segment has none (a value, or an error reported elsewhere).
+    fn qualifier_tree(&self, chain: ExprId, consumer: QualifierConsumer) -> Option<QualifierTree> {
         let mut segments = Vec::new();
         qualifier_expression_segments(self.file, chain, &mut segments).ok()?;
         let mut nodes: Vec<QualifierNode> = Vec::with_capacity(segments.len());
         let mut value = None;
-        for (index, (expression, name)) in segments.iter().enumerate() {
+        for (index, (expression, _)) in segments.iter().enumerate() {
             let expression = (*expression)?;
-            let binding = match self.qualifier(scope, QualifierInput::Expression(expression)) {
-                Ok(ResolvedQualifier::Package(package)) => QualifierBinding::Package(package),
-                Ok(ResolvedQualifier::Classifier(internal)) => {
-                    QualifierBinding::Classifier(internal)
-                }
-                Ok(ResolvedQualifier::Value) | Err(_) => return None,
-            };
+            let bound = self.bound_qualifier_segment(expression)?;
             let own_type_arguments = self.file.call_type_args.contains_key(&expression.0);
             let Some(previous) = nodes.last().copied() else {
                 nodes.push(QualifierNode {
                     expression,
-                    binding,
+                    binding: bound.binding,
                     has_type_arguments: own_type_arguments,
                     outer_class_type_arguments: 0,
                     has_explicit_parent: false,
@@ -304,13 +276,13 @@ impl Checker<'_> {
             };
             let selected_value = (index + 1 == segments.len()
                 && consumer == QualifierConsumer::Standalone)
-                .then(|| self.selected_qualifier_value(previous.binding, binding, expression, name))
+                .then(|| self.selected_qualifier_value(bound))
                 .flatten();
             let node = if let Some(selected) = selected_value {
                 value = Some(selected);
                 QualifierNode {
                     expression,
-                    binding,
+                    binding: bound.binding,
                     has_type_arguments: own_type_arguments,
                     outer_class_type_arguments: previous.outer_class_type_arguments,
                     has_explicit_parent: true,
@@ -319,13 +291,12 @@ impl Checker<'_> {
                 let nested = matches!(previous.binding, QualifierBinding::Classifier(_));
                 QualifierNode {
                     expression,
-                    binding,
-                    has_type_arguments: own_type_arguments
-                        || (nested && previous.has_type_arguments),
+                    binding: bound.binding,
+                    has_type_arguments: bound.type_arguments,
                     outer_class_type_arguments: usize::from(previous.has_type_arguments),
                     has_explicit_parent: nested
                         || (self.file.forbid_package_qualifier_forms
-                            && matches!(binding, QualifierBinding::Classifier(_))),
+                            && matches!(bound.binding, QualifierBinding::Classifier(_))),
                 }
             };
             nodes.push(node);
@@ -341,12 +312,9 @@ impl Checker<'_> {
     /// a classifier without one is still continued as a qualifier.
     fn selected_qualifier_value(
         &self,
-        previous: QualifierBinding,
-        binding: QualifierBinding,
-        expression: ExprId,
-        name: &str,
+        bound: BoundQualifierSegment,
     ) -> Option<SelectedQualifierValue> {
-        let QualifierBinding::Classifier(internal) = binding else {
+        let QualifierBinding::Classifier(internal) = bound.binding else {
             return None;
         };
         if internal != crate::types::wk::unit()
@@ -354,17 +322,6 @@ impl Checker<'_> {
         {
             return None;
         }
-        let source = self.fed_source();
-        let (_, declaration) = walk_qualifier_with_declaration_identity(
-            &source,
-            previous.resolved(),
-            &[(Some(expression), name.to_string())],
-        )
-        .ok()?;
-        let alias = match declaration {
-            Some(crate::libraries::ClassifierDeclaration::TypeAlias(alias)) => Some(alias.identity),
-            Some(crate::libraries::ClassifierDeclaration::Ordinary(_)) | None => None,
-        };
-        Some(SelectedQualifierValue { alias })
+        Some(SelectedQualifierValue { alias: bound.alias })
     }
 }

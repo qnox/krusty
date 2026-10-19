@@ -1,13 +1,74 @@
 //! Expression-position qualifier resolution: one left-to-right walk of a dotted name chain, from
 //! scope-tower root classification through the symbol-source package and classifier edges.
+//!
+//! The walk binds each written segment once. A segment continues its predecessor's qualifier
+//! ([`Checker::qualifier_step`]): a package continues to a classifier or a subpackage, a classifier
+//! to a nested classifier or to a typealias declared in its TYPE namespace, which is carried with
+//! the classifier it expands to. The receiver chain of an access is resolved through
+//! [`Checker::resolve_recorded_qualifier`], which records what every segment bound
+//! ([`BoundQualifierSegment`]); the checks that later visit the chain, and the member selection
+//! through it, read that record instead of walking the chain again.
 
+use super::classifier_binding::SelectedTypeAlias;
 use super::*;
+use crate::symbol_source::SymbolNamespace;
+
+/// `FirStandaloneQualifierChecker`: a package qualifier that is not the explicit receiver of a
+/// qualified access, a class literal's argument, or another qualifier's explicit parent is used as
+/// an expression. A callable reference is no qualified access of kotlinc's checker context, so its
+/// left-hand side is such a use too.
+pub(super) const EXPRESSION_EXPECTED_PACKAGE_FOUND: &str =
+    "expression expected, but package name found.";
+
+/// What one written qualifier segment binds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum QualifierBinding {
+    Package(TypeName),
+    Classifier(TypeName),
+}
+
+impl QualifierBinding {
+    pub(super) fn of(resolved: ResolvedQualifier) -> Option<Self> {
+        match resolved {
+            ResolvedQualifier::Package(package) => Some(Self::Package(package)),
+            ResolvedQualifier::Classifier(internal) => Some(Self::Classifier(internal)),
+            ResolvedQualifier::Value => None,
+        }
+    }
+}
+
+/// One edge of the walk: the qualifier a segment continues its predecessor to, and the typealias
+/// declaration the segment selected when it names one (`resolved` is then the expanded classifier).
+pub(super) struct QualifierStep {
+    pub(super) resolved: ResolvedQualifier,
+    pub(super) alias: Option<SelectedTypeAlias>,
+}
+
+/// A written segment that the walk of an access's receiver chain bound to a package or a
+/// classifier, recorded once for the checks and selections that consume the chain.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct BoundQualifierSegment {
+    pub(super) binding: QualifierBinding,
+    /// FIR's `typeArguments` of the segment continued as a qualifier is non-empty: its own written
+    /// list, or the list a classifier predecessor carries (`QualifiedNameResolution.kt`
+    /// `continueQualifier`). A package predecessor's list is not inherited.
+    pub(super) type_arguments: bool,
+    /// The segment names a typealias of its classifier.
+    pub(super) alias: bool,
+}
+
+/// The classifier an alias expansion denotes in qualifier position. `Unit` has a distinct semantic
+/// type but is still the `kotlin.Unit` object classifier there.
+pub(super) fn alias_expansion_classifier(expansion: Ty) -> Option<TypeName> {
+    match expansion.non_null() {
+        Ty::Unit => Some(type_name("kotlin/Unit")),
+        expansion => expansion.obj_internal(),
+    }
+}
 
 impl Checker<'_> {
-    /// Walk one qualified spelling exactly once, left-to-right. Root classification is scope-tower
-    /// work; subsequent package/classifier edges are symbol-source work. A value root commits the
-    /// entire spelling to ordinary expression checking, and this walk never performs call/constructor
-    /// overload selection or retries another namespace.
+    /// Whether the root of a qualified spelling is a value in scope. A value root commits the
+    /// entire spelling to ordinary expression checking.
     pub(super) fn qualifier_root_is_value(&self, scope: &CheckerScope<'_>, name: &str) -> bool {
         let resolver = self.resolver();
         scope
@@ -37,10 +98,119 @@ impl Checker<'_> {
             .is_some()
     }
 
+    /// Walk one qualified spelling exactly once, left-to-right. This walk never performs
+    /// call/constructor overload selection or retries another namespace.
     pub(super) fn qualifier(
         &self,
         scope: &CheckerScope<'_>,
         input: QualifierInput<'_>,
+    ) -> Result<ResolvedQualifier, QualifierError> {
+        self.walk_expression_qualifier(scope, input, |_, _, _| {})
+    }
+
+    /// Resolve the receiver chain `expression` of an access and record what each of its written
+    /// segments bound. A segment the walk did not bind (after a value root or segment, or past an
+    /// error) has no record, including one an earlier check of the same expression left.
+    pub(super) fn resolve_recorded_qualifier(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+    ) -> Result<ResolvedQualifier, QualifierError> {
+        let mut bound = Vec::new();
+        let resolved = self.walk_expression_qualifier(
+            scope,
+            QualifierInput::Expression(expression),
+            |segment, binding, alias| bound.push((segment, binding, alias)),
+        );
+        self.record_qualifier_chain(expression, bound);
+        resolved
+    }
+
+    /// Replace the records of every written segment of the chain `expression` by `bound`, the
+    /// segments its one walk bound, root first.
+    pub(super) fn record_qualifier_chain(
+        &mut self,
+        expression: ExprId,
+        bound: Vec<(ExprId, QualifierBinding, bool)>,
+    ) {
+        let mut segment = Some(expression);
+        while let Some(current) = segment {
+            self.bound_qualifier_segments.remove(&current);
+            segment = match self.file.expr(current) {
+                Expr::Member { receiver, .. } => Some(*receiver),
+                _ => None,
+            };
+        }
+        let mut previous = None;
+        for (segment, binding, alias) in bound {
+            previous = Some(self.record_qualifier_segment(segment, previous, binding, alias));
+        }
+    }
+
+    /// Record the member segment `expression` that continues the recorded receiver chain
+    /// `receiver` by `step`, or forget it when the step binds no qualifier.
+    pub(super) fn record_qualifier_continuation(
+        &mut self,
+        expression: ExprId,
+        receiver: ExprId,
+        step: Option<&QualifierStep>,
+    ) {
+        self.bound_qualifier_segments.remove(&expression);
+        let Some(binding) = step.and_then(|step| QualifierBinding::of(step.resolved)) else {
+            return;
+        };
+        let Some(previous) = self.bound_qualifier_segments.get(&receiver).copied() else {
+            return;
+        };
+        let alias = step.is_some_and(|step| step.alias.is_some());
+        self.record_qualifier_segment(expression, Some(previous), binding, alias);
+    }
+
+    fn record_qualifier_segment(
+        &mut self,
+        expression: ExprId,
+        previous: Option<BoundQualifierSegment>,
+        binding: QualifierBinding,
+        alias: bool,
+    ) -> BoundQualifierSegment {
+        let inherited = previous.is_some_and(|previous| {
+            previous.type_arguments && matches!(previous.binding, QualifierBinding::Classifier(_))
+        });
+        let segment = BoundQualifierSegment {
+            binding,
+            type_arguments: self.file.call_type_args.contains_key(&expression.0) || inherited,
+            alias,
+        };
+        self.bound_qualifier_segments.insert(expression, segment);
+        segment
+    }
+
+    /// The recorded qualifier of a written segment of a resolved receiver chain.
+    pub(super) fn bound_qualifier_segment(
+        &self,
+        expression: ExprId,
+    ) -> Option<BoundQualifierSegment> {
+        self.bound_qualifier_segments.get(&expression).copied()
+    }
+
+    /// Whether the receiver chain `receiver` is a classifier qualifier whose FIR type arguments are
+    /// non-empty. Such a qualifier does not supply its object or companion value as a receiver
+    /// (`FirTowerResolveTask.runResolverForQualifierReceiver` takes the qualifier's value only when
+    /// `typeArguments` is empty), so only its static scope remains.
+    pub(super) fn qualifier_value_is_hidden_by_type_arguments(&self, receiver: ExprId) -> bool {
+        self.bound_qualifier_segment(receiver)
+            .is_some_and(|segment| {
+                segment.type_arguments && matches!(segment.binding, QualifierBinding::Classifier(_))
+            })
+    }
+
+    /// The single walk: classify the root, then continue one written segment at a time, reporting
+    /// every segment bound to a package or a classifier to `on_segment` in order.
+    fn walk_expression_qualifier(
+        &self,
+        scope: &CheckerScope<'_>,
+        input: QualifierInput<'_>,
+        mut on_segment: impl FnMut(ExprId, QualifierBinding, bool),
     ) -> Result<ResolvedQualifier, QualifierError> {
         let mut segments = Vec::new();
         match input {
@@ -58,8 +228,6 @@ impl Checker<'_> {
             });
         };
 
-        let package_barrier =
-            package_qualifier_forms::first_segment_that_cannot_name_a_package(self.file, &segments);
         let root_is_value = self.qualifier_root_is_value(scope, root_name);
         crate::trace_compiler!(
             "resolve",
@@ -69,8 +237,10 @@ impl Checker<'_> {
             return Ok(ResolvedQualifier::Value);
         }
 
-        let classifier_root = match self.select_classifier(scope, root_name) {
-            InheritedNestedClassifier::Found(classifier) => Some(classifier),
+        let (mut prefix, root_alias) = match self.select_classifier(scope, root_name) {
+            InheritedNestedClassifier::Found(classifier) => {
+                (ResolvedQualifier::Classifier(classifier), false)
+            }
             InheritedNestedClassifier::Ambiguous => {
                 return Err(QualifierError::AmbiguousRoot {
                     expression: *root_expression,
@@ -79,11 +249,17 @@ impl Checker<'_> {
             }
             InheritedNestedClassifier::NotFound => {
                 if let Some(classifier) = self.scoped_source_alias_classifier(scope, root_name) {
-                    Some(classifier)
-                } else if package_barrier != Some(0)
+                    (ResolvedQualifier::Classifier(classifier), true)
+                } else if !self.segment_cannot_name_a_package(*root_expression)
                     && self.fed_source().package_exists(TypeName::ROOT, root_name)
                 {
-                    None
+                    (
+                        ResolvedQualifier::Package(crate::types::type_name_child(
+                            TypeName::ROOT,
+                            root_name,
+                        )),
+                        false,
+                    )
                 } else {
                     return Err(QualifierError::UnresolvedSegment {
                         expression: *root_expression,
@@ -92,43 +268,107 @@ impl Checker<'_> {
                 }
             }
         };
-        let source = self.fed_source();
-        // A classpath enum entry with a body also has a physical nested subclass (`E$ENTRY`). At
-        // the source level `E.ENTRY` is nevertheless the enum VALUE, and that value facet wins in
-        // expression position before the same segment is considered as a nested classifier. Stop
-        // qualifier folding at the first such semantic entry so the ordinary expression checker
-        // records the exact enum-entry value and resolves all remaining member segments from it.
-        if let Some(mut owner) = classifier_root {
-            for (_, segment) in &segments[1..] {
-                let is_entry = self.classifier_has_enum_entry(owner, segment);
-                if is_entry {
-                    return Ok(ResolvedQualifier::Value);
-                }
-                let Some(next) = classifier_identity(
-                    &source,
-                    crate::symbol_source::SymbolNamespace::Classifier(owner),
-                    segment,
-                ) else {
-                    break;
-                };
-                owner = next;
+        if let (Some(expression), Some(binding)) = (*root_expression, QualifierBinding::of(prefix))
+        {
+            on_segment(expression, binding, root_alias);
+        }
+        for (expression, name) in &segments[1..] {
+            let step = self.qualifier_step(prefix, *expression, name)?;
+            prefix = step.resolved;
+            let Some(binding) = QualifierBinding::of(prefix) else {
+                return Ok(ResolvedQualifier::Value);
+            };
+            if let Some(expression) = *expression {
+                on_segment(expression, binding, step.alias.is_some());
             }
         }
-        match (classifier_root, package_barrier) {
-            (None, Some(barrier)) => package_qualifier_forms::walk_package_root_with_barrier(
-                &source,
-                *root_expression,
-                root_name,
-                &segments,
-                barrier,
-            ),
-            _ => walk_qualifier_namespace_facets(
-                &source,
-                classifier_root,
-                *root_expression,
-                root_name,
-                &segments[1..],
-            ),
+        Ok(prefix)
+    }
+
+    /// Continue `prefix` by the written segment `name`.
+    ///
+    /// - A package continues to the classifier its provider record names (with the typealias
+    ///   declaration that record carries), else to a subpackage, unless the segment cannot name a
+    ///   package ([`package_qualifier_forms::segment_cannot_name_a_package`]).
+    /// - A classifier with an enum entry `name` selects that entry's VALUE: a classpath entry with a
+    ///   body also has a physical nested subclass (`E$ENTRY`), which expression position never
+    ///   names. Otherwise it continues to its nested classifier, or to the typealias declared in
+    ///   its body, which carries its own declaration identity because a nested alias of a nested
+    ///   or local owner has no provider record under the owner's runtime name.
+    pub(super) fn qualifier_step(
+        &self,
+        prefix: ResolvedQualifier,
+        expression: Option<ExprId>,
+        name: &str,
+    ) -> Result<QualifierStep, QualifierError> {
+        let unresolved = || QualifierError::UnresolvedSegment {
+            expression,
+            name: name.to_string(),
+        };
+        let classifier = |classifier: TypeName, alias: Option<SelectedTypeAlias>| QualifierStep {
+            resolved: ResolvedQualifier::Classifier(classifier),
+            alias,
+        };
+        let source = self.fed_source();
+        match prefix {
+            ResolvedQualifier::Value => Ok(QualifierStep {
+                resolved: ResolvedQualifier::Value,
+                alias: None,
+            }),
+            ResolvedQualifier::Package(package) => {
+                let record = source.symbols(SymbolNamespace::Package(package), name);
+                if let Some(internal) = record.classifier_name {
+                    let alias = self
+                        .selected_provider_alias(internal, record.classifier_declaration.as_ref())
+                        .map_err(|()| unresolved())?;
+                    Ok(classifier(internal, alias))
+                } else if !self.segment_cannot_name_a_package(expression)
+                    && source.package_exists(package, name)
+                {
+                    Ok(QualifierStep {
+                        resolved: ResolvedQualifier::Package(crate::types::type_name_child(
+                            package, name,
+                        )),
+                        alias: None,
+                    })
+                } else {
+                    Err(unresolved())
+                }
+            }
+            ResolvedQualifier::Classifier(owner) => {
+                if self.classifier_has_enum_entry(owner, name) {
+                    return Ok(QualifierStep {
+                        resolved: ResolvedQualifier::Value,
+                        alias: None,
+                    });
+                }
+                let record = source.symbols(SymbolNamespace::Classifier(owner), name);
+                if let Some(internal) = record.classifier_name {
+                    let alias = self
+                        .selected_provider_alias(internal, record.classifier_declaration.as_ref())
+                        .map_err(|()| unresolved())?;
+                    return Ok(classifier(internal, alias));
+                }
+                let alias = self
+                    .nested_source_type_alias(owner, name)
+                    .ok_or_else(unresolved)?;
+                let internal =
+                    alias_expansion_classifier(alias.expansion).ok_or_else(unresolved)?;
+                Ok(classifier(internal, Some(alias)))
+            }
         }
+    }
+
+    /// Whether the simple name `expression`, which no value or classifier rung bound, names a root
+    /// package: the qualifier the walk binds it to.
+    pub(super) fn names_root_package(&self, expression: ExprId, name: &str) -> bool {
+        !self.segment_cannot_name_a_package(Some(expression))
+            && self.fed_source().package_exists(TypeName::ROOT, name)
+    }
+
+    fn segment_cannot_name_a_package(&self, expression: Option<ExprId>) -> bool {
+        expression.is_some_and(|expression| {
+            package_qualifier_forms::segment_cannot_name_a_package(self.file, expression)
+        })
     }
 }

@@ -571,3 +571,214 @@ fn a_type_argument_segment_cannot_name_an_alias_constructor_package() {
         &[],
     );
 }
+
+const VALUE_RECEIVERS: &str = "\
+package part1.part2
+
+class Holder<T> {
+    object O { val z = 1; fun f() = 2 }
+    class Nested { companion object { val w = 1; fun cf() = 3 } }
+    enum class En { A; companion object { val q = 1 } }
+}
+";
+
+/// A classifier qualifier whose FIR type arguments are inherited from an outer classifier does not
+/// supply its object or companion value as a receiver (`FirTowerResolveTask`
+/// `runResolverForQualifierReceiver`), so a member of that value is unresolved; the static scope
+/// (an enum entry, `values()`) still answers.
+const VALUE_RECEIVER_USES: &str = "\
+fun use() {
+    val a = part1.part2.Holder<Int>.O.z
+    val b = part1.part2.Holder<Int>.O.f()
+    val c = part1.part2.Holder<Int>.Nested.w
+    val d = part1.part2.Holder<Int>.Nested.cf()
+    val e = part1.part2.Holder<Int>.En.A
+    val f = part1.part2.Holder<Int>.En.q
+    val g = part1.part2.Holder<Int>.En.values()
+    val h = part1.part2.Holder<Int>.Nested.Companion.w
+    part1.part2.Holder<Int>.O.z.toString()
+    val i = part1.part2.Holder.O.z
+}
+";
+
+#[test]
+fn a_qualifier_with_type_arguments_has_no_value_receiver() {
+    let outer = |location| error(location, OUTER_CLASS_TYPE_ARGUMENTS);
+    let errors = vec![
+        outer("Use.kt:2:13"),
+        unresolved("Use.kt:2:39", "z"),
+        outer("Use.kt:3:13"),
+        unresolved("Use.kt:3:39", "f"),
+        outer("Use.kt:4:13"),
+        unresolved("Use.kt:4:44", "w"),
+        outer("Use.kt:5:13"),
+        unresolved("Use.kt:5:44", "cf"),
+        outer("Use.kt:6:13"),
+        outer("Use.kt:7:13"),
+        unresolved("Use.kt:7:40", "q"),
+        outer("Use.kt:8:13"),
+        outer("Use.kt:9:13"),
+        outer("Use.kt:9:13"),
+        unresolved("Use.kt:9:54", "w"),
+        outer("Use.kt:10:5"),
+        unresolved("Use.kt:10:31", "z"),
+    ];
+    assert_matches_kotlinc(
+        &[
+            ("Declarations.kt", VALUE_RECEIVERS),
+            ("Use.kt", VALUE_RECEIVER_USES),
+        ],
+        &[],
+        &errors,
+        &[],
+    );
+}
+
+const EXPRESSION_EXPECTED: &str = "expression expected, but package name found.";
+
+/// A package qualifier used as an expression (`FirStandaloneQualifierChecker`), including as the
+/// left-hand side of a callable reference, which is no qualified access of kotlinc's checker
+/// context. It is reported at the package's last segment. The reference itself is still resolved
+/// in the package's callable scope, so a name with no top-level callable or constructor there is
+/// unresolved.
+const PACKAGE_EXPRESSIONS: &str = "\
+fun use() {
+    val a = part1.part2
+    val b = kotlin
+    val c = (part1.part2)
+    val d = part1<Int>.part2
+    println(part1.part2)
+    val e = part1.part2::top
+    val f = part1.part2<Int>::top
+    val g = (part1.part2<Int>)::top
+    val h = part1<Int>.part2<Int>::top
+    val i = part1.part2::prop
+    val j = part1<Int>::part2
+    val k = part1.part2::Obj
+    val l = part1.part2::Cls
+}
+";
+
+#[test]
+fn a_package_qualifier_is_not_an_expression() {
+    let expected = |location| error(location, EXPRESSION_EXPECTED);
+    let errors = vec![
+        expected("Use.kt:2:19"),
+        expected("Use.kt:3:13"),
+        expected("Use.kt:4:20"),
+        error("Use.kt:5:13", OUTER_CLASS_TYPE_ARGUMENTS),
+        expected("Use.kt:5:24"),
+        expected("Use.kt:6:19"),
+        expected("Use.kt:7:19"),
+        error("Use.kt:8:13", TYPE_ARGUMENTS),
+        expected("Use.kt:8:19"),
+        error("Use.kt:9:14", TYPE_ARGUMENTS),
+        expected("Use.kt:9:20"),
+        error("Use.kt:10:13", OUTER_CLASS_TYPE_ARGUMENTS),
+        error("Use.kt:10:13", TYPE_ARGUMENTS),
+        expected("Use.kt:10:24"),
+        expected("Use.kt:11:19"),
+        expected("Use.kt:12:13"),
+        error("Use.kt:12:13", TYPE_ARGUMENTS),
+        unresolved("Use.kt:12:25", "part2"),
+        expected("Use.kt:13:19"),
+        unresolved("Use.kt:13:26", "Obj"),
+        expected("Use.kt:14:19"),
+    ];
+    assert_matches_kotlinc(
+        &[
+            ("Declarations.kt", DECLARATIONS),
+            ("Use.kt", PACKAGE_EXPRESSIONS),
+        ],
+        &[],
+        &errors,
+        &[],
+    );
+}
+
+const GENERIC_QUALIFIER_ON_CONSTRUCTOR_CALL: &str = "usage of a qualifier with type arguments to \
+     call nested class constructor is deprecated. The type arguments must be removed.";
+
+const CONSTRUCTED: &str = "\
+package part1.part2
+
+class Made
+class Shell<T> {
+    class Nested { class Deep }
+    class Gen<U>
+}
+typealias MadeAlias = Made
+";
+
+/// `FirGenericQualifierOnConstructorCallChecker`: the constructor of a class that is not `inner`
+/// called through a qualifier with FIR type arguments, at the qualifier's own list or, for
+/// inherited arguments, at the qualifier.
+const QUALIFIED_CONSTRUCTOR_CALLS: &str = "\
+fun use() {
+    val a = part1.part2.Shell<Int>.Nested.Deep()
+    val b = part1<Int>.part2<String>.Made()
+    val c = part1.part2.Shell<Int>.Gen<String>()
+    val d = part1.part2.Shell<Int>.Nested<String>.Deep()
+    val e = (part1.part2<Int>).Made()
+    val f = part1.part2<Int>.MadeAlias()
+    val g = part1<Int>.part2.Made()
+    val h = part1.part2.Shell<Int>.Nested()
+}
+";
+
+#[test]
+fn a_qualifier_with_type_arguments_cannot_call_a_nested_constructor() {
+    let generic = |location| error(location, GENERIC_QUALIFIER_ON_CONSTRUCTOR_CALL);
+    let outer = |location| error(location, OUTER_CLASS_TYPE_ARGUMENTS);
+    let packages = |location| error(location, TYPE_ARGUMENTS);
+    let errors = vec![
+        generic("Use.kt:2:13"),
+        outer("Use.kt:2:13"),
+        outer("Use.kt:3:13"),
+        packages("Use.kt:3:13"),
+        generic("Use.kt:3:29"),
+        generic("Use.kt:4:30"),
+        outer("Use.kt:5:13"),
+        generic("Use.kt:5:42"),
+        packages("Use.kt:6:14"),
+        generic("Use.kt:6:25"),
+        packages("Use.kt:7:13"),
+        generic("Use.kt:7:24"),
+        outer("Use.kt:8:13"),
+        generic("Use.kt:9:30"),
+    ];
+    assert_matches_kotlinc(
+        &[
+            ("Declarations.kt", CONSTRUCTED),
+            ("Use.kt", QUALIFIED_CONSTRUCTOR_CALLS),
+        ],
+        &[],
+        &errors,
+        &[],
+    );
+}
+
+/// The constructor call through a typealias declared in a local class continues the local class
+/// the receiver resolved to; its hoisted runtime name is never spelled.
+const LOCAL_CLASS_ALIAS: &str = "\
+package local.aliases
+
+class Item(val value: String)
+
+fun use(): String {
+    class Local {
+        typealias ItemAlias = Item
+    }
+    return Local.ItemAlias(\"OK\").value
+}
+";
+
+#[test]
+fn a_local_class_alias_constructor_continues_its_owner() {
+    assert_matches_kotlinc(
+        &[("LocalAlias.kt", LOCAL_CLASS_ALIAS)],
+        &["-XXLanguage:+LocalTypeAliases"],
+        &[],
+        &[],
+    );
+}

@@ -11,10 +11,16 @@
 //!   package with type arguments reports "type arguments are not allowed for packages." on that
 //!   receiver. With `ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier` such a
 //!   segment does not name a package at all.
+//! - `FirGenericQualifierOnConstructorCallChecker`: a constructor call of a non-`inner` class
+//!   through a qualifier with type arguments is "usage of a qualifier with type arguments to call
+//!   nested class constructor is deprecated. The type arguments must be removed."
 
 use super::expression_qualifier_tree::{QualifierBinding, QualifierTree};
 use super::*;
 
+const GENERIC_QUALIFIER_ON_CONSTRUCTOR_CALL: &str =
+    "usage of a qualifier with type arguments to call \
+     nested class constructor is deprecated. The type arguments must be removed.";
 const OUTER_CLASS_TYPE_ARGUMENTS: &str =
     "type arguments for outer class are redundant when nested class is referenced.";
 
@@ -49,18 +55,51 @@ impl Checker<'_> {
         else {
             return;
         };
-        let rendered = match value.alias {
-            Some(alias) => format!("typealias '{}'", alias.nested_segment_ref()),
-            None => {
-                let kind = self.classifier_kind_word(previous.binding, internal);
-                format!("{kind} '{}'", internal.nested_segment_ref())
-            }
+        let rendered = if value.alias {
+            format!("typealias '{name}'")
+        } else {
+            let kind = self.classifier_kind_word(previous.binding, internal);
+            format!("{kind} '{}'", internal.nested_segment_ref())
         };
         let span = self.member_name_span(last.expression, name);
         self.diags.error(
             span,
             format!("nested {rendered} accessed via instance reference."),
         );
+    }
+
+    /// `FirGenericQualifierOnConstructorCallChecker`: a call that selected the constructor of a
+    /// class that is not `inner` through an explicit receiver qualifier with FIR type arguments
+    /// (`pkg.sub<Int>.Cls()`, `pkg.Outer<Int>.Nested.Deep()`) reports
+    /// `GENERIC_QUALIFIER_ON_CONSTRUCTOR_CALL` at that qualifier's type-argument list: its own list,
+    /// or the qualifier's start when the arguments are inherited from an outer classifier.
+    pub(super) fn check_generic_qualifier_on_constructor_call(
+        &mut self,
+        tree: &QualifierTree,
+        call: ExprId,
+    ) {
+        let last = tree.last();
+        if !last.has_type_arguments {
+            return;
+        }
+        let Some(constructed) = self.resolved_constructors.get(&call).map(|c| c.owner()) else {
+            return;
+        };
+        let inner = self
+            .resolver()
+            .classifier(constructed)
+            .is_none_or(|classifier| classifier.outer_instance.is_some());
+        if inner {
+            return;
+        }
+        let span = self
+            .file
+            .call_type_args
+            .get(&last.expression.0)
+            .map(|arguments| arguments.span)
+            .unwrap_or_else(|| self.qualifier_node_span(last.expression));
+        self.diags
+            .error(span, GENERIC_QUALIFIER_ON_CONSTRUCTOR_CALL.to_string());
     }
 
     pub(super) fn check_package_receiver_type_arguments(&mut self, tree: &QualifierTree) {

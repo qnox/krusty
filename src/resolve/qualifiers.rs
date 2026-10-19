@@ -132,45 +132,7 @@ pub(super) fn walk_qualifier_with_declaration_identity<S: SymbolSource + ?Sized>
 /// Commit the first namespace facet after value-root selection has declined the spelling. A scoped
 /// classifier outranks a root package with the same spelling; once selected, a later missing segment
 /// is that classifier path's error and must not reinterpret the root as the package.
-pub(super) fn walk_qualifier_namespace_facets<S: SymbolSource + ?Sized>(
-    source: &S,
-    classifier_root: Option<TypeName>,
-    root_expression: Option<ExprId>,
-    root_name: &str,
-    segments: &[(Option<ExprId>, String)],
-) -> Result<ResolvedQualifier, QualifierError> {
-    walk_qualifier_namespace_facets_with_declaration_identity(
-        source,
-        classifier_root,
-        root_expression,
-        root_name,
-        segments,
-    )
-    .map(|(resolved, _)| resolved)
-}
-
-/// Namespace-facet walk plus the exact identity of the final classifier declaration selected from
-/// its provider record. The identity is `None` when the root classifier was supplied by the caller
-/// and no later segment was selected; the caller already owns that root's binding provenance.
-pub(super) fn walk_qualifier_namespace_facets_with_declaration_identity<
-    S: SymbolSource + ?Sized,
->(
-    source: &S,
-    classifier_root: Option<TypeName>,
-    root_expression: Option<ExprId>,
-    root_name: &str,
-    segments: &[(Option<ExprId>, String)],
-) -> Result<(ResolvedQualifier, Option<ClassifierDeclaration>), QualifierError> {
-    walk_qualifier_namespace_facets_with_binding_identity(
-        source,
-        classifier_root,
-        root_expression,
-        root_name,
-        segments,
-    )
-    .map(|(resolved, declaration, _)| (resolved, declaration))
-}
-
+///
 /// Namespace-facet walk plus the zero-based written segment that first bound as a classifier.
 /// The package/classifier boundary is selected while the path is walked and must not be recovered
 /// later from the final classifier's nesting or the source spelling.
@@ -366,13 +328,14 @@ mod tests {
 
     #[test]
     fn a_later_classifier_miss_does_not_reinterpret_its_root_as_a_package() {
-        let result = walk_qualifier_namespace_facets(
+        let result = walk_qualifier_namespace_facets_with_binding_identity(
             &CollidingRoot,
             Some(crate::types::type_name("scope/Clash")),
             None,
             "Clash",
             &[(None, "Tail".to_string())],
-        );
+        )
+        .map(|(resolved, _, _)| resolved);
         assert_eq!(
             result,
             Err(QualifierError::UnresolvedSegment {
