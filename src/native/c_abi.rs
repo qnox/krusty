@@ -82,7 +82,9 @@ pub(super) fn file_records(ir: &IrFile, symbols: &mut HashSet<String>) -> Vec<Re
         .collect()
 }
 
-/// A function declared in the file, not a member and not a compiler-generated helper.
+/// A function declared in the file, not a member, not a compiler-generated helper and not an
+/// inline-only function, which has no code of its own to export (a dependency's inline template
+/// among them).
 pub(super) fn is_file_level(ir: &IrFile, index: usize) -> bool {
     let function = &ir.functions[index];
     if function.dispatch_receiver.is_some() || function.body.is_none() {
@@ -91,6 +93,7 @@ pub(super) fn is_file_level(ir: &IrFile, index: usize) -> bool {
     let id = index as u32;
     if ir.synthetic_methods.contains(&id)
         || ir.bridge_methods.contains(&id)
+        || ir.inline_only_fns.contains(&id)
         || ir.class_static_local_functions.contains_key(&id)
     {
         return false;

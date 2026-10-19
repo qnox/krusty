@@ -10,13 +10,16 @@
 //! types name; the serialized header must agree with it, and each serialized type parameter is
 //! that record's. A template is never a target function itself: a call it makes of an ordinary
 //! dependency function is the same external call a source call of that function is, through the
-//! identity the calling compilation's provider gives the exact serialized callee. A call of a
-//! member or of another inline function declines, as does every form body lowering declines. A
-//! declined template leaves the file as it was.
+//! identity the calling compilation's provider gives the exact serialized callee, a member's with
+//! its dispatch receiver, which the target dispatches as it dispatches that source call. A call of
+//! another inline function declines, as does every form body lowering declines. A declined
+//! template leaves the file as it was.
 
 use super::body_lowering::{BodyLowering, CallLinker, LinkedCallee, LoweredFunction};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
 use super::function_lowering::function_header;
+use super::klib_types::{member_owner, semantic_type, KlibTypeParameters};
+use crate::types::SemanticCallableOwner;
 use super::function_lowering::{declare_function, prepared_inline_header};
 use super::ir_builtins::IrBuiltinOperators;
 use super::lowering_checkpoint::LoweringCheckpoint;
@@ -286,11 +289,6 @@ impl CallLinker for TemplateCalls<'_> {
             .declarations
             .function(&identity)
             .ok_or_else(|| callee_declined(KlibBodyDeclineReason::Unjoined))?;
-        if declaration.dispatch_receiver.is_some() {
-            return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                "a call of a member function",
-            ));
-        }
         let Some((target, realization)) = (self.callees.provider)(&identity) else {
             return Err(callee_declined(KlibBodyDeclineReason::SignatureMismatch(
                 "the provider realizes no declaration of the exact serialized callee".to_owned(),
@@ -300,6 +298,10 @@ impl CallLinker for TemplateCalls<'_> {
             return Err(KlibBodyDeclineReason::UnsupportedOperation(
                 "a call of an inline dependency function from an inline template",
             ));
+        }
+        if let Some(receiver) = &declaration.dispatch_receiver {
+            return member_call(callee, arena, declaration, receiver, target, &realization)
+                .map_err(callee_declined);
         }
         let header = function_header(None, arena, declaration).map_err(callee_declined)?;
         let (params, ret, context_count, extension_receiver, receiver) = header.linked_signature();
@@ -320,6 +322,61 @@ impl CallLinker for TemplateCalls<'_> {
             singleton_dispatch: None,
         })
     }
+}
+
+/// A template's call of the member `callee`, by the provider's identity `target`. Its signature is
+/// the provider's: the member is non-generic and declares no extension receiver, and the serialized
+/// declaration must belong to the class metadata names as its owner. The dispatch receiver is read
+/// at the serialized receiver's type, the argument the call passes.
+fn member_call(
+    callee: &KlibPublicIdSignature,
+    arena: &crate::metadata::klib_ir::tree::KlibIrArena,
+    declaration: &crate::metadata::klib_ir::tree::KlibIrFunction,
+    receiver: &crate::metadata::klib_ir::tree::KlibIrParameter,
+    target: ExternalCallableId,
+    realization: &ExternalCallableRealization,
+) -> Result<LinkedCallee, KlibBodyDeclineReason> {
+    let generic = realization
+        .callable
+        .generic_sig
+        .as_deref()
+        .is_some_and(|generic| !generic.formals.is_empty());
+    if !declaration.type_parameters.is_empty() || generic {
+        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+            "type parameters",
+        ));
+    }
+    if declaration.extension_receiver.is_some() {
+        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+            "a member extension",
+        ));
+    }
+    let owner = member_owner(callee)?;
+    if realization.declaration_owner != Some(SemanticCallableOwner::Classifier(owner)) {
+        return Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+            "the serialized member of {owner:?} is selected as one of {:?}",
+            realization.declaration_owner
+        )));
+    }
+    let receiver = semantic_type(arena, &KlibTypeParameters::default(), receiver.ty)?;
+    let params = realization.callable.params.clone();
+    let ret = realization.callable.ret;
+    Ok(LinkedCallee {
+        callee: Callee::External {
+            target,
+            default_provider: None,
+            params: params.clone(),
+            ret,
+            substitutions: Vec::new(),
+            defaults: Vec::new(),
+            extension_receiver_parameter: None,
+        },
+        receiver: Some(receiver),
+        params,
+        ret,
+        context_count: realization.callable.context_count,
+        singleton_dispatch: None,
+    })
 }
 
 #[cfg(test)]
