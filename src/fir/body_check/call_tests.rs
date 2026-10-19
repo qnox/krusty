@@ -1261,7 +1261,7 @@ fn suspend_coroutine_is_an_ordinary_inline_suspend_call() {
         call.target,
         FirCallTarget::External {
             suspend: true,
-            can_inline: true,
+            inline: crate::libraries::InlineKind::CanInline,
             ..
         }
     ));

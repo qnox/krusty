@@ -17161,17 +17161,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `CallableId` or the dependency's `ExternalCallableId` with its template, and nothing else about
   the expansion differs. The template keeps the declaration's parameter order (dispatch receiver,
   context parameters, extension receiver, value parameters) and its parameter defaults, lowered in
-  the callee's scope. A body the KLIB lowering cannot express declines the template and the call
-  stays an ordinary call of the dependency function; a call that selected a template but cannot
-  expand from it is an error, never retried as a plain call. No per-shape plan is decoded for a
-  KLIB declaration and checked FIR carries none: KLIB inline knowledge enters at IR only. A member
+  the callee's scope. A call the template makes of an ordinary (non-member, non-inline) dependency
+  function is the external call a source call of it is, by the calling compilation's provider
+  identity for the exact serialized callee; a call of a member or of another inline function
+  declines the template for now. A KLIB `inline` declaration is `MustInline`: it has no legal
+  direct call, and checked FIR keeps the callee's whole `InlineKind`. A must-inline call whose
+  template is missing or declined is rejected, never compiled as a call of the dependency
+  function; a `CanInline` callee without a template stays an ordinary call. A call that selected a
+  template but cannot expand from it is rejected too. No per-shape plan is decoded for a KLIB
+  declaration and checked FIR carries none: KLIB inline knowledge enters at IR only. A member
   extension keeps its declaration's `inline`/`reified` flags through the checker's member-extension
   view, as a top-level or member function does. Tests:
   `klib_lowering::tests::inline_templates::*`,
   `klib_libraries::tests::prepared_inline_selection_takes_every_inline_declaration_of_its_module`,
-  `multimodule_conformance_cases::LIBRARY_INLINE_BODIES`,
   `multimodule_conformance_cases::RECEIVER_RETURNING_SCOPE_FUNCTIONS` and
-  `multimodule_conformance_cases::REIFIED_CALLABLE_ORIGINS` (JVM, Native and Wasm).
+  `multimodule_conformance_cases::REIFIED_CALLABLE_ORIGINS` (JVM, Native and Wasm), and
+  `wasm_a_declined_required_inline_body_rejects_the_caller` /
+  `native_a_declined_required_inline_body_rejects_the_caller` (a library reified inline function
+  with no template), and `wasm_a_declined_required_stdlib_template_rejects_the_caller` /
+  `native_a_declined_required_stdlib_template_rejects_the_caller` (`repeat`, whose template
+  declines).
 
 - **A KLIB `when` keeps its source form.** A `when` with an `else` (a final branch whose condition
   is the constant `true`) of origin `WHEN` lowers to one flat `when` recorded as exhaustive at its

@@ -297,39 +297,44 @@ pub const RECEIVER_RETURNING_SCOPE_FUNCTIONS: Case = Case {
              }\n",
 };
 
-/// Ordinary inline functions of a separately compiled library expand at the consumer's call from
-/// their serialized bodies, by the same inliner that expands a same-module inline call: a lambda is
-/// spliced with its captures and a non-local `return`, a parameter default is evaluated in the
-/// callee's scope, a member keeps its dispatch receiver, and a member extension called inside a
-/// scope function keeps both receivers.
-pub const LIBRARY_INLINE_BODIES: Case = Case {
-    stem: "multimoduleLibraryInlineBodies",
+/// A library's reified inline function whose body the library serializes no template for (its
+/// `for` loop). The declaration has no legal direct call, so a target that expands dependency
+/// inline bodies in IR must reject the consumer rather than call it. Not in [`ALL`]: each such
+/// target asserts its exact rejection.
+pub const DECLINED_REQUIRED_INLINE_BODY: Case = Case {
+    stem: "multimoduleDeclinedRequiredInlineBody",
     source: "// MODULE: lib\n\
-             inline fun twice(action: (Int) -> Unit) { action(1); action(2) }\n\
-             inline fun String.framed(left: String = \"[\", right: String = left): String = left + this + right\n\
-             class Counter(var total: Int) {\n\
-             \x20   inline fun add(step: () -> Int): Int { total += step(); return total }\n\
-             \x20   inline fun String.weighted(): Int = length * total\n\
+             inline fun <reified T> countOf(value: Any, times: Int): Int {\n\
+             \x20   var count = 0\n\
+             \x20   for (index in 0 until times) if (value is T) count++\n\
+             \x20   return count\n\
              }\n\
-             fun counter(): Counter = Counter(10)\n\
              // MODULE: main(lib)\n\
-             fun firstEven(): Int {\n\
-             \x20   twice { if (it % 2 == 0) return it }\n\
-             \x20   return -1\n\
-             }\n\
-             fun box(): String {\n\
-             \x20   var sum = 0\n\
-             \x20   twice { sum += it }\n\
-             \x20   if (sum != 3) return \"twice $sum\"\n\
-             \x20   if (firstEven() != 2) return \"non-local return\"\n\
-             \x20   if (\"a\".framed() != \"[a[\") return \"defaults\"\n\
-             \x20   if (\"a\".framed(\"<\", \">\") != \"<a>\") return \"arguments\"\n\
-             \x20   val counter = counter()\n\
-             \x20   if (counter.add { sum } != 13) return \"member\"\n\
-             \x20   if (counter.run { \"ab\".weighted() } != 26) return \"member extension\"\n\
-             \x20   return \"OK\"\n\
-             }\n",
+             fun box(): String = if (countOf<String>(\"a\", 2) == 2) \"OK\" else \"fail\"\n",
 };
+
+/// A call of the target stdlib's `repeat`, whose prepared body uses a form (its `for` loop's
+/// compiler-introduced block) KLIB body lowering declines. `repeat` has no legal direct call, so
+/// a target that expands dependency inline bodies in IR must reject the caller rather than call
+/// it. A single-module source: the rejection is about the stdlib, not a library module.
+pub const DECLINED_STDLIB_INLINE_BODY: &str = "fun box(): String {\n\
+                                               \x20   var count = 0\n\
+                                               \x20   repeat(2) { count++ }\n\
+                                               \x20   return if (count == 2) \"OK\" else \"fail\"\n\
+                                               }\n";
+
+/// The frontend rejection of a call of a required inline dependency function that has no
+/// template. The callee's identity is opaque and assigned per compilation, so it is read back
+/// whole from the message and must be a number; every other character is exact.
+pub fn required_inline_rejection(message: &str) -> Option<u32> {
+    message
+        .strip_prefix(
+            "internal error: checked FIR lowering failed: Body(UnsupportedExternalCall(ExternalCallableId(",
+        )?
+        .strip_suffix(")))")?
+        .parse()
+        .ok()
+}
 
 pub const ALL: &[Case] = &[
     TOP_LEVEL_DEPENDENCY,
@@ -352,7 +357,6 @@ pub const ALL: &[Case] = &[
     FLOATING_BIT_REFERENCES,
     OVERLAPPING_BITS,
     RECEIVER_RETURNING_SCOPE_FUNCTIONS,
-    LIBRARY_INLINE_BODIES,
 ];
 
 #[test]

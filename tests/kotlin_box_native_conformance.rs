@@ -292,6 +292,62 @@ pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::
     run_krusty_multimodule_case(case.source, &format!("native-{}", case.stem));
 }
 
+/// A required inline dependency function whose body cannot become a template rejects its caller:
+/// it is never compiled as a direct call of the dependency function.
+#[test]
+fn native_a_declined_required_inline_body_rejects_the_caller() {
+    let case = super::multimodule_conformance_cases::DECLINED_REQUIRED_INLINE_BODY;
+    let Some(target) = host() else {
+        if std::env::var_os("KRUSTY_REQUIRE_NATIVE_CONFORMANCE").is_some() {
+            panic!(
+                "{}: required Native target/KLIB setup is unavailable",
+                case.stem
+            );
+        }
+        return;
+    };
+    let modules = krusty::conformance::split_modules(case.source).expect("valid module test shape");
+    let units = krusty::conformance::module_units(&modules);
+    let lane = NativeLane {
+        target: Some(target),
+    };
+    let outcome =
+        lane.compile_modules_and_run(&std::env::temp_dir(), case.stem, &units, case.source);
+    assert!(
+        matches!(&outcome, Outcome::Frontend(message)
+            if super::multimodule_conformance_cases::required_inline_rejection(message).is_some()),
+        "{}: {outcome:?}",
+        case.stem
+    );
+}
+
+/// A required stdlib inline function whose template declines rejects its caller.
+#[test]
+fn native_a_declined_required_stdlib_template_rejects_the_caller() {
+    let src = super::multimodule_conformance_cases::DECLINED_STDLIB_INLINE_BODY;
+    let stem = "declinedRequiredStdlibTemplate";
+    let Some(target) = host() else {
+        if std::env::var_os("KRUSTY_REQUIRE_NATIVE_CONFORMANCE").is_some() {
+            panic!("{stem}: required Native target/KLIB setup is unavailable");
+        }
+        return;
+    };
+    let lane = NativeLane {
+        target: Some(target),
+    };
+    let outcome = lane.compile_and_run(
+        &std::env::temp_dir(),
+        stem,
+        &[(format!("{stem}.kt"), src.to_string())],
+        src,
+    );
+    assert!(
+        matches!(&outcome, Outcome::Frontend(message)
+            if super::multimodule_conformance_cases::required_inline_rejection(message).is_some()),
+        "{stem}: {outcome:?}"
+    );
+}
+
 fn run_krusty_multimodule_case(src: &str, stem: &str) {
     let Some(target) = host() else {
         if std::env::var_os("KRUSTY_REQUIRE_NATIVE_CONFORMANCE").is_some() {
