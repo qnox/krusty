@@ -132,3 +132,42 @@ fun outer(a: Int, b: Int): Int {
         "FunctionCaptureOrderKt$outer$C",
     );
 }
+
+/// Captures of different types whose first use reverses their identity order: `run` reads `b`
+/// (a `Long`) before `a` (a `String`), so `<init>` is `(JLjava/lang/String;I)V`, and the
+/// constructor signature `@Metadata` records must spell the same permuted descriptor.
+const MIXED_TYPES: &str = "\
+fun mixed(a: String, b: Long): String {
+    class Q(val p: Int) {
+        fun run(): String = b.toString() + a + p
+    }
+    return Q(1).run()
+}
+
+// A value-class parameter makes the recorded constructor the public marker `<init>`, which spells
+// the captures in the same permuted order.
+fun marked(a: String, b: Long): String {
+    class U(u: UInt) {
+        val v = u.toInt()
+        fun run(): String = b.toString() + a + v
+    }
+    return U(2u).run()
+}
+";
+
+/// The emitted `<init>` and the `@Metadata` constructor signature agree on the permuted order of
+/// differently typed captures.
+#[test]
+fn differently_typed_captures_record_their_physical_constructor_signature() {
+    for class in ["MixedCapturesKt$mixed$Q", "MixedCapturesKt$marked$U"] {
+        common::metadata_diff_against_kotlinc_cp(
+            "MixedCaptures",
+            MIXED_TYPES,
+            class,
+            &[common::stdlib_jar()],
+        )
+        .expect("the reference kotlinc is provisioned")
+        .unwrap_or_else(|why| panic!("{why}"));
+        assert_same_class("MixedCaptures", MIXED_TYPES, class);
+    }
+}
