@@ -678,6 +678,7 @@ impl Emitter<'_> {
                     false,
                     SourceMap::default(),
                 ),
+                enum_entries: &mut self.call_enum_entries(false),
             },
         ) {
             crate::trace_compiler!("splice", "unified inliner declines: {error:?}");
@@ -1031,6 +1032,18 @@ impl Emitter<'_> {
             lines
                 .emitter
                 .call_objects(call_expression, target.name, true, lambda_lines.clone());
+        let (classifiers, run, owner) = (
+            lines.emitter.classifiers,
+            lines.emitter.run,
+            lines.emitter.owner.clone(),
+        );
+        let mut enum_entries = entries_mappings::CallEnumEntries {
+            classifiers,
+            bodies,
+            run,
+            owner: &owner,
+            commit: true,
+        };
         let inlined = inliner::inline(
             callee,
             parameters,
@@ -1042,6 +1055,7 @@ impl Emitter<'_> {
                 lines: &mut lines,
                 classes: &bodies,
                 objects: &mut objects,
+                enum_entries: &mut enum_entries,
             },
         );
         let inlined = match inlined {

@@ -1239,6 +1239,10 @@ pub struct KotlinMeta {
     pub is_companion_object: bool,
     /// `Flags.IS_DATA` from the Kotlin `Class.flags` word: a `data class` or `data object`.
     pub is_data: bool,
+    /// `Flags.HAS_ENUM_ENTRIES` from the Kotlin `Class.flags` word: the enum declares the implicit
+    /// `entries` property and its static `getEntries()`. An enum compiled before that feature, like
+    /// every Java enum, has neither.
+    pub has_enum_entries: bool,
     /// `Class.type_parameter` and `Class.supertype`/`supertype_id`, decoded in source terms. These
     /// define the semantic class graph for a Kotlin class; the classfile's superclass/interfaces are
     /// only its JVM realization and must never be unioned into this list.
@@ -1292,6 +1296,7 @@ impl Default for KotlinMeta {
             is_fun_interface: false,
             is_companion_object: false,
             is_data: false,
+            has_enum_entries: false,
             class_type_parameters: crate::types::TypeParameters::default(),
             class_supertypes: Vec::new(),
             class_functions: std::sync::Arc::from([]),
@@ -1484,6 +1489,7 @@ pub fn decode_metadata_within(
         is_fun_interface: class_flags.is_some_and(|flags| flags & (1u64 << 14) != 0),
         is_companion_object: class_flags.is_some_and(|flags| (flags >> 6) & 0x7 == 6),
         is_data: class_flags.is_some_and(crate::metadata::semantic::class_is_data),
+        has_enum_entries: class_flags.is_some_and(|flags| flags & (1u64 << 15) != 0),
         class_type_parameters: crate::types::TypeParameters::new(
             class_type_params,
             class_type_param_bounds,

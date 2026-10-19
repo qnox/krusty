@@ -29,3 +29,31 @@ pub(in crate::jvm) enum ReifiedArgument {
     /// and the type-bearing op keeps its erased placeholder until the host's own caller reifies it.
     Forwarded { name: String, nullable: bool },
 }
+
+/// How a call site reads the entries of one concrete enum, as kotlinc's
+/// `ReifiedTypeInliner.processSpecialEnumFunction` decides it from the enum's declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::jvm) enum EnumEntriesRead {
+    /// The enum declares the static `getEntries()`.
+    Getter,
+    /// The enum does not (a Java enum, or a Kotlin enum compiled before `entries`): the call site's
+    /// class reads the static `field` of its synthetic mapping class `class`, which builds the
+    /// entries from `values()` once.
+    Mapping { class: String, field: String },
+}
+
+/// The call site's answer to [`EnumEntriesRead`] for each enum an inlined body reads the entries
+/// of. A read that claims a mapping field claims it for the class the body is inlined into.
+pub(in crate::jvm) trait EnumEntriesReads {
+    /// `None` when the enum's declaration cannot be read, which the inliner refuses.
+    fn entries(&mut self, enum_class: &str) -> Option<EnumEntriesRead>;
+}
+
+/// No declaration is readable: every entries read is refused.
+pub(in crate::jvm) struct NoEnumEntriesReads;
+
+impl EnumEntriesReads for NoEnumEntriesReads {
+    fn entries(&mut self, _enum_class: &str) -> Option<EnumEntriesRead> {
+        None
+    }
+}

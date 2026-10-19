@@ -86,6 +86,13 @@ pub trait MethodBodies {
         false
     }
 
+    /// Whether the class file of enum `internal` declares the static `getEntries()`: its Kotlin
+    /// metadata's `HAS_ENUM_ENTRIES` flag, and never for a class without Kotlin metadata (a Java
+    /// enum). `None` when the class file is not available.
+    fn enum_declares_entries(&self, _internal: &str) -> Option<bool> {
+        None
+    }
+
     /// Whether an instruction-level method or field reference is private to its defining class.
     fn member_is_private(&self, _owner: &str, _name: &str, _descriptor: &str) -> bool {
         false
