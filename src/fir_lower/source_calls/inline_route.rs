@@ -10,6 +10,9 @@ use crate::fir::{CallableId, DeclarationFlags, DeclarationId};
 use crate::ir::{ExprId, FunId, IrExpr, SameModuleInlining};
 use crate::types::{InlineParameterModifier, Ty, Visibility};
 
+#[cfg(test)]
+mod tests;
+
 /// How one call to a same-module inline function is realized.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in super::super) enum InlineCallRoute {

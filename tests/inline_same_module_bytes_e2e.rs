@@ -568,3 +568,39 @@ fn calls_outside_named_function_bodies_run() {
         "OK"
     );
 }
+
+// A suspend lambda's body, and a lambda written in a suspend local function, run in a state
+// machine, so a same-module inline call there stays expanded (`SuspendCaller`): its literal
+// argument suspends, which the compiled-body inliner cannot place in the machine. The route itself
+// is pinned by `inline_route::tests`; the expanded suspend bodies are not yet kotlinc's bytes (the
+// state machine is built before inlining), so this runs the program rather than comparing bytes.
+const SUSPEND_CONTEXT_CALLERS: &str = r#"import kotlin.coroutines.*
+
+inline fun applied(block: () -> String): String = block()
+
+suspend fun yielded(value: String): String = suspendCoroutine { it.resume(value) }
+
+fun builder(block: suspend () -> Unit) {
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+}
+
+suspend fun viaLocal(): String {
+    suspend fun local(): String = run { applied { yielded("K") } }
+    return local()
+}
+
+fun box(): String {
+    var result = ""
+    builder { result = applied { yielded("O") } }
+    builder { result += viaLocal() }
+    return result
+}
+"#;
+
+#[test]
+fn calls_in_suspend_lambdas_and_their_nested_lambdas_run() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SUSPEND_CONTEXT_CALLERS, "SuspendCallers"),
+        "OK"
+    );
+}

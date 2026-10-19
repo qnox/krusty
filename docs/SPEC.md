@@ -5191,8 +5191,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   caller's class) rather than failing the emission. Tests: `tests/inline_same_module_bytes_e2e.rs`
   (same-file and cross-file calls, a value-class argument, a call on an inlined result, and calls in
   a lambda, a local function, initializers, an `init` block, a secondary constructor and a getter,
-  against kotlinc's bytes, and a run; same-file and cross-file enum switches, including a nullable subject,
-  as runs).
+  against kotlinc's bytes, and a run; same-file and cross-file enum switches, including a nullable
+  subject, and calls in a suspend lambda and in a lambda of a suspend local function, as runs) and
+  `fir_lower::source_calls::inline_route::tests` (those suspend-context calls stay expanded while
+  the same call in an ordinary function's lambda is kept for the backend).
 
 - **A same-module inline call with function arguments is inlined from the compiled body too.**
   A literal lambda or callable reference passed to an inline parameter (one that is function-typed
