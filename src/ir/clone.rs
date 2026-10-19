@@ -421,6 +421,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if ir.call_operand_bindings.contains(&source) {
         ir.call_operand_bindings.insert(target);
     }
+    if ir.invocation_operand_bindings.contains(&source) {
+        ir.invocation_operand_bindings.insert(target);
+    }
     if ir.destructuring_containers.contains(&source) {
         ir.destructuring_containers.insert(target);
     }
@@ -494,6 +497,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     }
     if ir.elvis_safe_call_guards.contains(&source) {
         ir.elvis_safe_call_guards.insert(target);
+    }
+    if ir.jvm_value_class_null_guards.contains(&source) {
+        ir.jvm_value_class_null_guards.insert(target);
     }
     if ir.inline_call_sites.contains(&source) {
         ir.inline_call_sites.insert(target);

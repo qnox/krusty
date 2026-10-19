@@ -1237,6 +1237,8 @@ mod java_constructor_expected_type_e2e;
 mod java_ctor_sam_conversion_e2e;
 #[path = "java_flexible_collection_e2e.rs"]
 mod java_flexible_collection_e2e;
+#[path = "java_flexible_variable_inference_e2e.rs"]
+mod java_flexible_variable_inference_e2e;
 #[path = "java_fluent_setter_e2e.rs"]
 mod java_fluent_setter_e2e;
 #[path = "java_instance_e2e.rs"]
@@ -1257,6 +1259,8 @@ mod java_nested_static_e2e;
 mod java_not_null_null_argument_e2e;
 #[path = "java_parameters_attribute_e2e.rs"]
 mod java_parameters_attribute_e2e;
+#[path = "java_platform_type_publication_e2e.rs"]
+mod java_platform_type_publication_e2e;
 #[path = "java_source_interop_e2e.rs"]
 mod java_source_interop_e2e;
 mod java_static_modules;
@@ -1279,6 +1283,8 @@ mod jvm_default_mode_e2e;
 mod jvm_name_e2e;
 #[path = "jvm_name_toplevel_e2e.rs"]
 mod jvm_name_toplevel_e2e;
+#[path = "jvm_static_functions_e2e.rs"]
+mod jvm_static_functions_e2e;
 #[path = "kclass_type_e2e.rs"]
 mod kclass_type_e2e;
 #[path = "klib_class_surface_e2e.rs"]
@@ -1579,6 +1585,8 @@ mod primitive_hash_code_e2e;
 mod public_inline_property_access_e2e;
 #[path = "reference_carrier_cast_e2e.rs"]
 mod reference_carrier_cast_e2e;
+#[path = "reified_type_arguments_e2e.rs"]
+mod reified_type_arguments_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]
 mod result_generic_override_argument_e2e;
 #[path = "safe_call_null_line_e2e.rs"]
@@ -1639,6 +1647,8 @@ mod value_class_dependency_bridge_e2e;
 mod value_class_equality_e2e;
 #[path = "value_class_equals_hash_e2e.rs"]
 mod value_class_equals_hash_e2e;
+#[path = "value_class_generic_argument_join_e2e.rs"]
+mod value_class_generic_argument_join_e2e;
 #[path = "value_class_generic_carrier_e2e.rs"]
 mod value_class_generic_carrier_e2e;
 #[path = "value_class_generic_slot_read_e2e.rs"]
@@ -1653,6 +1663,8 @@ mod value_class_inherited_default_names_e2e;
 mod value_class_interface_default_receiver_e2e;
 #[path = "value_class_interface_entry_e2e.rs"]
 mod value_class_interface_entry_e2e;
+#[path = "value_class_java_nullable_element_e2e.rs"]
+mod value_class_java_nullable_element_e2e;
 #[path = "value_class_lambda_class_e2e.rs"]
 mod value_class_lambda_class_e2e;
 #[path = "value_class_nested_carrier_e2e.rs"]
@@ -2575,6 +2587,9 @@ mod toplevel_property_ref_e2e;
 
 #[path = "captured_unsigned_lines_e2e.rs"]
 mod captured_unsigned_lines_e2e;
+
+#[path = "char_code_inline_line_e2e.rs"]
+mod char_code_inline_line_e2e;
 #[path = "erased_parameter_boxing_e2e.rs"]
 mod erased_parameter_boxing_e2e;
 #[path = "function_type_parameter_name_e2e.rs"]

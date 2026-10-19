@@ -68,6 +68,37 @@ impl KlibPublicIdSignature {
         self.mask
     }
 
+    /// Public class identity for an already-resolved classifier.
+    ///
+    /// KLIB serialized IR names classifier types by the same structural package/declaration paths
+    /// as metadata. This conversion stays at that serialization boundary and walks the interned
+    /// nesting relation; it never renders a name and parses it back for lookup.
+    pub(crate) fn classifier(classifier: crate::types::TypeName) -> Self {
+        let mut classes = vec![classifier.nested_segment_ref().to_owned()];
+        let mut outer = classifier;
+        while let Some(parent) = outer.nested_owner() {
+            classes.push(parent.nested_segment_ref().to_owned());
+            outer = parent;
+        }
+        classes.reverse();
+        let package = outer
+            .package()
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        Self {
+            package: KlibNamePath {
+                segments: package.into_boxed_slice(),
+            },
+            declaration: KlibNamePath {
+                segments: classes.into_boxed_slice(),
+            },
+            member_id: None,
+            mask: 0,
+        }
+    }
+
     /// Whether this is one exact externally serialized declaration identity.
     ///
     /// This is intentionally stricter than matching a declaration spelling: both qualified paths,

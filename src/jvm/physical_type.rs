@@ -351,6 +351,10 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         // `T : Int` is `Integer`, never `int`.
         Ty::TyParam(_, bound) if t.is_nullable() => ir_ty_to_jvm(&Ty::nullable(*bound)),
         Ty::TyParam(_, bound) => ir_ty_to_jvm(bound),
+        // `T & Any` is non-null semantically, but its JVM representation is still the type
+        // parameter's erased bound. Keep the original `T` intact until this backend boundary so a
+        // nullable primitive bound continues to erase to its wrapper rather than its scalar.
+        Ty::DefinitelyNotNull(inner) => ir_ty_to_jvm(inner),
         // A bound that already determines one carrier is published as that bound, not an
         // intersection. What remains shares one erased class, or it is `Object`.
         Ty::Intersection(parts) => ir_ty_to_jvm(&intersection_jvm_carrier(parts)),
@@ -521,6 +525,25 @@ mod tests {
         assert_eq!(jvm_builtin_scalar(type_name("kotlin/Unit")), None);
         assert_eq!(jvm_builtin_scalar(type_name("kotlin/Nothing")), None);
         assert_eq!(jvm_builtin_scalar(type_name("kotlin/Array")), None);
+    }
+
+    #[test]
+    fn a_definitely_non_null_type_parameter_erases_through_its_declared_bound() {
+        let nullable_any = Ty::DefinitelyNotNull(crate::types::intern_ty(Ty::ty_param(
+            "T",
+            Ty::nullable(Ty::obj("kotlin/Any")),
+        )));
+        let any_carrier = super::ir_ty_to_jvm(&nullable_any);
+        assert_eq!(any_carrier, Ty::obj("java/lang/Object"));
+        assert!(any_carrier.is_reference());
+
+        let nullable_int = Ty::DefinitelyNotNull(crate::types::intern_ty(Ty::ty_param(
+            "N",
+            Ty::nullable(Ty::Int),
+        )));
+        let int_carrier = super::ir_ty_to_jvm(&nullable_int);
+        assert_eq!(int_carrier, Ty::obj("java/lang/Integer"));
+        assert!(int_carrier.is_reference());
     }
 
     #[test]

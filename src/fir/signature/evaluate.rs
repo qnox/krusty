@@ -3,6 +3,7 @@
 use super::*;
 use crate::integer_constant::IntegerConstant;
 
+mod declaration_publication;
 mod postponed_arguments;
 
 /// The sole structural evaluator for [`SigExpr`]. It knows only how graph nodes compose; every
@@ -71,6 +72,9 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 }
                 SigExpr::Sequence { result, .. }
                 | SigExpr::ScopedReceiver { result, .. }
+                | SigExpr::MutableLocalFlow {
+                    current: result, ..
+                }
                 | SigExpr::NonNullable(result)
                 | SigExpr::Substitute { base: result, .. } => {
                     evaluated_integer_literal(semantics, result, graph, memo)
@@ -1006,6 +1010,25 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         }),
                     )
                 }
+                SigExpr::MutableLocalFlow { current, declared } => Some(
+                    evaluate_expression(semantics, declared, graph, demand, memo, computing)
+                        .and_then(|_| {
+                            evaluate_expression_with_result_constraint(
+                                semantics,
+                                current,
+                                result_constraint,
+                                graph,
+                                demand,
+                                memo,
+                                computing,
+                            )
+                            .unwrap_or_else(|| {
+                                evaluate_expression(
+                                    semantics, current, graph, demand, memo, computing,
+                                )
+                            })
+                        }),
+                ),
                 SigExpr::ScopedReceiver {
                     receiver,
                     result,
@@ -1678,6 +1701,10 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         }
                         evaluate_expression(semantics, result, graph, demand, memo, computing)
                     }
+                    SigExpr::MutableLocalFlow { current, declared } => {
+                        evaluate_expression(semantics, declared, graph, demand, memo, computing)?;
+                        evaluate_expression(semantics, current, graph, demand, memo, computing)
+                    }
                     SigExpr::Delegate {
                         delegate,
                         expected,
@@ -2030,12 +2057,19 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             &mut memo,
             &mut crate::fx_hash::HashSet::default(),
         )?;
+        let (published, publication_changed, publication_abbreviation) =
+            declaration_publication::result(self.semantics, result, graph, &memo)?;
+        let declaration_result = if publication_changed {
+            published
+        } else {
+            evaluated
+        };
         let approximated = self
             .semantics
-            .approximate_declaration_result(declaration, evaluated)?;
+            .approximate_declaration_result(declaration, declaration_result)?;
         // An approximated result is a new type, which carries no abbreviation.
-        let result_abbreviation = (approximated == evaluated)
-            .then(|| result_abbreviation(self.semantics, graph, result, &memo))
+        let result_abbreviation = (approximated == declaration_result)
+            .then_some(publication_abbreviation)
             .flatten();
         let parameters = self.semantics.declaration_parameters(declaration);
         if parameters.is_err() {
@@ -2105,6 +2139,9 @@ fn result_abbreviation<S: SignatureSemantics>(
             })
         }
         SigExpr::Sequence { result, .. } => result_abbreviation(semantics, graph, result, memo),
+        SigExpr::MutableLocalFlow { declared, .. } => {
+            result_abbreviation(semantics, graph, declared, memo)
+        }
         SigExpr::Nullable(base) | SigExpr::NonNullable(base) => {
             result_abbreviation(semantics, graph, base, memo)
         }
@@ -2125,6 +2162,7 @@ fn call_selection_origin(graph: &SignatureGraph, expression: SigExprId) -> Optio
     match graph.expr(expression)? {
         SigExpr::Call { target, .. } => graph.callable_selection(target).map(|s| s.origin),
         SigExpr::Sequence { result, .. } => call_selection_origin(graph, result),
+        SigExpr::MutableLocalFlow { current, .. } => call_selection_origin(graph, current),
         _ => None,
     }
 }

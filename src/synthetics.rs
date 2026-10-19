@@ -38,6 +38,19 @@ pub(crate) fn by_kind(kind: SyntheticKind) -> Option<&'static Synthetic> {
     TABLE.iter().find(|synthetic| synthetic.kind == kind)
 }
 
+/// The type parameter a reference-array creator materializes at run time: the `reified T` of
+/// `arrayOf`, `emptyArray` and `arrayOfNulls`, and the `T` of `kotlin.Array` its constructor
+/// creates. A primitive array creator has no type parameter.
+pub(crate) fn reified_type_parameter(kind: SyntheticKind) -> Option<&'static str> {
+    match kind {
+        SyntheticKind::ReferenceVararg
+        | SyntheticKind::ReferenceSize
+        | SyntheticKind::EmptyReference
+        | SyntheticKind::NullableReference => Some("T"),
+        SyntheticKind::PrimitiveVararg(_) | SyntheticKind::PrimitiveSize(_) => None,
+    }
+}
+
 const fn syn(fqn: &'static str, name: &'static str, kind: SyntheticKind) -> Synthetic {
     Synthetic { fqn, name, kind }
 }

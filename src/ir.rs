@@ -2027,6 +2027,10 @@ pub struct IrFile {
     /// need this provenance when statement emission differs from a safe call's literal-null arm;
     /// it must not recover that distinction from the lowered branch shape.
     pub elvis_safe_call_guards: crate::fx_hash::HashSet<ExprId>,
+    /// The subset of [`Self::null_guards`] the JVM value-class pass writes to box or unbox a
+    /// nullable value class (`dup; ifnull; box-impl`). It is laid out like a safe call but is a
+    /// conversion of one, so it never folds into a safe-call chain's shared null exit.
+    pub(crate) jvm_value_class_null_guards: crate::fx_hash::HashSet<ExprId>,
     /// Physical type before a semantic read coercion.
     pub physical_types: crate::fx_hash::HashMap<u32, Ty>,
     /// Values a JVM value-class underlying-property read leaves in an erased generic slot as an
@@ -2154,6 +2158,9 @@ pub struct IrFile {
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
     /// that role participates in its own frame or register allocation.
     pub call_operand_bindings: crate::fx_hash::HashSet<ExprId>,
+    /// The call-operand holders of one inline lambda invocation, consecutive in its block: the
+    /// invocation evaluates every operand before it binds any. A backend chooses the binding order.
+    pub(crate) invocation_operand_bindings: crate::fx_hash::HashSet<ExprId>,
     /// Unnamed `Variable` declarations holding a destructuring declaration's container. This is
     /// source-role provenance; a backend decides whether that role affects physical debug lines.
     pub(crate) destructuring_containers: crate::fx_hash::HashSet<ExprId>,

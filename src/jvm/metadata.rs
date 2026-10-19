@@ -32,6 +32,7 @@ use string_table::{
 use type_aliases::decode_type_aliases;
 
 pub use enclosing_type_parameters::{RawMetadata, ScopedTypeParameter};
+pub use property_declarations::MetaProp;
 pub use type_aliases::MetaTypeAlias;
 pub use value_parameter::{MetaValueParam, MvpFlags};
 
@@ -1178,76 +1179,6 @@ pub struct MetaConstructor {
     pub hidden_since: Option<LanguageVersion>,
     /// The deprecation the realization method states, stamped beside `deprecated_hidden`.
     pub deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
-}
-
-/// One `Property` decoded from a class's `@Metadata`: its source name, logical (Kotlin) return-type
-/// class, the REAL getter/setter JVM method names + descriptors (from the `JvmPropertySignature`
-/// extension — so a caller need not guess `getX`), and the source facts a resolver needs (visibility,
-/// `const`). The property analogue of [`MetaFn`].
-#[derive(Clone, Debug)]
-pub struct MetaProp {
-    pub name: String,
-    /// The Kotlin return-type class name (`kotlin/String`), if it is a class type; `None` for a bare
-    /// type parameter.
-    pub ret_class: Option<TypeName>,
-    /// Whether the Kotlin property return is nullable (`T?`). JVM getter descriptors/signatures erase
-    /// this flag, so generic extension-property specialization must restore it from metadata.
-    pub ret_nullable: bool,
-    /// Metadata-primary generic relation between an extension receiver and its return.
-    pub generic_sig: Option<GenericSig>,
-    /// Context parameters declared by this property. Legacy unnamed context receivers use an empty
-    /// source name and otherwise retain the same semantic type shape.
-    pub context_params: Vec<MetaValueParam>,
-    pub context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
-    /// The JVM getter method name (`getLength`, or a `@JvmName`/value-class-mangled spelling) + its
-    /// descriptor, from the `JvmPropertySignature`. `None` if the metadata omits an explicit getter.
-    pub getter: Option<MetaJvmMethodSig>,
-    /// The JVM setter (present iff the property is a `var` with an emitted setter).
-    pub setter: Option<MetaJvmMethodSig>,
-    /// The backing field's JVM name + descriptor, from the `JvmPropertySignature` or Kotlin's default
-    /// mapping. The classfile decides whether such a field exists.
-    pub field: Option<MetaJvmFieldSig>,
-    /// Explicit custom setter value-parameter name. An absent protobuf field denotes the implicit
-    /// setter parameter; it must not be reconstructed from a JVM local or accessor spelling.
-    pub setter_parameter_name: Option<String>,
-    /// Exact synthetic method carrying property-targeted JVM annotations, when metadata records
-    /// one. This is a declaration edge, not a spelling convention such as `$annotations`.
-    pub annotation_method: Option<MetaJvmMethodSig>,
-    /// `@Deprecated(level = HIDDEN)`: retained for declaration/override matching and excluded from
-    /// ordinary property lookup.
-    pub deprecated_hidden: bool,
-    /// API version at which `@DeprecatedSinceKotlin` removes this property.
-    pub hidden_since: Option<LanguageVersion>,
-    /// The deprecation the property states (on [`Self::annotation_method`]), and each accessor's
-    /// own, stamped from the realization methods after decode.
-    pub deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
-    pub getter_deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
-    pub setter_deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
-    pub visibility: crate::types::Visibility,
-    /// Decoded from the current `Property.flags` word only; `old_flags` predates the status bits.
-    pub return_value_status: crate::types::ReturnValueStatus,
-    pub is_const: bool,
-    /// Whether repeated reads observe one value, from the declaration's flags alone. Only a reader
-    /// in the declaring module or a friend of it may rely on it (kotlinc's smart-cast stability).
-    pub read_stability: crate::libraries::PropertyReadStability,
-    /// Semantic property modality from metadata. The classfile accessor can still be abstract when
-    /// a legacy `$DefaultImpls` method realizes this concrete declaration.
-    pub is_abstract: bool,
-    /// The property cannot be overridden. This is Kotlin declaration modality, independent of the
-    /// accessor method's JVM flags.
-    pub is_final: bool,
-    /// `var` (has a setter) vs `val`.
-    pub is_var: bool,
-    /// This exact property is the value class's underlying storage declaration, joined by wire id.
-    pub is_inline_underlying: bool,
-    /// A `companion { … }` block property: a static member of the class that declares the block,
-    /// read and written through its static accessors with no receiver.
-    pub is_companion_block_member: bool,
-    /// The EXTENSION receiver's class name (`val String.foo` → `kotlin/String`) — `None` for an
-    /// ordinary member/top-level property.
-    pub receiver_class: Option<TypeName>,
-    /// Receiver presence, including a type-parameter receiver that has no class name.
-    pub is_extension: bool,
 }
 
 impl MetaProp {

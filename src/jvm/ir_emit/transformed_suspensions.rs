@@ -371,12 +371,14 @@ pub(super) fn request_transform(
 }
 
 /// The class a member function's continuation captures as `this$0`, by internal name: a member's
-/// own, or, for the `$suspendImpl` a member's body moved to, the receiver it takes first.
+/// own, or, for the `$suspendImpl` a member's body moved to, the receiver it takes first. A named
+/// object's `@JvmStatic` member is static and captures none.
 fn dispatch_receiver(ir: &IrFile, fid: u32) -> Option<String> {
     let function = &ir.functions[fid as usize];
+    let jvm_static = super::jvm_static_members::singleton_static_owner(ir, fid).is_some();
     function
         .dispatch_receiver
-        .filter(|_| !function.is_static)
+        .filter(|_| !function.is_static && !jvm_static)
         .or_else(|| {
             ir.jvm_suspend_impl_bodies
                 .get(&fid)

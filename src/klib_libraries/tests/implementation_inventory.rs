@@ -34,6 +34,7 @@ use crate::metadata::klib_ir::{
 };
 use crate::metadata::semantic::{
     KotlinClass, KotlinConstructor, KotlinFunction, KotlinModality, KotlinProperty,
+    KotlinTypeParameter, KotlinTypeParameterId,
 };
 use crate::types::SemanticCallableOwner;
 
@@ -1048,6 +1049,44 @@ fn fixture_class(functions: Vec<KotlinFunction>) -> KotlinClass {
         annotations: Vec::new(),
         nullable_member_returns: Vec::new(),
     }
+}
+
+#[test]
+fn prepared_inline_filter_keeps_an_associated_member_signature() {
+    let module = "prepared-associated";
+    let mut associated = function("materialize", None, Vec::new());
+    associated.is_static = true;
+    associated.is_inline = true;
+    associated.has_reified_type_params = true;
+    associated.formals = vec![KotlinTypeParameter {
+        id: KotlinTypeParameterId(1),
+        name: "T".to_owned(),
+        bounds: vec![class("kotlin/Any", true)],
+        variance: crate::types::TypeVariance::Invariant,
+        only_input: false,
+        reified: true,
+    }];
+    let inventory = inventory(vec![(
+        segments(&["fixture"]),
+        crate::metadata::semantic::KotlinPackage {
+            classes: [("fixture/Owner".to_owned(), fixture_class(vec![associated]))]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        },
+        module.to_owned(),
+    )]);
+    let classifier = inventory
+        .classifier(type_name("fixture/Owner"))
+        .expect("associated member owner is published");
+    let [associated] = classifier.associated_functions.as_slice() else {
+        panic!("one associated member must be signed")
+    };
+    let signature = KlibIrSignature::Public(associated.signature.clone());
+
+    assert!(inventory
+        .inline_body_selection()
+        .contains(module, &signature));
 }
 
 #[test]

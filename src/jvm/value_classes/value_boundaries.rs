@@ -85,6 +85,10 @@ pub(super) fn record_value_boundary(
         // A boxed branch result may still contain an unboxed value-class tail. Box that tail so
         // every path entering the merge has the same representation.
         Repr::Unboxed(value_class) | Repr::Boxed(value_class) if supertype_box => {
+            if let Some(op) = carrier_join_box(exprs, repr_ctx, value, value_class, under) {
+                ops.push((value, op));
+                return;
+            }
             let mut tails = Vec::new();
             value_tails(exprs, value, &mut tails);
             for tail in tails {
@@ -120,6 +124,66 @@ pub(super) fn record_value_boundary(
         }
         _ => {}
     }
+}
+
+/// The box a value whose `when` joins on the carrier of `value_class` takes as a whole. When every
+/// branch (a safe call `x?.id` included) yields that carrier or `null`, the merge holds the carrier,
+/// so boxing a branch tail would only be unboxed again there. Like kotlinc, box the joined value
+/// once; a nullable `X?` keeps its `null` (`dup; ifnull`), a non-null `X` takes plain `box-impl`.
+/// A join realized on the box itself (`X?` over a primitive carrier), or one with any other branch,
+/// returns `None`: its branches are boxed individually.
+fn carrier_join_box(
+    exprs: &[IrExpr],
+    repr_ctx: &ReprCtx<'_>,
+    value: ExprId,
+    value_class: crate::types::TypeName,
+    under: &Under,
+) -> Option<BoxOp> {
+    let mut join = value;
+    while let IrExpr::Block {
+        value: Some(inner), ..
+    } = &exprs[join as usize]
+    {
+        join = *inner;
+    }
+    if !matches!(exprs[join as usize], IrExpr::When { .. }) {
+        return None;
+    }
+    let mut tails = Vec::new();
+    value_tails(exprs, join, &mut tails);
+    let mut nullable = false;
+    for tail in tails {
+        if repr_ctx.operand_null_only(tail) {
+            nullable = true;
+        } else if matches!(repr_ctx.repr(tail), Repr::Unboxed(tail_class) if tail_class == value_class)
+        {
+            nullable |= !repr_ctx.operand_nonnull(tail);
+        } else {
+            return None;
+        }
+    }
+    match repr_ctx.types.join_result(join) {
+        // An exhaustive `when` (a safe call's guard included) merges on its checked result, erased.
+        // That result is `X?` only when its erasure is a nullable form of a non-null carrier: over
+        // a nullable carrier (`V(val value: String?)`) `V?` is the box, so a carrier merge there is
+        // a non-null `V` whose carrier may itself be `null` (`V(null)` is still boxed).
+        Some(merge) => {
+            let carrier = erase(under.get(&value_class)?, under);
+            if merge.non_null() != carrier.non_null() {
+                return None;
+            }
+            nullable = merge.is_nullable() && !carrier.is_nullable();
+        }
+        // An `if` merges on the representation its branches share, which holds a `null` only
+        // when the carrier can.
+        None if nullable && super::nullable_is_boxed(value_class, under) => return None,
+        None => {}
+    }
+    Some(if nullable {
+        BoxOp::BoxNull(value_class)
+    } else {
+        BoxOp::Box(value_class)
+    })
 }
 
 /// A Kotlin `Array<T>` is a JVM reference array even when `T` is a non-null value class. Its semantic

@@ -1,7 +1,5 @@
 //! Physical JVM emission of one common-IR value node.
 
-use crate::fx_hash::HashMap;
-
 use crate::ir::{Callee, IrExpr, NullCheck};
 use crate::jvm::classfile::CodeBuilder;
 use crate::jvm::names::{method_descriptor, type_descriptor};
@@ -11,14 +9,13 @@ use crate::types::Ty;
 use super::{
     access_bridges, array_jvm_element, bottom_values, boxed_descriptor, bytecode_inline_call,
     captured_storage, class_ctor_jvm_tys, constant_emission, constructor_accessors,
-    declared_jvm_interface, default_mask_bit, default_mask_count, emit_box_impl,
-    emit_constructor_default_arguments, instance_field_jvm_name, ir_ty_to_jvm, jvm_declared_ty,
-    jvm_function_interface, jvm_function_invoke_descriptor, jvm_function_params, jvm_tys,
-    jvm_value_ty, lambda_class, lambda_class_names, load, method_defaults,
-    native_unsigned_impl_target, parse_descriptor_params, physical_call_result_words,
-    prim_newarray_atype, push_zero, singleton_instance_load, slot_words, try_emission,
-    ty_from_descriptor_ret, vararg, JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation,
-    LMF_METAFACTORY_DESC,
+    declared_jvm_interface, default_mask_count, emit_constructor_default_arguments,
+    instance_field_jvm_name, ir_ty_to_jvm, jvm_declared_ty, jvm_function_interface,
+    jvm_function_invoke_descriptor, jvm_function_params, jvm_static_members, jvm_tys, jvm_value_ty,
+    lambda_class, lambda_class_names, load, method_defaults, native_unsigned_impl_target,
+    parse_descriptor_params, physical_call_result_words, prim_newarray_atype, push_zero,
+    singleton_instance_load, slot_words, try_emission, ty_from_descriptor_ret, vararg,
+    JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation, LMF_METAFACTORY_DESC,
 };
 
 impl super::Emitter<'_> {
@@ -100,6 +97,10 @@ impl super::Emitter<'_> {
             IrExpr::GetValue(i) => {
                 if self.stack_resident_value == Some(*i) {
                     self.stack_resident_value = None;
+                    return;
+                }
+                if let Some(singleton) = self.singleton_receiver_value(*i) {
+                    self.emit_singleton_instance(singleton, code);
                     return;
                 }
                 let Some(&(slot, jt)) = self.slots.get(i) else {
@@ -414,6 +415,10 @@ impl super::Emitter<'_> {
             } => {
                 let c = &self.ir.classes[*class as usize];
                 let fid = c.methods[*index as usize];
+                if jvm_static_members::singleton_static_owner(self.ir, fid).is_some() {
+                    self.emit_singleton_static_call(e, fid, *receiver, args, code);
+                    return;
+                }
                 let f = &self.ir.functions[fid as usize];
                 let param_tys = jvm_function_params(self.ir, fid);
                 let ret = jvm_declared_ty(&self.override_results.physical_result(self.ir, fid));
@@ -429,74 +434,11 @@ impl super::Emitter<'_> {
                     // parameter bounded by a JVM primitive is likewise the JDK wrapper on the stub:
                     // the placeholder is `valueOf` of the primitive zero, and a supplied primitive is
                     // boxed the same way.
-                    let boxed: HashMap<usize, Ty> = self
-                        .ir
-                        .default_stub_boxed_params
-                        .get(&fid)
-                        .map(|v| v.iter().copied().collect())
-                        .unwrap_or_default();
-                    let stub_param_tys: Vec<Ty> = param_tys
-                        .iter()
-                        .enumerate()
-                        .map(|(i, t)| method_defaults::stub_parameter_type(self.ir, fid, i, *t))
-                        .collect();
                     let args = args.clone();
                     self.emit_value(*receiver, code);
-                    // Mask bits are LOGICAL (kotlinc numbers them over the declared value
-                    // parameters) — a member EXTENSION's physical receiver at params[0] does not
-                    // shift them, and is never omitted.
-                    let recv_offset = usize::from(self.ir.extension_receiver_fns.contains(&fid));
-                    let logical_param_count = param_tys
-                        .len()
-                        .checked_sub(recv_offset)
-                        .expect("an extension receiver is a leading physical parameter");
-                    let mut masks = vec![0i32; default_mask_count(logical_param_count)];
-                    // Every operand the CALL synthesizes — a placeholder standing in for an omitted
-                    // argument, and the trailing mask/marker group — carries the call's own line, so
-                    // an argument supplied between two of them puts its own line in effect and the
-                    // next group restores the call's. A call that omits nothing synthesizes nothing,
-                    // which is why an ordinary call's dispatch mark sits at its invoke.
-                    for (i, arg) in args.iter().enumerate() {
-                        match arg {
-                            Some(a) => {
-                                self.emit_value(*a, code);
-                                if let Some(vc) = boxed.get(&i) {
-                                    emit_box_impl(self.ir, self.cw, vc, code);
-                                }
-                                method_defaults::emit_primitive_box_if_needed(
-                                    self.cw,
-                                    ir_ty_to_jvm(&self.value_ty(*a)),
-                                    stub_param_tys[i],
-                                    code,
-                                );
-                            }
-                            None => {
-                                self.mark_dispatch_line(e, code);
-                                method_defaults::emit_omitted_default_placeholder(
-                                    self.cw,
-                                    param_tys[i],
-                                    stub_param_tys[i],
-                                    code,
-                                );
-                                let li = i
-                                    .checked_sub(recv_offset)
-                                    .expect("an extension receiver cannot be omitted");
-                                masks[li / 32] |= default_mask_bit(li);
-                            }
-                        }
-                    }
-                    self.mark_dispatch_line(e, code);
-                    for mask in masks {
-                        code.push_int(mask, self.cw);
-                    }
-                    code.aconst_null();
                     let mut stub_params = vec![Ty::obj_name(c.fq_name)];
-                    stub_params.extend(stub_param_tys.iter().copied());
-                    stub_params.extend(std::iter::repeat_n(
-                        Ty::Int,
-                        default_mask_count(logical_param_count),
-                    ));
-                    stub_params.push(Ty::obj("java/lang/Object"));
+                    stub_params
+                        .extend(self.emit_default_call_arguments(e, fid, &args, &param_tys, code));
                     let aw: i32 = stub_params.iter().map(|t| slot_words(*t) as i32).sum();
                     let stub_desc = method_descriptor(&stub_params, ret);
                     let plain_stub = format!("{name}$default");
@@ -919,6 +861,11 @@ impl super::Emitter<'_> {
                         name
                     };
                     let args = args.clone();
+                    // Only a named object's static `$default` stub keeps a receiver: one that runs
+                    // code, evaluated and discarded ahead of the arguments.
+                    if let Some(receiver) = *dispatch_receiver {
+                        self.emit_discarded_static_receiver(receiver, code);
+                    }
                     if let Err(mismatch) =
                         self.emit_call_descriptor_operands(e, 0, &args, &param_tys, code)
                     {
@@ -1080,6 +1027,20 @@ impl super::Emitter<'_> {
                     // descriptor and emit a plain virtual/interface call. The classpath-operator
                     // special-casing below only applies to the `descriptor` form (a classpath receiver).
                     if let Some((param_tys, ret_ty)) = params {
+                        if let Some(owner) = module_target.and_then(|target| {
+                            jvm_static_members::module_singleton_static_owner(self.ir, target)
+                        }) {
+                            let call = jvm_static_members::ModuleStaticCall {
+                                owner,
+                                name,
+                                parameters: param_tys,
+                                result: ret_ty,
+                                receiver: recv,
+                                args,
+                            };
+                            self.emit_module_singleton_static_call(e, call, code);
+                            return;
+                        }
                         let owner_identity = *owner;
                         // Array `clone` names the JVM array type. That decision reads the receiver's
                         // type; the dispatch classifier still selects every other owner.
@@ -1441,25 +1402,7 @@ impl super::Emitter<'_> {
                 code.getstatic(f, 1);
             }
             IrExpr::SingletonValue { classifier } => {
-                let dependency = crate::jvm::singleton_storage::of(self.classifiers, *classifier);
-                let Some(published) =
-                    singleton_instance_load::published_singleton(self.ir, *classifier, dependency)
-                else {
-                    *self.run.emit_error.borrow_mut() = Some(format!(
-                        "missing JVM storage for singleton {}",
-                        classifier.render()
-                    ));
-                    return;
-                };
-                let (owner, field) = singleton_instance_load::loaded_instance(
-                    self.self_companion,
-                    *classifier,
-                    published,
-                );
-                let owner = owner.render();
-                let ty = classifier.render();
-                let f = self.cw.fieldref(&owner, &field, &format!("L{ty};"));
-                code.getstatic(f, 1);
+                self.emit_singleton_instance(*classifier, code);
             }
             IrExpr::ExternalStaticInstance { owner, ty, field } => {
                 let (owner, field) = singleton_instance_load::loaded_instance(

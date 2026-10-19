@@ -297,23 +297,24 @@ pub(super) fn attach_callable_generic_facts(
     let signature = index
         .signature(declaration)
         .expect("a member callable must have a pending-free signature");
-    if signature
+    let mut semantic_parameters = signature
         .parameters
         .iter()
         .map(|parameter| parameter.get())
+        .collect::<Vec<_>>();
+    if let (Some(callable), Some(receiver)) = (callable, extension_receiver) {
+        semantic_parameters.insert(
+            (callable.shape.context_parameter_count as usize).min(semantic_parameters.len()),
+            receiver.get(),
+        );
+    }
+    if semantic_parameters
+        .iter()
+        .copied()
         .chain(std::iter::once(signature.result.get()))
         .any(|ty| crate::types::ty_mentions_param(ty, &class_parameter_names))
     {
-        ir.member_semantic_sigs.insert(
-            function,
-            (
-                signature
-                    .parameters
-                    .iter()
-                    .map(|parameter| parameter.get())
-                    .collect(),
-                signature.result.get(),
-            ),
-        );
+        ir.member_semantic_sigs
+            .insert(function, (semantic_parameters, signature.result.get()));
     }
 }

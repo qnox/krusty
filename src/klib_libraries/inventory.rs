@@ -9,6 +9,7 @@ use super::declaration_signatures::{
 use super::parameter_defaults::{DefaultSelection, ParameterDefaults};
 use super::target_intrinsics::{KlibIntrinsicFacts, TargetIntrinsicPlatform};
 use crate::libraries::{declared_type_alias, AliasExpansion};
+use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::KlibIrSignature;
 use crate::metadata::semantic::KotlinPackage;
 use crate::types::{existing_type_name_child, type_name, type_name_child, TypeName, Visibility};
@@ -59,6 +60,75 @@ pub(super) struct PackageInventory {
     /// it is not a child of any namespace.
     namespaces: HashSet<TypeName>,
     intrinsics: KlibIntrinsicFacts,
+}
+
+/// Exact prepared-inline declarations selected by metadata, grouped by declaring module.
+///
+/// The prepared IR component can contain bodies that this compilation cannot publish. Keeping the
+/// selection at the metadata inventory boundary lets archive decoding skip those bodies without
+/// inferring eligibility from IR shape or source names.
+#[derive(Default)]
+pub(super) struct InlineBodySelection {
+    by_module: HashMap<String, HashSet<KlibPublicIdSignature>>,
+}
+
+impl InlineBodySelection {
+    fn insert(&mut self, module: Option<&str>, signature: &KlibPublicIdSignature) {
+        let Some(module) = module else {
+            return;
+        };
+        self.by_module
+            .entry(module.to_owned())
+            .or_default()
+            .insert(signature.clone());
+    }
+
+    pub(super) fn contains(&self, module: &str, signature: &KlibIrSignature) -> bool {
+        let KlibIrSignature::Public(signature) = signature else {
+            return false;
+        };
+        self.by_module
+            .get(module)
+            .is_some_and(|selected| selected.contains(signature))
+    }
+}
+
+fn is_inline_only(function: &SignedFunction) -> bool {
+    let inline_only = type_name("kotlin/internal/InlineOnly");
+    function
+        .declaration
+        .annotations
+        .iter()
+        .any(|annotation| annotation == &inline_only)
+}
+
+fn has_caller_frame_lambda(function: &SignedFunction) -> bool {
+    function
+        .declaration
+        .params
+        .iter()
+        .zip(&function.declaration.inline_modifiers)
+        .any(|(parameter, modifier)| {
+            modifier.runs_in_caller_frame()
+                && matches!(parameter,
+                    crate::metadata::semantic::KotlinType::Class {
+                        internal,
+                        nullable: false,
+                        ..
+                    } if crate::metadata::semantic::is_kotlin_function_classifier(internal))
+        })
+}
+
+fn can_publish_reified_type_test(function: &SignedFunction) -> bool {
+    function.declaration.is_inline && function.declaration.has_reified_type_params
+}
+
+fn can_publish_direct_lambda_invocation(function: &SignedFunction) -> bool {
+    function.declaration.is_inline && is_inline_only(function) && has_caller_frame_lambda(function)
+}
+
+fn can_publish_inline_body_plan(function: &SignedFunction) -> bool {
+    can_publish_reified_type_test(function) || can_publish_direct_lambda_invocation(function)
 }
 
 impl PackageInventory {
@@ -404,6 +474,26 @@ impl PackageInventory {
         wanted
     }
 
+    /// Inline declarations whose prepared bodies can contribute a normalized call-site plan.
+    pub(super) fn inline_body_selection(&self) -> InlineBodySelection {
+        let mut selected = InlineBodySelection::default();
+        let mut select = |function: &SignedFunction| {
+            if can_publish_inline_body_plan(function) {
+                selected.insert(function.module.as_deref(), &function.signature);
+            }
+        };
+        self.functions.values().flatten().for_each(&mut select);
+        self.companion_functions
+            .values()
+            .flatten()
+            .for_each(|extension| select(&extension.signed));
+        for classifier in self.classifiers.values() {
+            classifier.functions.iter().for_each(&mut select);
+            classifier.associated_functions.iter().for_each(&mut select);
+        }
+        selected
+    }
+
     /// Give every function the constant defaults its library's IR declares for it.
     pub(super) fn attach_defaults(&mut self, defaults: &ParameterDefaults) {
         let mut attach = |function: &mut SignedFunction| {
@@ -420,6 +510,101 @@ impl PackageInventory {
                 let signature = KlibIrSignature::Public(constructor.signature.clone());
                 constructor.defaults = defaults.of(classifier.module.as_deref(), &signature);
             }
+            classifier.functions.iter_mut().for_each(&mut attach);
+            classifier
+                .associated_functions
+                .iter_mut()
+                .for_each(&mut attach);
+        }
+    }
+
+    /// Attach structural inline plans only where metadata and the exact module-qualified body
+    /// agree that the referenced formal is reified. The provider performs this join once; call
+    /// checking and lowering never search declarations by spelling.
+    pub(super) fn attach_inline_body_plans(&mut self, bodies: &super::KlibDeclarationBodies) {
+        let mut attach = |function: &mut SignedFunction| {
+            if !can_publish_inline_body_plan(function) {
+                return;
+            }
+            let Some(module) = function.module.as_ref() else {
+                return;
+            };
+            let identity = crate::libraries::KlibDependencyCallable {
+                module: module.clone(),
+                declaration: crate::libraries::KlibDeclarationSignature::Public(
+                    function.signature.clone(),
+                ),
+            };
+            let plan = if can_publish_reified_type_test(function) {
+                let Some(
+                    plan @ crate::libraries::InlineBodyPlan::ReifiedTypeTest {
+                        type_parameter, ..
+                    },
+                ) = bodies.reified_type_test_inline_plan(&identity)
+                else {
+                    return;
+                };
+                if !function
+                    .declaration
+                    .formals
+                    .get(type_parameter as usize)
+                    .is_some_and(|parameter| parameter.reified)
+                {
+                    return;
+                }
+                plan
+            } else {
+                let Some(plan @ crate::libraries::InlineBodyPlan::InvokeLambda { .. }) =
+                    bodies.direct_lambda_invocation_inline_plan(&identity, &function.declaration)
+                else {
+                    return;
+                };
+                plan
+            };
+            let body_defaults = match &plan {
+                crate::libraries::InlineBodyPlan::ReifiedTypeTest { defaults, .. }
+                | crate::libraries::InlineBodyPlan::InvokeLambda { defaults, .. } => defaults,
+                crate::libraries::InlineBodyPlan::Iteration { .. }
+                | crate::libraries::InlineBodyPlan::CollectionTransform { .. } => unreachable!(),
+            };
+            let mut declared_default_count = 0usize;
+            for (parameter, &declares_default) in
+                function.declaration.param_defaults.iter().enumerate()
+            {
+                if !declares_default {
+                    continue;
+                }
+                declared_default_count += 1;
+                if parameter < function.declaration.context_count {
+                    // Context defaults are not in the regular-parameter default table.
+                    return;
+                }
+                let body_parameter = parameter
+                    + usize::from(
+                        function.declaration.receiver.is_some()
+                            && parameter >= function.declaration.context_count,
+                    );
+                if !body_defaults.iter().any(|default| {
+                    default.parameter == body_parameter
+                        && default.value == crate::libraries::DefaultValue::Null
+                }) {
+                    // Prepared IR owns defaults only inside this exact template. It may never
+                    // borrow a missing/general default from ordinary IR or metadata alone.
+                    return;
+                }
+            }
+            if body_defaults.len() != declared_default_count {
+                // A prepared body default not declared in metadata is equally inconsistent.
+                return;
+            }
+            function.inline_body_plan = Some(Box::new(plan));
+        };
+        self.functions.values_mut().flatten().for_each(&mut attach);
+        self.companion_functions
+            .values_mut()
+            .flatten()
+            .for_each(|extension| attach(&mut extension.signed));
+        for classifier in self.classifiers.values_mut() {
             classifier.functions.iter_mut().for_each(&mut attach);
             classifier
                 .associated_functions

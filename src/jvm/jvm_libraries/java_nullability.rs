@@ -69,8 +69,11 @@ pub(super) fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>
 }
 
 /// Apply Java's unqualified flexibility inside a generic argument without discarding its semantic
-/// wrapper. A declaration variable stays a variable whose bound is flexible; use-site variance stays
-/// a projection whose interior is flexible.
+/// wrapper. A declaration variable keeps its stable symbolic identity while its bound records the
+/// Java declaration's flexibility. Selected-call publication owns the occurrence-level `T!` fact;
+/// putting that wrapper into the shared semantic type would leak a Java provider detail through
+/// Kotlin collection supertypes and source-declared generic operations. Use-site variance stays a
+/// projection whose interior is flexible.
 pub(super) fn java_type_argument_nullability(ty: Ty) -> Ty {
     match ty {
         Ty::TyParam(name, bound) => Ty::ty_param(name, java_type_nullability(*bound, None)),
@@ -78,6 +81,21 @@ pub(super) fn java_type_argument_nullability(ty: Ty) -> Ty {
         Ty::OutProjection(inner) => Ty::out_projection(java_type_argument_nullability(*inner)),
         Ty::StarProjection(inner) => Ty::star_projection(java_type_argument_nullability(*inner)),
         _ => java_type_nullability(ty, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unqualified_java_type_variable_keeps_identity_and_a_flexible_bound() {
+        let variable = Ty::ty_param("T", Ty::obj("java/lang/Object"));
+
+        assert_eq!(
+            java_type_argument_nullability(variable),
+            Ty::ty_param("T", Ty::platform_nullable(Ty::obj("java/lang/Object")),)
+        );
     }
 }
 

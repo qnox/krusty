@@ -15,11 +15,20 @@ pub(super) enum MethodPlacement {
         instance: bool,
     },
     Holder(crate::types::TypeName),
+    /// A `@JvmStatic` member of a named object, written as a `static` method of the object. The
+    /// common IR still numbers its receiver as value 0; that value reads the singleton's instance
+    /// field instead of a parameter slot, and the descriptor carries no receiver.
+    Singleton {
+        static_owner: StaticOwner,
+        singleton: crate::types::TypeName,
+    },
     /// The private `name$$forInline` copy beside a callable suspend inline function on its
     /// declaring class: the same body, left untransformed for an inlining caller.
+    /// A named object's `@JvmStatic` member keeps its copy static, as `singleton` names.
     ForInlineCopy {
         static_owner: StaticOwner,
         instance: bool,
+        singleton: Option<crate::types::TypeName>,
     },
 }
 
