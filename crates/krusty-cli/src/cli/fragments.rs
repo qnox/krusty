@@ -13,10 +13,10 @@ pub(super) struct FragmentArguments {
 /// What the fragment arguments say about `free` (the free arguments as written).
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(super) struct FragmentCheck {
-    /// kotlinc's configuration errors, in its order: each malformed or undeclared
+    /// kotlinc's configuration errors, in its order: each malformed, undeclared or doubly listed
     /// `-Xfragment-sources` value, then each free argument that no fragment lists.
     pub(super) configuration_errors: Vec<String>,
-    /// A structure krusty does not compile: more than one fragment.
+    /// A well-formed structure krusty does not compile: more than one fragment.
     pub(super) unsupported: Option<String>,
 }
 
@@ -28,18 +28,9 @@ pub(super) fn check(arguments: &FragmentArguments, free: &[String]) -> FragmentC
     // A fragment is its exact name, the empty name included: kotlinc accepts a name declared
     // twice, in one list or in repeated arguments, as one fragment.
     let fragments = distinct(&arguments.fragments);
-    if fragments.len() > 1 {
-        return FragmentCheck {
-            configuration_errors: Vec::new(),
-            unsupported: Some(format!(
-                "krusty compiles a single fragment, but -Xfragments declares {}: {}",
-                fragments.len(),
-                fragments.join(",")
-            )),
-        };
-    }
     let mut configuration_errors = Vec::new();
-    let mut listed = Vec::new();
+    // Each listed source and the fragment it belongs to.
+    let mut listed: Vec<(&str, &str)> = Vec::new();
     // kotlinc validates each distinct value and free spelling once, in first-seen order.
     for value in distinct(&arguments.fragment_sources) {
         match value.split_once(':') {
@@ -52,19 +43,35 @@ pub(super) fn check(arguments: &FragmentArguments, free: &[String]) -> FragmentC
                     "passed {value}, but fragment `{fragment}` of source file {source} is not \
                      specified in -Xfragments"
                 )),
-            Some((_, source)) => listed.push(source),
+            Some((fragment, source)) => match listed.iter().find(|(seen, _)| *seen == source) {
+                Some((_, owner)) => configuration_errors.push(format!(
+                    "file '{source}' can be a part of only one module, but is listed as a source \
+                     for both `{owner}` and `{fragment}`, please check you -Xfragment-sources \
+                     options."
+                )),
+                None => listed.push((source, fragment)),
+            },
         }
     }
     // kotlinc matches a free argument by its exact spelling, a directory included; a Java source
     // belongs to no fragment.
     for source in distinct(free) {
-        if !source.ends_with(".java") && !listed.contains(&source) {
+        if !source.ends_with(".java") && !listed.iter().any(|(seen, _)| *seen == source) {
             configuration_errors.push(format!("source '{source}' does not belong to any module"));
         }
     }
+    // kotlinc reports a malformed structure whatever its shape; only a well-formed one with more
+    // than one fragment reaches what krusty does not compile.
+    let unsupported = (configuration_errors.is_empty() && fragments.len() > 1).then(|| {
+        format!(
+            "krusty compiles a single fragment, but -Xfragments declares {}: {}",
+            fragments.len(),
+            fragments.join(",")
+        )
+    });
     FragmentCheck {
         configuration_errors,
-        unsupported: None,
+        unsupported,
     }
 }
 
@@ -194,6 +201,46 @@ mod tests {
             .unsupported
             .as_deref(),
             Some("krusty compiles a single fragment, but -Xfragments declares 2: jvm,common")
+        );
+    }
+
+    /// kotlinc's own CLI cases (`compiler/testData/cli/jvm/hmpp`): with several fragments a
+    /// malformed structure is still kotlinc's configuration error, not krusty's refusal.
+    #[test]
+    fn several_fragments_report_kotlincs_configuration_errors_first() {
+        assert_eq!(
+            checked(&["a", "b", "c"], &["a;a.kt;"], &["a.kt", "b.kt"]),
+            FragmentCheck {
+                configuration_errors: strings(&[
+                    "incorrect syntax for -Xfragment-sources argument. `<module name>:<source \
+                     file>` expected but got `a;a.kt;`",
+                    "source 'a.kt' does not belong to any module",
+                    "source 'b.kt' does not belong to any module",
+                ]),
+                unsupported: None,
+            }
+        );
+        assert_eq!(
+            checked(&["a", "b"], &[], &["a.kt"]).configuration_errors,
+            strings(&["source 'a.kt' does not belong to any module"])
+        );
+    }
+
+    #[test]
+    fn a_source_listed_for_two_fragments_is_a_configuration_error() {
+        assert_eq!(
+            checked(
+                &["a", "b"],
+                &["a:a.kt", "b:a.kt", "b:b.kt"],
+                &["a.kt", "b.kt"]
+            ),
+            FragmentCheck {
+                configuration_errors: strings(&[
+                    "file 'a.kt' can be a part of only one module, but is listed as a source for \
+                     both `a` and `b`, please check you -Xfragment-sources options."
+                ]),
+                unsupported: None,
+            }
         );
     }
 
