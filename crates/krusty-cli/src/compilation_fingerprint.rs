@@ -5,7 +5,8 @@
 //! after `@argfile` expansion, the expanded source files, and every entry of the effective
 //! classpath (the implicit standard library and the selected JDK image included) plus the companion
 //! files [`JvmCompilationInputInventory`] selects from it, the friend paths, and the compiler plugin
-//! jars. The compiler binary is an input too.
+//! jars. The compiler binary is an input too, and so is every environment variable in
+//! [`OUTPUT_ENVIRONMENT`], by its presence and value.
 //!
 //! Every input enters by its contents, read afresh. A directory enters by
 //! [`krusty_build::dependency_view`], so an upstream module's body-only edit leaves a dependent's
@@ -13,18 +14,26 @@
 
 use std::path::Path;
 
-use krusty::jvm::compilation_inputs::JvmCompilationInputInventory;
+use krusty::jvm::compilation_inputs::{JvmCompilationInputInventory, OUTPUT_ENVIRONMENT};
 use krusty_build::dependency_view::directory_fingerprint;
 use krusty_build::{digest_files, Digest, Hasher};
 
 use crate::{cli, kotlinc_arguments};
 
 /// Bumped whenever the inputs read here change, so a digest from an older compiler never matches.
-const FORMAT: &str = "krusty compilation fingerprint 2";
+const FORMAT: &str = "krusty compilation fingerprint 3";
 
-/// The fingerprint of the compilation `argv` describes, or why it cannot be taken. A command line
-/// the compilation itself would reject has no fingerprint.
+/// The fingerprint of the compilation `argv` describes in this process's environment, or why it
+/// cannot be taken. A command line the compilation itself would reject has no fingerprint.
 pub fn fingerprint(argv: Vec<String>) -> Result<Digest, String> {
+    fingerprint_in(argv, |name| std::env::var_os(name))
+}
+
+/// [`fingerprint`], reading the output-affecting environment variables through `variable`.
+fn fingerprint_in(
+    argv: Vec<String>,
+    variable: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<Digest, String> {
     let mut argfile_problems = Vec::new();
     let expanded = kotlinc_arguments::argfile::expand(argv.clone(), &mut argfile_problems);
     let options = cli::parse(argv);
@@ -124,6 +133,14 @@ pub fn fingerprint(argv: Vec<String>) -> Result<Digest, String> {
     let mut hasher = Hasher::new();
     hasher.text("format", FORMAT);
     hasher.nested("compiler", compiler_digest);
+    hasher.count("environment", OUTPUT_ENVIRONMENT.len());
+    for name in OUTPUT_ENVIRONMENT {
+        hasher.text("variable", name);
+        match variable(name) {
+            Some(value) => hasher.field("set", value.as_encoded_bytes()),
+            None => hasher.text("unset", ""),
+        };
+    }
     hasher.count("arguments", expanded.len());
     for argument in &expanded {
         hasher.text("argument", argument);
@@ -154,7 +171,7 @@ enum Contents {
 
 #[cfg(test)]
 mod tests {
-    use super::fingerprint;
+    use super::{fingerprint, fingerprint_in};
     use std::path::{Path, PathBuf};
 
     struct Scratch(PathBuf);
@@ -260,6 +277,29 @@ mod tests {
         let base = fingerprint(arguments.clone()).expect("fingerprint");
         replace_keeping_size_and_time(&argfile, b"-module-name=two\n");
         assert_ne!(fingerprint(arguments).expect("fingerprint"), base);
+    }
+
+    /// Turning per-class `@Metadata` off changes every emitted class, so with the command line and
+    /// every file unchanged it still moves the fingerprint; so does its value, and unsetting it.
+    #[test]
+    fn output_affecting_environment_enters_the_fingerprint() {
+        let scratch = Scratch::new("environment");
+        let arguments = arguments(&scratch, &["-no-stdlib".to_string(), "-no-jdk".to_string()]);
+        let with = |value: Option<&str>| {
+            fingerprint_in(arguments.clone(), |name| {
+                (name == "KRUSTY_NO_CLASS_METADATA")
+                    .then_some(value)
+                    .flatten()
+                    .map(std::ffi::OsString::from)
+            })
+            .expect("fingerprint")
+        };
+        let unset = with(None);
+        assert_eq!(with(None), unset);
+        let set = with(Some("1"));
+        assert_ne!(set, unset, "setting it");
+        assert_ne!(with(Some("")), unset, "setting it empty");
+        assert_ne!(with(Some("yes")), set, "its value");
     }
 
     #[test]

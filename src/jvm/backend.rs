@@ -605,6 +605,9 @@ impl JvmBackend {
 /// `KRUSTY_NO_CLASS_METADATA` (read below) is how a shipping caller gets facade-only output back; it is
 /// consulted ONLY here, so a caller holding some other `EmitOptions` opts out by setting
 /// `emit_class_metadata: false` itself.
+/// The environment variable that turns off per-class `@Metadata` in shipping output.
+pub const NO_CLASS_METADATA_VARIABLE: &str = "KRUSTY_NO_CLASS_METADATA";
+
 pub fn shipping_emit_options(
     stem: &str,
     module_name: &str,
@@ -632,7 +635,7 @@ pub fn shipping_emit_options(
         // `operator` marks (destructuring). A shape `build_class_metadata` has not verified against
         // kotlinc declines individually and emits nothing, so this cannot write an unverified
         // payload. `KRUSTY_NO_CLASS_METADATA` restores the facade-only output for bisecting.
-        emit_class_metadata: std::env::var_os("KRUSTY_NO_CLASS_METADATA").is_none(),
+        emit_class_metadata: std::env::var_os(NO_CLASS_METADATA_VARIABLE).is_none(),
         jvm_default: crate::jvm::ir_emit::JvmDefaultMode::default(),
         // `-Xno-param-assertions` is applied by the caller (`with_param_assertions`); the shipping
         // default emits the guards, as kotlinc does.
