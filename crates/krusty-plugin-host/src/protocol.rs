@@ -2,12 +2,17 @@
 //!
 //! Each message is one frame: a big-endian `u32` payload length, then the payload, whose first byte
 //! is the message's tag. Strings are a `u32` byte length and UTF-8; lists are a `u32` count and the
-//! elements. The host's side is `adapter/Host.kt`; keep the two in step and bump [`PROTOCOL`] on any
+//! elements. The host's side is `adapter/`; keep the two in step and bump [`PROTOCOL`] on any
 //! change.
 
 use std::io::{self, Read, Write};
 
-pub(crate) const PROTOCOL: u32 = 1;
+use crate::session::{
+    CallableIdentity, CallableKind, ClassName, Classifier, SessionRequest, TypeArgument,
+    TypeIdentity, TypeParameterOwner,
+};
+
+pub(crate) const PROTOCOL: u32 = 3;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -16,6 +21,12 @@ const FAILED: u8 = 3;
 const SHUTDOWN: u8 = 4;
 const UNLOAD: u8 = 5;
 const UNLOADED: u8 = 6;
+const OPEN_SESSION: u8 = 7;
+const SESSION_OPENED: u8 = 8;
+const CLOSE_SESSION: u8 = 9;
+const SESSION_CLOSED: u8 = 10;
+const RESOLVE: u8 = 11;
+const RESOLVED: u8 = 12;
 
 /// A frame larger than this is a broken stream, not a message.
 const MAX_FRAME: u32 = 1 << 30;
@@ -37,6 +48,11 @@ pub(crate) enum Request<'a> {
     },
     /// End the loaded plugins' lifetime: dispose their resources and close their class loader.
     Unload,
+    /// Open a compilation's session, replacing the one open.
+    OpenSession(&'a SessionRequest),
+    CloseSession,
+    /// Find declarations on the session's classpath.
+    Resolve(&'a [CallableIdentity]),
     Shutdown,
 }
 
@@ -44,6 +60,10 @@ pub(crate) enum Request<'a> {
 pub(crate) enum Reply {
     Loaded(Vec<LoadedPlugin>),
     Unloaded,
+    SessionOpened,
+    SessionClosed,
+    /// Each resolved declaration rendered as kotlinc renders IR, in request order.
+    Resolved(Vec<String>),
     /// The request failed in the host; the message says why, as kotlinc would.
     Failed(String),
 }
@@ -73,6 +93,27 @@ pub(crate) fn write_request(out: &mut impl Write, request: &Request) -> io::Resu
             });
         }
         Request::Unload => payload.push(UNLOAD),
+        Request::OpenSession(session) => {
+            payload.push(OPEN_SESSION);
+            let classpath = session
+                .classpath
+                .iter()
+                .map(|entry| utf8(entry))
+                .collect::<io::Result<Vec<_>>>()?;
+            put_list(&mut payload, &classpath, |payload, entry| {
+                put_str(payload, entry)
+            });
+            put_str(&mut payload, utf8(&session.jdk_home)?);
+            put_str(&mut payload, &session.module_name);
+            put_str(&mut payload, &session.language_version);
+            put_str(&mut payload, &session.api_version);
+            put_str(&mut payload, &session.jvm_target);
+        }
+        Request::CloseSession => payload.push(CLOSE_SESSION),
+        Request::Resolve(identities) => {
+            payload.push(RESOLVE);
+            put_list(&mut payload, identities, put_callable);
+        }
         Request::Shutdown => payload.push(SHUTDOWN),
     }
     write_frame(out, &payload)
@@ -108,6 +149,9 @@ pub(crate) fn read_reply(input: &mut impl Read) -> io::Result<Reply> {
             Ok(Reply::Loaded(plugins))
         }
         UNLOADED => Ok(Reply::Unloaded),
+        SESSION_OPENED => Ok(Reply::SessionOpened),
+        SESSION_CLOSED => Ok(Reply::SessionClosed),
+        RESOLVED => Ok(Reply::Resolved(payload.list(|payload| payload.string())?)),
         FAILED => Ok(Reply::Failed(payload.string()?)),
         tag => Err(malformed(format!("unknown reply {tag}"))),
     }
@@ -130,6 +174,86 @@ fn read_frame(input: &mut impl Read) -> io::Result<Vec<u8>> {
     let mut frame = vec![0u8; length as usize];
     input.read_exact(&mut frame)?;
     Ok(frame)
+}
+
+/// A path as the host reads it. kotlinc takes paths as strings, so one that is not UTF-8 cannot be
+/// passed on unchanged.
+fn utf8(path: &std::path::Path) -> io::Result<&str> {
+    path.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a UTF-8 path", path.display()),
+        )
+    })
+}
+
+fn put_callable(payload: &mut Vec<u8>, identity: &CallableIdentity) {
+    match &identity.kind {
+        CallableKind::Function { .. } => payload.push(0),
+        CallableKind::Property { .. } => payload.push(1),
+        CallableKind::Constructor => payload.push(2),
+    }
+    put_str(payload, &identity.package);
+    put_list(payload, &identity.classes, |payload, class| {
+        put_str(payload, class)
+    });
+    match &identity.kind {
+        CallableKind::Function { name } | CallableKind::Property { name } => put_str(payload, name),
+        CallableKind::Constructor => {}
+    }
+    payload.extend_from_slice(&identity.type_parameters.to_be_bytes());
+    put_list(payload, &identity.context_parameters, put_type);
+    match &identity.extension_receiver {
+        Some(receiver) => {
+            payload.push(1);
+            put_type(payload, receiver);
+        }
+        None => payload.push(0),
+    }
+    put_list(payload, &identity.value_parameters, put_type);
+}
+
+fn put_class_name(payload: &mut Vec<u8>, class: &ClassName) {
+    put_str(payload, &class.package);
+    put_list(payload, &class.classes, |payload, name| {
+        put_str(payload, name)
+    });
+}
+
+fn put_type(payload: &mut Vec<u8>, ty: &TypeIdentity) {
+    match &ty.classifier {
+        Classifier::Class { class, arguments } => {
+            payload.push(0);
+            put_class_name(payload, class);
+            put_list(payload, arguments, put_argument);
+        }
+        Classifier::TypeParameter { owner, index } => {
+            payload.push(1);
+            match owner {
+                TypeParameterOwner::Callable => payload.push(0),
+                TypeParameterOwner::Class(class) => {
+                    payload.push(1);
+                    put_class_name(payload, class);
+                }
+            }
+            payload.extend_from_slice(&index.to_be_bytes());
+        }
+    }
+    payload.push(u8::from(ty.nullable));
+    put_list(payload, &ty.annotations, put_class_name);
+}
+
+fn put_argument(payload: &mut Vec<u8>, argument: &TypeArgument) {
+    let (tag, ty) = match argument {
+        TypeArgument::Star => (0, None),
+        TypeArgument::Invariant(ty) => (1, Some(ty)),
+        TypeArgument::In(ty) => (2, Some(ty)),
+        TypeArgument::Out(ty) => (3, Some(ty)),
+    };
+    payload.push(tag);
+    if let Some(ty) = ty {
+        put_type(payload, ty);
+    }
 }
 
 fn put_str(payload: &mut Vec<u8>, value: &str) {
@@ -206,6 +330,99 @@ mod tests {
         expected.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 12]);
         expected.extend_from_slice(b"plugin:p:k=v");
         assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn a_resolve_request_frames_each_identity_in_signature_order() {
+        let any = TypeIdentity {
+            classifier: Classifier::Class {
+                class: ClassName {
+                    package: "kotlin".into(),
+                    classes: vec!["Any".into()],
+                },
+                arguments: vec![TypeArgument::Star],
+            },
+            nullable: true,
+            annotations: Vec::new(),
+        };
+        let identity = CallableIdentity {
+            kind: CallableKind::Function {
+                name: "println".into(),
+            },
+            package: "kotlin.io".into(),
+            classes: Vec::new(),
+            type_parameters: 0,
+            context_parameters: Vec::new(),
+            extension_receiver: None,
+            value_parameters: vec![any],
+        };
+        let mut bytes = Vec::new();
+        write_request(&mut bytes, &Request::Resolve(&[identity])).unwrap();
+        let mut payload = vec![RESOLVE, 0, 0, 0, 1, 0];
+        put_str(&mut payload, "kotlin.io");
+        payload.extend_from_slice(&[0, 0, 0, 0]);
+        put_str(&mut payload, "println");
+        // No type parameters, no context parameters, no extension receiver, one value parameter.
+        payload.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+        put_str(&mut payload, "kotlin");
+        payload.extend_from_slice(&[0, 0, 0, 1]);
+        put_str(&mut payload, "Any");
+        // One star argument, nullable, no annotations.
+        payload.extend_from_slice(&[0, 0, 0, 1, 0, 1, 0, 0, 0, 0]);
+        let mut expected = (payload.len() as u32).to_be_bytes().to_vec();
+        expected.extend_from_slice(&payload);
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn a_type_parameter_is_framed_with_the_declaration_that_owns_it() {
+        let parameter = |owner| TypeIdentity {
+            classifier: Classifier::TypeParameter { owner, index: 1 },
+            nullable: false,
+            annotations: Vec::new(),
+        };
+        let mut callable = Vec::new();
+        put_type(&mut callable, &parameter(TypeParameterOwner::Callable));
+        assert_eq!(callable, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
+        let mut class = Vec::new();
+        put_type(
+            &mut class,
+            &parameter(TypeParameterOwner::Class(ClassName {
+                package: "a".into(),
+                classes: vec!["Outer".into()],
+            })),
+        );
+        let mut expected = vec![1, 1];
+        put_str(&mut expected, "a");
+        expected.extend_from_slice(&[0, 0, 0, 1]);
+        put_str(&mut expected, "Outer");
+        // The index, then not nullable, with no annotations.
+        expected.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 0]);
+        assert_eq!(class, expected);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_session_over_a_path_that_is_not_utf8_is_refused_before_it_is_sent() {
+        use std::os::unix::ffi::OsStrExt;
+        let request = SessionRequest {
+            classpath: vec![std::ffi::OsStr::from_bytes(b"/lib/\xff.jar").into()],
+            jdk_home: "/jdk".into(),
+            module_name: "main".into(),
+            language_version: "2.4".into(),
+            api_version: "2.4".into(),
+            jvm_target: "1.8".into(),
+        };
+        let mut bytes = Vec::new();
+        let error = write_request(&mut bytes, &Request::OpenSession(&request)).unwrap_err();
+        assert_eq!(
+            (error.kind(), error.to_string(), bytes),
+            (
+                io::ErrorKind::InvalidInput,
+                "/lib/\u{FFFD}.jar is not a UTF-8 path".to_string(),
+                Vec::new()
+            )
+        );
     }
 
     #[test]
