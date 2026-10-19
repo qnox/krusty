@@ -14,6 +14,7 @@ use super::{
     ResolvedContextArgument, SelectedContextSources,
 };
 use crate::ast::ExprId;
+use crate::fx_hash::HashSet;
 use crate::types::Ty;
 
 impl super::Checker<'_> {
@@ -224,32 +225,56 @@ impl super::Checker<'_> {
             .collect()
     }
 
-    /// The exact binding of each of a local function's `captured` values, with how many nearer
-    /// same-named bindings shadow it in `scope`, where the function is declared. A value the body
-    /// passes as a context argument is the binding the checker selected (`selected`); a value it
-    /// reads by name is the binding that name resolves to.
+    /// A local function's captures in name order, each with its exact binding and how many nearer
+    /// same-named bindings shadow it in `scope`, where the function is declared. A value `captured`
+    /// names is the binding that name resolves to there. A value the body passes as a context
+    /// argument (`selected`) is the binding the checker selected, and is a capture of its own unless
+    /// a captured name already resolves to that same binding: a context value shadowed by a nearer
+    /// same-named local is a second capture, not a duplicate of the local.
     pub(super) fn captured_local_bindings(
         &self,
         scope: &CheckerScope<'_>,
-        captured: &[(String, Ty, bool)],
-        selected: &[(String, Local)],
-    ) -> Vec<(Option<Local>, u32)> {
-        captured
-            .iter()
-            .map(|(name, _, _)| {
-                let local = match selected.iter().find(|(selected, _)| selected == name) {
-                    Some((_, local)) => Some(*local),
-                    None => self.lookup(scope, name),
-                };
-                let shadow_depth = local
-                    .as_ref()
-                    .and_then(|local| local.lexical_capture_identity)
-                    .and_then(|identity| self.lexical_binding_by_identity(scope, name, identity))
-                    .map_or(0, |(_, depth)| depth);
-                (local, shadow_depth)
+        captured: Vec<(String, Ty, bool)>,
+        selected: Vec<(String, Local)>,
+        capturable: &HashSet<String>,
+    ) -> CapturedLocals {
+        let mut bound = captured
+            .into_iter()
+            .map(|capture| {
+                let local = self.lookup(scope, &capture.0);
+                (capture, local)
             })
-            .collect()
+            .collect::<Vec<_>>();
+        for (name, local) in selected {
+            let already_captured = bound.iter().any(|(_, captured)| {
+                captured.is_some_and(|captured| captured.flow_identity == local.flow_identity)
+            });
+            if capturable.contains(&name) && !already_captured {
+                bound.push(((name, local.ty, false), Some(local)));
+            }
+        }
+        bound.sort_by(|left, right| left.0 .0.cmp(&right.0 .0));
+        let mut out = CapturedLocals::default();
+        for (capture, local) in bound {
+            let shadow_depth = local
+                .and_then(|local| local.lexical_capture_identity)
+                .and_then(|identity| self.lexical_binding_by_identity(scope, &capture.0, identity))
+                .map_or(0, |(_, depth)| depth);
+            out.captured.push(capture);
+            out.locals.push(local);
+            out.shadow_depths.push(shadow_depth);
+        }
+        out
     }
+}
+
+/// A lifted local function's captures in parameter order: each capture's name, type and
+/// shared-cell hint, its exact binding, and its shadow depth where the function is declared.
+#[derive(Default)]
+pub(super) struct CapturedLocals {
+    pub(super) captured: Vec<(String, Ty, bool)>,
+    pub(super) locals: Vec<Option<Local>>,
+    pub(super) shadow_depths: Vec<u32>,
 }
 
 /// The value binding `name` in `scope` whose flow identity is `identity`.

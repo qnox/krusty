@@ -555,19 +555,12 @@ impl BodyFirChecker<'_> {
                 .iter()
                 .zip(&requirements.captures)
             {
+                // The class field holding a capture is the one that stores the same binding: a
+                // shadowing local and the context value it hides share a spelling, not a field.
                 let capture = &value_captures[ordinal as usize];
-                let binding = self
-                    .class_values
-                    .get(&capture.name)
-                    .copied()
-                    .or_else(|| {
-                        self.class_delegates
-                            .get(&capture.name)
-                            .and_then(|delegate| match delegate.storage {
-                                DelegateStorage::ClassField(binding) => Some(binding),
-                                DelegateStorage::Local(_) => None,
-                            })
-                    })
+                let binding = capture
+                    .lexical_binding
+                    .and_then(|identity| self.class_value_by_lexical_binding(identity))
                     .ok_or_else(|| {
                         self.failure(None, BodyCheckFailureKind::MissingStableCallTarget)
                     })?;

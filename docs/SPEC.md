@@ -10485,7 +10485,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   swapped it captures `($registry, $other)`
   (`an_implicit_context_argument_is_a_first_use_at_its_call`). The checker records the flow
   identity of the binding it selects for each context argument or named context receiver, and the
-  order maps that identity to the capture, never the value's spelling. A capture no recorded use orders is
+  order maps that identity to the capture, never the value's spelling. A shadowing local and the
+  context value it hides are two captures of one spelling: with `val registry = "shadow"` inside
+  that `render`, a class that calls `fun local() = registry + contextualValue() + other` takes
+  `($registry: String, $registry$1: Registry, $other)`. The class's call passes each of the
+  function's captures from the field that stores the same lexical binding, never the field of that
+  name. kotlinc names the fields in physical order: the first capture of a spelling is `$name` and
+  each later one `$name$1`, `$name$2`, …, so with `contextualValue()` first the class takes
+  `($registry: Registry, $registry$1: String, $other)`
+  (`a_shadowing_read_and_a_context_value_of_one_name_are_two_captures`,
+  `a_context_value_used_first_takes_the_plain_capture_name`). The JVM backend numbers the names
+  once over the physical order, and the field table, `MethodParameters` and the constructor's
+  `LocalVariableTable` all take them from there. A capture no recorded use orders is
   an internal error, never ordered by name. Field and parameter order is JVM representation, so the checker
   publishes the order as a recorded fact (`TypeInfo::local_class_capture_orders`, carried by the
   checked local-class declaration to `IrFile::class_capture_order`). Every phase before the JVM

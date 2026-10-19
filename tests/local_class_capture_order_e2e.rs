@@ -227,3 +227,55 @@ fun renderShadowed(other: String): String {
         "ContextCaptureOrderKt$renderShadowed$C",
     );
 }
+
+/// Captures are told apart by binding, not by name: `local` reads the nearer `val registry` by name
+/// and also passes the shadowed context parameter `registry` to `contextualValue()`. Those are two
+/// bindings, so the class that calls `local` keeps two captures, `($registry, $registry$1, $other)`
+/// in first-use order, as kotlinc does.
+#[test]
+fn a_shadowing_read_and_a_context_value_of_one_name_are_two_captures() {
+    let source = "\
+class Registry(val value: String)
+
+context(registry: Registry)
+fun contextualValue(): String = registry.value
+
+context(registry: Registry)
+fun renderBoth(other: String): String {
+    val registry = \"shadow\"
+    fun local(): String = registry + contextualValue() + other
+    class C { fun f() = local() }
+    return C().f()
+}
+";
+    assert_same_class(
+        "ContextShadowCapture",
+        source,
+        "ContextShadowCaptureKt$renderBoth$C",
+    );
+}
+
+/// With the context value used first, kotlinc gives it the plain spelling and numbers the
+/// shadowing local after it: `($registry: Registry, $registry$1: String, $other)`.
+#[test]
+fn a_context_value_used_first_takes_the_plain_capture_name() {
+    let source = "\
+class Registry(val value: String)
+
+context(registry: Registry)
+fun contextualValue(): String = registry.value
+
+context(registry: Registry)
+fun renderBoth(other: String): String {
+    val registry = \"shadow\"
+    fun local(): String = contextualValue() + registry + other
+    class C { fun f() = local() }
+    return C().f()
+}
+";
+    assert_same_class(
+        "ContextFirstShadowCapture",
+        source,
+        "ContextFirstShadowCaptureKt$renderBoth$C",
+    );
+}

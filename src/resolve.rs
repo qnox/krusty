@@ -9180,6 +9180,8 @@ pub struct LocalCapture {
     /// The captured binding's flow identity, which an enclosing callable that calls this function
     /// maps the capture by.
     pub flow_identity: Option<u32>,
+    /// The captured binding's lexical identity, which a calling class maps the capture's field by.
+    pub lexical_binding: Option<u32>,
     /// How many nearer same-named bindings shadow the captured one where the function is declared.
     pub lexical_shadow_depth: u32,
 }
@@ -15922,6 +15924,7 @@ impl<'a> Checker<'a> {
                         receiver_label: None,
                         receiver: None,
                         semantic_receiver: None,
+                        lexical_binding: local.lexical_capture_identity,
                         receiver_identity: None,
                         receiver_capture: None,
                         receiver_role: None,
@@ -16011,6 +16014,7 @@ impl<'a> Checker<'a> {
                                 receiver_label: self
                                     .anonymous_capture_receiver_label(scope, receiver),
                                 semantic_receiver: Some(semantic_receiver),
+                                lexical_binding: None,
                                 receiver_identity: Some(identity),
                             },
                             identity,
@@ -21946,8 +21950,7 @@ impl<'a> Checker<'a> {
                         .insert(d, std::mem::take(&mut captures.forwarded_super_arguments));
                 }
                 self.keep_unsupported_local_class_capture(scope, &mut captures);
-                let mut capture_bindings =
-                    self.local_capture_binding_identities(scope, &captures.values);
+                let mut capture_bindings = Self::local_capture_binding_identities(&captures.values);
                 self.restore_proven_local_receiver_captures(
                     &mut established,
                     &receiver_candidates,
@@ -23512,33 +23515,18 @@ impl<'a> Checker<'a> {
         // A lifted local function can consume an implicit context binding without spelling its source
         // name. Add each checker-selected binding, retrieved by the identity recorded when it was
         // selected, to the same capture ABI as explicit name reads.
-        let mut selected = Vec::new();
-        if let FunBody::Expr(body) | FunBody::Block(body) = &f.body {
-            for (name, local) in self.selected_context_bindings(scope, *body) {
-                if outer_names.contains(&name)
-                    && !captured_locals
-                        .iter()
-                        .any(|(captured, _, _)| *captured == name)
-                {
-                    captured_locals.push((name.clone(), local.ty, false));
-                    selected.push((name, local));
-                }
+        let selected = match &f.body {
+            FunBody::Expr(body) | FunBody::Block(body) => {
+                self.selected_context_bindings(scope, *body)
             }
-        }
-        captured_locals.sort_by(|left, right| left.0.cmp(&right.0));
-        let (locals, shadow_depths): (Vec<_>, Vec<_>) = self
-            .captured_local_bindings(scope, &captured_locals, &selected)
-            .into_iter()
-            .unzip();
+            FunBody::None => Vec::new(),
+        };
+        let context_argument_selection::CapturedLocals {
+            captured: captured_locals,
+            locals,
+            shadow_depths,
+        } = self.captured_local_bindings(scope, captured_locals, selected, &outer_names);
         self.record_local_function_first_use(stmt_id, f, &captured_locals, &locals);
-        let capture_bindings = locals
-            .iter()
-            .map(|local| {
-                local
-                    .as_ref()
-                    .and_then(|local| local.lexical_capture_identity)
-            })
-            .collect::<Vec<_>>();
         let captures = captured_locals
             .into_iter()
             .zip(locals.iter().zip(shadow_depths))
@@ -23559,12 +23547,13 @@ impl<'a> Checker<'a> {
                     ty,
                     shared_cell,
                     flow_identity: local.as_ref().map(|local| local.flow_identity),
+                    lexical_binding: local
+                        .as_ref()
+                        .and_then(|local| local.lexical_capture_identity),
                     lexical_shadow_depth,
                 }
             })
             .collect();
-        self.local_function_capture_bindings
-            .insert(stmt_id, capture_bindings);
         self.stmt_lowers.insert(
             stmt_id,
             StmtLowering::LocalFunction(Box::new(LocalFunInfo {
@@ -32955,7 +32944,6 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         discovered_local_class_capture_bindings: HashMap::default(),
         class_capture_uses: Default::default(),
         finalized_local_class_captures: crate::fx_hash::HashSet::default(),
-        local_function_capture_bindings: HashMap::default(),
         receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds::default(),
         next_lexical_capture_identity: 0,
         try_body_writes: Vec::new(),
@@ -35783,8 +35771,6 @@ struct Checker<'a> {
     discovered_local_class_capture_bindings: HashMap<DeclId, Vec<Option<u32>>>,
     class_capture_uses: capture_field_order::ClassCaptureUses,
     finalized_local_class_captures: crate::fx_hash::HashSet<DeclId>,
-    /// Resolver-only binding identities parallel to lifted local-function capture vectors.
-    local_function_capture_bindings: HashMap<StmtId, Vec<Option<u32>>>,
     receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds,
     next_lexical_capture_identity: u32,
     /// Bindings written by each try body being checked, innermost last.
