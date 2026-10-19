@@ -44585,7 +44585,7 @@ impl<'a> Checker<'a> {
                 target: ResolvedCtorDelegationTarget::Super {
                     owner,
                     params: params.clone(),
-                    declaration_params: constructor.params.clone(),
+                    declaration_params: constructor.constructor_declaration_params().to_vec(),
                     implicit_outer: base.outer_instance,
                     stable_declaration: constructor.stable_declaration,
                     external_identity: constructor.external_identity,
@@ -65334,11 +65334,7 @@ impl<'a> Checker<'a> {
             let mut member = declaration;
             member.generic_sig =
                 crate::libraries::constructor_generic_signature(internal, classifier, &member);
-            let declaration_parameter_shapes = member
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.params.clone())
-                .unwrap_or_else(|| member.params.clone());
+            let declaration_parameter_shapes = member.constructor_declaration_params().to_vec();
             let parameter_count = member.params.len();
             let call_sig = Self::normalized_constructor_call_sig(&member);
             let contextual = match self.contextual_call_shape_result(

@@ -335,7 +335,12 @@ pub enum IrCheckedConstructorTarget {
     External {
         declaration: crate::fir::ExternalCallableId,
         classifier: TypeName,
+        /// The selected parameters specialized at this delegation; argument mapping reads these.
         parameters: Vec<Ty>,
+        /// The same parameters before classifier type-argument substitution (`Base<T>(T)` keeps
+        /// `T` when delegated to as `Base<Money>(value)`). They are the super-constructor operand
+        /// destinations a target represents values against.
+        declared_parameters: Vec<Ty>,
     },
 }
 
