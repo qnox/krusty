@@ -258,6 +258,8 @@ impl<'a> CommonIrBodySink<'a> {
         // Equality with a safe-call operand short-circuits the other operand when the receiver is
         // null. Record that source evaluation order in common IR before any backend consumes it.
         super::safe_call_equality::fold_safe_call_equalities(self.ir);
+        // Every inline lambda reaching a backend carries whether it leaves non-locally.
+        self.ir.record_lambda_exits();
         self.ir
             .validate_determined_types()
             .map_err(FirFileLoweringFailure::UndeterminedType)?;

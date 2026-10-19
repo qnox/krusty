@@ -54,6 +54,41 @@ fn parameter(ty: Ty, parameters: &HashMap<String, ReifiedParameter>) -> Option<&
     parameters.get(identity)
 }
 
+/// kotlinc's `extractReificationArgument` for the element type of an array a reified body creates:
+/// the reified parameter the element type reaches through nested arrays, with the marker argument
+/// that names it (`[` per array level, the source spelling, `?` when the created array's own
+/// element is marked nullable, whatever the levels below it are). `None` when the element is no reified parameter of this file, or reaches one only
+/// through another classifier or a star projection.
+fn new_array_reification(
+    array_type: Ty,
+    parameters: &HashMap<String, ReifiedParameter>,
+) -> Option<(String, String)> {
+    let projected = |ty: Ty| match ty {
+        Ty::OutProjection(inner) | Ty::InProjection(inner) => Some(*inner),
+        Ty::StarProjection(_) => None,
+        element => Some(element),
+    };
+    let element = projected(array_type.non_null().array_elem()?)?;
+    // kotlinc reads the mark from the created array's element before descending its levels, so
+    // `Array<Array<T?>>` names `[T` and `Array<Array<T>?>` names `[T?`.
+    let nullable = element.is_nullable();
+    let mut depth = 0;
+    let mut current = element;
+    while current.non_null().is_reference_array() {
+        depth += 1;
+        current = projected(current.non_null().array_elem()?)?;
+    }
+    let Ty::TyParam(identity, _) = current.non_null() else {
+        return None;
+    };
+    let parameter = parameters.get(identity)?;
+    let suffix = if nullable { "?" } else { "" };
+    Some((
+        identity.to_owned(),
+        format!("{}{}{suffix}", "[".repeat(depth), parameter.source_name),
+    ))
+}
+
 /// The splice operands for the checked reified substitutions attached to one call. Common IR
 /// retains semantic [`Ty`] values; the conversion to physical classifier names belongs here at the
 /// backend boundary. A `Unit` value uses its stored classifier form, just like every other value
@@ -101,13 +136,16 @@ pub(super) fn splice_type_map(
 }
 
 /// The JVM class a reified argument's type-bearing instruction names: a function type's
-/// `FunctionN` (`Function{N+1}` when it suspends), an array's descriptor, otherwise the stored
-/// classifier's mapped class.
+/// `FunctionN` (`Function{N+1}` when it suspends), an array's descriptor, `Void` for Kotlin's
+/// bottom/null-only types, otherwise the stored classifier's mapped class.
 fn reified_class_internal(ty: Ty) -> Option<String> {
     if let Some(function) = jvm_function_erasure(ty) {
         return Some(function);
     }
     let value = ty.non_null();
+    if matches!(value, Ty::Nothing | Ty::Null) {
+        return Some("java/lang/Void".to_owned());
+    }
     if value.is_array() {
         return Some(super::names::instanceof_internal_name(value));
     }
@@ -289,7 +327,7 @@ fn record_reified_catches(
     parameters: &HashMap<String, ReifiedParameter>,
     functions: &HashSet<FunId>,
 ) {
-    ir.reified_catch_markers.clear();
+    ir.reified_markers.catches.clear();
     let mut visited = HashSet::default();
     let mut roots = marker_roots(ir, functions);
     for class in &ir.classes {
@@ -312,7 +350,7 @@ fn record_reified_catches(
                 .map(|catch| parameter(catch.ty, parameters).map(|found| found.source_name.clone()))
                 .collect::<Vec<_>>();
             if markers.iter().any(Option::is_some) {
-                ir.reified_catch_markers.insert(expression, markers);
+                ir.reified_markers.catches.insert(expression, markers);
             }
         }
     }
@@ -344,6 +382,13 @@ fn realize_expression_dag(
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
         used_parameters.extend(marker_identities[expression as usize].iter().cloned());
+        if let IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } =
+            ir.expr(expression)
+        {
+            if let Some((_, marker)) = new_array_reification(*array_type, parameters) {
+                ir.reified_markers.arrays.insert(expression, marker);
+            }
+        }
         let replacement = match ir.expr(expression).clone() {
             IrExpr::KClassLiteral {
                 classifier: Some(classifier),
@@ -455,6 +500,11 @@ fn expression_reified_parameters(
                 collect_type_reified_parameters(catch.ty, parameters, &mut found);
             }
         }
+        IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => {
+            found.extend(
+                new_array_reification(*array_type, parameters).map(|(identity, _)| identity),
+            );
+        }
         IrExpr::Call {
             callee:
                 crate::ir::Callee::Intrinsic {
@@ -548,6 +598,7 @@ pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMe
     // An object declared in a reified body executes the marker too: inlining regenerates its class.
     let parameters = collect_reified_parameters(ir);
     let functions = reified_marker_functions(ir, lambdas);
+    ir.reified_markers.arrays.clear();
     let marker_identities = (0..ir.exprs.len() as ExprId)
         .map(|expression| expression_reified_parameters(ir, expression, &parameters))
         .collect::<Vec<_>>();
@@ -657,6 +708,43 @@ mod tests {
                         intrinsic: None,
                         rendered: String::new(),
                     }
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn splice_type_map_maps_nullable_nothing_and_null_to_void() {
+        let expression = 7;
+        let mut ir = IrFile::default();
+        ir.reified_call_subst.insert(
+            expression,
+            vec![
+                ("N".to_owned(), Ty::nullable(Ty::Nothing)),
+                ("Z".to_owned(), Ty::Null),
+            ],
+        );
+
+        assert_eq!(
+            splice_type_map(&ir, expression, &|ty| format!("{ty:?}")),
+            HashMap::from_iter([
+                (
+                    "N".to_owned(),
+                    ReifiedArgument::Class {
+                        internal: "java/lang/Void".to_owned(),
+                        nullable: true,
+                        intrinsic: None,
+                        rendered: "Nothing".to_owned(),
+                    },
+                ),
+                (
+                    "Z".to_owned(),
+                    ReifiedArgument::Class {
+                        internal: "java/lang/Void".to_owned(),
+                        nullable: false,
+                        intrinsic: None,
+                        rendered: "Null".to_owned(),
+                    },
                 ),
             ])
         );
@@ -889,7 +977,7 @@ mod tests {
         realize(&mut ir, &Default::default());
 
         assert_eq!(
-            ir.reified_catch_markers.get(&catch),
+            ir.reified_markers.catches.get(&catch),
             Some(&vec![Some("T".to_owned())])
         );
         assert_eq!(ir.reified_anonymous_declarations, HashSet::from_iter([0]));
@@ -1077,10 +1165,10 @@ mod tests {
         realize(&mut ir, &Default::default());
 
         assert_eq!(
-            ir.reified_catch_markers.get(&reified),
+            ir.reified_markers.catches.get(&reified),
             Some(&vec![Some("E".to_owned()), None])
         );
-        assert!(!ir.reified_catch_markers.contains_key(&plain));
+        assert!(!ir.reified_markers.catches.contains_key(&plain));
     }
 
     fn reified_catch(ir: &mut IrFile, identity: &str) -> ExprId {
@@ -1137,9 +1225,12 @@ mod tests {
         let lambdas = super::super::lambda_classes::LambdaMethods::for_test([1]);
         realize(&mut ir, &lambdas);
 
-        assert!(ir.reified_catch_markers.contains_key(&declaration));
-        assert!(ir.reified_catch_markers.contains_key(&lambda));
-        assert!(!ir.reified_catch_markers.contains_key(&erased_object_member));
+        assert!(ir.reified_markers.catches.contains_key(&declaration));
+        assert!(ir.reified_markers.catches.contains_key(&lambda));
+        assert!(!ir
+            .reified_markers
+            .catches
+            .contains_key(&erased_object_member));
     }
 
     #[test]
@@ -1227,9 +1318,9 @@ mod tests {
             } if name == "E"
         ));
         assert_eq!(
-            ir.reified_catch_markers.get(&declaration_default_catch),
+            ir.reified_markers.catches.get(&declaration_default_catch),
             Some(&vec![Some("E".to_owned())])
         );
-        assert!(!ir.reified_catch_markers.contains_key(&other_default));
+        assert!(!ir.reified_markers.catches.contains_key(&other_default));
     }
 }

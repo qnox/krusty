@@ -503,6 +503,17 @@ impl Emitter<'_> {
         if physical_arg == Ty::Unit && target.is_reference() {
             let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
             code.getstatic(unit, 1);
+        } else if type_operand == Ty::Unit
+            && physical_arg.is_reference()
+            && matches!(self.ir.expr(arg), IrExpr::Call { .. })
+        {
+            // A `Unit` call's value is `V` to kotlinc whatever its callee returns: the erased
+            // result is popped and `Unit.INSTANCE` read in its place (`StackValue.coerce` to
+            // `VOID_TYPE`, then from it). An inlined body's own `Unit` result goes with the `pop`
+            // in the later pop propagation.
+            code.pop();
+            let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+            code.getstatic(unit, 1);
         } else if physical_arg.is_jvm_scalar() && target.is_reference() {
             let semantic = self
                 .ir

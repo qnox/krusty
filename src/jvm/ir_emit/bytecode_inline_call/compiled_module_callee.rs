@@ -132,7 +132,7 @@ fn compile_callee(
         &mut cw,
     );
     let method = cw
-        .sole_emitted_method()
+        .sole_emitted_method_for_inlining()
         .ok_or("a compiled inline callee's body does not read back as one method")?;
     Ok(CompiledInlineCallee {
         owner,
@@ -181,7 +181,13 @@ impl Emitter<'_> {
             allow_owner_bridge: true,
             for_inline_copy: false,
         };
-        let reified = crate::jvm::reified_arguments::ReifiedArguments::default();
+        let reified = crate::jvm::reified_operations::splice_arguments(
+            self.ir,
+            call_expression,
+            &self.facade,
+            self.ir.recursive_type_of,
+            &|ty| self.rendered_inlined_cast_target(ty),
+        );
         let call = ClasspathInlineCall {
             call_expression,
             target: &target,
@@ -192,12 +198,15 @@ impl Emitter<'_> {
             defaults: None,
         };
         let call_frame = self.frame.mark();
-        let inlined = self.try_inline_classpath_body(&call, code);
+        let base = self.frame.size().max(code.max_locals);
+        let inlined = self.inline_call_with_body(&call, base, code);
         // The call's temporaries go with its frame, as kotlinc's `leaveTemps` does.
         self.frame.drop_to(call_frame);
-        if inlined.is_none() {
-            self.run
-                .set_inline_bail("the inliner does not cover a compiled same-module inline body");
+        match inlined {
+            InlineCallOutcome::Handled | InlineCallOutcome::HandledWithError => {}
+            InlineCallOutcome::NotApplicable => self
+                .run
+                .set_inline_bail("the inliner does not cover a compiled same-module inline body"),
         }
     }
 }

@@ -350,8 +350,10 @@ pub(super) fn expand(
         }
     }
     // The body's try/catch blocks and variable table are visited last.
+    let lambda_blocks = out.try_catch_blocks.len();
     out.try_catch_blocks
         .extend(node.try_catch_blocks.iter().cloned());
+    super::try_blocks::order_around_finally_blocks(&mut out, lambda_blocks);
     for local in &node.local_variables {
         let mut local = local.clone();
         sorter.visit_local(&mut local);

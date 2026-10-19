@@ -175,7 +175,11 @@ fn plan(node: &MethodNode, arguments: &ReifiedArguments) -> Result<Vec<Marker>, 
             let target = (call + 1..node.nodes.len())
                 .find(|&at| is_type_bearing(node.nodes.get(at)))
                 .ok_or(InlineError::MalformedReifiedMarker)?;
-            match arguments.classes.get(argument.trim_end_matches('?')) {
+            let (depth, parameter) = reification_argument(argument);
+            match arguments.classes.get(parameter) {
+                // An array of the parameter (`[T`) is the array class of the call-site class, as
+                // kotlinc's `ReificationArgument.arrayDepth` makes it; no `is`/`as` intrinsic of
+                // the element class applies to it.
                 Some(ReifiedArgument::Class {
                     internal,
                     nullable,
@@ -184,14 +188,18 @@ fn plan(node: &MethodNode, arguments: &ReifiedArguments) -> Result<Vec<Marker>, 
                 }) => Repoint::Class {
                     instruction: target,
                     mode,
-                    class: internal.clone(),
+                    class: array_class(internal, depth),
                     nullable: *nullable || argument.ends_with('?'),
-                    intrinsic: *intrinsic,
+                    intrinsic: if depth == 0 { *intrinsic } else { None },
                     rendered: rendered.clone(),
                 },
                 Some(ReifiedArgument::Forwarded { name, nullable }) => Repoint::Forwarded {
                     name_instruction,
-                    name: forwarded_marker_name(name, *nullable, argument),
+                    name: format!(
+                        "{}{}",
+                        "[".repeat(depth),
+                        forwarded_marker_name(name, *nullable, argument)
+                    ),
                 },
                 None => return Err(InlineError::MissingReifiedArgument(argument.to_owned())),
             }
@@ -320,6 +328,31 @@ fn preceding_debug_label(node: &MethodNode, before: usize) -> Option<PrecedingLa
         }
     }
     None
+}
+
+/// A marker argument's array depth and the reified parameter it names: kotlinc writes
+/// `ReificationArgument.asString` as a `[` per array level, the parameter's name, and `?` when
+/// the operand is marked nullable.
+fn reification_argument(argument: &str) -> (usize, &str) {
+    let parameter = argument.trim_start_matches('[');
+    (
+        argument.len() - parameter.len(),
+        parameter.trim_end_matches('?'),
+    )
+}
+
+/// The internal name of the `depth`-dimensional array of class `internal` (itself when `depth`
+/// is zero).
+fn array_class(internal: &str, depth: usize) -> String {
+    if depth == 0 {
+        return internal.to_owned();
+    }
+    let element = if internal.starts_with('[') {
+        internal.to_owned()
+    } else {
+        format!("L{internal};")
+    };
+    format!("{}{element}", "[".repeat(depth))
 }
 
 fn forwarded_marker_name(name: &str, nullable: bool, argument: &str) -> String {

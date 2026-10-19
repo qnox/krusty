@@ -26,11 +26,13 @@ mod lambda_return_flow;
 mod local_classifier_provenance;
 mod lowering_temporaries;
 mod ranges;
-mod source_set_lowering;
-
-pub(crate) use source_set_lowering::lower_source_from_set;
+mod single_source_lowering;
 
 use lambda_return_flow::expression_subtree_contains;
+pub(crate) use single_source_lowering::{
+    lower_single_source, lower_single_source_with_jvm_stdlib, lower_single_source_with_platform,
+    lower_source_from_set, lower_with_jvm_stdlib_into,
+};
 
 use super::lower_body;
 
@@ -2886,85 +2888,6 @@ fn common_ir_sink_prepares_inline_bodies_before_ordinary_callers() {
     assert_eq!(sink.attached_body_count(), 2);
     sink.finish(&index).unwrap();
     assert!(no_inline_insertions.is_empty());
-}
-
-pub(super) fn lower_single_source(source: &str, stem: &str) -> IrFile {
-    lower_single_source_with_platform(source, stem, Box::new(crate::libraries::EmptySymbolSource))
-}
-
-pub(crate) fn lower_single_source_with_jvm_stdlib(source: &str, stem: &str) -> IrFile {
-    let mut classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB");
-    if let Some(jdk) = crate::toolchain::jdk_modules() {
-        classpath.push(jdk);
-    }
-    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
-        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(classpath),
-        ))
-        .expect("JVM provider initialization"),
-    );
-    lower_single_source_with_platform(source, stem, platform)
-}
-
-pub(crate) fn lower_single_source_with_platform(
-    source: &str,
-    stem: &str,
-    platform: Box<dyn crate::libraries::SemanticPlatform>,
-) -> IrFile {
-    let mut diagnostics = crate::diag::DiagSink::new();
-    let mut analysis = crate::frontend::analyze_source_set_with_features(
-        &[crate::source::SourceInput::kotlin(source).with_file_stem(stem)],
-        crate::frontend::PlatformProvider::jvm(platform),
-        &crate::features::LangFeatures::new(),
-        &mut diagnostics,
-    );
-    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
-    let ordinary =
-        streamed.ordinary_body_work(&analysis.files[0], crate::fir::SourceFileId::from_raw(0));
-    let (mut index, mut inline_bodies, mut default_arguments, mut sources) =
-        streamed.module.into_parts();
-    let retained_inline_count = inline_bodies.len();
-    let mut ir = IrFile::default();
-    let mut sink =
-        super::CommonIrBodySink::new(&index, crate::fir::SourceFileId::from_raw(0), &mut ir)
-            .unwrap();
-    crate::resolve::publish_checked_local_signatures(
-        &analysis.files[0],
-        crate::fir::SourceFileId::from_raw(0),
-        &analysis.symbols,
-        analysis.types[0].as_ref().expect("checked type info"),
-        &mut index,
-    )
-    .expect("checked local signatures");
-    sink.refresh_body_local_declarations(&index)
-        .expect("checked local declarations");
-    sink.accept_inline_bodies(&index, &mut inline_bodies)
-        .unwrap();
-    sink.accept_default_arguments(&index, &inline_bodies, &mut default_arguments)
-        .unwrap();
-    for work in ordinary {
-        let mut indexed_sink = sink.indexed(&index);
-        crate::fir::check_and_dispatch_body(
-            crate::fir::BodyCheckUnit {
-                file: &analysis.files[0],
-                info: analysis.types[0].as_ref().expect("checked type info"),
-                source: crate::fir::SourceFileId::from_raw(0),
-                index: &index,
-            },
-            work,
-            sources.origins_mut(),
-            &mut inline_bodies,
-            &mut indexed_sink,
-        )
-        .unwrap();
-    }
-    sink.accept_inline_bodies(&index, &inline_bodies).unwrap();
-    sink.accept_default_arguments(&index, &inline_bodies, &mut default_arguments)
-        .unwrap();
-    sink.finish(&index).unwrap();
-    assert_eq!(inline_bodies.len(), retained_inline_count);
-    ir
 }
 
 pub(super) fn resolved(ty: Ty) -> ResolvedTy {

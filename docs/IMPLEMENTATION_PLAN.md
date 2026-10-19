@@ -5314,8 +5314,26 @@ regress.
     the emission rather than calling it.
     A generic argument is now boxed into an erased `Object` temporary as kotlinc's is: 25 more
     box files are byte-identical on 2.4.20 (3,681 to 3,706), none regresses.
-  - ☐ 6b. Lambda arguments, `$default` calls, class members, non-public callees, suspend callers
-    and callees, and calls in lambdas, local functions, initializers and accessors.
+  - ◐ 6b. Function arguments: ✓ literal lambdas and callable references for inline parameters
+    (not `crossinline`, not suspend, without a non-local jump), placed at the compiled body's
+    invokes through the classpath route (`inline_call_with_body`), with function values read from
+    caller locals, unread literals dropped and stacked operands saved around a `try` or loop body
+    for every inline callee: 26 more box files are byte-identical on 2.4.20 (3,706 to 3,732), none
+    regresses. ✓ Reified callees (their markers repointed from `IrFile::reified_call_subst`) and
+    same-file non-public callees, with try/catch ordering around a `finally`, `Unit` call results
+    and compacted body slots placed as kotlinc's inliner places them, and a method's inlined lines
+    copied into the class map in their unoptimized order: on master with #2351 beneath it,
+    32 more box files are byte-identical (3,719 to 3,751), none regresses.
+    ✓ `NEW_ARRAY` markers on arrays of a reified parameter, and local delegated properties read
+    through the declaring class's accessor.
+  - ◐ 6c. Route exclusions retired one by one, in the order of the divergent box files they cover.
+    ✓ Calls in lambdas, local functions, property initializers, `init` blocks, constructors and
+    accessors (`LocalCallable`, `NotInFunctionBody`); a lambda written in a suspend function or
+    suspend lambda stays with `SuspendCaller`: 3 more box files are byte-identical on 2.4.20
+    (3,752 to 3,755), none regresses.
+    ☐ `$default` calls, class members, non-public callees of another file, suspend callers and callees,
+    `crossinline` parameters, literals with non-local jumps, calls in inline functions and default
+    arguments, and callee bodies with lambdas, local classes, nested expansions or enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
 

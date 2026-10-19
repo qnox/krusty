@@ -59,3 +59,24 @@ pub(super) fn move_try_starts_to_their_first_instruction(
     }
     Ok(())
 }
+
+/// kotlinc's `InternalFinallyBlockInliner.processInlineFunFinallyBlocks` on the inlined body, whose
+/// first `lambda_blocks` try/catch blocks come from inlined lambdas: when the body's own blocks
+/// include a `finally` (a block catching any throwable), they are all rewritten through
+/// `substituteTryBlockNodes`, which orders them by handler, then start, then end position, and
+/// drops each one whose range holds no instruction. Only that rewrite is ported: the bodies this
+/// inliner accepts already carry their duplicated finally code (see `finally_markers`).
+pub(super) fn order_around_finally_blocks(node: &mut MethodNode, lambda_blocks: usize) {
+    if !node.try_catch_blocks[lambda_blocks..]
+        .iter()
+        .any(|block| block.catch_type.is_none())
+    {
+        return;
+    }
+    super::preparation::remove_empty_try_catch_blocks(node);
+    let positions = label_positions(node);
+    let at = |label: LabelId| positions[label.index()];
+    // `Collections.sort` is stable, as `sort_by_key` is.
+    node.try_catch_blocks
+        .sort_by_key(|block| (at(block.handler), at(block.start), at(block.end)));
+}
