@@ -313,7 +313,7 @@ identity krusty names a dependency's declaration by when it hands the host IR th
 
 ### The module's IR
 
-`Host::generate` hands the session the module's own declarations as a `ModuleIr`: each source file
+`Host::generate` hands the session the module's own declarations as a `ModuleIr` (from `crates/krusty-plugin-ir`, plain data with no dependencies, so the compiler can build it without depending on the host): each source file
 with its path, package and text, and its functions in kotlinc's IR shape, every element with the
 UTF-16 offsets kotlinc gives the same source. The host builds them as fir2ir builds a module's
 sources (every declaration first, so a body can call any function of the module, then every body),
