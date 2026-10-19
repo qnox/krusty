@@ -94,6 +94,7 @@ impl Checker<'_> {
                     singleton_dispatch: property.getter.singleton_dispatch.as_deref().map(
                         |singleton| SingletonValue {
                             classifier: singleton.classifier,
+                            companion_owner: None,
                         },
                     ),
                     owner: property.owner,

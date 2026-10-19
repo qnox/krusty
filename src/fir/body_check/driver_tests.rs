@@ -2271,6 +2271,41 @@ fn production_stream_checks_expect_constructor_default_against_actual_signature(
 }
 
 #[test]
+fn production_stream_checks_same_source_expect_constructor_default_once() {
+    let source = r#"// LANGUAGE: +MultiPlatformProjects
+expect class C(value: String = "OK") {
+    fun get(): String
+}
+
+actual class C actual constructor(private val value: String) {
+    actual fun get(): String = value
+}
+
+fun box(): String = C().get()
+"#;
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_streaming_with_features(
+        &[SourceInput::kotlin(source).with_file_stem("SameSource")],
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        &LangFeatures::from_source(source),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+
+    let default_fragments = analysis
+        .streamed
+        .as_ref()
+        .expect("same-source actualization must finalize")
+        .module
+        .default_arguments()
+        .len();
+    assert_eq!(default_fragments, 1);
+    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    assert!(census.is_conformant(), "{:?}", census.failures);
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+}
+
+#[test]
 fn qualified_array_factory_is_folded_as_annotation_array_payload() {
     let source = r#"annotation class Entity(val foreignKeys: Array<String>)
         @Entity(foreignKeys = kotlin.arrayOf("id"))

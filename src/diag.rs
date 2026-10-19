@@ -31,6 +31,7 @@ pub enum CompilerWarningName {
     DataClassInvisibleCopyUsage,
     ClassLiteralLhsNotAClass,
     Deprecation,
+    DeprecationErrorMigrationPeriodWarning,
     ExplicitTypeArgumentsInPropertyAccess,
     InapplicableOperatorModifier,
     TypeIntersectionAsReified,
@@ -50,6 +51,9 @@ impl CompilerWarningName {
             Self::DataClassInvisibleCopyUsage => "DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING",
             Self::ClassLiteralLhsNotAClass => "CLASS_LITERAL_LHS_NOT_A_CLASS_WARNING",
             Self::Deprecation => "DEPRECATION",
+            Self::DeprecationErrorMigrationPeriodWarning => {
+                "DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING"
+            }
             Self::ExplicitTypeArgumentsInPropertyAccess => {
                 "EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING"
             }
@@ -79,6 +83,9 @@ impl CompilerWarningName {
             "DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING" => Self::DataClassInvisibleCopyUsage,
             "CLASS_LITERAL_LHS_NOT_A_CLASS_WARNING" => Self::ClassLiteralLhsNotAClass,
             "DEPRECATION" => Self::Deprecation,
+            "DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING" => {
+                Self::DeprecationErrorMigrationPeriodWarning
+            }
             "EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING" => {
                 Self::ExplicitTypeArgumentsInPropertyAccess
             }
@@ -113,6 +120,7 @@ mod warning_name_tests {
             CompilerWarningName::DataClassInvisibleCopyUsage,
             CompilerWarningName::ClassLiteralLhsNotAClass,
             CompilerWarningName::Deprecation,
+            CompilerWarningName::DeprecationErrorMigrationPeriodWarning,
             CompilerWarningName::ExplicitTypeArgumentsInPropertyAccess,
             CompilerWarningName::InapplicableOperatorModifier,
             CompilerWarningName::TypeIntersectionAsReified,

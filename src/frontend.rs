@@ -1076,6 +1076,10 @@ where
         });
         let diagnostics_before = diags.diags.len();
         let mut file = parse_source_kind(source.text, source.kind, &features, diags);
+        let parser_error = source.kind != SourceKind::Java
+            && diags.diags[diagnostics_before..]
+                .iter()
+                .any(|diagnostic| diagnostic.severity == Severity::Error);
         file.is_common = source.is_common;
         if source.kind != SourceKind::Java {
             record_local_class_name_provenance(&mut file);
@@ -1128,7 +1132,7 @@ where
         let extracted = pass1_builder.add_source(
             index,
             source,
-            (index < inferred_count && !parse_error && source.kind != SourceKind::Java)
+            (index < inferred_count && !parser_error && source.kind != SourceKind::Java)
                 .then_some(&file),
         );
         if let Some((source, stubs, stable_by_transient)) = extracted {
@@ -1388,7 +1392,8 @@ where
     }
     prepare_symbols(&files, &mut symbols);
     crate::resolve::install_streamed_plugin_declarations(&mut pass1_headers, &mut symbols);
-    crate::resolve::check_module_import_paths(&files[..inferred_end], &symbols, diags);
+    let bound_imports =
+        crate::resolve::check_module_import_paths(&files[..inferred_end], &symbols, diags);
     let inline_capture_selection = pass1_headers.inline_body_ranges(files.len());
     let has_inline_capture_roots = inline_capture_selection
         .roots
@@ -1445,6 +1450,7 @@ where
         // Publish the inventory before deriving declaration-owned metadata such as enum-entry
         // override edges; those entries deliberately have no ordinary classifier header.
         pass1_headers.publish_declaration_inventory(&mut index);
+        index.publish_actualized_away_declarations(&matched_expect_declarations);
         for (source, file) in files[..inferred_end].iter().enumerate() {
             if file.is_common {
                 index.publish_common_source(crate::fir::SourceFileId::from_raw(source as u32));
@@ -1505,6 +1511,19 @@ where
             &symbols,
             target,
             &mut index,
+            diags,
+        );
+        crate::resolve::check_import_deprecations(
+            &files[..inferred_end],
+            &bound_imports,
+            &symbols,
+            &index,
+            diags,
+        );
+        crate::resolve::check_finalized_top_level_type_alias_bounds(
+            &files[..inferred_end],
+            &index,
+            &symbols,
             diags,
         );
         crate::resolve::publish_named_class_constructors(
@@ -1571,11 +1590,18 @@ where
         // graph/header syntax is consumed here before the second source pass begins.
         let mut index = streamed_index.index;
         pass1_headers.publish_declaration_inventory(&mut index);
+        index.publish_actualized_away_declarations(&matched_expect_declarations);
         // The declarations that DID finalize are still the module's facts. Project them into the
         // source symbol environment consumed beside the partial stable index; otherwise one
         // genuine signature error would make every use of an unrelated inferred declaration look
         // unresolved in an editor's steady state. Failed declarations remain absent.
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
+        crate::resolve::check_finalized_top_level_type_alias_bounds(
+            &files[..inferred_end],
+            &index,
+            &symbols,
+            diags,
+        );
         let (index, sources, _) = pass1_headers.finish(index);
         recovery_streamed = Some(diagnostic_streamed_state(index, sources));
         None

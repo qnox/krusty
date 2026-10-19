@@ -433,7 +433,7 @@ impl BodyFirChecker<'_> {
     /// `current_receiver` is the resolver's current-rung flag. An inherited member of the current
     /// instance may name a supertype, but a labeled enclosing `this` is a different value even when
     /// the current classifier extends that supertype.
-    fn materialize_classifier_dispatch_receiver(
+    pub(super) fn materialize_classifier_dispatch_receiver(
         &mut self,
         owner: DeclarationId,
         ty: ResolvedTy,
@@ -779,6 +779,64 @@ impl BodyFirChecker<'_> {
                 current: selected.current,
                 depth,
             },
+        });
+        Ok(Some(FirReceiver {
+            value,
+            conversion: None,
+        }))
+    }
+
+    /// Materialize the resolver-selected enclosing instance used by a constructor delegation.
+    ///
+    /// A module classifier selection already carries its stable declaration identity. Constructor
+    /// prefixes must consume that identity exactly: the current instance does not exist yet, and a
+    /// numeric receiver coordinate must not be allowed to reinterpret the selected classifier when
+    /// its exact capture or enclosing path is unavailable. Dependency classifiers have no module
+    /// declaration identity and retain the ordinary coordinate-only materialization path.
+    pub(super) fn materialize_constructor_prefix_receiver(
+        &mut self,
+        cause: OriginId,
+        span: Option<Span>,
+        selected: &crate::resolve::ImplicitReceiverSelection,
+    ) -> Result<Option<FirReceiver>, BodyCheckFailure> {
+        if !self.constructor_prefix_capture_access {
+            return Err(self.failure(span, BodyCheckFailureKind::MissingStableCallTarget));
+        }
+        let Some(owner) = selected.classifier else {
+            return self.materialize_implicit_receiver(cause, span, selected);
+        };
+        let origin = self
+            .origins
+            .synthetic(cause, SyntheticOriginKind::ImplicitReceiver);
+        let selected_ty = ResolvedTy::new(selected.ty)
+            .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))?;
+        // `current` describes the receiver at the construction site. Inside an anonymous/local
+        // classifier's constructor that same value is a captured prefix parameter, so consult the
+        // declaration-owned capture ledger before interpreting the construction-site flag in this
+        // rebuilt body.
+        if let Some(receiver) = self.local_class_enclosing_receiver(origin, selected)? {
+            return Ok(Some(receiver));
+        }
+        if let Some(receiver) = self.materialize_classifier_dispatch_receiver(
+            owner,
+            selected_ty,
+            origin,
+            span,
+            selected.current,
+        )? {
+            return Ok(Some(receiver));
+        }
+        // An ordinary `inner` classifier owns no capture field for its enclosing instance. Its
+        // selected classifier identity is nevertheless enough to validate the exact declaration
+        // path from the class being constructed; publish that stable path rather than falling
+        // back to the receiver-tower coordinate.
+        let Some(path) = self.enclosing_receiver_path(selected) else {
+            return Ok(None);
+        };
+        let value = self.body.add_expr(FirExpr {
+            origin,
+            ty: selected_ty,
+            kind: FirExprKind::EnclosingReceiver { path },
         });
         Ok(Some(FirReceiver {
             value,

@@ -98,3 +98,16 @@ fn explicit_api_mode_reports_like_kotlinc() {
         ],
     );
 }
+
+#[test]
+fn a_rejected_alias_does_not_hide_a_later_alias_bound_diagnostic() {
+    let source = r#"// EXPLICIT_API_MODE: STRICT
+public open class Bound<T : Number>
+typealias MissingVisibility = String
+public typealias InvalidBound = Bound<String>
+"#;
+    common::assert_errors_match_kotlinc(
+        &[("MixedAliasDiagnostics.kt", source)],
+        &["-Xexplicit-api=strict".to_string()],
+    );
+}

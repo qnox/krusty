@@ -4,40 +4,60 @@
 
 use super::*;
 
-/// Validate an import from left to right and return its single source diagnostic, if any.
-fn import_path_diagnostic(
+mod deprecation;
+pub(crate) use deprecation::check_import_deprecations;
+
+/// Stable resolver output for every valid import occurrence in source order.
+pub(crate) struct BoundImportInventory {
+    files: Vec<Vec<BoundImport>>,
+}
+
+struct BoundImport {
+    span: Span,
+    classifiers: Vec<TypeName>,
+    imports_classifier: bool,
+}
+
+/// Validate and bind one import from left to right. The successful product contains only selected
+/// identities; later checks cannot reopen the source spelling or provider lookup.
+fn bind_import_path(
     import: &crate::ast::ImportPath,
     source: &dyn SymbolSource,
     resolver: &crate::symbol_resolver::SymbolResolver<'_>,
     access_package: TypeName,
-) -> Option<(Span, String)> {
+) -> Result<BoundImport, (Span, String)> {
     use crate::libraries::Callables;
     use crate::symbol_source::SymbolNamespace;
     let unresolved =
         |segment: &str, span: Span| (span, format!("unresolved reference '{segment}'."));
     let mut prefix = ResolvedQualifier::Package(TypeName::ROOT);
+    let mut classifiers = Vec::new();
+    let mut imports_classifier = false;
     for (index, (segment, span)) in import.segments.iter().enumerate() {
         // A `.*` suffix means every stored segment is a qualifier, never the imported name.
         let terminal = index + 1 == import.segments.len() && !import.wildcard;
         match prefix {
-            ResolvedQualifier::Value => return None,
+            ResolvedQualifier::Value => break,
             ResolvedQualifier::Package(package) => {
                 let symbols = source.symbols(SymbolNamespace::Package(package), segment);
                 if let Some(classifier) = symbols.classifier_name {
                     if terminal {
-                        let shape = source.classifier(classifier)?;
-                        if shape.access == crate::libraries::ClassifierAccess::PackagePrivate
-                            && access_package != classifier.namespace()
-                        {
-                            return Some((
-                                *span,
-                                format!(
-                                    "cannot access '{}': it is package-private in file.",
-                                    classifier_access_display_from_shape(classifier, &shape),
-                                ),
-                            ));
+                        if let Some(shape) = source.classifier(classifier) {
+                            if shape.access == crate::libraries::ClassifierAccess::PackagePrivate
+                                && access_package != classifier.namespace()
+                            {
+                                return Err((
+                                    *span,
+                                    format!(
+                                        "cannot access '{}': it is package-private in file.",
+                                        classifier_access_display_from_shape(classifier, &shape),
+                                    ),
+                                ));
+                            }
                         }
                     }
+                    classifiers.push(classifier);
+                    imports_classifier = terminal;
                     prefix = ResolvedQualifier::Classifier(classifier);
                 } else if source.package_exists(package, segment) {
                     prefix =
@@ -46,19 +66,21 @@ fn import_path_diagnostic(
                     && (!matches!(symbols.callables, Callables::None)
                         || symbols.importable_declaration)
                 {
-                    return None;
+                    break;
                 } else {
-                    return Some(unresolved(segment, *span));
+                    return Err(unresolved(segment, *span));
                 }
             }
             ResolvedQualifier::Classifier(owner) => {
                 let symbols = source.symbols(SymbolNamespace::Classifier(owner), segment);
                 if let Some(classifier) = symbols.classifier_name {
+                    classifiers.push(classifier);
+                    imports_classifier = terminal;
                     prefix = ResolvedQualifier::Classifier(classifier);
                     continue;
                 }
                 if !terminal {
-                    return Some(unresolved(segment, *span));
+                    return Err(unresolved(segment, *span));
                 }
                 let inherited = crate::symbol_resolver::members_in_hierarchy(
                     source,
@@ -84,10 +106,10 @@ fn import_path_diagnostic(
                     || (owner_type.as_ref().is_some_and(|owner| owner.is_object())
                         && !matches!(inherited, Callables::None))
                 {
-                    return None;
+                    break;
                 }
                 let Some(owner_type) = owner_type else {
-                    return Some(unresolved(segment, *span));
+                    return Err(unresolved(segment, *span));
                 };
                 let instance_member = !matches!(inherited, Callables::None)
                     || owner_type
@@ -95,18 +117,26 @@ fn import_path_diagnostic(
                         .iter()
                         .any(|member| member.name == *segment);
                 if instance_member {
-                    return Some((
+                    return Err((
                         *span,
                         format!(
                             "cannot import '{segment}'. Functions and properties can only be imported from packages or objects."
                         ),
                     ));
                 }
-                return Some(unresolved(segment, *span));
+                return Err(unresolved(segment, *span));
             }
         }
     }
-    None
+    let span = match (import.segments.first(), import.segments.last()) {
+        (Some((_, first)), Some((_, last))) => Span::new(first.lo, last.hi),
+        _ => Span::new(0, 0),
+    };
+    Ok(BoundImport {
+        span,
+        classifiers,
+        imports_classifier,
+    })
 }
 
 fn reports(
@@ -115,14 +145,17 @@ fn reports(
     libraries: &dyn SemanticPlatform,
     resolver: &crate::symbol_resolver::SymbolResolver<'_>,
     access_package: TypeName,
-) -> Vec<(Span, String)> {
+) -> (Vec<(Span, String)>, Vec<BoundImport>) {
     let source =
         crate::symbol_source::CompositeSource::new(vec![module, libraries as &dyn SymbolSource]);
-    let mut reports = file
-        .import_paths
-        .iter()
-        .filter_map(|import| import_path_diagnostic(import, &source, resolver, access_package))
-        .collect::<Vec<_>>();
+    let mut reports = Vec::new();
+    let mut bound = Vec::new();
+    for import in &file.import_paths {
+        match bind_import_path(import, &source, resolver, access_package) {
+            Ok(import) => bound.push(import),
+            Err(report) => reports.push(report),
+        }
+    }
 
     // Classifiers occupy a single-symbol namespace: two distinct explicit imports under one
     // visible name are conflicting imports. Callable/property facets deliberately do not enter
@@ -169,7 +202,7 @@ fn reports(
             format!("conflicting import: imported name '{visible}' is ambiguous."),
         ));
     }
-    reports
+    (reports, bound)
 }
 
 fn emit(diags: &mut DiagSink, file: u32, reports: Vec<(Span, String)>) {
@@ -188,7 +221,14 @@ fn emit(diags: &mut DiagSink, file: u32, reports: Vec<(Span, String)>) {
 
 /// Validate every source file's import list while the complete module header provider is live.
 /// This precedes signature finalization, so a failed signature cannot suppress file diagnostics.
-pub(crate) fn check_module_import_paths(files: &[File], table: &SymbolTable, diags: &mut DiagSink) {
+pub(crate) fn check_module_import_paths(
+    files: &[File],
+    table: &SymbolTable,
+    diags: &mut DiagSink,
+) -> BoundImportInventory {
+    let mut inventory = BoundImportInventory {
+        files: Vec::with_capacity(files.len()),
+    };
     for (file_index, file) in files.iter().enumerate() {
         let file_index = u32::try_from(file_index).expect("too many source files");
         let module = crate::module_symbols::ModuleSymbols::for_file(table, file_index);
@@ -208,10 +248,9 @@ pub(crate) fn check_module_import_paths(files: &[File], table: &SymbolTable, dia
             &scope,
         )
         .with_access_context(package, file_index, Vec::new());
-        emit(
-            diags,
-            file_index,
-            reports(file, &module, table.libraries.as_ref(), &resolver, package),
-        );
+        let (reports, bound) = reports(file, &module, table.libraries.as_ref(), &resolver, package);
+        emit(diags, file_index, reports);
+        inventory.files.push(bound);
     }
+    inventory
 }

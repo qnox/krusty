@@ -1180,6 +1180,10 @@ pub(super) fn compact(file: &mut File) {
         .into_iter()
         .filter_map(|(old, span)| statements.get(&StmtId(old)).map(|new| (new.0, span)))
         .collect();
+    file.compound_assignment_read_spans = remap_u32_map(
+        std::mem::take(&mut file.compound_assignment_read_spans),
+        &expressions,
+    );
     file.assignment_target_lines = std::mem::take(&mut file.assignment_target_lines)
         .into_iter()
         .filter_map(|(old, line)| statements.get(&StmtId(old)).map(|new| (new.0, line)))
