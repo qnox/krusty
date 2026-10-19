@@ -5337,6 +5337,9 @@ regress.
     regresses. Not yet matched: a nested line the class map holds in a middle range (kotlinc's
     `SourceMapper` reuses only the first or last range) and the `$iv` depth of a literal's locals
     inlined through another inline body.
+    A call whose literal reads one of the inline function's own inline parameters stays expanded
+    (`InlineParameterInLiteral`): a caller expanding that function's template splices its literal
+    only through expanded bodies. Retire it with the expansions that need it.
     ☐ `$default` calls, class members, non-public callees of another file, suspend callers and callees,
     `crossinline` parameters, literals with non-local jumps, calls in default arguments, and callee
     bodies with lambdas, local classes, nested expansions or enum switches.

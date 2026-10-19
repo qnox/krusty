@@ -1204,6 +1204,10 @@ impl BodyLowering<'_> {
                 )
             })
             .collect::<HashMap<_, _>>();
+        let inline_parameter_values = self.inline_parameter_values.nested(body);
+        if !inline_parameter_values.is_empty() {
+            self.callables_reading_inline_parameters.insert(function);
+        }
         let mut scopes = self.local_callable_scopes.clone();
         scopes.push(HashMap::default());
         let mut nested = BodyLowering::new(
@@ -1218,6 +1222,7 @@ impl BodyLowering<'_> {
         nested.enclosure = declaration_enclosure;
         nested.expansion_enclosure = expansion_enclosure;
         nested.inline_declaration = self.inline_declaration;
+        nested.inline_parameter_values = inline_parameter_values;
         nested.suspend_context = suspend_context;
         nested.declaration_lambda = if body.source_lambda().is_some() {
             Some(function)

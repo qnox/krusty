@@ -5176,7 +5176,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   accessor, as kotlinc inlines wherever the call is written. A suspend function or suspend lambda, and a lambda written in one (whose body may be
   spliced into its state machine), keep their calls expanded (`SuspendCaller`), as does a default
   argument. With no literal lambda argument
-  that leaves its body by a non-local `return`, `break` or `continue`. Every other call is
+  that leaves its body by a non-local `return`, `break` or `continue`, and, in an inline function,
+  none that reads one of that function's inline parameters at any depth (`InlineParameterInLiteral`):
+  a caller that expands the function's template splices its own literal for that parameter, which
+  reaches a literal only through an expanded body, never through one the backend inlines. Every other call is
   expanded in IR for a named reason. The JVM compiles each such callee once per emission pass, alone, into a writer of
   its declaring class and source file, and the inliner reads that body as it reads a dependency's.
   A callee whose body inlines another same-module callee is compiled after it, as kotlinc compiles
@@ -5202,7 +5205,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   inline functions inlining their own same-module calls, and a literal that always throws inside a
   bracketed body, against kotlinc's bytes and as runs) and
   `fir_lower::source_calls::inline_route::tests` (those suspend-context calls stay expanded while
-  the same call in an ordinary function's lambda is kept for the backend).
+  the same call in an ordinary function's lambda is kept for the backend; literals reading an
+  inline parameter keep their call expanded, at any depth, while a function's own literal or one
+  reading a `noinline` parameter does not), with
+  `tests/inline_deep_coverage_e2e.rs` (`inline_nonlocal_return_two_frames`) and
+  `tests/nested_inline_lambda_e2e.rs` for a caller's literal forwarded through two inline frames.
 
 - **A same-module inline call with function arguments is inlined from the compiled body too.**
   A literal lambda or callable reference passed to an inline parameter (one that is function-typed

@@ -4,6 +4,8 @@ pub(super) mod argument_boundaries;
 mod inline_route;
 mod reordered_operands;
 
+pub(super) use inline_route::InlineParameterValues;
+
 use crate::fir::{
     CallableId, DeclarationKind, ExternalCallableId, ExternalPropertyId, FirAnnotationConstruction,
     FirAnnotationDefaultValue, FirConstant, ResolvedTy,

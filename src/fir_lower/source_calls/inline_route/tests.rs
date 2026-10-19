@@ -88,3 +88,42 @@ fn calls_in_suspend_lambdas_and_lambdas_of_suspend_local_functions_stay_expanded
         "{expanded:?}"
     );
 }
+
+const INLINE_PARAMETER_LITERALS: &str = r#"inline fun inner(g: () -> Unit) { g() }
+
+inline fun forwards(f: () -> Unit) { inner { f() } }
+
+inline fun forwardsDeeper(f: () -> Unit) { inner { inner { f() } } }
+
+inline fun ownLiteral(f: () -> Unit) {
+    inner { println("own") }
+    f()
+}
+
+inline fun notInlined(noinline f: () -> Unit) { inner { f() } }
+
+fun box(): String {
+    forwards {}
+    forwardsDeeper {}
+    ownLiteral {}
+    notInlined {}
+    return "OK"
+}
+"#;
+
+// A caller expanding an inline function's template splices its literal for each inline parameter,
+// which it reaches only through expanded bodies: a literal reading one, at any depth, keeps its
+// call expanded (`InlineParameterInLiteral`). A literal of the function's own, or one reading a
+// `noinline` parameter (a value the template keeps), leaves the call to the compiled-body inliner.
+#[test]
+fn literals_reading_an_inline_parameter_keep_their_call_expanded_in_the_template() {
+    let ir = lowered_for_compiled_bodies(INLINE_PARAMETER_LITERALS);
+    let (compiled, expanded) = routed_bodies(&ir);
+    let named = |names: &[&str], wanted: &str| names.contains(&wanted);
+    assert!(named(&expanded, "forwards"), "{expanded:?}");
+    assert!(named(&expanded, "forwardsDeeper"), "{expanded:?}");
+    assert!(!named(&compiled, "forwards"), "{compiled:?}");
+    assert!(!named(&compiled, "forwardsDeeper"), "{compiled:?}");
+    assert!(named(&compiled, "ownLiteral"), "{compiled:?}");
+    assert!(named(&compiled, "notInlined"), "{compiled:?}");
+}
