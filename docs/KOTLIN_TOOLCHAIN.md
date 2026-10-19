@@ -197,8 +197,9 @@ generated:
 ```
 
 A directory is the argument of a task's action that is `${module.rootDir}` or a plain path below
-it; the toolchain rejects a directory that is not a task's output, and so does krusty-toolchain.
-krusty-toolchain runs no plugin task: the action is the plugin's own code, so a directory a
+it, or that directory written out, which the toolchain takes as that task's output. A directory
+written out that no task's action argument is the toolchain rejects, for each module that enables
+the plugin, and krusty-toolchain reports the same problem. krusty-toolchain runs no plugin task: the action is the plugin's own code, so a directory a
 task provides is compiled as it is on disk, and refused when it is not a directory there. It does
 not compile the plugin module before the modules that enable it, as the toolchain does to run the
 task. It refuses, where each is written: a plugin the project does not list, plugin settings
@@ -286,7 +287,9 @@ plugin's module in a `--- toolchain-plugin-module` section: the recorder then al
 module, with the reference Kotlin compiler (the case's local repository lists the plugin API, whose
 stand-in jar is replaced by the one the distribution ships, and the standard library's by the
 reference compiler's), and the toolchain's invocation for it, which krusty-toolchain does not make,
-must be recorded once and is left out of the comparison.
+must be recorded once and is left out of the comparison. A case with neither section is a project
+both reject: krusty-toolchain must refuse it, and where the oracle runs, with exactly the problems
+the toolchain reports.
 
 `tests/support/oracle.rs` caches each reference's exit code and raw stdout and stderr (only a JVM's
 `Picked up JAVA_TOOL_OPTIONS` line is dropped from stderr) under

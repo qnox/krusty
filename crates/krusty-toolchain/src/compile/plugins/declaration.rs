@@ -1,8 +1,9 @@
 //! What a toolchain plugin's `plugin.yaml` declares, as far as krusty-toolchain implements it: the
 //! Kotlin source directories it adds to the main fragment of a module that enables it
-//! (`generated.sources`), each written as the argument of a task's action
-//! (`${tasks.<task>.action.<argument>}`) that is a directory of that module
-//! (`${module.rootDir}/…`). The toolchain itself rejects a directory that is not a task's output.
+//! (`generated.sources`), each written as the argument of a task's action that is a directory of
+//! that module (`${tasks.<task>.action.<argument>}`), or as that directory itself
+//! (`${module.rootDir}/…`). The toolchain rejects a directory written out that no task's action
+//! argument is, for each module that enables the plugin (`super`).
 //!
 //! krusty-toolchain does not run a plugin's tasks: their actions are code of the plugin's own. A
 //! directory a task provides is compiled as it is when the task would run. Everything else a
@@ -18,8 +19,8 @@ use crate::yaml::{NodeId, Span};
 pub(super) struct GeneratedSources {
     /// The directory below the module's directory, as path segments.
     pub below_module: Vec<String>,
-    /// The task whose action argument names the directory.
-    pub task: String,
+    /// The task whose action argument names the directory, when one does.
+    pub task: Option<String>,
     /// Where the directory is written in `plugin.yaml`.
     pub span: Span,
 }
@@ -27,6 +28,8 @@ pub(super) struct GeneratedSources {
 /// A plugin's declarations.
 pub(super) struct Declaration {
     pub file: PathBuf,
+    /// The whole document, where the toolchain reports a problem with a generated directory.
+    pub document: Option<Span>,
     pub sources: Vec<GeneratedSources>,
 }
 
@@ -49,6 +52,7 @@ pub(super) fn read(id: &str, file: &Path) -> Result<Declaration, Vec<Diagnostic>
         arguments: Vec::new(),
     };
     let mut generated = None;
+    let document_span = document.root().map(|root| reader.span(root));
     match document.root().map(|root| (root, reader.value(root))) {
         None | Some((_, Value::Missing | Value::Null)) => {}
         Some((_, Value::Mapping(pairs))) => {
@@ -79,6 +83,7 @@ pub(super) fn read(id: &str, file: &Path) -> Result<Declaration, Vec<Diagnostic>
     }
     Ok(Declaration {
         file: file.to_path_buf(),
+        document: document_span,
         sources,
     })
 }
@@ -237,13 +242,14 @@ fn read_source(
     })
 }
 
-/// The directory `node` names, below the module's directory, and the task whose argument it is.
+/// The directory `node` names, below the module's directory, and the task whose argument it is,
+/// when it is one.
 fn directory_of(
     id: &str,
     reader: &mut FileReader<'_>,
     node: NodeId,
     tasks: &Tasks<'_>,
-) -> Option<(Vec<String>, String)> {
+) -> Option<(Vec<String>, Option<String>)> {
     let Value::Scalar(text) = reader.value(node) else {
         reader.error(
             node,
@@ -255,13 +261,28 @@ fn directory_of(
         .strip_prefix("${tasks.")
         .and_then(|rest| rest.strip_suffix('}'))
     else {
-        // The toolchain refuses it too, for each module that enables the plugin: "must be an
-        // `@Output` of some task registered in this plugin".
-        reader.error(
-            node,
-            format!("the directory of generated sources of plugin `{id}` must be an argument of one of its task actions, as the toolchain requires"),
-        );
-        return None;
+        return match below_module(text) {
+            // The toolchain takes a directory written out as the output of the task whose action
+            // argument is the same directory, and rejects it when no task's is (`super`).
+            Some(below) => {
+                let task = tasks.arguments.iter().find_map(|&(task, _, argument)| {
+                    match reader.value(argument) {
+                        Value::Scalar(given) if below_module(given).as_ref() == Some(&below) => {
+                            Some(task.to_string())
+                        }
+                        _ => None,
+                    }
+                });
+                Some((below, task))
+            }
+            None => {
+                reader.error(
+                    node,
+                    format!("krusty-toolchain reads a directory of plugin `{id}` only as a task action's argument that is `{MODULE_ROOT}` or a path below it"),
+                );
+                None
+            }
+        };
     };
     let found = reference
         .split_once(".action.")
@@ -289,7 +310,7 @@ fn directory_of(
         );
         return None;
     };
-    Some((below, task.to_string()))
+    Some((below, Some(task.to_string())))
 }
 
 /// The segments of `text` below `${module.rootDir}`, when it is that directory or a plain path

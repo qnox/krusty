@@ -16,7 +16,9 @@
 //! A case whose modules enable a toolchain plugin names the plugin's module in a
 //! `toolchain-plugin-module` section: the toolchain compiles that module for real to run the
 //! plugin's tasks (`compiling::RecordingKrustyCompilingPlugin`), and its invocation, which
-//! krusty-toolchain does not make, must be recorded once and is left out of the comparison.
+//! krusty-toolchain does not make, must be recorded once and is left out of the comparison. A case
+//! with neither ledger is a project both reject: krusty-toolchain must refuse it, and where the
+//! oracle runs, with exactly the problems the toolchain reports.
 //!
 //! One test compiles with the real krusty instead of the recorder: a library and an application
 //! that uses it, whose outputs are listed and whose program is run on the JDK it compiled against.
@@ -111,8 +113,8 @@ fn compile_cases() -> Vec<CompileCase> {
                 compiled.name
             );
             assert!(
-                compiled.argv.is_some() != compiled.refusal.is_some(),
-                "{}: a case holds either a `krusty-argv` or a `krusty-refusal` section",
+                compiled.argv.is_none() || compiled.refusal.is_none(),
+                "{}: a case holds a `krusty-argv` or a `krusty-refusal` section, not both",
                 compiled.name
             );
             compiled
@@ -216,7 +218,7 @@ fn ledger(problems: &[ExpectedDiagnostic]) -> String {
 fn every_compile_case_is_exact() {
     compiling::recorder();
     let cases = compile_cases();
-    assert_eq!(cases.len(), 13, "the cases are missing");
+    assert_eq!(cases.len(), 15, "the cases are missing");
     let mut failures = Vec::new();
     for case in &cases {
         let ran = krusty_toolchain(
@@ -264,7 +266,15 @@ fn every_compile_case_is_exact() {
                     ));
                 }
             }
-            (None, None) => unreachable!("checked when the cases are read"),
+            (None, None) => {
+                // Checked against the toolchain's problems where the oracle runs.
+                if refusal(actual).is_none() || !ran.record.is_empty() {
+                    failures.push(format!(
+                        "{}: krusty-toolchain did {printed}\na case with neither ledger expects status 1, no stdout, nothing recorded and nothing but problems",
+                        case.name
+                    ));
+                }
+            }
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
@@ -308,6 +318,7 @@ fn every_compile_case_passes_the_arguments_the_toolchain_passes() {
         .into_iter()
         .filter(|case| case.refusal.is_none())
         .collect();
+    compiling::recorder();
     let arguments: Vec<[&str; 2]> = cases
         .iter()
         .map(|case| ["task", case.task.as_str()])
@@ -337,7 +348,39 @@ fn every_compile_case_passes_the_arguments_the_toolchain_passes() {
     let mut failures = Vec::new();
     for (case, toolchain) in cases.iter().zip(outputs) {
         let record = placed(&toolchain.root, &toolchain.stdout);
-        let argv = case.argv.as_deref().unwrap_or_default();
+        let Some(argv) = case.argv.as_deref() else {
+            // Both reject the project, with the same problems.
+            let ran = krusty_toolchain(
+                &format!("rejected-{}", case.name),
+                case,
+                &[case.task.as_str()],
+                |_| {},
+            );
+            let project_root = format!("{}/{}", toolchain.root, Resolving::PROJECT);
+            let (rejected, unread) = problems(&project_root, &toolchain.stderr);
+            let rejected: Vec<ExpectedDiagnostic> = rejected
+                .into_iter()
+                .map(|problem| ExpectedDiagnostic {
+                    rendered: placed(&toolchain.root, problem.rendered.as_bytes()),
+                    ..problem
+                })
+                .collect();
+            let refused = refusal(&ran.output);
+            if toolchain.code == 0
+                || !unread.is_empty()
+                || !record.is_empty()
+                || refused.as_ref() != Some(&rejected)
+            {
+                failures.push(format!(
+                    "{}: the toolchain exited {} having recorded\n{record}\nand rejected the project with\n{}krusty-toolchain refused it with\n{}",
+                    case.name,
+                    toolchain.code,
+                    ledger(&rejected),
+                    refused.as_deref().map(ledger).unwrap_or_default()
+                ));
+            }
+            continue;
+        };
         let mut recorded = by_module(&record);
         // The plugin module's invocation is the toolchain's alone: krusty-toolchain runs no task.
         let plugin_compiled = case.plugin_module.as_ref().is_none_or(|plugin| {
