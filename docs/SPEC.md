@@ -6445,6 +6445,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/reified_catch_e2e.rs`. Corpus:
   `codegen/box/reified/catchParameter/tryCatchReifiedType.kt`.
 
+- **A reified enum operation inlined for a concrete enum calls that enum's own member.** A reified
+  body writes `enumValueOf<T>(s)`, `enumValues<T>()` and `enumEntries<T>()` as
+  `Intrinsics.reifiedOperationMarker(5, "T")` followed by an erased placeholder:
+  `aconst_null; aload s; invokestatic Enum.valueOf(Class, String)`, `iconst_0; anewarray Enum`,
+  or `aconst_null; checkcast EnumEntries`. The bytecode inliner reads the operation from the marker's
+  mode and the placeholder's shape, never from a function name, as kotlinc's
+  `ReifiedTypeInliner.processSpecialEnumFunction` does: for a concrete enum `E` it erases the marker
+  and writes `E.valueOf(String)` (dropping the `aconst_null`), `E.values()` or `E.getEntries()` in
+  place of the placeholder. A forwarded parameter renames the marker and keeps the placeholder for
+  the outer caller. A mode-5 marker followed by any other shape is malformed and fails the
+  splice. Not yet matched: kotlinc reads the entries of a Java enum, or of a Kotlin enum compiled
+  without `getEntries`, through a generated `$EntriesMappings` class; this inliner always calls
+  `getEntries()`, as krusty's own `enumEntries<E>()` does. Tests:
+  `tests/inline_reified_enum_operations_e2e.rs`.
+
 - **An escaping lambda inside `inline fun <reified T>` specializes `T` at the call that creates it.**
   `func = { it as? T }` stores a closure, so the body is not spliced into the caller. The
   declaration's implementation keeps the reified marker. Each call copies that implementation,

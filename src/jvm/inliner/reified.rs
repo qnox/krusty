@@ -14,6 +14,16 @@ const MARKER_DESCRIPTOR: &str = "(ILjava/lang/String;)V";
 /// `ReifiedTypeInliner` mode for `catch (e: T)`. The marker is the handler's first instructions;
 /// the exception table still names the parameter's erasure until a concrete argument replaces it.
 const CATCH_MARKER: i32 = 7;
+/// `ReifiedTypeInliner` mode for `enumValueOf<T>`, `enumValues<T>` and `enumEntries<T>`: the marker
+/// precedes an erased placeholder that a concrete argument rewrites into the enum's own member
+/// (`processSpecialEnumFunction`).
+const ENUM_MARKER: i32 = 5;
+const ACONST_NULL: u8 = 0x01;
+const ICONST_0: u8 = 0x03;
+const ALOAD: u8 = 0x19;
+const ANEWARRAY: u8 = 0xbd;
+const CHECKCAST: u8 = 0xc0;
+const ENUM_ENTRIES: &str = "kotlin/enums/EnumEntries";
 
 enum Repoint {
     Class {
@@ -34,6 +44,77 @@ enum Repoint {
     },
     /// A concrete `catch (e: T)`: rewrite every agreeing typed entry of this handler to `class`.
     Catch { class: String },
+    /// A concrete enum operation: `placeholder` is replaced by `with`, and `consumed` (the rest of
+    /// the erased form) is removed.
+    Enum {
+        placeholder: usize,
+        with: Vec<Node>,
+        consumed: usize,
+    },
+}
+
+/// The erased form a mode-5 marker at `call` precedes, as kotlinc's reified enum templates write
+/// it: `aconst_null; aload; invokestatic Enum.valueOf`, `iconst_0; anewarray`, or
+/// `aconst_null; checkcast EnumEntries`.
+enum EnumOperation {
+    ValueOf { placeholder: usize, call: usize },
+    Values { placeholder: usize, array: usize },
+    Entries { placeholder: usize, cast: usize },
+}
+
+fn enum_operation(node: &MethodNode, call: usize) -> Option<EnumOperation> {
+    let at = |offset: usize| node.nodes.get(call + offset);
+    match (at(1)?, at(2)?) {
+        (Node::Insn(Insn::Op(ACONST_NULL)), Node::Insn(Insn::Var { op: ALOAD, .. })) => matches!(
+            at(3)?,
+            Node::Insn(Insn::Method { op: INVOKESTATIC, name, .. }) if name == "valueOf"
+        )
+        .then_some(EnumOperation::ValueOf {
+            placeholder: call + 1,
+            call: call + 3,
+        }),
+        (Node::Insn(Insn::Op(ICONST_0)), Node::Insn(Insn::Type { op: ANEWARRAY, .. })) => {
+            Some(EnumOperation::Values {
+                placeholder: call + 1,
+                array: call + 2,
+            })
+        }
+        (
+            Node::Insn(Insn::Op(ACONST_NULL)),
+            Node::Insn(Insn::Type {
+                op: CHECKCAST,
+                class,
+            }),
+        ) if class == ENUM_ENTRIES => Some(EnumOperation::Entries {
+            placeholder: call + 1,
+            cast: call + 2,
+        }),
+        _ => None,
+    }
+}
+
+/// The concrete form of `operation` for enum `class`: its own static `valueOf(String)`,
+/// `values()` or `getEntries()`.
+fn enum_repoint(operation: EnumOperation, class: &str) -> Repoint {
+    let invoke =
+        |name: &str, desc: String| vec![Node::Insn(method(INVOKESTATIC, class, name, &desc))];
+    match operation {
+        EnumOperation::ValueOf { placeholder, call } => Repoint::Enum {
+            placeholder: call,
+            with: invoke("valueOf", format!("(Ljava/lang/String;)L{class};")),
+            consumed: placeholder,
+        },
+        EnumOperation::Values { placeholder, array } => Repoint::Enum {
+            placeholder,
+            with: invoke("values", format!("()[L{class};")),
+            consumed: array,
+        },
+        EnumOperation::Entries { placeholder, cast } => Repoint::Enum {
+            placeholder,
+            with: invoke("getEntries", format!("()L{ENUM_ENTRIES};")),
+            consumed: cast,
+        },
+    }
 }
 
 struct Marker {
@@ -101,6 +182,15 @@ pub(super) fn specialize(
             Repoint::Catch { class } => {
                 retarget_catch(node, marker.operation, class)?;
                 erase_marker(node, marker);
+            }
+            Repoint::Enum {
+                placeholder,
+                with,
+                consumed,
+            } => {
+                erase_marker(node, marker);
+                replacements.push((*placeholder, with.clone()));
+                replacements.push((*consumed, Vec::new()));
             }
             Repoint::TypeOf {
                 placeholder,
@@ -171,6 +261,16 @@ fn plan(node: &MethodNode, arguments: &ReifiedArguments) -> Result<Vec<Marker>, 
             }
         } else if mode == CATCH_MARKER {
             catch_repoint(node, operation, name_instruction, argument, arguments)?
+        } else if mode == ENUM_MARKER {
+            let erased = enum_operation(node, call).ok_or(InlineError::MalformedReifiedMarker)?;
+            match arguments.classes.get(argument) {
+                Some(ReifiedArgument::Class { internal, .. }) => enum_repoint(erased, internal),
+                Some(ReifiedArgument::Forwarded { name, nullable }) => Repoint::Forwarded {
+                    name_instruction,
+                    name: forwarded_marker_name(name, *nullable, argument),
+                },
+                None => return Err(InlineError::MissingReifiedArgument(argument.to_owned())),
+            }
         } else {
             let target = (call + 1..node.nodes.len())
                 .find(|&at| is_type_bearing(node.nodes.get(at)))
