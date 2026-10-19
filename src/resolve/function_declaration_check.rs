@@ -528,7 +528,7 @@ impl Checker<'_> {
         self.this_extension_receiver = dispatch_extension_receiver;
         self.leave_public_api_inline(public_api_inline);
         self.lambda_returns.leave_function(enclosing_return_frame);
-        self.retire_type_parameter_owners(&owned_type_parameters);
+        self.restore_type_parameter_owners(owned_type_parameters);
         self.active_lexical_policies.truncate(suppression_depth);
     }
 
@@ -1028,7 +1028,7 @@ impl Checker<'_> {
         self.leave_public_api_inline(public_api_inline);
         self.leave_block_body(block);
         self.lambda_returns.leave_function(enclosing_return_frame);
-        self.retire_type_parameter_owners(&owned_type_parameters);
+        self.restore_type_parameter_owners(owned_type_parameters);
         self.active_lexical_policies.truncate(suppression_depth);
     }
 

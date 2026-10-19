@@ -85,6 +85,51 @@ fn self_type_bound(owner: TypeName, formal: &str, formals: &[String], bounds: &[
     .then_some(bound)
 }
 
+/// How a constructor call fixed one of its classifier's type parameters, once argument and
+/// expected-type inference are done.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConstructorFormalEvidence {
+    /// A written type argument, an argument, the expected type, an enclosing call or a joined
+    /// conditional sibling bound it.
+    Bound,
+    /// Nothing bound it, and it is a self type of the classifier: Kotlin completes it to its
+    /// starred bound, as [`complete_self_bounded_formals`] describes.
+    SelfType,
+    /// Nothing bound it. Kotlin does not infer such a variable from its declared bound: `C(1)` for
+    /// `class C<T : Comparable<T>>(val n: Int)` reports `cannot infer type for type parameter 'T'`.
+    Unconstrained,
+}
+
+/// The evidence for each of `owner`'s `formals` given the call's inferred `bindings`.
+pub(crate) fn constructor_formal_evidence(
+    owner: TypeName,
+    formals: &[String],
+    formal_bounds: &[Vec<Ty>],
+    bindings: &GSigBinds,
+) -> Vec<ConstructorFormalEvidence> {
+    formals
+        .iter()
+        .zip(
+            formal_bounds
+                .iter()
+                .map(Vec::as_slice)
+                .chain(std::iter::repeat(&[][..])),
+        )
+        .map(|(formal, bounds)| {
+            if bindings
+                .get(formal)
+                .is_some_and(|binding| *binding != Ty::Error)
+            {
+                ConstructorFormalEvidence::Bound
+            } else if self_type_bound(owner, formal, formals, bounds).is_some() {
+                ConstructorFormalEvidence::SelfType
+            } else {
+                ConstructorFormalEvidence::Unconstrained
+            }
+        })
+        .collect()
+}
+
 /// The classifier arguments of a constructor result once argument and expected-type inference are
 /// done. A bound variable keeps its binding, a self type of `owner` completes as
 /// [`complete_self_bounded_formals`] describes, and any other takes its first declared bound.

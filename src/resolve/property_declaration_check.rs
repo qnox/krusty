@@ -537,7 +537,7 @@ impl Checker<'_> {
             );
         }
         self.leave_block_body(block);
-        self.retire_type_parameter_owners(&owned_type_parameters);
+        self.restore_type_parameter_owners(owned_type_parameters);
         self.active_lexical_policies.truncate(suppression_depth);
     }
 

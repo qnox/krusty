@@ -1166,12 +1166,15 @@ impl BodyFirChecker<'_> {
                 if access.property.getter.compiler_intrinsic
                     == Some(crate::libraries::CompilerIntrinsic::CharCode)
                 {
-                    // kotlinc inlines the getter; its result ends an inlined call.
-                    let cause = self.expression_origin(expression)?;
-                    let cause = self
-                        .origins
-                        .synthetic(cause, SyntheticOriginKind::InlinedCall);
-                    self.body.record_inlined_call_conversion(cause);
+                    // A getter declared `inline` is realized here in place of the call kotlinc
+                    // inlines, so its result ends an inlined call.
+                    let mut cause = self.expression_origin(expression)?;
+                    if access.property.getter.inline != crate::libraries::InlineKind::None {
+                        cause = self
+                            .origins
+                            .synthetic(cause, SyntheticOriginKind::InlinedCall);
+                        self.body.record_inlined_call_conversion(cause);
+                    }
                     let target = ResolvedTy::new(access.property.ty).map_err(|error| {
                         self.failure(
                             self.file.expr_span(expression),

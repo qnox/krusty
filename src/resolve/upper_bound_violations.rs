@@ -808,7 +808,7 @@ impl<'a> Checker<'a> {
             if let Some(result) = function.ret.as_ref() {
                 self.check_declaration_type(&method_scope, result);
             }
-            self.retire_type_parameter_owners(&owned);
+            self.restore_type_parameter_owners(owned);
             return;
         }
         let value_parameters = function
@@ -828,7 +828,7 @@ impl<'a> Checker<'a> {
                 self.failed_local_declaration_bindings.insert(declaration);
             }
         }
-        self.retire_type_parameter_owners(&owned);
+        self.restore_type_parameter_owners(owned);
     }
 
     /// [`Self::check_bodyless_member_bounds`] for a property of the class rung `scope`, when it
@@ -944,7 +944,7 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
-            self.retire_type_parameter_owners(&owned);
+            self.restore_type_parameter_owners(owned);
             return;
         }
         let context_parameters = property
@@ -964,7 +964,7 @@ impl<'a> Checker<'a> {
                 self.failed_local_declaration_bindings.insert(declaration);
             }
         }
-        self.retire_type_parameter_owners(&owned);
+        self.restore_type_parameter_owners(owned);
     }
 
     /// The alias spellings Pass 1 recorded for the declared types of `declaration`; none for a

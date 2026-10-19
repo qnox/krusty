@@ -14,6 +14,13 @@ use super::common;
 const JAVA: &[(&str, &str)] = &[
     ("Pub.java", "package pub;\npublic interface Pub<T> {}\n"),
     (
+        "Box.java",
+        "package pub;\n\
+         public final class Box<T> {\n\
+         \x20 public T get() { return null; }\n\
+         }\n",
+    ),
+    (
         "Mono.java",
         "package pub;\n\
          import java.util.function.Function;\n\
@@ -21,6 +28,9 @@ const JAVA: &[(&str, &str)] = &[
          \x20 public static <T> Mono<T> empty() { return new Mono<T>(); }\n\
          \x20 public static <T> Mono<T> just(T value) { return new Mono<T>(); }\n\
          \x20 public <R> Mono<R> flatMap(Function<? super T, ? extends Mono<? extends R>> f) {\n\
+         \x20\x20 return new Mono<R>();\n\
+         \x20 }\n\
+         \x20 public <R> Mono<R> map(Function<? super T, ? extends R> f) {\n\
          \x20\x20 return new Mono<R>();\n\
          \x20 }\n\
          }\n",
@@ -185,4 +195,96 @@ fn an_incompatible_block_branch_is_still_rejected() {
             .as_str()
         ),
     );
+}
+
+/// Without an enclosing result expectation, the selected `flatMap` call still owns an open `R`.
+/// Its primary inference/return mismatch does not consume the independent open `T` selected for a
+/// terminal conditional branch. Every value-conditional form must retain the complete ordered
+/// diagnostic set, including the branch call's exact source location.
+#[test]
+fn open_selected_lambda_results_preserve_terminal_branch_diagnostics() {
+    let java = JAVA
+        .iter()
+        .map(|(name, source)| ((*name).into(), (*source).into()))
+        .collect::<Vec<(String, String)>>();
+    let Some((library, _)) = common::javac_compile(&java, &[]) else {
+        eprintln!("skipping: javac unavailable");
+        return;
+    };
+    let classpath = [library.clone(), common::stdlib_jar(), common::jdk_modules()];
+    for (form, body) in [
+        ("if", "if (s.isEmpty()) {} else { Mono.empty() }"),
+        ("when", "when { s.isEmpty() -> {}; else -> Mono.empty() }"),
+        ("try", "try {} catch (ignored: Exception) { Mono.empty() }"),
+    ] {
+        let user = format!(
+            "import pub.Mono\n\
+             fun use(m: Mono<String>) =\n\
+             \x20 m.flatMap {{ s -> {body} }}\n"
+        );
+        let result = common::compiler_diagnostics(&[("Use.kt", &user)], &classpath);
+        common::expect_identical_rejection(
+            &result,
+            &format!("open selected lambda {form} branch completion"),
+        );
+    }
+}
+
+/// An elvis lambda result is not a mismatch: `R` is recorded as `empty`'s open `T`, and kotlinc
+/// reports both as uninferred.
+#[test]
+fn an_open_lambda_result_leaves_the_selected_formal_uninferred() {
+    let java = JAVA
+        .iter()
+        .map(|(name, source)| ((*name).into(), (*source).into()))
+        .collect::<Vec<(String, String)>>();
+    let Some((library, _)) = common::javac_compile(&java, &[]) else {
+        eprintln!("skipping: javac unavailable");
+        return;
+    };
+    let classpath = [library.clone(), common::stdlib_jar(), common::jdk_modules()];
+    let user = "import pub.Mono\n\
+         fun use(m: Mono<String>) {\n\
+         \x20 val result = m.flatMap { s -> null ?: Mono.empty() }\n\
+         }\n";
+    let result = common::compiler_diagnostics(&[("Use.kt", user)], &classpath);
+    common::expect_identical_rejection(&result, "open elvis lambda result");
+}
+
+#[test]
+fn stable_symbolic_lambda_results_are_inference_evidence() {
+    let java = JAVA
+        .iter()
+        .map(|(name, source)| ((*name).into(), (*source).into()))
+        .collect::<Vec<(String, String)>>();
+    let Some((library, _)) = common::javac_compile(&java, &[]) else {
+        eprintln!("skipping: javac unavailable");
+        return;
+    };
+    let classpath = [library.clone(), common::stdlib_jar(), common::jdk_modules()];
+    for (form, user) in [
+        (
+            "captured star projection",
+            "import pub.Box\n\
+             import pub.Mono\n\
+             fun use(m: Mono<String>, box: Box<*>) = m.map { box.get() }\n",
+        ),
+        (
+            "enclosing lexical type parameter",
+            "import pub.Mono\n\
+             fun <T> use(m: Mono<String>, value: T) = m.map { value }\n",
+        ),
+    ] {
+        let result = common::compiler_diagnostics(&[("Use.kt", user)], &classpath);
+        assert_eq!(
+            (result.reference_code, result.reference_stderr.as_str()),
+            (0, ""),
+            "kotlinc rejected the {form} control"
+        );
+        assert_eq!(
+            (result.krusty_code, result.krusty_stderr.as_str()),
+            (0, ""),
+            "krusty rejected the {form} control"
+        );
+    }
 }

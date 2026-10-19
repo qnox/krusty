@@ -2933,13 +2933,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `java_platform_type_publication_e2e::reassigned_mutable_local_drops_unshared_enhanced_java_arguments_like_kotlinc`.
 - **A Java `T!` bound to a nullable argument is that nullable type.** Kotlin's flexible
   `(X?..X?)` is `X?`, so a Java member's `T!` specialized through a receiver whose argument is
-  nullable (`java.util.ArrayList<V?>.get(0)`, `values[0]`) is `V?`, not `V!`, even when the
-  parameter's bound makes substitution yield the argument's non-null form: an unsafe call on it is
-  rejected (`only safe (?.) or non-null asserted (!!.) calls…`), and a value class keeps its box, so
-  a safe call, an elvis or a stored local tests the reference for null before `unbox-impl`, as
-  kotlinc does. Typed `V!`, the value was unboxed to its primitive carrier first and a null element
-  threw a `NullPointerException`. A non-null or platform argument keeps `T!`. Tests:
-  `tests/value_class_java_nullable_element_e2e.rs`.
+  nullable (`java.util.ArrayList<V?>.get(0)`, `values[0]`) is `V?`, not `V!`. A Java type
+  variable's bound is itself a Java type and so admits null, whether implicit (`Any!`) or declared
+  (`<T extends Number>` is `Number!`), and every occurrence the Java provider publishes carries a
+  bound that admits null. An argument (`List<E>`) records its flexibility on that bound (`Any!`);
+  a whole member type (`E get(int)`) is flexible through its platform wrapper alone, with the
+  upper face of the Java bound (`Any?`, `Number?`) inside, so its flexibility is counted once.
+  Substitution therefore keeps the nullable argument instead of narrowing it to its non-null form
+  as for `E & Any`; counting the flexibility twice made `ra(l.get(0))` on an `ArrayList<T>` reify
+  a flexible `T`, a deprecation warning where kotlinc reports the error. An unsafe call on the
+  result is rejected (`only safe (?.) or non-null asserted (!!.) calls…`), and a value class keeps
+  its box, so a safe call, an elvis or a stored local tests the reference for null before
+  `unbox-impl`, as kotlinc does. Typed `V!`, the value was unboxed to its primitive carrier first
+  and a null element threw a `NullPointerException`. A non-null or platform argument keeps `T!`.
+  Tests: `tests/value_class_java_nullable_element_e2e.rs`, `tests/java_type_variable_bound_e2e.rs`
+  (Java-source and javac class-file declarations, an unbounded and a `Number`-bounded variable),
+  `reified_type_arguments_e2e::reified_type_argument_shapes_match_kotlinc`.
 - **A PLATFORM value narrowed to a declared non-null type is guarded where it enters.** A Java value
   arrives as `T!` (`Ty::PlatformNullable`), usable as both `T` and `T?`. Where the source commits it to
   a declared non-null type, kotlinc emits `dup` + `ldc "<expression>"` +
@@ -4619,9 +4628,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_captured_destructured_var_is_a_shared_cell` in `tests/captured_field_storage_e2e.rs`.
 - **`Char.code` ends an inlined call.** Its getter is an inline property kotlinc inlines, so the
   rule below applies after it (`return c + d.code` writes the line again at the `iadd`). The checker
-  realizes it in place as a numeric conversion and records that conversion's origin as an inlined
-  call; common lowering marks the node `SyntheticOriginKind::InlinedCall`. A constant receiver folds
-  (`'a'.code`) and the non-inline `toInt()` is not an inlined call.
+  realizes it in place as a numeric conversion. Because the getter is declared `inline` (the
+  accessor flag word's `isInline` bit, decoded from metadata for every property getter), the
+  checker records that conversion's origin as an inlined call; common lowering marks the node
+  `SyntheticOriginKind::InlinedCall`. A constant receiver folds (`'a'.code`) and the non-inline
+  `toInt()` is not an inlined call. `arrayOf` and `emptyArray` are declared `inline` too, but kotlinc
+  realizes them as its own intrinsics instead of inlining them, so they end no inlined call.
   `tests/char_code_inline_line_e2e.rs` (full-byte against kotlinc).
 - **The line after a call kotlinc inlines.** After an inlined call, kotlinc's
   `markLineNumberAfterInlineIfNeeded` re-emits the line in effect when the call sits inside a
@@ -9851,6 +9863,35 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   use-site projection is reported on that keyword, for that application only:
   `conflicting projection in type alias expansion in intermediate type 'Box<CONFLICTING-PROJECTION String>?'`.
   Tests: `tests/typealias_projection_e2e.rs`. Corpus: `reflection/typeOf/typeAliasedType.kt`.
+- **A constructor type parameter that nothing constrains cannot be inferred.** `C(1)` for
+  `class C<T : Comparable<T>>(val n: Int)`, `D(2)` for `class D<T>(val n: Int)`, and the `B` of
+  `P(3)` for `class P<A, B>(val a: A)` have no argument, written type argument, expected type or
+  enclosing call that fixes the parameter. kotlinc reports `cannot infer type for type parameter`
+  at the callee, as it does for `val x = make()` with `fun <T> make(): List<T>`. krusty completed
+  the parameter to its declared bound and accepted the call. It now reports the same diagnostic at
+  the same completion roots the generic-call report uses (an untyped declaration initializer or a
+  statement), so an enclosing call such as `use(C(7))` still completes the result first. A self
+  type (`T : KB<T>` in `KB`) is exempt: Kotlin completes it to its starred bound. A recursive bound
+  that also names another formal (`SELF : MB<T, SELF>`) is not, and `MB("v")` is reported. The
+  report reads what constructor inference recorded for each formal when it selected the
+  constructor, never the selected parameters: those are already specialized, so `Seq(s)` for
+  `class Seq<T : CharSequence>(val x: T)` with `s: CharSequence` would otherwise look unconstrained,
+  and a named or defaulted argument (`Named(x = s)`) would be matched to the wrong parameter. A
+  branch of an `if` with an `else`, a `when` with an `else` arm, an elvis or a `try` defers the report
+  until the branch results are joined: kotlinc completes the conditional as one call, so a sibling
+  branch can fix the parameter (`else -> Buildee()` beside
+  `build { setTypeVariable(TargetType()) }`, KT-60291). An open branch is re-selected under its
+  sibling's type viewed as the constructor's class (`if (c) D(1) else D<String>(2)` checks `D(1)`
+  against `D<String>`), the same rebinding a generic call branch gets; a sibling of another class
+  (`E<String>`, `"x"`) supplies no such view and constrains nothing. An open branch is never a
+  sibling's evidence, so a declared-bound fallback in one bare `D()` does not fix another bare
+  `D()`; when no branch constrains the formal, every remaining open call is reported at its callee. A `when` without `else` is not joined and reports immediately.
+  Evidence is published only after the selected constructor commits, so an inaccessible or rejected
+  candidate cannot add a second inference diagnostic. An inner class has no type parameter of its
+  own, so `Outer(42).Inner(100)` reports nothing. Owner:
+  `src/resolve/constructor_formal_evidence.rs`. Test:
+  `tests/uninferred_constructor_type_parameter_e2e.rs`.
+
 - **A self-bounded constructor variable with no other constraint completes to its starred bound.**
   `Builder("x")` for Java `class Builder<SELF extends Builder<SELF>>` has no argument or expected
   type evidence for `SELF`. kotlinc completes it to the declared bound with the recursive occurrence
@@ -9859,8 +9900,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Builder<SELF>`, so the second fluent call returned the bare `SELF` and the third failed as an
   unresolved member. Only a bound that is the constructed classifier itself is such a self type: for
   `C<T : Comparable<T>>`, `C(1)` has no completion in kotlinc (`cannot infer type for type
-  parameter 'T'`), and krusty keeps its existing bound completion there. Nor is a bound that also
-  names another formal: for `MB<T, SELF : MB<T, SELF>>`, kotlinc reports `cannot infer type for
+  parameter 'T'`), and krusty reports the same error (see the entry above). Nor is a bound that
+  also names another formal: for `MB<T, SELF : MB<T, SELF>>`, kotlinc reports `cannot infer type for
   type parameter 'SELF'` for `MB("v")` even with `T` inferred. Owner:
   `src/symbol_resolver/generic_inference/postponed_result.rs`. Test:
   `tests/java_self_bounded_constructor_e2e.rs::a_self_bounded_constructor_result_keeps_a_fluent_chain_typed`.
@@ -17254,6 +17295,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   formal not in scope keeps its identity, where `T` against `T` still marks a postponed
   expression and contributes nothing. Tests: `tests/self_call_type_variables_e2e.rs`,
   `symbol_resolver::generic_inference::call_site_variables::tests`.
+
+- **A postponed solution that depends on another call's open result remains uninferred.** If a
+  selected generic call's lambda result relates its `R` to the still-open `T` of a terminal generic
+  producer, `R = T` is a dependency between inference variables, not a solution. Completing the
+  enclosing expression reports `R` at the selected call and `T` at the terminal producer, including
+  when the producer is the value branch of an `if`, `when`, elvis, or `try`. A type parameter from
+  the enclosing lexical declaration is fixed and remains a valid solution. Test:
+  `conditional_block_branch_rebind_e2e::open_selected_lambda_results_preserve_terminal_branch_diagnostics`.
 
 - **An anonymous function's `return` targets the anonymous function, everywhere.** `fun (…): T { …
   return e … }` is a LOCAL return — unlike a lambda's bare `return`, which is a non-local return from

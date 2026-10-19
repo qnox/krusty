@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use krusty_plugin_host::{
-    provision, ArtifactPin, Environment, Fetcher, HostRuntime, JdkPin, Pins, Platform,
-    ProvisionError, Request,
+    provision, provision_artifact, ArtifactPin, Environment, Fetcher, HostRuntime, JdkPin, Pins,
+    Platform, ProvisionError, Request,
 };
 use sha2::{Digest, Sha256};
 
@@ -200,9 +200,13 @@ fn downloads_what_is_missing_says_why_and_reuses_it_silently() {
         .root
         .join("cache/jdk/test-21-linux-x86_64/jdk-21-test");
     let expected = HostRuntime {
+        kotlin_version: "2.4.20".into(),
         java: java_home.join("bin/java"),
         java_home,
         compiler_classpath: fixture.cached_jars(),
+        compiler_identity: ArtifactPin::identity(
+            fixture.pins.compiler_classpath("2.4.20").unwrap(),
+        ),
     };
     assert_eq!(result, Ok(expected.clone()));
     let archive_size = fixture.repository.files[JDK_URL].len();
@@ -439,4 +443,72 @@ fn provisions_the_pinned_kotlin_2_4_20_classpath() {
     eprint!("{}", String::from_utf8_lossy(&report));
     let runtime = result.unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(runtime.compiler_classpath.len(), 8);
+}
+
+#[test]
+fn a_single_pinned_jar_is_provisioned_like_the_classpath_and_then_reused_silently() {
+    let mut fixture = fixture("single");
+    let plugin = artifact("plugin", b"plugin jar");
+    let url = format!("{REPOSITORY}/org/example/plugin/1.0/plugin-1.0.jar");
+    fixture
+        .repository
+        .files
+        .insert(url.clone(), b"plugin jar".to_vec());
+    let run = |fixture: &Fixture| {
+        let mut report = Vec::new();
+        let result = provision_artifact(
+            &plugin,
+            "the compiler plugin power-assert",
+            &fixture.env,
+            &fixture.repository,
+            &mut report,
+        );
+        let report = String::from_utf8(report).unwrap();
+        (
+            result,
+            report.replace(&fixture.root.display().to_string(), "<tmp>"),
+        )
+    };
+    let cached = fixture
+        .root
+        .join("cache/maven/org/example/plugin/1.0/plugin-1.0.jar");
+    assert_eq!(
+        run(&fixture),
+        (
+            Ok(cached.clone()),
+            format!(
+                "info: the compiler plugin power-assert needs plugin-1.0.jar, which krusty keeps in \
+                 its cache\n\
+                 info: downloading plugin-1.0.jar (10 bytes) from {url}\n\
+                 info: saved in <tmp>/cache; later builds reuse it\n"
+            )
+        )
+    );
+    assert_eq!(run(&fixture), (Ok(cached), String::new()));
+    assert_eq!(fixture.fetched(), [url]);
+    assert_eq!(
+        fixture.cache_files(),
+        ["maven/org/example/plugin/1.0/plugin-1.0.jar"]
+    );
+}
+
+#[test]
+fn a_single_pinned_jar_that_is_missing_offline_is_named() {
+    let mut fixture = fixture("single-offline");
+    fixture.env.offline = true;
+    let plugin = artifact("plugin", b"plugin jar");
+    let error = provision_artifact(
+        &plugin,
+        "the compiler plugin power-assert",
+        &fixture.env,
+        &fixture.repository,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "the compiler plugin power-assert needs files that are neither installed nor cached, and \
+         downloads are off (KRUSTY_OFFLINE): plugin-1.0.jar. Run once with downloads on to cache them"
+    );
+    assert_eq!(fixture.fetched(), Vec::<String>::new());
 }

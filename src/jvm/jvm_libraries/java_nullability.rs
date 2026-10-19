@@ -49,6 +49,13 @@ pub(super) fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>
             signature.has_receiver,
             signature.suspend,
         ),
+        // A Java type variable's bound is a Java type, so it admits null (`E`'s implicit bound is
+        // `Any!`). As a whole member type (`E get(int)`) the variable is flexible through the
+        // platform wrapper below alone; its own bound is the upper face of that Java bound (`Any?`)
+        // and does not repeat the wrapper's flexibility, which a bare variable's bound records
+        // only where it is an argument (`List<E>`). The parse leaves a placeholder `Any` here, and
+        // read as the bound of `E & Any` it made `ArrayList<V?>.get` substitute the non-null `V`.
+        Ty::TyParam(name, bound) => Ty::ty_param(name, Ty::nullable(bound.non_null())),
         _ => ty,
     };
     // Java wrapper classes are Kotlin primitive types with Java's flexible/nullability qualifier.
@@ -87,6 +94,30 @@ pub(super) fn java_type_argument_nullability(ty: Ty) -> Ty {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_java_type_variable_member_type_is_flexible_with_a_bound_that_admits_null() {
+        let any = Ty::obj("kotlin/Any");
+        let number = Ty::obj("kotlin/Number");
+
+        assert_eq!(
+            java_type_nullability(Ty::ty_param("E", any), None),
+            Ty::platform_nullable(Ty::ty_param("E", Ty::nullable(any)))
+        );
+        assert_eq!(
+            java_type_nullability(Ty::ty_param("T", Ty::platform_nullable(number)), None),
+            Ty::platform_nullable(Ty::ty_param("T", Ty::nullable(number)))
+        );
+        assert_eq!(
+            java_type_nullability(Ty::ty_param("E", any), Some(JavaNullability::Nullable)),
+            Ty::nullable(Ty::ty_param("E", Ty::nullable(any)))
+        );
+        assert_eq!(
+            java_type_nullability(Ty::ty_param("E", any), Some(JavaNullability::NotNull)),
+            Ty::ty_param("E", any),
+            "`@NotNull E` stays `E & Any`"
+        );
+    }
 
     #[test]
     fn an_unqualified_java_type_variable_keeps_identity_and_a_flexible_bound() {

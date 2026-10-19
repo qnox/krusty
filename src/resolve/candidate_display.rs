@@ -95,6 +95,16 @@ impl Checker<'_> {
         )
     }
 
+    /// `fun <T : Bound> name` for a provider-normalized member declaration.
+    pub(super) fn generic_library_member_header(
+        name: &str,
+        member: &crate::libraries::LibraryMember,
+    ) -> Option<String> {
+        let signature = member.generic_sig.as_ref()?;
+        let type_parameters = type_parameters_display(signature, member.reified);
+        Some(format!("fun {type_parameters}{name}"))
+    }
+
     /// kotlinc's rendering of a generic classifier's constructor,
     /// `constructor<T : Number>(t: T): Box<T>`: the classifier's type parameters follow the keyword.
     pub(super) fn generic_constructor_display(

@@ -159,19 +159,6 @@ pub(super) fn preserve_receiver_identity_bindings(
     }
 }
 
-/// Whether `ty` is a type parameter whose receiver binding is a nullable type argument
-/// (`V?`, `out V?`, `in V?`).
-fn nullable_binding(ty: Ty, bindings: &GSigBinds) -> bool {
-    let Ty::TyParam(name, _) = ty else {
-        return false;
-    };
-    match bindings.get(name).copied() {
-        Some(Ty::InProjection(argument) | Ty::OutProjection(argument)) => argument.is_nullable(),
-        Some(argument) => argument.is_nullable(),
-        None => false,
-    }
-}
-
 fn compose_position(position: TypePosition, variance: crate::types::TypeVariance) -> TypePosition {
     use crate::types::TypeVariance;
     match (position, variance) {
@@ -257,13 +244,8 @@ fn specialize_member_type_with_unbound(
             // identical and therefore produces that rigid nullable type; every other binding
             // retains the flexible wrapper. This belongs to selected-slot instantiation, not the
             // general type-substitution walk used by aliases, hierarchy projection, and bounds.
-            // The binding is checked as well as the result: substitution yields the argument's
-            // non-null form when the parameter's bound rejects null, so `ArrayList<V?>.get`
-            // would otherwise stay `V!`.
-            if matches!(declared, Ty::TyParam(..))
-                && (specialized.is_nullable() || nullable_binding(declared, bindings))
-            {
-                Ty::nullable(specialized)
+            if matches!(declared, Ty::TyParam(..)) && specialized.is_nullable() {
+                specialized
             } else {
                 Ty::platform_nullable(specialized)
             }
