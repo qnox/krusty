@@ -164,7 +164,7 @@ impl Checker<'_> {
                 | StmtLowering::TopLevelPropertySet(access),
             ) => (
                 access.property.stable_declaration,
-                access.property.setter.as_ref(),
+                access.property.setter.as_deref(),
             ),
             Some(StmtLowering::ImplicitPropertyWrite(target)) => match target.as_ref() {
                 ImplicitPropertyWriteTarget::Member {
@@ -172,7 +172,7 @@ impl Checker<'_> {
                 } => (*stable_declaration, None),
                 ImplicitPropertyWriteTarget::Extension { access, .. } => (
                     access.property.stable_declaration,
-                    access.property.setter.as_ref(),
+                    access.property.setter.as_deref(),
                 ),
             },
             _ => (None, None),

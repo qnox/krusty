@@ -181,7 +181,7 @@ impl Checker<'_> {
                 property.getter_declaration.or(property.stable_declaration);
             let setter = property.setter.clone().map(|callable| {
                 crate::symbol_resolver::ResolvedPropertySetter {
-                    callable,
+                    callable: *callable,
                     visibility: property.setter_visibility,
                     source_member: property.source_member,
                     stable_declaration: property.stable_declaration,

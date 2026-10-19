@@ -2139,7 +2139,7 @@ pub struct PropertyInfo {
     /// The real getter — an opaque platform emit handle (the erased descriptor lives here).
     pub getter: LibraryCallable,
     /// The setter, present iff the property is a `var`.
-    pub setter: Option<LibraryCallable>,
+    pub setter: Option<Box<LibraryCallable>>,
     /// The setter's own visibility. Accessors can differ, so property visibility cannot stand in for
     /// this fact.
     pub setter_visibility: Visibility,

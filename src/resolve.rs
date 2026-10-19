@@ -22922,7 +22922,7 @@ impl<'a> Checker<'a> {
                 StmtLowering::MemberPropertyWrite {
                     stable_declaration: property.stable_declaration,
                     backing_field: deferred_constructor_write,
-                    setter: property.setter.clone().map(Box::new),
+                    setter: property.setter.clone(),
                     setter_declaration: property.setter_declaration.or(property.stable_declaration),
                     owner,
                     ty: property.ty,
