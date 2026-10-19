@@ -13,6 +13,8 @@
 //! (the order it starts them in is checked by its own tests). Where the oracle runs, the
 //! toolchain's recorded invocations must be the `krusty-argv` ledger's, compared module by module
 //! (the toolchain may compile independent modules in either order), the sources of each as a set.
+//! A case the toolchain cannot run with that krusty says why in a `no-toolchain-oracle` section,
+//! and its ledger stands on krusty-toolchain's own checks.
 //!
 //! One test compiles with the real krusty instead of the recorder: a library and an application
 //! that uses it, whose outputs are listed and whose program is run on the JDK it compiled against.
@@ -33,6 +35,7 @@ use support::{ExpectedDiagnostic, ExpectedSeverity, KrustyExpected};
 const REPOSITORY_SECTION: &str = "m2/";
 const TASK_SECTION: &str = "task";
 const ARGV_SECTION: &str = "krusty-argv";
+const NO_ORACLE_SECTION: &str = "no-toolchain-oracle";
 const PLACEHOLDER: &str = "<directory>";
 
 type Files = Vec<(String, String)>;
@@ -45,6 +48,8 @@ struct CompileCase {
     task: String,
     argv: Option<String>,
     refusal: Option<Vec<ExpectedDiagnostic>>,
+    /// Why the toolchain cannot run the case with the recording krusty, when it cannot.
+    no_oracle: Option<String>,
 }
 
 fn files_below(directory: &Path, prefix: &str, files: &mut Files) {
@@ -75,6 +80,7 @@ fn compile_cases() -> Vec<CompileCase> {
                 repository: shared.clone(),
                 task: String::new(),
                 argv: None,
+                no_oracle: None,
                 refusal: match case.krusty {
                     Some(KrustyExpected::Refusal(refused)) => Some(refused),
                     Some(KrustyExpected::Difference(_)) => {
@@ -90,6 +96,13 @@ fn compile_cases() -> Vec<CompileCase> {
                     compiled.task = text.trim().to_string();
                 } else if file == ARGV_SECTION {
                     compiled.argv = Some(text);
+                } else if file == NO_ORACLE_SECTION {
+                    assert!(
+                        !text.trim().is_empty(),
+                        "{}: a `{NO_ORACLE_SECTION}` section says why",
+                        case.name
+                    );
+                    compiled.no_oracle = Some(text);
                 } else {
                     compiled.project.push((file, text));
                 }
@@ -205,7 +218,7 @@ fn ledger(problems: &[ExpectedDiagnostic]) -> String {
 fn every_compile_case_is_exact() {
     compiling::recorder();
     let cases = compile_cases();
-    assert_eq!(cases.len(), 11, "the cases are missing");
+    assert_eq!(cases.len(), 13, "the cases are missing");
     let mut failures = Vec::new();
     for case in &cases {
         let ran = krusty_toolchain(
@@ -295,7 +308,7 @@ fn by_module(record: &str) -> Vec<Vec<String>> {
 fn every_compile_case_passes_the_arguments_the_toolchain_passes() {
     let cases: Vec<CompileCase> = compile_cases()
         .into_iter()
-        .filter(|case| case.refusal.is_none())
+        .filter(|case| case.refusal.is_none() && case.no_oracle.is_none())
         .collect();
     let arguments: Vec<[&str; 2]> = cases
         .iter()
@@ -715,6 +728,7 @@ fn diamond() -> CompileCase {
         task: ":app:compileJvm".to_string(),
         argv: None,
         refusal: None,
+        no_oracle: None,
     }
 }
 

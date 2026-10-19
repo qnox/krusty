@@ -1,0 +1,118 @@
+What a toolchain plugin declares beyond Kotlin source directories of the module is refused where
+it is written, as is a plugin the project does not list, a plugin with settings or `pluginInfo`, a
+directory a plugin task provides that is not there (krusty-toolchain runs no plugin task), and a
+source directory that exists without being a directory, for every module the task needs.
+--- task
+:app:compileJvm
+--- project.yaml
+modules:
+  - app
+  - configured
+  - file-root
+  - missing
+  - tools/elaborate
+  - tools/named
+  - tools/pregenerated
+  - unlisted
+plugins:
+  - ./tools/elaborate
+  - ./tools/named
+  - ./tools/pregenerated
+--- tools/pregenerated/module.yaml
+product: jvm/amper-plugin
+--- tools/pregenerated/plugin.yaml
+tasks:
+  declare:
+    action: !org.example.build.declareSources
+      sourceDir: ${module.rootDir}/generated-src/kotlin
+generated:
+  sources:
+    - language: kotlin
+      directory: ${tasks.declare.action.sourceDir}
+--- tools/elaborate/module.yaml
+product: jvm/amper-plugin
+--- tools/elaborate/plugin.yaml
+tasks:
+  produce:
+    action: !org.example.build.produce
+      outputDir: ${module.rootDir}/out
+    markOutputsAs:
+      - path: ${module.rootDir}/out
+        kind: kotlin-sources
+generated:
+  sources:
+    - language: java
+      directory: ${module.rootDir}/java-gen
+    - language: kotlin
+      directory: gen
+      fragment: main
+  resources:
+    - directory: ${module.rootDir}/res
+commands: []
+--- tools/named/module.yaml
+product: jvm/amper-plugin
+pluginInfo:
+  id: renamed
+--- tools/named/plugin.yaml
+generated:
+  sources:
+    - language: kotlin
+      directory: ${module.rootDir}/gen
+--- app/module.yaml
+product: jvm/app
+repositories:
+  - mavenLocal
+dependencies:
+  - ../unlisted
+  - ../configured
+  - ../missing
+  - ../file-root
+plugins:
+  elaborate: enabled
+  named: enabled
+--- app/src/main.kt
+fun main() = Unit
+--- unlisted/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+plugins:
+  elsewhere: enabled
+--- unlisted/src/A.kt
+class A
+--- configured/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+plugins:
+  pregenerated:
+    enabled: true
+    flavor: plain
+--- configured/src/B.kt
+class B
+--- missing/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+plugins:
+  pregenerated: enabled
+--- missing/src/C.kt
+class C
+--- file-root/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+--- file-root/src
+not a directory
+--- krusty-refusal
+error	configured/module.yaml:6:5: ERROR: krusty-toolchain reads plugin `pregenerated` of module `configured` only as `enabled` or `enabled: <boolean>`, without plugin settings
+error	file-root/src: ERROR: Source directory at '<directory>/project/file-root/src' exists, but it's not a directory, this is currently unsupported
+error	tools/pregenerated/plugin.yaml:8:18: ERROR: module `missing` needs the directory `<directory>/project/missing/generated-src/kotlin` that task `declare` of toolchain plugin `pregenerated` provides, and krusty-toolchain does not run plugin tasks
+error	unlisted/module.yaml:5:3: ERROR: module `unlisted` enables toolchain plugin `elsewhere`, which the project does not list in its `plugins`
+error	tools/elaborate/plugin.yaml:5:5: ERROR: task `produce` of plugin `elaborate` sets `markOutputsAs`, and krusty-toolchain does not implement it
+error	tools/elaborate/plugin.yaml:17:1: ERROR: plugin `elaborate` declares `commands`, and krusty-toolchain does not implement it
+error	tools/elaborate/plugin.yaml:10:17: ERROR: plugin `elaborate` generates sources other than Kotlin sources, and krusty-toolchain compiles Kotlin sources only
+error	tools/elaborate/plugin.yaml:14:7: ERROR: plugin `elaborate` sets `fragment` on generated sources, and krusty-toolchain does not implement it
+error	tools/elaborate/plugin.yaml:13:18: ERROR: krusty-toolchain reads a directory of plugin `elaborate` only as `${module.rootDir}`, a path below it, or a task action's argument that is one
+error	tools/elaborate/plugin.yaml:15:3: ERROR: plugin `elaborate` declares `generated.resources`, and krusty-toolchain does not implement it
+error	tools/named/module.yaml:2:1: ERROR: toolchain plugin `named` sets `pluginInfo`, and krusty-toolchain does not read it
