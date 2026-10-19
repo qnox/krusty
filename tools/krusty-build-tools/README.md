@@ -10,8 +10,11 @@ with krusty when this jar takes the place of `org.jetbrains.kotlin:kotlin-build-
   (`-Xkotlin-reference-version`).
 - Compiler arguments are forwarded as kotlinc command-line strings, which krusty parses itself.
 - Only the JVM toolchain and in-process execution exist. Each compilation is one krusty process
-  over the whole source set; the destination is cleared first, so incremental-compilation
-  settings are accepted and do not change the result. Classpath snapshots are empty.
+  over the whole source set; the destination is cleared first. With an incremental-compilation
+  configuration the compilation is skipped instead when its inputs match the last successful run
+  in that configuration's working directory: sources, arguments, the binary, and what it observes
+  of each classpath entry (`krusty dependency-fingerprint` for a class directory, so an upstream
+  body-only edit does not recompile dependents). Classpath snapshots are empty.
 - The krusty binary comes from `KRUSTY_BIN` or the `krusty.binary` system property.
 
 ## Build and test

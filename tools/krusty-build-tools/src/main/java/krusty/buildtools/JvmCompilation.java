@@ -22,9 +22,12 @@ import org.jetbrains.kotlin.buildtools.api.trackers.BuildMetricsCollector;
 /**
  * One Kotlin/JVM compilation, run as one krusty process over the whole source set.
  *
- * krusty does not compile incrementally. An incremental-compilation configuration is accepted
- * because callers attach one whenever their own up-to-date check found the module dirty, but the
- * destination is always cleared and rebuilt, so classes of deleted sources never survive.
+ * krusty does not compile incrementally: a compilation clears the destination and rebuilds it, so
+ * classes of deleted sources never survive. A caller attaches an incremental-compilation
+ * configuration whenever its own up-to-date check found the module dirty, and that check counts
+ * any change to an upstream module's classes. With such a configuration the compilation is skipped
+ * instead when {@link CompileAvoidance} finds its inputs unchanged: an upstream body-only edit
+ * then recompiles only the edited module.
  */
 final class JvmCompilation implements JvmCompilationOperation, KrustyOperation<CompilationResult> {
     private final KrustyConfiguration configuration;
@@ -97,12 +100,35 @@ final class JvmCompilation implements JvmCompilationOperation, KrustyOperation<C
 
     @Override
     public CompilationResult execute(KotlinLogger logger) {
+        Path binary = configuration.binary();
+        CompileAvoidance avoidance = null;
+        String inputs = null;
+        if (options.get(JvmCompilationOperation.INCREMENTAL_COMPILATION)
+            instanceof JvmSnapshotBasedIncrementalCompilationConfiguration incremental) {
+            avoidance = new CompileAvoidance(incremental.getWorkingDirectory(), destinationDirectory);
+            inputs = avoidance
+                .inputs(binary, configuration.kotlinVersion(), arguments.toArgumentStrings(), sources)
+                .orElse(null);
+            if (inputs != null && avoidance.upToDate(inputs)) {
+                logger.info("krusty: inputs of " + destinationDirectory + " are unchanged; keeping its classes");
+                return CompilationResult.COMPILATION_SUCCESS;
+            }
+            avoidance.forget();
+        }
+        CompilationResult result = compile(binary, logger);
+        if (result == CompilationResult.COMPILATION_SUCCESS && inputs != null) {
+            avoidance.record(inputs);
+        }
+        return result;
+    }
+
+    private CompilationResult compile(Path binary, KotlinLogger logger) {
         clearDestination();
         if (sources.isEmpty()) {
             return CompilationResult.COMPILATION_SUCCESS;
         }
         List<String> command = new ArrayList<>();
-        command.add(configuration.binary().toString());
+        command.add(binary.toString());
         command.addAll(arguments.toArgumentStrings());
         command.add("-Xkotlin-reference-version=" + configuration.kotlinVersion());
         command.add("-d");
@@ -263,7 +289,7 @@ final class JvmCompilation implements JvmCompilationOperation, KrustyOperation<C
         }
     }
 
-    /** Recorded so the caller's builder code runs unchanged; krusty does not read it. */
+    /** Recorded so the caller's builder code runs unchanged; krusty reads only its working directory. */
     private static final class IncrementalConfiguration implements JvmSnapshotBasedIncrementalCompilationConfiguration.Builder {
         private final Path workingDirectory;
         private final SourcesChanges sourcesChanges;

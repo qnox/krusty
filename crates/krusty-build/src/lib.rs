@@ -15,6 +15,8 @@
 //!   is written down.
 //! * [`abi`] — an ABI model carrying no method bodies, and its fingerprint. This is the artifact a
 //!   dependent compiles against and the hash every dependent's cache key folds in.
+//! * [`dependency_view`] — what a dependent compilation observes of a compiled class directory:
+//!   the conservative fingerprint the Build Tools API implementation keys a module's compile on.
 //! * [`cache`] — the cache key. Every input that can change emitted bytes is in it by default.
 //! * [`store`] — the content-addressed artifact store. Its one job beyond lookup is integrity: a
 //!   partially written entry must never read as a hit.
@@ -35,8 +37,8 @@
 //! a process pool with crash isolation and interleaved diagnostics, and the sequential driver is
 //! its oracle: the same graph must produce the same artifacts either way.
 //!
-//! Nothing here is wired into the compiler or the shipped CLI yet. The crate builds and tests
-//! standalone.
+//! Only [`dependency_view`] is wired into the shipped CLI (`krusty dependency-fingerprint`); the
+//! rest builds and tests standalone.
 //!
 //! # The property this all rests on
 //!
@@ -49,6 +51,7 @@
 pub mod abi;
 pub mod cache;
 pub mod compiler;
+pub mod dependency_view;
 pub mod digest;
 pub mod driver;
 pub mod gradle;

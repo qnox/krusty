@@ -22,6 +22,16 @@ fn main() {
         run_cinterop(&argv[1..]);
         return;
     }
+    // `krusty dependency-fingerprint <dir>…` prints, one line per directory, the fingerprint of
+    // what a dependent compilation observes of those compiled classes; a build tool recompiles a
+    // dependent only when it moves.
+    if argv
+        .first()
+        .is_some_and(|command| command == "dependency-fingerprint")
+    {
+        run_dependency_fingerprint(&argv[1..]);
+        return;
+    }
     // Bazel starts a persistent worker by appending `--persistent_worker` to the tool's command
     // line; every actual compilation then arrives as a work request on stdin.
     if argv
@@ -99,6 +109,18 @@ fn run_cinterop(arguments: &[String]) {
             eprintln!("error: {error}");
             eprintln!("info: use krusty cinterop -help for more information");
             std::process::exit(1);
+        }
+    }
+}
+
+fn run_dependency_fingerprint(directories: &[String]) {
+    for directory in directories {
+        match krusty_build::dependency_view::directory_fingerprint(Path::new(directory)) {
+            Ok(fingerprint) => println!("{fingerprint}"),
+            Err(error) => {
+                eprintln!("error: cannot fingerprint {directory}: {error}");
+                std::process::exit(1);
+            }
         }
     }
 }
