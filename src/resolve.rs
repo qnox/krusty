@@ -98,7 +98,6 @@ mod condition_exclusions;
 mod conditional_branch;
 mod constant_evaluation;
 mod constructor_commitment;
-mod constructor_formal_evidence;
 mod context_capture;
 mod context_receiver_priority;
 mod context_sensitive_resolution;
@@ -287,6 +286,7 @@ pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
 mod type_join;
 mod type_parameter_owners;
+mod uninferred_call_results;
 mod upper_bound_violations;
 mod value_class_parameters;
 mod variance_conflicts;
@@ -14407,7 +14407,7 @@ impl<'a> Checker<'a> {
                     self.unbound_call_result_signature(argument)
                         .is_some_and(|generic| {
                             crate::symbol_resolver::infer_generic_return_bindings(
-                                generic,
+                                &generic,
                                 expected,
                                 |actual, bound| self.receiver_is_assignable(actual, bound),
                             )
@@ -14545,7 +14545,7 @@ impl<'a> Checker<'a> {
                             .unbound_call_result_signature(argument)
                             .is_some_and(|generic| {
                                 crate::symbol_resolver::infer_generic_return_bindings(
-                                    generic,
+                                    &generic,
                                     declared,
                                     |actual, bound| self.receiver_is_assignable(actual, bound),
                                 )
@@ -16007,7 +16007,6 @@ impl<'a> Checker<'a> {
         self.unbound_value_lambda_call_formals.remove(&call);
         self.open_lambda_result_call_formals.remove(&call);
         self.discard_constructor_commitment(call);
-        self.constructor_formal_evidence.remove(&call);
         self.record_call_site_lexical_formals(scope, call);
         if expected.is_some() {
             self.postponed_diagnostics.discard(call);
@@ -33110,7 +33109,6 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         for_range_iterator_protocols: HashMap::default(),
         iteration_plans: IterationPlans::default(),
         resolved_constructors: HashMap::default(),
-        constructor_formal_evidence: HashMap::default(),
         call_owned_conditional_branches: HashMap::default(),
         resolved_enum_entry_constructors: HashMap::default(),
         resolved_ctor_delegations: HashMap::default(),
@@ -35830,8 +35828,6 @@ struct Checker<'a> {
     for_range_iterator_protocols: HashMap<StmtId, ForRangeIteratorTarget>,
     iteration_plans: IterationPlans,
     resolved_constructors: HashMap<ExprId, ResolvedConstructor>,
-    /// How each constructor call's inference fixed its classifier's own type parameters.
-    constructor_formal_evidence: HashMap<ExprId, constructor_formal_evidence::CallEvidence>,
     /// Conditional branches whose terminal selected call stayed open while a callable candidate
     /// shaped its lambda argument. Selection consumes each obligation exactly once after its
     /// functional result is fixed or remains call-owned.
@@ -37687,106 +37683,6 @@ impl<'a> Checker<'a> {
             format!(
                 "{wording} for '{}'.",
                 Self::generic_callable_display(name, candidate)
-            ),
-        );
-        true
-    }
-
-    fn report_unbound_call_result_type_parameter(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-    ) -> bool {
-        let Some(signature) = self.unbound_call_result_signature(call).cloned() else {
-            return self.report_uninferred_constructor_type_parameter(call);
-        };
-        let actual = self.expr_types[call.0 as usize];
-        let resolved = self.selected_call_type_arguments(call);
-        let lexical_formals = scope.lexical_tparam_identities();
-        // A formal lexically in scope here resolved to the enclosing declaration's own type is a
-        // complete solution of this call's fresh variable, not an uninferred occurrence.
-        let open_formals = signature
-            .formals
-            .iter()
-            .filter(|formal| !lexical_formals.contains(formal))
-            .cloned()
-            .collect::<Vec<_>>();
-        let unbound_value_lambda_formals = self.unbound_value_lambda_call_formals.get(&call);
-        let open_lambda_result_formals = self.open_lambda_result_call_formals.get(&call);
-        let call_arguments = match self.file.expr(call) {
-            Expr::Call { args, .. } => args.as_slice(),
-            _ => &[],
-        };
-        let had_postponed_argument_diagnostic = call_arguments
-            .iter()
-            .any(|argument| self.postponed_diagnostics.was_captured(*argument));
-        let call_span = self.span(call);
-        let has_nested_diagnostic = self.diags.diags.iter().any(|diagnostic| {
-            diagnostic.severity == crate::diag::Severity::Error
-                && diagnostic.file == self.file_index
-                && diagnostic.span.lo >= call_span.lo
-                && diagnostic.span.hi <= call_span.hi
-        }) || self
-            .postponed_diagnostics
-            .contains_error_in_span(self.file_index, call_span);
-        let Some(formal) = signature
-            .formals
-            .iter()
-            .enumerate()
-            .find(|(index, formal)| {
-                // A recorded argument that is only a lambda result's open nested-call variable
-                // (`R := T` of `Mono.empty()`) leaves this formal uninferred along with it.
-                let open_dependency = resolved
-                    .and_then(|arguments| arguments.get(*index))
-                    .copied()
-                    .flatten()
-                    .is_some_and(|argument| {
-                        self.type_argument_depends_on_open_lambda_result(call, argument)
-                    });
-                (ty_mentions_param(actual, std::slice::from_ref(*formal))
-                    || ty_mentions_param(signature.ret, std::slice::from_ref(*formal)))
-                    && (unbound_value_lambda_formals
-                        .is_some_and(|formals| formals.contains(formal))
-                        || open_dependency
-                        || had_postponed_argument_diagnostic
-                        || has_nested_diagnostic
-                        || !signature
-                            .params
-                            .iter()
-                            .any(|parameter| {
-                                ty_mentions_param(*parameter, std::slice::from_ref(*formal))
-                            }))
-                    && (open_lambda_result_formals
-                        .is_some_and(|formals| formals.contains(formal))
-                        || open_dependency
-                        || resolved
-                            .and_then(|arguments| arguments.get(*index))
-                            .copied()
-                            .flatten()
-                            .is_none_or(|argument| ty_mentions_param(argument, &open_formals)))
-                    // A star-projected receiver can leave the selected method result bounded by a
-                    // non-lexical classifier parameter. That stable symbolic bound is the captured
-                    // result Kotlin chooses; it is neither an uninferred method formal nor a
-                    // spelling-based fallback. A caller-owned lexical parameter does not have this
-                    // property and still requires ordinary inference evidence.
-                    && actual
-                        .type_parameter_occurrence_bound(formal)
-                        .or_else(|| signature.ret.type_parameter_occurrence_bound(formal))
-                        .and_then(|bound| bound.non_null().ty_param_name())
-                        .is_none_or(|bound| {
-                            signature.formals.iter().any(|owned| owned == bound)
-                                || lexical_formals.iter().any(|lexical| lexical == bound)
-                        })
-            })
-            .map(|(_, formal)| formal)
-        else {
-            return false;
-        };
-        self.diags.error(
-            self.call_callee_name_span(call),
-            format!(
-                "cannot infer type for type parameter '{}'. Specify it explicitly.",
-                crate::types::type_parameter_source_name(formal)
             ),
         );
         true
@@ -53655,7 +53551,7 @@ impl<'a> Checker<'a> {
             }
             bindings[type_parameter] = candidate;
         }
-        self.record_source_constructor_evidence(call, class, &bindings);
+        self.record_source_constructor_type_arguments(call, class, &bindings, &captured_bindings);
         for (type_parameter, binding) in bindings.iter_mut().enumerate() {
             if explicitly_bound[type_parameter] {
                 continue;
@@ -53836,7 +53732,7 @@ impl<'a> Checker<'a> {
                 None,
             );
         }
-        constructor_formal_evidence::complete_source_constructor_bindings(class, bindings)
+        uninferred_call_results::complete_source_constructor_bindings(class, bindings)
     }
 
     /// Bind the declaration identities captured by an inner/local classifier to this construction
@@ -66047,7 +65943,7 @@ impl<'a> Checker<'a> {
             constructor_commitment::ConstructorDeclarationShape::provider(classifier, &member);
         self.commit_constructor(call, target.clone(), publication);
         if let Some(Some(bindings)) = member_bindings.get(candidate_index) {
-            self.record_library_constructor_evidence(call, internal, classifier, bindings);
+            self.record_library_constructor_type_arguments(call, internal, classifier, bindings);
         }
         Ok(LibraryConstructorSelection::Selected)
     }
@@ -66503,6 +66399,20 @@ impl<'a> Checker<'a> {
     }
 
     fn attach_captured_classifier_arguments(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        internal: TypeName,
+        instance: Ty,
+        bound_outer: Option<Ty>,
+    ) -> Ty {
+        let result =
+            self.apply_captured_classifier_arguments(scope, call, internal, instance, bound_outer);
+        self.record_captured_constructor_type_arguments(call, internal, result);
+        result
+    }
+
+    fn apply_captured_classifier_arguments(
         &mut self,
         scope: &CheckerScope<'_>,
         call: ExprId,
