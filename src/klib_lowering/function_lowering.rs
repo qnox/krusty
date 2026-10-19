@@ -278,6 +278,9 @@ pub(super) fn prepared_inline_header(
         match read {
             read if read == declared => Ok(None),
             read if read == erased => Ok(Some(read)),
+            // The erasure also drops a function type's use-site annotations, which mark its
+            // context parameters and receiver: the copy keeps the plain function class.
+            read if read == plain_function_type(erased) => Ok(Some(read)),
             read => Err(mismatch(format!(
                 "{read:?} is serialized for the selected {declared:?}"
             ))),
@@ -774,6 +777,22 @@ fn parameter_role(role: SerializedRole, identity: &ResolvedParameterIdentity) ->
             ResolvedParameterIdentity::Source(_) | ResolvedParameterIdentity::Unnamed { .. },
         ) => Some(true),
         _ => None,
+    }
+}
+
+/// The function class application `ty` is, without the annotations that mark its context
+/// parameters and receiver; any other type unchanged.
+fn plain_function_type(ty: Ty) -> Ty {
+    match ty {
+        Ty::Fun(signature) => Ty::fun_with_shape(
+            signature.params.to_vec(),
+            signature.ret,
+            0,
+            false,
+            signature.suspend,
+        ),
+        Ty::Nullable(inner) => Ty::nullable(plain_function_type(*inner)),
+        ty => ty,
     }
 }
 
