@@ -53551,7 +53551,7 @@ impl<'a> Checker<'a> {
             }
             bindings[type_parameter] = candidate;
         }
-        self.record_source_constructor_type_arguments(call, class, &bindings);
+        self.record_source_constructor_type_arguments(call, class, &bindings, &captured_bindings);
         for (type_parameter, binding) in bindings.iter_mut().enumerate() {
             if explicitly_bound[type_parameter] {
                 continue;
@@ -66399,6 +66399,20 @@ impl<'a> Checker<'a> {
     }
 
     fn attach_captured_classifier_arguments(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        internal: TypeName,
+        instance: Ty,
+        bound_outer: Option<Ty>,
+    ) -> Ty {
+        let result =
+            self.apply_captured_classifier_arguments(scope, call, internal, instance, bound_outer);
+        self.record_captured_constructor_type_arguments(call, internal, result);
+        result
+    }
+
+    fn apply_captured_classifier_arguments(
         &mut self,
         scope: &CheckerScope<'_>,
         call: ExprId,

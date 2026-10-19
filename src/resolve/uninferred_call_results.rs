@@ -11,12 +11,15 @@ use super::*;
 
 impl Checker<'_> {
     /// Record a source constructor call's inferred declaration-order `bindings`, where a type
-    /// parameter nothing bound is still `Ty::Error`.
+    /// parameter nothing bound is still `Ty::Error`. The captured type parameters of an inner or
+    /// local classifier follow in normalized classifier order, as the dependency record does; they
+    /// come from the enclosing receiver or declaration and are always solved.
     pub(super) fn record_source_constructor_type_arguments(
         &mut self,
         call: ExprId,
         class: &ClassSig,
         bindings: &[Ty],
+        captured_bindings: &HashMap<String, Ty>,
     ) {
         let bound = class
             .type_params
@@ -35,11 +38,31 @@ impl Checker<'_> {
                     .collect()
             })
             .collect::<Vec<_>>();
-        let arguments = crate::symbol_resolver::solved_constructor_type_arguments(
+        let mut arguments = crate::symbol_resolver::solved_constructor_type_arguments(
             class.internal_name(),
             &class.type_params,
             &bounds,
             &bound,
+        );
+        let captured = &class.captured_type_parameters;
+        arguments.extend(
+            captured
+                .type_params
+                .iter()
+                .enumerate()
+                .map(|(index, formal)| {
+                    // With no applied outer receiver, the captured declaration is the one the
+                    // construction site sees lexically, so its argument is that type parameter.
+                    Some(captured_bindings.get(formal).copied().unwrap_or_else(|| {
+                        let bound = captured
+                            .type_param_bounds
+                            .get(index)
+                            .copied()
+                            .filter(|bound| *bound != Ty::Error)
+                            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+                        Ty::ty_param(formal, bound)
+                    }))
+                }),
         );
         self.replace_call_type_arguments(call, arguments);
     }
@@ -55,6 +78,43 @@ impl Checker<'_> {
         bindings: &crate::symbol_resolver::GSigBinds,
     ) {
         let arguments = Self::library_constructor_type_arguments(owner, classifier, bindings);
+        self.replace_call_type_arguments(call, arguments);
+    }
+
+    /// Record the captured type arguments a construction bound in its checked `instance`. Captured
+    /// parameters follow the classifier's own ones in the normalized layout and come from the
+    /// outer receiver or the lexical declaration, never from the call's inference, so the
+    /// selected-call record takes them from the same application the result type carries.
+    pub(super) fn record_captured_constructor_type_arguments(
+        &mut self,
+        call: ExprId,
+        internal: TypeName,
+        instance: Ty,
+    ) {
+        let Some(own) = self
+            .resolved_type_name(internal)
+            .map(|classifier| classifier.own_type_parameter_count)
+        else {
+            return;
+        };
+        let Some(captured) = instance
+            .type_args()
+            .get(own..)
+            .filter(|captured| !captured.is_empty())
+        else {
+            return;
+        };
+        let Some(recorded) = self.selected_call_type_arguments(call) else {
+            return;
+        };
+        if recorded.len() != own && recorded.len() != own + captured.len() {
+            return;
+        }
+        let arguments = recorded[..own]
+            .iter()
+            .copied()
+            .chain(captured.iter().copied().map(Some))
+            .collect();
         self.replace_call_type_arguments(call, arguments);
     }
 
@@ -242,4 +302,71 @@ pub(super) fn complete_source_constructor_bindings(
         }
     }
     bindings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The selected-call record of every constructor named `callee` in `source`.
+    fn constructor_records(source: &str, callee: &str) -> Vec<Option<Vec<Option<Ty>>>> {
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let (file, _, types) = crate::frontend::analyze_source_standalone(source, &mut diagnostics);
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            Vec::<&str>::new()
+        );
+        let types = types.expect("checked file");
+        file.expr_arena
+            .iter()
+            .enumerate()
+            .filter_map(|(raw, expression)| {
+                let Expr::Call { callee: target, .. } = expression else {
+                    return None;
+                };
+                matches!(
+                    file.expr(*target),
+                    Expr::Name(name) | Expr::Member { name, .. } if name == callee
+                )
+                .then(|| {
+                    types
+                        .selected_call_type_arguments_for_test(ExprId(raw as u32))
+                        .map(<[Option<Ty>]>::to_vec)
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_inner_source_constructor_records_its_captured_argument() {
+        let records = constructor_records(
+            "class Box<T>(val t: T) { inner class In<U>(val u: U) }\n\
+             fun make(box: Box<String>): Any = box.In(1)\n",
+            "In",
+        );
+        assert_eq!(records, vec![Some(vec![Some(Ty::Int), Some(Ty::String)])]);
+    }
+
+    #[test]
+    fn a_local_source_constructor_records_its_captured_argument() {
+        let records = constructor_records(
+            "fun <T> make(t: T): Any {\n\
+             class Local(val n: Int) { fun get(): T = t }\n\
+             return Local(1)\n\
+             }\n",
+            "Local",
+        );
+        let [Some(arguments)] = records.as_slice() else {
+            panic!("one selected local constructor record: {records:?}")
+        };
+        let [Some(Ty::TyParam(name, bound))] = arguments.as_slice() else {
+            panic!("the captured `T` must be recorded as the lexical parameter: {arguments:?}")
+        };
+        assert_eq!(crate::types::type_parameter_source_name(name), "T");
+        assert_eq!(**bound, Ty::nullable(Ty::obj("kotlin/Any")));
+    }
 }
