@@ -102,6 +102,7 @@ mod tests {
     fn a_secondary_constructor_names_its_physical_init() {
         let class = synthetic_class("sample/Owner");
         let signature = declared_constructor_signature(
+            &IrFile::default(),
             &class,
             &constructor(vec![
                 Ty::Int,
@@ -122,7 +123,8 @@ mod tests {
     fn an_enum_constructor_takes_the_name_and_ordinal_first() {
         let mut class = synthetic_class("sample/Owner");
         class.is_enum = true;
-        let signature = declared_constructor_signature(&class, &constructor(vec![Ty::Int]));
+        let signature =
+            declared_constructor_signature(&IrFile::default(), &class, &constructor(vec![Ty::Int]));
         assert_eq!(signature.desc, "(Ljava/lang/String;IZI)V");
     }
 

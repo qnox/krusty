@@ -10255,8 +10255,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `this@Outer` both go through. It is rejected when the enclosing receiver is a `@JvmInline value
   class`: there is no instance to capture, since `this` is the bare underlying value there
   (`codegen/box/inlineClasses/initBlock.kt` fails verification otherwise).
-  Three capture shapes are NOT modelled yet and are rejected (the file skips): a local function
-  (which carries captures of its own), a reassigned `var` (shared mutable state, not capturable by
+  Three capture shapes are NOT modelled yet and are rejected (the file skips): a local class that
+  calls a local function capturing a value only an implicit context argument uses (no recorded use
+  orders that capture), a reassigned `var` (shared mutable state, not capturable by
   value), and a capture read during CONSTRUCTION — an initializer, an `init` block, a
   base-constructor argument, a secondary constructor, or a primary-constructor parameter default. The capture scan is syntactic and
   conservative: over-reporting skips a file, under-reporting emits a class without what it needs,
