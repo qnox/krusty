@@ -1,14 +1,16 @@
-//! Exact top-level property identities in one stateful Wasm source module.
+//! Exact property identities in one stateful Wasm source module.
 //!
-//! Files reserve or publish the Wasm global chosen for each source property they use or store.
-//! Other files in the source module reach that global by the frontend's stable [`PropertyId`];
-//! neither the property spelling nor a file facade is reconstructed in the backend.
+//! Files reserve or publish the Wasm global chosen for each top-level property and private
+//! getter/setter entries for each ordinary member property. Other files reach either realization
+//! by the frontend's stable [`PropertyId`]; neither spelling nor a file facade is reconstructed.
 
 use crate::fx_hash::HashMap;
 
 use crate::fir::{DeclarationFlags, PropertyId};
 use crate::ir::{IrFile, IrLocalPropertyLayout};
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
+
+use super::super::encode::Module;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct TopLevelProperty {
@@ -19,19 +21,150 @@ pub(super) struct TopLevelProperty {
     pub(super) direct_write: bool,
 }
 
+/// The private Wasm entry points through which another source file reads or writes an ordinary
+/// member property. A `PropertyId` is the only join between the using and defining files.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct MemberProperty {
+    pub(super) getter: u32,
+    pub(super) setter: Option<u32>,
+    pub(super) owner: TypeName,
+    pub(super) ty: Ty,
+}
+
+/// One property this file defines, paired with the program-wide entries reserved for it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct MemberPropertyDefinition {
+    pub(super) property: PropertyId,
+    pub(super) entry: MemberProperty,
+}
+
 #[derive(Default)]
 pub(super) struct PropertyRegistry {
     source_module: Option<String>,
     module: HashMap<PropertyId, TopLevelProperty>,
+    members: HashMap<PropertyId, MemberProperty>,
 }
 
 impl PropertyRegistry {
     /// Property ids belong to one frontend analysis, so they never cross a source-module boundary.
     pub(super) fn enter_source_module(&mut self, module_name: &str) {
-        if self.source_module.as_deref() != Some(module_name) {
-            self.source_module = Some(module_name.to_owned());
-            self.module.clear();
+        match self.source_module.as_deref() {
+            None => self.source_module = Some(module_name.to_owned()),
+            Some(current) if current == module_name => {}
+            Some(_) => {
+                self.source_module = Some(module_name.to_owned());
+                self.module.clear();
+                self.members.clear();
+            }
         }
+    }
+
+    /// Reserve the member-property entries this file defines or references. Definitions are
+    /// returned so their bodies can be emitted after this file's classes and accessors exist.
+    pub(super) fn prepare_member_properties(
+        &mut self,
+        ir: &IrFile,
+        module: &mut Module,
+    ) -> Result<Vec<MemberPropertyDefinition>, String> {
+        let mut local = ir
+            .local_property_layouts
+            .iter()
+            .filter_map(|(&property, layout)| match layout {
+                IrLocalPropertyLayout::Member {
+                    class,
+                    owner,
+                    ty,
+                    mutable,
+                    context_parameters,
+                    ..
+                } if context_parameters.is_empty() => {
+                    Some((property, *class, *owner, *ty, *mutable))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        local.sort_by_key(|(property, ..)| property.raw());
+
+        let mut definitions = Vec::new();
+        for (property, class, owner, ty, mutable) in local {
+            let declaration = ir
+                .checked_properties
+                .get(&property)
+                .ok_or_else(|| "a member property with no checked declaration".to_string())?;
+            let classifier = ir
+                .classes
+                .get(class as usize)
+                .ok_or_else(|| "a member property with an invalid owner".to_string())?;
+            if declaration.visibility == crate::types::Visibility::Private
+                || declaration.flags.has(DeclarationFlags::EXPECT)
+                || declaration.flags.has(DeclarationFlags::CONST)
+                || classifier.is_interface
+                || classifier.is_annotation
+                || classifier.is_local_class
+                || classifier.is_anonymous_object
+                || classifier.is_enum_entry
+                || !classifier.is_source_declared
+            {
+                continue;
+            }
+            let entry = self.reserve_member(module, property, owner, ty, mutable)?;
+            definitions.push(MemberPropertyDefinition { property, entry });
+        }
+
+        let mut referenced = ir.referenced_module_properties.iter().collect::<Vec<_>>();
+        referenced.sort_by_key(|(property, _)| **property);
+        for (&property, declaration) in referenced {
+            let Some(owner) = declaration.owner else {
+                continue;
+            };
+            if declaration.extension_receiver.is_some()
+                || !declaration.context_parameters.is_empty()
+                || declaration.visibility == crate::types::Visibility::Private
+                || declaration.flags.has(DeclarationFlags::EXPECT)
+                || declaration.flags.has(DeclarationFlags::CONST)
+                || !matches!(
+                    declaration.owner_kind,
+                    Some(
+                        crate::ir::IrClassifierKind::Class
+                            | crate::ir::IrClassifierKind::Object
+                            | crate::ir::IrClassifierKind::Enum
+                    )
+                )
+                || !matches!(declaration.placement, crate::ir::IrStaticPlacement::Package)
+            {
+                continue;
+            }
+            self.reserve_member(module, property, owner, declaration.ty, declaration.mutable)?;
+        }
+        Ok(definitions)
+    }
+
+    fn reserve_member(
+        &mut self,
+        module: &mut Module,
+        property: PropertyId,
+        owner: TypeName,
+        ty: Ty,
+        mutable: bool,
+    ) -> Result<MemberProperty, String> {
+        if let Some(entry) = self.members.get(&property).copied() {
+            if entry.owner != owner || entry.ty != ty || entry.setter.is_some() != mutable {
+                return Err("a member property reservation disagrees with its declaration".into());
+            }
+            return Ok(entry);
+        }
+        let entry = MemberProperty {
+            getter: module.declare(),
+            setter: mutable.then(|| module.declare()),
+            owner,
+            ty,
+        };
+        self.members.insert(property, entry);
+        Ok(entry)
+    }
+
+    pub(super) fn member(&self, property: PropertyId) -> Option<MemberProperty> {
+        self.members.get(&property).copied()
     }
 
     /// Allocate this file's globals, reusing indices reserved by an earlier file, then reserve
