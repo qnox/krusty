@@ -467,10 +467,12 @@ pub(super) fn body_has_reified_markers(ir: &IrFile, expression: crate::ir::ExprI
     if matches!(
         ir.expr(expression),
         IrExpr::ReifiedClassMarker { .. } | IrExpr::ReifiedTypeOp { .. }
-    ) || ir
-        .reified_catch_markers
-        .get(&expression)
-        .is_some_and(|markers| markers.iter().any(Option::is_some))
+    ) || ir.reified_markers.arrays.contains_key(&expression)
+        || ir
+            .reified_markers
+            .catches
+            .get(&expression)
+            .is_some_and(|markers| markers.iter().any(Option::is_some))
     {
         return true;
     }
@@ -931,7 +933,8 @@ mod catch_marker_tests {
             result: Ty::Unit,
         });
         assert!(!body_has_reified_markers(&ir, expression));
-        ir.reified_catch_markers
+        ir.reified_markers
+            .catches
             .insert(expression, vec![Some("E".to_owned())]);
         assert!(body_has_reified_markers(&ir, expression));
         let wrapper = ir.add_expr(IrExpr::Block {

@@ -367,7 +367,8 @@ impl Emitter<'_> {
             }
             if let Some(name) = self
                 .ir
-                .reified_catch_markers
+                .reified_markers
+                .catches
                 .get(&expression)
                 .and_then(|markers| markers.get(ordinal)?.as_deref())
             {

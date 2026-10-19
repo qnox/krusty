@@ -53,7 +53,10 @@ pub(in crate::jvm) fn function_descriptor(
     )
 }
 
+/// Whether `ty` is the JVM erasure of an unbounded type parameter (`Object`), or an array of one at
+/// any depth. Nullability is no part of the erasure: `Array<T?>` erases to `Object[]` too.
 pub(super) fn jvm_is_erased_top(ty: Ty) -> bool {
+    let ty = ty.non_null();
     match ty.obj_internal() {
         Some(name) if crate::jvm::jvm_class_map::is_jvm_erased_top(name) => true,
         _ => ty.array_elem().is_some_and(jvm_is_erased_top),

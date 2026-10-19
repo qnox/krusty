@@ -5165,13 +5165,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   body is lowered whether it inlines from compiled bodies (`Backend::same_module_inlining`); the
   JVM does, every other target expands the IR template. Common lowering then decides each call's
   route once (`fir_lower/source_calls/inline_route.rs`): a call stays a call recorded for the
-  backend (`IrFile::compiled_inline_call`) only when the callee is a public top-level, non-suspend
-  function in this module (not a companion-block member, which its class compiles) with no function-typed parameter or receiver, no reified type parameter,
-  and a template without lambdas, callable references, local classes, nested expansions or a
-  subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`), called
-  with every argument from a named, non-suspend, non-inline function body (not a lambda, local
-  function, default argument, initializer or accessor). Every other call is expanded in IR for a
-  named reason. The JVM compiles each such callee once per emission pass, alone, into a writer of
+  backend (`IrFile::compiled_inline_call`) only when the callee is a top-level, non-suspend
+  function in this module (public, or declared in the caller's own file; not a companion-block
+  member, which its class compiles) with no suspend function-typed parameter or receiver, no
+  `crossinline` parameter, and a template without lambdas, callable references, local classes,
+  nested expansions or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
+  called with every argument from a named, non-suspend, non-inline function body (not a lambda,
+  local function, default argument, initializer or accessor), and with no literal lambda argument
+  that leaves its body by a non-local `return`, `break` or `continue`. Every other call is
+  expanded in IR for a named reason. The JVM compiles each such callee once per emission pass, alone, into a writer of
   its declaring class and source file, and the inliner reads that body as it reads a dependency's;
   a body it cannot compile or inline fails the emission, never becoming a real call. The call
   keeps its record when a value-class representation wrapper takes its place, and a call one of
@@ -5186,6 +5188,75 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (same-file and cross-file calls, a value-class argument, and a call on an inlined result, against
   kotlinc's bytes, and a run; same-file and cross-file enum switches, including a nullable subject,
   as runs).
+
+- **A same-module inline call with function arguments is inlined from the compiled body too.**
+  A literal lambda or callable reference passed to an inline parameter (one that is function-typed
+  and not `noinline`) replaces the compiled body's `invoke`s, exactly as a library callee's
+  literals do: the call publishes each operand's declared `crossinline`/`noinline` modifier
+  (`IrFile::call_inline_modifiers`) when common lowering records it, so the backend marks the
+  literal's own method dead and consumes a callable reference as an inline argument. Three
+  placements follow kotlinc's `IrInlineCodegen` for every inline callee, same-module or library:
+  a function value held in a caller local for an inline parameter is read from that local by the
+  body's invokes, never stored to a parameter temporary (`genOrGetLocal`); a literal the body never
+  loads (`new { }` where `init` is unused) is dropped with nothing of it left in the caller; and a
+  body with a `try` or a loop inlined beside caller operands already on the stack saves them around
+  the body (`FixStack`) rather than taking the byte splice. An erased `FunctionN.invoke` result
+  used at its erased `Object` type is not cast: `StackValue.coerce` between equal types writes
+  nothing, so the inlined lambda's exact result type reaches the caller and the trailing narrowing
+  `checkcast` folds away. A bound reference whose value-class receiver is boxed until `!!` captures
+  the unboxed value (`unbox-impl`), as the reference's adapter takes it. A literal that jumps
+  non-locally keeps the call expanded in IR (the backend places such literals only on its byte
+  splice). Tests: `tests/inline_same_module_bytes_e2e.rs` (literal lambdas in same-file and
+  cross-file calls, function values from locals and callable references, an unread literal against
+  kotlinc's bytes; a callee with a `try` beside stacked operands, non-local jumps and a bound
+  value-class reference run).
+
+- **An inline call's body is placed as kotlinc's `MethodInliner` places it.** Four rules hold for
+  every inline callee, compiled in this module or read from a dependency. A `noinline` literal of a
+  call inlined from a compiled body is a value the body receives, so it keeps its own class
+  (`jvm::inline_parameters::is_inline_parameter`, kotlinc's `InlineUtil.isInlineParameter`, the
+  one predicate for library and compiled inline calls). When the inlined body's own try/catch blocks include a `finally` (a block catching any
+  throwable), its blocks, the inlined lambdas' first, are rewritten as
+  `InternalFinallyBlockInliner.processInlineFunFinallyBlocks` does through
+  `substituteTryBlockNodes`: ordered by handler, then start, then end position, with empty ranges
+  dropped. A call whose value is `Unit` is `V` to kotlinc whatever its callee returns, so its erased
+  result is popped and `Unit.INSTANCE` read in its place; after an inlined body the pop
+  propagation removes that pop together with the body's own `Unit`. A compiled callee reaches the
+  inliner with no slot that neither an access nor a variable names (the result slot krusty reserves
+  for a diverging `try` is closed), as kotlinc's node never enters one; the inliner hands slots out
+  in the order the body names them, so a gap would place the catch parameter beside the lambda's
+  locals. Tests: `tests/inline_use_close_e2e.rs`, `tests/inline_scope_function_bytes_e2e.rs`,
+  `tests/try_debug_lines_e2e.rs` (`an_inlined_catch_parameter_is_named_at_its_expansion_depth`),
+  `tests/value_class_lambda_class_e2e.rs` (`a_noinline_argument_of_an_inline_call_is_its_own_class`).
+
+- **A same-module reified or same-file private inline callee is inlined from the compiled body.**
+  The callee's compiled body carries kotlinc's `Intrinsics.reifiedOperationMarker` before each
+  `checkcast`/`instanceof` on a reified type parameter, and the call records each reified
+  parameter's call-site value by the parameter's source name (`IrFile::reified_call_subst`), so the
+  inliner repoints the marked instructions exactly as it does for a library callee. A scalar the body
+  casts to a reified `T` (a smart-cast `-value as T`) is boxed before the marker, as kotlinc's
+  `AS` operand is an object. An array a reified body creates of its parameter (`arrayOf`,
+  `arrayOfNulls`, `Array(n) { … }`, a vararg) carries kotlinc's `NEW_ARRAY` marker, mode 0, before
+  its `anewarray` (`ExpressionCodegen.newArrayInstruction`), in the declaration's own method as in
+  the body compiled for a call; its argument is kotlinc's `ReificationArgument.asString`: a `[` per
+  nested array level, the parameter's source name, and `?` for a marked-nullable element
+  (`ReifiedMarkers::arrays`). The inliner makes `[T` the array class of the call-site class.
+  A non-public callee is inlined from its compiled body when it is declared in the caller's own
+  file (its body is compiled into the same class); one declared in another file stays expanded
+  (`NonPublicCallee`), since its body may reach that file's private declarations. A local
+  delegated property read in a compiled callee calls the accessor its declaring class exports
+  (`access$<function>$lambda-N`), as kotlinc's compiled body does: the template of a call inlined
+  from its compiled body counts as emitted code when local-delegate accesses are realized, even
+  when it is another file's or inline-only. A compiled body's lines are numbered against the
+  caller's own method map, and the class map takes them in the order the method's unoptimized table
+  lists them, as kotlinc's `SourceMapCopyingMethodVisitor` reads the method ahead of its
+  optimization passes: a callee line that dead-code removal later drops (a `throw` branch a reified
+  check makes unreachable) still widens the call's range in the class map.
+  Tests: `tests/inline_same_module_bytes_e2e.rs` (reified `is`, `as T` and a boxed `as T`, reified
+  arrays including `[T` and `T?`, and a private same-file callee against kotlinc's bytes; a jagged
+  reified-array callee runs), `tests/reified_local_delegate_e2e.rs` (a reified callee with a local
+  delegate, across files and in an object), and
+  `source_map::tests::the_copier_reads_lines_the_optimizer_dropped`.
 
 - **`inline fun` (same-module, user-defined):** expanded at each call site by the IR lowerer
   (`Lower::lower_inline_fn_call`), matching kotlinc's effect — value parameters bind to once-evaluated
