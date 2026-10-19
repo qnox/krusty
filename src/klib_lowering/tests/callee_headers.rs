@@ -130,6 +130,7 @@ impl Record {
             None,
             None,
             None,
+            None,
             Some(&self.identity),
         )
         .expect("signed")

@@ -280,6 +280,15 @@ pub(super) fn prepared_inline_header(
                     "a dispatch receiver of a generic or non-class type",
                 ));
             };
+            // Metadata is authoritative for the member's owner: the copy must be its member.
+            if selected.declaration_owner()
+                != Some(crate::types::SemanticCallableOwner::Classifier(classifier))
+            {
+                return Err(mismatch(format!(
+                    "a prepared inline copy is a member of {classifier:?}, selected as one of {:?}",
+                    selected.declaration_owner()
+                )));
+            }
             values.insert(
                 receiver.base.symbol.clone(),
                 ParameterValue {

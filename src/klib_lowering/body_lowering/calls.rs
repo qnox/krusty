@@ -4,7 +4,7 @@
 //! call of it; a dependency function lowers as a call of its function in the same unit.
 
 use super::super::ir_builtins::{BuiltinOperator, BuiltinRelation};
-use super::super::klib_types::function_class_member;
+use super::super::klib_types::function_invocation_arity;
 use super::{mismatch, unsupported, BodyLowering, LinkedCallee, Lowered};
 use crate::ir::{ExprId, IrBinOp, IrExpr};
 use crate::metadata::id_signature::KlibPublicIdSignature;
@@ -33,16 +33,13 @@ impl BodyLowering<'_> {
                 return unsupported("a call through a property accessor signature")
             }
         };
-        if let Some((function, member)) = function_class_member(callee) {
-            if member != "invoke" {
-                return unsupported("a call of a function class member other than `invoke`");
-            }
+        if let Some(arity) = function_invocation_arity(callee) {
             if !access.type_arguments.is_empty() {
                 return Err(mismatch(
                     "a function invocation is called with type arguments",
                 ));
             }
-            return self.function_invocation(access, function.arity(), ty);
+            return self.function_invocation(access, arity, ty);
         }
         let operator = self.builtins.operator(callee);
         // A checked source call may select the same exact declaration that this support body

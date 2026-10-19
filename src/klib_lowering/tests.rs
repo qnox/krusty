@@ -2141,3 +2141,67 @@ fn wasm_math_wrappers_are_scalar_roots_closing_through_one_instruction() {
         );
     }
 }
+
+/// The public signature of the member `name(Any)` of `package.class`.
+fn member_of(package: &[&str], class: &str, name: &str) -> KlibPublicIdSignature {
+    let package = package
+        .iter()
+        .map(|segment| (*segment).to_owned())
+        .collect::<Vec<_>>();
+    let classes = [crate::metadata::id_signature::ClassScope {
+        name: class,
+        type_parameters: Vec::new(),
+        expect: false,
+    }];
+    let any = kotlin_class("Any");
+    callable_signature(
+        DeclarationContainer::<KotlinType> {
+            package: &package,
+            classes: &classes,
+            native_interop_library: false,
+        },
+        &CallableShape {
+            name,
+            contexts: Vec::new(),
+            receiver: None,
+            params: vec![&any],
+            vararg: None,
+            type_parameters: Vec::new(),
+            expect: false,
+            placement: Placement::Ordinary,
+        },
+    )
+    .expect("a non-generic shape is signable")
+}
+
+#[test]
+fn only_a_declared_function_invocation_has_invocation_semantics() {
+    use super::klib_types::function_invocation_arity;
+    assert_eq!(
+        function_invocation_arity(&member_of(&["kotlin"], "Function1", "invoke")),
+        Some(1)
+    );
+    // The function classifier declares no such member: its spelling alone is no invocation.
+    assert_eq!(
+        function_invocation_arity(&member_of(&["kotlin"], "Function1", "equals")),
+        None
+    );
+    // A class spelled like a function classifier outside Kotlin's builtins declares nothing.
+    assert_eq!(
+        function_invocation_arity(&member_of(&["demo"], "Function1", "invoke")),
+        None
+    );
+    // A suspend or reflective classifier's invocation is not a plain function invocation.
+    assert_eq!(
+        function_invocation_arity(&member_of(
+            &["kotlin", "coroutines"],
+            "SuspendFunction1",
+            "invoke"
+        )),
+        None
+    );
+    assert_eq!(
+        function_invocation_arity(&member_of(&["kotlin", "reflect"], "KFunction1", "invoke")),
+        None
+    );
+}
