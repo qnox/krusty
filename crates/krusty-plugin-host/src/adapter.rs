@@ -1,4 +1,4 @@
-//! The host's own code, `adapter/Host.kt`, compiled once per Kotlin version by that version's
+//! The host's own code, the Kotlin sources in `adapter/`, compiled once per Kotlin version by that version's
 //! `kotlin-compiler-embeddable` and kept in the cache. Compiling it against the exact compiler the
 //! host loads means the adapter always links against that compiler, whatever changed between
 //! releases.
@@ -13,8 +13,48 @@ use crate::host::HostError;
 use crate::install;
 use crate::provision::{HostRuntime, COMPILER_MIN_JAVA};
 
-const SOURCE: &str = include_str!("../adapter/Host.kt");
-const SOURCE_NAME: &str = "Host.kt";
+/// The adapter's sources every compiler builds, by file name.
+const SOURCES: [(&str, &str); 4] = [
+    ("Host.kt", include_str!("../adapter/Host.kt")),
+    ("ModuleIr.kt", include_str!("../adapter/ModuleIr.kt")),
+    ("Session.kt", include_str!("../adapter/Session.kt")),
+    ("Wire.kt", include_str!("../adapter/Wire.kt")),
+];
+
+/// The adapter's sources for compiler API that changed between Kotlin releases, under
+/// `adapter/compat/<first release>/`.
+struct Compat {
+    /// The releases these sources build for, each exactly.
+    versions: &'static [&'static str],
+    sources: &'static [(&'static str, &'static str)],
+}
+
+/// Every supported Kotlin version is listed in exactly one.
+const COMPAT: [Compat; 2] = [
+    Compat {
+        versions: &["2.4.0", "2.4.10"],
+        sources: &[(
+            "IrFiles.kt",
+            include_str!("../adapter/compat/2.4.0/IrFiles.kt"),
+        )],
+    },
+    Compat {
+        versions: &["2.4.20", "2.4.21"],
+        sources: &[(
+            "IrFiles.kt",
+            include_str!("../adapter/compat/2.4.20/IrFiles.kt"),
+        )],
+    },
+];
+
+/// Every source of the adapter for `kotlin_version`, or `None` when no compat set lists it.
+fn sources(kotlin_version: &str) -> Option<Vec<(&'static str, &'static str)>> {
+    let compat = COMPAT
+        .iter()
+        .find(|compat| compat.versions.contains(&kotlin_version))?;
+    Some(SOURCES.iter().chain(compat.sources).copied().collect())
+}
+
 const JAR: &str = "krusty-plugin-host.jar";
 /// The jar's SHA-256, recorded when it is built and checked before it is reused.
 const DIGEST: &str = "krusty-plugin-host.jar.sha256";
@@ -24,7 +64,7 @@ pub(crate) const MAIN_CLASS: &str = "krusty.pluginhost.HostKt";
 /// runtime's exact compiler classpath. Compiling is announced on `report`; reusing the cached jar is
 /// silent.
 ///
-/// The cache key is the source and [`HostRuntime::compiler_identity`], the pins the classpath was
+/// The cache key is the sources and [`HostRuntime::compiler_identity`], the pins the classpath was
 /// verified against, so a corrected pin for the same Kotlin version builds afresh. A cached jar is
 /// reused only when it still has the digest recorded when it was built.
 pub(crate) fn jar(
@@ -32,10 +72,18 @@ pub(crate) fn jar(
     env: &Environment,
     report: &mut dyn Write,
 ) -> Result<PathBuf, HostError> {
+    let Some(sources) = sources(&runtime.kotlin_version) else {
+        return Err(HostError::Build {
+            detail: format!(
+                "the adapter has no sources for kotlinc {}",
+                runtime.kotlin_version
+            ),
+        });
+    };
     let dir = env.cache_dir.join("adapter").join(format!(
         "{}-{}",
         runtime.kotlin_version,
-        build_key(runtime)
+        build_key(runtime, &sources)
     ));
     let jar = dir.join(JAR);
     if is_intact(&dir) {
@@ -53,7 +101,7 @@ pub(crate) fn jar(
         runtime.kotlin_version
     );
     let staged = install::staging_path(&dir);
-    let built = compile(runtime, &staged);
+    let built = compile(runtime, &sources, &staged);
     if built.is_err() {
         install::remove(&staged);
     }
@@ -63,10 +111,13 @@ pub(crate) fn jar(
 }
 
 /// Compiles the adapter into `<dir>/krusty-plugin-host.jar` with the runtime's own compiler.
-fn compile(runtime: &HostRuntime, dir: &Path) -> Result<(), HostError> {
-    std::fs::create_dir_all(dir).map_err(|error| HostError::io(dir, error))?;
-    let source = dir.join(SOURCE_NAME);
-    std::fs::write(&source, SOURCE).map_err(|error| HostError::io(&source, error))?;
+fn compile(runtime: &HostRuntime, texts: &[(&str, &str)], dir: &Path) -> Result<(), HostError> {
+    let sources = dir.join("src");
+    std::fs::create_dir_all(&sources).map_err(|error| HostError::io(&sources, error))?;
+    for (name, text) in texts {
+        let source = sources.join(name);
+        std::fs::write(&source, text).map_err(|error| HostError::io(&source, error))?;
+    }
     let classpath =
         std::env::join_paths(&runtime.compiler_classpath).map_err(|error| HostError::Build {
             detail: format!("the compiler classpath cannot be passed to java: {error}"),
@@ -84,7 +135,7 @@ fn compile(runtime: &HostRuntime, dir: &Path) -> Result<(), HostError> {
         .arg(&classpath)
         .arg("-d")
         .arg(dir.join(JAR))
-        .arg(&source)
+        .arg(&sources)
         .output()
         .map_err(|error| HostError::Build {
             detail: format!("could not run {}: {error}", runtime.java.display()),
@@ -108,12 +159,16 @@ fn compile(runtime: &HostRuntime, dir: &Path) -> Result<(), HostError> {
     })
 }
 
-/// Names the adapter build in the cache: the adapter source and the classpath identity it is
+/// Names the adapter build in the cache: the adapter sources and the classpath identity they are
 /// compiled against, so a change to either compiles afresh.
-fn build_key(runtime: &HostRuntime) -> String {
+fn build_key(runtime: &HostRuntime, sources: &[(&str, &str)]) -> String {
     let mut digest = Sha256::new();
-    digest.update(SOURCE.as_bytes());
-    digest.update([0]);
+    for (name, text) in sources {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update(text.as_bytes());
+        digest.update([0]);
+    }
     digest.update(runtime.compiler_identity.as_bytes());
     hex(&digest.finalize()[..8])
 }
@@ -144,4 +199,47 @@ fn jvm_target(java: u32) -> String {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_supported_kotlin_version_has_the_adapter_sources_for_its_compiler() {
+        let versions = include_str!("../../../kotlin-versions");
+        let supported: Vec<&str> = versions
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .map(|line| line.split_whitespace().next().unwrap())
+            .collect();
+        let listed: Vec<&str> = COMPAT
+            .iter()
+            .flat_map(|compat| compat.versions.iter().copied())
+            .collect();
+        assert_eq!(listed, supported);
+        for version in supported {
+            let names: Vec<&str> = sources(version)
+                .unwrap()
+                .iter()
+                .map(|(name, _)| *name)
+                .collect();
+            assert_eq!(
+                names,
+                [
+                    "Host.kt",
+                    "ModuleIr.kt",
+                    "Session.kt",
+                    "Wire.kt",
+                    "IrFiles.kt"
+                ],
+                "{version}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_kotlin_version_no_compat_set_lists_has_no_adapter() {
+        assert_eq!(sources("2.4.20-RC"), None);
+    }
 }

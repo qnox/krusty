@@ -269,7 +269,7 @@ downloads off and fails with everything that is missing.
 ### Starting the host
 
 `Host::start` runs `java` on the provisioned classpath with krusty's adapter in front of it. The
-adapter is Kotlin source (`crates/krusty-plugin-host/adapter/Host.kt`) that the provisioned
+adapter is Kotlin source (`crates/krusty-plugin-host/adapter/`) that the provisioned
 `kotlin-compiler-embeddable` compiles once into the cache, so it always links against the exact
 compiler it runs on; the first build prints that it is compiling it. The cache key is the source and
 the pinned identity of the compiler classpath, so a corrected pin builds afresh, and a cached jar is
@@ -289,6 +289,51 @@ before it registered, and the host reports every registrar with what it added. T
 register live as long as the loaded set: `Host::unload`, a later load, a failed load and stopping
 the host all dispose them through kotlinc's `Disposer` and close the class loader. The plugins are not run yet:
 until the IR round trip lands, the registry still refuses a non-native plugin jar as `Unsupported`.
+
+### The compilation's session
+
+An IR plugin looks declarations up through `IrPluginContext` and builds IR against kotlinc's
+builtins, so the host needs kotlinc's own view of the build's dependencies. `Host::open_session`
+gives it one: the host runs kotlinc's JVM configuration, frontend and fir2ir phases over the
+`SessionRequest` (the build's exact classpath, standard library included, its JDK, module name,
+language and API versions and JVM target) with no source files, kotlinc's own `allowNoSourceFiles`
+mode, and keeps the `Fir2IrActualizedResult` whose plugin context IR plugins receive. kotlinc's
+errors refuse the session in kotlinc's words, such as
+`error: JDK home directory does not exist: <path>`; its warnings go to stderr. The module's sources
+are not part of the session: krusty supplies their IR.
+
+`Host::resolve` finds declarations in the session by `CallableIdentity`: the owner, the name, and
+the signature as kotlinc's IR declares it (type parameter count, context parameters, extension
+receiver and value parameter types, a vararg parameter by its array type, each type with its
+nullability and the classes of its annotations). A type parameter is named by the declaration that
+owns it: the callable itself, or a class by its full name, so an inner class's member names its outer
+class's `T` as `Outer`'s and never as the inner class's own. The lookup goes through the same plugin context a
+plugin uses, and an identity that names no declaration, or more than one, fails by name. This is the
+identity krusty names a dependency's declaration by when it hands the host IR that calls it.
+
+### The module's IR
+
+`Host::generate` hands the session the module's own declarations as a `ModuleIr` (from `crates/krusty-plugin-ir`, plain data with no dependencies, so the compiler can build it without depending on the host): each source file
+with its path, package and text, and its functions in kotlinc's IR shape, every element with the
+UTF-16 offsets kotlinc gives the same source. The host builds them as fir2ir builds a module's
+sources (every declaration first, so a body can call any function of the module, then every body),
+adds the files to the session's module and runs the loaded plugins' IR generation extensions over
+it, in registration order, with the session's plugin context. A call names a module function by its
+file and position, and a dependency's function by its `CallableIdentity`. IR the host cannot build
+yet, such as a type annotation or a module function's type parameters, refuses the request by what
+it is, before anything is added; a session builds one module.
+
+The IR covers top-level functions with regular parameters and a block body (an expression body as
+the block kotlinc makes of it), local `val` and `var`, constants, reads and plain assignments of
+parameters and locals, `return`, and calls to module and dependency functions with their type and
+value arguments. A test compiles the same source with kotlinc and an IR plugin that dumps the module
+with its offsets, then builds krusty's IR for it in the host under the same plugin, and requires the
+two dumps to be identical.
+
+The adapter builds against every supported compiler. Where kotlinc's IR API changed between
+releases (`IrFileImpl` takes its module as a constructor argument from 2.4.20), the version-specific
+source lives under `adapter/compat/<first release>/`, and `adapter.rs` lists the exact releases each
+set builds for; a Kotlin version no set lists has no adapter.
 
 ## Drop-in extension management — two layers, like kotlinc
 

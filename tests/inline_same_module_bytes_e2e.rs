@@ -522,3 +522,180 @@ fn a_private_same_file_callee_inlined_from_the_compiled_body_runs() {
         "OK"
     );
 }
+
+// kotlinc inlines a same-module call from the callee's compiled body wherever the call is written:
+// in a lambda's method, a local function, a top-level or member property initializer, an `init`
+// block, a constructor and an accessor.
+const CALLERS_OUTSIDE_FUNCTION_BODIES: &str = r#"inline fun twice(x: Int): Int = x * 2
+
+val top = twice(21)
+
+class Holder(val seed: Int) {
+    val doubled = twice(seed)
+    var log = ""
+
+    init {
+        log += twice(seed)
+    }
+
+    constructor() : this(twice(2)) {
+        log += "secondary"
+    }
+
+    val next: Int
+        get() = twice(seed) + 1
+}
+
+fun box(): String {
+    val lambda = { y: Int -> twice(y) }
+    fun local(z: Int) = twice(z) + 1
+    val holder = Holder(3)
+    if (top != 42 || lambda(4) != 8 || local(5) != 11) return "fail"
+    if (holder.doubled != 6 || holder.next != 7 || holder.log != "6") return holder.log
+    return if (Holder().log == "8secondary") "OK" else "secondary"
+}
+"#;
+
+#[test]
+fn calls_outside_named_function_bodies_are_inlined_from_the_compiled_body() {
+    assert_like_kotlinc(&[("main.kt", CALLERS_OUTSIDE_FUNCTION_BODIES)]);
+}
+
+#[test]
+fn calls_outside_named_function_bodies_run() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(CALLERS_OUTSIDE_FUNCTION_BODIES, "Callers"),
+        "OK"
+    );
+}
+
+// A suspend lambda's body, and a lambda written in a suspend local function, run in a state
+// machine, so a same-module inline call there stays expanded (`SuspendCaller`): its literal
+// argument suspends, which the compiled-body inliner cannot place in the machine. The route itself
+// is pinned by `inline_route::tests`; the expanded suspend bodies are not yet kotlinc's bytes (the
+// state machine is built before inlining), so this runs the program rather than comparing bytes.
+const SUSPEND_CONTEXT_CALLERS: &str = r#"import kotlin.coroutines.*
+
+inline fun applied(block: () -> String): String = block()
+
+suspend fun yielded(value: String): String = suspendCoroutine { it.resume(value) }
+
+fun builder(block: suspend () -> Unit) {
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+}
+
+suspend fun viaLocal(): String {
+    suspend fun local(): String = run { applied { yielded("K") } }
+    return local()
+}
+
+fun box(): String {
+    var result = ""
+    builder { result = applied { yielded("O") } }
+    builder { result += viaLocal() }
+    return result
+}
+"#;
+
+#[test]
+fn calls_in_suspend_lambdas_and_their_nested_lambdas_run() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SUSPEND_CONTEXT_CALLERS, "SuspendCallers"),
+        "OK"
+    );
+}
+
+// An inline function's own same-module inline calls are inlined from their compiled bodies into
+// its compiled body, which its callers inline in turn: the nested callee's lines reach the caller
+// through the callee class's source map, numbered past that class's own file.
+const NESTED_LIBRARY: &str = r#"inline fun plusThree(x: Int): Int {
+    return x + 3
+}
+
+inline fun plusTwo(x: Int): Int {
+    return x + 2
+}
+
+inline fun plusTwoAgain(x: Int): Int {
+    return plusTwo(x)
+}
+
+inline fun chained(x: Int): Int {
+    return plusTwoAgain(x) * plusThree(x)
+}
+"#;
+
+const NESTED_MAIN: &str = r#"fun compute(x: Int): Int {
+    return plusTwoAgain(x) + plusThree(x)
+}
+
+fun box(): String = if (compute(2) == 9) "OK" else "fail ${compute(2)}"
+"#;
+
+// Not yet kotlinc's bytes: a nested line the class map already holds in a range other than its
+// first or last is mapped anew by kotlinc's `SourceMapper`, where krusty reuses that range.
+const NESTED_CHAIN_MAIN: &str = r#"fun compute(x: Int): Int {
+    return plusTwoAgain(x) + plusThree(x) + chained(x)
+}
+
+fun box(): String = if (compute(2) == 29) "OK" else "fail ${compute(2)}"
+"#;
+
+#[test]
+fn an_inline_body_inlines_its_own_calls_from_compiled_bodies() {
+    assert_like_kotlinc(&[("lib.kt", NESTED_LIBRARY), ("main.kt", NESTED_MAIN)]);
+}
+
+#[test]
+fn an_inline_body_inlining_its_own_calls_runs() {
+    common::expect_box_ok_files_with_stdlib(
+        &[("lib.kt", NESTED_LIBRARY), ("main.kt", NESTED_CHAIN_MAIN)],
+        "Nested",
+    );
+}
+
+// A body with a `try` inlined over a caller operand is bracketed for FixStack, and inside the
+// bracket it runs over an empty stack: a literal it expands is bracketed again only for operands
+// of its own, so a literal that always throws leaves no bracket open.
+const DIVERGING_LITERAL_LIBRARY: &str = r#"inline fun catchAll(x: String, block: () -> Unit): String {
+    try {
+        block()
+    } catch (e: Throwable) {
+    }
+    return x
+}
+
+inline fun throwIt(msg: String) {
+    throw Exception(msg)
+}
+
+inline fun bar(x: String): String = x + catchAll("") { throwIt("oops!") }
+"#;
+
+const DIVERGING_LITERAL_MAIN: &str = r#"fun direct(x: String): String = x + catchAll("") { throwIt("oops!") }
+
+fun box(): String = direct("OK")
+"#;
+
+// Through another inline body (`bar`) the literal's locals are not yet named as kotlinc names them
+// (`msg$iv$iv`, `$i$a$-catchAll-LibKt$bar$1$iv`), so that shape only runs.
+const DIVERGING_LITERAL_NESTED_MAIN: &str = r#"fun box(): String = bar("OK")
+"#;
+
+#[test]
+fn a_diverging_literal_inside_a_bracketed_body_is_inlined_like_kotlinc() {
+    assert_like_kotlinc(&[
+        ("lib.kt", DIVERGING_LITERAL_LIBRARY),
+        ("main.kt", DIVERGING_LITERAL_MAIN),
+    ]);
+}
+
+#[test]
+fn a_diverging_literal_inside_a_bracketed_body_runs() {
+    for main in [DIVERGING_LITERAL_MAIN, DIVERGING_LITERAL_NESTED_MAIN] {
+        common::expect_box_ok_files_with_stdlib(
+            &[("lib.kt", DIVERGING_LITERAL_LIBRARY), ("main.kt", main)],
+            "DivergingLiteral",
+        );
+    }
+}

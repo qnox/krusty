@@ -1353,6 +1353,7 @@ fn external_inner_constructor_prepends_the_checked_outer_receiver() {
                 declaration,
                 classifier: crate::types::type_name("dependency/Outer$Inner"),
                 parameters: Box::new([]),
+                declared_parameters: Box::new([]),
                 annotation: None,
             },
             context_parameter_count: 0,
@@ -1413,6 +1414,7 @@ fn external_annotation_construction_reaches_common_ir_without_provider_lookup() 
                 declaration,
                 classifier: interface,
                 parameters: Box::new([resolved(Ty::String)]),
+                declared_parameters: Box::new([resolved(Ty::String)]),
                 annotation: Some(Box::new(FirAnnotationConstruction {
                     members: Box::new([("name".into(), resolved(Ty::String))]),
                     defaults: Box::new([None]),

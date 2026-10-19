@@ -46,7 +46,10 @@ impl ClassWriter {
                 })
             })
             .collect::<Option<Vec<_>>>()?;
-        let dependency_source_map = match self.source_map.render() {
+        // A method something was inlined into keeps its own map until the class is written; the
+        // node carries that map, as kotlinc's method node carries its codegen's source mapper.
+        let source_map = method.source_map.as_ref().unwrap_or(&self.source_map);
+        let dependency_source_map = match source_map.render() {
             Some(text) => Some(Arc::new(DependencyMap::parse(&text)?)),
             None => None,
         };

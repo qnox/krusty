@@ -5326,9 +5326,23 @@ regress.
     32 more box files are byte-identical (3,719 to 3,751), none regresses.
     ✓ `NEW_ARRAY` markers on arrays of a reified parameter, and local delegated properties read
     through the declaring class's accessor.
+  - ◐ 6c. Route exclusions retired one by one, in the order of the divergent box files they cover.
+    ✓ Calls in lambdas, local functions, property initializers, `init` blocks, constructors and
+    accessors (`LocalCallable`, `NotInFunctionBody`); a lambda written in a suspend function or
+    suspend lambda stays with `SuspendCaller`: 3 more box files are byte-identical on 2.4.20
+    (3,752 to 3,755), none regresses.
+    ✓ Calls in inline functions (`InlineCaller`): nested callees compiled first, each node with
+    its method's own source map numbered past its own file, and a body bracketed for FixStack
+    written over an empty stack: 3 more box files are byte-identical (3,755 to 3,758), none
+    regresses. Not yet matched: a nested line the class map holds in a middle range (kotlinc's
+    `SourceMapper` reuses only the first or last range) and the `$iv` depth of a literal's locals
+    inlined through another inline body.
+    A call whose literal reads one of the inline function's own inline parameters stays expanded
+    (`InlineParameterInLiteral`): a caller expanding that function's template splices its literal
+    only through expanded bodies. Retire it with the expansions that need it.
     ☐ `$default` calls, class members, non-public callees of another file, suspend callers and callees,
-    `crossinline` parameters, literals with non-local jumps, and calls in lambdas, local functions,
-    initializers and accessors.
+    `crossinline` parameters, literals with non-local jumps, calls in default arguments, and callee
+    bodies with lambdas, local classes, nested expansions or enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
 

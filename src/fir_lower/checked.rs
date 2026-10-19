@@ -8,7 +8,7 @@ use crate::ir::{
     IrCheckedSubstitution, IrExpr, IrFunction,
 };
 
-use super::source_calls::ModuleConstructorRequest;
+use super::source_calls::{ExternalConstructorRequest, ModuleConstructorRequest};
 use super::{BodyLowering, FirLoweringFailure};
 
 /// A checked callable reference as FIR records it: the resolved target, how it binds its
@@ -943,20 +943,22 @@ impl BodyLowering<'_> {
                 declaration,
                 classifier,
                 parameters,
+                declared_parameters,
                 annotation,
             } => {
                 let arguments = self.external_arguments(&call.arguments, parameters)?;
                 let outer_receiver = self.receiver(call.outer_receiver)?;
-                self.external_constructor_call(
-                    *declaration,
-                    *classifier,
+                self.external_constructor_call(ExternalConstructorRequest {
+                    declaration: *declaration,
+                    classifier: *classifier,
                     parameters,
-                    call.context_parameter_count,
-                    call.outer_parameter,
+                    declared_parameters,
+                    context_parameter_count: call.context_parameter_count,
+                    outer_parameter: call.outer_parameter,
                     outer_receiver,
-                    &arguments,
-                    annotation.as_deref(),
-                )
+                    arguments: &arguments,
+                    annotation: annotation.as_deref(),
+                })
                 .ok_or(FirLoweringFailure::UnsupportedExternalConstructor(
                     *declaration,
                 ))
@@ -1065,6 +1067,7 @@ impl BodyLowering<'_> {
                 declaration,
                 classifier,
                 parameters,
+                declared_parameters,
                 ..
             } => {
                 let arguments = self.external_arguments(&call.arguments, parameters)?;
@@ -1077,6 +1080,10 @@ impl BodyLowering<'_> {
                         declaration: *declaration,
                         classifier: *classifier,
                         parameters: parameter_types.clone(),
+                        declared_parameters: declared_parameters
+                            .iter()
+                            .map(|parameter| parameter.get())
+                            .collect(),
                     },
                     parameter_types,
                     arguments,
