@@ -466,6 +466,19 @@ fn only_fragment_configuration_source_paths_are_materialized() {
         stderr,
         "a basename ambiguous within its source role is never guessed"
     );
+
+    let near_matches = format!(
+        "error: passed common:{recorded}, but fragment `other` of source file {recorded} is not specified in -Xfragments\nerror: passed common:{recorded}, but fragment `common` of source file {recorded}\nerror: passed common:{recorded}, but fragment `common` of source file {recorded} is not specified in -Xfragments after all\n"
+    );
+    assert_eq!(
+        materialize_diagnostic_sources(
+            &near_matches,
+            std::slice::from_ref(&current_free),
+            &[("common".to_string(), current_fragment)],
+        ),
+        near_matches,
+        "a diagnostic prefix, mismatched fragment, or non-terminal suffix is not rewritten"
+    );
 }
 
 #[test]
