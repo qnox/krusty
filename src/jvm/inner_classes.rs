@@ -14,7 +14,7 @@ use crate::types::{type_name, TypeName};
 /// The complete ordered candidate list for one IR file. Every class writer receives the same list;
 /// `ClassWriter::finish` retains only entries referenced by that classfile.
 pub(super) struct InnerClasses {
-    specs: Vec<InnerClassSpec>,
+    specs: Vec<Rc<InnerClassSpec>>,
     paths: DeclarationPaths,
     /// The class each class declared in executable code is declared in, by internal name.
     declaring: Rc<HashMap<String, String>>,
@@ -224,7 +224,7 @@ impl InnerClasses {
             })
             .collect();
         Self {
-            specs,
+            specs: specs.into_iter().map(Rc::new).collect(),
             paths: Rc::new(paths),
             declaring: Rc::new(declaring),
             call_sites: Rc::new(call_site_regenerated_lambdas(ir)),
@@ -850,7 +850,7 @@ mod tests {
         );
         assert_eq!(
             prepared.specs,
-            vec![
+            [
                 InnerClassSpec {
                     inner: "sample/Outer$$serializer".to_string(),
                     outer: Some("sample/Outer".to_string()),
@@ -870,6 +870,7 @@ mod tests {
                     access: 0x0019,
                 },
             ]
+            .map(Rc::new)
         );
     }
 
@@ -928,6 +929,7 @@ mod tests {
                     access: 0x0019,
                 },
             ]
+            .map(Rc::new)
         );
     }
 
