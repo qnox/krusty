@@ -231,6 +231,25 @@ impl Emitter<'_> {
             .then_some((*arg, slot))
     }
 
+    /// Emit an erased scalar result consumed by a reference `slot` as the box its callee returned,
+    /// answering the erased slot it occupies. kotlinc coerces the call's own `Object` value
+    /// straight to the slot (`StackValue.coerce(Object, Object)` writes nothing), so the
+    /// substituted primitive is never materialized. `None`, with nothing emitted, for any other
+    /// operand or a scalar slot.
+    pub(super) fn emit_erased_scalar_box(
+        &mut self,
+        expression: crate::ir::ExprId,
+        slot: Ty,
+        code: &mut CodeBuilder,
+    ) -> Option<Ty> {
+        if !ir_ty_to_jvm(&slot).is_reference() {
+            return None;
+        }
+        let (call, erased) = self.erased_scalar_result(expression)?;
+        self.emit_value(call, code);
+        Some(erased)
+    }
+
     /// Whether checked primitive equality consumes an ordinary JVM wrapper retained by an exact
     /// value-class underlying-property read. The frontend's equality mode remains authoritative;
     /// this is only the JVM representation choice for those already-selected operands. An

@@ -336,9 +336,10 @@ impl Emitter<'_> {
         // The call owns any operand a default-argument realization synthesized for it, so its own
         // line goes back into effect at the start of each such run.
         let origins = self.default_operand_origins(call_expression, ops, false);
-        self.emit_operands_adapted(
+        self.emit_operands_at_slots(
             Some((call_expression, &origins)),
             ops,
+            physical,
             code,
             |this, source, code| {
                 let physical_index = index;
@@ -391,7 +392,7 @@ impl Emitter<'_> {
         physical.extend_from_slice(physical_params);
         self.mark_generated_operand_start(call_expression, ops.first().copied(), code);
         let mut index = 0usize;
-        self.emit_operands_adapted(None, &ops, code, |this, source, code| {
+        self.emit_operands_at_slots(None, &ops, &physical, code, |this, source, code| {
             let operand = ops[index];
             let target = physical[index];
             if index == 0 {

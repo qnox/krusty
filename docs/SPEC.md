@@ -4025,7 +4025,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   takes the erased `Object` result as the callee returned it (`share(42, holder.get())` passes it
   straight through), with a `checkcast` only where the consumer's class is narrower than `Object`.
   kotlinc never visits the substituted primitive there, so no `checkcast Number; intValue;
-  Integer.valueOf` round trip is written (`tests/erased_scalar_result_e2e.rs`).
+  Integer.valueOf` round trip is written (`tests/erased_scalar_result_e2e.rs`). The consumer's
+  origin does not matter: an argument of a dependency function or constructor, or of a member
+  called through its selected descriptor (`listOf(property.get())`, `Pair(list[0], 2L)`,
+  `map.put("k", list[0])`), is the same reference slot and takes the erased result the same way
+  (`erased_scalar_results_passed_to_dependency_reference_slots_are_byte_identical_to_kotlinc`).
 - **Return-only type parameters on `inline` functions use the expected type.** The inferred binding
   must satisfy its declared bound and is passed to the inline expander for reified operations. For a
   nullable return such as `T?`, inference removes the return nullability before binding `T`.

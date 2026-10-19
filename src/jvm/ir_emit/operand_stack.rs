@@ -5,9 +5,13 @@ use super::*;
 
 /// Whether a sequence's consumer materializes each operand at its own slot type.
 #[derive(Clone, Copy)]
-enum OperandUse {
+enum OperandUse<'s> {
     /// The adapter coerces to the consumer's slot, so an erased generic result stays erased.
     Materialized,
+    /// As `Materialized`, with each operand's physical slot known before it is emitted. An erased
+    /// scalar result bound for a reference slot is consumed as the box its callee returned, as
+    /// kotlinc coerces the call's own `Object` value straight to the slot.
+    Slots(&'s [Ty]),
     /// A reference comparison consumes an erased scalar result as the box already occupying its
     /// generic `Object` slot. Other values materialize normally and scalars are boxed by the
     /// comparison's adapter.
@@ -183,6 +187,24 @@ impl Emitter<'_> {
         self.sequence_operands(default_plan, ops, code, OperandUse::Materialized, adapt);
     }
 
+    /// [`Self::emit_operands_adapted`] for a consumer whose physical slot for each operand is
+    /// `slots[i]`, so a reference slot reads an erased scalar result without unboxing it first.
+    pub(super) fn emit_operands_at_slots<F>(
+        &mut self,
+        default_plan: Option<(
+            u32,
+            &[crate::jvm::default_call_operands::DefaultOperandOrigin],
+        )>,
+        ops: &[u32],
+        slots: &[Ty],
+        code: &mut CodeBuilder,
+        adapt: F,
+    ) where
+        F: FnMut(&mut Self, Ty, &mut CodeBuilder),
+    {
+        self.sequence_operands(default_plan, ops, code, OperandUse::Slots(slots), adapt);
+    }
+
     /// Push operands into reference-comparison slots, preserving a box already returned through an
     /// erased generic boundary instead of unboxing and allocating an equivalent replacement box.
     pub(super) fn emit_reference_comparison_operands(
@@ -207,7 +229,7 @@ impl Emitter<'_> {
         )>,
         ops: &[u32],
         code: &mut CodeBuilder,
-        operand_use: OperandUse,
+        operand_use: OperandUse<'_>,
         mut adapt: F,
     ) where
         F: FnMut(&mut Self, Ty, &mut CodeBuilder),
@@ -216,8 +238,9 @@ impl Emitter<'_> {
         if ops.iter().skip(1).any(|&o| self.spills_operand_prefix(o)) {
             let temps = ops
                 .iter()
-                .map(|&o| {
-                    let source = self.emit_sequenced_operand(o, operand_use, code);
+                .enumerate()
+                .map(|(operand_index, &o)| {
+                    let source = self.emit_sequenced_operand(o, operand_index, operand_use, code);
                     self.spill_operand(o, source, code)
                 })
                 .collect::<Vec<_>>();
@@ -240,7 +263,7 @@ impl Emitter<'_> {
                     &mut inside_run,
                     code,
                 );
-                let source = self.emit_sequenced_operand(o, operand_use, code);
+                let source = self.emit_sequenced_operand(o, operand_index, operand_use, code);
                 adapt(self, source, code);
             }
         }
@@ -250,11 +273,16 @@ impl Emitter<'_> {
     fn emit_sequenced_operand(
         &mut self,
         o: u32,
-        operand_use: OperandUse,
+        operand_index: usize,
+        operand_use: OperandUse<'_>,
         code: &mut CodeBuilder,
     ) -> Ty {
         match operand_use {
             OperandUse::Materialized => self.emit_consumed_operand(o, code),
+            OperandUse::Slots(slots) => slots
+                .get(operand_index)
+                .and_then(|&slot| self.emit_erased_scalar_box(o, slot, code))
+                .unwrap_or_else(|| self.emit_consumed_operand(o, code)),
             OperandUse::ReferenceComparison => match self.erased_scalar_result(o) {
                 Some((source, slot)) => {
                     self.emit_value(source, code);

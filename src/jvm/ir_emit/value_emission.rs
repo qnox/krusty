@@ -379,14 +379,16 @@ impl super::Emitter<'_> {
                                         self.ir.fir_origins.get(&e),
                                     )
                                 });
-                            self.emit_value(argument, code);
+                            let source = match self.emit_erased_scalar_box(argument, physical, code)
+                            {
+                                Some(erased) => erased,
+                                None => {
+                                    self.emit_value(argument, code);
+                                    self.value_ty(argument)
+                                }
+                            };
                             self.adapt_physical_constructor_operand_for(
-                                e,
-                                parameter,
-                                argument,
-                                self.value_ty(argument),
-                                physical,
-                                code,
+                                e, parameter, argument, source, physical, code,
                             );
                         }
                     }
@@ -1079,15 +1081,14 @@ impl super::Emitter<'_> {
                         let result_narrow = ordinary_virtual
                             .then(|| self.ir.jvm_overridden_call_realizations.get(&e))
                             .flatten()
-                            .map(|realization| {
+                            .and_then(|realization| {
                                 let narrow = (realization.descriptor != descriptor
                                     && ret.is_reference())
                                 .then(|| crate::jvm::names::instanceof_internal_name(ret));
                                 name = realization.physical_name.clone();
                                 descriptor = realization.descriptor.clone();
                                 narrow
-                            })
-                            .flatten();
+                            });
                         let call_parameters = bridge.as_ref().map_or(ptys.as_slice(), |bridge| {
                             bridge.bridge_parameters.as_slice()
                         });
