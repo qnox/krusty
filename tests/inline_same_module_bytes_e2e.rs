@@ -402,7 +402,8 @@ fn a_bound_value_class_reference_captures_the_unboxed_receiver() {
 
 // A reified callee is inlined from its compiled body: the body's `reifiedOperationMarker` calls name
 // the type parameter, and the inliner repoints the `checkcast`/`instanceof` after each to the call's
-// type argument. A smart-cast scalar the body casts to `T` is boxed before the marker.
+// type argument. A smart-cast scalar the body casts to `T` is boxed before the marker, and a
+// `Nothing?` argument names `java/lang/Void`.
 const REIFIED_LIBRARY: &str = r#"inline fun <reified T> isOf(x: Any?): Boolean = x is T
 
 inline fun <reified T> castTo(x: Any?): T = x as T
@@ -421,6 +422,7 @@ const REIFIED_MAIN: &str = r#"fun box(): String {
     if (isOf<Int>("a")) return "is Int"
     if (negated(0.0).toString() != "-0.0") return "Double"
     if (negated(0.0f).toString() != "-0.0") return "Float"
+    if (castTo<Nothing?>(null) != null || isOf<Nothing?>("a")) return "Nothing?"
     return castTo<String>("OK")
 }
 "#;
