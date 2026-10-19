@@ -207,7 +207,10 @@ impl Checker<'_> {
             .call_type_args
             .get(&call.0)
             .and_then(|syntax| syntax.arguments.get(index))
-            .map_or_else(|| self.call_callee_name_span(call), |argument| argument.span);
+            .map_or_else(
+                || self.call_callee_name_span(call),
+                |argument| argument.span,
+            );
         self.diags.error(
             span,
             format!(
