@@ -10529,6 +10529,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor prefix is an internal error. A local declaration nothing uses is never included by kotlinc,
   which then captures nothing for it; krusty still captures what it reads and orders those values
   after everything else. Tests: `tests/local_class_capture_order_e2e.rs`.
+  Constructor code reads a capture from its constructor parameter, and a capture gets a field only
+  when code that runs after construction uses it, as kotlinc's local declaration lowering does.
+  Constructor code is the primary constructor's defaults and super-constructor arguments, the
+  property initializers and delegate values, the `init` blocks, and each secondary constructor's
+  defaults, delegation arguments and body. In `class L { val x = a + 1; fun m() = b }` the
+  constructor is `(a, b)`, the initializer reads the parameter `a`, and only `$b` is a field; in
+  `class B { val x = a; fun m() = a }` the initializer still reads the parameter and `m` reads the
+  field. The walk that orders the captures decides this: a direct read in the local class's own
+  constructor code is a construction read (`LocalClassCaptureLayouts::construction_reads`, which
+  checked FIR turns into a `ConstructorCaptureRead` of the parameter), and every other use keeps
+  the field. Common IR gives only a stored capture a field; the constructor prefix keeps every
+  capture at its identity, and the JVM backend lays the stored fields out in the same first-use
+  order as the parameters and names both through `capture_names::class_captures`. A receiver
+  capture, a captured delegated local, and every capture of a data class (whose `copy` constructs
+  the class again from its storage) are stored. A field read of a capture without a field is an internal lowering error.
+  Known divergences, each stored by krusty where kotlinc keeps only the parameter: a capture read
+  by a lambda or a local function in constructor code (kotlinc passes the parameter to the lambda
+  or lifted function), a local class or anonymous object constructed there, a capture only passed
+  on to a local superclass, a shared `var` cell used only there, and every capture of an anonymous
+  object. Tests: `tests/local_class_construction_capture_e2e.rs`.
   The enclosing INSTANCE is the second capture kind — the receiver itself rather than a binding in
   the chain — and is carried as ONE capture however many of its members are read, placed FIRST
   because lowering identifies it by position (field 0), which is what an outer member read and a

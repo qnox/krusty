@@ -4,6 +4,18 @@ use crate::ir::IrClass;
 
 pub(super) mod captured_assignment;
 
+/// How many leading fields store the constructor prefix. A local class keeps a capture that only
+/// its constructor code reads in the parameter, so it can have fewer prefix fields than prefix
+/// parameters; so can an anonymous object, whose forwarded super-constructor arguments are
+/// parameters only.
+pub(super) fn constructor_prefix_fields(class: &IrClass) -> usize {
+    let prefix = usize::try_from(class.constructor_prefix_count)
+        .expect("constructor prefix count does not fit usize");
+    class.ctor_args.get(..prefix).map_or(prefix, |prefix| {
+        prefix.iter().filter(|argument| argument.is_field).count()
+    })
+}
+
 /// Whether instance field `field_index` stores a constructor-prefix value: the enclosing instance
 /// of an inner class, or a value a local class or anonymous object captures.
 ///

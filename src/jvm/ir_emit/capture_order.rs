@@ -67,3 +67,25 @@ pub(in crate::jvm) fn position(ir: &IrFile, class: &IrClass, identity: u32) -> u
         .and_then(|order| order.iter().position(|&ordered| ordered == identity))
         .map_or(identity, |position| position as u32)
 }
+
+/// `items`, given in field-table order, in physical order. The fields that store the constructor
+/// prefix follow its physical order; a prefix value with no field (a capture only constructor code
+/// reads, a forwarded super-constructor argument) has no entry. Every other field keeps its place
+/// after them. Without a recorded order the prefix fields already lead in prefix order.
+pub(in crate::jvm) fn physical_fields<T>(ir: &IrFile, class: &IrClass, items: Vec<T>) -> Vec<T> {
+    if order(ir, class.fq_name).is_none() {
+        return items;
+    }
+    let prefix = (0..class.constructor_prefix_count).collect();
+    let prefix_fields = physical(ir, class, prefix)
+        .into_iter()
+        .filter_map(|identity| class.ctor_args.get(identity as usize)?.field_index)
+        .collect::<Vec<_>>();
+    let mut items = items.into_iter().map(Some).collect::<Vec<_>>();
+    let mut placed = prefix_fields
+        .iter()
+        .filter_map(|&field| items.get_mut(field as usize)?.take())
+        .collect::<Vec<_>>();
+    placed.extend(items.into_iter().flatten());
+    placed
+}

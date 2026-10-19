@@ -1427,18 +1427,15 @@ impl BodyFirChecker<'_> {
                             dispatch_receiver,
                         }
                     } else if let Some(field) = self.active_class_storage_read(expression) {
-                        match self.class_values.get(name).copied() {
-                            Some(binding) => {
-                                let origin = self.expression_origin(expression)?;
-                                self.class_storage_read_kind(binding, origin)?
-                            }
+                        let binding = match self.class_values.get(name).copied() {
+                            Some(binding) => binding,
                             None => {
                                 let field = *field;
-                                let origin = self.expression_origin(expression)?;
                                 let ty = self.expression_type(expression)?;
-                                self.direct_class_storage_read_kind(field, ty, origin)?
+                                self.direct_class_capture_binding(field, ty)?
                             }
-                        }
+                        };
+                        self.capture_read_kind(expression, binding)?
                     } else if let Some(ExprLowering::SingletonValue(singleton)) =
                         self.info.expr_lowers.get(&expression)
                     {
@@ -1478,8 +1475,7 @@ impl BodyFirChecker<'_> {
                             source.lateinit.then_some(name.as_str()),
                         );
                     } else if let Some(binding) = self.class_values.get(name).copied() {
-                        let origin = self.expression_origin(expression)?;
-                        let kind = self.class_storage_read_kind(binding, origin)?;
+                        let kind = self.capture_read_kind(expression, binding)?;
                         return self.checked_storage_read(expression, binding.ty, kind);
                     } else if let Some((owner, parameter, ty)) =
                         self.current_named_context_parameter(name)

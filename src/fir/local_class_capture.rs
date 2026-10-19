@@ -130,6 +130,9 @@ pub struct FirLocalClassCapture {
     pub source: FirLocalClassCaptureSource,
     /// `Some` exactly when the captured value is a receiver.
     pub receiver: Option<FirCapturedReceiver>,
+    /// Whether code that runs after construction uses the capture, so the class stores it in a
+    /// field. Constructor code reads the parameter instead. An anonymous object stores every one.
+    pub stored: bool,
 }
 
 impl FirLocalClassCapture {

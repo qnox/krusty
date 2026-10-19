@@ -316,7 +316,15 @@ pub(super) fn finalize_local_superclass_captures(
             .enumerate()
             .filter_map(|(parameter, supply)| {
                 let (owner, field) = match *supply {
-                    SuperCaptureSupply::PrefixParameter(slot) => (class as u32, slot),
+                    // A capture handed on to a local superclass is stored: the field its
+                    // parameter fills is the one that can hold a shared cell.
+                    SuperCaptureSupply::PrefixParameter(slot) => (
+                        class as u32,
+                        ir.classes[class]
+                            .ctor_args
+                            .get(slot as usize)?
+                            .field_index?,
+                    ),
                     SuperCaptureSupply::EnclosingField(read) => (read.class, read.field),
                 };
                 ir.shared_class_capture_fields

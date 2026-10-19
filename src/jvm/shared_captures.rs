@@ -65,28 +65,36 @@ pub(super) fn holder_ty(elem: &Ty) -> Ty {
 /// Replace only backend declaration slots. The marker map remains logical so metadata, diagnostics,
 /// and non-JVM backends never observe `Ref$*Ref` as the captured source value's type.
 pub(super) fn lower_class_capture_slots(ir: &mut IrFile) {
-    let mut physical = HashMap::<ClassId, Vec<(usize, Ty)>>::default();
-    for (&(class, field), _) in &ir.shared_class_capture_fields {
+    // Each cell is a field and the constructor-prefix parameter that fills it. A local class can
+    // keep a capture in its parameter alone, so the two positions can differ.
+    let mut physical = HashMap::<ClassId, Vec<(usize, usize, Ty)>>::default();
+    for &(class, field) in ir.shared_class_capture_fields.keys() {
+        let declaration = &ir.classes[class as usize];
+        let parameter = declaration
+            .ctor_args
+            .iter()
+            .position(|argument| argument.field_index == Some(field))
+            .expect("a shared capture field is filled by a constructor-prefix parameter");
         let field = field as usize;
-        let element = ir.classes[class as usize].fields[field].ty;
+        let element = declaration.fields[field].ty;
         physical
             .entry(class)
             .or_default()
-            .push((field, holder_ty(&element)));
+            .push((field, parameter, holder_ty(&element)));
     }
     for slots in physical.values_mut() {
-        slots.sort_unstable_by_key(|(field, _)| *field);
+        slots.sort_unstable_by_key(|(field, _, _)| *field);
     }
 
     for (&class, slots) in &physical {
         let declaration = &mut ir.classes[class as usize];
-        for &(field, holder) in slots {
+        for &(field, parameter, holder) in slots {
             declaration.fields[field].ty = holder;
-            let argument = &mut declaration.ctor_args[field];
+            let argument = &mut declaration.ctor_args[parameter];
             argument.ty = holder;
             argument.check = None;
             for constructor in &mut declaration.secondary_ctors {
-                constructor.prefix_params[field] = holder;
+                constructor.prefix_params[parameter] = holder;
             }
         }
     }
@@ -122,8 +130,8 @@ pub(super) fn lower_class_capture_slots(ir: &mut IrFile) {
         let Some(slots) = class_names.get(internal) else {
             continue;
         };
-        for &(field, holder) in slots {
-            parameters[field] = holder;
+        for &(_, parameter, holder) in slots {
+            parameters[parameter] = holder;
         }
     }
 }

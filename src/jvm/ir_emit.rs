@@ -679,7 +679,7 @@ fn primary_ctor_parameter_descs(ir: &IrFile, c: &IrClass) -> String {
 
 fn ctor_field_descs(ir: &IrFile, c: &IrClass) -> String {
     let fields = c.fields.iter().take(c.ctor_param_count as usize).collect();
-    capture_order::physical(ir, c, fields)
+    capture_order::physical_fields(ir, c, fields)
         .into_iter()
         .map(|f| crate::jvm::names::type_descriptor(f.ty))
         .collect()
@@ -2411,10 +2411,10 @@ fn emit_class(
     let mut field_order: Vec<(usize, &crate::ir::IrField)> = if static_storage(ir, c) {
         Vec::new()
     } else {
-        capture_order::physical(ir, c, c.fields.iter().enumerate().collect())
+        capture_order::physical_fields(ir, c, c.fields.iter().enumerate().collect())
     };
     // kotlinc appends captures and the outer instance (the constructor prefix) after declared fields.
-    let prefix = (c.constructor_prefix_count as usize).min(field_order.len());
+    let prefix = captured_storage::constructor_prefix_fields(c).min(field_order.len());
     field_order.rotate_left(prefix);
     if is_continuation {
         field_order.sort_by_key(|(_, field)| match field.name.as_str() {

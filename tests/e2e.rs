@@ -1254,6 +1254,8 @@ mod java_member_modules;
 mod java_self_bounded_constructor_e2e;
 #[path = "local_class_capture_order_e2e.rs"]
 mod local_class_capture_order_e2e;
+#[path = "local_class_construction_capture_e2e.rs"]
+mod local_class_construction_capture_e2e;
 #[path = "local_function_reference_inference_e2e.rs"]
 mod local_function_reference_inference_e2e;
 java_member_modules::declare!();
