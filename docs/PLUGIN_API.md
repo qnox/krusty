@@ -266,6 +266,30 @@ it; a build that finds everything in place prints nothing. A Kotlin version with
 is refused by its exact name, never matched to a neighbouring release. `KRUSTY_OFFLINE=1` turns
 downloads off and fails with everything that is missing.
 
+### Starting the host
+
+`Host::start` runs `java` on the provisioned classpath with krusty's adapter in front of it. The
+adapter is Kotlin source (`crates/krusty-plugin-host/adapter/Host.kt`) that the provisioned
+`kotlin-compiler-embeddable` compiles once into the cache, so it always links against the exact
+compiler it runs on; the first build prints that it is compiling it. The cache key is the source and
+the pinned identity of the compiler classpath, so a corrected pin builds afresh, and a cached jar is
+run only while it has the digest recorded when it was built. The host greets krusty with the
+compiler's `KotlinCompilerVersion`, and a host whose compiler is not the build's exact Kotlin version
+is refused.
+
+krusty drives the host over its stdin and stdout in length-prefixed frames
+(`src/protocol.rs`, versioned by `PROTOCOL`). It runs on the provisioned JDK with `JAVA_HOME` set to
+that JDK, so a plugin that looks for one finds the JDK it runs on. Plugins may print, so the host
+moves `System.out` to stderr, which is the user's. `Host::load` loads a plugin classpath as
+`-Xplugin` does, except that it refuses an entry that is neither a directory nor a jar, and a legacy
+`ComponentRegistrar`, instead of loading them as no plugin. Its command-line processors read the
+`-P` values through kotlinc's own option parser, so an unknown or missing option fails with kotlinc's message. The registrars then register into one extension storage
+of a configuration made by kotlinc's own `CompilerConfiguration.create()`, so each sees what those
+before it registered, and the host reports every registrar with what it added. The resources they
+register live as long as the loaded set: `Host::unload`, a later load, a failed load and stopping
+the host all dispose them through kotlinc's `Disposer` and close the class loader. The plugins are not run yet:
+until the IR round trip lands, the registry still refuses a non-native plugin jar as `Unsupported`.
+
 ## Drop-in extension management — two layers, like kotlinc
 
 Extensions have **two registration layers**, mirroring kotlinc exactly:
