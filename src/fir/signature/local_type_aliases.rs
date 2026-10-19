@@ -69,6 +69,66 @@ pub(crate) struct WrittenTypeApplication {
 }
 
 impl SignatureGraph {
+    fn local_alias_preserves_argument_shape(&self, alias: LocalTypeAliasTemplateId) -> bool {
+        let Some(template) = self.local_type_alias_template(alias) else {
+            return false;
+        };
+        let Some(root) = self.local_type_template_node(template.root) else {
+            return false;
+        };
+        root.children.len() == template.formals.len()
+            && root.children.iter().enumerate().all(|(ordinal, child)| {
+                self.local_type_template_node(*child).is_some_and(|child| {
+                    matches!(child.target, LocalTypeTemplateTarget::Formal(formal)
+                        if formal as usize == ordinal)
+                        && !child.flags.nullable
+                        && !child.flags.definitely_non_null
+                        && !child.flags.in_projection
+                        && !child.flags.out_projection
+                })
+            })
+    }
+
+    fn expression_has_shape_changing_local_alias(&self, expression: SigExprId) -> bool {
+        if let Some(application) = self.written_type_application(expression) {
+            if application
+                .local_alias
+                .is_some_and(|alias| !self.local_alias_preserves_argument_shape(alias))
+            {
+                return true;
+            }
+            if self
+                .operands(application.arguments)
+                .iter()
+                .copied()
+                .any(|argument| self.expression_has_shape_changing_local_alias(argument))
+            {
+                return true;
+            }
+        }
+        match self.expr(expression) {
+            Some(SigExpr::Nullable(inner) | SigExpr::NonNullable(inner)) => {
+                self.expression_has_shape_changing_local_alias(inner)
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn record_shape_changing_local_alias_header(
+        &mut self,
+        declaration: DeclarationId,
+        expression: SigExprId,
+    ) {
+        if self.expression_has_shape_changing_local_alias(expression) {
+            self.shape_changing_local_alias_headers.insert(declaration);
+        }
+    }
+
+    pub(crate) fn has_shape_changing_local_alias_header(&self, declaration: DeclarationId) -> bool {
+        self.shape_changing_local_alias_headers
+            .contains(&declaration)
+    }
+
     pub(crate) fn add_local_type_alias_application(
         &mut self,
         alias: LocalTypeAliasTemplateId,

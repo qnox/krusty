@@ -135,6 +135,7 @@ pub struct SignatureGraph {
     written_type_applications: HashMap<SigExprId, WrittenTypeApplication>,
     local_type_alias_templates: Vec<local_type_aliases::LocalTypeAliasTemplate>,
     local_type_template_nodes: Vec<LocalTypeTemplateNode>,
+    shape_changing_local_alias_headers: HashSet<DeclarationId>,
     constraints: Vec<SignatureConstraint>,
     constraint_by_declaration: HashMap<DeclarationId, usize>,
     local_effects: HashMap<DeclarationId, LocalSignatureEffect>,
@@ -479,6 +480,7 @@ impl SignatureGraph {
             + self.explicit_classifier_parents.len()
                 * (std::mem::size_of::<DeclarationId>()
                     + std::mem::size_of::<ExplicitClassifierParents>())
+            + self.shape_changing_local_alias_headers.len() * std::mem::size_of::<DeclarationId>()
     }
 }
 

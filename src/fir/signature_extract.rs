@@ -7,6 +7,7 @@ mod compound_assignments;
 mod condition_facts;
 mod evaluated_casts;
 mod integer_literals;
+mod local_alias_header_dependencies;
 mod mutable_local_flow;
 mod qualified_calls;
 mod safe_index;
@@ -217,6 +218,7 @@ impl SignatureConstraintExtractor {
                 self.direct_classifier_parents.insert(child, parent);
             }
         }
+        self.capture_ordinary_local_alias_headers(file, source, &mut origin);
         // Local-class members are not published in the module index, but their inferred result may
         // be demanded by an enclosing non-local signature (for example, a function returning the
         // result of a method on an anonymous-object property). Such a constraint is registered
