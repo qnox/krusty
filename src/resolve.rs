@@ -7442,6 +7442,8 @@ pub struct TypeInfo {
     /// declaration — the resolution the scope chain performed, in declaration order. What a capture
     /// costs to represent is lowering's decision, not this one's.
     pub local_class_captures_by_class: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
+    /// Each local class's captures in first-use order: `order[position]` is a capture field.
+    pub local_class_capture_orders: HashMap<DeclId, Box<[u32]>>,
     /// Local classifiers actually entered through their lexical statement path during this
     /// bounded check. An empty capture list is still semantically meaningful, so capture maps
     /// alone cannot identify every checked local declaration that must be published to FIR.
@@ -22106,36 +22108,7 @@ impl<'a> Checker<'a> {
                     self.discovered_anonymous_super_forwards
                         .insert(d, std::mem::take(&mut captures.forwarded_super_arguments));
                 }
-                // Capture representability is an emission concern. The frontend records the
-                // semantic value even when it is read during construction; lowering either realizes
-                // that field/constructor flow or reports its own capability failure.
-                if let Some(captured) = captures.unsupported.take() {
-                    if let Some(local) = self.lookup(scope, &captured) {
-                        captures.values.push(AnonymousObjectCapture {
-                            ty: local.ty,
-                            shared_cell: capture_storage::CapturedBinding {
-                                delegated: local.delegate_storage_ty.is_some(),
-                                mutable: local.is_var,
-                                already_shared: local.shared_storage_cell,
-                                written_here: self.fn_reassigned.contains(&captured),
-                                source_var: self
-                                    .local_properties
-                                    .is_source_var(local.flow_identity),
-                            }
-                            .is_shared_cell(),
-                            storage_ty: local.delegate_storage_ty,
-                            name: captured,
-                            source: AnonymousObjectCaptureSource::LexicalValue,
-                            receiver_label: None,
-                            receiver: None,
-                            semantic_receiver: None,
-                            lexical_shadow_depth: 0,
-                            capture_dependency: None,
-                            receiver_capture: None,
-                            receiver_role: None,
-                        });
-                    }
-                }
+                self.keep_unsupported_local_class_capture(scope, &mut captures);
                 let mut capture_bindings =
                     self.local_capture_binding_identities(scope, &captures.values);
                 self.restore_proven_local_receiver_captures(
@@ -22169,6 +22142,7 @@ impl<'a> Checker<'a> {
                     uses_before_body,
                     established,
                 );
+                self.publish_local_class_capture_layout(scope, s, d, &cl);
             }
         }
     }
@@ -23742,6 +23716,7 @@ impl<'a> Checker<'a> {
             }
         }
         captured_locals.sort_by(|left, right| left.0.cmp(&right.0));
+        self.record_local_function_first_use(scope, stmt_id, f, &captured_locals);
         let capture_bindings = captured_locals
             .iter()
             .map(|(name, _, _)| {
@@ -33157,6 +33132,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         discovered_anonymous_super_forwards: HashMap::default(),
         discovered_local_class_captures: HashMap::default(),
         discovered_local_class_capture_bindings: HashMap::default(),
+        class_capture_uses: Default::default(),
         finalized_local_class_captures: crate::fx_hash::HashSet::default(),
         local_function_capture_bindings: HashMap::default(),
         receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds::default(),
@@ -34589,6 +34565,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         discovered_anonymous_captures,
         discovered_anonymous_super_forwards,
         discovered_local_class_captures,
+        class_capture_uses,
         checked_local_class_declarations,
         checked_local_classifier_identities,
         checked_local_classifier_type_arguments,
@@ -34844,6 +34821,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         anonymous_object_captures_by_construction,
         anonymous_forwarded_super_arguments: discovered_anonymous_super_forwards,
         local_class_captures_by_class: discovered_local_class_captures,
+        local_class_capture_orders: class_capture_uses.orders,
         checked_local_class_declarations,
         checked_local_classifier_identities,
         checked_local_classifier_type_arguments,
@@ -35940,6 +35918,7 @@ struct Checker<'a> {
     /// These let a selected closure dependency be remapped into the caller's lexical tower without
     /// publishing parser ids, source ranges, or names as semantic identities.
     discovered_local_class_capture_bindings: HashMap<DeclId, Vec<Option<u32>>>,
+    class_capture_uses: capture_field_order::ClassCaptureUses,
     finalized_local_class_captures: crate::fx_hash::HashSet<DeclId>,
     /// Resolver-only binding identities parallel to lifted local-function capture vectors.
     local_function_capture_bindings: HashMap<StmtId, Vec<Option<u32>>>,

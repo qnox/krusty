@@ -6,7 +6,7 @@ use crate::types::{Ty, TypeName};
 
 use super::{
     class_ctor_jvm_tys, function_descriptor, is_jvm_interface, jvm_tys, method_descriptor,
-    static_storage,
+    secondary_prefix_jvm_tys, static_storage,
 };
 
 /// A local, anonymous or generated class's `EnclosingMethod`: the JVM class its scope belongs to,
@@ -186,20 +186,15 @@ pub(in crate::jvm) fn scope_enclosure(
         crate::ir::IrEnclosure::Constructor { class, ordinal } => {
             let declaration = &ir.classes[class as usize];
             let mut parameters = if ordinal == 0 {
-                class_ctor_jvm_tys(declaration)
+                class_ctor_jvm_tys(ir, declaration)
             } else {
                 let constructor = declaration
                     .secondary_ctors
                     .get(ordinal.saturating_sub(1) as usize)
                     .unwrap_or_else(|| panic!("constructor enclosure has no declared constructor"));
-                jvm_tys(
-                    &constructor
-                        .prefix_params
-                        .iter()
-                        .chain(&constructor.params)
-                        .copied()
-                        .collect::<Vec<_>>(),
-                )
+                let mut parameters = secondary_prefix_jvm_tys(ir, declaration, constructor);
+                parameters.extend(jvm_tys(&constructor.params));
+                parameters
             };
             if declaration.is_enum {
                 parameters.splice(0..0, [Ty::String, Ty::Int]);
@@ -240,7 +235,7 @@ pub(in crate::jvm) fn scope_enclosure(
                 return Some((class.fq_name(), Some(("<init>".to_string(), descriptor))));
             }
             class.has_primary_ctor.then(|| {
-                let descriptor = method_descriptor(&class_ctor_jvm_tys(class), Ty::Unit);
+                let descriptor = method_descriptor(&class_ctor_jvm_tys(ir, class), Ty::Unit);
                 (class.fq_name(), Some(("<init>".to_string(), descriptor)))
             })
         }

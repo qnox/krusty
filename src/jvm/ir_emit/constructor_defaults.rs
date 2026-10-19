@@ -6,6 +6,7 @@
 //! physical JVM shapes with no Kotlin declaration of their own, so they live here rather than in
 //! the emitter facade.
 
+use super::capture_order;
 use super::frame_map::FrameKey;
 use super::{
     default_mask_bit, default_mask_count, load, method_descriptor, slot_words, store, ClassWriter,
@@ -22,10 +23,11 @@ pub(super) struct ConstructorDefaultStub<'a> {
     pub(super) owner: &'a str,
     pub(super) owner_identity: TypeName,
     pub(super) facade: &'a str,
-    /// Compiler-supplied parameters before the source declaration's parameters. Enum constructors
-    /// contribute `(name, ordinal)` here; captured/local constructors contribute their captures.
-    pub(super) physical_prefix: &'a [Ty],
-    /// How much of `physical_prefix` is addressable by checked default expressions.
+    /// Compiler-supplied parameters before the source declaration's parameters, in identity order.
+    /// Enum constructors contribute `(name, ordinal)` here; captured/local constructors contribute
+    /// their captures, which the stub takes and forwards in the owner's physical capture order.
+    pub(super) prefix: &'a [Ty],
+    /// How much of `prefix` is addressable by checked default expressions.
     pub(super) logical_prefix_count: usize,
     pub(super) real_params: &'a [Ty],
     pub(super) defaults: &'a [Option<u32>],
@@ -51,7 +53,7 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
         owner,
         owner_identity,
         facade,
-        physical_prefix,
+        prefix,
         logical_prefix_count,
         real_params,
         defaults,
@@ -60,13 +62,16 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
         deprecated,
         access,
     } = stub;
-    debug_assert!(logical_prefix_count <= physical_prefix.len());
+    debug_assert!(logical_prefix_count <= prefix.len());
     let n = real_params.len();
     let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
-    let physical_params = physical_prefix
+    // `prefix_identities[position]` is the prefix entry the stub takes at that physical position.
+    let prefix_identities =
+        capture_order::physical_for(ir, owner_identity, (0..prefix.len()).collect());
+    let physical_params = prefix_identities
         .iter()
-        .chain(real_params)
-        .copied()
+        .map(|&index| prefix[index])
+        .chain(real_params.iter().copied())
         .collect::<Vec<_>>();
     let mut stub_params = physical_params.clone();
     stub_params.extend(std::iter::repeat_n(Ty::Int, default_mask_count(n)));
@@ -90,12 +95,13 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
     // `this` at slot 0 = value-index 0; real params at value-index 1..=n.
     let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(owner));
     e.slots.insert(0, (receiver, Ty::obj(owner)));
-    let mut prefix_slots = Vec::with_capacity(physical_prefix.len());
-    for (index, &ty) in physical_prefix.iter().enumerate() {
+    let mut prefix_slots = Vec::with_capacity(prefix.len());
+    for (position, &index) in prefix_identities.iter().enumerate() {
+        let ty = prefix[index];
         let key = if index < logical_prefix_count {
             FrameKey::Value(index as u32 + 1)
         } else {
-            FrameKey::Parameter(index as u16)
+            FrameKey::Parameter(position as u16)
         };
         let slot = e.frame.enter(key, ty);
         prefix_slots.push((slot, ty));
@@ -110,7 +116,7 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
         e.slots.insert(value, (slot, *t));
         param_slots.push((slot, *t));
     }
-    let trailing = physical_prefix.len() + real_params.len();
+    let trailing = prefix.len() + real_params.len();
     let mask_count = default_mask_count(real_params.len());
     let mask_slots: Vec<u16> = (0..mask_count)
         .map(|mask| {
@@ -140,11 +146,6 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
         .unwrap_or_else(|| class_decl.map_or(0, |candidate| candidate.decl_line));
     // kotlinc visits the stub's name and descriptor before its body, so the descriptor's constant
     // precedes the default values and the delegation the body interns.
-    let physical_params = physical_prefix
-        .iter()
-        .chain(real_params)
-        .copied()
-        .collect::<Vec<_>>();
     let mut stub_params = physical_params.clone();
     stub_params.extend(std::iter::repeat_n(
         Ty::Int,
