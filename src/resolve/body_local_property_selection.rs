@@ -39,7 +39,7 @@ impl Checker<'_> {
         let (Some(owner), Some(declared)) = (owner, property.declared_ty()) else {
             return false;
         };
-        if property.receiver.is_some() {
+        if let Some(receiver_ref) = property.receiver.as_ref() {
             let (deprecated_hidden, accessor_availability) =
                 self.checked_property_availability(stable_declaration, Some(property));
             let header_scope = scope.child(ScopeKind::Function { receiver: None });
@@ -59,13 +59,7 @@ impl Checker<'_> {
             header_scope.declare_tparams(&property.type_params, &type_parameters, |name| {
                 property.reified_type_params.contains(name)
             });
-            let receiver = self.check_declaration_type(
-                &header_scope,
-                property
-                    .receiver
-                    .as_ref()
-                    .expect("member-extension property has a receiver"),
-            );
+            let receiver = self.check_declaration_type(&header_scope, receiver_ref);
             let result = self.check_declaration_type(&header_scope, declared);
             let context_params = property
                 .context_params

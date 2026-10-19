@@ -503,7 +503,8 @@ fn a_function_with_what_the_plugin_ir_does_not_carry_is_refused_where_it_is_writ
     let source_path = source.to_str().unwrap().to_string();
     for (text, spanned, what) in cases {
         std::fs::write(&source, text).unwrap();
-        let (module, diags) = krusty_ir_at(&runtime, &source_path, &[source_path.clone()]);
+        let (module, diags) =
+            krusty_ir_at(&runtime, &source_path, std::slice::from_ref(&source_path));
         assert_eq!(module, None, "{text}");
         let lo = text.find(spanned).unwrap() as u32;
         let diagnostics: Vec<(u32, u32, u32, &str)> = diags

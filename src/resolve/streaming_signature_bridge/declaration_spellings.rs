@@ -12,11 +12,18 @@ use crate::fir::{
 };
 use crate::spelling::{DeclaredSpellings, RecordedTypeAnnotations, Spelled};
 
+type AliasSpellingTemplate = (Spelled, Vec<String>, crate::types::Ty);
+type FinalizedCompactDeclaredSpellings = (
+    Vec<(DeclarationId, DeclaredSpellings)>,
+    Vec<(DeclarationId, crate::spelling::DeferredDeclaredSpellings)>,
+    Vec<(DeclarationId, Spelled)>,
+    Vec<DeclarationId>,
+);
+
 /// The module-wide inputs every declared-type spelling reads: source alias expansion templates and
 /// each file's recorded type-use annotations.
 struct SpellingContext {
-    expansions:
-        crate::fx_hash::HashMap<crate::types::TypeName, (Spelled, Vec<String>, crate::types::Ty)>,
+    expansions: crate::fx_hash::HashMap<crate::types::TypeName, AliasSpellingTemplate>,
     annotations: crate::fx_hash::HashMap<crate::fir::SourceFileId, RecordedTypeAnnotations>,
 }
 
@@ -120,10 +127,11 @@ fn project_local_alias_spelling(
                 }
                 children.truncate(source.targs.len());
                 let alias = occurrence.binding.alias;
-                let alias_args = alias
-                    .is_some()
-                    .then(|| children.clone())
-                    .unwrap_or_default();
+                let alias_args = if alias.is_some() {
+                    children.clone()
+                } else {
+                    Vec::new()
+                };
                 let dependency_alias = alias
                     .and_then(|identity| semantics.table.libraries.type_alias_expansion(identity));
                 let template = alias.and_then(|identity| {
@@ -466,12 +474,7 @@ pub(in crate::resolve) fn finalized_compact_declared_spellings(
     index: &crate::fir::ResolvedModuleIndex,
     deferred_headers: &crate::fx_hash::HashSet<DeclarationId>,
     deferred_roles: &crate::fx_hash::HashMap<DeclarationId, crate::fx_hash::HashSet<HeaderTypeId>>,
-) -> (
-    Vec<(DeclarationId, DeclaredSpellings)>,
-    Vec<(DeclarationId, crate::spelling::DeferredDeclaredSpellings)>,
-    Vec<(DeclarationId, Spelled)>,
-    Vec<DeclarationId>,
-) {
+) -> FinalizedCompactDeclaredSpellings {
     let headers = semantics.headers;
     let table = semantics.table;
     let annotations = (0..headers.sources.len() as u32)
