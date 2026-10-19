@@ -775,6 +775,7 @@ mod tests {
             formals: Vec::new(),
             param_names: (0..params.len()).map(|index| format!("p{index}")).collect(),
             param_defaults: vec![false; params.len()],
+            inline_modifiers: vec![crate::types::InlineParameterModifier::None; params.len()],
             vararg: None,
             visibility: Visibility::Public,
             modality: KotlinModality::Final,

@@ -56,6 +56,11 @@ impl TypeEnhancement {
         !self.arguments.is_empty()
     }
 
+    /// The layouts of the type arguments in declaration order; empty when none is marked.
+    pub fn arguments(&self) -> &[TypeEnhancement] {
+        &self.arguments
+    }
+
     /// The layout of the `index`th type argument.
     pub fn argument(&self, index: usize) -> &TypeEnhancement {
         static NONE: TypeEnhancement = TypeEnhancement::NONE;

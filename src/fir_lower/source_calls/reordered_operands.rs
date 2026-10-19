@@ -56,6 +56,7 @@ impl BodyLowering<'_> {
                 let boxed = !operand_ty.is_reference() && type_operand.is_reference();
                 if boxed || self.is_reference_value(arg) {
                     let read = self.spill_call_operand(arg, operand_ty, statements);
+                    let read = self.reordered_operand_replay(value, read);
                     return self.ir.add_expr(IrExpr::TypeOp {
                         op: IrTypeOp::ImplicitCoercion,
                         arg: read,
@@ -66,10 +67,22 @@ impl BodyLowering<'_> {
         }
         if self.is_reference_value(value) {
             if let Some(&reference_ty) = self.ir.logical_types.get(&value) {
-                return self.spill_call_operand(value, reference_ty, statements);
+                let read = self.spill_call_operand(value, reference_ty, statements);
+                return self.reordered_operand_replay(value, read);
             }
         }
-        self.spill_call_operand(value, parameter_ty, statements)
+        let read = self.spill_call_operand(value, parameter_ty, statements);
+        self.reordered_operand_replay(value, read)
+    }
+
+    /// A temporary read physically replays this source operand in declaration-parameter order.
+    /// Keep the operand's source line on that replay so the next direct operand can restore its own
+    /// line, exactly as it would without the evaluation-order temporary.
+    fn reordered_operand_replay(&mut self, source: ExprId, replay: ExprId) -> ExprId {
+        if let Some(&line) = self.ir.expr_source_lines.get(&source) {
+            self.ir.expr_source_lines.insert(replay, line);
+        }
+        replay
     }
 
     fn is_reference_value(&self, value: ExprId) -> bool {

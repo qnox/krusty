@@ -532,6 +532,30 @@ fn assert_line_table(name: &str, src: &str, class: &str, signature: &str, want: 
     );
 }
 
+/// Named arguments are evaluated in source order, then replayed in constructor-parameter order.
+/// The replayed temporary read keeps the source operand's line; the following direct constant then
+/// restores its own line before the invoke.
+#[test]
+fn reordered_named_constructor_operands_map_their_replay_lines_like_kotlinc() {
+    let src = "class Pair<A, B>(val first: A, val second: B)\n\
+               \n\
+               fun namedBox(x: String) = Pair(second = 1,\n\
+               \x20   first = java.util.Collections.singletonList(x))\n";
+    assert_line_table(
+        "ReorderedNamedConstructorLines",
+        src,
+        "ReorderedNamedConstructorLinesKt",
+        "namedBox(java.lang.String)",
+        &[
+            "line 4: 6",
+            "line 3: 11",
+            "line 4: 15",
+            "line 3: 16",
+            "line 4: 23",
+        ],
+    );
+}
+
 /// A FUNCTION VALUE's invocation is a dispatch like any other: `Function2.invoke` returns to the
 /// line the call is written on, after its operands have each marked their own.
 #[test]

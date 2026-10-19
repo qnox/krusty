@@ -33,6 +33,9 @@ pub enum CompilerWarningName {
     Deprecation,
     ExplicitTypeArgumentsInPropertyAccess,
     InapplicableOperatorModifier,
+    TypeIntersectionAsReified,
+    TypeIntersectionAsReifiedDeprecation,
+    TypeParameterAsReifiedDeprecation,
     TypeArgumentsNotAllowed,
     WrongNumberOfTypeArgumentsInGetClass,
     ValueClassCannotBeRecursiveViaTypeParameters,
@@ -51,6 +54,13 @@ impl CompilerWarningName {
                 "EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING"
             }
             Self::InapplicableOperatorModifier => "INAPPLICABLE_OPERATOR_MODIFIER_WARNING",
+            Self::TypeIntersectionAsReified => "TYPE_INTERSECTION_AS_REIFIED_WARNING",
+            Self::TypeIntersectionAsReifiedDeprecation => {
+                "TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING"
+            }
+            Self::TypeParameterAsReifiedDeprecation => {
+                "TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING"
+            }
             Self::TypeArgumentsNotAllowed => "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING",
             Self::WrongNumberOfTypeArgumentsInGetClass => {
                 "WRONG_NUMBER_OF_TYPE_ARGUMENTS_IN_GET_CLASS_WARNING"
@@ -73,6 +83,13 @@ impl CompilerWarningName {
                 Self::ExplicitTypeArgumentsInPropertyAccess
             }
             "INAPPLICABLE_OPERATOR_MODIFIER_WARNING" => Self::InapplicableOperatorModifier,
+            "TYPE_INTERSECTION_AS_REIFIED_WARNING" => Self::TypeIntersectionAsReified,
+            "TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING" => {
+                Self::TypeIntersectionAsReifiedDeprecation
+            }
+            "TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING" => {
+                Self::TypeParameterAsReifiedDeprecation
+            }
             "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING" => Self::TypeArgumentsNotAllowed,
             "WRONG_NUMBER_OF_TYPE_ARGUMENTS_IN_GET_CLASS_WARNING" => {
                 Self::WrongNumberOfTypeArgumentsInGetClass
@@ -98,6 +115,9 @@ mod warning_name_tests {
             CompilerWarningName::Deprecation,
             CompilerWarningName::ExplicitTypeArgumentsInPropertyAccess,
             CompilerWarningName::InapplicableOperatorModifier,
+            CompilerWarningName::TypeIntersectionAsReified,
+            CompilerWarningName::TypeIntersectionAsReifiedDeprecation,
+            CompilerWarningName::TypeParameterAsReifiedDeprecation,
             CompilerWarningName::TypeArgumentsNotAllowed,
             CompilerWarningName::WrongNumberOfTypeArgumentsInGetClass,
             CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,

@@ -140,6 +140,7 @@ pub(super) fn declaration((name, params, ret): Shape) -> KotlinFunction {
             .map(|name| (*name).to_owned())
             .collect(),
         param_defaults: vec![false; params.len()],
+        inline_modifiers: vec![crate::types::InlineParameterModifier::None; params.len()],
         vararg: None,
         visibility: Visibility::Public,
         modality: crate::metadata::semantic::KotlinModality::Final,

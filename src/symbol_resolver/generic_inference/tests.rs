@@ -204,6 +204,46 @@ fn argument_merge_completes_dependent_formal_before_intersection_bounds() {
 }
 
 #[test]
+fn postponed_platform_argument_preserves_an_expected_non_null_binding() {
+    let any = Ty::platform_nullable(Ty::obj("kotlin/Any"));
+    let r = Ty::ty_param("R", any);
+    let list = Ty::obj_args("kotlin/collections/MutableList", &[Ty::String]);
+    let flexible_list = Ty::platform_nullable(list);
+    let signature = GenericSig {
+        formals: vec!["R".to_string()],
+        formal_bounds: vec![vec![any]],
+        receiver: None,
+        params: vec![r],
+        ret: Ty::platform_nullable(r),
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    // The expected call result contextualizes R before a postponed Java producer contributes its
+    // flexible result. Joining those two faces must retain the declaration's platform interval;
+    // rigid nullable would reject the very non-null expectation that selected this call.
+    let mut bindings = GSigBinds::from_iter([("R".to_string(), list)]);
+
+    merge_call_argument_bindings(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        0,
+        &GSigBinds::default(),
+        &mut bindings,
+        GSigBinds::from_iter([("R".to_string(), flexible_list)]),
+    );
+
+    assert_eq!(bindings.get("R"), Some(&flexible_list));
+    assert_eq!(
+        instantiate_signature_result(
+            &crate::libraries::EmptySymbolSource,
+            &signature,
+            &bindings,
+            UnboundSpecialization::Preserve,
+        ),
+        flexible_list,
+    );
+}
+
+#[test]
 fn projected_receiver_binding_can_widen_to_a_nullable_argument_constraint() {
     let any = Ty::nullable(Ty::obj("kotlin/Any"));
     let k = Ty::ty_param("K", any);
@@ -371,7 +411,7 @@ fn callable_reference_expectation_keeps_invariant_expected_result_equalities() {
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
     let bindings = GSigBinds::from_iter([("R".to_string(), Ty::String)]);
-    let fixed = invariant_expected_result_formals(
+    let fixed = expected_result_equality_formals(
         &crate::libraries::EmptySymbolSource,
         &signature,
         Ty::fun(vec![Ty::String], Ty::String),
@@ -387,6 +427,100 @@ fn callable_reference_expectation_keeps_invariant_expected_result_equalities() {
         &fixed,
     );
     assert_eq!(expected.get("R"), Some(&Ty::String));
+}
+
+#[test]
+fn nested_flexible_result_occurrence_is_an_expected_equality() {
+    let any = Ty::platform_nullable(Ty::obj("kotlin/Any"));
+    let variable = Ty::ty_param("T", any);
+    let signature = GenericSig {
+        formals: vec!["T".to_string()],
+        formal_bounds: vec![vec![any]],
+        receiver: None,
+        params: vec![Ty::platform_nullable(variable)],
+        ret: Ty::fun(Vec::new(), Ty::platform_nullable(variable)),
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let expected = Ty::fun(Vec::new(), Ty::String);
+    let expected_bindings = GSigBinds::from_iter([("T".to_string(), Ty::String)]);
+
+    assert_eq!(
+        formal_variance_in_type(&crate::libraries::EmptySymbolSource, signature.ret, "T"),
+        Some(crate::types::TypeVariance::Out),
+        "the flexible occurrence, not invariant variance, owns this equality"
+    );
+    assert_eq!(
+        expected_result_equality_formals(
+            &crate::libraries::EmptySymbolSource,
+            &signature,
+            expected,
+            &expected_bindings,
+        ),
+        crate::fx_hash::HashSet::from_iter(["T".to_string()])
+    );
+}
+
+#[test]
+fn root_flexible_result_occurrence_is_not_an_expected_equality() {
+    let any = Ty::platform_nullable(Ty::obj("kotlin/Any"));
+    let variable = Ty::ty_param("T", any);
+    let signature = GenericSig {
+        formals: vec!["T".to_string()],
+        formal_bounds: vec![vec![any]],
+        receiver: None,
+        params: vec![Ty::platform_nullable(variable)],
+        ret: Ty::platform_nullable(variable),
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let expected_bindings = GSigBinds::from_iter([("T".to_string(), Ty::String)]);
+    let nullable = Ty::nullable(Ty::String);
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [(0, nullable, false)],
+        None,
+    );
+
+    assert_eq!(inferred.bindings.get("T"), Some(&nullable));
+    assert_eq!(
+        inferred.nullable_flexible_roots,
+        crate::fx_hash::HashSet::from_iter(["T".to_string()])
+    );
+    assert!(expected_result_equality_formals(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        Ty::String,
+        &expected_bindings,
+    )
+    .is_empty());
+}
+
+#[test]
+fn contravariant_nested_flexible_occurrence_is_not_an_expected_equality() {
+    let any = Ty::platform_nullable(Ty::obj("kotlin/Any"));
+    let variable = Ty::ty_param("T", any);
+    let signature = GenericSig {
+        formals: vec!["T".to_string()],
+        formal_bounds: vec![vec![any]],
+        receiver: None,
+        params: vec![Ty::platform_nullable(variable)],
+        ret: Ty::fun(vec![Ty::platform_nullable(variable)], Ty::String),
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let expected = Ty::fun(vec![Ty::String], Ty::String);
+    let expected_bindings = GSigBinds::from_iter([("T".to_string(), Ty::String)]);
+
+    assert_eq!(
+        formal_variance_in_type(&crate::libraries::EmptySymbolSource, signature.ret, "T"),
+        Some(crate::types::TypeVariance::In)
+    );
+    assert!(expected_result_equality_formals(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        expected,
+        &expected_bindings,
+    )
+    .is_empty());
 }
 
 #[test]
@@ -417,7 +551,7 @@ fn projected_expected_result_does_not_widen_an_argument_binding() {
     );
 
     assert_eq!(bindings.get("X"), Some(&any));
-    assert!(invariant_expected_result_formals(
+    assert!(expected_result_equality_formals(
         &crate::libraries::EmptySymbolSource,
         &signature,
         expected,
@@ -801,4 +935,58 @@ fn mixed_nullable_and_bare_any_bound_keeps_the_bound_violation() {
             actual: caller,
         })
     );
+}
+
+#[test]
+fn nullable_input_fixes_a_root_flexible_variable_before_expected_result_inference() {
+    let any = Ty::platform_nullable(Ty::obj("kotlin/Any"));
+    let variable = Ty::ty_param("T", any);
+    let signature = GenericSig {
+        formals: vec!["T".to_string()],
+        formal_bounds: vec![vec![any]],
+        receiver: None,
+        params: vec![Ty::platform_nullable(variable)],
+        ret: Ty::platform_nullable(Ty::obj_args("kotlin/collections/MutableList", &[variable])),
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let actual = Ty::nullable(Ty::String);
+
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [(0, actual, false)],
+        None,
+    );
+
+    assert_eq!(inferred.bindings.get("T"), Some(&actual));
+    assert_eq!(inferred.nullable_flexible_roots.len(), 1);
+    assert!(inferred.nullable_flexible_roots.contains("T"));
+}
+
+#[test]
+fn a_structural_argument_owns_the_binding_before_a_nullable_flexible_slot() {
+    let any = Ty::platform_nullable(Ty::obj("kotlin/Any"));
+    let variable = Ty::ty_param("T", any);
+    let slot = |argument| Ty::obj_args("sample/Slot", &[argument]);
+    let signature = GenericSig {
+        formals: vec!["T".to_string()],
+        formal_bounds: vec![vec![any]],
+        receiver: None,
+        params: vec![slot(variable), Ty::platform_nullable(variable)],
+        ret: Ty::Unit,
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [
+            (0, slot(Ty::Boolean), false),
+            (1, Ty::nullable(Ty::Nothing), false),
+        ],
+        None,
+    );
+
+    assert_eq!(inferred.bindings.get("T"), Some(&Ty::Boolean));
+    assert!(inferred.nullable_flexible_roots.is_empty());
 }

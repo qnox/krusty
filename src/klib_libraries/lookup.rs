@@ -167,6 +167,7 @@ pub(super) fn published_function(
         enclosing,
     );
     function.default_values = signed.defaults.clone();
+    function.callable.inline_body_plan = signed.inline_body_plan.clone();
     // A KLIB declaration's implementation is its serialized IR body unless provider normalization
     // authenticated an exact shared builtin or target-stdlib intrinsic declaration.
     if let CallablePlacement::Package(package) = placement {

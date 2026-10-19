@@ -1384,8 +1384,8 @@ impl BodyFirChecker<'_> {
     }
 
     /// Type arguments of a selected getter, recovered from its generic signature and the receiver
-    /// and result the reference or read already specialized. A callable reference does not carry
-    /// `resolved_call_type_args`, so this is the same record a property read publishes.
+    /// and result the reference or read already specialized. A callable reference has no selected
+    /// generic-call record, so this reconstructs the same substitutions a property read publishes.
     pub(super) fn selected_getter_substitutions(
         &self,
         expression: ExprId,

@@ -15,9 +15,9 @@
 //! [`super::platform_value_narrowing`] consumes them to decide kotlinc's implicit not-null casts.
 
 use super::{Checker, Local, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor};
-use crate::ast::{Expr, ExprId};
+use crate::ast::ExprId;
 use crate::fx_hash::HashMap;
-use crate::libraries::{GenericSig, ResultEnhancement, TypeEnhancement};
+use crate::libraries::{GenericSig, TypeEnhancement};
 use crate::types::{Ty, TypeName};
 
 /// The checker's record of marked values that a later check reads back through a local.
@@ -25,45 +25,126 @@ use crate::types::{Ty, TypeName};
 pub(super) struct EnhancedLocals {
     /// The marks of each local declared with a type inferred from a marked value, by its flow
     /// identity.
-    declarations: HashMap<u32, TypeEnhancement>,
+    declarations: HashMap<u32, EnhancedLocalDeclaration>,
     /// The marks of each read of such a local.
     reads: HashMap<ExprId, TypeEnhancement>,
+    /// The marks of a checked lambda's terminal result, before the function value is passed to a
+    /// generic call. The lambda expression owns this handoff; call substitution consumes it from
+    /// the function type's result position without reopening the body.
+    lambda_results: HashMap<ExprId, TypeEnhancement>,
+}
+
+#[derive(Clone)]
+struct EnhancedLocalDeclaration {
+    /// The semantic storage type this publication fact describes. Mutable-local assignments may
+    /// change the value's marks, but they cannot change this inferred declaration type.
+    declared: Ty,
+    value: TypeEnhancement,
 }
 
 impl Checker<'_> {
     /// Record the marks the local, just declared without a type, takes from its
     /// `initializer`.
-    pub(super) fn record_enhanced_local(&mut self, flow_identity: u32, initializer: ExprId) {
+    pub(super) fn record_enhanced_local(
+        &mut self,
+        flow_identity: u32,
+        initializer: ExprId,
+        declared: Ty,
+    ) {
         let marks = self.value_enhancement(initializer).declared();
         if marks.is_none() {
+            self.enhanced_locals.declarations.remove(&flow_identity);
             return;
         }
-        self.enhanced_locals
-            .declarations
-            .insert(flow_identity, marks);
+        self.enhanced_locals.declarations.insert(
+            flow_identity,
+            EnhancedLocalDeclaration {
+                declared,
+                value: marks,
+            },
+        );
     }
 
     /// Record the marks the loop variable takes from the elements of `iterable`.
-    pub(super) fn record_enhanced_loop_variable(&mut self, flow_identity: u32, iterable: ExprId) {
+    pub(super) fn record_enhanced_loop_variable(
+        &mut self,
+        flow_identity: u32,
+        iterable: ExprId,
+        declared: Ty,
+    ) {
         let Some(protocol) = self.iterator_protocols.get(&iterable) else {
+            self.enhanced_locals.declarations.remove(&flow_identity);
             return;
         };
         let marks = protocol.enhancement.element.declared();
         if marks.is_none() {
+            self.enhanced_locals.declarations.remove(&flow_identity);
             return;
         }
-        self.enhanced_locals
-            .declarations
-            .insert(flow_identity, marks);
+        self.enhanced_locals.declarations.insert(
+            flow_identity,
+            EnhancedLocalDeclaration {
+                declared,
+                value: marks,
+            },
+        );
+    }
+
+    /// Retain the enhancement attributes of a mutable local's inferred declaration across writes.
+    /// They belong to the type fixed by the initializer, not to each value later stored in it. That
+    /// remains true for a compound write: it may replace or mutate the value, but cannot redeclare
+    /// the local. The ordinary data-flow engine owns the current value and its narrowing; this
+    /// sidecar only rejects a stale flow identity or a write through a different storage type.
+    pub(super) fn update_enhanced_local(&mut self, local: &Local) {
+        let valid = matches!(local.origin, ReceiverFnValueOrigin::Local)
+            && local.is_var
+            && local.write_ty == Some(local.declared_ty)
+            && self
+                .enhanced_locals
+                .declarations
+                .get(&local.flow_identity)
+                .is_some_and(|fact| fact.declared == local.declared_ty);
+        if !valid {
+            self.enhanced_locals
+                .declarations
+                .remove(&local.flow_identity);
+        }
     }
 
     /// Record that `read` reads `local` at its declared type.
     pub(super) fn record_enhanced_local_read(&mut self, read: ExprId, local: &Local) {
         if !matches!(local.origin, ReceiverFnValueOrigin::Local) || local.ty != local.declared_ty {
+            self.enhanced_locals.reads.remove(&read);
             return;
         }
-        if let Some(marks) = self.enhanced_locals.declarations.get(&local.flow_identity) {
-            self.enhanced_locals.reads.insert(read, marks.clone());
+        if let Some(fact) = self
+            .enhanced_locals
+            .declarations
+            .get(&local.flow_identity)
+            .filter(|fact| fact.declared == local.declared_ty)
+        {
+            self.enhanced_locals.reads.insert(read, fact.value.clone());
+        } else {
+            self.enhanced_locals.reads.remove(&read);
+        }
+    }
+
+    /// Publish the checked terminal value's marks onto the lambda expression. A `Unit`-coerced
+    /// body has no value result, so a previous provisional check must not leave marks behind.
+    pub(super) fn record_lambda_result_enhancement(
+        &mut self,
+        lambda: ExprId,
+        body: ExprId,
+        coerced_to_unit: bool,
+    ) {
+        let result = super::conditional_branch::branch_value_expression(self.file, body);
+        let marks = (!coerced_to_unit)
+            .then(|| self.value_enhancement(result))
+            .unwrap_or_default();
+        if marks.is_none() {
+            self.enhanced_locals.lambda_results.remove(&lambda);
+        } else {
+            self.enhanced_locals.lambda_results.insert(lambda, marks);
         }
     }
 
@@ -82,19 +163,22 @@ impl Checker<'_> {
         if let Some(marks) = self.enhanced_locals.reads.get(&e) {
             return marks.clone();
         }
+        if let Some(result) = self.enhanced_locals.lambda_results.get(&e) {
+            return function_result_enhancement(self.expr_types[e.0 as usize], result);
+        }
         if let Some(constructor) = self.resolved_constructors.get(&e) {
             return self.constructor_result_enhancement(e, constructor);
         }
         let Some(call) = self.resolved_calls.get(&e) else {
             return TypeEnhancement::NONE;
         };
-        let receiver = self.call_receiver(e).map(|receiver| {
+        let receiver = self.checked_call_receiver(e).map(|receiver| {
             (
                 self.expr_types[receiver.0 as usize],
                 self.value_enhancement(receiver),
             )
         });
-        let explicit_type_arguments = self.file.call_type_args.contains_key(&e.0);
+        let explicit_type_arguments = self.has_checked_explicit_type_arguments(e);
         let arguments = (!explicit_type_arguments)
             .then(|| self.resolved_call_arg_slots.get(&e))
             .flatten();
@@ -116,12 +200,14 @@ impl Checker<'_> {
             ResolvedConstructor::Source {
                 owner,
                 declaration_params,
-                argument_bindings,
                 ..
             } => {
-                if self.file.call_type_args.contains_key(&e.0) {
+                if self.has_checked_explicit_type_arguments(e) {
                     return TypeEnhancement::NONE;
                 }
+                let Some(arguments) = self.resolved_call_arg_slots.get(&e) else {
+                    return TypeEnhancement::NONE;
+                };
                 let Some(classifier) = self.resolver().classifier(*owner) else {
                     return TypeEnhancement::NONE;
                 };
@@ -132,7 +218,7 @@ impl Checker<'_> {
                     formals,
                     declaration_params,
                     None,
-                    argument_bindings,
+                    &arguments.argument_bindings,
                     &mut bindings,
                 );
                 let argument_count = self.expr_types[e.0 as usize].type_args().len();
@@ -149,7 +235,7 @@ impl Checker<'_> {
         let Some(signature) = member.generic_sig.as_ref() else {
             return TypeEnhancement::NONE;
         };
-        if self.file.call_type_args.contains_key(&e.0) {
+        if self.has_checked_explicit_type_arguments(e) {
             return TypeEnhancement::NONE;
         }
         let Some(arguments) = self.resolved_call_arg_slots.get(&e) else {
@@ -168,79 +254,27 @@ impl Checker<'_> {
         receiver: Option<(Ty, TypeEnhancement)>,
         arguments: Option<&super::SelectedArgumentCommitment>,
     ) -> TypeEnhancement {
-        let not_null = |enhancement| enhancement == ResultEnhancement::NotNull;
-        let (signature, result, enhanced, receiver_parameter) = match call {
-            ResolvedCall::Member(selected) => (
-                selected.member.generic_sig.as_ref(),
-                selected.member.ret,
-                (
-                    &selected.member.enhanced_result,
-                    not_null(selected.member.call_sig.result_enhancement),
-                ),
-                false,
-            ),
-            ResolvedCall::Companion(member) => (
-                member.generic_sig.as_ref(),
-                member.ret,
-                (
-                    &member.enhanced_result,
-                    not_null(member.call_sig.result_enhancement),
-                ),
-                false,
-            ),
-            ResolvedCall::TopLevel(selected) => (
-                selected.callable.generic_sig.as_deref(),
-                selected.callable.ret,
-                (
-                    &selected.callable.enhanced_result,
-                    not_null(selected.call_sig.result_enhancement),
-                ),
-                false,
-            ),
-            ResolvedCall::Extension(selected) => (
-                selected.callable.generic_sig.as_deref(),
-                selected.callable.ret,
-                (&selected.callable.enhanced_result, false),
-                true,
-            ),
-            _ => return TypeEnhancement::NONE,
+        let target = call.selected_result_target();
+        let Some((enhanced, head)) = target.enhancement else {
+            return TypeEnhancement::NONE;
         };
-        let (enhanced, head) = enhanced;
-        let marks = enhanced.marks.with_head(head);
+        let marks = enhanced.with_head(head);
         let mut bindings = HashMap::default();
-        // A specialized member's result no longer names its classifier's type parameters; the
-        // result its declaring classifier states does.
-        let declared = match (&enhanced.declared, &receiver) {
-            (Some((classifier, declared)), Some((receiver_ty, receiver_marks))) => {
-                self.bind_class_parameters(
-                    *classifier,
-                    *receiver_ty,
-                    receiver_marks,
-                    &mut bindings,
-                );
-                *declared
-            }
-            _ => signature.map_or(result, |signature| signature.ret),
-        };
-        if let (Some(signature), Some(arguments)) = (signature, arguments) {
-            let receiver = receiver.filter(|_| receiver_parameter);
+        if let (
+            Some(super::selected_result_publication::DispatchBinding::Explicit(owner)),
+            Some((receiver_ty, receiver_marks)),
+        ) = (target.dispatch, &receiver)
+        {
+            self.bind_class_parameters(owner, *receiver_ty, receiver_marks, &mut bindings);
+        }
+        if let (Some(signature), Some(arguments)) = (target.signature, arguments) {
+            let receiver = receiver.filter(|_| target.receiver_parameter);
             bind_callable_parameters(self, signature, receiver.as_ref(), arguments, &mut bindings);
         }
         if bindings.is_empty() {
-            return marks;
-        }
-        marks.substitute(declared, &|name| bindings.get(name).cloned())
-    }
-
-    /// The explicit source receiver of the selected call or property read `e`.
-    fn call_receiver(&self, e: ExprId) -> Option<ExprId> {
-        match self.file.expr(e) {
-            Expr::Call { callee, .. } => match self.file.expr(*callee) {
-                Expr::Member { receiver, .. } => Some(*receiver),
-                _ => None,
-            },
-            Expr::SafeCall { receiver, .. } | Expr::Member { receiver, .. } => Some(*receiver),
-            _ => None,
+            marks
+        } else {
+            marks.substitute(target.declared, &|name| bindings.get(name).cloned())
         }
     }
 
@@ -390,41 +424,119 @@ fn constrain(
     marks: &TypeEnhancement,
     constraints: &mut HashMap<String, Vec<TypeEnhancement>>,
 ) {
-    match declared {
-        Ty::TyParam(name, _) if formals.iter().any(|formal| formal == name) => {
-            constraints
-                .entry(name.to_string())
-                .or_default()
-                .push(marks.clone());
+    if let Some(positions) = function_enhancement_positions(declared, actual, marks) {
+        for (declared, actual, marks) in positions {
+            constrain(checker, formals, declared, actual, &marks, constraints);
         }
-        Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::DefinitelyNotNull(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner) => {
-            constrain(checker, formals, *inner, actual, marks, constraints);
-        }
-        Ty::Obj(class, declared_arguments) if !declared_arguments.is_empty() => {
+        return;
+    }
+    super::selected_result_publication::constrain_parameters(
+        formals,
+        declared,
+        actual,
+        marks,
+        constraints,
+        super::selected_result_publication::StarProjectionPolicy::Stop,
+        &mut |actual, marks, owner| {
             let actual = match actual.non_null() {
                 Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
                 other => other,
             };
-            let Some((view, view_marks)) = checker.supertype_view(actual, marks, class) else {
-                return;
-            };
-            for (index, (&declared, &actual)) in
-                declared_arguments.iter().zip(view.type_args()).enumerate()
-            {
-                constrain(
-                    checker,
-                    formals,
-                    declared,
-                    actual,
-                    view_marks.argument(index),
-                    constraints,
-                );
-            }
-        }
-        _ => {}
+            let (view, view_marks) = checker.supertype_view(actual, marks, owner)?;
+            let facts = (0..view.type_args().len())
+                .map(|index| view_marks.argument(index).clone())
+                .collect();
+            Some((view, facts))
+        },
+    );
+}
+
+/// Put a checked lambda result at the result position of its semantic function type. Function
+/// parameters have no result-derived marks; the layout follows the same parameter-then-result
+/// order used by Kotlin metadata.
+fn function_result_enhancement(function: Ty, result: &TypeEnhancement) -> TypeEnhancement {
+    let Ty::Fun(signature) = function.non_null() else {
+        return TypeEnhancement::NONE;
+    };
+    let mut arguments = vec![TypeEnhancement::NONE; signature.params.len()];
+    arguments.push(result.clone());
+    TypeEnhancement::new(false, arguments)
+}
+
+/// Align the enhancement positions of one semantic function argument with the function type a
+/// selected generic parameter declares. `Some` means the declared type was a function and owns the
+/// result, including an empty vector when the actual function shape cannot be correlated.
+fn function_enhancement_positions(
+    declared: Ty,
+    actual: Ty,
+    marks: &TypeEnhancement,
+) -> Option<Vec<(Ty, Ty, TypeEnhancement)>> {
+    let Ty::Fun(declared) = declared.non_null() else {
+        return None;
+    };
+    let Ty::Fun(actual) = actual.non_null() else {
+        return Some(Vec::new());
+    };
+    if declared.suspend != actual.suspend
+        || declared.context_count != actual.context_count
+        || declared.has_receiver != actual.has_receiver
+        || declared.params.len() != actual.params.len()
+    {
+        return Some(Vec::new());
+    }
+    let mut positions = declared
+        .params
+        .iter()
+        .copied()
+        .zip(actual.params.iter().copied())
+        .enumerate()
+        .map(|(index, (declared, actual))| (declared, actual, marks.argument(index).clone()))
+        .collect::<Vec<_>>();
+    positions.push((
+        declared.ret,
+        actual.ret,
+        marks.argument(declared.params.len()).clone(),
+    ));
+    Some(positions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn marked() -> TypeEnhancement {
+        TypeEnhancement::new(true, Vec::new())
+    }
+
+    #[test]
+    fn lambda_result_marks_occupy_only_the_function_result_position() {
+        let nested = TypeEnhancement::new(false, vec![marked()]);
+        let function = Ty::fun(
+            vec![Ty::Int],
+            Ty::obj_args("kotlin/collections/Set", &[Ty::String]),
+        );
+
+        assert_eq!(
+            function_result_enhancement(function, &nested),
+            TypeEnhancement::new(false, vec![TypeEnhancement::NONE, nested])
+        );
+    }
+
+    #[test]
+    fn generic_function_result_constraint_reads_the_terminal_value_marks() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let formal = Ty::ty_param("R", any);
+        let set = Ty::obj_args("kotlin/collections/Set", &[Ty::String]);
+        let nested = TypeEnhancement::new(false, vec![marked()]);
+        let marks = function_result_enhancement(Ty::fun(Vec::new(), set), &nested);
+
+        assert_eq!(
+            function_enhancement_positions(
+                Ty::fun(Vec::new(), formal),
+                Ty::fun(Vec::new(), set),
+                &marks
+            ),
+            Some(vec![(formal, set, nested)])
+        );
     }
 }
