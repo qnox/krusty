@@ -491,6 +491,11 @@ fn a_function_with_what_the_plugin_ir_does_not_carry_is_refused_where_it_is_writ
             "@Suppress",
             "an annotated type in `f`",
         ),
+        (
+            "fun f() { emptyList<@Suppress(\"x\") Int>() }\n",
+            "@Suppress",
+            "an annotated type in `f`",
+        ),
     ];
     let directory = temporary("refused-shapes");
     std::fs::create_dir_all(&directory).unwrap();
