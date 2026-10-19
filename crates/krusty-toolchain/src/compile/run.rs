@@ -1,7 +1,8 @@
 //! Carrying out a plan: each module's output directory cleared, krusty run with the module's
 //! arguments, then its resources copied, modules running together as soon as the modules they
 //! compile against are done (`schedule.rs`). krusty's output is captured per module and handed on
-//! as each module finishes, so one module's output stays together. The first module that fails
+//! whole, in plan order, so one module's output stays together and the order is the same however
+//! the modules' compilations race. The first module that fails
 //! stops new modules from starting. Both output directories are reconciled on every run, so a
 //! module whose last source or resources directory is gone keeps no output from an earlier run.
 
@@ -36,9 +37,10 @@ pub fn default_jobs() -> NonZeroUsize {
 }
 
 /// Run `plan` with the krusty binary `krusty`, up to `jobs` modules at once. `printed` sees what
-/// krusty printed for each module it ran, in the order the modules finish. The failures are those
-/// of the modules that failed, in the order they finished; once one fails no module starts, and
-/// the modules running then are waited for.
+/// krusty printed for each module it ran, in plan order: a module's output is handed on once it
+/// and every module planned before it that ran have finished, so the order does not depend on
+/// which finishes first. The failures are those of the modules that failed, in plan order; once one
+/// fails no module starts, and the modules running then are waited for.
 pub fn run(
     plan: &Plan,
     krusty: &Path,
@@ -46,26 +48,41 @@ pub fn run(
     mut printed: impl FnMut(&Step, &Printed),
 ) -> Result<(), Vec<RunFailure>> {
     let waits: Vec<Vec<usize>> = plan.steps.iter().map(|step| step.waits.clone()).collect();
-    let mut failures = Vec::new();
+    // Each step's output and result by plan index, once it has finished.
+    let mut results: Vec<Option<(Printed, Result<(), RunFailure>)>> =
+        plan.steps.iter().map(|_| None).collect();
+    // The first step whose output has not been handed on.
+    let mut next = 0;
     schedule(
         &waits,
         jobs,
-        |index| {
+        |index, stop| {
             let mut output = Printed::default();
             let result = run_step(&plan.steps[index], krusty, &mut output);
+            if result.is_err() {
+                stop.request();
+            }
             (output, result)
         },
-        |index, (output, result)| {
-            printed(&plan.steps[index], &output);
-            match result {
-                Ok(()) => true,
-                Err(failure) => {
-                    failures.push(failure);
-                    false
-                }
+        |index, done| {
+            results[index] = Some(done);
+            while let Some(Some((output, _))) = results.get(next) {
+                printed(&plan.steps[next], output);
+                next += 1;
             }
         },
     );
+    // What is left waited for steps that never started.
+    for (step, result) in plan.steps.iter().zip(&results).skip(next) {
+        if let Some((output, _)) = result {
+            printed(step, output);
+        }
+    }
+    let failures: Vec<RunFailure> = results
+        .into_iter()
+        .flatten()
+        .filter_map(|(_, result)| result.err())
+        .collect();
     if failures.is_empty() {
         Ok(())
     } else {

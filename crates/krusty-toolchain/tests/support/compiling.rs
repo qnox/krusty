@@ -14,7 +14,8 @@
 //! it appends `start <module>` and `end <module>` lines to it around its work. When
 //! `KRUSTY_RECORDER_SLEEP` is set, a module it does not fail prints `recorder: <module> begins` on
 //! stderr, sleeps that many seconds, prints `recorder: <module> ends` on stderr and
-//! `recorder: compiled <module>` on stdout.
+//! `recorder: compiled <module>` on stdout. The module `KRUSTY_RECORDER_FAIL_LATE` names instead
+//! prints `recorder: failing <module> late` on stderr after its sleep and exits with status 4.
 //!
 //! The toolchain compiles through the Build Tools API, whose implementation it loads from its
 //! shared cache by Maven coordinates. krusty's implementation (`tools/krusty-build-tools`) is
@@ -74,6 +75,11 @@ if [ -n \"${KRUSTY_RECORDER_SLEEP:-}\" ]; then
   echo \"recorder: $module begins\" >&2
   sleep \"$KRUSTY_RECORDER_SLEEP\"
   echo \"recorder: $module ends\" >&2
+  if [ \"$module\" = \"${KRUSTY_RECORDER_FAIL_LATE:-}\" ]; then
+    echo \"recorder: failing $module late\" >&2
+    event end
+    exit 4
+  fi
   echo \"recorder: compiled $module\"
 fi
 event end
@@ -142,6 +148,7 @@ pub fn environment(command: &mut Command, directory: &Path, krusty: &Path) {
         .env("KRUSTY_RECORD", directory.join(RECORD))
         .env_remove("KRUSTY_RECORDER_FAIL")
         .env_remove("KRUSTY_RECORDER_SLEEP")
+        .env_remove("KRUSTY_RECORDER_FAIL_LATE")
         .env_remove("KRUSTY_EVENTS")
         .env_remove("AMPER_SHARED_CACHE_DIR")
         .env_remove("M2_HOME");

@@ -141,10 +141,12 @@ directory (`src/main/resources` in the Maven-like layout, else `resources`) to `
 Modules run as the toolchain runs its task graph (`src/compile/schedule.rs`): a module starts as
 soon as the modules it compiles against have finished, at most as many at once as the host has
 available processors (the toolchain bounds its task executor the same way and has no option for
-it, so neither does krusty-toolchain). krusty's output is captured per module and printed when the
-module finishes, so each module's output stays together. Once a module fails no module starts; the
-running ones are waited for, each failure is reported, and the task exits with the first failing
-krusty's status. When several tasks name modules that do not exist, the last is reported, as the
+it, so neither does krusty-toolchain). krusty's output is captured per module and printed whole in plan
+order, as soon as the module and every module planned before it that ran have finished, so each
+module's output stays together and nothing printed depends on which compilation finishes first.
+Once a module fails no module starts, even while another's result is being handled; the running
+ones are waited for, each failure is reported in plan order, and the task exits with the status of
+the first failing krusty in plan order. When several tasks name modules that do not exist, the last is reported, as the
 toolchain reports it.
 
 Before compiling anything, krusty-toolchain refuses, at the setting and naming the module, every

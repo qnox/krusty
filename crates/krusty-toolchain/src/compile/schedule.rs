@@ -1,21 +1,37 @@
 //! Running a plan's steps as JetBrains' toolchain runs its task graph: a step starts as soon as
 //! every step it waits for has succeeded, at most `jobs` at a time, the plan's order deciding
-//! between steps that are ready together. Once a step fails no step starts; the running ones are
-//! waited for.
+//! between steps that are ready together. Once a step fails no step starts, even before its
+//! result arrives; the running ones are waited for.
 
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
+/// How a running step says it failed, so that no step starts after it, whenever its result
+/// arrives.
+pub(super) struct Stop(AtomicBool);
+
+impl Stop {
+    /// Start no more steps.
+    pub(super) fn request(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    fn requested(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 /// Run step `0..waits.len()` with `work`, each after the earlier steps `waits` names for it, on up
-/// to `jobs` threads. `finished` sees each step's result on the calling thread, in the order the
-/// steps finish, and says whether the step succeeded.
+/// to `jobs` threads. A step that fails says so through the [`Stop`] it is given before it
+/// returns. `finished` sees each step's result on the calling thread as soon as it arrives.
 pub(super) fn schedule<R: Send>(
     waits: &[Vec<usize>],
     jobs: NonZeroUsize,
-    work: impl Fn(usize) -> R + Sync,
-    mut finished: impl FnMut(usize, R) -> bool,
+    work: impl Fn(usize, &Stop) -> R + Sync,
+    mut finished: impl FnMut(usize, R),
 ) {
     let mut remaining: Vec<usize> = waits.iter().map(Vec::len).collect();
     let mut dependents = vec![Vec::new(); waits.len()];
@@ -28,16 +44,23 @@ pub(super) fn schedule<R: Send>(
         .filter(|&step| remaining[step] == 0)
         .collect();
     let mut running = 0;
-    let mut stopped = false;
+    let stop = Stop(AtomicBool::new(false));
     let (sender, receiver) = mpsc::channel();
     let work = &work;
+    let stop = &stop;
     std::thread::scope(|scope| loop {
-        while !stopped && running < jobs.get() {
+        // The stop is read as each step starts, so a failure recorded while results were being
+        // handled starts nothing, though its result has not arrived yet.
+        while running < jobs.get() && !stop.requested() {
             let Some(step) = ready.pop_first() else { break };
             let sender = sender.clone();
             scope.spawn(move || {
-                // A panic is carried back so the caller does not wait for a result never sent.
-                let result = panic::catch_unwind(AssertUnwindSafe(|| work(step)));
+                // A panic stops the plan and is carried back, so the caller does not wait for a
+                // result never sent.
+                let result = panic::catch_unwind(AssertUnwindSafe(|| work(step, stop)));
+                if result.is_err() {
+                    stop.request();
+                }
                 // The receiver lives until every spawned step has reported.
                 let _ = sender.send((step, result));
             });
@@ -51,15 +74,13 @@ pub(super) fn schedule<R: Send>(
             .expect("the scheduler holds a sender while steps run");
         running -= 1;
         let result = result.unwrap_or_else(|payload| panic::resume_unwind(payload));
-        if finished(step, result) {
-            for &dependent in &dependents[step] {
-                remaining[dependent] -= 1;
-                if remaining[dependent] == 0 {
-                    ready.insert(dependent);
-                }
+        finished(step, result);
+        // A failed step's dependents are released too: once a stop is requested nothing starts.
+        for &dependent in &dependents[step] {
+            remaining[dependent] -= 1;
+            if remaining[dependent] == 0 {
+                ready.insert(dependent);
             }
-        } else {
-            stopped = true;
         }
     });
 }
@@ -69,7 +90,7 @@ mod tests {
     use super::schedule;
     use std::num::NonZeroUsize;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Condvar, Mutex};
+    use std::sync::{mpsc, Condvar, Mutex};
     use std::time::Duration;
 
     /// 0 is the base; 1 and 2 wait for it; 3 waits for both.
@@ -81,26 +102,39 @@ mod tests {
         NonZeroUsize::new(count).unwrap()
     }
 
-    /// The steps' starts and ends, as `+step` and `-step`, and the order `finished` saw them in.
+    /// The steps' starts and ends, as `+step` and `-step`, and the order `finished` saw them in;
+    /// a step fails when `work` returns false.
     fn events(
         waits: &[Vec<usize>],
         jobs: NonZeroUsize,
         work: impl Fn(usize) -> bool + Sync,
+    ) -> (Vec<String>, Vec<usize>) {
+        events_seen(waits, jobs, work, |_| {})
+    }
+
+    /// [`events`], with `seen` called as each result arrives.
+    fn events_seen(
+        waits: &[Vec<usize>],
+        jobs: NonZeroUsize,
+        work: impl Fn(usize) -> bool + Sync,
+        mut seen: impl FnMut(usize),
     ) -> (Vec<String>, Vec<usize>) {
         let events = Mutex::new(Vec::new());
         let mut finished = Vec::new();
         schedule(
             waits,
             jobs,
-            |step| {
+            |step, stop| {
                 events.lock().unwrap().push(format!("+{step}"));
                 let succeeded = work(step);
                 events.lock().unwrap().push(format!("-{step}"));
-                succeeded
+                if !succeeded {
+                    stop.request();
+                }
             },
-            |step, succeeded| {
+            |step, ()| {
                 finished.push(step);
-                succeeded
+                seen(step);
             },
         );
         (events.into_inner().unwrap(), finished)
@@ -218,5 +252,45 @@ mod tests {
                 vec![0, 1, 2]
             )
         );
+    }
+
+    #[test]
+    fn a_failure_not_yet_received_starts_nothing() {
+        // 0 and 1 run with two jobs while 2 waits for one. 1 fails while 0's success is being
+        // handled, before 1's result arrives: 2 must not take 0's job.
+        let (handling_zero, at_one) = mpsc::channel();
+        let (one_failed, failure) = mpsc::channel();
+        let at_one = Mutex::new(at_one);
+        let one_failed = Mutex::new(one_failed);
+        let started = Mutex::new(Vec::new());
+        let mut finished = Vec::new();
+        schedule(
+            &[Vec::new(), Vec::new(), Vec::new()],
+            jobs(2),
+            |step, stop| {
+                started.lock().unwrap().push(step);
+                if step == 1 {
+                    at_one
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(30))
+                        .expect("0's result is handled");
+                    stop.request();
+                    one_failed.lock().unwrap().send(()).unwrap();
+                }
+            },
+            |step, ()| {
+                finished.push(step);
+                if step == 0 {
+                    handling_zero.send(()).unwrap();
+                    failure
+                        .recv_timeout(Duration::from_secs(30))
+                        .expect("1 fails");
+                }
+            },
+        );
+        let mut started = started.into_inner().unwrap();
+        started.sort();
+        assert_eq!((started, finished), (vec![0, 1], vec![0, 1]));
     }
 }

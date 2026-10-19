@@ -150,7 +150,7 @@ enum Failure {
     Model,
     /// A mistake by the user that is not a problem in a file, such as an unknown module name.
     User(String),
-    /// Modules failed, krusty on some of them: each failure, in the order the modules finished.
+    /// Modules failed, krusty on some of them: each failure, in plan order.
     Tasks(Vec<compile::RunFailure>),
 }
 

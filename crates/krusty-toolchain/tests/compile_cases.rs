@@ -769,13 +769,8 @@ fn sleeper(module: &str) -> String {
 fn independent_modules_compile_together_after_what_they_compile_against() {
     compiling::recorder();
     let (code, stdout, stderr, events) = timed_run("diamond", &[":app:compileJvm"], |_| {});
-    // Each module's output stays together, in the order the modules finish.
-    let middle = if stdout.find("compiled right") < stdout.find("compiled left") {
-        ["right", "left"]
-    } else {
-        ["left", "right"]
-    };
-    let order = ["base", middle[0], middle[1], "app"];
+    // Each module's output stays together, in plan order whichever finishes first.
+    let order = ["base", "left", "right", "app"];
     assert_eq!(
         (code, stdout, stderr),
         (
@@ -858,16 +853,77 @@ fn a_failure_starts_no_module_and_waits_for_the_running_ones() {
     }
 }
 
+/// Two sibling modules fail: `left`, planned first, slowly with status 4, and `right` at once with
+/// status 3. What is printed, and the status, follow the plan, not which fails first.
+#[test]
+fn concurrent_failures_are_reported_in_plan_order() {
+    compiling::recorder();
+    for attempt in 0..4 {
+        let ran = timed_run(
+            &format!("siblings-{attempt}"),
+            &[":app:compileJvm"],
+            |command| {
+                command
+                    .env("KRUSTY_RECORDER_FAIL", "right")
+                    .env("KRUSTY_RECORDER_FAIL_LATE", "left");
+            },
+        );
+        let base = "recorder: compiled base\n".to_string();
+        let expected = if parallel() {
+            (
+                4,
+                base,
+                format!(
+                    "{}{}recorder: failing left late\nrecorder: failing right\n\n\
+                     ERROR: Task ':left:compileJvm' failed: krusty exited with status 4\n\n\
+                     ERROR: Task ':right:compileJvm' failed: krusty exited with status 3\n",
+                    sleeper("base"),
+                    sleeper("left")
+                ),
+                lines(&[
+                    "start base",
+                    "end base",
+                    "start left",
+                    "start right",
+                    "end right",
+                    "end left",
+                ]),
+            )
+        } else {
+            (
+                4,
+                base,
+                format!(
+                    "{}{}recorder: failing left late\n\n\
+                     ERROR: Task ':left:compileJvm' failed: krusty exited with status 4\n",
+                    sleeper("base"),
+                    sleeper("left")
+                ),
+                lines(&["start base", "end base", "start left", "end left"]),
+            )
+        };
+        let (code, stdout, stderr, events) = ran;
+        // `left` and `right` start together; `right` ends first.
+        let events = if parallel() {
+            settled(events, &[(2, 4)])
+        } else {
+            events
+        };
+        assert_eq!(
+            (code, stdout, stderr, events),
+            expected,
+            "attempt {attempt}"
+        );
+    }
+}
+
 #[test]
 fn several_tasks_compile_the_union_of_what_they_need_once() {
     compiling::recorder();
     let case = diamond();
-    let ran = krusty_toolchain(
-        "union",
-        &case,
-        &[":right:compileJvm", ":left:compileJvm", ":right:compileJvm"],
-        |_| {},
-    );
+    // A target named twice, and a dependency both targets share.
+    let tasks = [":right:compileJvm", ":left:compileJvm", ":right:compileJvm"];
+    let ran = krusty_toolchain("union", &case, &tasks, |_| {});
     let mut compiled = modules(&ran.record);
     // `left` and `right` compile together, in either order, after `base`.
     compiled[1..].sort();
@@ -884,5 +940,22 @@ fn several_tasks_compile_the_union_of_what_they_need_once() {
             String::new(),
             lines(&["base", "left", "right"])
         )
+    );
+    // The toolchain, given the same tasks, compiles the same modules with the same arguments.
+    let mut arguments = vec!["task"];
+    arguments.extend(tasks);
+    let toolchain = kotlin::kotlin(&Invocation {
+        case: "diamond-union",
+        files: &case.project,
+        args: &arguments,
+        repository: Some(&case.repository),
+        compiler: Some(&compiling::RecordingKrusty),
+    });
+    let recorded = placed(&toolchain.root, &toolchain.stdout);
+    assert_eq!(
+        (toolchain.code, by_module(&recorded)),
+        (0, by_module(&ran.record)),
+        "the toolchain printed\n{}",
+        placed(&toolchain.root, &toolchain.stderr)
     );
 }
