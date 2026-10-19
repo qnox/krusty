@@ -348,6 +348,17 @@ fn independent_capture_holders(
         if ir.foreign_inline_templates.contains(&function) {
             continue;
         }
+        // Few bodies allocate a holder, and finding a body's owner is the costly part.
+        let allocations: Vec<_> = crate::ir::value_namespace_expressions(ir, body)
+            .into_iter()
+            .filter(|&expression| {
+                matches!(ir.expr(expression), crate::ir::IrExpr::RefNew { .. })
+                    && ir.inline_copy_provenance(expression).is_none()
+            })
+            .collect();
+        if allocations.is_empty() {
+            continue;
+        }
         let owner = match crate::jvm::ir_emit::lambda_class_names::class_realized_function_location(
             ir,
             function,
@@ -367,13 +378,10 @@ fn independent_capture_holders(
                 owner
             }
         };
-        for expression in crate::ir::value_namespace_expressions(ir, body) {
+        for expression in allocations {
             let crate::ir::IrExpr::RefNew { elem, .. } = ir.expr(expression) else {
                 continue;
             };
-            if ir.inline_copy_provenance(expression).is_some() {
-                continue;
-            }
             let holder = crate::jvm::shared_captures::holder_ty(elem)
                 .obj_internal()
                 .expect("a shared-capture holder has an object identity");
