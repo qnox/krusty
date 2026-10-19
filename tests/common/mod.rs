@@ -2985,8 +2985,8 @@ pub type JavacOutput = (PathBuf, Vec<(String, Vec<u8>)>);
 
 /// The whole Java-interop e2e idiom in one strict call: javac-compile `java_sources` (pooled
 /// in-process javac), krusty-compile Kotlin `use_src` (file stem `Use`, declaring `fun box()`)
-/// against that classpath in-process, then run a Java driver invoking `UseKt.box()` in the pooled
-/// JavaRunner and return its trimmed stdout. Every step panics with the failing stage — a
+/// in-process against that classpath and the stdlib it later runs with, then run a Java driver
+/// invoking `UseKt.box()` in the pooled JavaRunner and return its trimmed stdout. Every step panics with the failing stage — a
 /// misconfigured environment or a krusty gap fails the test, it never skips.
 #[allow(dead_code)]
 pub fn java_interop_box(tag: &str, java_sources: &[(&str, &str)], use_src: &str) -> String {
@@ -2999,16 +2999,9 @@ pub fn java_interop_box(tag: &str, java_sources: &[(&str, &str)], use_src: &str)
     let (cp, _) = javac_compile(&sources, &[])
         .unwrap_or_else(|| panic!("{tag}: pooled javac failed on the Java fixture"));
     let kr = scratch_dir().unwrap_or_else(|| panic!("{tag}: scratch filesystem unavailable"));
-    compile_to_dir(
-        use_src,
-        "Use",
-        std::slice::from_ref(&cp),
-        Some(jdk.as_path()),
-        &kr,
-    )
-    .unwrap_or_else(|| {
-        let diagnostics =
-            front_end_diagnostics(use_src, std::slice::from_ref(&cp), Some(jdk.as_path()));
+    let classpath = [cp.clone(), stdlib.clone()];
+    compile_to_dir(use_src, "Use", &classpath, Some(jdk.as_path()), &kr).unwrap_or_else(|| {
+        let diagnostics = front_end_diagnostics(use_src, &classpath, Some(jdk.as_path()));
         panic!("{tag}: krusty failed against the Java fixture; diagnostics: {diagnostics:?}")
     });
     let main =
