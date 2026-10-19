@@ -468,16 +468,32 @@ fn only_fragment_configuration_source_paths_are_materialized() {
     );
 
     let near_matches = format!(
-        "error: passed common:{recorded}, but fragment `other` of source file {recorded} is not specified in -Xfragments\nerror: passed common:{recorded}, but fragment `common` of source file {recorded}\nerror: passed common:{recorded}, but fragment `common` of source file {recorded} is not specified in -Xfragments after all\n"
+        "error: passed common:{recorded}, but fragment `other` of source file {recorded} is not specified in -Xfragments\nerror: passed common:{recorded}, but fragment `common` of source file /old/root/G.kt is not specified in -Xfragments\nerror: passed common:{recorded}, but fragment `common` of source file {recorded}\nerror: passed common:{recorded}, but fragment `common` of source file {recorded} is not specified in -Xfragments after all\n"
     );
     assert_eq!(
         materialize_diagnostic_sources(
             &near_matches,
             std::slice::from_ref(&current_free),
-            &[("common".to_string(), current_fragment)],
+            &[("common".to_string(), current_fragment.clone())],
         ),
         near_matches,
-        "a diagnostic prefix, mismatched fragment, or non-terminal suffix is not rewritten"
+        "a mismatched fragment/source, diagnostic prefix, or non-terminal suffix is not rewritten"
+    );
+
+    let delimiter_source = "/old/name, but fragment `common` of source file nested/F.kt";
+    let delimiter_diagnostic = format!(
+        "error: passed common:{delimiter_source}, but fragment `common` of source file {delimiter_source} is not specified in -Xfragments\n"
+    );
+    assert_eq!(
+        materialize_diagnostic_sources(
+            &delimiter_diagnostic,
+            &[],
+            &[("common".to_string(), current_fragment.clone())],
+        ),
+        format!(
+            "error: passed common:{current_fragment}, but fragment `common` of source file {current_fragment} is not specified in -Xfragments\n"
+        ),
+        "the unique complete sentence wins over delimiter text inside a source path"
     );
 }
 

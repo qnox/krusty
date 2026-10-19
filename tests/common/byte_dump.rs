@@ -1496,30 +1496,43 @@ impl DiagnosticSourceRange<'_> {
 
 fn diagnostic_source_ranges(line: &str) -> Vec<DiagnosticSourceRange<'_>> {
     const PASSED: &str = "error: passed ";
-    const FRAGMENT: &str = ", but fragment `";
-    const SOURCE_FILE: &str = "` of source file ";
     const NOT_SPECIFIED: &str = " is not specified in -Xfragments";
     const SOURCE: &str = "error: source '";
     const NO_MODULE: &str = "' does not belong to any module";
 
     let mut ranges = Vec::new();
     if let Some(rest) = line.strip_prefix(PASSED) {
-        if let Some((argument, reported)) = rest.split_once(FRAGMENT) {
-            if let Some((fragment, source)) = argument.split_once(':') {
-                if let Some(reported_source) = reported
-                    .strip_prefix(fragment)
-                    .and_then(|rest| rest.strip_prefix(SOURCE_FILE))
-                    .and_then(|rest| rest.strip_suffix(NOT_SPECIFIED))
-                {
-                    let argument_start = PASSED.len() + fragment.len() + 1;
+        if let Some((fragment, after_fragment)) = rest.split_once(':') {
+            let middle = format!(", but fragment `{fragment}` of source file ");
+            let mut matched = None;
+            let mut ambiguous = false;
+            for (middle_start, _) in after_fragment.match_indices(&middle) {
+                let source = &after_fragment[..middle_start];
+                let Some(reported_source) =
+                    after_fragment[middle_start + middle.len()..].strip_suffix(NOT_SPECIFIED)
+                else {
+                    continue;
+                };
+                if source != reported_source {
+                    continue;
+                }
+                if matched.is_some() {
+                    ambiguous = true;
+                    break;
+                }
+                matched = Some((source, middle_start));
+            }
+            if !ambiguous {
+                if let Some((source, middle_start)) = matched {
+                    let source_start = PASSED.len() + fragment.len() + 1;
                     ranges.push(DiagnosticSourceRange::Fragment {
                         fragment,
-                        range: argument_start..argument_start + source.len(),
+                        range: source_start..source_start + source.len(),
                     });
-                    let reported_start = line.len() - NOT_SPECIFIED.len() - reported_source.len();
+                    let reported_start = source_start + middle_start + middle.len();
                     ranges.push(DiagnosticSourceRange::Fragment {
                         fragment,
-                        range: reported_start..reported_start + reported_source.len(),
+                        range: reported_start..reported_start + source.len(),
                     });
                 }
             }
