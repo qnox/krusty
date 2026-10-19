@@ -6,7 +6,11 @@
 //! inlines that way; every other call is expanded in IR, for a named reason.
 
 use super::super::BodyLowering;
-use crate::fir::{CallableId, DeclarationFlags, DeclarationId};
+use crate::fir::{
+    CallableId, DeclarationFlags, DeclarationId, FirBody, FirCapture, FirCaptureSource,
+    LocalValueId,
+};
+use crate::fx_hash::HashSet;
 use crate::ir::{ExprId, FunId, IrExpr, SameModuleInlining};
 use crate::types::{InlineParameterModifier, Ty, Visibility};
 
@@ -27,11 +31,12 @@ pub(in super::super) enum InlineCallRoute {
 pub(in super::super) enum ExpansionReason {
     /// The backend expands every same-module inline call in IR.
     BackendExpandsInIr,
-    /// The call is in an inline function's body (or in a callable nested in one), which is itself
-    /// a template some caller may expand.
-    InlineCaller,
     /// The call is in a default-argument expression.
     DefaultArgument,
+    /// The call is in an inline function and a literal lambda argument reads one of that
+    /// function's inline parameters. A caller that expands the function's template splices its
+    /// own literal for that parameter, which reaches the literal only through an expanded body.
+    InlineParameterInLiteral,
     /// The call is in a suspend function or a suspend lambda, or in a lambda written in one,
     /// whose state machine is built around expanded bodies.
     SuspendCaller,
@@ -108,6 +113,15 @@ impl BodyLowering<'_> {
         {
             return Some(ExpansionReason::NonLocalJumpInLambda);
         }
+        if inline_lambdas.iter().flatten().any(|&lambda| {
+            matches!(
+                self.ir.expr(lambda),
+                IrExpr::Lambda { impl_fn, .. }
+                    if self.callables_reading_inline_parameters.contains(impl_fn)
+            )
+        }) {
+            return Some(ExpansionReason::InlineParameterInLiteral);
+        }
         let Some(callable) = self.index.callable(target) else {
             return Some(ExpansionReason::NoTemplate);
         };
@@ -170,9 +184,6 @@ impl BodyLowering<'_> {
 
     /// What about the body being lowered keeps its same-module inline calls expanded in IR.
     fn caller_exclusion(&self) -> Option<ExpansionReason> {
-        if self.inline_declaration.is_some() {
-            return Some(ExpansionReason::InlineCaller);
-        }
         if self.in_default_argument {
             return Some(ExpansionReason::DefaultArgument);
         }
@@ -264,5 +275,58 @@ impl BodyLowering<'_> {
             return false;
         };
         self.ir.record_lambda_exit(body)
+    }
+}
+
+/// The values of a body that hold an inline parameter of the inline function it is written in:
+/// a splice-mode parameter of that function's own body, and the captures through which a lambda
+/// written in it reads one, keyed as the lambda's checked captures name them.
+#[derive(Clone, Debug, Default)]
+pub(in super::super) struct InlineParameterValues {
+    own: HashSet<LocalValueId>,
+    captured: HashSet<(u32, LocalValueId)>,
+}
+
+impl InlineParameterValues {
+    /// The splice-mode value parameters of an inline function's `body`, as checking bound them.
+    pub(in super::super) fn of_inline_function(body: &FirBody) -> Self {
+        Self {
+            own: body.spliced_inline_parameters().iter().copied().collect(),
+            captured: HashSet::default(),
+        }
+    }
+
+    /// Whether `capture`, of a callable written in this body, reads one of these values.
+    pub(in super::super) fn holds(&self, capture: &FirCapture) -> bool {
+        let FirCaptureSource::Value(value) = capture.source else {
+            return false;
+        };
+        match capture.enclosing_depth.checked_sub(1) {
+            None => self.own.contains(&value),
+            Some(depth) => self.captured.contains(&(depth, value)),
+        }
+    }
+
+    /// The values of `body`, a callable written in this body, that hold an inline parameter.
+    pub(in super::super) fn nested(&self, body: &FirBody) -> Self {
+        let captured = body
+            .captures()
+            .iter()
+            .filter(|capture| self.holds(capture))
+            .filter_map(|capture| {
+                let FirCaptureSource::Value(value) = capture.source else {
+                    return None;
+                };
+                Some((capture.enclosing_depth, value))
+            })
+            .collect();
+        Self {
+            own: HashSet::default(),
+            captured,
+        }
+    }
+
+    pub(in super::super) fn is_empty(&self) -> bool {
+        self.own.is_empty() && self.captured.is_empty()
     }
 }

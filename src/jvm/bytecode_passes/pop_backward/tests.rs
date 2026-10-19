@@ -1,4 +1,5 @@
 use super::*;
+use crate::jvm::bytecode_passes::analysis::analyze_with;
 use crate::jvm::method_node::LabelId;
 
 const ILOAD: u8 = 0x15;

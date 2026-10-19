@@ -18,7 +18,11 @@ pub(super) fn parse_field_gsig(
     if !matches!(signature.as_bytes().first(), Some(b'L' | b'T' | b'[')) {
         return None;
     }
-    let parsed = parse_gsig_inner(signature, true)?;
+    let mut parsed = parse_gsig_inner(signature, true)?;
+    parsed.ty = crate::types::ty_with_param_bounds(
+        parsed.ty,
+        &class_formal_bounds(declaring_class_signature),
+    );
     let erasure = field_type_parameter_erasure(signature, declaring_class_signature)
         .or(parsed.erasure.as_deref().map(str::to_string));
     if !parsed.rest.is_empty()
@@ -162,7 +166,12 @@ pub(super) fn mark_receiver_fun_params(gsig: &mut GenericSig, recv_fun: &[bool],
 pub(in crate::jvm) type ParsedClassGenericSignature = (Vec<String>, Vec<Vec<Ty>>, Vec<Ty>);
 
 pub(in crate::jvm) fn parse_class_gsig(sig: &str) -> Option<ParsedClassGenericSignature> {
-    let (formals, formal_bounds, mut s) = parse_formals(sig);
+    let (formals, mut formal_bounds, mut s) = parse_formals(sig);
+    hydrate_formal_bounds(
+        &formals,
+        &mut formal_bounds,
+        &crate::fx_hash::HashMap::default(),
+    );
     let mut supers = Vec::new();
     while !s.is_empty() {
         let (g, rest) = parse_gsig(s)?;
@@ -170,6 +179,57 @@ pub(in crate::jvm) fn parse_class_gsig(sig: &str) -> Option<ParsedClassGenericSi
         s = rest;
     }
     Some((formals, formal_bounds, supers))
+}
+
+/// The bound each occurrence of a formal carries: its first declared bound, or Java's implicit
+/// `Any!`. `enclosing` holds the declaring class's formals; a formal declared here shadows one of the
+/// same name there.
+pub(super) fn formal_inline_bounds(
+    formals: &[String],
+    formal_bounds: &[Vec<Ty>],
+    enclosing: &crate::fx_hash::HashMap<String, Ty>,
+) -> crate::fx_hash::HashMap<String, Ty> {
+    let mut inline_bounds = enclosing.clone();
+    inline_bounds.extend(formals.iter().zip(formal_bounds).map(|(formal, bounds)| {
+        (
+            formal.clone(),
+            bounds
+                .first()
+                .copied()
+                .unwrap_or_else(|| Ty::platform_nullable(Ty::obj("kotlin/Any"))),
+        )
+    }));
+    inline_bounds
+}
+
+/// Hydrate each declared bound through the complete chain of formals it names, the declaring
+/// class's (`enclosing`) included, and return the bound each occurrence of a formal carries. In
+/// `<A extends CharSequence, B extends A, C extends B>` a `C` occurrence is bounded by
+/// `B(A(CharSequence!))`, not by a `B` whose `A` still has the parser's `Any` placeholder. A cycle
+/// through a bound's own arguments (`T extends Comparable<T>`) keeps its first repeated occurrence.
+pub(super) fn hydrate_formal_bounds(
+    formals: &[String],
+    formal_bounds: &mut [Vec<Ty>],
+    enclosing: &crate::fx_hash::HashMap<String, Ty>,
+) -> crate::fx_hash::HashMap<String, Ty> {
+    let declared = formal_inline_bounds(formals, formal_bounds, enclosing);
+    for bound in formal_bounds.iter_mut().flatten() {
+        *bound = crate::types::ty_with_transitive_param_bounds(*bound, &declared);
+    }
+    formal_inline_bounds(formals, formal_bounds, enclosing)
+}
+
+/// The hydrated bound of each formal of a class generic signature. A Java member's type variables
+/// that the member does not declare itself are these formals: `class Box<T extends CharSequence>`
+/// makes `T get()` return a `T` bounded by `CharSequence!`, not by the parser's `Any` placeholder.
+pub(super) fn class_formal_bounds(
+    class_signature: Option<&str>,
+) -> crate::fx_hash::HashMap<String, Ty> {
+    let none = crate::fx_hash::HashMap::default();
+    let Some((formals, formal_bounds, _)) = class_signature.and_then(parse_class_gsig) else {
+        return none;
+    };
+    formal_inline_bounds(&formals, &formal_bounds, &none)
 }
 
 /// The inference signature of a JVM constructor.
@@ -252,17 +312,19 @@ pub(super) fn constructor_inference_signature(
 }
 
 impl JvmLibraries {
-    /// Publish a Java method's `Signature` attribute: parameter and return nullability, then the
-    /// constructor's class type parameters when `constructor` is set. The caller decides
-    /// `<init>` at this provider boundary.
+    /// Publish a Java method's `Signature` attribute: the declaring class's formal bounds
+    /// (`class_bounds`), parameter and return nullability, then the constructor's class type
+    /// parameters when `constructor` is set. The caller decides `<init>` at this provider boundary.
     pub(super) fn publish_java_member_generic_signature(
         &self,
         signature: Option<&str>,
+        class_bounds: &crate::fx_hash::HashMap<String, Ty>,
         parameter_nullability: &[Option<JavaNullability>],
         return_nullability: Option<JavaNullability>,
         constructor: Option<(Option<&str>, TypeName, &str)>,
     ) -> Option<GenericSig> {
-        let mut generic = signature.and_then(parse_method_gsig)?;
+        let mut generic =
+            signature.and_then(|signature| parse_member_method_gsig(signature, class_bounds))?;
         // A JVM generic signature still distinguishes a boxed Java reference from a Kotlin
         // primitive at this point (`java.lang.Integer` versus `Int`). Apply Java's type-use
         // flexibility while that declaration fact is available. Semanticizing a `FunctionN`
@@ -288,6 +350,80 @@ impl JvmLibraries {
             ));
         }
         Some(generic)
+    }
+}
+
+#[cfg(test)]
+mod class_formal_bound_tests {
+    use super::*;
+
+    const BOX: &str = "<T::Ljava/lang/CharSequence;>Ljava/lang/Object;";
+
+    fn char_sequence() -> Ty {
+        Ty::platform_nullable(Ty::obj("kotlin/CharSequence"))
+    }
+
+    #[test]
+    fn a_class_formal_occurrence_carries_the_declared_bound() {
+        let bounds = class_formal_bounds(Some(BOX));
+        let t = Ty::ty_param("T", char_sequence());
+        let method =
+            parse_member_method_gsig("(TT;)Ljava/util/List<TT;>;", &bounds).expect("member");
+
+        assert_eq!(method.params, vec![t]);
+        assert_eq!(method.ret.type_args(), [t]);
+        assert_eq!(
+            parse_member_method_gsig("()TT;", &bounds)
+                .expect("member")
+                .ret,
+            t
+        );
+        assert_eq!(
+            parse_field_gsig("TT;", "Ljava/lang/CharSequence;", Some(BOX)),
+            Some((t, true))
+        );
+    }
+
+    #[test]
+    fn a_method_formal_bounded_by_a_class_formal_carries_its_declared_bound() {
+        let method = parse_member_method_gsig("<U:TT;>()TU;", &class_formal_bounds(Some(BOX)))
+            .expect("member");
+        let t = Ty::platform_nullable(Ty::ty_param("T", char_sequence()));
+
+        assert_eq!(method.formal_bounds, vec![vec![t]]);
+        assert_eq!(method.ret, Ty::ty_param("U", t));
+    }
+
+    #[test]
+    fn a_chained_class_formal_carries_the_complete_declared_chain() {
+        let bounds = class_formal_bounds(Some(
+            "<A::Ljava/lang/CharSequence;B:TA;C:TB;>Ljava/lang/Object;",
+        ));
+        let a = Ty::ty_param("A", char_sequence());
+        let b = Ty::ty_param("B", Ty::platform_nullable(a));
+        let c = Ty::ty_param("C", Ty::platform_nullable(b));
+
+        assert_eq!(
+            parse_member_method_gsig("()TC;", &bounds)
+                .expect("member")
+                .ret,
+            c
+        );
+        let method = parse_member_method_gsig("<D:TC;>()TD;", &bounds).expect("member");
+        assert_eq!(method.formal_bounds, vec![vec![Ty::platform_nullable(c)]]);
+    }
+
+    #[test]
+    fn a_method_formal_shadows_the_class_formal_of_the_same_name() {
+        let method = parse_member_method_gsig(
+            "<T:Ljava/lang/Object;>(TT;)TT;",
+            &class_formal_bounds(Some(BOX)),
+        )
+        .expect("member");
+        let own = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
+
+        assert_eq!(method.params, vec![own]);
+        assert_eq!(method.ret, own);
     }
 }
 
