@@ -37,9 +37,14 @@ impl DependencyInlineTemplates for KlibInlineTemplates {
         let provider = |identity: &crate::libraries::KlibDependencyCallable| {
             self.platform.external_callable_by_dependency(identity)
         };
+        let source: &dyn crate::symbol_source::SymbolSource = self.platform.as_ref();
+        let properties = |identity| source.external_property(identity);
+        let types = crate::symbol_resolver::SourceOracle(source);
         let callees = TemplateCallees {
             declarations: bodies.bodies(),
             provider: &provider,
+            properties: &properties,
+            types: &types,
         };
         let Some(template) =
             lower_inline_template(ir, &realization, bodies.inline_bodies(), callees)

@@ -17193,6 +17193,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `native_a_declined_required_stdlib_template_rejects_the_caller` (`repeat`, whose template
   declines).
 
+- **A KLIB template lowers the forms kotlinc's prepared copy introduces.** A constructor call
+  constructs by the provider identity of the exact serialized constructor, with the provider's
+  parameter types and omitted arguments left to the constructor's defaults; a generic constructor
+  declines. A call of a generic non-member function binds the provider's formals to the serialized
+  type arguments and records each as a substitution of the external callable's type parameter, so
+  the call is checked exactly as a source call with explicit type arguments. An argument whose
+  type is a proper subtype of the parameter type (by the calling compilation's subtyping over its
+  providers, never by names), or the non-null form of a nullable parameter type, is passed as is;
+  any other mismatch is an implicit conversion and declines. `CHECK_NOT_NULL` is the source `!!`.
+  A call of a non-generic property's getter or setter is the source read or write of the
+  property: the provider's property identity for the exact serialized accessor, read or written
+  with the accessor's dispatch receiver, context and extension arguments; whether the accessor is
+  the setter comes from the provider's property realization, never from the accessor's name. Each
+  KLIB accessor's realization names its property, as the published accessor does.
+  The prepared copy's own blocks lower to their source meaning: an `IR_TEMPORARY_VARIABLE` whose
+  initializer reads an immutable value (a constant, a parameter, or another immutable local) is
+  that value, any other one is an unnamed immutable local; an inline-arguments container is a
+  block whose value is its last expression; and an already inlined function's returnable block is
+  a block whose value is its tail `return`, while one that returns before its end declines. A
+  source file whose must-inline call is rejected lowers nothing, so its checked parameter defaults
+  are dropped with it. Tests: `klib_lowering::tests::inline_templates::*` (among them
+  `a_dependency_constructor_call_constructs_by_the_provider_identity` and
+  `a_dependency_property_read_reads_the_provider_property`), `klib_lowering::tests::body_forms::*`.
+
 - **A KLIB `when` keeps its source form.** A `when` with an `else` (a final branch whose condition
   is the constant `true`) of origin `WHEN` lowers to one flat `when` recorded as exhaustive at its
   type; one of origin `IF` is an `if`-`else if` chain and lowers to nested two-branch `when`s, each

@@ -237,13 +237,9 @@ pub(super) fn classifier_name(
 pub(super) fn member_owner(
     member: &KlibPublicIdSignature,
 ) -> Result<TypeName, KlibBodyDeclineReason> {
-    let (_, class) = member
-        .declaration()
-        .segments()
-        .split_last()
-        .ok_or(KlibBodyDeclineReason::UnsupportedType(
-            "a member without a declaration path",
-        ))?;
+    let (_, class) = member.declaration().segments().split_last().ok_or(
+        KlibBodyDeclineReason::UnsupportedType("a member without a declaration path"),
+    )?;
     declaration_name(member.package().segments(), class)
 }
 

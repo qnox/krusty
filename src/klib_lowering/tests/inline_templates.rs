@@ -30,9 +30,14 @@ fn template(
     let provider = |identity: &crate::libraries::KlibDependencyCallable| {
         libraries.external_callable_by_dependency(identity)
     };
+    let properties =
+        |identity| crate::symbol_source::SymbolSource::external_property(libraries, identity);
+    let types = crate::symbol_resolver::SourceOracle(libraries);
     let callees = TemplateCallees {
         declarations: libraries.declaration_bodies(),
         provider: &provider,
+        properties: &properties,
+        types: &types,
     };
     lower_inline_template(ir, selected, libraries.inline_declaration_bodies(), callees)
         .expect("a KLIB function")
@@ -189,4 +194,127 @@ fn a_context_function_value_is_invoked_with_its_context_arguments() {
             .count();
         assert_eq!(invocations, 1, "{}", render(&ir, body));
     }
+}
+
+#[test]
+fn a_dependency_constructor_call_constructs_by_the_provider_identity() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let selected = kotlin_function(&libraries, "error");
+    let mut ir = IrFile::default();
+    let template = template(&mut ir, &libraries, &selected)
+        .unwrap_or_else(|decline| panic!("`error`: {decline}"));
+    let function = &ir.functions[template.function as usize];
+    let construction = ir
+        .exprs
+        .iter()
+        .find_map(|expression| match expression {
+            IrExpr::New {
+                internal,
+                args,
+                ctor_params,
+                external_target: Some(target),
+                defaults,
+                ..
+            } => Some((
+                *internal,
+                args.len(),
+                ctor_params.clone(),
+                *target,
+                defaults.clone(),
+            )),
+            _ => None,
+        })
+        .expect("`error` constructs its exception");
+    let (internal, supplied, params, target, defaults) = construction;
+    assert_eq!(internal, type_name("kotlin/IllegalStateException"));
+    assert_eq!(supplied, 1);
+    assert_eq!(params, Some(vec![Ty::nullable(Ty::String)]));
+    assert!(defaults.is_empty());
+    let constructor = libraries
+        .external_callable(target)
+        .expect("the provider realizes the constructor identity");
+    assert_eq!(
+        constructor.kind,
+        crate::libraries::ExternalCallableKind::Constructor
+    );
+    assert_eq!(
+        constructor.declaration_owner,
+        Some(crate::types::SemanticCallableOwner::Classifier(type_name(
+            "kotlin/IllegalStateException"
+        )))
+    );
+    assert!(function.body.is_some());
+    validated(&ir);
+}
+
+#[test]
+fn a_dependency_property_read_reads_the_provider_property() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/text")),
+        "isNotEmpty",
+    );
+    let char_sequence = Ty::obj("kotlin/CharSequence");
+    let [function] = symbols
+        .callables
+        .functions()
+        .iter()
+        .filter(|function| function.receiver.map(Ty::non_null) == Some(char_sequence))
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("expected one `kotlin.text.isNotEmpty` of a `CharSequence`");
+    };
+    let selected = libraries
+        .external_callable(
+            function
+                .callable
+                .external_identity
+                .expect("a KLIB identity"),
+        )
+        .expect("the provider realizes its own identity");
+    let mut ir = IrFile::default();
+    let template = template(&mut ir, &libraries, &selected)
+        .unwrap_or_else(|decline| panic!("`isNotEmpty`: {decline}"));
+    let reads = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Checked(crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                target,
+                dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+                receiver: Some(_),
+                arguments,
+                parameters,
+                result,
+                source_receiver,
+            }) => Some((
+                *target,
+                arguments.len(),
+                parameters.clone(),
+                *result,
+                *source_receiver,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(target, arguments, parameters, result, source_receiver)] = &reads[..] else {
+        panic!("`isNotEmpty` reads one property, read {reads:?}");
+    };
+    assert_eq!(
+        (*arguments, parameters.as_slice(), *result),
+        (0, &[][..], Ty::Int)
+    );
+    assert_eq!(*source_receiver, Some(char_sequence));
+    let property = crate::symbol_source::SymbolSource::external_property(&libraries, *target)
+        .expect("the provider realizes the property identity");
+    assert_eq!(property.name, "length");
+    assert!(property.setter.is_none());
+    assert!(ir.functions[template.function as usize].body.is_some());
+    validated(&ir);
 }

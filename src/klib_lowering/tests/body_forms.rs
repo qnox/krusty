@@ -914,16 +914,8 @@ fn stdlib_unsigned_max_declines_through_its_callee() {
     let callable = max.klib_body_callable().expect("signed");
     let mut unit = DependencyBodyUnit::default();
     let selected = KlibCalleeFacts::new([max_of.klib_body_callable().expect("signed")]);
-    let callee_reason =
-        if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
-            "it uses an inline argument container of another shape"
-        } else {
-            "it uses a block of a compiler-introduced form"
-        };
-    let expected = format!(
-        "the KLIB body of `kotlin.math.max` \
-         (it reaches the KLIB body of `kotlin.comparisons.maxOf` ({callee_reason}))"
-    );
+    let expected = "the KLIB body of `kotlin.math.max` (it reaches the KLIB body of \
+         `kotlin.comparisons.maxOf` (it uses a call through a property accessor signature))";
     assert_eq!(
         unit.lower_function(callable, bodies, &selected)
             .expect_err("the callee declines")
@@ -992,6 +984,9 @@ fn stdlib_built_in_calls_have_the_signed_operands() {
                 }
                 super::super::ir_builtins::BuiltinOperator::Equals => ("EQEQ", None),
                 super::super::ir_builtins::BuiltinOperator::Identical => ("EQEQEQ", None),
+                super::super::ir_builtins::BuiltinOperator::CheckNotNull => {
+                    ("CHECK_NOT_NULL", None)
+                }
             };
             if let Some(expected) = expected {
                 for ty in operand_types.into_iter().flatten() {
@@ -1009,6 +1004,7 @@ fn stdlib_built_in_calls_have_the_signed_operands() {
         "numeric conversion",
         "EQEQ",
         "EQEQEQ",
+        "CHECK_NOT_NULL",
     ] {
         assert!(
             checked.get(kind).copied().unwrap_or(0) > 0,

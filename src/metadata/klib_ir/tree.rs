@@ -108,6 +108,27 @@ impl KlibIrArena {
         calls.into_iter()
     }
 
+    /// The number of `return`s naming `target` among `statements` and the expressions nested in
+    /// them.
+    pub(crate) fn returns_to(
+        &self,
+        statements: &[KlibIrStatement],
+        target: &KlibIrSymbol,
+    ) -> usize {
+        let mut pending = Vec::new();
+        push_statement_expressions(self, statements, &mut pending);
+        let mut count = 0;
+        while let Some(id) = pending.pop() {
+            let expression = self.expr(id);
+            if matches!(&expression.kind, KlibIrExprKind::Return { target: named, .. } if named == target)
+            {
+                count += 1;
+            }
+            push_child_expressions(self, &expression.kind, &mut pending);
+        }
+        count
+    }
+
     /// Whether exactly `function`'s body reads `symbol` as a value. Nested declarations share the
     /// arena but are not part of the function's expression graph, matching `call_symbols_in_body`.
     pub(crate) fn body_reads_value(

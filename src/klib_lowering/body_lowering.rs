@@ -5,8 +5,9 @@
 //! stability, `when` facts), so a backend compiles a dependency body as it compiles a module one.
 //! The match over KLIB expression forms is exhaustive: every form either has a lowering here or
 //! declines by its name. The forms are lowered by responsibility: blocks and the source block
-//! shape of a body ([`blocks`]), calls of built-in operators and dependency functions
-//! ([`calls`]), `if`/`when` chains and `&&`/`||` ([`conditionals`]), loops and their jumps
+//! shape of a body ([`blocks`]), the blocks of calls a prepared body inlined
+//! ([`compiler_blocks`]), calls of built-in operators and dependency functions
+//! ([`calls`]), constructor calls ([`constructions`]), `if`/`when` chains and `&&`/`||` ([`conditionals`]), loops and their jumps
 //! ([`loops`]), string templates ([`string_templates`]) and type operators
 //! ([`type_operators`]).
 
@@ -14,8 +15,9 @@ use crate::fx_hash::{HashMap, HashSet};
 
 mod blocks;
 mod calls;
+mod compiler_blocks;
 mod conditionals;
-mod inline_containers;
+mod constructions;
 mod loops;
 mod string_templates;
 mod type_operators;
@@ -29,7 +31,7 @@ use crate::ir::{
     complete_bottom_value, Callee, ExprId, FunId, IrBindingStability, IrConst, IrExpr, IrFile,
     IrTypeOp,
 };
-use crate::metadata::id_signature::KlibPublicIdSignature;
+use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrExpr, KlibIrExprId, KlibIrExprKind, KlibIrStatement, KlibIrTypeOperator,
     KlibIrVariableId,
@@ -49,6 +51,9 @@ pub(super) struct LinkedCallee {
     pub(super) context_count: usize,
     /// Exact classifier of an external singleton dispatch selected by an earlier support unit.
     pub(super) singleton_dispatch: Option<TypeName>,
+    /// The semantic identities of the callee's own type parameters, which the receiver,
+    /// parameters and result name and a call's type arguments bind, in declaration order.
+    pub(super) type_parameters: Vec<String>,
 }
 
 /// Joins the calls a body makes of public dependency declarations to the functions they invoke.
@@ -60,6 +65,37 @@ pub(super) trait CallLinker {
 
     /// The function a call of the public declaration `callee` invokes.
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
+
+    /// The dependency constructor a constructor call of the public declaration `callee` invokes.
+    fn link_constructor(&mut self, callee: &KlibPublicIdSignature) -> Lowered<LinkedConstructor>;
+
+    /// The dependency property a call of its accessor `callee` reads or writes.
+    fn link_accessor(&mut self, callee: &KlibAccessorIdSignature) -> Lowered<LinkedAccessor>;
+
+    /// Whether `sub` is a subtype of `sup` in the calling compilation's semantic model, which a
+    /// producer-checked body uses a value of the one where the other is expected for.
+    fn is_subtype(&self, sub: Ty, sup: Ty) -> bool;
+}
+
+/// The dependency constructor a constructor call invokes: the provider's identity, the class it
+/// constructs and its declared value parameters.
+pub(super) struct LinkedConstructor {
+    pub(super) target: crate::fir::ExternalCallableId,
+    pub(super) classifier: TypeName,
+    pub(super) params: Vec<Ty>,
+}
+
+/// The dependency property a call of one of its accessors reads or writes, as a source access of
+/// the property is checked: the provider's property identity, whether the accessor is its setter,
+/// and the accessor's dispatch receiver, parameters (context parameters, extension receiver, and a
+/// setter's value) and result.
+pub(super) struct LinkedAccessor {
+    pub(super) property: crate::fir::ExternalPropertyId,
+    pub(super) write: bool,
+    pub(super) receiver: Option<Ty>,
+    pub(super) params: Vec<Ty>,
+    pub(super) ret: Ty,
+    pub(super) context_count: usize,
 }
 
 /// The function a body is lowered into: its serialized symbol, the only target its `return`s may
@@ -79,8 +115,8 @@ pub(super) struct BodyLowering<'a> {
     ir: &'a mut IrFile,
     linker: &'a mut dyn CallLinker,
     locals: LocalValues,
-    /// Compiler aliases admitted only by an exact inline-container shape. They are substituted
-    /// while that container's value is lowered and removed before lowering continues.
+    /// Compiler temporaries that name another immutable value, by the initializer each read of
+    /// them lowers as.
     compiler_aliases: HashMap<KlibIrSymbol, KlibIrExprId>,
     /// The loops enclosing the expression being lowered, innermost last: each serialized loop
     /// identity with the label its `break`s and `continue`s name.
@@ -187,7 +223,16 @@ impl<'a> BodyLowering<'a> {
                 let ty = self.ty(expression, "assignment")?;
                 (self.assignment(symbol, *value, ty)?, ty)
             }
-            KlibIrExprKind::ConstructorCall { .. } => return unsupported("a constructor call"),
+            KlibIrExprKind::ConstructorCall {
+                access,
+                constructor_type_arguments,
+            } => {
+                let ty = self.ty(expression, "constructor call")?;
+                (
+                    self.constructor_call(access, *constructor_type_arguments, ty)?,
+                    ty,
+                )
+            }
             KlibIrExprKind::DelegatingConstructorCall(_) => {
                 return unsupported("a delegating constructor call")
             }
@@ -218,13 +263,23 @@ impl<'a> BodyLowering<'a> {
                 origin: Some(origin),
             } if origin == "INLINE_ARGS_CONTAINER" => {
                 let ty = self.ty(expression, "inline argument container")?;
-                return self.inline_argument_container(statements, ty);
+                return self.argument_container(statements, ty);
             }
             KlibIrExprKind::Block { .. } => {
                 return unsupported("a block of a compiler-introduced form")
             }
             KlibIrExprKind::Composite { .. } => return unsupported("a composite block"),
-            KlibIrExprKind::ReturnableBlock { .. } => return unsupported("a returnable block"),
+            KlibIrExprKind::ReturnableBlock {
+                symbol,
+                statements,
+                origin: None,
+            } => {
+                let ty = self.ty(expression, "returnable block")?;
+                return self.returnable_block(symbol, statements, ty);
+            }
+            KlibIrExprKind::ReturnableBlock { .. } => {
+                return unsupported("a returnable block of a compiler-introduced form")
+            }
             KlibIrExprKind::InlinedFunctionBlock { .. } => {
                 return unsupported("an inlined function block")
             }
@@ -300,14 +355,29 @@ impl<'a> BodyLowering<'a> {
         semantic_type(self.arena, self.header.type_parameters(), ty)
     }
 
-    /// Lower `id` as a value used where `expected` is: the serialized body states every conversion
-    /// explicitly, and this lowering models none. `null` is a value of every nullable type.
+    /// Lower `id` as a value used where `expected` is. The serialized body states every
+    /// conversion explicitly but the two Kotlin leaves implicit, as checked FIR does: a value is
+    /// one of each of its supertypes, with no conversion, and the widening of a non-null value to
+    /// a nullable type is marked with the coercion checked FIR lowering places. `null` is a value
+    /// of every nullable type. Any other use, such as an erased body's value where its declared
+    /// type is expected, is a conversion the body must state.
     fn operand(&mut self, id: KlibIrExprId, expected: Ty) -> Lowered<ExprId> {
         let lowered = self.expression(id)?;
-        if !is_value_of(self.lowered_type(lowered), expected) {
+        let actual = self.lowered_type(lowered);
+        if is_value_of(actual, expected) {
+            return Ok(lowered);
+        }
+        if let Some(widened) = self.nullable_widening(lowered, actual, expected) {
+            return Ok(widened);
+        }
+        if !self.linker.is_subtype(actual, expected) {
             return Err(KlibBodyDeclineReason::ImplicitConversion);
         }
-        Ok(lowered)
+        Ok(if actual.is_nullable() == expected.is_nullable() {
+            lowered
+        } else {
+            self.coercion(lowered, expected)
+        })
     }
 
     /// The type recorded for an expression this lowering produced.

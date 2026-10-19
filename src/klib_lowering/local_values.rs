@@ -109,6 +109,21 @@ impl LocalValues {
         Ok(())
     }
 
+    /// Declare the immutable compiler temporary `symbol` of semantic type `ty` in the next slot.
+    pub(super) fn temporary(
+        &mut self,
+        symbol: &KlibIrSymbol,
+        ty: Ty,
+    ) -> Result<LocalValue, KlibBodyDeclineReason> {
+        let value = LocalValue {
+            index: self.next,
+            ty,
+            mutable: false,
+        };
+        self.declare(symbol, value)?;
+        Ok(value)
+    }
+
     pub(super) fn get(&self, symbol: &KlibIrSymbol) -> Option<LocalValue> {
         self.values.get(symbol).copied()
     }

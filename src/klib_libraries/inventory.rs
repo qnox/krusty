@@ -589,6 +589,107 @@ impl PackageInventory {
             })
     }
 
+    /// The constructor serialized under exactly `identity`, with the class that declares it.
+    pub(super) fn dependency_constructor(
+        &self,
+        identity: &crate::libraries::KlibDependencyCallable,
+    ) -> Option<(
+        TypeName,
+        &SignedClassifier,
+        &super::classifier_signatures::SignedConstructor,
+    )> {
+        let crate::libraries::KlibDeclarationSignature::Public(signature) = &identity.declaration
+        else {
+            return None;
+        };
+        self.classifiers
+            .iter()
+            .filter(|(_, signed)| signed.module.as_deref() == Some(identity.module.as_str()))
+            .find_map(|(&classifier, signed)| {
+                signed
+                    .constructors
+                    .iter()
+                    .find(|constructor| &constructor.signature == signature)
+                    .map(|constructor| (classifier, signed, constructor))
+            })
+    }
+
+    /// The property whose getter or setter is serialized under exactly `identity`, at its
+    /// placement, with the class that declares it as a member or companion-block member.
+    pub(super) fn dependency_property(
+        &self,
+        identity: &crate::libraries::KlibDependencyCallable,
+    ) -> Option<(
+        crate::libraries::CallablePlacement,
+        &SignedProperty,
+        Option<&SignedClassifier>,
+    )> {
+        let crate::libraries::KlibDeclarationSignature::Accessor(accessor) = &identity.declaration
+        else {
+            return None;
+        };
+        let declares = |property: &&SignedProperty| {
+            property.module.as_deref() == Some(identity.module.as_str())
+                && (&property.getter == accessor || property.setter.as_ref() == Some(accessor))
+        };
+        self.properties
+            .iter()
+            .find_map(|(&package, properties)| {
+                properties.iter().find(declares).map(|property| {
+                    (
+                        crate::libraries::CallablePlacement::Package(package),
+                        property,
+                        None,
+                    )
+                })
+            })
+            .or_else(|| {
+                self.companion_properties
+                    .iter()
+                    .find_map(|(&classifier, extensions)| {
+                        extensions
+                            .iter()
+                            .find(|extension| declares(&&extension.signed))
+                            .map(|extension| {
+                                (extension.placement(classifier), &extension.signed, None)
+                            })
+                    })
+            })
+            .or_else(|| {
+                self.classifiers.iter().find_map(|(&classifier, signed)| {
+                    signed
+                        .properties
+                        .iter()
+                        .find(declares)
+                        .map(|property| {
+                            (
+                                crate::libraries::CallablePlacement::Member {
+                                    owner: classifier,
+                                    owner_is_interface: signed.shape.is_interface(),
+                                },
+                                property,
+                                Some(signed),
+                            )
+                        })
+                        .or_else(|| {
+                            signed
+                                .associated_properties
+                                .iter()
+                                .find(declares)
+                                .map(|property| {
+                                    (
+                                        super::classifier_records::block_member_placement(
+                                            classifier,
+                                        ),
+                                        property,
+                                        Some(signed),
+                                    )
+                                })
+                        })
+                })
+            })
+    }
+
     /// The top-level properties `package` declares under `name`, in library order.
     pub(super) fn properties<'a>(
         &'a self,
