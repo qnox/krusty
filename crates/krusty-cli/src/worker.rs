@@ -836,13 +836,7 @@ mod tests {
 
     #[test]
     fn the_real_argument_surface_translates() {
-        // `--progressive` is part of the real request but refused while it turns on features krusty
-        // does not implement. Keep exercising every other field of that request here.
-        let request = intellij_request()
-            .into_iter()
-            .filter(|argument| argument != "--progressive")
-            .collect::<Vec<_>>();
-        let unit = translate(&request).expect("must translate");
+        let unit = translate(&intellij_request()).expect("must translate");
         assert_eq!(unit.output_jar, PathBuf::from("out/util.jar"));
         assert_eq!(unit.abi_jar, Some(PathBuf::from("out/util.abi.jar")));
         assert_eq!(
@@ -872,6 +866,7 @@ mod tests {
             "-api-version",
             "2.4",
             "-language-version",
+            "-progressive",
         ] {
             assert!(
                 unit.kotlinc_args.iter().any(|a| a == expected),
