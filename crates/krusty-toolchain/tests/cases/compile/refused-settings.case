@@ -1,0 +1,53 @@
+What the toolchain compiles with KSP processors, toolchain plugins, compiler settings or compiler
+plugins krusty-toolchain does not pass is refused where it is set, for every module the task
+needs, before anything is compiled.
+--- task
+:app:compileJvm
+--- project.yaml
+modules:
+  - app
+  - lib
+--- app/module.yaml
+product: jvm/app
+repositories:
+  - mavenLocal
+dependencies:
+  - ../lib
+plugins:
+  my-plugin: enabled
+settings:
+  kotlin:
+    languageVersion: "2.3"
+    freeCompilerArgs:
+      - -Xcontext-parameters
+    explicitApi: strict
+    allOpen: enabled
+  springBoot:
+    enabled: true
+    applyBom: false
+--- app/src/main.kt
+fun main() = Unit
+--- lib/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+settings:
+  kotlin:
+    allWarningsAsErrors: true
+    optIns:
+      - kotlin.ExperimentalStdlibApi
+    ksp:
+      processors:
+        - org.example:processor:1.0
+--- lib/src/Lib.kt
+class Lib
+--- krusty-refusal
+error	lib/module.yaml:11:9: ERROR: module `lib` runs KSP processors (`settings.kotlin.ksp.processors`), and krusty-toolchain does not run KSP
+error	lib/module.yaml:8:7: ERROR: module `lib` sets `settings.kotlin.optIns`, and krusty-toolchain does not implement compiling with it
+error	lib/module.yaml:6:26: ERROR: module `lib` sets `settings.kotlin.allWarningsAsErrors`, and krusty-toolchain does not implement compiling with it
+error	app/module.yaml:7:3: ERROR: module `app` enables toolchain plugins (`plugins`), and krusty-toolchain does not run toolchain plugins
+error	app/module.yaml:10:22: ERROR: module `app` sets `settings.kotlin.languageVersion`, and krusty-toolchain does not implement compiling with it
+error	app/module.yaml:12:7: ERROR: module `app` sets `settings.kotlin.freeCompilerArgs`, and krusty-toolchain does not implement compiling with it
+error	app/module.yaml:13:18: ERROR: module `app` sets `settings.kotlin.explicitApi`, and krusty-toolchain does not implement compiling with it
+error	app/module.yaml:14:14: ERROR: module `app` sets `settings.kotlin.allOpen.enabled`, and krusty-toolchain does not implement compiling with it
+error	app/module.yaml:16:14: ERROR: module `app` sets `settings.springBoot.enabled`, which the toolchain compiles with compiler plugins krusty-toolchain does not implement

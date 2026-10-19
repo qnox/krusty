@@ -1,0 +1,33 @@
+A module with Java sources is refused: krusty compiles Kotlin sources only. The module that needs
+it is refused with it, though nothing of its own is.
+--- task
+:app:compileJvm
+--- project.yaml
+modules:
+  - app
+  - lib
+--- app/module.yaml
+product: jvm/app
+repositories:
+  - mavenLocal
+dependencies:
+  - ../lib
+--- app/src/main.kt
+fun main() = Unit
+--- lib/module.yaml
+product: jvm/lib
+layout: maven-like
+repositories:
+  - mavenLocal
+--- lib/src/main/kotlin/Lib.kt
+class Lib
+--- lib/src/main/java/lib/Helper.java
+package lib;
+
+class Helper {}
+--- lib/src/main/java/lib/Another.java
+package lib;
+
+class Another {}
+--- krusty-refusal
+error	lib/src/main/java/lib/Another.java: ERROR: module `lib` has Java sources, and krusty-toolchain compiles Kotlin sources only

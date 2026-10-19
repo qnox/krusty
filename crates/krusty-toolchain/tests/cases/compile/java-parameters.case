@@ -1,0 +1,29 @@
+`jvm.storeParameterNames` keeps parameter names in the compiled classes (`-java-parameters`), and
+`jvm.release` sets the JDK release compiled against apart from the JDK's version.
+--- task
+:app:compileJvm
+--- project.yaml
+modules:
+  - app
+--- app/module.yaml
+product: jvm/app
+repositories:
+  - mavenLocal
+settings:
+  jvm:
+    storeParameterNames: true
+    release: 17
+--- app/src/main.kt
+fun main(args: Array<String>) = println(args.size)
+--- krusty-argv
+-Xjdk-release=17
+-jdk-home=<directory>/jdk
+-classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-no-stdlib
+-module-name=app
+-java-parameters
+-Xkotlin-reference-version=2.4.20
+-d
+<directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output
+<directory>/project/app/src/main.kt
+----

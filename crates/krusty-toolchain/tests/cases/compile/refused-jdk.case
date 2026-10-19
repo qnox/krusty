@@ -1,0 +1,55 @@
+krusty-toolchain compiles against the JDK `JAVA_HOME` names (a JDK 25 here) and provisions none:
+a module that needs another version, always provisions, or picks a distribution is refused.
+--- task
+:app:compileJvm
+--- project.yaml
+modules:
+  - app
+  - older
+  - provisioned
+  - vendor
+--- app/module.yaml
+product: jvm/app
+repositories:
+  - mavenLocal
+dependencies:
+  - ../older
+  - ../provisioned
+  - ../vendor
+--- app/src/main.kt
+fun main() = Unit
+--- older/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+settings:
+  jvm:
+    jdk:
+      version: 21
+--- older/src/Older.kt
+class Older
+--- provisioned/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+settings:
+  jvm:
+    jdk:
+      selectionMode: alwaysProvision
+--- provisioned/src/Provisioned.kt
+class Provisioned
+--- vendor/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+settings:
+  jvm:
+    jdk:
+      distributions:
+        - temurin
+--- vendor/src/Vendor.kt
+class Vendor
+--- krusty-refusal
+error	older/module.yaml:7:16: ERROR: module `older` compiles against JDK 21, but JAVA_HOME (<directory>/jdk) is JDK 25, and krusty-toolchain does not provision JDKs
+error	provisioned/module.yaml:7:22: ERROR: module `provisioned` sets `settings.jvm.jdk.selectionMode: alwaysProvision`, and krusty-toolchain does not provision JDKs
+error	vendor/module.yaml:8:9: ERROR: module `vendor` sets `settings.jvm.jdk.distributions`, and krusty-toolchain does not check a JDK's distribution
