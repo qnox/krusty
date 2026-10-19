@@ -311,6 +311,30 @@ class's `T` as `Outer`'s and never as the inner class's own. The lookup goes thr
 plugin uses, and an identity that names no declaration, or more than one, fails by name. This is the
 identity krusty names a dependency's declaration by when it hands the host IR that calls it.
 
+### The module's IR
+
+`Host::generate` hands the session the module's own declarations as a `ModuleIr`: each source file
+with its path, package and text, and its functions in kotlinc's IR shape, every element with the
+UTF-16 offsets kotlinc gives the same source. The host builds them as fir2ir builds a module's
+sources (every declaration first, so a body can call any function of the module, then every body),
+adds the files to the session's module and runs the loaded plugins' IR generation extensions over
+it, in registration order, with the session's plugin context. A call names a module function by its
+file and position, and a dependency's function by its `CallableIdentity`. IR the host cannot build
+yet, such as a type annotation or a module function's type parameters, refuses the request by what
+it is, before anything is added; a session builds one module.
+
+The IR covers top-level functions with regular parameters and a block body (an expression body as
+the block kotlinc makes of it), local `val` and `var`, constants, reads and plain assignments of
+parameters and locals, `return`, and calls to module and dependency functions with their type and
+value arguments. A test compiles the same source with kotlinc and an IR plugin that dumps the module
+with its offsets, then builds krusty's IR for it in the host under the same plugin, and requires the
+two dumps to be identical.
+
+The adapter builds against every supported compiler. Where kotlinc's IR API changed between
+releases (`IrFileImpl` takes its module as a constructor argument from 2.4.20), the version-specific
+source lives under `adapter/compat/<first release>/`, and `adapter.rs` lists the exact releases each
+set builds for; a Kotlin version no set lists has no adapter.
+
 ## Drop-in extension management — two layers, like kotlinc
 
 Extensions have **two registration layers**, mirroring kotlinc exactly:

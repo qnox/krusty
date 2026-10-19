@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::adapter;
 use crate::environment::Environment;
+use crate::module_ir::ModuleIr;
 use crate::protocol::{self, LoadedPlugin, Reply, Request, PROTOCOL};
 use crate::provision::HostRuntime;
 use crate::session::{CallableIdentity, SessionRequest};
@@ -228,6 +229,18 @@ impl Host {
         }
     }
 
+    /// Builds `module`'s IR in the open session, as kotlinc's fir2ir builds a module's sources, and
+    /// runs the loaded plugins' IR generation extensions over it, in registration order, with the
+    /// session's plugin context. A session builds one module: a second one in the same session is
+    /// refused, and so is IR the host cannot build, by what it is.
+    pub fn generate(&mut self, module: &ModuleIr) -> Result<(), HostError> {
+        match self.exchange(&Request::Generate(module))? {
+            Reply::Generated => Ok(()),
+            Reply::Failed(message) => Err(HostError::Plugin { message }),
+            _ => Err(unexpected("generate")),
+        }
+    }
+
     /// The host process's id.
     pub fn id(&self) -> u32 {
         self.child.id()
@@ -300,8 +313,8 @@ impl Drop for Host {
 mod tests {
     use super::*;
 
-    /// The host's greeting for protocol 3 and kotlinc 2.4.20, as `printf` octal escapes.
-    const HELLO: &str = r"\000\000\000\017\000\000\000\000\003\000\000\000\0062.4.20";
+    /// The host's greeting for protocol 4 and kotlinc 2.4.20, as `printf` octal escapes.
+    const HELLO: &str = r"\000\000\000\017\000\000\000\000\004\000\000\000\0062.4.20";
     const GRACE: Duration = Duration::from_millis(300);
 
     /// A host that writes its pid to `pid_file`, greets, then runs `then` in the same process.

@@ -1,5 +1,6 @@
 package krusty.pluginhost
 
+import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
 import org.jetbrains.kotlin.cli.common.arguments.K2JVMCompilerArguments
 import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSeverity
 import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSourceLocation
@@ -21,6 +22,7 @@ import org.jetbrains.kotlin.fir.pipeline.Fir2IrActualizedResult
 import org.jetbrains.kotlin.ir.IrElement
 import org.jetbrains.kotlin.ir.declarations.IrClass
 import org.jetbrains.kotlin.ir.declarations.IrFunction
+import org.jetbrains.kotlin.ir.declarations.IrSimpleFunction
 import org.jetbrains.kotlin.ir.declarations.IrParameterKind
 import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
 import org.jetbrains.kotlin.ir.symbols.IrTypeParameterSymbol
@@ -62,6 +64,9 @@ internal class SessionRequest(
  * plugins work with. The module's own sources are not part of it; krusty supplies their IR.
  */
 private class Session(private val resources: Disposable, val ir: Fir2IrActualizedResult) {
+    /** Whether the module's IR is built: a session builds one module, as a compilation does. */
+    var generated = false
+
     fun close() = Disposer.dispose(resources)
 }
 
@@ -143,6 +148,22 @@ private fun <T : Any> finished(
     collector.flush()
     if (messages.hasErrors()) throw Refused(messages.errors())
     return result ?: throw Refused("kotlinc's $phase phase stopped without reporting why")
+}
+
+/**
+ * Builds the module [input] frames in the open session, adds its files to the session's module as
+ * fir2ir adds a module's sources, and runs [extensions] over it in order, with the session's plugin
+ * context, as kotlinc runs IR generation extensions after fir2ir. IR the host cannot build refuses
+ * the request before anything is added, and the session can still build its module.
+ */
+internal fun generate(input: DataInputStream, extensions: List<IrGenerationExtension>) {
+    val open = session ?: throw Refused("no session is open")
+    if (open.generated) throw Refused("the session's module is already built; a session builds one module")
+    val files = ModuleBuilder(open.ir).read(input)
+    open.generated = true
+    val module = open.ir.irModuleFragment
+    module.files += files
+    for (extension in extensions) extension.generate(module, open.ir.pluginContext)
 }
 
 /** Ends the open session, if one is open. */
@@ -270,7 +291,14 @@ internal fun resolve(identities: List<CallableIdentity>): List<String> {
     return identities.map { identity -> render(resolveIn(ir, identity), identity) }
 }
 
-private fun resolveIn(ir: Fir2IrActualizedResult, identity: CallableIdentity): IrElement {
+/** The function [identity] names on [ir]'s classpath, refusing it as [resolve] does. */
+internal fun resolveFunction(ir: Fir2IrActualizedResult, identity: CallableIdentity): IrSimpleFunction =
+    match(ir, identity).second as IrSimpleFunction
+
+private fun resolveIn(ir: Fir2IrActualizedResult, identity: CallableIdentity): IrElement = match(ir, identity).first
+
+/** The declaration [identity] names, with the function whose signature it was matched by. */
+private fun match(ir: Fir2IrActualizedResult, identity: CallableIdentity): Pair<IrElement, IrFunction> {
     val context = ir.pluginContext
     val owner = identity.classes.takeIf { it.isNotEmpty() }?.let { ClassName(identity.packageName, it).classId }
     fun callableId() = owner?.let { CallableId(it, Name.identifier(identity.name)) }
@@ -286,7 +314,7 @@ private fun resolveIn(ir: Fir2IrActualizedResult, identity: CallableIdentity): I
     }
     val matches = candidates.filter { (_, function) -> signatureIs(function, identity) }
     return when (matches.size) {
-        1 -> matches.single().first
+        1 -> matches.single()
         0 -> throw Refused("$identity names no declaration on the session's classpath")
         else -> throw Refused("$identity names ${matches.size} declarations on the session's classpath")
     }
@@ -368,7 +396,7 @@ internal fun DataInputStream.readCallable(): CallableIdentity {
 
 private fun DataInputStream.readClassName() = ClassName(readString(), readList { readString() })
 
-private fun DataInputStream.readType(): TypeIdentity = when (val tag = readByte().toInt()) {
+internal fun DataInputStream.readType(): TypeIdentity = when (val tag = readByte().toInt()) {
     0 -> {
         val classifier = readClassName()
         val arguments = readList { readArgument() }

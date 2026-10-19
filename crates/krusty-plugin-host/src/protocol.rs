@@ -7,12 +7,15 @@
 
 use std::io::{self, Read, Write};
 
+use crate::module_ir::ModuleIr;
 use crate::session::{
     CallableIdentity, CallableKind, ClassName, Classifier, SessionRequest, TypeArgument,
     TypeIdentity, TypeParameterOwner,
 };
 
-pub(crate) const PROTOCOL: u32 = 3;
+mod module_ir;
+
+pub(crate) const PROTOCOL: u32 = 4;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -27,6 +30,8 @@ const CLOSE_SESSION: u8 = 9;
 const SESSION_CLOSED: u8 = 10;
 const RESOLVE: u8 = 11;
 const RESOLVED: u8 = 12;
+const GENERATE: u8 = 13;
+const GENERATED: u8 = 14;
 
 /// A frame larger than this is a broken stream, not a message.
 const MAX_FRAME: u32 = 1 << 30;
@@ -53,6 +58,8 @@ pub(crate) enum Request<'a> {
     CloseSession,
     /// Find declarations on the session's classpath.
     Resolve(&'a [CallableIdentity]),
+    /// Build the module's IR in the session and run the loaded plugins' IR generation over it.
+    Generate(&'a ModuleIr),
     Shutdown,
 }
 
@@ -64,6 +71,7 @@ pub(crate) enum Reply {
     SessionClosed,
     /// Each resolved declaration rendered as kotlinc renders IR, in request order.
     Resolved(Vec<String>),
+    Generated,
     /// The request failed in the host; the message says why, as kotlinc would.
     Failed(String),
 }
@@ -114,6 +122,10 @@ pub(crate) fn write_request(out: &mut impl Write, request: &Request) -> io::Resu
             payload.push(RESOLVE);
             put_list(&mut payload, identities, put_callable);
         }
+        Request::Generate(module) => {
+            payload.push(GENERATE);
+            module_ir::put_module(&mut payload, module);
+        }
         Request::Shutdown => payload.push(SHUTDOWN),
     }
     write_frame(out, &payload)
@@ -152,6 +164,7 @@ pub(crate) fn read_reply(input: &mut impl Read) -> io::Result<Reply> {
         SESSION_OPENED => Ok(Reply::SessionOpened),
         SESSION_CLOSED => Ok(Reply::SessionClosed),
         RESOLVED => Ok(Reply::Resolved(payload.list(|payload| payload.string())?)),
+        GENERATED => Ok(Reply::Generated),
         FAILED => Ok(Reply::Failed(payload.string()?)),
         tag => Err(malformed(format!("unknown reply {tag}"))),
     }
