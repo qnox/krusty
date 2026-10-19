@@ -196,8 +196,9 @@ generated:
       directory: ${tasks.declare.action.sourceDir}
 ```
 
-A directory is `${module.rootDir}`, a plain path below it, or the argument of a task's action that
-is one. krusty-toolchain runs no plugin task: the action is the plugin's own code, so a directory a
+A directory is the argument of a task's action that is `${module.rootDir}` or a plain path below
+it; the toolchain rejects a directory that is not a task's output, and so does krusty-toolchain.
+krusty-toolchain runs no plugin task: the action is the plugin's own code, so a directory a
 task provides is compiled as it is on disk, and refused when it is not a directory there. It does
 not compile the plugin module before the modules that enable it, as the toolchain does to run the
 task. It refuses, where each is written: a plugin the project does not list, plugin settings
@@ -279,9 +280,13 @@ with exit status 0 and no output, or to report exactly its `--- krusty-refusal` 
 nothing. The toolchain records the same arguments through krusty's Build Tools API implementation
 (`tools/krusty-build-tools`), built from its sources (by the JDK `KRUSTY_BUILD_TOOLS_JAVA_HOME`
 names, else `JAVA_HOME`) and installed into its shared cache, and must record each argv section
-(compared module by module, sources as a sorted list). A case the toolchain cannot run with the
-recording krusty (a plugin's task needs the plugin module really compiled) says why in a
-`--- no-toolchain-oracle` section and is checked against krusty-toolchain only.
+(compared module by module, sources as a sorted list). The toolchain compiles a toolchain plugin's
+module and runs its tasks before the modules that enable it, so a case with a plugin names the
+plugin's module in a `--- toolchain-plugin-module` section: the recorder then also compiles that
+module, with the reference Kotlin compiler (the case's local repository lists the plugin API, whose
+stand-in jar is replaced by the one the distribution ships, and the standard library's by the
+reference compiler's), and the toolchain's invocation for it, which krusty-toolchain does not make,
+must be recorded once and is left out of the comparison.
 
 `tests/support/oracle.rs` caches each reference's exit code and raw stdout and stderr (only a JVM's
 `Picked up JAVA_TOOL_OPTIONS` line is dropped from stderr) under

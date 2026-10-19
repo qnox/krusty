@@ -66,19 +66,18 @@ pub(super) fn generated_sources(
                 .fold(module_directory.to_path_buf(), |path, segment| {
                     path.join(segment)
                 });
-            if let Some(task) = &source.task {
-                if !directory.is_dir() {
-                    refused.push(Diagnostic::error(
-                        &declaration.file,
-                        Some(source.span),
-                        format!(
-                            "module `{module}` needs the directory `{}` that task `{task}` of toolchain plugin `{}` provides, and krusty-toolchain does not run plugin tasks",
-                            directory.display(),
-                            plugin.id
-                        ),
-                    ));
-                    continue;
-                }
+            if !directory.is_dir() {
+                refused.push(Diagnostic::error(
+                    &declaration.file,
+                    Some(source.span),
+                    format!(
+                        "module `{module}` needs the directory `{}` that task `{}` of toolchain plugin `{}` provides, and krusty-toolchain does not run plugin tasks",
+                        directory.display(),
+                        source.task,
+                        plugin.id
+                    ),
+                ));
+                continue;
             }
             directories.push(directory);
         }

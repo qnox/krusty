@@ -15,6 +15,8 @@ plugins:
   - ./tools/pregenerated
 --- tools/pregenerated/module.yaml
 product: jvm/amper-plugin
+repositories:
+  - mavenLocal
 --- tools/pregenerated/plugin.yaml
 tasks:
   declare:
@@ -63,11 +65,17 @@ plugins:
 fun use() = org.example.Model()
 --- mixed/generated-src/kotlin/Generated.kt
 fun generated() = use()
---- no-toolchain-oracle
-The toolchain compiles the plugin module and runs its task before compiling a module that enables
-it; with the recording krusty the plugin module compiles to nothing, so the task's action is not
-found and the toolchain fails. The ledger follows the arguments the toolchain passed for modules
-of this shape in a project it built with the real krusty.
+--- m2/org/jetbrains/amper/amper-extensibility-api/0.13.0/amper-extensibility-api-0.13.0.pom
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.jetbrains.amper</groupId>
+  <artifactId>amper-extensibility-api</artifactId>
+  <version>0.13.0</version>
+</project>
+--- m2/org/jetbrains/amper/amper-extensibility-api/0.13.0/amper-extensibility-api-0.13.0.jar
+The plugin API the distribution ships replaces this when the toolchain runs.
+--- toolchain-plugin-module
+pregenerated
 --- krusty-argv
 -Xjdk-release=25
 -jdk-home=<directory>/jdk

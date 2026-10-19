@@ -13,8 +13,10 @@
 //! (the order it starts them in is checked by its own tests). Where the oracle runs, the
 //! toolchain's recorded invocations must be the `krusty-argv` ledger's, compared module by module
 //! (the toolchain may compile independent modules in either order), the sources of each as a set.
-//! A case the toolchain cannot run with that krusty says why in a `no-toolchain-oracle` section,
-//! and its ledger stands on krusty-toolchain's own checks.
+//! A case whose modules enable a toolchain plugin names the plugin's module in a
+//! `toolchain-plugin-module` section: the toolchain compiles that module for real to run the
+//! plugin's tasks (`compiling::RecordingKrustyCompilingPlugin`), and its invocation, which
+//! krusty-toolchain does not make, must be recorded once and is left out of the comparison.
 //!
 //! One test compiles with the real krusty instead of the recorder: a library and an application
 //! that uses it, whose outputs are listed and whose program is run on the JDK it compiled against.
@@ -35,7 +37,7 @@ use support::{ExpectedDiagnostic, ExpectedSeverity, KrustyExpected};
 const REPOSITORY_SECTION: &str = "m2/";
 const TASK_SECTION: &str = "task";
 const ARGV_SECTION: &str = "krusty-argv";
-const NO_ORACLE_SECTION: &str = "no-toolchain-oracle";
+const PLUGIN_SECTION: &str = "toolchain-plugin-module";
 const PLACEHOLDER: &str = "<directory>";
 
 type Files = Vec<(String, String)>;
@@ -48,8 +50,9 @@ struct CompileCase {
     task: String,
     argv: Option<String>,
     refusal: Option<Vec<ExpectedDiagnostic>>,
-    /// Why the toolchain cannot run the case with the recording krusty, when it cannot.
-    no_oracle: Option<String>,
+    /// The toolchain plugin module the toolchain compiles, and krusty-toolchain does not, to run
+    /// its tasks, when there is one.
+    plugin_module: Option<String>,
 }
 
 fn files_below(directory: &Path, prefix: &str, files: &mut Files) {
@@ -80,7 +83,7 @@ fn compile_cases() -> Vec<CompileCase> {
                 repository: shared.clone(),
                 task: String::new(),
                 argv: None,
-                no_oracle: None,
+                plugin_module: None,
                 refusal: match case.krusty {
                     Some(KrustyExpected::Refusal(refused)) => Some(refused),
                     Some(KrustyExpected::Difference(_)) => {
@@ -96,13 +99,8 @@ fn compile_cases() -> Vec<CompileCase> {
                     compiled.task = text.trim().to_string();
                 } else if file == ARGV_SECTION {
                     compiled.argv = Some(text);
-                } else if file == NO_ORACLE_SECTION {
-                    assert!(
-                        !text.trim().is_empty(),
-                        "{}: a `{NO_ORACLE_SECTION}` section says why",
-                        case.name
-                    );
-                    compiled.no_oracle = Some(text);
+                } else if file == PLUGIN_SECTION {
+                    compiled.plugin_module = Some(text.trim().to_string());
                 } else {
                     compiled.project.push((file, text));
                 }
@@ -308,21 +306,31 @@ fn by_module(record: &str) -> Vec<Vec<String>> {
 fn every_compile_case_passes_the_arguments_the_toolchain_passes() {
     let cases: Vec<CompileCase> = compile_cases()
         .into_iter()
-        .filter(|case| case.refusal.is_none() && case.no_oracle.is_none())
+        .filter(|case| case.refusal.is_none())
         .collect();
     let arguments: Vec<[&str; 2]> = cases
         .iter()
         .map(|case| ["task", case.task.as_str()])
         .collect();
+    let compilers: Vec<Box<dyn kotlin::Compiler>> = cases
+        .iter()
+        .map(|case| -> Box<dyn kotlin::Compiler> {
+            match &case.plugin_module {
+                Some(plugin) => Box::new(compiling::RecordingKrustyCompilingPlugin { plugin }),
+                None => Box::new(compiling::RecordingKrusty),
+            }
+        })
+        .collect();
     let invocations: Vec<Invocation<'_>> = cases
         .iter()
         .zip(&arguments)
-        .map(|(case, args)| Invocation {
+        .zip(&compilers)
+        .map(|((case, args), compiler)| Invocation {
             case: &case.name,
             files: &case.project,
             args,
             repository: Some(&case.repository),
-            compiler: Some(&compiling::RecordingKrusty),
+            compiler: Some(compiler.as_ref()),
         })
         .collect();
     let outputs = kotlin::kotlin_all(&invocations);
@@ -330,7 +338,15 @@ fn every_compile_case_passes_the_arguments_the_toolchain_passes() {
     for (case, toolchain) in cases.iter().zip(outputs) {
         let record = placed(&toolchain.root, &toolchain.stdout);
         let argv = case.argv.as_deref().unwrap_or_default();
-        if toolchain.code != 0 || by_module(&record) != by_module(argv) {
+        let mut recorded = by_module(&record);
+        // The plugin module's invocation is the toolchain's alone: krusty-toolchain runs no task.
+        let plugin_compiled = case.plugin_module.as_ref().is_none_or(|plugin| {
+            let name = format!("-module-name={plugin}");
+            let before = recorded.len();
+            recorded.retain(|invocation| !invocation.contains(&name));
+            recorded.len() + 1 == before
+        });
+        if toolchain.code != 0 || !plugin_compiled || recorded != by_module(argv) {
             failures.push(format!(
                 "{}: the toolchain exited {} having printed\n{}and recorded\n{record}\nthe `krusty-argv` section is\n{argv}",
                 case.name,
@@ -728,7 +744,7 @@ fn diamond() -> CompileCase {
         task: ":app:compileJvm".to_string(),
         argv: None,
         refusal: None,
-        no_oracle: None,
+        plugin_module: None,
     }
 }
 

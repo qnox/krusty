@@ -1,7 +1,8 @@
 //! What a toolchain plugin's `plugin.yaml` declares, as far as krusty-toolchain implements it: the
 //! Kotlin source directories it adds to the main fragment of a module that enables it
-//! (`generated.sources`), each written as a directory of that module (`${module.rootDir}/…`) or
-//! as the argument of a task's action that is one (`${tasks.<task>.action.<argument>}`).
+//! (`generated.sources`), each written as the argument of a task's action
+//! (`${tasks.<task>.action.<argument>}`) that is a directory of that module
+//! (`${module.rootDir}/…`). The toolchain itself rejects a directory that is not a task's output.
 //!
 //! krusty-toolchain does not run a plugin's tasks: their actions are code of the plugin's own. A
 //! directory a task provides is compiled as it is when the task would run. Everything else a
@@ -17,8 +18,8 @@ use crate::yaml::{NodeId, Span};
 pub(super) struct GeneratedSources {
     /// The directory below the module's directory, as path segments.
     pub below_module: Vec<String>,
-    /// The task whose action argument names the directory, when one does.
-    pub task: Option<String>,
+    /// The task whose action argument names the directory.
+    pub task: String,
     /// Where the directory is written in `plugin.yaml`.
     pub span: Span,
 }
@@ -242,7 +243,7 @@ fn directory_of(
     reader: &mut FileReader<'_>,
     node: NodeId,
     tasks: &Tasks<'_>,
-) -> Option<(Vec<String>, Option<String>)> {
+) -> Option<(Vec<String>, String)> {
     let Value::Scalar(text) = reader.value(node) else {
         reader.error(
             node,
@@ -250,48 +251,45 @@ fn directory_of(
         );
         return None;
     };
-    if let Some(reference) = text
+    let Some(reference) = text
         .strip_prefix("${tasks.")
         .and_then(|rest| rest.strip_suffix('}'))
-    {
-        let found = reference
-            .split_once(".action.")
-            .and_then(|(task, argument)| {
-                tasks
-                    .arguments
-                    .iter()
-                    .find(|(name, given, _)| *name == task && *given == argument)
-            });
-        let Some(&(task, _, argument)) = found else {
-            reader.error(
-                node,
-                format!("plugin `{id}` refers to `{text}`, which is not an argument of one of its task actions"),
-            );
-            return None;
-        };
-        let argument_text = match reader.value(argument) {
-            Value::Scalar(text) => text,
-            _ => "",
-        };
-        let Some(below) = below_module(argument_text) else {
-            reader.error(
-                argument,
-                format!("krusty-toolchain reads a directory of plugin `{id}` only as `{MODULE_ROOT}` or a path below it"),
-            );
-            return None;
-        };
-        return Some((below, Some(task.to_string())));
-    }
-    match below_module(text) {
-        Some(below) => Some((below, None)),
-        None => {
-            reader.error(
-                node,
-                format!("krusty-toolchain reads a directory of plugin `{id}` only as `{MODULE_ROOT}`, a path below it, or a task action's argument that is one"),
-            );
-            None
-        }
-    }
+    else {
+        // The toolchain refuses it too, for each module that enables the plugin: "must be an
+        // `@Output` of some task registered in this plugin".
+        reader.error(
+            node,
+            format!("the directory of generated sources of plugin `{id}` must be an argument of one of its task actions, as the toolchain requires"),
+        );
+        return None;
+    };
+    let found = reference
+        .split_once(".action.")
+        .and_then(|(task, argument)| {
+            tasks
+                .arguments
+                .iter()
+                .find(|(name, given, _)| *name == task && *given == argument)
+        });
+    let Some(&(task, _, argument)) = found else {
+        reader.error(
+            node,
+            format!("plugin `{id}` refers to `{text}`, which is not an argument of one of its task actions"),
+        );
+        return None;
+    };
+    let argument_text = match reader.value(argument) {
+        Value::Scalar(text) => text,
+        _ => "",
+    };
+    let Some(below) = below_module(argument_text) else {
+        reader.error(
+            argument,
+            format!("krusty-toolchain reads a directory of plugin `{id}` only as `{MODULE_ROOT}` or a path below it"),
+        );
+        return None;
+    };
+    Some((below, task.to_string()))
 }
 
 /// The segments of `text` below `${module.rootDir}`, when it is that directory or a plain path

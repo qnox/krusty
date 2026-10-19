@@ -1,7 +1,9 @@
 What a toolchain plugin declares beyond Kotlin source directories of the module is refused where
 it is written, as is a plugin the project does not list, a plugin with settings or `pluginInfo`, a
-directory a plugin task provides that is not there (krusty-toolchain runs no plugin task), and a
-source directory that exists without being a directory, for every module the task needs.
+directory a plugin task provides that is not there (krusty-toolchain runs no plugin task), a
+directory of generated sources written directly rather than as a task's argument (which the
+toolchain rejects too), and a source directory that exists without being a directory, for every
+module the task needs.
 --- task
 :app:compileJvm
 --- project.yaml
@@ -10,11 +12,13 @@ modules:
   - configured
   - file-root
   - missing
+  - tools/direct
   - tools/elaborate
   - tools/named
   - tools/pregenerated
   - unlisted
 plugins:
+  - ./tools/direct
   - ./tools/elaborate
   - ./tools/named
   - ./tools/pregenerated
@@ -29,6 +33,13 @@ generated:
   sources:
     - language: kotlin
       directory: ${tasks.declare.action.sourceDir}
+--- tools/direct/module.yaml
+product: jvm/amper-plugin
+--- tools/direct/plugin.yaml
+generated:
+  sources:
+    - language: kotlin
+      directory: ${module.rootDir}/generated-src/kotlin
 --- tools/elaborate/module.yaml
 product: jvm/amper-plugin
 --- tools/elaborate/plugin.yaml
@@ -68,6 +79,7 @@ dependencies:
   - ../missing
   - ../file-root
 plugins:
+  direct: enabled
   elaborate: enabled
   named: enabled
 --- app/src/main.kt
@@ -109,10 +121,12 @@ error	configured/module.yaml:6:5: ERROR: krusty-toolchain reads plugin `pregener
 error	file-root/src: ERROR: Source directory at '<directory>/project/file-root/src' exists, but it's not a directory, this is currently unsupported
 error	tools/pregenerated/plugin.yaml:8:18: ERROR: module `missing` needs the directory `<directory>/project/missing/generated-src/kotlin` that task `declare` of toolchain plugin `pregenerated` provides, and krusty-toolchain does not run plugin tasks
 error	unlisted/module.yaml:5:3: ERROR: module `unlisted` enables toolchain plugin `elsewhere`, which the project does not list in its `plugins`
+error	tools/direct/plugin.yaml:4:18: ERROR: the directory of generated sources of plugin `direct` must be an argument of one of its task actions, as the toolchain requires
 error	tools/elaborate/plugin.yaml:5:5: ERROR: task `produce` of plugin `elaborate` sets `markOutputsAs`, and krusty-toolchain does not implement it
 error	tools/elaborate/plugin.yaml:17:1: ERROR: plugin `elaborate` declares `commands`, and krusty-toolchain does not implement it
 error	tools/elaborate/plugin.yaml:10:17: ERROR: plugin `elaborate` generates sources other than Kotlin sources, and krusty-toolchain compiles Kotlin sources only
+error	tools/elaborate/plugin.yaml:11:18: ERROR: the directory of generated sources of plugin `elaborate` must be an argument of one of its task actions, as the toolchain requires
 error	tools/elaborate/plugin.yaml:14:7: ERROR: plugin `elaborate` sets `fragment` on generated sources, and krusty-toolchain does not implement it
-error	tools/elaborate/plugin.yaml:13:18: ERROR: krusty-toolchain reads a directory of plugin `elaborate` only as `${module.rootDir}`, a path below it, or a task action's argument that is one
+error	tools/elaborate/plugin.yaml:13:18: ERROR: the directory of generated sources of plugin `elaborate` must be an argument of one of its task actions, as the toolchain requires
 error	tools/elaborate/plugin.yaml:15:3: ERROR: plugin `elaborate` declares `generated.resources`, and krusty-toolchain does not implement it
 error	tools/named/module.yaml:2:1: ERROR: toolchain plugin `named` sets `pluginInfo`, and krusty-toolchain does not read it
