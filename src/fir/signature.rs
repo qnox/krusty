@@ -20,6 +20,7 @@ mod call_result_constraints;
 mod expressions;
 mod postponed_argument_transaction;
 mod resolved_types;
+mod selected_result_publication;
 mod selections;
 mod signature_state;
 pub use arena_ranges::{CallArgumentRange, OperandRange, SubstitutionRange};
@@ -30,6 +31,7 @@ pub(crate) use classifier_headers::{superclass_slot, DeclaredSuperclass};
 pub use expressions::*;
 pub use postponed_argument_transaction::PostponedArgumentTransaction;
 pub use resolved_types::*;
+pub use selected_result_publication::SelectedResultPublicationSemantics;
 pub use selections::*;
 pub use signature_state::SignatureState;
 mod classifier_headers;
@@ -583,7 +585,9 @@ pub trait SignatureConstraintEvaluator {
 /// beside the production checker implements these methods by invoking the same scope tower,
 /// candidate collection, overload selection, generic inference, expected-type, nullability, and
 /// LUB routines used for ordinary bodies. This trait intentionally contains no fallback operation.
-pub trait SignatureSemantics: PostponedArgumentTransaction {
+pub trait SignatureSemantics:
+    PostponedArgumentTransaction + SelectedResultPublicationSemantics
+{
     /// Enter/leave an implicit receiver while a scoped compact expression is evaluated. This
     /// covers both receiver-function lambdas and branch-local smart casts of `this`.
     /// Implementations may keep this as a short-lived stack; it is signature-solving state and is
@@ -968,13 +972,6 @@ pub trait SignatureSemantics: PostponedArgumentTransaction {
         _condition: bool,
     ) -> bool {
         false
-    }
-
-    /// The typealias the call selected at `origin` constructed through (`StringBuilder()` via
-    /// `kotlin.text.StringBuilder`), recorded when that call was selected. A semantics that keeps
-    /// no selection state reports none.
-    fn call_result_abbreviation(&self, _origin: OriginId) -> Option<ResolvedTypeAbbreviation> {
-        None
     }
 
     /// The typealias selected while resolving the compact type expression at `origin`. Selection

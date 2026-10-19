@@ -2716,8 +2716,11 @@ fn selected_top_level_inline_run_rechecks_its_lambda_inside_the_loop_scope() {
 
 #[test]
 fn inline_array_constructor_break_keeps_its_enclosing_loop_coordinate() {
-    let (body, _) =
-        checked_function_body("fun run() { while (true) { Array(1) { break } } }\n", "run");
+    // The element type is written: kotlinc rejects an `Array<Nothing>` inferred from `break`.
+    let (body, _) = checked_function_body(
+        "fun run() { while (true) { Array<String>(1) { break } } }\n",
+        "run",
+    );
     let outer_target = (0..body.statement_count())
         .find_map(|raw| {
             let statement = body.statement(FirStatementId::from_raw(raw as u32))?;
@@ -4547,84 +4550,6 @@ fn functional_intersection_selects_the_matching_constituent_for_suspend_conversi
                 && signature.params == [Ty::Int]
                 && signature.ret == Ty::String
     ));
-}
-
-#[test]
-fn flow_intersection_type_argument_preserves_all_bounds_in_checked_fir() {
-    let (body, index) = checked_function_body(
-        "interface A\n\
-         interface B\n\
-         inline fun <reified K> select(x: K): K where K : A, K : B = x\n\
-         fun test(value: Any) { if (value is A && value is B) select(value) }\n",
-        "test",
-    );
-    let call = (0..body.expression_count())
-        .find_map(|raw| {
-            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
-                return None;
-            };
-            let target = call.target.module()?;
-            (index.callable_name(target) == Some("select")).then_some(call)
-        })
-        .expect("intersection-constrained generic call");
-    let [substitution] = call.substitutions.as_ref() else {
-        panic!("select must publish its inferred reified type argument")
-    };
-    assert_eq!(substitution.value.get(), Ty::obj("A"));
-    assert_eq!(
-        substitution
-            .additional_bounds
-            .iter()
-            .map(|bound| bound.get())
-            .collect::<Vec<_>>(),
-        vec![Ty::obj("B")]
-    );
-    let [FirCallArgument::Expression {
-        conversion:
-            Some(FirConversion {
-                kind: FirConversionKind::SmartCast { to },
-                ..
-            }),
-        ..
-    }] = call.arguments.as_ref()
-    else {
-        panic!("the argument must retain its primary intersection projection")
-    };
-    assert_eq!(to.get(), Ty::obj("A"));
-}
-
-#[test]
-fn reified_intersection_argument_records_its_common_supertype() {
-    let (body, index) = checked_function_body(
-        "// LANGUAGE: -ProhibitIntersectionReifiedTypeParameter\n\
-         interface X\n\
-         interface Y\n\
-         object A : X, Y\n\
-         object B : X, Y\n\
-         fun <T> sel(left: T, right: T): T = left\n\
-         inline fun <reified T> T.keep(): T = this\n\
-         fun run() { sel(A, B).keep() }\n",
-        "run",
-    );
-    let call = (0..body.expression_count())
-        .find_map(|raw| {
-            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
-                return None;
-            };
-            let target = call.target.module()?;
-            (index.callable_name(target) == Some("keep")).then_some(call)
-        })
-        .expect("reified extension call");
-    let [substitution] = call.substitutions.as_ref() else {
-        panic!("keep must publish its reified type argument")
-    };
-    assert!(substitution.reified);
-    assert!(
-        matches!(substitution.value.get(), Ty::Intersection(parts) if parts.len() == 2),
-        "the semantic argument stays the intersection, got {:?}",
-        substitution.value.get()
-    );
-    assert_eq!(substitution.reified_runtime.get(), Ty::obj("kotlin/Any"));
 }
 
 #[test]

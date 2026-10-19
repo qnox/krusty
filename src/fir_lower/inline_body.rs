@@ -42,6 +42,7 @@ fn external_frame_line(
 }
 
 pub(super) struct ExternalInlineCallRequest<'a> {
+    pub(super) target: crate::fir::ExternalCallableId,
     pub(super) plan: &'a crate::fir::FirInlineBodyPlan,
     pub(super) receiver_ty: Option<ResolvedTy>,
     pub(super) parameter_types: &'a [Ty],
@@ -49,6 +50,8 @@ pub(super) struct ExternalInlineCallRequest<'a> {
     pub(super) dispatch_receiver: Option<ExprId>,
     pub(super) extension_receiver: Option<ExprId>,
     pub(super) arguments: &'a [IrCheckedArgument],
+    pub(super) substitutions: &'a [crate::fir::FirTypeSubstitution],
+    pub(super) extension_receiver_parameter: Option<u32>,
     /// Source line of the expanded call. The frame's marker and frame-closing line attribute to
     /// it; `None` lowers the same expansion without that attribution.
     pub(super) source_line: Option<u32>,
@@ -86,6 +89,7 @@ impl BodyLowering<'_> {
         request: ExternalInlineCallRequest<'_>,
     ) -> Option<ExprId> {
         let ExternalInlineCallRequest {
+            target,
             plan,
             receiver_ty,
             parameter_types,
@@ -93,8 +97,76 @@ impl BodyLowering<'_> {
             dispatch_receiver,
             extension_receiver,
             arguments,
+            substitutions,
+            extension_receiver_parameter,
             source_line,
         } = request;
+        if let crate::fir::FirInlineBodyPlan::ReifiedTypeTest {
+            value,
+            type_parameter,
+            negated,
+            defaults: plan_defaults,
+        } = plan
+        {
+            if result.get() != Ty::Boolean {
+                return None;
+            }
+            let runtime = substitutions.iter().find_map(|substitution| {
+                matches!(
+                    substitution.parameter,
+                    crate::fir::FirTypeParameterRef::External { callable, ordinal }
+                        if callable == target && ordinal == *type_parameter
+                )
+                .then_some(substitution)
+            })?;
+            if !runtime.reified {
+                return None;
+            }
+            let (statements, receiver, mut arguments, defaults) =
+                self.selected_semantic_operands(SelectedOperandRequest {
+                    receiver_ty,
+                    parameter_types,
+                    dispatch_receiver,
+                    extension_receiver,
+                    arguments,
+                    defaults: SelectedDefaultMode::Materialize,
+                    preserve_inline_lambdas: false,
+                    extension_receiver_parameter,
+                    mode: SelectedOperandMode::Materialized,
+                })?;
+            for omitted in &defaults {
+                let default = plan_defaults
+                    .iter()
+                    .find(|default| default.parameter == *omitted)?;
+                let replacement = match default.value {
+                    crate::fir::FirInlineDefaultValue::Null => {
+                        self.ir.add_expr(IrExpr::Const(IrConst::Null))
+                    }
+                };
+                *arguments.get_mut(*omitted as usize)? = replacement;
+            }
+            let argument = match value {
+                crate::fir::FirInlineValue::Receiver => receiver?,
+                crate::fir::FirInlineValue::Parameter(parameter) => {
+                    *arguments.get(*parameter as usize)?
+                }
+                crate::fir::FirInlineValue::Cause => return None,
+            };
+            let operation = self.ir.add_expr(IrExpr::TypeOp {
+                op: if *negated {
+                    crate::ir::IrTypeOp::NotInstanceOf
+                } else {
+                    crate::ir::IrTypeOp::InstanceOf
+                },
+                arg: argument,
+                type_operand: runtime.reified_runtime.get(),
+            });
+            self.ir.logical_types.insert(operation, Ty::Boolean);
+            let expanded = self.wrap_call_statements(statements, operation);
+            self.ir.logical_types.insert(expanded, Ty::Boolean);
+            self.ir.external_inline_expansions.insert(expanded);
+            return Some(expanded);
+        }
         let (
             frame,
             lambda_parameter,
@@ -107,6 +179,7 @@ impl BodyLowering<'_> {
             returned_value,
             declared_receiver,
         ) = match plan {
+            crate::fir::FirInlineBodyPlan::ReifiedTypeTest { .. } => unreachable!(),
             crate::fir::FirInlineBodyPlan::Iteration {
                 frame,
                 lambda_parameter,

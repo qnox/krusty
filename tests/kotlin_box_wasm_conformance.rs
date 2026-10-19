@@ -183,6 +183,19 @@ impl Lane for WasmLane {
         directive_source: &str,
     ) -> Outcome {
         let backend = WasmBackend::new(self.target).with_entry(Entry::Box);
+        let features = krusty::features::LangFeatures::from_source(directive_source);
+        let platform = match self.target {
+            WasmTarget::Js => krusty::klib::write::KlibPlatform::WasmJs,
+            WasmTarget::Wasi => krusty::klib::write::KlibPlatform::WasmWasi,
+        };
+        let metadata = krusty::klib::backend::KlibBackend::new(
+            platform,
+            krusty::klib::write::KlibStamp::new(
+                krusty::kotlin_version::target(),
+                features.language_version(),
+            ),
+        )
+        .with_annotations_in_metadata(features.has("AnnotationsInMetadata"));
         let program = match box_lane::compile_modules(
             scratch,
             stem,
@@ -191,6 +204,7 @@ impl Lane for WasmLane {
             self.libraries(),
             self.test_target(),
             &backend,
+            &metadata,
             DECLINE_PREFIX,
         ) {
             Ok(program) => program,

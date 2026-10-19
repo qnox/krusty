@@ -165,6 +165,227 @@ fn written_fragments(
     (Vec::new(), fragments)
 }
 
+/// The pinned official Native compiler must be able to consume Krusty's prepared-inline IR, not
+/// merely Krusty's own decoder. This crosses the producer boundary in the direction that catches
+/// nonstandard table layouts, missing file provenance, incomplete type-parameter records, and the
+/// private annotated IR copy an `@InlineOnly` public metadata declaration requires.
+#[test]
+fn kotlinc_native_consumes_a_krusty_reified_inline_body() {
+    let Some(native_root) = kotlin_native_root() else {
+        return;
+    };
+    let library_source = "package fixture\n@Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n@kotlin.internal.InlineOnly\ninline fun <reified T> probe(value: Any? = null): Boolean = value is T\n";
+    let stdlib = krusty::toolchain::kotlin_stdlib_klib(
+        krusty::compilation_target::CompilationTarget::Native,
+    )
+    .expect("the Native KLIB producer test has a stdlib");
+    let libraries = krusty::klib_libraries::KlibLibraries::open(&[
+        krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
+            stdlib,
+            krusty::klib_libraries::KlibStdlibSemantics::Native,
+        ),
+    ])
+    .expect("open the Native stdlib KLIB");
+    let inputs = [krusty::source::SourceInput::kotlin(library_source).with_file_stem("Probe")];
+    let mut diags = DiagSink::new();
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+        &inputs,
+        krusty::frontend::PlatformProvider::new(
+            krusty::compilation_target::CompilationTarget::Native,
+            Box::new(libraries.for_compilation()),
+        ),
+        &krusty::features::LangFeatures::from_source(library_source),
+        &mut diags,
+    );
+    let stems = ["Probe".to_owned()];
+    let backend = KlibBackend::new(
+        KlibPlatform::Native,
+        KlibStamp::new(
+            krusty::kotlin_version::KotlinVersion::V2_4_20,
+            krusty::language_version::LanguageVersion::V2_4,
+        ),
+    )
+    .with_native_target(krusty::native::NativeTarget::new(
+        krusty::native::Arch::X86_64,
+        krusty::native::Os::Linux,
+    ))
+    .expect("the official consumer fixture targets Kotlin/Native linux_x64");
+    let entries = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "probe", &mut diags);
+    assert_eq!(
+        diags
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>(),
+        Vec::<&str>::new()
+    );
+    for component in [
+        "default/ir/files.knf",
+        "default/ir_inlinable_functions/files.knf",
+    ] {
+        assert!(
+            entries.iter().any(|(path, _)| path == component),
+            "the supported reified inline body emits {component}"
+        );
+    }
+
+    let work = common::scratch_dir()
+        .expect("allocate the official KLIB consumer directory")
+        .join("krusty-inline-ir-official-consumer");
+    let _ = std::fs::remove_dir_all(&work);
+    let library = work.join("probe");
+    for (entry, bytes) in entries {
+        let path = library.join(entry);
+        std::fs::create_dir_all(path.parent().expect("KLIB entry has a parent"))
+            .expect("create KLIB entry directory");
+        std::fs::write(path, bytes).expect("write KLIB entry");
+    }
+    let consumer = work.join("Consumer.kt");
+    std::fs::write(
+        &consumer,
+        "import fixture.probe\nfun box() = if (probe<String>(\"OK\") && !probe<String>()) \"OK\" else \"fail\"\nfun main() { print(box()) }\n",
+    )
+    .expect("write official consumer source");
+    let output = std::process::Command::new(native_root.join("bin/kotlinc-native"))
+        .arg(&consumer)
+        .arg("-library")
+        .arg(&library)
+        .args(["-produce", "program", "-output"])
+        .arg(work.join("consumer"))
+        .output()
+        .expect("launch the pinned kotlinc-native consumer");
+    assert!(
+        output.status.success(),
+        "kotlinc-native rejected Krusty's prepared inline KLIB (status {}):\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = std::process::Command::new(work.join("consumer.kexe"))
+        .output()
+        .expect("run the official consumer");
+    assert!(
+        run.status.success(),
+        "official consumer exited {}:\nstdout:\n{}\nstderr:\n{}",
+        run.status,
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.stdout, b"OK");
+    std::fs::remove_dir_all(work).expect("remove the official consumer directory");
+}
+
+/// The reverse boundary uses a real kotlinc-produced prepared component and proves common
+/// lowering consumes its declaration-owned body. Merely resolving the metadata declaration would
+/// leave the external call in place and would not set `external_inline_expansions`.
+#[test]
+fn krusty_consumes_a_kotlinc_native_reified_inline_body() {
+    let Some(native_root) = kotlin_native_root() else {
+        return;
+    };
+    let work = common::scratch_dir()
+        .expect("allocate the official KLIB producer directory")
+        .join("official-inline-ir-krusty-consumer");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).expect("create official KLIB producer directory");
+    let producer = work.join("Probe.kt");
+    std::fs::write(
+        &producer,
+        "package fixture\ninline fun <reified T> probe(value: Any? = null): Boolean = value is T\n",
+    )
+    .expect("write official producer source");
+    let library = work.join("probe");
+    let output = std::process::Command::new(native_root.join("bin/kotlinc-native"))
+        .args(["-p", "library", "-nopack", "-o"])
+        .arg(&library)
+        .arg(&producer)
+        .output()
+        .expect("launch the pinned kotlinc-native producer");
+    assert!(
+        output.status.success(),
+        "kotlinc-native rejected the prepared-inline fixture (status {}):\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdlib = krusty::toolchain::kotlin_stdlib_klib(
+        krusty::compilation_target::CompilationTarget::Native,
+    )
+    .expect("the Native KLIB consumer test has a stdlib");
+    let libraries = krusty::klib_libraries::KlibLibraries::open(&[
+        krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
+            stdlib,
+            krusty::klib_libraries::KlibStdlibSemantics::Native,
+        ),
+        krusty::klib_libraries::KlibLibraryInput::dependency(library),
+    ])
+    .expect("open the official producer and Native stdlib");
+    let source = krusty::source::SourceInput::kotlin(
+        "import fixture.probe\nfun box() = probe<String>(\"OK\") && !probe<String>()\n",
+    )
+    .with_file_stem("Consumer");
+    let mut diags = DiagSink::new();
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+        &[source],
+        krusty::frontend::PlatformProvider::new(
+            krusty::compilation_target::CompilationTarget::Native,
+            Box::new(libraries.for_compilation()),
+        ),
+        &krusty::features::LangFeatures::new(),
+        &mut diags,
+    );
+
+    struct ExpansionProbe(std::rc::Rc<std::cell::Cell<bool>>);
+
+    impl krusty::compiler::Backend for ExpansionProbe {
+        type State = ();
+
+        fn compilation_target(&self) -> krusty::compilation_target::CompilationTarget {
+            krusty::compilation_target::CompilationTarget::Native
+        }
+
+        fn lower_ir_file(
+            &self,
+            file: krusty::compiler::CheckedIrFile<'_>,
+            _state: &mut Self::State,
+            _diags: &mut DiagSink,
+        ) -> Vec<krusty::compiler::Artifact> {
+            if !file.ir.external_inline_expansions.is_empty() {
+                self.0.set(true);
+            }
+            Vec::new()
+        }
+
+        fn finalize(
+            &self,
+            _state: Self::State,
+            _module_name: &str,
+        ) -> Vec<krusty::compiler::Artifact> {
+            Vec::new()
+        }
+    }
+
+    let expanded = std::rc::Rc::new(std::cell::Cell::new(false));
+    let stems = ["Consumer".to_owned()];
+    let artifacts = krusty::compiler::emit_analyzed(
+        analysis,
+        &stems,
+        &ExpansionProbe(expanded.clone()),
+        "consumer",
+        &mut diags,
+    );
+    assert!(artifacts.is_empty());
+    assert_eq!(
+        diags
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>(),
+        Vec::<&str>::new()
+    );
+    assert!(expanded.get(), "official prepared IR was not specialized");
+    std::fs::remove_dir_all(work).expect("remove the official producer directory");
+}
+
 /// A decoded type as Kotlin spells it, with the internal (`/`-separated) class name.
 fn render(ty: &KotlinType) -> String {
     match ty {

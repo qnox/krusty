@@ -66,6 +66,7 @@ fn function(
         receiver,
         param_names: vec![String::new(); params.len()],
         param_defaults: vec![false; params.len()],
+        inline_modifiers: vec![crate::types::InlineParameterModifier::None; params.len()],
         params,
         ret: class("kotlin/Unit", Vec::new()),
         formals,

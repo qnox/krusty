@@ -296,7 +296,7 @@ impl ProductionSignatureSemantics<'_> {
                 crate::resolve::implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
             };
             if let Some(result) =
-                self.selected_member_property_type(scope, receiver, spelling, demand)?
+                self.selected_member_property_type(scope, receiver, spelling, None, demand)?
             {
                 return Ok(SelectedValue::plain(result));
             }

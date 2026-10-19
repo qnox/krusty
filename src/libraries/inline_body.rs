@@ -135,6 +135,17 @@ pub struct InlineBodySource {
 /// compiled inline body; source spelling never participates.
 #[derive(Clone, Debug)]
 pub enum InlineBodyPlan {
+    /// Return an `is`/`!is` check whose target is one of this inline declaration's reified type
+    /// parameters. KLIB providers publish this only after matching the complete serialized body;
+    /// the checked call supplies the concrete runtime type through its exact substitution.
+    ReifiedTypeTest {
+        value: InlineBodyValue,
+        type_parameter: u32,
+        negated: bool,
+        /// Closed defaults for every declaration parameter metadata permits the caller to omit.
+        /// A provider with an unsupported default does not publish the plan.
+        defaults: Vec<InlineBodyDefault>,
+    },
     /// Invoke one function-typed parameter, optionally entering a region before it and leaving the
     /// region from `finally`.
     InvokeLambda {

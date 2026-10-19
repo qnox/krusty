@@ -685,6 +685,7 @@ impl JvmLibraries {
     /// the plan crosses the provider boundary.
     pub(super) fn register_inline_body_plan_dependencies(&self, plan: &mut InlineBodyPlan) {
         match plan {
+            InlineBodyPlan::ReifiedTypeTest { .. } => {}
             InlineBodyPlan::InvokeLambda {
                 prologue,
                 cleanup,

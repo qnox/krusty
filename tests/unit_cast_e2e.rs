@@ -117,7 +117,7 @@ fun box(): String {\n\
                 let id = krusty::ast::ExprId(index as u32);
                 Some((
                     info.expr_types.get(index).copied(),
-                    info.resolved_call_type_args.get(&id).cloned(),
+                    info.resolved_call_type_arguments(id).map(<[_]>::to_vec),
                 ))
             })
     });
@@ -158,7 +158,7 @@ fun box(): String {\n\
                 let id = krusty::ast::ExprId(index as u32);
                 Some((
                     info.expr_types.get(index).copied(),
-                    info.resolved_call_type_args.get(&id).cloned(),
+                    info.resolved_call_type_arguments(id).map(<[_]>::to_vec),
                 ))
             });
         let lambda_ret = file.lambda_labels.iter().find_map(|(id, label)| {

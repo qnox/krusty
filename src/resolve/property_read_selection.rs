@@ -12,6 +12,10 @@ pub(super) struct PropertyReadMemberSelection {
     pub(super) ty: Ty,
     pub(super) owner: TypeName,
     pub(super) interface: bool,
+    /// Selected declaration shape used only to publish the property's generic result. A source
+    /// property may have no physical getter call at this use site, but its result still binds
+    /// through the checked dispatch receiver.
+    pub(super) publication: Option<crate::symbol_resolver::ResolvedMember>,
     pub(super) getter: Option<crate::symbol_resolver::ResolvedMember>,
     pub(super) accessor: Option<Box<crate::libraries::LibraryCallable>>,
     /// Provider-chosen field, Kotlin accessor, or Java accessor. The platform null-check names it.

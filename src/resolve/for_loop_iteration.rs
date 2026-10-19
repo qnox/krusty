@@ -306,7 +306,7 @@ impl Checker<'_> {
         let body_scope = scope.child(ScopeKind::Block);
         let scope = &body_scope;
         let flow_identity = self.declare_loop_variable(scope, &name, elem, false);
-        self.record_enhanced_loop_variable(flow_identity, iterable);
+        self.record_enhanced_loop_variable(flow_identity, iterable, elem);
         self.check_loop_body(scope, body, &label);
     }
 

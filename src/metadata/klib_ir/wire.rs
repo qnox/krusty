@@ -11,6 +11,106 @@ use crate::klib::KlibArchive;
 use super::KlibIrDecodeError;
 
 const IR_PREFIX: &str = "default/ir/";
+const INLINABLE_IR_PREFIX: &str = "default/ir_inlinable_functions/";
+
+/// A protobuf `int32` read through a varint: negative values arrive sign-extended to 64 bits.
+pub(super) fn int32(value: u64) -> i32 {
+    value as i64 as i32
+}
+
+/// `BinaryLattice`: two ints interleaved bit by bit, the first in the even bits.
+pub(super) fn lattice(code: u64) -> (u64, u64) {
+    fn deinterleave(mut x: u64) -> u64 {
+        x &= 0x5555_5555_5555_5555;
+        x = (x ^ (x >> 1)) & 0x3333_3333_3333_3333;
+        x = (x ^ (x >> 2)) & 0x0f0f_0f0f_0f0f_0f0f;
+        x = (x ^ (x >> 4)) & 0x00ff_00ff_00ff_00ff;
+        x = (x ^ (x >> 8)) & 0x0000_ffff_0000_ffff;
+        (x ^ (x >> 16)) & 0x0000_0000_ffff_ffff
+    }
+    (deinterleave(code), deinterleave(code >> 1))
+}
+
+/// The pre-2.4 `IrOperationPre_2_4_0` alternative's number in today's `IrExpression` oneof.
+pub(super) fn current_operation(legacy: u64) -> Option<u64> {
+    const CURRENT: [u64; 39] = [
+        10, 22, 8, 19, 21, 5, 23, 26, 25, 27, 39, 18, 20, 15, 17, 6, 28, 40, 12, 16, 7, 29, 30, 31,
+        14, 32, 13, 24, 33, 34, 35, 9, 36, 37, 38, 11, 43, 41, 42,
+    ];
+    let index = usize::try_from(legacy.checked_sub(1)?).ok()?;
+    CURRENT.get(index).copied()
+}
+
+pub(super) struct DeclarationTreeTables {
+    pub(super) files: Vec<Vec<u8>>,
+    pub(super) strings: Vec<Vec<u8>>,
+    pub(super) signatures: Vec<Vec<u8>>,
+    pub(super) declarations: Vec<Vec<u8>>,
+    pub(super) bodies: Vec<Vec<u8>>,
+    pub(super) types: Vec<Vec<u8>>,
+    pub(super) file_entries: Option<Vec<Vec<u8>>>,
+}
+
+/// Read and count-check every parallel table used by one declaration-tree component.
+pub(super) fn read_declaration_tree_tables(
+    archive: &KlibArchive,
+    inlinable: bool,
+) -> Result<DeclarationTreeTables, KlibIrDecodeError> {
+    let table = |name| {
+        if inlinable {
+            read_inlinable_per_file_table(archive, name)
+        } else {
+            read_per_file_table(archive, name)
+        }
+    };
+    let file_entries = if inlinable
+        || archive
+            .entries()
+            .iter()
+            .any(|entry| entry.as_str() == "default/ir/fileEntries.knf")
+    {
+        Some(table("fileEntries.knf")?)
+    } else {
+        // Older ordinary-IR components omit both the IrFile reference and its table.
+        None
+    };
+    let tables = DeclarationTreeTables {
+        files: table("files.knf")?,
+        strings: table("strings.knt")?,
+        signatures: table("signatures.knt")?,
+        declarations: table("irDeclarations.knd")?,
+        bodies: table("bodies.knb")?,
+        types: table("types.knt")?,
+        file_entries,
+    };
+    let expected = tables.files.len();
+    let counts = [
+        tables.strings.len(),
+        tables.signatures.len(),
+        tables.declarations.len(),
+        tables.bodies.len(),
+        tables.types.len(),
+    ];
+    let file_entries_disagree = tables
+        .file_entries
+        .as_ref()
+        .is_some_and(|entries| entries.len() != expected);
+    if counts.iter().any(|count| *count != expected) || file_entries_disagree {
+        return Err(KlibIrDecodeError::malformed(
+            if inlinable {
+                "default/ir_inlinable_functions"
+            } else {
+                "default/ir"
+            },
+            0,
+            format!(
+                "per-file table counts disagree: files={expected}, tables={counts:?}, file entries={:?}",
+                tables.file_entries.as_ref().map(Vec::len)
+            ),
+        ));
+    }
+    Ok(tables)
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum WireValue<'a> {
@@ -305,7 +405,22 @@ pub(super) fn read_per_file_table(
     archive: &KlibArchive,
     name: &str,
 ) -> Result<Vec<Vec<u8>>, KlibIrDecodeError> {
-    let entry = format!("{IR_PREFIX}{name}");
+    read_per_file_table_at(archive, IR_PREFIX, name)
+}
+
+pub(super) fn read_inlinable_per_file_table(
+    archive: &KlibArchive,
+    name: &str,
+) -> Result<Vec<Vec<u8>>, KlibIrDecodeError> {
+    read_per_file_table_at(archive, INLINABLE_IR_PREFIX, name)
+}
+
+fn read_per_file_table_at(
+    archive: &KlibArchive,
+    prefix: &str,
+    name: &str,
+) -> Result<Vec<Vec<u8>>, KlibIrDecodeError> {
+    let entry = format!("{prefix}{name}");
     if !archive
         .entries()
         .iter()

@@ -20,6 +20,7 @@
 //! | `default/linkdata/package_<fqname>/<NN>_<seg>.knm`   | per-package declaration fragments    |
 //! | `default/linkdata/root_package/<NN>_.knm`            | the root package's own fragments     |
 //! | `default/ir/*.kn[bdft]`                              | serialized Kotlin IR (bodies)        |
+//! | `default/ir_inlinable_functions/*.kn[bdft]`          | prepared inline-function IR copies   |
 //!
 //! Declarations live in the `.knm` fragments, which carry the same Kotlin metadata protobuf the JVM
 //! `@Metadata` reader already decodes — that decoder is what turns a fragment into declarations.
@@ -27,6 +28,7 @@
 //! entries as bytes and stops there.
 
 pub mod backend;
+mod inline_ir;
 pub mod write;
 
 use std::collections::BTreeMap;
@@ -44,6 +46,8 @@ const PACKAGE_PREFIX: &str = "default/linkdata/package_";
 const ROOT_PACKAGE_PREFIX: &str = "default/linkdata/root_package/";
 /// Serialized Kotlin IR — the bodies. Read as opaque bytes here.
 const IR_PREFIX: &str = "default/ir/";
+/// Kotlin 2.4's separate, standard component for prepared inline-function copies.
+const INLINABLE_IR_PREFIX: &str = "default/ir_inlinable_functions/";
 /// Guard against a symlink cycle in an unpacked klib. A klib's own tree is three levels deep.
 const MAX_DIRECTORY_DEPTH: usize = 8;
 
@@ -51,6 +55,7 @@ fn semantic_entry(entry: &str) -> bool {
     entry == "default/manifest"
         || entry.starts_with("default/linkdata/")
         || entry.starts_with("default/ir/")
+        || entry.starts_with("default/ir_inlinable_functions/")
 }
 
 fn native_import_entry(entry: &str) -> bool {
@@ -562,9 +567,23 @@ impl KlibArchive {
     pub fn ir_entries(&self) -> Vec<&str> {
         self.entries
             .iter()
-            .filter(|entry| entry.starts_with(IR_PREFIX))
+            .filter(|entry| entry.starts_with(IR_PREFIX) || entry.starts_with(INLINABLE_IR_PREFIX))
             .map(String::as_str)
             .collect()
+    }
+
+    /// Whether this library carries Kotlin 2.4's standard prepared-inline IR component.
+    pub fn has_inlinable_ir(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.starts_with(INLINABLE_IR_PREFIX))
+    }
+
+    /// Whether this library carries its ordinary serialized-IR component.
+    pub fn has_main_ir(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.starts_with(IR_PREFIX))
     }
 }
 

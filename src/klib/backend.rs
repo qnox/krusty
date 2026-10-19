@@ -3,8 +3,9 @@
 //! A KLIB is what a non-JVM dependency is distributed as, and what a dependent compilation reads its
 //! declarations from. This backend writes one `PackageFragment` per checked file, from the same
 //! declaration records the JVM `@Metadata` is built from, and lays the fragments out as a library
-//! ([`super::write`]). It runs before any target lowering: a library records Kotlin declarations,
-//! not a target's realization of them.
+//! ([`super::write`]). Supported inline templates additionally use Kotlin 2.4's standard prepared
+//! inline-function IR component. Both run before target lowering: a library records checked Kotlin
+//! declarations and target-neutral inline bodies, not a target's realization of them.
 
 use crate::backend::{
     Artifact, Backend, CheckedIrFile, DependencyExportSignatures, DependencyMetadata,
@@ -32,8 +33,46 @@ pub const DECLINE_PREFIX: &str = "krusty: the KLIB writer does not support ";
 pub struct KlibBackend {
     platform: KlibPlatform,
     stamp: KlibStamp,
+    native_target: Option<NativeKlibTarget>,
     annotations_in_metadata: bool,
 }
+
+/// One validated pairing of krusty's target model with Kotlin/Native's serialized identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeKlibTarget {
+    target: crate::native::NativeTarget,
+    konan_name: &'static str,
+}
+
+impl NativeKlibTarget {
+    fn konan_name(self) -> &'static str {
+        debug_assert_eq!(self.target.konan_name(), Some(self.konan_name));
+        self.konan_name
+    }
+}
+
+/// Why a metadata sink cannot be bound to one concrete Kotlin/Native target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KlibTargetBindingError {
+    NonNativePlatform(KlibPlatform),
+    UnsupportedNativeTarget(crate::native::NativeTarget),
+}
+
+impl std::fmt::Display for KlibTargetBindingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonNativePlatform(platform) => write!(
+                formatter,
+                "cannot bind Native target metadata to {platform:?} KLIB output"
+            ),
+            Self::UnsupportedNativeTarget(target) => {
+                write!(formatter, "Kotlin/Native has no target for {target}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for KlibTargetBindingError {}
 
 impl KlibBackend {
     /// A library for `platform`, stamped with the compilation's finalized versions.
@@ -41,8 +80,27 @@ impl KlibBackend {
         Self {
             platform,
             stamp,
+            native_target: None,
             annotations_in_metadata: true,
         }
+    }
+
+    /// Bind Native library output to the exact target selected by executable emission.
+    ///
+    /// [`Self::new`] remains target-neutral for metadata-only KLIBs. This boundary accepts only a
+    /// Native platform and a target Kotlin/Native itself names; it never substitutes the host.
+    pub fn with_native_target(
+        mut self,
+        target: crate::native::NativeTarget,
+    ) -> Result<Self, KlibTargetBindingError> {
+        if self.platform != KlibPlatform::Native {
+            return Err(KlibTargetBindingError::NonNativePlatform(self.platform));
+        }
+        let konan_name = target
+            .konan_name()
+            .ok_or(KlibTargetBindingError::UnsupportedNativeTarget(target))?;
+        self.native_target = Some(NativeKlibTarget { target, konan_name });
+        Ok(self)
     }
 
     /// kotlinc's `AnnotationsInMetadata` language feature (on from Kotlin 2.4).
@@ -195,18 +253,53 @@ impl KlibBackend {
             self.annotations_in_metadata,
             &inner_classifier,
         );
-        let Some(exports) = package_exports(ir, file.module_name, &segments, &fragment, diags)
+        let Some(package_exports) =
+            package_exports(ir, file.module_name, &segments, &fragment, diags)
         else {
             return DependencyExportSignatures::default();
         };
+        let inline_functions = super::inline_ir::collect(
+            ir,
+            &format!("{simple_stem}.kt"),
+            &package_exports.declarations,
+        );
+        // Ordinary IR is an all-or-nothing module channel. The narrow writer currently owns one
+        // exact file component, so publish it only for a single-source module whose every metadata
+        // declaration is one of the exact serialized templates. Otherwise retain the independently
+        // valid prepared component without claiming that it is the module's complete body graph.
+        state.complete_main_ir &= state.fragments.is_empty()
+            && classes.is_empty()
+            && ir.package_properties.is_empty()
+            && ir.package_type_aliases.is_empty()
+            && ir.package_functions.len() == inline_functions.len();
+        state.inline_functions.extend(inline_functions);
         state.fragments.push((package, fragment));
-        exports
+        package_exports.executables
     }
 
     fn finish(&self, state: KlibModule, module_name: &str) -> Vec<Artifact> {
         let mut writer = KlibWriter::new(module_name, self.stamp, self.platform);
+        if let Some(target) = self.native_target {
+            writer.set_property("native_targets", target.konan_name());
+        }
         for (package, fragment) in state.fragments {
             writer.add_fragment(&package, fragment);
+        }
+        let inline_ir =
+            super::inline_ir::artifacts(&state.inline_functions, state.complete_main_ir);
+        if !inline_ir.is_empty() {
+            // The serialized types use Kotlin built-ins. This is the standard module edge a full
+            // KLIB records; metadata-only libraries did not previously need one.
+            writer.set_property(
+                "depends",
+                match self.platform {
+                    KlibPlatform::Native => "stdlib",
+                    KlibPlatform::WasmJs | KlibPlatform::WasmWasi => "kotlin",
+                },
+            );
+        }
+        for (path, bytes) in inline_ir {
+            writer.add_file(&path, bytes);
         }
         writer.entries()
     }
@@ -214,9 +307,20 @@ impl KlibBackend {
 
 /// What the backend accumulates across the files of one module: each file's fragment and the
 /// package it declares into, in compilation order.
-#[derive(Default)]
 pub struct KlibModule {
     fragments: Vec<(String, Vec<u8>)>,
+    inline_functions: Vec<super::inline_ir::PreparedFunction>,
+    complete_main_ir: bool,
+}
+
+impl Default for KlibModule {
+    fn default() -> Self {
+        Self {
+            fragments: Vec::new(),
+            inline_functions: Vec::new(),
+            complete_main_ir: true,
+        }
+    }
 }
 
 impl Backend for KlibBackend {
@@ -267,13 +371,18 @@ impl DependencyMetadata for KlibBackend {
 /// Decode the bytes the dependency will actually read, then sign those declarations through the
 /// same identity algorithm as `KlibLibraries`. Declaration order joins the decoded metadata back
 /// to the stable common-IR callable ids that produced it; no spelling participates in the join.
+struct PackageExports {
+    executables: DependencyExportSignatures,
+    declarations: super::inline_ir::DeclarationSignatures,
+}
+
 fn package_exports(
     ir: &IrFile,
     module_name: &str,
     package: &[&str],
     fragment: &[u8],
     diags: &mut DiagSink,
-) -> Option<DependencyExportSignatures> {
+) -> Option<PackageExports> {
     let decoded = match parse_package_fragment_checked(fragment) {
         Ok(decoded) => decoded,
         Err(error) => {
@@ -303,6 +412,7 @@ fn package_exports(
         native_interop_library: false,
     };
     let mut exports = DependencyExportSignatures::default();
+    let mut declarations = super::inline_ir::DeclarationSignatures::default();
     for (source, declaration) in ir.package_functions.iter().zip(&decoded.functions) {
         if source.visibility == crate::types::Visibility::Private {
             continue;
@@ -317,6 +427,7 @@ fn package_exports(
                 return None;
             }
         };
+        declarations.record(source.function, signature.clone(), None);
         // Metadata retains inline templates and bodyless declarations because a dependent
         // frontend needs their semantic declarations (and, for an inline function, its KLIB
         // body). The target registry is narrower: it may publish only code this source unit
@@ -381,16 +492,24 @@ fn package_exports(
             }
         }
     }
-    if let Err(error) =
-        record_class_function_exports(ir, module_name, &package, &decoded, &mut exports)
-    {
+    if let Err(error) = record_class_function_exports(
+        ir,
+        module_name,
+        &package,
+        &decoded,
+        &mut exports,
+        &mut declarations,
+    ) {
         diags.error(
             crate::diag::Span::new(0, 0),
             format!("internal error: cannot sign generated KLIB class function: {error}"),
         );
         return None;
     }
-    Some(exports)
+    Some(PackageExports {
+        executables: exports,
+        declarations,
+    })
 }
 
 /// Record the target bodies behind the exact member-function identities this fragment publishes.
@@ -404,6 +523,7 @@ fn record_class_function_exports(
     package: &[String],
     decoded: &crate::metadata::semantic::KotlinPackage,
     exports: &mut DependencyExportSignatures,
+    declarations: &mut super::inline_ir::DeclarationSignatures,
 ) -> Result<(), String> {
     let source_classes = library_classes(ir);
     if source_classes.len() != decoded.class_order.len() {
@@ -451,19 +571,11 @@ fn record_class_function_exports(
                         declaration.name
                     )
                 })?;
-            if !crate::backend::has_standalone_dependency_code(ir, function) {
-                continue;
-            }
             let signature = package_function_signature(container, declaration)
                 .map_err(|error| format!("{name}.{}: {error}", declaration.name))?;
-            exports.record_callable(
-                function,
-                crate::libraries::KlibDependencyCallable {
-                    module: module_name.to_owned(),
-                    declaration: crate::libraries::KlibDeclarationSignature::Public(signature),
-                },
-            );
-            if !declaration.is_static {
+            let receiver = if declaration.is_static {
+                None
+            } else {
                 let receiver = ir.functions[function as usize]
                     .dispatch_receiver
                     .ok_or_else(|| {
@@ -472,7 +584,26 @@ fn record_class_function_exports(
                             declaration.name
                         )
                     })?;
-                exports.record_member_receiver(function, crate::types::Ty::Obj(receiver, &[]));
+                Some(crate::types::Ty::Obj(receiver, &[]))
+            };
+            // The current prepared writer can serialize a non-generic dispatch classifier exactly.
+            // A generic owner also needs its class parameters remapped into the synthetic prepared
+            // root; do not publish a raw receiver that would erase that declaration contract.
+            if source.type_params.is_empty() && source.captured_type_params.is_empty() {
+                declarations.record(function, signature.clone(), receiver);
+            }
+            if !crate::backend::has_standalone_dependency_code(ir, function) {
+                continue;
+            }
+            exports.record_callable(
+                function,
+                crate::libraries::KlibDependencyCallable {
+                    module: module_name.to_owned(),
+                    declaration: crate::libraries::KlibDeclarationSignature::Public(signature),
+                },
+            );
+            if let Some(receiver) = receiver {
+                exports.record_member_receiver(function, receiver);
             }
         }
     }
@@ -605,4 +736,73 @@ fn constant_value(
         return None;
     };
     static_constant(ir, *storage)
+}
+
+#[cfg(test)]
+mod target_binding_tests {
+    use super::*;
+    use crate::native::{Arch, NativeTarget, Os};
+
+    fn stamp() -> KlibStamp {
+        KlibStamp::new(
+            crate::kotlin_version::KotlinVersion::V2_4_20,
+            crate::language_version::LanguageVersion::V2_4,
+        )
+    }
+
+    fn manifest(backend: &KlibBackend) -> String {
+        let entries = backend.finish(KlibModule::default(), "probe");
+        let bytes = entries
+            .iter()
+            .find_map(|(path, bytes)| (path == "default/manifest").then_some(bytes))
+            .expect("a KLIB backend writes its manifest");
+        String::from_utf8(bytes.clone()).expect("the manifest is UTF-8")
+    }
+
+    #[test]
+    fn native_metadata_output_stays_target_neutral_until_explicitly_bound() {
+        let neutral = KlibBackend::new(KlibPlatform::Native, stamp());
+        assert_eq!(
+            manifest(&neutral),
+            "abi_version=2.4.0\n\
+             builtins_platform=NATIVE\n\
+             compiler_version=2.4.20\n\
+             ir_signature_versions=1,2\n\
+             metadata_version=2.4.0\n\
+             native_targets=\n\
+             unique_name=probe\n"
+        );
+
+        let target = NativeTarget::new(Arch::X86_64, Os::Linux);
+        let targeted = KlibBackend::new(KlibPlatform::Native, stamp())
+            .with_native_target(target)
+            .expect("linux-x86_64 has a Kotlin/Native identity");
+        assert_eq!(
+            manifest(&targeted),
+            "abi_version=2.4.0\n\
+             builtins_platform=NATIVE\n\
+             compiler_version=2.4.20\n\
+             ir_signature_versions=1,2\n\
+             metadata_version=2.4.0\n\
+             native_targets=linux_x64\n\
+             unique_name=probe\n"
+        );
+    }
+
+    #[test]
+    fn native_target_binding_rejects_the_wrong_platform_and_unmapped_target() {
+        let x64 = NativeTarget::new(Arch::X86_64, Os::Linux);
+        assert!(matches!(
+            KlibBackend::new(KlibPlatform::WasmJs, stamp()).with_native_target(x64),
+            Err(KlibTargetBindingError::NonNativePlatform(
+                KlibPlatform::WasmJs
+            ))
+        ));
+
+        let riscv = NativeTarget::new(Arch::Riscv64, Os::Linux);
+        assert!(matches!(
+            KlibBackend::new(KlibPlatform::Native, stamp()).with_native_target(riscv),
+            Err(KlibTargetBindingError::UnsupportedNativeTarget(target)) if target == riscv
+        ));
+    }
 }

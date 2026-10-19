@@ -1350,19 +1350,12 @@ impl BodyFirChecker<'_> {
         declaration: DeclarationId,
     ) -> Result<Box<[FirTypeSubstitution]>, BodyCheckFailure> {
         self.info
-            .resolved_call_type_args
-            .get(&expression)
-            .into_iter()
-            .flatten()
-            .enumerate()
+            .materialized_call_type_arguments(expression)
             .map(|(ordinal, argument)| {
                 let additional_bounds = self
                     .info
-                    .resolved_call_type_argument_bounds
-                    .get(&expression)
-                    .and_then(|bounds| bounds.get(ordinal))
-                    .into_iter()
-                    .flatten()
+                    .resolved_call_type_argument_bounds(expression, ordinal)
+                    .iter()
                     .copied()
                     .map(|bound| {
                         ResolvedTy::new(bound).map_err(|error| {
@@ -1403,14 +1396,8 @@ impl BodyFirChecker<'_> {
                             BodyCheckFailureKind::MissingStableCallTarget,
                         )
                     })?;
-                let value = argument.ok_or_else(|| {
-                    self.failure(
-                        self.file.expr_span(expression),
-                        BodyCheckFailureKind::UnsupportedCallShape,
-                    )
-                })?;
                 let reified = header.flags.is_reified();
-                let value = ResolvedTy::new(value).map_err(|error| {
+                let value = ResolvedTy::new(argument).map_err(|error| {
                     self.failure(
                         self.file.expr_span(expression),
                         BodyCheckFailureKind::UnpublishableType(error),
@@ -1693,19 +1680,12 @@ impl BodyFirChecker<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         let substitutions = self
             .info
-            .resolved_call_type_args
-            .get(&expression)
-            .into_iter()
-            .flatten()
-            .enumerate()
+            .materialized_call_type_arguments(expression)
             .map(|(ordinal, argument)| {
                 let additional_bounds = self
                     .info
-                    .resolved_call_type_argument_bounds
-                    .get(&expression)
-                    .and_then(|bounds| bounds.get(ordinal))
-                    .into_iter()
-                    .flatten()
+                    .resolved_call_type_argument_bounds(expression, ordinal)
+                    .iter()
                     .copied()
                     .map(resolved)
                     .collect::<Result<Vec<_>, _>>()?
@@ -1716,14 +1696,8 @@ impl BodyFirChecker<'_> {
                         BodyCheckFailureKind::UnsupportedCallShape,
                     )
                 })?;
-                let value = argument.ok_or_else(|| {
-                    self.failure(
-                        self.file.expr_span(expression),
-                        BodyCheckFailureKind::UnsupportedCallShape,
-                    )
-                })?;
                 let reified = reified_type_parameter_ordinals.contains(&ordinal);
-                let value = resolved(value)?;
+                let value = resolved(argument)?;
                 Ok(FirTypeSubstitution {
                     parameter: FirTypeParameterRef::External {
                         callable: declaration,
@@ -1805,15 +1779,14 @@ impl BodyFirChecker<'_> {
             selected.callable.suspend,
             selected.callable.params,
             selected.callable.ret,
-            self.info.resolved_call_type_args.get(&expression),
+            self.info.resolved_call_type_arguments(expression),
         );
         if selected.callable.compiler_intrinsic == Some(crate::libraries::CompilerIntrinsic::TypeOf)
             && !self.file.recursive_type_of
         {
             let ty = self
                 .info
-                .resolved_call_type_args
-                .get(&expression)
+                .resolved_call_type_arguments(expression)
                 .and_then(|arguments| arguments.first())
                 .copied()
                 .flatten()
@@ -2375,7 +2348,7 @@ impl BodyFirChecker<'_> {
                 "fir",
                 "publish member call expression={expression:?} declaration={declaration:?} name={} type_args={:?}",
                 selected.member.name,
-                self.info.resolved_call_type_args.get(&expression),
+                self.info.resolved_call_type_arguments(expression),
             );
             let callable = self
                 .index

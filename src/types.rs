@@ -1545,7 +1545,7 @@ impl Ty {
         context: &[Ty],
         type_parameter: &dyn Fn(&str) -> String,
     ) -> String {
-        self.source_name_with_classifier_in(context, type_parameter, &|_| None)
+        self.source_name_with_classifier_in(context, type_parameter, &|_| None, &|lower| lower)
     }
 
     /// Render one type for a diagnostic while allowing the frontend to replace an opaque semantic
@@ -1556,7 +1556,16 @@ impl Ty {
         context: &[Ty],
         type_parameter: &dyn Fn(&str) -> String,
         classifier: &dyn Fn(TypeName) -> Option<String>,
+        platform_upper_bound: &dyn Fn(Ty) -> Ty,
     ) -> String {
+        let render = |ty: Ty| {
+            ty.source_name_with_classifier_in(
+                context,
+                type_parameter,
+                classifier,
+                platform_upper_bound,
+            )
+        };
         match self {
             Ty::Int => "Int".to_string(),
             Ty::Byte => "Byte".to_string(),
@@ -1589,13 +1598,7 @@ impl Ty {
                 } else {
                     let arguments = args
                         .iter()
-                        .map(|argument| {
-                            argument.source_name_with_classifier_in(
-                                context,
-                                type_parameter,
-                                classifier,
-                            )
-                        })
+                        .map(|argument| render(*argument))
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!("{base}<{arguments}>")
@@ -1604,9 +1607,13 @@ impl Ty {
             Ty::Null => "Null".to_string(),
             Ty::Nothing => "Nothing".to_string(),
             Ty::Error => "<error>".to_string(),
-            Ty::Fun(signature) => {
-                diagnostic_rendering::function_type(signature, context, type_parameter, classifier)
-            }
+            Ty::Fun(signature) => diagnostic_rendering::function_type(
+                signature,
+                context,
+                type_parameter,
+                classifier,
+                platform_upper_bound,
+            ),
             // A type parameter's nullability marker belongs to its name, ahead of any owner text a
             // diagnostic appends: `T? (of class Box<T>)`, `T! (of class Box<T>)`.
             Ty::Nullable(inner) | Ty::PlatformNullable(inner)
@@ -1618,46 +1625,31 @@ impl Ty {
                     type_parameter,
                 )
             }
-            Ty::Nullable(inner) => intersection::spell_nullable(
+            Ty::Nullable(inner) => intersection::spell_nullable(*inner, render, true),
+            Ty::PlatformNullable(inner) => diagnostic_rendering::platform_type(
                 *inner,
-                |ty| ty.source_name_with_classifier_in(context, type_parameter, classifier),
-                true,
+                context,
+                type_parameter,
+                classifier,
+                platform_upper_bound,
             ),
-            Ty::PlatformNullable(inner) => {
-                diagnostic_rendering::platform_type(*inner, context, type_parameter, classifier)
-            }
             Ty::InProjection(inner) => match *inner {
-                Ty::OutProjection(conflicting) => format!(
-                    "CONFLICTING-PROJECTION {}",
-                    conflicting
-                        .source_name_with_classifier_in(context, type_parameter, classifier,)
-                ),
-                _ => format!(
-                    "in {}",
-                    inner.source_name_with_classifier_in(context, type_parameter, classifier)
-                ),
+                Ty::OutProjection(conflicting) => {
+                    format!("CONFLICTING-PROJECTION {}", render(*conflicting))
+                }
+                _ => format!("in {}", render(*inner)),
             },
             Ty::OutProjection(inner) => match *inner {
-                Ty::InProjection(conflicting) => format!(
-                    "CONFLICTING-PROJECTION {}",
-                    conflicting
-                        .source_name_with_classifier_in(context, type_parameter, classifier,)
-                ),
-                _ => format!(
-                    "out {}",
-                    inner.source_name_with_classifier_in(context, type_parameter, classifier)
-                ),
+                Ty::InProjection(conflicting) => {
+                    format!("CONFLICTING-PROJECTION {}", render(*conflicting))
+                }
+                _ => format!("out {}", render(*inner)),
             },
             Ty::StarProjection(_) => "*".to_string(),
-            Ty::DefinitelyNotNull(inner) => format!(
-                "{} & Any",
-                inner.source_name_with_classifier_in(context, type_parameter, classifier)
-            ),
+            Ty::DefinitelyNotNull(inner) => format!("{} & Any", render(*inner)),
             Ty::Intersection(parts) => parts
                 .iter()
-                .map(|part| {
-                    part.source_name_with_classifier_in(context, type_parameter, classifier)
-                })
+                .map(|part| render(*part))
                 .collect::<Vec<_>>()
                 .join(" & "),
             Ty::TyParam(n, _) => type_parameter(n),

@@ -206,13 +206,35 @@ impl SymbolResolver<'_> {
                     property.owner,
                     property.visibility,
                 );
-                let interface = self
-                    .src
-                    .classifier(property.owner)
+                let declaration = self.src.classifier(property.owner);
+                let interface = declaration
+                    .as_ref()
                     .is_some_and(|owner| owner.is_interface());
                 let accessor_derived = property.accessor_derived();
+                let declaration_receiver = declaration.as_ref().map(|declaration| {
+                    Ty::obj_args_name(
+                        property.owner,
+                        &declaration
+                            .type_params()
+                            .iter()
+                            .enumerate()
+                            .map(|(index, parameter)| {
+                                Ty::ty_param(
+                                    parameter,
+                                    declaration
+                                        .type_param_bounds()
+                                        .get(index)
+                                        .and_then(|bounds| bounds.first())
+                                        .copied()
+                                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                });
                 let selected = SelectedMemberProperty {
                     owner: property.owner,
+                    declaration_receiver,
                     ty,
                     interface,
                     visibility: property.visibility,
