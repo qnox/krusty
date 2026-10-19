@@ -16393,6 +16393,9 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if let Ok(ResolvedQualifier::Classifier(internal)) = &member_qualifier {
+                    if self.report_inner_constructor_through_qualifier(callee, &name, *internal) {
+                        return Ty::Error;
+                    }
                     match self.check_sam_constructor_call(
                         scope,
                         call,
@@ -16564,6 +16567,14 @@ impl<'a> Checker<'a> {
                                 .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
                         }
                         return Ty::Error;
+                    }
+                }
+                if let Ok(ResolvedQualifier::Package(package)) = receiver_qualifier {
+                    let call_args = (call, callee, args);
+                    if let Some(ret) =
+                        self.package_property_call(scope, call_args, package, &name, expected)
+                    {
+                        return ret;
                     }
                 }
                 // `super.method(args)` / `super<T>.method(args)` — dispatch to a supertype's method
@@ -58517,11 +58528,7 @@ impl<'a> Checker<'a> {
                     // it unresolved.
                     ty
                 } else if self.names_root_package(e, &n) {
-                    self.diags.error(
-                        self.span(e),
-                        expression_qualifiers::EXPRESSION_EXPECTED_PACKAGE_FOUND.to_string(),
-                    );
-                    Ty::Error
+                    self.package_used_as_expression(self.span(e))
                 } else {
                     self.diags
                         .error(self.span(e), format!("unresolved reference '{n}'."));
@@ -59175,18 +59182,17 @@ impl<'a> Checker<'a> {
                 Ok(ResolvedQualifier::Value) | Err(_) => false,
             };
             if pure_qualifier {
-                let message = if matches!(
-                    member_step,
-                    Ok(expression_qualifiers::QualifierStep {
-                        resolved: ResolvedQualifier::Package(_),
-                        ..
-                    })
-                ) {
-                    expression_qualifiers::EXPRESSION_EXPECTED_PACKAGE_FOUND.to_string()
-                } else {
-                    crate::diagnostic_wording::unresolved_reference_on(&name, None)
-                };
-                self.diags.error(self.member_name_span(e, &name), message);
+                let span = self.member_name_span(e, &name);
+                if let Ok(expression_qualifiers::QualifierStep {
+                    resolved: ResolvedQualifier::Package(_),
+                    ..
+                }) = member_step
+                {
+                    let ty = self.package_used_as_expression(span);
+                    return self.set(e, ty);
+                }
+                let message = crate::diagnostic_wording::unresolved_reference_on(&name, None);
+                self.diags.error(span, message);
                 return self.set(e, Ty::Error);
             }
             let diag_mark = self.diags.diags.len();
@@ -61331,7 +61337,8 @@ impl<'a> Checker<'a> {
             if let Some(r) = receiver {
                 let diag_mark = self.diags.diags.len();
                 let rty = self.expr(scope, r);
-                if rty == Ty::Error {
+                // A package left-hand side is no value: its `Unit` type is not a bound receiver.
+                if rty == Ty::Error || self.package_lhs(r) {
                     // An error-typed receiver carries one of two situations. Typing the receiver
                     // EXPRESSION may itself have failed (`Unresolved::method`, `missingFn()::m`):
                     // that diagnostic already explains the failure, and kotlinc adds nothing on

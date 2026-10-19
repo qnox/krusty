@@ -361,6 +361,79 @@ impl Checker<'_> {
 
     /// Whether the simple name `expression`, which no value or classifier rung bound, names a root
     /// package: the qualifier the walk binds it to.
+    /// A package qualifier used as an expression at `span`. kotlinc reports it and types the
+    /// qualifier `Unit`, so the use goes on to be checked against that type: `val x: Int = pkg` is
+    /// also a mismatch, and `pkg?.f()` selects `f` on `Unit`.
+    pub(super) fn package_used_as_expression(&mut self, span: Span) -> Ty {
+        self.diags
+            .error(span, EXPRESSION_EXPECTED_PACKAGE_FOUND.to_string());
+        Ty::Unit
+    }
+
+    /// Whether `package` has no callable named `name` in the scope kotlinc's
+    /// `PackageQualifierReceiver` resolves through: no top-level function or property, and no
+    /// classifier with a constructor.
+    pub(super) fn package_lacks_callable(&self, package: TypeName, name: &str) -> bool {
+        let resolver = self.resolver_in_scope(std::slice::from_ref(&package));
+        if !resolver.top_level_candidates(name).is_empty()
+            || !resolver.top_level_properties(name).is_empty()
+        {
+            return false;
+        }
+        let record = self
+            .fed_source()
+            .symbols(SymbolNamespace::Package(package), name);
+        !record.classifier_name.is_some_and(|classifier| {
+            self.resolver()
+                .classifier(classifier)
+                .is_some_and(|classifier| !classifier.constructors.is_empty())
+        })
+    }
+
+    /// `pkg.name(args)` once neither a top-level function nor a classifier constructor of the
+    /// package was selected: the package's scope alone is searched, so a top-level property is
+    /// read and its value invoked, and any other `name` is unresolved at the callee. `None` when
+    /// the package has a callable this does not own.
+    pub(super) fn package_property_call(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        (call, callee, args): (ExprId, ExprId, &[ExprId]),
+        package: TypeName,
+        name: &str,
+        expected: Option<Ty>,
+    ) -> Option<Ty> {
+        let resolver = self.resolver_in_scope(std::slice::from_ref(&package));
+        let properties = resolver.top_level_properties(name);
+        if properties.is_empty() {
+            if !self.package_lacks_callable(package, name) {
+                return None;
+            }
+        } else if let Some(value) = self.read_package_property(scope, callee, package, name) {
+            if value == Ty::Error {
+                return Some(Ty::Error);
+            }
+            if self.value_type_claims_call(scope, value) {
+                let arg_tys = self.arg_tys(scope, args);
+                return self.record_invoke_or_report(
+                    scope,
+                    CallArgs {
+                        call,
+                        args,
+                        arg_tys: &arg_tys,
+                    },
+                    callee,
+                    value,
+                    self.span(call),
+                    CallResultConstraint::direct(expected),
+                );
+            }
+        }
+        let message = crate::diagnostic_wording::unresolved_reference_on(name, None);
+        self.diags
+            .error(self.member_name_span(callee, name), message);
+        Some(Ty::Error)
+    }
+
     pub(super) fn names_root_package(&self, expression: ExprId, name: &str) -> bool {
         !self.segment_cannot_name_a_package(Some(expression))
             && self.fed_source().package_exists(TypeName::ROOT, name)

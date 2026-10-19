@@ -782,3 +782,124 @@ fn a_local_class_alias_constructor_continues_its_owner() {
         &[],
     );
 }
+
+const PACKAGE_SCOPE: &str = "\
+package part1.part2
+
+fun top() = 2
+val prop = 3
+";
+
+/// A package receiver resolves its callee in the package's scope alone, so a member of `Any` or a
+/// property whose value cannot be invoked is unresolved at the callee. A package qualifier used as
+/// an expression is typed `Unit`: an expected type mismatches it and a safe call selects on it.
+const PACKAGE_RECEIVER_USES: &str = "\
+fun use() {
+    val a = part1.part2.toString()
+    val b = part1.part2.prop()
+    val c = (part1.part2).top()
+    val d: Int = part1.part2
+    val e = kotlin?.toString()
+    val f = part1.part2?.top()
+}
+";
+
+#[test]
+fn a_package_receiver_resolves_its_callee_in_the_package_scope() {
+    let expected = |location| error(location, EXPRESSION_EXPECTED);
+    let on_unit = if release_has_feature() {
+        "unresolved reference 'top' on receiver of type 'Unit'."
+    } else {
+        "unresolved reference 'top'."
+    };
+    let errors = vec![
+        unresolved("Use.kt:2:25", "toString"),
+        unresolved("Use.kt:3:25", "prop"),
+        error(
+            "Use.kt:5:16",
+            "initializer type mismatch: expected 'Int', actual 'Unit'.",
+        ),
+        expected("Use.kt:5:24"),
+        expected("Use.kt:6:13"),
+        expected("Use.kt:7:19"),
+        error("Use.kt:7:26", on_unit),
+    ];
+    assert_matches_kotlinc(
+        &[
+            ("Declarations.kt", PACKAGE_SCOPE),
+            ("Use.kt", PACKAGE_RECEIVER_USES),
+        ],
+        &[],
+        &errors,
+        &[],
+    );
+}
+
+const INNER_CLASSES: &str = "\
+package part1.part2
+
+interface Marker<A>
+class Shell<T : CharSequence, in Q> {
+    class Mid<V> {
+        inner class Deep<out W>
+    }
+    inner class Inner<U> : Marker<T>, Comparable<U> {
+        override fun compareTo(other: U) = 0
+    }
+    fun own() = Shell.Inner<Int>()
+}
+class Plain {
+    inner class I
+    class Nested { inner class In }
+}
+";
+
+/// A classifier qualifier has no value, so the constructor of an `inner` class it selects has no
+/// dispatch receiver even inside the outer class; the call has no type to check further.
+const INNER_CONSTRUCTOR_CALLS: &str = "\
+fun use() {
+    val a = part1.part2.Plain.I()
+    val b = part1.part2.Shell.Mid.Deep<Int>()
+    val c = part1.part2.Shell<String, Int>.Inner<Int>()
+    val d: String = part1.part2.Shell.Inner<Int>()
+    val e = part1.part2.Shell.Inner<Int>().hashCode()
+    val f = part1.part2.Shell<String, Int>.Mid.Deep<Int>()
+    val g = part1.part2.Plain.Nested.In()
+}
+";
+
+#[test]
+fn an_inner_constructor_through_a_qualifier_has_no_receiver() {
+    let no_receiver = |location, class: &str| {
+        error(
+            location,
+            &format!(
+                "constructor of the inner class '{class}' can only be called with a receiver of \
+                 the containing class."
+            ),
+        )
+    };
+    let inner =
+        "inner class Inner<U, Outer(T) : CharSequence, in Outer(Q)> : Marker<T>, Comparable<U>";
+    let deep = "inner class Deep<out W, Outer(V)> : Any";
+    let errors = vec![
+        no_receiver("Declarations.kt:11:23", inner),
+        no_receiver("Use.kt:2:31", "inner class I : Any"),
+        no_receiver("Use.kt:3:35", deep),
+        no_receiver("Use.kt:4:44", inner),
+        no_receiver("Use.kt:5:39", inner),
+        no_receiver("Use.kt:6:31", inner),
+        error("Use.kt:7:13", OUTER_CLASS_TYPE_ARGUMENTS),
+        no_receiver("Use.kt:7:48", deep),
+        no_receiver("Use.kt:8:38", "inner class In : Any"),
+    ];
+    assert_matches_kotlinc(
+        &[
+            ("Declarations.kt", INNER_CLASSES),
+            ("Use.kt", INNER_CONSTRUCTOR_CALLS),
+        ],
+        &[],
+        &errors,
+        &[],
+    );
+}

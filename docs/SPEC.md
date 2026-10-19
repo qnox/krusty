@@ -14102,8 +14102,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     still resolved in the package's callable scope (`PackageQualifierReceiver`), so a name with no
     top-level function or property and no class constructor there is also "unresolved reference
     '<name>'." (`pkg<Int>::sub`, `pkg.sub::Obj`). A segment that cannot name a package keeps its
-    unresolved-reference error instead.
-    (`tests/package_qualifier_forms_e2e.rs`.)
+    unresolved-reference error instead. The standalone qualifier is typed `Unit`, so an expected
+    type mismatches it (`val x: Int = pkg.sub` is also "initializer type mismatch: expected 'Int',
+    actual 'Unit'.") and a safe call selects on it (`pkg.sub?.top()` is also "unresolved reference
+    'top' on receiver of type 'Unit'."); a callable reference's package left-hand side is never a
+    bound receiver.
+  - A package that is the explicit receiver of a call (`pkg.sub.f()`, also parenthesized) is not
+    standalone: the callee is resolved in the package's scope alone. After its top-level functions
+    and its classifiers' constructors, a top-level property is read and its value invoked
+    (`pkg.sub.lambdaProp()`, a property whose type has `operator fun invoke`); any other name, a
+    member of `Any` (`pkg.sub.toString()`) or a property whose value cannot be invoked included, is
+    "unresolved reference '<name>'." at the callee.
+  - A classifier qualifier has no value, so the constructor of an `inner` class it selects has no
+    dispatch receiver, even where an implicit receiver of the outer class is in scope:
+    `pkg.Outer.Inner()`, `Outer<Int>.Inner()` and `Outer.Mid.Deep()` report "constructor of the
+    inner class '<class>' can only be called with a receiver of the containing class." at the
+    constructor's name (`INNER_CLASS_CONSTRUCTOR_NO_RECEIVER`), and the call has no type to check
+    further. The class renders as kotlinc's symbol rendering: `inner class Inner<U, Outer(T) :
+    Bound, in Outer(Q)> : Marker<T>` lists its own formals, then each formal captured from an
+    enclosing class as `Outer(<name>)` with its variance and bounds, then its declared supertypes
+    (`Any` when it names none).
+    (`tests/package_qualifier_forms_e2e.rs`, `tests/resolver_regression_e2e.rs`.)
   - The receiver chain of a call, property access, assignment, callable reference or class literal
     is resolved by one left-to-right walk (`src/resolve/expression_qualifiers.rs`), which records
     what each written segment bound (package or classifier, its FIR type-argument fact, whether it

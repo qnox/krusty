@@ -413,30 +413,24 @@ impl Checker<'_> {
 
     /// Whether the left-hand side `lhs`, which the walk bound to a package, has no callable named
     /// `name`. kotlinc reports the package used as an expression and still resolves the reference
-    /// in the package's callable scope (`PackageQualifierReceiver`): a top-level function or
-    /// property, or the constructor of a class.
+    /// in the package's callable scope.
     pub(super) fn package_lhs_lacks_callable(&self, lhs: ExprId, name: &str) -> bool {
-        let Some(QualifierBinding::Package(package)) = self
+        match self
             .bound_qualifier_segment(lhs)
             .map(|segment| segment.binding)
-        else {
-            return false;
-        };
-        let resolver = self.resolver_in_scope(std::slice::from_ref(&package));
-        if !resolver.top_level_candidates(name).is_empty()
-            || !resolver.top_level_properties(name).is_empty()
         {
-            return false;
+            Some(QualifierBinding::Package(package)) => self.package_lacks_callable(package, name),
+            _ => false,
         }
-        let record = self.fed_source().symbols(
-            crate::symbol_source::SymbolNamespace::Package(package),
-            name,
-        );
-        !record.classifier_name.is_some_and(|classifier| {
-            self.resolver()
-                .classifier(classifier)
-                .is_some_and(|classifier| !classifier.constructors.is_empty())
-        })
+    }
+
+    /// Whether the walk bound the left-hand side `lhs` to a package.
+    pub(super) fn package_lhs(&self, lhs: ExprId) -> bool {
+        matches!(
+            self.bound_qualifier_segment(lhs)
+                .map(|segment| segment.binding),
+            Some(QualifierBinding::Package(_))
+        )
     }
 
     pub(super) fn has_type_arguments(&self, expression: ExprId) -> bool {

@@ -2322,3 +2322,17 @@ fun box(): String {
 "#;
     assert_accepted_and_runs(src, "ResolverQualifiedNestedAliasConstructors");
 }
+
+#[test]
+fn a_package_qualified_property_value_is_invoked() {
+    let src = r#"
+package invoked.values
+
+val greeting = { "O" }
+object Suffix { operator fun invoke() = "K" }
+val suffix = Suffix
+
+fun box(): String = invoked.values.greeting() + invoked.values.suffix()
+"#;
+    assert_accepted_and_runs(src, "ResolverPackageQualifiedPropertyInvoke");
+}
