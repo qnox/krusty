@@ -180,6 +180,11 @@ impl CallSiteVariables {
                 .into_iter()
                 .map(|(name, bounds)| (formal(name), bounds.into_iter().map(ty).collect()))
                 .collect(),
+            nullable_flexible_roots: inferred
+                .nullable_flexible_roots
+                .into_iter()
+                .map(formal)
+                .collect(),
             bound_violation: inferred
                 .bound_violation
                 .map(|violation| GenericBoundViolation {

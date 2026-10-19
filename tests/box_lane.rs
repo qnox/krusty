@@ -490,7 +490,9 @@ pub fn analyze_module(
 
 /// Analyze each source module against only its declared dependency KLIB closure, emit all target
 /// code through one backend session, and retain every generated dependency as a distinct archive.
-pub fn compile_modules<B: Backend>(
+/// The target lane supplies `metadata`: Native owns its concrete Konan target here, while each Wasm
+/// lane owns its exact JS/WASI platform.
+pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
     scratch: &Path,
     stem: &str,
     modules: &[krusty::conformance::ModuleUnit],
@@ -498,6 +500,7 @@ pub fn compile_modules<B: Backend>(
     libraries: Libraries,
     target: TestTarget,
     backend: &B,
+    metadata: &M,
     decline_prefix: &str,
 ) -> Result<CompiledProgram, Outcome> {
     #[derive(Clone)]
@@ -563,31 +566,12 @@ pub fn compile_modules<B: Backend>(
             "the {target:?} corpus lane received a {compilation_target:?} backend"
         )));
     }
-    let features = krusty::features::LangFeatures::from_source(directive_source);
-    let platform = match compilation_target {
-        krusty::compilation_target::CompilationTarget::Native => {
-            krusty::klib::write::KlibPlatform::Native
-        }
-        krusty::compilation_target::CompilationTarget::WasmJs => {
-            krusty::klib::write::KlibPlatform::WasmJs
-        }
-        krusty::compilation_target::CompilationTarget::WasmWasi => {
-            krusty::klib::write::KlibPlatform::WasmWasi
-        }
-        other => {
-            return Err(Outcome::Harness(format!(
-                "the multi-module box lane cannot emit dependency KLIBs for {other:?}"
-            )))
-        }
-    };
-    let metadata = krusty::klib::backend::KlibBackend::new(
-        platform,
-        krusty::klib::write::KlibStamp::new(
-            krusty::kotlin_version::target(),
-            features.language_version(),
-        ),
-    )
-    .with_annotations_in_metadata(features.has("AnnotationsInMetadata"));
+    if metadata.compilation_target() != compilation_target {
+        return Err(Outcome::Harness(format!(
+            "the {target:?} corpus lane received {:?} dependency metadata",
+            metadata.compilation_target()
+        )));
+    }
     let generated_root = GeneratedRoot(scratch.join(format!(
         ".krusty-klib-{stem}-{}-{}",
         std::process::id(),
@@ -634,7 +618,7 @@ pub fn compile_modules<B: Backend>(
         )?;
         native_imports.extend(module_imports);
         let Some(dependency) =
-            session.emit_module(analysis, &stems, &metadata, &unit.name, &mut diags)
+            session.emit_module(analysis, &stems, metadata, &unit.name, &mut diags)
         else {
             let outcome = diagnostic_outcome(&diags, decline_prefix).unwrap_or_else(|| {
                 Outcome::Harness("module emission failed without a diagnostic".to_string())

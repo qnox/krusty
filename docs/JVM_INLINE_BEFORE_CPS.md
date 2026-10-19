@@ -88,6 +88,18 @@ Each step reports box passes, byte-identical files and divergent classes before 
   only suspend ones), which is the line `@DebugMetadata` records after a point that ends its
   protected range (`tests/catch_clause_line_e2e.rs`).
 
+### Step 5 so far
+
+* A dependency's callable inline suspend function is spliced from its `$$forInline` copy into a
+  method the transformer owns, whose markers make the copy's suspend call a point of the caller.
+* A literal lambda the method inliner places, for a reified callee or for such an inline suspend
+  callee, may suspend: the lambda captures the caller's continuation as `$completion`, and its
+  suspensions are points of the same machine (`placed_lambda_suspensions` in
+  `jvm/suspend/cps/inline_suspension.rs`). The lambda's standalone `invoke` is not written. A
+  lambda that keeps the byte splice (a non-local `return`, operands on the stack across the
+  callee) writes the same markers and runs, but its locals are not yet kotlinc's.
+* A suspension in any other spliced body still keeps the IR machine.
+
 ### Step 2 as landed
 
 * `jvm::suspend::bytecode_machine` routes a top-level (static) suspend function to

@@ -67,7 +67,7 @@ impl Emitter<'_> {
                     let inline_parameter = index
                         .checked_sub(leading_non_argument_operands)
                         .and_then(|operand| {
-                            super::super::inline_parameters::is_inline_parameter(
+                            crate::jvm::inline_parameters::is_inline_parameter(
                                 self.ir,
                                 call_expression,
                                 operand,

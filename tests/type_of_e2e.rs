@@ -84,7 +84,7 @@ package lib
 import kotlin.reflect.KType
 import kotlin.reflect.typeOf
 class Holder<T : CharSequence>(val value: T) {
-    inline fun described(): KType = typeOf<Array<T>>()
+    inline fun described(): KType = typeOf<List<T>>()
 }
 "#;
     const MAIN: &str = r#"
@@ -92,7 +92,7 @@ import kotlin.reflect.KTypeParameter
 fun box(): String {
     val type = lib.Holder("x").described()
     val parameter = type.arguments.first().type!!.classifier as KTypeParameter
-    return if (type.toString() == "kotlin.Array<T>" && parameter.upperBounds.toString() == "[kotlin.CharSequence]") "OK" else "fail: $type ${parameter.upperBounds}"
+    return if (type.toString() == "kotlin.collections.List<T>" && parameter.upperBounds.toString() == "[kotlin.CharSequence]") "OK" else "fail: $type ${parameter.upperBounds}"
 }
 "#;
     assert_eq!(

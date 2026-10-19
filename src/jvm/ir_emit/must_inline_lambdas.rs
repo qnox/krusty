@@ -60,7 +60,7 @@ pub fn mark_must_inline_lambdas(ir: &mut IrFile) -> Result<(), MissingInlinePara
             };
             // A literal for a parameter the call publishes as no inline parameter is a value the
             // body receives, so its method is live.
-            match super::inline_parameters::is_inline_parameter(ir, call, parameter) {
+            match crate::jvm::inline_parameters::is_inline_parameter(ir, call, parameter) {
                 Some(true) => {}
                 Some(false) => continue,
                 None => return Err(MissingInlineParameterFacts { call, parameter }),

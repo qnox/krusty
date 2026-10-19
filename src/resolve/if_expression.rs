@@ -180,6 +180,7 @@ impl Checker<'_> {
                         et,
                         e,
                     );
+                    self.record_flexible_join(e, [then_branch, eb], result, false);
                     self.complete_conditional_branches(
                         scope,
                         e,
@@ -204,6 +205,7 @@ impl Checker<'_> {
                     result
                 }
                 None => {
+                    self.record_flexible_join(e, std::iter::empty(), Ty::Unit, false);
                     self.report_unbound_conditional_branch(scope, then_branch);
                     let (false_reads, false_intersections) =
                         self.implicit_false_edge_state(scope, cond, &locals, &entry_reads);
@@ -223,6 +225,18 @@ impl Checker<'_> {
                 }
             }
         };
+        if let Some(else_branch) = else_branch {
+            self.publish_conditional_intersection(
+                e,
+                [
+                    (then_branch, self.expr_types[then_branch.0 as usize]),
+                    (else_branch, self.expr_types[else_branch.0 as usize]),
+                ],
+                t,
+            );
+        } else {
+            self.inferred_expression_intersections.remove(&e);
+        }
         self.set(e, t)
     }
 }

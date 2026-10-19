@@ -1,0 +1,23 @@
+//! Declaration-publication handoff for one callable already selected by signature semantics.
+
+use super::{DiagnosticId, OriginId, ResolvedTy, ResolvedTypeAbbreviation, SignatureScope};
+
+/// Publication-only result projection over the exact selected call. The compact evaluator supplies
+/// ordinary and recursively published operand types; implementations must consume selection facts
+/// recorded at `origin`, never repeat lookup or overload selection.
+pub trait SelectedResultPublicationSemantics {
+    /// Typealias constructed by the call selected at `origin`, when one survives publication.
+    fn call_result_abbreviation(&self, _origin: OriginId) -> Option<ResolvedTypeAbbreviation> {
+        None
+    }
+
+    fn call_result_publication(
+        &self,
+        _scope: SignatureScope,
+        _origin: OriginId,
+        _receiver: Option<(ResolvedTy, ResolvedTy)>,
+        _arguments: &[(ResolvedTy, ResolvedTy)],
+    ) -> Result<Option<ResolvedTy>, DiagnosticId> {
+        Ok(None)
+    }
+}

@@ -554,6 +554,38 @@ impl Checker<'_> {
         })
     }
 
+    pub(super) fn postponed_reference_input_fits(&self, expected: Ty, target: Ty) -> bool {
+        let constraints = self
+            .active_callable_reference
+            .and_then(|expression| self.callable_reference_literal_constraints.get(&expression));
+        // A postponed callable-reference check gives the enclosing declaration's type parameters
+        // call-owned identities. Literal applicability was recorded before that namespace was
+        // entered, so compare through the frame's declared identity.
+        let expected = self
+            .postponed_call_constraints
+            .iter()
+            .rev()
+            .find(|frame| frame.mentions_formal(expected))
+            .map_or(expected, |frame| frame.declared_type(expected));
+        let Ty::TyParam(formal, _) = expected.non_null() else {
+            return true;
+        };
+        // A generic referenced declaration can specialize its input to the still-open formal. Its
+        // final call solution chooses the concrete literal type; only a concrete target is useful
+        // overload evidence while this call is postponed.
+        if target.mentions_ty_param() {
+            return true;
+        }
+        constraints
+            .and_then(|constraints| constraints.get(formal))
+            .is_none_or(|arguments| {
+                arguments.iter().all(|argument| {
+                    self.receiver_is_assignable(argument.ty(), target)
+                        || argument.adapts_integer_literal_to(target)
+                })
+            })
+    }
+
     /// Reach the fixed point of the constraints contributed by postponed function arguments.
     /// Rechecks and their diagnostic ownership stay together here; the call-site facade supplies
     /// only the selected parameter shapes and consumes the finalized argument types.
@@ -686,12 +718,22 @@ impl Checker<'_> {
                 } else {
                     self.postponed_diagnostics.discard(argument);
                     let diagnostic_mark = self.diags.diags.len();
+                    self.completed_failed_postponed_callable_rechecks
+                        .remove(&argument);
+                    let previous_recheck = self
+                        .active_postponed_callable_reference_recheck
+                        .replace(argument);
                     let nominal = self.expr_expected(site.scope, argument, expected);
+                    self.active_postponed_callable_reference_recheck = previous_recheck;
                     let checked = self
                         .expression_function_type(site.scope, argument, nominal)
                         .unwrap_or(nominal);
                     self.postponed_diagnostics
                         .capture_since(argument, self.diags, diagnostic_mark);
+                    if checked == Ty::Error {
+                        self.completed_failed_postponed_callable_rechecks
+                            .insert(argument);
+                    }
                     checked
                 };
                 if is_lambda
@@ -727,10 +769,11 @@ impl Checker<'_> {
         prior_solutions
     }
 
-    /// Close one lambda's call-owned inference namespace. Its collected constraints and its checked
-    /// function type cross the call boundary together; allowing only the constraints through would
-    /// leave the argument carrying temporary identities into final overload selection.
-    pub(super) fn merge_postponed_lambda(
+    /// Close one function argument's call-owned inference namespace. Its collected constraints and
+    /// its checked function type cross the call boundary together; allowing only the constraints
+    /// through would leave the argument carrying temporary identities into final overload
+    /// selection.
+    pub(super) fn merge_postponed_function_argument(
         &mut self,
         expression: ExprId,
         checked: Ty,
@@ -813,6 +856,37 @@ impl Checker<'_> {
         self.postponed_call_constraints
             .iter()
             .any(|constraints| constraints.mentions_formal(ty))
+    }
+
+    /// Test one symbolic assignability relation against cloned postponed-call frames. Selection
+    /// may use the answer, but only the ordinary argument-commit path may publish the constraints.
+    pub(super) fn postponed_assignability_trial(&self, expected: Ty, actual: Ty) -> bool {
+        if !(self.postponed_call_mentions(expected) || self.postponed_call_mentions(actual))
+            || !self.postponed_argument_constraint_is_satisfiable(expected, actual)
+        {
+            return false;
+        }
+        let source = self.fed_source();
+        let inferred = crate::symbol_resolver::collect_assignability_constraints_from_symbols(
+            &source, expected, actual,
+        );
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
+        let mut shadowed = crate::fx_hash::HashSet::default();
+        for constraints in self.postponed_call_constraints.iter().rev() {
+            let mut trial = constraints.clone();
+            trial.constrain_assignable(&source, expected, actual, &inferred, &shadowed);
+            for formal in &trial.formals {
+                if !shadowed.contains(formal) {
+                    if let Some(solution) = self.postponed_solution(&trial, formal) {
+                        bindings.insert(formal.clone(), solution);
+                    }
+                }
+            }
+            shadowed.extend(constraints.formals.iter().cloned());
+        }
+        let expected = crate::symbol_resolver::ty_subst_keep_unbound(expected, &bindings);
+        let actual = crate::symbol_resolver::ty_subst_keep_unbound(actual, &bindings);
+        self.receiver_is_assignable(actual, expected)
     }
 
     /// Defer an unresolved member on a still-symbolic postponed lambda input. The call solution

@@ -46,6 +46,7 @@ mod inherited_collection_bridges;
 mod inherited_default_realization;
 pub mod inline;
 pub mod inline_class;
+mod inline_parameters;
 pub(crate) mod inliner;
 mod inner_classes;
 mod internal_names;

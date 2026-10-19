@@ -268,6 +268,7 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                 HeaderDeclarationKind::Property {
                     receiver,
                     declared_type,
+                    getter_type,
                     type_parameters,
                     bounds,
                     context_parameters,
@@ -276,7 +277,11 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                     let (own, scope) = declaration_scope(headers, stub.id, type_parameters)
                         .expect("compact property scope must be materializable");
                     Some(DeclaredSpellings {
-                        ret: match declared_type {
+                        // An explicit getter return is the property's declared public type when
+                        // the property header itself omits one. Semantic header projection uses
+                        // this same stable pair; metadata spelling must join it to the property
+                        // declaration here instead of treating the body as inferred.
+                        ret: match declared_type.or(getter_type) {
                             Some(ty) => spelling(
                                 headers, &semantics, stub.id, ty, classes, &scope, &context,
                             )?,

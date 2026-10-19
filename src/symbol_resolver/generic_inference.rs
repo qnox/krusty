@@ -3,7 +3,7 @@
 use super::*;
 
 mod nullable_actual;
-use nullable_actual::nullable_generic_actual;
+use nullable_actual::{flexible_variable_argument, nullable_generic_actual};
 mod bound_relations;
 mod call_constraints;
 mod call_site_variables;
@@ -566,6 +566,7 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
 }
 
 pub(crate) fn unify_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {
+    let (sig, actual) = flexible_variable_argument(sig, actual).unwrap_or((sig, actual));
     unify_ty_impl(None, sig, actual, binds);
 }
 
@@ -583,6 +584,7 @@ pub(crate) fn unify_ty_from_symbols(
     } else {
         sig
     };
+    let (sig, actual) = flexible_variable_argument(sig, actual).unwrap_or((sig, actual));
     unify_ty_impl(Some(source), sig, actual, binds);
 }
 
@@ -716,13 +718,14 @@ pub(crate) fn callable_reference_expected_bindings(
     expected
 }
 
-/// Type variables fixed by an invariant expected-result constraint.
+/// Type variables fixed by an expected-result equality.
 ///
-/// These bindings are equalities, not provisional lower bounds. Postponed callable-reference
-/// selection may discard a covariant result binding learned from another value argument so the
-/// reference can contribute its own result type, but it must retain an equality imposed through an
-/// invariant return constructor (`Pair<T, R?>` expected as `Pair<Int?, String?>`).
-pub(crate) fn invariant_expected_result_formals(
+/// An invariant return constructor imposes the ordinary equality. A provider-flexible variable at
+/// a nested covariant result position also takes the fixed expected face: `Box<T!>` expected as
+/// `Box<String>` fixes `T` to `String`. A contravariant occurrence remains a lower bound, while a
+/// root `T!` is deliberately excluded; nullable value arguments own that root collapse and must
+/// remain rejected by a non-null expected result.
+pub(crate) fn expected_result_equality_formals(
     source: &dyn SymbolSource,
     signature: &GenericSig,
     expected: Ty,
@@ -737,11 +740,80 @@ pub(crate) fn invariant_expected_result_formals(
         .filter(|formal| {
             expected_bindings.get(*formal).is_some()
                 && formal_has_unprojected_expected_occurrence(declared, expected, formal)
-                && formal_variance_in_type(source, declared, formal)
-                    == Some(crate::types::TypeVariance::Invariant)
+                && match formal_variance_in_type(source, declared, formal) {
+                    Some(crate::types::TypeVariance::Invariant) => true,
+                    Some(crate::types::TypeVariance::Out) => {
+                        formal_has_nested_flexible_expected_occurrence(declared, expected, formal)
+                    }
+                    Some(crate::types::TypeVariance::In) | None => false,
+                }
         })
         .cloned()
         .collect()
+}
+
+/// Whether `formal` occurs under a provider-flexible wrapper below the result root and the paired
+/// expected occurrence rejects null. Outer nullability wrappers do not make an occurrence nested;
+/// only entering an object/function component does.
+fn formal_has_nested_flexible_expected_occurrence(
+    declared: Ty,
+    expected: Ty,
+    formal: &str,
+) -> bool {
+    fn visit(declared: Ty, expected: Ty, formal: &str, nested: bool) -> bool {
+        match declared {
+            Ty::PlatformNullable(inner) => {
+                if nested
+                    && matches!(*inner, Ty::TyParam(name, _) if name == formal)
+                    && !expected.admits_null()
+                {
+                    return true;
+                }
+                visit(*inner, expected.non_null(), formal, nested)
+            }
+            Ty::Nullable(inner) | Ty::DefinitelyNotNull(inner) => {
+                visit(*inner, expected.non_null(), formal, nested)
+            }
+            Ty::InProjection(inner) | Ty::OutProjection(inner) => visit(
+                *inner,
+                expected.projection_inner().unwrap_or(expected),
+                formal,
+                nested,
+            ),
+            Ty::StarProjection(_) => false,
+            Ty::Obj(declared_owner, declared_arguments) => {
+                let Ty::Obj(expected_owner, expected_arguments) = expected.non_null() else {
+                    return false;
+                };
+                declared_owner == expected_owner
+                    && declared_arguments.len() == expected_arguments.len()
+                    && declared_arguments
+                        .iter()
+                        .copied()
+                        .zip(expected_arguments.iter().copied())
+                        .any(|(declared, expected)| visit(declared, expected, formal, true))
+            }
+            Ty::Fun(declared) => {
+                let Ty::Fun(expected) = expected.non_null() else {
+                    return false;
+                };
+                declared.params.len() == expected.params.len()
+                    && declared.context_count == expected.context_count
+                    && declared.has_receiver == expected.has_receiver
+                    && declared.suspend == expected.suspend
+                    && (declared
+                        .params
+                        .iter()
+                        .copied()
+                        .zip(expected.params.iter().copied())
+                        .any(|(declared, expected)| visit(declared, expected, formal, true))
+                        || visit(declared.ret, expected.ret, formal, true))
+            }
+            _ => false,
+        }
+    }
+
+    visit(declared, expected, formal, false)
 }
 
 /// Result formals whose matching expected occurrence is not a use-site projection. These may be
@@ -953,7 +1025,10 @@ pub(crate) fn merge_call_argument_bindings(
                     receiver
                 }
             }
-            _ => merge_inferred_ty(bindings.get(&formal).copied(), actual),
+            _ => bindings.get(&formal).copied().map_or_else(
+                || merge_inferred_ty(None, actual),
+                |current| merge_inferred_ty_from_symbols(Some(source), current, actual),
+            ),
         };
         bindings.insert(formal, merged);
     }
@@ -1354,7 +1429,7 @@ pub(crate) fn merge_inferred_lower_bounds_from_symbols(
 }
 
 pub(crate) fn unify_inferred_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {
-    unify_inferred_ty_impl(None, sig, actual, binds);
+    unify_inferred_root(None, sig, actual, binds);
 }
 
 pub(crate) fn unify_inferred_ty_with_source(
@@ -1363,7 +1438,20 @@ pub(crate) fn unify_inferred_ty_with_source(
     actual: Ty,
     binds: &mut GSigBinds,
 ) {
-    unify_inferred_ty_impl(Some(source), sig, actual, binds);
+    unify_inferred_root(Some(source), sig, actual, binds);
+}
+
+/// Unify one complete receiver or value-parameter position. A root flexible variable has a
+/// distinct nullable-argument rule; recursive structural positions keep ordinary flexible
+/// constraint collection.
+fn unify_inferred_root(
+    source: Option<&dyn SymbolSource>,
+    sig: Ty,
+    actual: Ty,
+    binds: &mut GSigBinds,
+) {
+    let (sig, actual) = flexible_variable_argument(sig, actual).unwrap_or((sig, actual));
+    unify_inferred_ty_impl(source, sig, actual, binds);
 }
 
 pub(crate) fn infer_generic_bindings(
@@ -1507,7 +1595,16 @@ pub(crate) fn specialize_typed_call_signature(
     let parameters = signature
         .params
         .iter()
-        .map(|parameter| ty_subst_keep_unbound(*parameter, &bindings))
+        .map(|parameter| {
+            super::instantiate_slot(
+                source,
+                Some(signature),
+                *parameter,
+                &bindings,
+                super::TypePosition::In,
+                super::UnboundSpecialization::Preserve,
+            )
+        })
         .collect::<Vec<_>>();
     if !parameters
         .iter()
@@ -1516,7 +1613,17 @@ pub(crate) fn specialize_typed_call_signature(
     {
         return None;
     }
-    Some((parameters, ty_subst_keep_unbound(signature.ret, &bindings)))
+    Some((
+        parameters,
+        super::instantiate_slot(
+            source,
+            Some(signature),
+            signature.ret,
+            &bindings,
+            super::TypePosition::Out,
+            super::UnboundSpecialization::Preserve,
+        ),
+    ))
 }
 
 /// Enforce Kotlin's `@OnlyInputTypes` inference policy for selected declaration formals.

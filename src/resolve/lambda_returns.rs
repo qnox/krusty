@@ -386,6 +386,11 @@ impl Checker<'_> {
     ) -> (Ty, bool) {
         let checked = self.check_lambda_body(scope, body, coerce_return_to_unit, result_constraint);
         let unit_from_exits = self.lambda_returns.take_unit_from_exits(lambda);
+        self.record_lambda_result_enhancement(
+            lambda,
+            body,
+            coerce_return_to_unit || unit_from_exits,
+        );
         (checked, unit_from_exits)
     }
 

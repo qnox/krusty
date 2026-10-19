@@ -124,6 +124,13 @@ pub enum SigExpr {
         effects: OperandRange,
         result: SigExprId,
     },
+    /// Current flow value of a mutable local and the initializer/declared value that owns the
+    /// local's inferred storage type. Ordinary expression evaluation reads `current`; inferred
+    /// declaration publication follows `declared` without reconstructing source syntax.
+    MutableLocalFlow {
+        current: SigExprId,
+        declared: SigExprId,
+    },
     Delegate {
         delegate: SigExprId,
         expected: Option<SigExprId>,
@@ -278,6 +285,10 @@ impl SignatureGraph {
                 Some(SigExpr::Sequence { effects, result }) => {
                     pending.extend(self.operands(effects));
                     pending.push(result);
+                }
+                Some(SigExpr::MutableLocalFlow { current, declared }) => {
+                    pending.push(current);
+                    pending.push(declared);
                 }
                 Some(SigExpr::Delegate {
                     delegate, expected, ..

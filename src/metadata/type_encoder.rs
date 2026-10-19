@@ -853,22 +853,39 @@ fn encode_type_with_parameter(
     let (nullable, flexible, base) = match ty {
         Ty::Nullable(inner) => (true, false, *inner),
         Ty::PlatformNullable(inner) => (false, true, *inner),
-        other => (false, false, other),
+        other => (false, spelled.flexible_upper_bound.is_some(), other),
     };
-    let mut message = Pb::new();
     if flexible {
-        let capability = strings.local("kotlin.jvm.PlatformType");
-        let upper = encode_type_with_parameter(
+        // A provider has already normalized the exact upper face. Encode the lower first, then the
+        // upper, and intern the capability last, matching kotlinc's string-table visitation order.
+        // Occurrence-level flexibility may live only in the declaration spelling sidecar: the
+        // shared semantic type deliberately keeps a selected Kotlin argument rigid. Clear the mark
+        // while encoding each face so it describes this node once rather than recursing.
+        let mut face = spelled.clone();
+        face.flexible_upper_bound = None;
+        let mut message = encode_type_with_parameter(
             strings,
-            Ty::nullable(base),
-            spelled,
+            base,
+            &face,
             type_parameters,
             forced_parameter,
             expansion,
         )?;
+        let upper = spelled.flexible_upper_bound.unwrap_or(base);
+        let upper = encode_type_with_parameter(
+            strings,
+            Ty::nullable(upper),
+            &face,
+            type_parameters,
+            forced_parameter,
+            expansion,
+        )?;
+        let capability = strings.local("kotlin.jvm.PlatformType");
         message.field_varint(4, capability as u64);
         strings.put_type(&mut message, 5, 8, &upper); // Type.flexible_upper_bound(_id) = 5 / 8
+        return Ok(message);
     }
+    let mut message = Pb::new();
     if let Some(index) = forced_parameter {
         if nullable {
             message.field_varint(3, 1);
@@ -1236,7 +1253,19 @@ fn type_annotations(strings: &mut StringTable<'_>, spelled: &Spelled) -> Vec<Pb>
     if let Some(name) = spelled.parameter_name.as_deref() {
         annotations.push(parameter_name_annotation(strings, name));
     }
+    if spelled.enhanced_nullability {
+        annotations.push(enhanced_nullability_annotation(strings));
+    }
     annotations
+}
+
+fn enhanced_nullability_annotation(strings: &mut StringTable<'_>) -> Pb {
+    let annotation_id = strings.class_id(crate::types::type_name(
+        "kotlin/jvm/internal/EnhancedNullability",
+    ));
+    let mut annotation = Pb::new();
+    annotation.field_varint(1, annotation_id as u64);
+    annotation
 }
 
 /// A type-use annotation application as a metadata `Annotation` message, with its argument values.
@@ -1504,14 +1533,81 @@ mod tests {
     #[test]
     fn platform_type_encodes_a_nullable_flexible_upper_bound() {
         let mut strings = StringTable::default();
-        let encoded = encode_type(
+        let lower = Ty::obj_args("kotlin/collections/MutableList", &[Ty::String]);
+        let upper = Ty::obj_args("kotlin/collections/List", &[Ty::String]);
+        let encoded = encode_declared_type(
             &mut strings,
-            Ty::platform_nullable(Ty::obj_args("sample/Box", &[Ty::String])),
+            Ty::platform_nullable(lower),
+            &Spelled {
+                flexible_upper_bound: Some(upper),
+                ..Spelled::default()
+            },
             &TypeParameters::new(),
         )
         .unwrap();
-        assert!(encoded.as_bytes().starts_with(&[0x20]));
-        assert!(encoded.as_bytes().contains(&0x30));
+        assert_eq!(
+            strings.strings.last().map(String::as_str),
+            Some("kotlin.jvm.PlatformType")
+        );
+        let capability = strings.names["kotlin.jvm.PlatformType"];
+        let bytes = encoded.canonical().as_bytes().to_vec();
+        assert_eq!(
+            bytes[0], 0x12,
+            "the lower bound's argument is encoded first"
+        );
+        let at = bytes
+            .windows(2)
+            .position(|pair| pair == [0x20, capability as u8])
+            .expect("the flexibility capability is encoded");
+        assert_eq!(
+            bytes
+                .windows(2)
+                .filter(|pair| *pair == [0x20, capability as u8])
+                .count(),
+            1,
+            "one flexible occurrence carries one capability"
+        );
+        assert_eq!(
+            bytes[at + 2],
+            0x2a,
+            "the upper bound follows the capability"
+        );
+    }
+
+    #[test]
+    fn declaration_spelling_can_publish_flexibility_without_changing_semantic_type() {
+        let mut strings = StringTable::default();
+        let encoded = encode_declared_type(
+            &mut strings,
+            Ty::String,
+            &Spelled {
+                flexible_upper_bound: Some(Ty::String),
+                ..Spelled::default()
+            },
+            &TypeParameters::new(),
+        )
+        .unwrap();
+
+        let capability = strings.names["kotlin.jvm.PlatformType"];
+        let canonical = encoded.canonical();
+        let bytes = canonical.as_bytes();
+        assert_eq!(
+            bytes,
+            &[0x20, 0x01, 0x2a, 0x04, 0x18, 0x01, 0x30, 0x00, 0x30, 0x00],
+            "the sidecar emits one lower face, capability and nullable upper face"
+        );
+        assert_eq!(
+            bytes
+                .windows(2)
+                .filter(|pair| *pair == [0x20, capability as u8])
+                .count(),
+            1,
+            "the sidecar occurrence must carry exactly one platform capability"
+        );
+        assert!(
+            bytes.contains(&0x2a),
+            "the sidecar occurrence has an upper face"
+        );
     }
 }
 

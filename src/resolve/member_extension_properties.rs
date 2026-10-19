@@ -122,6 +122,10 @@ pub(super) struct MemberExtensionProperty {
     pub(super) declared_receiver: Ty,
     pub(super) context_params: Vec<Ty>,
     pub(super) context_args: Vec<ResolvedContextArgument>,
+    /// Declaration-owned receiver/result shape retained on the selected property for metadata
+    /// publication. It includes class-owner variables in `ret` even when the property declares no
+    /// type parameters of its own.
+    pub(super) publication_signature: Box<GenericSig>,
     pub(super) stable_declaration: Option<crate::fir::DeclarationId>,
     pub(super) getter: Option<crate::libraries::LibraryCallable>,
     pub(super) setter: Option<crate::libraries::LibraryCallable>,
@@ -333,6 +337,14 @@ pub(super) fn select(
                         declared_receiver,
                         context_params,
                         context_args,
+                        publication_signature: Box::new(GenericSig {
+                            formals: sig.type_params.clone(),
+                            formal_bounds: sig.formal_bounds.clone(),
+                            receiver: Some(sig.receiver),
+                            params: sig.context_params.clone(),
+                            ret: sig.ret,
+                            return_policy: Default::default(),
+                        }),
                         stable_declaration: sig.stable_declaration,
                         getter: sig.getter.clone(),
                         setter: sig.setter.clone(),

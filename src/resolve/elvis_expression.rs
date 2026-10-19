@@ -1,4 +1,4 @@
-//! Elvis-expression typing, sibling completion, and successful-edge flow.
+//! Elvis-expression typing, sibling completion, and checked result-value publication.
 
 use super::*;
 
@@ -69,15 +69,24 @@ impl Checker<'_> {
                 self.null_check_narrowings(scope, lhs, &mut proven, &mut declined);
                 proven.retain(|(_, ty)| !ty.is_unsigned());
                 self.apply_narrowings(scope, &proven, &declined, false);
-                match lt0 {
+                let result = match lt0 {
                     Ty::Nullable(inner) => *inner,
                     _ => lt,
-                }
+                };
+                self.record_flexible_alias(e, lhs, true);
+                self.publish_conditional_intersection(e, [(lhs, result)], result);
+                result
             } else if lt == Ty::Null || matches!(lt0, Ty::Nullable(inner) if *inner == Ty::Nothing)
             {
+                self.record_flexible_alias(e, rhs, false);
+                self.publish_conditional_intersection(e, [(rhs, rt)], rt);
                 rt
             } else {
-                conditional_branch::join_types(self, scope, conditional_expected, lt, rt, e)
+                let joined =
+                    conditional_branch::join_types(self, scope, conditional_expected, lt, rt, e);
+                self.record_flexible_join(e, [lhs, rhs], joined, true);
+                self.publish_conditional_intersection(e, [(lhs, lt), (rhs, rt)], joined);
+                joined
             };
             self.complete_conditional_branches(
                 scope,
