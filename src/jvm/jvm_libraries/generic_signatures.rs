@@ -166,7 +166,12 @@ pub(super) fn mark_receiver_fun_params(gsig: &mut GenericSig, recv_fun: &[bool],
 pub(in crate::jvm) type ParsedClassGenericSignature = (Vec<String>, Vec<Vec<Ty>>, Vec<Ty>);
 
 pub(in crate::jvm) fn parse_class_gsig(sig: &str) -> Option<ParsedClassGenericSignature> {
-    let (formals, formal_bounds, mut s) = parse_formals(sig);
+    let (formals, mut formal_bounds, mut s) = parse_formals(sig);
+    hydrate_formal_bounds(
+        &formals,
+        &mut formal_bounds,
+        &crate::fx_hash::HashMap::default(),
+    );
     let mut supers = Vec::new();
     while !s.is_empty() {
         let (g, rest) = parse_gsig(s)?;
@@ -197,23 +202,33 @@ pub(super) fn formal_inline_bounds(
     inline_bounds
 }
 
-/// The declared bound of each formal of a class generic signature, with references between the
-/// class's own formals hydrated as a method's are. A Java member's type variables that the member
-/// does not declare itself are these formals: `class Box<T extends CharSequence>` makes `T get()`
-/// return a `T` bounded by `CharSequence!`, not by the parser's `Any` placeholder.
+/// Hydrate each declared bound through the complete chain of formals it names, the declaring
+/// class's (`enclosing`) included, and return the bound each occurrence of a formal carries. In
+/// `<A extends CharSequence, B extends A, C extends B>` a `C` occurrence is bounded by
+/// `B(A(CharSequence!))`, not by a `B` whose `A` still has the parser's `Any` placeholder. A cycle
+/// through a bound's own arguments (`T extends Comparable<T>`) keeps its first repeated occurrence.
+pub(super) fn hydrate_formal_bounds(
+    formals: &[String],
+    formal_bounds: &mut [Vec<Ty>],
+    enclosing: &crate::fx_hash::HashMap<String, Ty>,
+) -> crate::fx_hash::HashMap<String, Ty> {
+    let declared = formal_inline_bounds(formals, formal_bounds, enclosing);
+    for bound in formal_bounds.iter_mut().flatten() {
+        *bound = crate::types::ty_with_transitive_param_bounds(*bound, &declared);
+    }
+    formal_inline_bounds(formals, formal_bounds, enclosing)
+}
+
+/// The hydrated bound of each formal of a class generic signature. A Java member's type variables
+/// that the member does not declare itself are these formals: `class Box<T extends CharSequence>`
+/// makes `T get()` return a `T` bounded by `CharSequence!`, not by the parser's `Any` placeholder.
 pub(super) fn class_formal_bounds(
     class_signature: Option<&str>,
 ) -> crate::fx_hash::HashMap<String, Ty> {
     let none = crate::fx_hash::HashMap::default();
-    let Some((formals, mut formal_bounds, _)) = class_signature.and_then(parse_class_gsig) else {
+    let Some((formals, formal_bounds, _)) = class_signature.and_then(parse_class_gsig) else {
         return none;
     };
-    let inline_bounds = formal_inline_bounds(&formals, &formal_bounds, &none);
-    for bounds in &mut formal_bounds {
-        for bound in bounds {
-            *bound = crate::types::ty_with_param_bounds(*bound, &inline_bounds);
-        }
-    }
     formal_inline_bounds(&formals, &formal_bounds, &none)
 }
 
@@ -377,6 +392,25 @@ mod class_formal_bound_tests {
 
         assert_eq!(method.formal_bounds, vec![vec![t]]);
         assert_eq!(method.ret, Ty::ty_param("U", t));
+    }
+
+    #[test]
+    fn a_chained_class_formal_carries_the_complete_declared_chain() {
+        let bounds = class_formal_bounds(Some(
+            "<A::Ljava/lang/CharSequence;B:TA;C:TB;>Ljava/lang/Object;",
+        ));
+        let a = Ty::ty_param("A", char_sequence());
+        let b = Ty::ty_param("B", Ty::platform_nullable(a));
+        let c = Ty::ty_param("C", Ty::platform_nullable(b));
+
+        assert_eq!(
+            parse_member_method_gsig("()TC;", &bounds)
+                .expect("member")
+                .ret,
+            c
+        );
+        let method = parse_member_method_gsig("<D:TC;>()TD;", &bounds).expect("member");
+        assert_eq!(method.formal_bounds, vec![vec![Ty::platform_nullable(c)]]);
     }
 
     #[test]

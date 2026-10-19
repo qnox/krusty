@@ -42,7 +42,7 @@ use builtin_classifier_shapes::{mapped_builtin_property, mapped_builtin_signatur
 use builtins_customizer::JvmBuiltInsCustomizer;
 pub(in crate::jvm) use generic_signatures::parse_class_gsig;
 use generic_signatures::{
-    class_formal_bounds, concrete_generic_ret, formal_inline_bounds, mark_receiver_fun_params,
+    class_formal_bounds, concrete_generic_ret, hydrate_formal_bounds, mark_receiver_fun_params,
     parse_field_gsig, suspend_return_from_gsig,
 };
 use inline_capability::{metadata_inline, property_accessor_inline, property_getter_inline};
@@ -2714,13 +2714,7 @@ pub(in crate::jvm) fn parse_member_method_gsig(
     class_bounds: &crate::fx_hash::HashMap<String, Ty>,
 ) -> Option<GenericSig> {
     let (formals, mut formal_bounds, s) = parse_formals(sig);
-    let inline_bounds = formal_inline_bounds(&formals, &formal_bounds, class_bounds);
-    for bounds in &mut formal_bounds {
-        for bound in bounds {
-            *bound = crate::types::ty_with_param_bounds(*bound, &inline_bounds);
-        }
-    }
-    let inline_bounds = formal_inline_bounds(&formals, &formal_bounds, class_bounds);
+    let inline_bounds = hydrate_formal_bounds(&formals, &mut formal_bounds, class_bounds);
     let inner = s.strip_prefix('(')?;
     let close = inner.find(')')?;
     let mut params_s = &inner[..close];
