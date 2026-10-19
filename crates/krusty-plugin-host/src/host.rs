@@ -300,8 +300,8 @@ impl Drop for Host {
 mod tests {
     use super::*;
 
-    /// The host's greeting for protocol 2 and kotlinc 2.4.20, as `printf` octal escapes.
-    const HELLO: &str = r"\000\000\000\017\000\000\000\000\002\000\000\000\0062.4.20";
+    /// The host's greeting for protocol 3 and kotlinc 2.4.20, as `printf` octal escapes.
+    const HELLO: &str = r"\000\000\000\017\000\000\000\000\003\000\000\000\0062.4.20";
     const GRACE: Duration = Duration::from_millis(300);
 
     /// A host that writes its pid to `pid_file`, greets, then runs `then` in the same process.

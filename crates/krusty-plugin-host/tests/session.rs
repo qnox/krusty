@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use krusty_plugin_host::{
     provision, CallableIdentity, CallableKind, ClassName, Classifier, Curl, Environment, Host,
     HostError, HostRuntime, Pins, Request, SessionRequest, TypeArgument, TypeIdentity,
+    TypeParameterOwner,
 };
 
 mod support;
@@ -63,9 +64,9 @@ fn kotlin(name: &str) -> TypeIdentity {
     of("kotlin", name, Vec::new(), false)
 }
 
-fn type_parameter(of_class: bool, index: u32) -> TypeIdentity {
+fn type_parameter(owner: TypeParameterOwner, index: u32) -> TypeIdentity {
     TypeIdentity {
-        classifier: Classifier::TypeParameter { of_class, index },
+        classifier: Classifier::TypeParameter { owner, index },
         nullable: false,
         annotations: Vec::new(),
     }
@@ -102,7 +103,10 @@ fn declarations_on_the_classpath_resolve_by_their_exact_signature() {
                 vec![of(
                     "kotlin",
                     "Array",
-                    vec![TypeArgument::Out(type_parameter(false, 0))],
+                    vec![TypeArgument::Out(type_parameter(
+                        TypeParameterOwner::Callable,
+                        0,
+                    ))],
                     false,
                 )],
             )
@@ -124,7 +128,10 @@ fn declarations_on_the_classpath_resolve_by_their_exact_signature() {
             ..function(
                 "kotlin",
                 "",
-                vec![type_parameter(true, 0), type_parameter(true, 1)],
+                vec![
+                    type_parameter(TypeParameterOwner::Class(class("kotlin", &["Pair"])), 0),
+                    type_parameter(TypeParameterOwner::Class(class("kotlin", &["Pair"])), 1),
+                ],
             )
         },
     ];
@@ -157,6 +164,75 @@ fn an_identity_that_names_no_declaration_fails_by_name() {
         HostError::Plugin {
             message: "fun kotlin.io.println(kotlin.Int, kotlin.Int) names no declaration on the \
                       session's classpath"
+                .into()
+        }
+    );
+}
+
+/// `inner.Outer<T>.Inner<U>`, compiled once: its members name `T` of the outer class.
+fn inner_classes(runtime: &HostRuntime) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    OUT.get_or_init(|| {
+        let out = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("plugin-host-inner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/inner/Outer.kt");
+        kotlinc(runtime, &[stdlib(runtime)], &out, &[source.as_path()]);
+        out
+    })
+    .clone()
+}
+
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn an_inner_class_member_names_its_outer_class_type_parameter_by_that_class() {
+    let (runtime, _) = runtime();
+    let mut host = opened(&runtime, vec![stdlib(&runtime), inner_classes(&runtime)]);
+    let outer = || type_parameter(TypeParameterOwner::Class(class("inner", &["Outer"])), 0);
+    let inner = || {
+        type_parameter(
+            TypeParameterOwner::Class(class("inner", &["Outer", "Inner"])),
+            0,
+        )
+    };
+    let member = CallableIdentity {
+        classes: vec!["Outer".into(), "Inner".into()],
+        ..function("inner", "use", vec![outer(), inner()])
+    };
+    let constructor = CallableIdentity {
+        kind: CallableKind::Constructor,
+        ..member.clone()
+    };
+    assert_eq!(
+        host.resolve(&[member.clone(), constructor]).unwrap(),
+        [
+            "FUN IR_EXTERNAL_DECLARATION_STUB name:use visibility:public modality:FINAL <> \
+             (<this>:inner.Outer.Inner<U of inner.Outer.Inner, T of inner.Outer>, \
+             value:T of inner.Outer, other:U of inner.Outer.Inner) returnType:kotlin.Unit",
+            "CONSTRUCTOR IR_EXTERNAL_DECLARATION_STUB visibility:public <> \
+             (<this>:inner.Outer<T of inner.Outer>, first:T of inner.Outer, \
+             second:U of inner.Outer.Inner) \
+             returnType:inner.Outer.Inner<U of inner.Outer.Inner, T of inner.Outer> [primary]",
+        ]
+    );
+    // The outer class's `T` is not the inner class's own first type parameter.
+    let misowned = CallableIdentity {
+        value_parameters: vec![
+            type_parameter(
+                TypeParameterOwner::Class(class("inner", &["Outer", "Inner"])),
+                0,
+            ),
+            inner(),
+        ],
+        ..member
+    };
+    assert_eq!(
+        host.resolve(&[misowned]).unwrap_err(),
+        HostError::Plugin {
+            message: "fun inner.Outer.Inner.use(type parameter 0 of inner.Outer.Inner, type \
+                      parameter 0 of inner.Outer.Inner) names no declaration on the session's \
+                      classpath"
                 .into()
         }
     );

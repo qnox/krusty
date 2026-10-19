@@ -31,7 +31,7 @@ import kotlin.system.exitProcess
  * the real stdout for frames. The protocol is `crates/krusty-plugin-host/src/protocol.rs`; keep the
  * two in step and bump [PROTOCOL] on any change.
  */
-const val PROTOCOL = 2
+const val PROTOCOL = 3
 
 private const val HELLO = 0
 private const val LOAD = 1

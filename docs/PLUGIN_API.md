@@ -305,7 +305,9 @@ are not part of the session: krusty supplies their IR.
 `Host::resolve` finds declarations in the session by `CallableIdentity`: the owner, the name, and
 the signature as kotlinc's IR declares it (type parameter count, context parameters, extension
 receiver and value parameter types, a vararg parameter by its array type, each type with its
-nullability and the classes of its annotations). The lookup goes through the same plugin context a
+nullability and the classes of its annotations). A type parameter is named by the declaration that
+owns it: the callable itself, or a class by its full name, so an inner class's member names its outer
+class's `T` as `Outer`'s and never as the inner class's own. The lookup goes through the same plugin context a
 plugin uses, and an identity that names no declaration, or more than one, fails by name. This is the
 identity krusty names a dependency's declaration by when it hands the host IR that calls it.
 

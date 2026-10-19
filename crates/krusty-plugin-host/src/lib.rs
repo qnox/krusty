@@ -40,5 +40,5 @@ pub use provision::{
 };
 pub use session::{
     CallableIdentity, CallableKind, ClassName, Classifier, SessionRequest, TypeArgument,
-    TypeIdentity,
+    TypeIdentity, TypeParameterOwner,
 };

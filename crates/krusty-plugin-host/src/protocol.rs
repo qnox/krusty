@@ -9,10 +9,10 @@ use std::io::{self, Read, Write};
 
 use crate::session::{
     CallableIdentity, CallableKind, ClassName, Classifier, SessionRequest, TypeArgument,
-    TypeIdentity,
+    TypeIdentity, TypeParameterOwner,
 };
 
-pub(crate) const PROTOCOL: u32 = 2;
+pub(crate) const PROTOCOL: u32 = 3;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -227,9 +227,15 @@ fn put_type(payload: &mut Vec<u8>, ty: &TypeIdentity) {
             put_class_name(payload, class);
             put_list(payload, arguments, put_argument);
         }
-        Classifier::TypeParameter { of_class, index } => {
+        Classifier::TypeParameter { owner, index } => {
             payload.push(1);
-            payload.push(u8::from(*of_class));
+            match owner {
+                TypeParameterOwner::Callable => payload.push(0),
+                TypeParameterOwner::Class(class) => {
+                    payload.push(1);
+                    put_class_name(payload, class);
+                }
+            }
             payload.extend_from_slice(&index.to_be_bytes());
         }
     }
@@ -366,6 +372,33 @@ mod tests {
         let mut expected = (payload.len() as u32).to_be_bytes().to_vec();
         expected.extend_from_slice(&payload);
         assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn a_type_parameter_is_framed_with_the_declaration_that_owns_it() {
+        let parameter = |owner| TypeIdentity {
+            classifier: Classifier::TypeParameter { owner, index: 1 },
+            nullable: false,
+            annotations: Vec::new(),
+        };
+        let mut callable = Vec::new();
+        put_type(&mut callable, &parameter(TypeParameterOwner::Callable));
+        assert_eq!(callable, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
+        let mut class = Vec::new();
+        put_type(
+            &mut class,
+            &parameter(TypeParameterOwner::Class(ClassName {
+                package: "a".into(),
+                classes: vec!["Outer".into()],
+            })),
+        );
+        let mut expected = vec![1, 1];
+        put_str(&mut expected, "a");
+        expected.extend_from_slice(&[0, 0, 0, 1]);
+        put_str(&mut expected, "Outer");
+        // The index, then not nullable, with no annotations.
+        expected.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 0]);
+        assert_eq!(class, expected);
     }
 
     #[test]

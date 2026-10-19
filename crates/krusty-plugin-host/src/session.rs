@@ -44,8 +44,21 @@ pub enum Classifier {
         class: ClassName,
         arguments: Vec<TypeArgument>,
     },
-    /// The declaration's own type parameter at `index`, or its class's when `of_class`.
-    TypeParameter { of_class: bool, index: u32 },
+    /// The type parameter at `index` of the declaration that `owner` names.
+    TypeParameter {
+        owner: TypeParameterOwner,
+        index: u32,
+    },
+}
+
+/// The declaration a type parameter belongs to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypeParameterOwner {
+    /// The callable whose signature names it.
+    Callable,
+    /// A class, by its full name: the callable's own class, or any class enclosing it, as the
+    /// outer class's `T` in an inner class's members and constructors.
+    Class(ClassName),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

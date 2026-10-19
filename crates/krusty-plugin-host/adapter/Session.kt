@@ -19,6 +19,7 @@ import org.jetbrains.kotlin.config.CompilerConfiguration
 import org.jetbrains.kotlin.config.Services
 import org.jetbrains.kotlin.fir.pipeline.Fir2IrActualizedResult
 import org.jetbrains.kotlin.ir.IrElement
+import org.jetbrains.kotlin.ir.declarations.IrClass
 import org.jetbrains.kotlin.ir.declarations.IrFunction
 import org.jetbrains.kotlin.ir.declarations.IrParameterKind
 import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
@@ -191,9 +192,12 @@ internal class ClassType(
     override val annotations: List<ClassName>,
 ) : TypeIdentity
 
-/** The [index]th type parameter of the declaration itself, or of its class when [ofClass]. */
+/**
+ * The [index]th type parameter of the class [owner], or of the declaration itself when [owner] is
+ * null: an inner class's members name their outer class's type parameters by that class.
+ */
 internal class TypeParameterType(
-    val ofClass: Boolean,
+    val owner: ClassName?,
     val index: Int,
     override val nullable: Boolean,
     override val annotations: List<ClassName>,
@@ -242,7 +246,7 @@ private fun render(type: TypeIdentity): String {
     val base = when (type) {
         is ClassType -> type.classifier.toString() +
             if (type.arguments.isEmpty()) "" else type.arguments.joinToString(", ", "<", ">") { render(it) }
-        is TypeParameterType -> (if (type.ofClass) "class type parameter " else "type parameter ") + type.index
+        is TypeParameterType -> "type parameter ${type.index}" + (type.owner?.let { " of $it" } ?: "")
     }
     return annotations + base + if (type.nullable) "?" else ""
 }
@@ -319,8 +323,11 @@ private fun typeIs(type: IrType, identity: TypeIdentity, function: IrFunction): 
         }
         is TypeParameterType -> {
             val parameter = (type.classifier as? IrTypeParameterSymbol)?.owner ?: return false
-            val owner = if (identity.ofClass) function.parentClassOrNull else function
-            parameter.index == identity.index && owner != null && parameter.parent == owner
+            val ownedHere = when (val owner = identity.owner) {
+                null -> parameter.parent == function
+                else -> (parameter.parent as? IrClass)?.classId == owner.classId
+            }
+            parameter.index == identity.index && ownedHere
         }
     }
 }
@@ -368,9 +375,13 @@ private fun DataInputStream.readType(): TypeIdentity = when (val tag = readByte(
         ClassType(classifier, arguments, readBoolean(), readList { readClassName() })
     }
     1 -> {
-        val ofClass = readBoolean()
+        val owner = when (val tag = readByte().toInt()) {
+            0 -> null
+            1 -> readClassName()
+            else -> throw Refused("unknown type parameter owner $tag")
+        }
         val index = readInt()
-        TypeParameterType(ofClass, index, readBoolean(), readList { readClassName() })
+        TypeParameterType(owner, index, readBoolean(), readList { readClassName() })
     }
     else -> throw Refused("unknown type kind $tag")
 }
