@@ -87,3 +87,131 @@ fn default_lambdas_are_inlined_where_kotlinc_inlines_them() {
     let differences = classes.code_differences();
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
 }
+
+const PUBLIC_LIB: &str = r#"
+package lib
+
+class Request {
+    var url = ""
+    var method = ""
+}
+
+inline fun Request.send(block: Request.() -> Unit): String {
+    block()
+    return method + " " + url
+}
+
+inline fun get(url: String, block: Request.() -> Unit = {}): String =
+    Request().send {
+        this.url = url
+        method = "GET"
+        block()
+    }
+
+inline fun joined(first: String, second: String = "b"): String = first + second
+"#;
+
+const PUBLIC_MAIN: &str = r#"
+import lib.*
+
+fun fetched(): String = get("/x")
+
+fun posted(): String = get("/y") { method = "POST" }
+
+fun joinedDefault(): String = joined("a")
+
+fun box(): String {
+    if (fetched() != "GET /x") return "FAIL fetched: " + fetched()
+    if (posted() != "POST /y") return "FAIL posted: " + posted()
+    if (joinedDefault() != "ab") return "FAIL joined: " + joinedDefault()
+    return "OK"
+}
+"#;
+
+/// A call that omits arguments of an ordinary public inline function inlines the library's
+/// `$default` bridge, as kotlinc does, rather than calling the bridge.
+#[test]
+fn public_inline_default_bridges_are_inlined_where_kotlinc_inlines_them() {
+    let classes = common::classes_against_kotlinc_lib(
+        "PublicDefaults",
+        &[("Lib.kt", PUBLIC_LIB)],
+        PUBLIC_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        ["PublicDefaultsKt"]
+    );
+    let differences = classes.code_differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+#[test]
+fn public_inline_default_bridges_run_like_the_reference_compiler() {
+    let output = common::expect_box_run_against_ref(
+        "public_inline_default_bridges",
+        PUBLIC_LIB,
+        PUBLIC_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+}
+
+const SUSPEND_LIB: &str = r#"
+package lib
+
+class Statement(val url: String) {
+    suspend fun execute(): String = "ran " + url
+}
+
+suspend inline fun fetch(url: String, suffix: String = "/rate"): String {
+    val target = url + suffix
+    return Statement(target).execute()
+}
+"#;
+
+const SUSPEND_CLIENT: &str = r#"
+import lib.*
+
+class Client(private val base: String) {
+    suspend fun load(): String {
+        val url = base + "/v1"
+        return fetch(url)
+    }
+}
+"#;
+
+const SUSPEND_BOX: &str = r#"
+fun box(): String {
+    var result = "not started"
+    suspend { Client("api").load() }.startCoroutine(Continuation(EmptyCoroutineContext) {
+        result = it.getOrThrow()
+    })
+    return if (result == "ran api/v1/rate") "OK" else result
+}
+"#;
+
+/// A suspend inline function's `$default` bridge is inlined from its own body, which is never a
+/// state machine: there is no `$$forInline` copy of a bridge.
+#[test]
+fn suspend_inline_default_bridges_are_inlined_where_kotlinc_inlines_them() {
+    let classes = common::classes_against_kotlinc_lib(
+        "SuspendDefaults",
+        &[("Lib.kt", SUSPEND_LIB)],
+        SUSPEND_CLIENT,
+    )
+    .expect("reference kotlinc is provisioned");
+    let differences = classes.code_differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+#[test]
+fn suspend_inline_default_bridges_run_like_the_reference_compiler() {
+    let output = common::expect_box_run_against_ref(
+        "suspend_inline_default_bridges",
+        SUSPEND_LIB,
+        &format!("import kotlin.coroutines.*\n{SUSPEND_CLIENT}{SUSPEND_BOX}"),
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+}

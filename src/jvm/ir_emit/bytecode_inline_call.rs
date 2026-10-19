@@ -155,8 +155,10 @@ impl Emitter<'_> {
             inline,
             reified,
         } = request;
-        let for_inline_copy =
-            self.ir.suspend_calls.contains_key(&call_expression) && !inline.must_inline();
+        // A `$default` bridge has no `$$forInline` copy: its body is never a state machine.
+        let for_inline_copy = self.ir.suspend_calls.contains_key(&call_expression)
+            && !inline.must_inline()
+            && !self.default_call_operands.contains(call_expression);
         if let Some(recv) = dispatch_receiver {
             let recv_desc = type_descriptor(self.value_ty(recv));
             let splice_desc = format!("({}{}", recv_desc, &descriptor[1..]);
