@@ -40,7 +40,7 @@ pub fn default_jobs() -> NonZeroUsize {
 /// krusty printed for each module it ran, in plan order: a module's output is handed on once it
 /// and every module planned before it that ran have finished, so the order does not depend on
 /// which finishes first. The failures are those of the modules that failed, in plan order; once one
-/// fails no module starts, and the modules running then are waited for.
+/// fails no module begins (see `schedule.rs`), and the modules running then are waited for.
 pub fn run(
     plan: &Plan,
     krusty: &Path,
@@ -56,13 +56,17 @@ pub fn run(
     schedule(
         &waits,
         jobs,
-        |index, stop| {
+        |index, gate| {
+            // Nothing of a module is touched unless it begins before any module has failed.
+            if !gate.begin() {
+                return None;
+            }
             let mut output = Printed::default();
             let result = run_step(&plan.steps[index], krusty, &mut output);
             if result.is_err() {
-                stop.request();
+                gate.fail();
             }
-            (output, result)
+            Some((output, result))
         },
         |index, done| {
             results[index] = Some(done);

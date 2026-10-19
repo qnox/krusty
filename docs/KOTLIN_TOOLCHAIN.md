@@ -144,8 +144,9 @@ available processors (the toolchain bounds its task executor the same way and ha
 it, so neither does krusty-toolchain). krusty's output is captured per module and printed whole in plan
 order, as soon as the module and every module planned before it that ran have finished, so each
 module's output stays together and nothing printed depends on which compilation finishes first.
-Once a module fails no module starts, even while another's result is being handled; the running
-ones are waited for, each failure is reported in plan order, and the task exits with the status of
+Once a module fails no module begins: a module begins, before it touches its outputs, only under
+the same lock a failure is recorded under, so it either began before the failure or does nothing.
+The running ones are waited for, each failure is reported in plan order, and the task exits with the status of
 the first failing krusty in plan order. When several tasks name modules that do not exist, the last is reported, as the
 toolchain reports it.
 

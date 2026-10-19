@@ -1,36 +1,53 @@
 //! Running a plan's steps as JetBrains' toolchain runs its task graph: a step starts as soon as
 //! every step it waits for has succeeded, at most `jobs` at a time, the plan's order deciding
-//! between steps that are ready together. Once a step fails no step starts, even before its
-//! result arrives; the running ones are waited for.
+//! between steps that are ready together. Once a step fails no step begins; the running ones are
+//! waited for.
+//!
+//! Beginning a step and recording a failure are one synchronization boundary ([`Gate`]): a step
+//! either began before the failure was recorded, or does nothing at all, however late it was
+//! scheduled.
 
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex, MutexGuard, PoisonError};
 
-/// How a running step says it failed, so that no step starts after it, whenever its result
-/// arrives.
-pub(super) struct Stop(AtomicBool);
+/// Whether the plan has stopped, consulted by every step before it does anything and set by the
+/// first step that fails.
+pub(super) struct Gate {
+    stopped: Mutex<bool>,
+}
 
-impl Stop {
-    /// Start no more steps.
-    pub(super) fn request(&self) {
-        self.0.store(true, Ordering::SeqCst);
+impl Gate {
+    fn state(&self) -> MutexGuard<'_, bool> {
+        // A step that panicked holding the lock had nothing half-done to the flag.
+        self.stopped.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn requested(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+    /// Whether the step calling it may begin: false once a step has failed. A step does nothing,
+    /// and touches nothing, before it has begun.
+    pub(super) fn begin(&self) -> bool {
+        !*self.state()
+    }
+
+    /// Record that a step failed: no step begins after this.
+    pub(super) fn fail(&self) {
+        *self.state() = true;
+    }
+
+    fn stopped(&self) -> bool {
+        *self.state()
     }
 }
 
 /// Run step `0..waits.len()` with `work`, each after the earlier steps `waits` names for it, on up
-/// to `jobs` threads. A step that fails says so through the [`Stop`] it is given before it
-/// returns. `finished` sees each step's result on the calling thread as soon as it arrives.
+/// to `jobs` threads. `work` begins a step through the [`Gate`] it is given, returning `None`
+/// without doing anything when the gate refuses, and records through it a failure before it
+/// returns. `finished` sees each begun step's result on the calling thread as soon as it arrives.
 pub(super) fn schedule<R: Send>(
     waits: &[Vec<usize>],
     jobs: NonZeroUsize,
-    work: impl Fn(usize, &Stop) -> R + Sync,
+    work: impl Fn(usize, &Gate) -> Option<R> + Sync,
     mut finished: impl FnMut(usize, R),
 ) {
     let mut remaining: Vec<usize> = waits.iter().map(Vec::len).collect();
@@ -44,22 +61,24 @@ pub(super) fn schedule<R: Send>(
         .filter(|&step| remaining[step] == 0)
         .collect();
     let mut running = 0;
-    let stop = Stop(AtomicBool::new(false));
+    let gate = Gate {
+        stopped: Mutex::new(false),
+    };
     let (sender, receiver) = mpsc::channel();
     let work = &work;
-    let stop = &stop;
+    let gate = &gate;
     std::thread::scope(|scope| loop {
-        // The stop is read as each step starts, so a failure recorded while results were being
-        // handled starts nothing, though its result has not arrived yet.
-        while running < jobs.get() && !stop.requested() {
+        // Only spares threads: whether a scheduled step does anything is the gate's to decide
+        // when the step begins.
+        while running < jobs.get() && !gate.stopped() {
             let Some(step) = ready.pop_first() else { break };
             let sender = sender.clone();
             scope.spawn(move || {
                 // A panic stops the plan and is carried back, so the caller does not wait for a
                 // result never sent.
-                let result = panic::catch_unwind(AssertUnwindSafe(|| work(step, stop)));
+                let result = panic::catch_unwind(AssertUnwindSafe(|| work(step, gate)));
                 if result.is_err() {
-                    stop.request();
+                    gate.fail();
                 }
                 // The receiver lives until every spawned step has reported.
                 let _ = sender.send((step, result));
@@ -74,8 +93,10 @@ pub(super) fn schedule<R: Send>(
             .expect("the scheduler holds a sender while steps run");
         running -= 1;
         let result = result.unwrap_or_else(|payload| panic::resume_unwind(payload));
+        // A step the gate refused did nothing; the plan has stopped, so nothing waits for it.
+        let Some(result) = result else { continue };
         finished(step, result);
-        // A failed step's dependents are released too: once a stop is requested nothing starts.
+        // A failed step's dependents are released too: once a step fails nothing begins.
         for &dependent in &dependents[step] {
             remaining[dependent] -= 1;
             if remaining[dependent] == 0 {
@@ -124,13 +145,17 @@ mod tests {
         schedule(
             waits,
             jobs,
-            |step, stop| {
+            |step, gate| {
+                if !gate.begin() {
+                    return None;
+                }
                 events.lock().unwrap().push(format!("+{step}"));
                 let succeeded = work(step);
                 events.lock().unwrap().push(format!("-{step}"));
                 if !succeeded {
-                    stop.request();
+                    gate.fail();
                 }
+                Some(())
             },
             |step, ()| {
                 finished.push(step);
@@ -267,7 +292,10 @@ mod tests {
         schedule(
             &[Vec::new(), Vec::new(), Vec::new()],
             jobs(2),
-            |step, stop| {
+            |step, gate| {
+                if !gate.begin() {
+                    return None;
+                }
                 started.lock().unwrap().push(step);
                 if step == 1 {
                     at_one
@@ -275,9 +303,10 @@ mod tests {
                         .unwrap()
                         .recv_timeout(Duration::from_secs(30))
                         .expect("0's result is handled");
-                    stop.request();
+                    gate.fail();
                     one_failed.lock().unwrap().send(()).unwrap();
                 }
+                Some(())
             },
             |step, ()| {
                 finished.push(step);
@@ -292,5 +321,50 @@ mod tests {
         let mut started = started.into_inner().unwrap();
         started.sort();
         assert_eq!((started, finished), (vec![0, 1], vec![0, 1]));
+    }
+
+    #[test]
+    fn a_step_scheduled_before_a_failure_but_beginning_after_it_does_nothing() {
+        // 0 and 1 run with two jobs while 2 waits for one. 0 succeeds, so 2 is scheduled while
+        // nothing has failed; 1 fails only then, and 2 tries to begin only after that.
+        let (two_scheduled, at_one) = mpsc::channel();
+        let (one_failed, at_two) = mpsc::channel();
+        let at_one = Mutex::new(at_one);
+        let at_two = Mutex::new(at_two);
+        let two_scheduled = Mutex::new(two_scheduled);
+        let one_failed = Mutex::new(one_failed);
+        let wait = |receiver: &Mutex<mpsc::Receiver<()>>| {
+            receiver
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the other step arrives");
+        };
+        let began = Mutex::new(Vec::new());
+        let mut finished = Vec::new();
+        schedule(
+            &[Vec::new(), Vec::new(), Vec::new()],
+            jobs(2),
+            |step, gate| {
+                if step == 2 {
+                    two_scheduled.lock().unwrap().send(()).unwrap();
+                    wait(&at_two);
+                }
+                if !gate.begin() {
+                    return None;
+                }
+                began.lock().unwrap().push(step);
+                if step == 1 {
+                    wait(&at_one);
+                    gate.fail();
+                    one_failed.lock().unwrap().send(()).unwrap();
+                }
+                Some(())
+            },
+            |step, ()| finished.push(step),
+        );
+        let mut began = began.into_inner().unwrap();
+        began.sort();
+        assert_eq!((began, finished), (vec![0, 1], vec![0, 1]));
     }
 }
