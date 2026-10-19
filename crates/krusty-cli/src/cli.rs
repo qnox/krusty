@@ -704,11 +704,11 @@ mod tests {
         parse(args.iter().map(|s| s.to_string()))
     }
 
-    /// `-progressive` accepts a release whose progressive features are all modeled, and turns
-    /// them on; every supported release's are.
+    /// `-progressive` accepts releases whose progressive features are all modeled and names the
+    /// first unmodeled feature otherwise.
     #[test]
-    fn progressive_turns_on_every_modeled_progressive_feature() {
-        for release in ["2.4.0", "2.4.10", "2.4.20"] {
+    fn progressive_accepts_modeled_features_and_refuses_the_first_unmodeled_one() {
+        for release in ["2.4.0", "2.4.10"] {
             let o = parse_args(&[
                 &format!("-Xkotlin-reference-version={release}"),
                 "-progressive",
@@ -722,13 +722,18 @@ mod tests {
                 "kotlinc {release}"
             );
         }
+
         let o = parse_args(&["-Xkotlin-reference-version=2.4.20", "-progressive", "f.kt"]);
-        for feature in [
-            "ReportReificationProblemsInDnnAndFlexible",
-            "ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier",
-        ] {
-            assert!(o.language_settings.features.has(feature), "{feature}");
-        }
+        assert_eq!(
+            o.errors,
+            ["krusty does not implement the language feature \
+              'ReportReificationProblemsInDnnAndFlexible' selected by '-progressive'"
+                .to_string()]
+        );
+        assert!(o
+            .language_settings
+            .features
+            .has("ReportTypeVarianceConflictsInDnnAndFlexible"));
     }
 
     /// `-Xkotlin-reference-version` selects a supported release and refuses any other, rather than
