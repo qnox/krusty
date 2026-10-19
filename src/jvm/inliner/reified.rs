@@ -24,6 +24,8 @@ const ALOAD: u8 = 0x19;
 const ANEWARRAY: u8 = 0xbd;
 const CHECKCAST: u8 = 0xc0;
 const ENUM_ENTRIES: &str = "kotlin/enums/EnumEntries";
+const ENUM: &str = "java/lang/Enum";
+const ERASED_VALUE_OF: &str = "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;";
 
 enum Repoint {
     Class {
@@ -65,20 +67,22 @@ enum EnumOperation {
 fn enum_operation(node: &MethodNode, call: usize) -> Option<EnumOperation> {
     let at = |offset: usize| node.nodes.get(call + offset);
     match (at(1)?, at(2)?) {
-        (Node::Insn(Insn::Op(ACONST_NULL)), Node::Insn(Insn::Var { op: ALOAD, .. })) => matches!(
-            at(3)?,
-            Node::Insn(Insn::Method { op: INVOKESTATIC, name, .. }) if name == "valueOf"
-        )
-        .then_some(EnumOperation::ValueOf {
-            placeholder: call + 1,
-            call: call + 3,
-        }),
-        (Node::Insn(Insn::Op(ICONST_0)), Node::Insn(Insn::Type { op: ANEWARRAY, .. })) => {
-            Some(EnumOperation::Values {
+        (Node::Insn(Insn::Op(ACONST_NULL)), Node::Insn(Insn::Var { op: ALOAD, .. })) => {
+            is_erased_value_of(at(3)?).then_some(EnumOperation::ValueOf {
                 placeholder: call + 1,
-                array: call + 2,
+                call: call + 3,
             })
         }
+        (
+            Node::Insn(Insn::Op(ICONST_0)),
+            Node::Insn(Insn::Type {
+                op: ANEWARRAY,
+                class,
+            }),
+        ) if class == ENUM => Some(EnumOperation::Values {
+            placeholder: call + 1,
+            array: call + 2,
+        }),
         (
             Node::Insn(Insn::Op(ACONST_NULL)),
             Node::Insn(Insn::Type {
@@ -91,6 +95,21 @@ fn enum_operation(node: &MethodNode, call: usize) -> Option<EnumOperation> {
         }),
         _ => None,
     }
+}
+
+/// The erased call a reified `enumValueOf` template ends with: exactly the static, non-interface
+/// `java/lang/Enum.valueOf(Class, String)`.
+fn is_erased_value_of(node: &Node) -> bool {
+    matches!(
+        node,
+        Node::Insn(Insn::Method {
+            op: INVOKESTATIC,
+            owner,
+            name,
+            desc,
+            interface: false,
+        }) if owner == ENUM && name == "valueOf" && desc == ERASED_VALUE_OF
+    )
 }
 
 /// The concrete form of `operation` for enum `class`: its own static `valueOf(String)`,
@@ -885,6 +904,115 @@ mod tests {
             Err(InlineError::MalformedReifiedMarker),
         );
         assert_eq!(node, original);
+    }
+
+    fn concrete_enum() -> ReifiedArguments {
+        ReifiedArguments {
+            classes: HashMap::from_iter([(
+                "T".to_owned(),
+                ReifiedArgument::Class {
+                    internal: "Color".to_owned(),
+                    nullable: false,
+                    intrinsic: None,
+                    rendered: String::new(),
+                },
+            )]),
+            ..Default::default()
+        }
+    }
+
+    /// A mode-5 marker followed by the erased `enumValueOf` form, ending with `call`.
+    fn enum_value_of(call: Insn) -> MethodNode {
+        let mut node = MethodNode::new(0x0008, "parsed", "(Ljava/lang/String;)Ljava/lang/Enum;");
+        node.nodes = marker("T", ENUM_MARKER);
+        node.nodes.extend([
+            Node::Insn(Insn::Op(ACONST_NULL)),
+            Node::Insn(Insn::Var { op: ALOAD, slot: 0 }),
+            Node::Insn(call),
+        ]);
+        node
+    }
+
+    fn rejected_unchanged(mut node: MethodNode) {
+        let original = node.clone();
+        assert_eq!(
+            specialize(&mut node, &concrete_enum()),
+            Err(InlineError::MalformedReifiedMarker),
+        );
+        assert_eq!(node, original);
+    }
+
+    #[test]
+    fn the_canonical_enum_value_of_becomes_the_enum_s_own_value_of() {
+        let mut node = enum_value_of(method(INVOKESTATIC, ENUM, "valueOf", ERASED_VALUE_OF));
+        specialize(&mut node, &concrete_enum()).expect("specializes");
+        assert_eq!(
+            node.nodes[3..],
+            [
+                Node::Insn(Insn::Var { op: ALOAD, slot: 0 }),
+                Node::Insn(method(
+                    INVOKESTATIC,
+                    "Color",
+                    "valueOf",
+                    "(Ljava/lang/String;)LColor;"
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_enum_value_of_with_another_owner_is_malformed() {
+        rejected_unchanged(enum_value_of(method(
+            INVOKESTATIC,
+            "Color",
+            "valueOf",
+            ERASED_VALUE_OF,
+        )));
+    }
+
+    #[test]
+    fn an_enum_value_of_with_another_descriptor_is_malformed() {
+        rejected_unchanged(enum_value_of(method(
+            INVOKESTATIC,
+            ENUM,
+            "valueOf",
+            "(Ljava/lang/String;)Ljava/lang/Enum;",
+        )));
+    }
+
+    #[test]
+    fn an_interface_enum_value_of_is_malformed() {
+        let Insn::Method {
+            op,
+            owner,
+            name,
+            desc,
+            ..
+        } = method(INVOKESTATIC, ENUM, "valueOf", ERASED_VALUE_OF)
+        else {
+            unreachable!()
+        };
+        rejected_unchanged(enum_value_of(Insn::Method {
+            op,
+            owner,
+            name,
+            desc,
+            interface: true,
+        }));
+    }
+
+    #[test]
+    fn an_enum_values_array_of_another_class_is_malformed() {
+        let mut node = MethodNode::new(0x0008, "all", "()[Ljava/lang/Enum;");
+        node.nodes = marker("T", ENUM_MARKER);
+        node.nodes.extend([
+            Node::Insn(Insn::Op(ICONST_0)),
+            Node::Insn(Insn::Type {
+                op: ANEWARRAY,
+                class: "java/lang/Object".to_owned(),
+            }),
+        ]);
+        rejected_unchanged(node);
     }
 
     fn child_failure() -> ReifiedArguments {
