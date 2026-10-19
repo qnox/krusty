@@ -11,7 +11,9 @@
 use crate::fx_hash::HashMap;
 use std::collections::VecDeque;
 
-use super::body_lowering::{BodyLowering, CallLinker, LinkedCallee, LoweredFunction};
+use super::body_lowering::{
+    BodyLowering, CallLinker, LinkedAccessor, LinkedCallee, LinkedConstructor, LoweredFunction,
+};
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
 use super::function_lowering::{
@@ -25,7 +27,7 @@ use crate::klib_libraries::{
     KlibCalleeOrigin, KlibDeclarationBodies, KlibIntrinsicCallable, KlibIntrinsicFacts,
 };
 use crate::libraries::{KlibBodyCallable, KlibDeclarationSignature, KlibDependencyCallable};
-use crate::metadata::id_signature::KlibPublicIdSignature;
+use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrBody, KlibIrFunction, KlibIrStatement};
 use crate::metadata::klib_ir::KlibIrSymbol;
 use crate::types::{Ty, TypeName};
@@ -395,6 +397,29 @@ struct Linker<'u, 's> {
 }
 
 impl CallLinker for Linker<'_, '_> {
+    fn is_subtype(&self, sub: Ty, sup: Ty) -> bool {
+        // A support unit has no semantic model of the classes its body names.
+        sub == sup
+    }
+
+    fn link_constructor(
+        &mut self,
+        _callee: &KlibPublicIdSignature,
+    ) -> Result<LinkedConstructor, KlibBodyDeclineReason> {
+        Err(KlibBodyDeclineReason::UnsupportedOperation(
+            "a constructor call",
+        ))
+    }
+
+    fn link_accessor(
+        &mut self,
+        _callee: &KlibAccessorIdSignature,
+    ) -> Result<LinkedAccessor, KlibBodyDeclineReason> {
+        Err(KlibBodyDeclineReason::UnsupportedOperation(
+            "a call through a property accessor signature",
+        ))
+    }
+
     fn is_selected(&self, callee: &KlibPublicIdSignature) -> Result<bool, KlibBodyDeclineReason> {
         let signature = KlibDeclarationSignature::Public(callee.clone());
         let identity = match self
@@ -487,6 +512,7 @@ impl CallLinker for Linker<'_, '_> {
                 ret: intrinsic.ret(),
                 context_count: 0,
                 singleton_dispatch: None,
+                type_parameters: Vec::new(),
             });
         }
         if let Some(&emitted) = self.sources.externals.get(&identity) {
@@ -522,6 +548,7 @@ impl CallLinker for Linker<'_, '_> {
                 ret,
                 context_count,
                 singleton_dispatch: emitted.singleton_classifier(),
+                type_parameters: Vec::new(),
             });
         }
         if declaration.dispatch_receiver.is_some() {
@@ -558,6 +585,7 @@ impl CallLinker for Linker<'_, '_> {
             ret: declaration.ret,
             context_count: ir.fn_context_counts.get(&function).copied().unwrap_or(0),
             singleton_dispatch: None,
+            type_parameters: Vec::new(),
         })
     }
 }

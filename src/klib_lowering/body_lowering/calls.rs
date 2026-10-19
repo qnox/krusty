@@ -5,9 +5,13 @@
 
 use super::super::ir_builtins::{BuiltinOperator, BuiltinRelation};
 use super::super::klib_types::function_invocation_arity;
-use super::{mismatch, unsupported, BodyLowering, LinkedCallee, Lowered};
-use crate::ir::{ExprId, IrBinOp, IrExpr};
-use crate::metadata::id_signature::KlibPublicIdSignature;
+use super::super::klib_types::semantic_type;
+use super::{mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedCallee, Lowered};
+use crate::fir::FirTypeParameterRef;
+use crate::ir::{
+    Callee, ExprId, IrBinOp, IrCheckedOperation, IrCheckedSubstitution, IrExpr, IrPropertyDispatch,
+};
+use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::{
     KlibIrArguments, KlibIrExprId, KlibIrExprKind, KlibIrMemberAccess,
 };
@@ -29,9 +33,7 @@ impl BodyLowering<'_> {
             KlibIrSignature::FileLocal { .. } => {
                 return unsupported("a call of a file-private declaration")
             }
-            KlibIrSignature::Accessor(_) => {
-                return unsupported("a call through a property accessor signature")
-            }
+            KlibIrSignature::Accessor(accessor) => return self.accessor_call(accessor, access, ty),
         };
         if let Some(arity) = function_invocation_arity(callee) {
             if !access.type_arguments.is_empty() {
@@ -52,12 +54,11 @@ impl BodyLowering<'_> {
             return self.dependency_call(callee, access, ty);
         }
         let Some(operator) = operator else {
-            if !access.type_arguments.is_empty() {
-                // Only a generic declaration takes type arguments, and lowering declines those.
-                return unsupported("a call of a generic declaration");
-            }
             return self.dependency_call(callee, access, ty);
         };
+        if operator == BuiltinOperator::CheckNotNull {
+            return self.not_null_assertion(access, ty);
+        }
         if !access.type_arguments.is_empty() {
             return Err(mismatch(
                 "a built-in operator is called with type arguments",
@@ -72,6 +73,27 @@ impl BodyLowering<'_> {
             }
             equality => self.equality(access, equality, ty, false),
         }
+    }
+
+    /// `operand!!`, lowered as checked FIR lowers the source assertion: the operand, checked for
+    /// `null`, typed as its non-null type.
+    fn not_null_assertion(&mut self, access: &KlibIrMemberAccess, ty: Ty) -> Lowered<ExprId> {
+        let (&[Some(operand)], 1) = (arguments(access).as_slice(), access.type_arguments.len())
+        else {
+            return Err(mismatch(
+                "`CHECK_NOT_NULL` is called with another shape than its declaration's",
+            ));
+        };
+        let operand = self.expression(operand)?;
+        if self.lowered_type(operand).non_null() != ty || ty.is_nullable() {
+            return Err(mismatch(
+                "`CHECK_NOT_NULL` is typed apart from its operand's non-null type",
+            ));
+        }
+        Ok(self.ir.add_expr(IrExpr::NotNullAssert {
+            operand,
+            check: crate::ir::NullCheck::Source,
+        }))
     }
 
     /// `Float.isNaN()` / `Double.isNaN()` as the IEEE fact `value != value`. The dependency body
@@ -189,7 +211,8 @@ impl BodyLowering<'_> {
                 BuiltinOperator::Relation(_)
                 | BuiltinOperator::Not
                 | BuiltinOperator::IsNan { .. }
-                | BuiltinOperator::NumericConversion { .. },
+                | BuiltinOperator::NumericConversion { .. }
+                | BuiltinOperator::CheckNotNull,
                 _,
             ) => {
                 unreachable!("only an equality operator is lowered as an equality")
@@ -323,38 +346,17 @@ impl BodyLowering<'_> {
         access: &KlibIrMemberAccess,
         ty: Ty,
     ) -> Lowered<ExprId> {
-        if linked.context_count != 0 && matches!(access.arguments, KlibIrArguments::Split { .. }) {
-            return unsupported("a context argument in the pre-2.4 argument layout");
-        }
-        if ty != linked.ret {
-            return Err(mismatch("a call is typed apart from its callee's result"));
-        }
-        let arguments = arguments(access);
-        if arguments.len() != linked.params.len() + usize::from(linked.receiver.is_some()) {
-            return Err(mismatch(
-                "a call passes another number of arguments than its callee declares",
-            ));
-        }
-        let mut arguments = arguments.into_iter();
-        let dispatch_receiver = linked
-            .receiver
-            .map(|expected| {
-                let argument = arguments.next().flatten().ok_or(
-                    KlibBodyDeclineReason::UnsupportedOperation(
-                        "a call that omits its dispatch receiver",
-                    ),
-                )?;
-                self.operand(argument, expected).map(Some)
-            })
-            .transpose()?
-            .flatten();
-        let mut args = Vec::with_capacity(linked.params.len());
-        for (argument, parameter) in arguments.zip(linked.params) {
-            let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
-                "a call that leaves a parameter to its default",
-            ))?;
-            args.push(self.operand(argument, parameter)?);
-        }
+        let linked = self.substituted(linked, access)?;
+        let (dispatch_receiver, args) = self.call_operands(
+            access,
+            ty,
+            CalleeShape {
+                receiver: linked.receiver,
+                params: &linked.params,
+                ret: linked.ret,
+                context_count: linked.context_count,
+            },
+        )?;
         let singleton_dispatch = linked.singleton_dispatch;
         let call = self.ir.add_expr(IrExpr::Call {
             callee: linked.callee,
@@ -368,6 +370,179 @@ impl BodyLowering<'_> {
         }
         Ok(call)
     }
+}
+
+impl BodyLowering<'_> {
+    /// A call of a dependency property's accessor, lowered as checked FIR lowers a source access
+    /// of the property: a read through its getter, a write through its setter.
+    fn accessor_call(
+        &mut self,
+        accessor: &KlibAccessorIdSignature,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        if !access.type_arguments.is_empty() {
+            return unsupported("an access of a generic property");
+        }
+        let linked = self.linker.link_accessor(accessor)?;
+        let (receiver, arguments) = self.call_operands(
+            access,
+            ty,
+            CalleeShape {
+                receiver: linked.receiver,
+                params: &linked.params,
+                ret: linked.ret,
+                context_count: linked.context_count,
+            },
+        )?;
+        let LinkedAccessor {
+            property: target,
+            write,
+            receiver: source_receiver,
+            params: parameters,
+            ret: result,
+            context_count: _,
+        } = linked;
+        let dispatch = IrPropertyDispatch::Ordinary;
+        Ok(self.ir.add_expr(IrExpr::Checked(if write {
+            IrCheckedOperation::ExternalPropertyWrite {
+                target,
+                dispatch,
+                receiver,
+                arguments,
+                parameters,
+                result,
+                source_receiver,
+            }
+        } else {
+            IrCheckedOperation::ExternalPropertyRead {
+                target,
+                dispatch,
+                receiver,
+                arguments,
+                parameters,
+                result,
+                source_receiver,
+            }
+        })))
+    }
+
+    /// A call's dispatch receiver and arguments, each read at the callee's declared type, after
+    /// checking that the call has the callee's result type and passes every parameter.
+    fn call_operands(
+        &mut self,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+        callee: CalleeShape<'_>,
+    ) -> Lowered<(Option<ExprId>, Vec<ExprId>)> {
+        if callee.context_count != 0 && matches!(access.arguments, KlibIrArguments::Split { .. }) {
+            return unsupported("a context argument in the pre-2.4 argument layout");
+        }
+        if ty != callee.ret {
+            return Err(mismatch("a call is typed apart from its callee's result"));
+        }
+        let arguments = arguments(access);
+        if arguments.len() != callee.params.len() + usize::from(callee.receiver.is_some()) {
+            return Err(mismatch(
+                "a call passes another number of arguments than its callee declares",
+            ));
+        }
+        let mut arguments = arguments.into_iter();
+        let dispatch_receiver = callee
+            .receiver
+            .map(|expected| {
+                let argument = arguments.next().flatten().ok_or(
+                    KlibBodyDeclineReason::UnsupportedOperation(
+                        "a call that omits its dispatch receiver",
+                    ),
+                )?;
+                self.operand(argument, expected)
+            })
+            .transpose()?;
+        let mut args = Vec::with_capacity(callee.params.len());
+        for (argument, &parameter) in arguments.zip(callee.params) {
+            let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call that leaves a parameter to its default",
+            ))?;
+            args.push(self.operand(argument, parameter)?);
+        }
+        Ok((dispatch_receiver, args))
+    }
+
+    /// `linked` at the call's type arguments: each of the callee's type parameters bound to the
+    /// argument the call serializes for it, as checked FIR lowering records a source call of the
+    /// generic declaration, with the same substituted parameters, result and substitutions.
+    fn substituted(
+        &self,
+        mut linked: LinkedCallee,
+        access: &KlibIrMemberAccess,
+    ) -> Lowered<LinkedCallee> {
+        if linked.type_parameters.is_empty() && !access.type_arguments.is_empty() {
+            // A linker that does not model the callee's type parameters links no generic call.
+            return unsupported("a call of a generic declaration");
+        }
+        if access.type_arguments.len() != linked.type_parameters.len() {
+            return Err(mismatch(
+                "a call passes another number of type arguments than its callee declares",
+            ));
+        }
+        if linked.type_parameters.is_empty() {
+            return Ok(linked);
+        }
+        let Callee::External {
+            target,
+            params,
+            ret,
+            substitutions,
+            ..
+        } = &mut linked.callee
+        else {
+            return Err(mismatch("a generic callee is not a dependency function"));
+        };
+        let mut bindings = crate::fx_hash::HashMap::default();
+        for (ordinal, (parameter, argument)) in linked
+            .type_parameters
+            .iter()
+            .zip(&access.type_arguments)
+            .enumerate()
+        {
+            let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call that leaves a type argument unset",
+            ))?;
+            let value = semantic_type(self.arena, self.header.type_parameters(), argument)?;
+            bindings.insert(parameter.clone(), value);
+            substitutions.push(IrCheckedSubstitution {
+                parameter: FirTypeParameterRef::External {
+                    callable: *target,
+                    ordinal: ordinal as u32,
+                },
+                // A reified type parameter belongs to an inline function, which a template does
+                // not call.
+                reified: false,
+                value,
+                reified_runtime: value,
+                additional_bounds: Vec::new(),
+            });
+        }
+        for param in params.iter_mut() {
+            *param = param.substitute_erased(&bindings);
+        }
+        *ret = ret.substitute_erased(&bindings);
+        linked.params = params.clone();
+        linked.ret = *ret;
+        linked.receiver = linked
+            .receiver
+            .map(|receiver| receiver.substitute_erased(&bindings));
+        Ok(linked)
+    }
+}
+
+/// The declared signature a call's operands are read at.
+struct CalleeShape<'a> {
+    receiver: Option<Ty>,
+    params: &'a [Ty],
+    ret: Ty,
+    context_count: usize,
 }
 
 /// A call's arguments in the order of its callee's parameters: dispatch receiver, context

@@ -15,22 +15,25 @@
 //! another inline function declines, as does every form body lowering declines. A declined
 //! template leaves the file as it was.
 
-use super::body_lowering::{BodyLowering, CallLinker, LinkedCallee, LoweredFunction};
+use super::body_lowering::{
+    BodyLowering, CallLinker, LinkedAccessor, LinkedCallee, LinkedConstructor, LoweredFunction,
+};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
 use super::function_lowering::function_header;
-use super::klib_types::{member_owner, semantic_type, KlibTypeParameters};
-use crate::types::SemanticCallableOwner;
 use super::function_lowering::{declare_function, prepared_inline_header};
 use super::ir_builtins::IrBuiltinOperators;
+use super::klib_types::{member_owner, semantic_type, KlibTypeParameters};
 use super::lowering_checkpoint::LoweringCheckpoint;
 use crate::fir::ExternalCallableId;
 use crate::ir::{Callee, FunId, IrFile};
 use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies};
 use crate::libraries::{
-    ExternalCallableRealization, KlibBodyCallable, KlibDeclarationSignature, KlibDependencyCallable,
+    ExternalCallableKind, ExternalCallableRealization, KlibBodyCallable, KlibDeclarationSignature,
+    KlibDependencyCallable,
 };
-use crate::metadata::id_signature::KlibPublicIdSignature;
+use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::KlibIrBody;
+use crate::types::SemanticCallableOwner;
 use crate::types::{InlineExpansionMode, InlineParameterModifier, Ty};
 
 /// An inline dependency function's template in a file.
@@ -52,6 +55,13 @@ pub struct TemplateCallees<'a> {
     pub provider: &'a dyn Fn(
         &KlibDependencyCallable,
     ) -> Option<(ExternalCallableId, ExternalCallableRealization)>,
+    /// The calling compilation's provider realization of a dependency property.
+    pub properties: &'a dyn Fn(
+        crate::fir::ExternalPropertyId,
+    ) -> Option<crate::libraries::ExternalPropertyRealization>,
+    /// The calling compilation's class hierarchy, which decides the subtyping a body leaves
+    /// implicit.
+    pub types: &'a dyn crate::assignable::TypeOracle,
 }
 
 /// Lower the prepared-inline body of the dependency function `selected`, from `prepared`, into
@@ -249,7 +259,142 @@ struct TemplateCalls<'a> {
     callees: TemplateCallees<'a>,
 }
 
+impl TemplateCalls<'_> {
+    /// The declaration a call of `callee` in the template's module names.
+    fn identity(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<KlibDependencyCallable, KlibBodyDeclineReason> {
+        self.origin(&KlibDeclarationSignature::Public(callee.clone()), callee)
+    }
+
+    /// The declaration `signature` names in the template's module; `callee` is the public
+    /// signature a decline names it by.
+    fn origin(
+        &self,
+        signature: &KlibDeclarationSignature,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<KlibDependencyCallable, KlibBodyDeclineReason> {
+        match self
+            .callees
+            .declarations
+            .callee_origin(self.module, signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => Ok(identity),
+            KlibCalleeOrigin::Ambiguous => Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(
+                Box::new(callee.clone()),
+            )),
+            KlibCalleeOrigin::Missing => Err(KlibBodyDeclineReason::UndeclaredCallee(Box::new(
+                callee.clone(),
+            ))),
+        }
+    }
+}
+
 impl CallLinker for TemplateCalls<'_> {
+    fn is_subtype(&self, sub: Ty, sup: Ty) -> bool {
+        crate::assignable::is_subtype(
+            &crate::assignable::TyCtx::new(),
+            self.callees.types,
+            sub,
+            sup,
+        )
+    }
+
+    fn link_constructor(
+        &mut self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<LinkedConstructor, KlibBodyDeclineReason> {
+        let identity = self.identity(callee)?;
+        let declined = |reason| {
+            KlibBodyDeclineReason::CalleeDeclined(Box::new(KlibBodyDecline::new(
+                KlibDeclarationSignature::Public(callee.clone()),
+                reason,
+            )))
+        };
+        let Some((target, realization)) = (self.callees.provider)(&identity) else {
+            return Err(declined(KlibBodyDeclineReason::SignatureMismatch(
+                "the provider realizes no declaration of the exact serialized callee".to_owned(),
+            )));
+        };
+        let (
+            ExternalCallableKind::Constructor,
+            Some(SemanticCallableOwner::Classifier(classifier)),
+        ) = (realization.kind, realization.declaration_owner)
+        else {
+            return Err(declined(KlibBodyDeclineReason::SignatureMismatch(format!(
+                "the serialized constructor is selected as a {:?} of {:?}",
+                realization.kind, realization.declaration_owner
+            ))));
+        };
+        // A class type parameter in a constructor parameter would need the call's class type
+        // arguments substituted, which this lowering does not model yet.
+        if realization.callable.context_count != 0
+            || realization
+                .callable
+                .params
+                .iter()
+                .any(|param| param.mentions_ty_param())
+        {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a constructor call of a generic or contextual parameter list",
+            ));
+        }
+        Ok(LinkedConstructor {
+            target,
+            classifier,
+            params: realization.callable.params.clone(),
+        })
+    }
+
+    fn link_accessor(
+        &mut self,
+        callee: &KlibAccessorIdSignature,
+    ) -> Result<LinkedAccessor, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Accessor(callee.clone());
+        let identity = self.origin(&signature, callee.property())?;
+        let declined = |reason| {
+            KlibBodyDeclineReason::CalleeDeclined(Box::new(KlibBodyDecline::new(
+                signature.clone(),
+                reason,
+            )))
+        };
+        let (arena, declaration) = self
+            .callees
+            .declarations
+            .function(&identity)
+            .ok_or_else(|| declined(KlibBodyDeclineReason::Unjoined))?;
+        let Some((target, realization)) = (self.callees.provider)(&identity) else {
+            return Err(declined(KlibBodyDeclineReason::SignatureMismatch(
+                "the provider realizes no declaration of the exact serialized callee".to_owned(),
+            )));
+        };
+        let property = realization
+            .callable
+            .external_property_identity
+            .and_then(|property| Some((property, (self.callees.properties)(property)?)));
+        let Some((property, accessors)) = property else {
+            return Err(declined(KlibBodyDeclineReason::SignatureMismatch(
+                "the serialized accessor is selected as no property's accessor".to_owned(),
+            )));
+        };
+        if realization.callable.inline.can_inline() {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "an access of an inline dependency property from an inline template",
+            ));
+        }
+        accessor_access(callee, arena, declaration, &realization)
+            .map(|receiver| LinkedAccessor {
+                property,
+                write: accessors.setter == Some(target),
+                receiver,
+                params: realization.callable.params.clone(),
+                ret: realization.callable.ret,
+                context_count: realization.callable.context_count,
+            })
+            .map_err(declined)
+    }
+
     fn is_selected(&self, _callee: &KlibPublicIdSignature) -> Result<bool, KlibBodyDeclineReason> {
         // No source edge needs a template's callee as target code.
         Ok(false)
@@ -261,23 +406,7 @@ impl CallLinker for TemplateCalls<'_> {
         callee: &KlibPublicIdSignature,
     ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
         let signature = KlibDeclarationSignature::Public(callee.clone());
-        let identity = match self
-            .callees
-            .declarations
-            .callee_origin(self.module, &signature)
-        {
-            KlibCalleeOrigin::Exact(identity) => identity,
-            KlibCalleeOrigin::Ambiguous => {
-                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
-                    callee.clone(),
-                )))
-            }
-            KlibCalleeOrigin::Missing => {
-                return Err(KlibBodyDeclineReason::UndeclaredCallee(Box::new(
-                    callee.clone(),
-                )))
-            }
-        };
+        let identity = self.identity(callee)?;
         let callee_declined = |reason| {
             KlibBodyDeclineReason::CalleeDeclined(Box::new(KlibBodyDecline::new(
                 signature.clone(),
@@ -303,6 +432,16 @@ impl CallLinker for TemplateCalls<'_> {
             return member_call(callee, arena, declaration, receiver, target, &realization)
                 .map_err(callee_declined);
         }
+        let formals = realization
+            .callable
+            .generic_sig
+            .as_deref()
+            .map(|generic| generic.formals.clone())
+            .unwrap_or_default();
+        if !formals.is_empty() || !declaration.type_parameters.is_empty() {
+            return generic_call(declaration, target, &realization, formals)
+                .map_err(callee_declined);
+        }
         let header = function_header(None, arena, declaration).map_err(callee_declined)?;
         let (params, ret, context_count, extension_receiver, receiver) = header.linked_signature();
         Ok(LinkedCallee {
@@ -320,8 +459,64 @@ impl CallLinker for TemplateCalls<'_> {
             ret,
             context_count,
             singleton_dispatch: None,
+            type_parameters: Vec::new(),
         })
     }
+}
+
+/// A template's call of the generic top-level function or extension `declaration`, by the
+/// provider's identity `target`. Its signature is the provider's, naming the provider's type
+/// parameters `formals`, which each call binds to its type arguments.
+fn generic_call(
+    declaration: &crate::metadata::klib_ir::tree::KlibIrFunction,
+    target: ExternalCallableId,
+    realization: &ExternalCallableRealization,
+    formals: Vec<String>,
+) -> Result<LinkedCallee, KlibBodyDeclineReason> {
+    if declaration.type_parameters.len() != formals.len() {
+        return Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+            "{} serialized type parameters, {} selected",
+            declaration.type_parameters.len(),
+            formals.len()
+        )));
+    }
+    let extension = declaration.extension_receiver.is_some();
+    let expected_kind = if extension {
+        ExternalCallableKind::Extension
+    } else {
+        ExternalCallableKind::TopLevel
+    };
+    let context_count = realization.callable.context_count;
+    let params = realization.callable.params.clone();
+    if realization.kind != expected_kind
+        || context_count != declaration.context_parameters.len()
+        || params.len()
+            != context_count + usize::from(extension) + declaration.regular_parameters.len()
+    {
+        return Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+            "the serialized declaration is selected as a {:?} with {} parameters",
+            realization.kind,
+            params.len()
+        )));
+    }
+    let ret = realization.callable.ret;
+    Ok(LinkedCallee {
+        callee: Callee::External {
+            target,
+            default_provider: None,
+            params: params.clone(),
+            ret,
+            substitutions: Vec::new(),
+            defaults: Vec::new(),
+            extension_receiver_parameter: extension.then_some(context_count as u32),
+        },
+        receiver: None,
+        params,
+        ret,
+        context_count,
+        singleton_dispatch: None,
+        type_parameters: formals,
+    })
 }
 
 /// A template's call of the member `callee`, by the provider's identity `target`. Its signature is
@@ -376,7 +571,57 @@ fn member_call(
         ret,
         context_count: realization.callable.context_count,
         singleton_dispatch: None,
+        type_parameters: Vec::new(),
     })
+}
+
+/// The dispatch receiver an access through the non-generic accessor `declaration` reads, by the
+/// provider's realization of it: a member's must belong to the class metadata names as its owner
+/// and is read at the serialized receiver's type, the argument the call passes.
+fn accessor_access(
+    callee: &KlibAccessorIdSignature,
+    arena: &crate::metadata::klib_ir::tree::KlibIrArena,
+    declaration: &crate::metadata::klib_ir::tree::KlibIrFunction,
+    realization: &ExternalCallableRealization,
+) -> Result<Option<Ty>, KlibBodyDeclineReason> {
+    let generic = realization
+        .callable
+        .generic_sig
+        .as_deref()
+        .is_some_and(|generic| !generic.formals.is_empty());
+    if !declaration.type_parameters.is_empty() || generic {
+        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+            "type parameters",
+        ));
+    }
+    let extension = declaration.extension_receiver.is_some();
+    let declared = declaration.context_parameters.len()
+        + usize::from(extension)
+        + declaration.regular_parameters.len();
+    if realization.callable.context_count != declaration.context_parameters.len()
+        || realization.callable.params.len() != declared
+    {
+        return Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+            "the serialized accessor is selected with {} parameters",
+            realization.callable.params.len()
+        )));
+    }
+    let Some(receiver) = &declaration.dispatch_receiver else {
+        return Ok(None);
+    };
+    if extension {
+        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+            "a member extension",
+        ));
+    }
+    let owner = member_owner(callee.property())?;
+    if realization.declaration_owner != Some(SemanticCallableOwner::Classifier(owner)) {
+        return Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+            "the serialized member of {owner:?} is selected as one of {:?}",
+            realization.declaration_owner
+        )));
+    }
+    semantic_type(arena, &KlibTypeParameters::default(), receiver.ty).map(Some)
 }
 
 #[cfg(test)]

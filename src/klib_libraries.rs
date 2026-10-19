@@ -184,10 +184,43 @@ impl SymbolSource for KlibLibraries {
         crate::fir::ExternalCallableId,
         crate::libraries::ExternalCallableRealization,
     )> {
-        let (placement, signed) = self.inventory.dependency_function(identity)?;
-        let function =
-            lookup::published_function(&self.identities, signed, placement, &Default::default());
-        let external = function.callable.external_identity?;
+        // A serialized identity names one declaration: a function, a property accessor or a
+        // constructor.
+        let external =
+            if let Some((placement, signed)) = self.inventory.dependency_function(identity) {
+                lookup::published_function(&self.identities, signed, placement, &Default::default())
+                    .callable
+                    .external_identity?
+            } else if let Some((placement, signed, classifier)) =
+                self.inventory.dependency_property(identity)
+            {
+                let package = crate::libraries::EnclosingBounds::default();
+                let enclosing = classifier.map_or(&package, |classifier| {
+                    classifier.type_parameters.enclosing()
+                });
+                let property =
+                    lookup::published_property(&self.identities, signed, placement, enclosing);
+                // The accessor the identity serializes; the realization check below proves it.
+                let setter = signed.setter.as_ref().is_some_and(|setter| {
+                    identity.declaration
+                        == crate::libraries::KlibDeclarationSignature::Accessor(setter.clone())
+                });
+                if setter {
+                    property.setter?.external_identity?
+                } else {
+                    property.getter.external_identity?
+                }
+            } else {
+                let (owner, classifier, constructor) =
+                    self.inventory.dependency_constructor(identity)?;
+                classifier_records::published_constructor(
+                    &self.identities,
+                    owner,
+                    classifier,
+                    constructor,
+                )
+                .external_identity?
+            };
         let realization = self.identities.realization(external)?;
         (realization.dependency_callable.as_ref() == Some(identity))
             .then_some((external, realization))

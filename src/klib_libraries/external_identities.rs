@@ -96,9 +96,16 @@ impl ExternalIdentities {
             );
         }
         let identity = self.intern_property(signed, property);
-        property.getter.external_property_identity = Some(identity);
-        if let Some(setter) = &mut property.setter {
-            setter.external_property_identity = Some(identity);
+        // Each accessor's realization names its property, as the published accessor does.
+        let mut realizations = self.realizations.borrow_mut();
+        for accessor in std::iter::once(&mut property.getter).chain(property.setter.as_mut()) {
+            accessor.external_property_identity = Some(identity);
+            if let Some(realization) = accessor
+                .external_identity
+                .and_then(|accessor| realizations.get_mut(accessor.raw() as usize))
+            {
+                realization.callable.external_property_identity = Some(identity);
+            }
         }
     }
 

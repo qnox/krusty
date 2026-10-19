@@ -180,6 +180,8 @@ fn emit_analyzed_into<B: Backend>(
                     Span::new(0, 0),
                     format!("internal error: cannot initialize FIR lowering: {error:?}"),
                 );
+                // A failed source lowers nothing, so its checked defaults are dropped with it.
+                default_arguments.take_for_source(&index, source_id);
                 continue;
             }
         };
@@ -202,6 +204,7 @@ fn emit_analyzed_into<B: Backend>(
                 Span::new(0, 0),
                 format!("internal error: cannot consume inline FIR: {error:?}"),
             );
+            default_arguments.take_for_source(&index, source_id);
             continue;
         }
         if let Err(error) = sink.accept_default_arguments(&index, &mut default_arguments) {
