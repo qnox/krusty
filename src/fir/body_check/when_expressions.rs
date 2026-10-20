@@ -5,7 +5,7 @@
 
 use crate::ast::{ExprId, WhenArm};
 use crate::fir::{
-    FirExpr, FirWhenBranch, FirWhenCondition, FirWhenSubjectNumericEquality, ResolvedTy,
+    FirExpr, FirExprId, FirWhenBranch, FirWhenCondition, FirWhenSubjectNumericEquality, ResolvedTy,
     SyntheticOriginKind,
 };
 use crate::types::Ty;
@@ -121,6 +121,8 @@ impl BodyFirChecker<'_> {
                     .map(|condition| {
                         let checked = if has_subject && !condition.is_predicate() {
                             self.expression(condition.expression())?
+                        } else if let (Some(syntax), Some(subject)) = (substituted, subject) {
+                            self.subject_predicate(condition.expression(), syntax, subject)?
                         } else {
                             self.boolean_condition(condition.expression())?
                         };
@@ -202,6 +204,33 @@ impl BodyFirChecker<'_> {
             branches: branches.into_boxed_slice(),
             deeply_exhaustive,
         })
+    }
+
+    /// An `is`/`in` condition over the subject. It reads the subject as its arm sees it: when
+    /// earlier conditions narrowed the subject (past a `null` arm, or a failed `!is`), that is a
+    /// smart cast or unboxing of the subject's single value, kotlinc's smart-cast `$subj$`, and
+    /// the subject itself keeps its own type.
+    fn subject_predicate(
+        &mut self,
+        condition: ExprId,
+        syntax: ExprId,
+        subject: FirExprId,
+    ) -> Result<FirExprId, BodyCheckFailure> {
+        let Some(view) = self.info.when_subject_condition_view(condition) else {
+            return self.boolean_condition(condition);
+        };
+        let span = self
+            .file
+            .expr_span(condition)
+            .ok_or_else(|| self.failure(None, super::BodyCheckFailureKind::MissingSourceSpan))?;
+        let view = self.resolved_type(span, view)?;
+        let storage = self.expression_type(syntax)?;
+        let origin = self.expression_origin(syntax)?;
+        let read = self.stored_value_view(subject, storage, view, origin);
+        self.expression_substitutions.insert(syntax, read);
+        let checked = self.boolean_condition(condition);
+        self.expression_substitutions.insert(syntax, subject);
+        checked
     }
 
     /// Whether an `else` result keeps its `if`/`when` deeply exhaustive: an `else if` chain (a

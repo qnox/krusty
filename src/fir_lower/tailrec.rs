@@ -1245,7 +1245,7 @@ mod tests {
     fn returned_member_call(ir: &mut IrFile, receiver: ExprId, temp: u32) -> ExprId {
         let binding = ir.add_expr(IrExpr::Variable {
             index: temp,
-            ty: Ty::Obj(crate::types::type_name("C"), &[]),
+            ty: Ty::Obj(crate::types::type_name("C"), crate::types::TyList::EMPTY),
             init: Some(receiver),
             named: false,
         });
@@ -1631,7 +1631,7 @@ mod tests {
         let this = ir.add_expr(IrExpr::GetValue(RECEIVER));
         let binding = ir.add_expr(IrExpr::Variable {
             index: 11,
-            ty: Ty::Obj(crate::types::type_name("C"), &[]),
+            ty: Ty::Obj(crate::types::type_name("C"), crate::types::TyList::EMPTY),
             init: Some(this),
             named: false,
         });

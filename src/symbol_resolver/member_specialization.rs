@@ -185,7 +185,7 @@ fn specialize_member_type_with_unbound(
 ) -> Ty {
     match ty {
         Ty::TyParam(name, bound) => {
-            let Some(binding) = bindings.get(name).copied() else {
+            let Some(binding) = bindings.get(name.as_str()).copied() else {
                 return match unbound {
                     UnboundSpecialization::Preserve => ty,
                     UnboundSpecialization::UseUpperBound => bound.non_null(),

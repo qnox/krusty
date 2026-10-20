@@ -2082,11 +2082,35 @@ impl BodyLowering<'_> {
             .dispatch_receiver_slot()
             .map(|slot| self.ir.add_expr(IrExpr::GetValue(slot)))
             .ok_or(FirLoweringFailure::MissingLocalClass(owner))?;
+        let index = self.capture_field_index(class, field)?;
         Ok(self.ir.add_expr(IrExpr::GetField {
             receiver,
             class,
-            index: field,
+            index,
         }))
+    }
+
+    /// The field-table position of capture `field` (its identity) of `class`. A local class stores
+    /// only the captures code that runs after construction reads, so its capture fields can be
+    /// fewer than its constructor prefix. Reading the storage of a capture that has none is an
+    /// internal error: the checker selected the constructor parameter for every read of it.
+    fn capture_field_index(
+        &self,
+        class: crate::ir::ClassId,
+        field: u32,
+    ) -> Result<u32, FirLoweringFailure> {
+        let declaration = &self.ir.classes[class as usize];
+        match declaration.ctor_args.get(field as usize) {
+            Some(argument)
+                if field < declaration.constructor_prefix_count
+                    && argument.provenance == crate::ir::IrCtorParameterProvenance::Capture =>
+            {
+                argument
+                    .field_index
+                    .ok_or(FirLoweringFailure::UnstoredCaptureRead { class, field })
+            }
+            _ => Ok(field),
+        }
     }
 
     pub(super) fn constructor_capture_parameter(
@@ -2108,7 +2132,14 @@ impl BodyLowering<'_> {
                 let valid_owner = self
                     .index
                     .declaration_anchor(declaration)
-                    .filter(|anchor| anchor.kind == crate::fir::DeclarationKind::Constructor)
+                    .filter(|anchor| {
+                        matches!(
+                            anchor.kind,
+                            crate::fir::DeclarationKind::Constructor
+                                | crate::fir::DeclarationKind::Initializer
+                                | crate::fir::DeclarationKind::Property
+                        )
+                    })
                     .and_then(|anchor| anchor.owner)
                     == Some(owner);
                 if !valid_owner || field >= self.class_constructor_capture_count {
@@ -2188,10 +2219,11 @@ impl BodyLowering<'_> {
                 ),
             });
         }
+        let index = self.capture_field_index(class, field)?;
         Ok(self.ir.add_expr(IrExpr::GetField {
             receiver,
             class,
-            index: field,
+            index,
         }))
     }
 
@@ -2237,10 +2269,11 @@ impl BodyLowering<'_> {
             return Err(FirLoweringFailure::MissingLocalClass(owner));
         }
         let class = self.storage_class(owner)?;
+        let index = self.capture_field_index(class, field)?;
         Ok(self.ir.add_expr(IrExpr::GetField {
             receiver,
             class,
-            index: field,
+            index,
         }))
     }
 

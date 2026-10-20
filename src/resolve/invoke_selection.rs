@@ -230,7 +230,7 @@ impl Checker<'_> {
         match ty {
             Ty::Nullable(_) | Ty::Null => true,
             Ty::TyParam(name, bound) => {
-                visited.insert(name)
+                visited.insert(name.as_str())
                     && std::iter::once(*bound)
                         .chain(self.semantic_tparam_extra_bounds(scope, ty))
                         .all(|bound| {

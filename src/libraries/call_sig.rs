@@ -15,22 +15,14 @@ impl CallSig {
                 .get(start..)
                 .unwrap_or_default()
                 .to_vec(),
-            param_defaults: self
-                .param_defaults
-                .get(start..)
-                .unwrap_or_default()
-                .to_vec(),
-            exact_params: self.exact_params.get(start..).unwrap_or_default().to_vec(),
-            no_infer_params: self
-                .no_infer_params
-                .get(start..)
-                .unwrap_or_default()
-                .to_vec(),
+            param_defaults: self.param_defaults.get(start..).unwrap_or_default().into(),
+            exact_params: self.exact_params.get(start..).unwrap_or_default().into(),
+            no_infer_params: self.no_infer_params.get(start..).unwrap_or_default().into(),
             implicit_integer_coercion: self
                 .implicit_integer_coercion
                 .get(start..)
                 .unwrap_or_default()
-                .to_vec(),
+                .into(),
             lambda_param_types: self
                 .lambda_param_types
                 .get(start..)
@@ -45,7 +37,7 @@ impl CallSig {
                 .lambda_receiver_params
                 .get(start..)
                 .unwrap_or_default()
-                .to_vec(),
+                .into(),
             lambda_context_counts: self
                 .lambda_context_counts
                 .get(start..)
@@ -60,7 +52,7 @@ impl CallSig {
                 .platform_nullable_params
                 .get(start..)
                 .unwrap_or_default()
-                .to_vec(),
+                .into(),
             result_enhancement: self.result_enhancement,
             required: self.required.saturating_sub(start),
             vararg: self.vararg,
@@ -87,18 +79,18 @@ impl CallSig {
             reified_type_parameter_ordinals: self.reified_type_parameter_ordinals.clone(),
             param_names: selected(&self.param_names, parameters),
             parameter_identities: selected(&self.parameter_identities, parameters),
-            exact_params: selected(&self.exact_params, parameters),
-            no_infer_params: selected(&self.no_infer_params, parameters),
-            implicit_integer_coercion: selected(&self.implicit_integer_coercion, parameters),
+            exact_params: selected(&self.exact_params, parameters).into(),
+            no_infer_params: selected(&self.no_infer_params, parameters).into(),
+            implicit_integer_coercion: selected(&self.implicit_integer_coercion, parameters).into(),
             lambda_param_types: selected(&self.lambda_param_types, parameters),
             lambda_receivers: selected(&self.lambda_receivers, parameters),
-            lambda_receiver_params: selected(&self.lambda_receiver_params, parameters),
+            lambda_receiver_params: selected(&self.lambda_receiver_params, parameters).into(),
             lambda_context_counts: selected(&self.lambda_context_counts, parameters),
             inline_modifiers: selected(&self.inline_modifiers, parameters),
-            platform_nullable_params: selected(&self.platform_nullable_params, parameters),
+            platform_nullable_params: selected(&self.platform_nullable_params, parameters).into(),
             result_enhancement: self.result_enhancement,
             required: crate::libraries::required_arity(parameters.len(), &param_defaults),
-            param_defaults,
+            param_defaults: param_defaults.into(),
             vararg: vararg_index.is_some(),
             vararg_index,
         }

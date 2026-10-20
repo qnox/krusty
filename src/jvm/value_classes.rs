@@ -692,9 +692,9 @@ pub(crate) fn lower_value_classes(
             .obj_internal()
             .is_some_and(|fq| under.contains_key(&fq))
     };
-    // kotlinc hides a constructor over any inline class, the unsigned types included, behind its
-    // `DefaultConstructorMarker` accessor.
-    let hides_constructor = |t: &Ty| is_vc_ty(t) || t.non_null().is_unsigned();
+    // kotlinc hides a constructor whose parameters require mangling (unsigned types included,
+    // `kotlin.Result` excluded) behind its `DefaultConstructorMarker` accessor.
+    let hides_constructor = |t: &Ty| member_names::requires_mangling(t, &callable_under);
     let is_callable_vc_ty = |t: &Ty| {
         t.non_null()
             .obj_internal()

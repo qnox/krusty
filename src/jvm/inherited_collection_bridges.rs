@@ -796,7 +796,10 @@ fn signature_type(ty: Ty, keep_parameters: bool) -> String {
     match ty.non_null() {
         Ty::TyParam(name, bound) => {
             if keep_parameters {
-                format!("T{};", crate::types::type_parameter_source_name(name))
+                format!(
+                    "T{};",
+                    crate::types::type_parameter_source_name(name.as_str())
+                )
             } else {
                 signature_type(*bound, false)
             }
@@ -841,7 +844,7 @@ fn reference_of(ty: Ty) -> Ty {
         Ty::StarProjection(_) | Ty::OutProjection(_) | Ty::InProjection(_) => {
             Ty::obj("java/lang/Object")
         }
-        Ty::Obj(name, arguments) => Ty::obj_args_name(name, arguments),
+        Ty::Obj(name, arguments) => Ty::obj_args_name(name, arguments.as_slice()),
         _ => Ty::obj("java/lang/Object"),
     }
 }

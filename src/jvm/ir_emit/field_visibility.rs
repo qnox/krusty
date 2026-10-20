@@ -110,7 +110,7 @@ pub(super) fn default_accessor_access(visibility: Visibility, overridable: bool)
 /// null until assigned, so kotlinc's `AnnotationCodegen` leaves it unannotated too.
 pub(super) fn publishes_field_nullability(c: &IrClass, field_index: usize) -> bool {
     let field = &c.fields[field_index];
-    field_index >= c.constructor_prefix_count as usize
+    field_index >= super::captured_storage::constructor_prefix_fields(c)
         && !field.is_compiler_generated()
         && !field.is_lateinit()
 }

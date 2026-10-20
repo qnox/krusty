@@ -4354,6 +4354,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   checked type exactly as an `==` condition's does; an untyped read would be converted to the
   comparison type and that conversion stored in a temporary kotlinc never declares.
   `tests/when_subject_range_temporary_e2e.rs`.
+- **A `when` subject keeps its own type; a narrowed arm reads it through a smart cast.** The
+  subject is evaluated once into `tmp_subject` with the type it has at the `when`'s entry, so
+  `when (c: Int?) { null -> …; in 1..3 -> … }` stores the boxed `Int?` and tests it for `null`
+  first. An `is`/`in` condition in a later arm sees the subject narrowed by the arms before it
+  (past a `null` arm, or a failed `!is Int`), and reads it as kotlinc's smart-cast `$subj$`
+  does: an unboxing or smart cast of `tmp_subject` inside that condition. The resolver records
+  that narrowed view against the condition and keeps the subject's own type on the subject
+  node, which the condition shares as its operand; checked FIR applies the view as a conversion
+  of the subject's single value.
+  `tests/nullable_when_subject_membership_e2e.rs`.
 - **`x ?: return` smart-casts `x` for the code that follows** (also `?: throw`/`break`/`continue`/a
   `Nothing`-typed call): completing an elvis whose right-hand side is `Nothing` proves a stable
   `val`/parameter non-null, exactly like an `if (x == null) return` guard. A nullable-primitive local
@@ -6523,6 +6533,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   before it. A `when` tail still discards in its branches, which is where kotlinc's pop
   propagation leaves those `pop`s, and a pure load or constant still vanishes with its `pop`.
   Tests: `tests/discarded_inline_lambda_result_e2e.rs`.
+- **An inlined lambda returns on its trailing expression's last line.** kotlinc marks a lambda's
+  implicit `return` once the value is on the stack, at the end of the trailing expression (not
+  the lambda's `}`), and the inliner leaves a `nop` in the `return`'s place. Usually that line is
+  already in effect and the `nop` goes. After an inline call it is not: kotlinc forgets the line
+  after inlining (`markLineNumberAfterInlineIfNeeded`), so `run { run { one() } }` writes the line
+  again on a `nop` that the cleanup keeps, inside the outer lambda's locals, in value and
+  statement position alike. A trailing expression that ends on a later line than the one in
+  effect gets the same mark. An inline call is that trailing expression itself; the lambda body
+  blocks around it are looked through.
+  Tests: `tests/nested_inline_lambda_line_e2e.rs`.
 - **A same-file inline call's result is adapted after its copied frame ends.** kotlinc ends the
   `$i$f$` marker and the inlined parameter locals at the copied body's end label before its caller
   adapts the result. An erased type-parameter result is narrowed after those locals end, a
@@ -10593,6 +10613,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor prefix is an internal error. A local declaration nothing uses is never included by kotlinc,
   which then captures nothing for it; krusty still captures what it reads and orders those values
   after everything else. Tests: `tests/local_class_capture_order_e2e.rs`.
+  Constructor code reads a capture from its constructor parameter, and a capture gets a field only
+  when code that runs after construction uses it, as kotlinc's local declaration lowering does.
+  Constructor code is the primary constructor's defaults and super-constructor arguments, the
+  property initializers and delegate values, the `init` blocks, and each secondary constructor's
+  defaults, delegation arguments and body; a value only a delegate expression reads
+  (`val x by boxOf(a)`) is captured for that constructor read. In `class L { val x = a + 1; fun m() = b }` the
+  constructor is `(a, b)`, the initializer reads the parameter `a`, and only `$b` is a field; in
+  `class B { val x = a; fun m() = a }` the initializer still reads the parameter and `m` reads the
+  field. The walk that orders the captures decides this: a direct read in the local class's own
+  constructor code is a construction read (`LocalClassCaptureLayouts::construction_reads`, which
+  checked FIR turns into a `ConstructorCaptureRead` of the parameter), and every other use keeps
+  the field. Common IR gives only a stored capture a field; the constructor prefix keeps every
+  capture at its identity, and the JVM backend lays the stored fields out in the same first-use
+  order as the parameters and names both through `capture_names::class_captures`. A receiver
+  capture, a captured delegated local, and every capture of a data class (whose `copy` constructs
+  the class again from its storage) are stored. A field read of a capture without a field is an internal lowering error.
+  Known divergences, each stored by krusty where kotlinc keeps only the parameter: a capture read
+  by a lambda or a local function in constructor code (kotlinc passes the parameter to the lambda
+  or lifted function), a local class or anonymous object constructed there, a capture only passed
+  on to a local superclass, a shared `var` cell used only there, and every capture of an anonymous
+  object. Tests: `tests/local_class_construction_capture_e2e.rs`.
   The enclosing INSTANCE is the second capture kind — the receiver itself rather than a binding in
   the chain — and is carried as ONE capture however many of its members are read, placed FIRST
   because lowering identifies it by position (field 0), which is what an outer member read and a
@@ -12860,6 +12901,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   call records the override's declared parameters with that position marked as the box, and a
   nullable destination over a null-accepting underlying is the box. The override checks no null,
   as for any `Result` parameter. Tests: `tests/result_generic_override_argument_e2e.rs`.
+- **Value-class mangling reads two separate facts per parameter, through its erased upper bound.**
+  Whether a parameter *requires* mangling (kotlinc `getRequiresMangling`: a value class other than
+  `kotlin.Result`) decides whether a function's name is hashed at all, and also whether an ordinary
+  class's constructor is hidden behind its `DefaultConstructorMarker` accessor. How it is *spelled* in
+  the hashed signature does not exempt `Result`: once another parameter or a mangled result triggers
+  the hash, `Result` contributes `Lkotlin.Result;` (`Lkotlin.Result?;` when nullable) like any value
+  class. So `fun mixed(a: Result<Int>, ic: IC)` is `mixed-bIshmZE` (`Lkotlin.Result;LIC;`), a member
+  `same(a: Result<Int>): Result<Int>` is `same-bjn95JY`, `fun onlyResult(a: Result<Int>)` stays plain,
+  and `class ResultHolder(r: Result<Int>)` keeps a public `<init>(Object)` that its `@Metadata`
+  records over the carrier. Both facts read a type parameter through its bound: `val z: T` with
+  `T : Z1?` declares `getZ-<hash of ":LZ1?;">`, and `class Bounded<T : Z1?>(val z: T)` hides its
+  constructor. A bridge answers to the supertype member's own JVM name, hashed over that member's
+  declared parameters, not the override's substituted ones: `I<T>.foo(x: T): IC` is
+  `foo-<hash of "_:LIC;">` on `I` and on `C : I<IC2>`'s bridge, which unboxes the `IC2` a generic
+  call passes before calling `foo-<hash of "LIC2;:LIC;">`. Tests:
+  `tests/value_class_mangled_names_e2e.rs`.
 - **A nested value class's property is the shared carrier.** For `Outer(val inner: Inner)` over
   `Inner(val x: Any)`, `outer.inner` reads nothing: it is `Inner`'s carrier, which `Outer`'s carrier
   already is, so `Outer(outer.inner)` and `outer.inner.x` neither cast nor unbox, as kotlinc does.

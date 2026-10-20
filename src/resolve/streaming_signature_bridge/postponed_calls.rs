@@ -94,7 +94,7 @@ pub(super) fn collect_type_parameters(
 ) {
     match ty {
         Ty::TyParam(name, _) => {
-            parameters.insert(name);
+            parameters.insert(name.as_str());
         }
         Ty::Nullable(inner)
         | Ty::PlatformNullable(inner)

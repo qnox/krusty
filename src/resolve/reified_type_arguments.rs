@@ -253,18 +253,18 @@ impl Checker<'_> {
         let features = &self.file.reified_type_arguments;
         match argument {
             Ty::TyParam(name, _) => {
-                if !reified_type_parameter(scope, name) {
+                if !reified_type_parameter(scope, name.as_str()) {
                     problems.push(ReifiedProblem::TypeParameter {
-                        name,
+                        name: name.as_str(),
                         in_array,
                         in_dnn_or_flexible: through_indirect,
                     });
                 }
             }
             Ty::Nullable(&Ty::TyParam(name, _)) => {
-                if !reified_type_parameter(scope, name) {
+                if !reified_type_parameter(scope, name.as_str()) {
                     problems.push(ReifiedProblem::TypeParameter {
-                        name,
+                        name: name.as_str(),
                         in_array,
                         in_dnn_or_flexible: through_indirect,
                     });
@@ -390,9 +390,9 @@ fn reified_type_parameter(scope: &CheckerScope<'_>, identity: &str) -> bool {
 /// The type arguments of a fully expanded `kotlin.Array` type, nullable or not.
 fn array_type_arguments(ty: Ty) -> Option<&'static [Ty]> {
     match ty {
-        Ty::Obj(name, arguments) if name == crate::types::wk::array() => Some(arguments),
+        Ty::Obj(name, arguments) if name == crate::types::wk::array() => Some(arguments.as_slice()),
         Ty::Nullable(&Ty::Obj(name, arguments)) if name == crate::types::wk::array() => {
-            Some(arguments)
+            Some(arguments.as_slice())
         }
         _ => None,
     }

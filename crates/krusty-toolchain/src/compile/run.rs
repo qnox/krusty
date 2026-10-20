@@ -1,5 +1,6 @@
 //! Carrying out a plan: each module's output directory cleared, krusty run with the module's
-//! arguments, then its resources copied, modules running together as soon as the modules they
+//! arguments, then its resources copied, unless its inputs and output are as its last successful
+//! compilation left them (`avoidance.rs`), modules running together as soon as the modules they
 //! compile against are done (`schedule.rs`). krusty's output is captured per module and handed on
 //! whole, in plan order, so one module's output stays together and the order is the same however
 //! the modules' compilations race. The first module that fails
@@ -11,6 +12,7 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::process::Command;
 
+use super::avoidance;
 use super::plan::{Plan, Step};
 use super::schedule::schedule;
 
@@ -105,6 +107,14 @@ fn run_step(step: &Step, krusty: &Path, printed: &mut Printed) -> Result<(), Run
     };
     match &step.arguments {
         Some(arguments) => {
+            let inputs = avoidance::inputs(krusty, arguments);
+            if inputs
+                .as_deref()
+                .is_some_and(|inputs| avoidance::up_to_date(&step.state, &step.output, inputs))
+            {
+                return copy_resources(step);
+            }
+            avoidance::forget(&step.state).map_err(|error| output("remove", &step.state, error))?;
             clear(&step.output).map_err(|error| output("clear", &step.output, error))?;
             let ran = Command::new(krusty)
                 .args(arguments)
@@ -125,23 +135,46 @@ fn run_step(step: &Step, krusty: &Path, printed: &mut Printed) -> Result<(), Run
                     code: ran.status.code().unwrap_or(1),
                 });
             }
+            if let Some(inputs) = inputs {
+                avoidance::record(&step.state, &step.output, &inputs)
+                    .map_err(|error| output("record", &step.state, error))?;
+            }
         }
-        None => remove(&step.output).map_err(|error| output("remove", &step.output, error))?,
+        None => {
+            avoidance::forget(&step.state).map_err(|error| output("remove", &step.state, error))?;
+            remove(&step.output).map_err(|error| output("remove", &step.output, error))?;
+        }
     }
-    match &step.resources {
-        Some(resources) => clear(&step.resources_output)
-            .and_then(|()| copy_tree(resources, &step.resources_output))
-            .map_err(|error| {
-                RunFailure::Io(format!(
-                    "cannot copy the resources of module `{}` from {} to {}: {error}",
-                    step.module,
-                    resources.display(),
-                    step.resources_output.display()
-                ))
-            }),
-        None => remove(&step.resources_output)
-            .map_err(|error| output("remove", &step.resources_output, error)),
+    copy_resources(step)
+}
+
+/// Make the module's resources output exactly its resource directories' contents, a file of a
+/// later directory replacing the same file of an earlier one.
+fn copy_resources(step: &Step) -> Result<(), RunFailure> {
+    let output = |action: &str, directory: &Path, error: io::Error| {
+        RunFailure::Io(format!(
+            "cannot {action} {} for module `{}`: {error}",
+            directory.display(),
+            step.module
+        ))
+    };
+    if step.resources.is_empty() {
+        return remove(&step.resources_output)
+            .map_err(|error| output("remove", &step.resources_output, error));
     }
+    clear(&step.resources_output)
+        .map_err(|error| output("clear", &step.resources_output, error))?;
+    for resources in &step.resources {
+        copy_tree(resources, &step.resources_output).map_err(|error| {
+            RunFailure::Io(format!(
+                "cannot copy the resources of module `{}` from {} to {}: {error}",
+                step.module,
+                resources.display(),
+                step.resources_output.display()
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 /// Make `directory` an empty directory.
@@ -163,7 +196,8 @@ fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
         let entry = entry?;
         let target = to.join(entry.file_name());
         if entry.file_type()?.is_dir() {
-            std::fs::create_dir(&target)?;
+            // An earlier resource directory may have the same directory.
+            std::fs::create_dir_all(&target)?;
             copy_tree(&entry.path(), &target)?;
         } else {
             std::fs::copy(entry.path(), &target)?;

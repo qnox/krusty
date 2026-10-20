@@ -138,7 +138,7 @@ fn approximate_type_parameters(ty: Ty, names: &[&str]) -> Ty {
     }
     let approximate = |ty: Ty| approximate_type_parameters(ty, names);
     match ty {
-        Ty::TyParam(name, bound) if names.contains(&name) => approximate(*bound),
+        Ty::TyParam(name, bound) if names.contains(&name.as_str()) => approximate(*bound),
         Ty::Fun(signature) => Ty::fun_with_shape(
             signature
                 .params

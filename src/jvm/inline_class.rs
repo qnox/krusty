@@ -7,8 +7,11 @@
 //! their underlying representation. The algorithm mirrors
 //! `compiler/backend/.../inlineClassManglingUtils.kt` (new mangling rules, K2 / language 2.x):
 //!
-//!   * each value parameter contributes `L<fqName>[?];` when its type is an inline class, or the
-//!     placeholder `_` otherwise;
+//!   * mangling applies when a value parameter *requires* it (an inline class other than
+//!     `kotlin.Result`) or when the caller decided the return type is mangled;
+//!   * each value parameter then contributes `L<fqName>[?];` when its type is an inline class --
+//!     `kotlin.Result` included, which never triggers mangling but is spelled like any other inline
+//!     class once something else does -- or the placeholder `_` otherwise;
 //!   * a return type that must be mangled contributes `:` + that same element;
 //!   * the elements are concatenated (no separator), MD5'd, and the first 5 bytes base64url-encoded.
 //!
@@ -41,14 +44,17 @@ fn signature_element(info: &InfoForMangling) -> String {
 }
 
 /// The mangling **signature string** for a function with the given value parameters and (optional,
-/// caller-decided) mangled return type, or `None` when no mangling applies (no inline-class parameter
+/// caller-decided) mangled return type, or `None` when no mangling applies (no parameter requires it
 /// and no return to mangle). `params` is every value parameter (an extension receiver, if any, comes
-/// first); `ret` is `Some` only when the caller has determined the return type must be mangled.
+/// first); `requires_param_mangling` is kotlinc's `requiresMangling` over those parameters, which is
+/// a separate fact from their signature elements (a `kotlin.Result` parameter is spelled as an inline
+/// class but requires nothing); `ret` is `Some` only when the caller has determined the return type
+/// must be mangled.
 pub fn mangling_signature(
     params: &[InfoForMangling],
+    requires_param_mangling: bool,
     ret: Option<&InfoForMangling>,
 ) -> Option<String> {
-    let requires_param_mangling = params.iter().any(|p| p.is_value);
     if !requires_param_mangling && ret.is_none() {
         return None;
     }
@@ -76,9 +82,10 @@ pub fn mangle_suffix(signature: &str) -> String {
 pub fn mangled_name(
     base: &str,
     params: &[InfoForMangling],
+    requires_param_mangling: bool,
     ret: Option<&InfoForMangling>,
 ) -> String {
-    match mangling_signature(params, ret) {
+    match mangling_signature(params, requires_param_mangling, ret) {
         Some(sig) => format!("{base}{}", mangle_suffix(&sig)),
         None => base.to_string(),
     }
@@ -223,23 +230,56 @@ mod tests {
         };
         // A value parameter → "LS;".
         assert_eq!(
-            mangling_signature(std::slice::from_ref(&s), None).as_deref(),
+            mangling_signature(std::slice::from_ref(&s), true, None).as_deref(),
             Some("LS;")
         );
         // A return-only mangle → ":LS;".
-        assert_eq!(mangling_signature(&[], Some(&s)).as_deref(), Some(":LS;"));
+        assert_eq!(
+            mangling_signature(&[], false, Some(&s)).as_deref(),
+            Some(":LS;")
+        );
         // No inline class anywhere → no mangling.
         let i = InfoForMangling {
             fq_name: "kotlin/Int".to_string(),
             is_value: false,
             is_nullable: false,
         };
-        assert_eq!(mangling_signature(std::slice::from_ref(&i), None), None);
+        assert_eq!(
+            mangling_signature(std::slice::from_ref(&i), false, None),
+            None
+        );
         // End-to-end name.
         assert_eq!(
-            mangled_name("useS", std::slice::from_ref(&s), None),
+            mangled_name("useS", std::slice::from_ref(&s), true, None),
             "useS-gSa4wCw"
         );
-        assert_eq!(mangled_name("getS", &[], Some(&s)), "getS-C-fiWsc");
+        assert_eq!(mangled_name("getS", &[], false, Some(&s)), "getS-C-fiWsc");
+    }
+
+    #[test]
+    fn a_result_parameter_is_spelled_once_another_parameter_requires_mangling() {
+        // Verified against kotlinc 2.4.20: `fun foo(a: Result<Int>, ic: IC)` → `foo-bIshmZE`, the
+        // hash of "Lkotlin.Result;LIC;"; `fun onlyResult(a: Result<Int>)` keeps its plain name.
+        let result = InfoForMangling {
+            fq_name: "kotlin.Result".to_string(),
+            is_value: true,
+            is_nullable: false,
+        };
+        let ic = InfoForMangling {
+            fq_name: "IC".to_string(),
+            is_value: true,
+            is_nullable: false,
+        };
+        assert_eq!(
+            mangling_signature(&[result, ic], true, None).as_deref(),
+            Some("Lkotlin.Result;LIC;")
+        );
+        assert_eq!(mangle_suffix("Lkotlin.Result;LIC;"), "-bIshmZE");
+        let result = InfoForMangling {
+            fq_name: "kotlin.Result".to_string(),
+            is_value: true,
+            is_nullable: false,
+        };
+        assert_eq!(mangling_signature(&[result], false, None), None);
     }
 }

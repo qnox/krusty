@@ -594,6 +594,16 @@ impl BodyFirChecker<'_> {
         ty: ResolvedTy,
         origin: OriginId,
     ) -> Result<FirExprKind, BodyCheckFailure> {
+        let binding = self.direct_class_capture_binding(field, ty)?;
+        self.class_storage_read_kind(binding, origin)
+    }
+
+    /// The binding of field `field` of the class whose storage this body reads directly.
+    pub(super) fn direct_class_capture_binding(
+        &self,
+        field: u32,
+        ty: ResolvedTy,
+    ) -> Result<ClassCaptureBinding, BodyCheckFailure> {
         let owner = self
             .current_storage_owner()
             .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingStableCallTarget))?;
@@ -607,20 +617,31 @@ impl BodyFirChecker<'_> {
         } else {
             None
         };
-        self.class_storage_read_kind(
-            ClassCaptureBinding {
-                owner,
-                field,
-                ty,
-                shared_cell: false,
-                enclosing_depth: 0,
-                semantic_receiver_depth: None,
-                receiver_source,
-                capture_identity: None,
-                lexical_binding: None,
-            },
-            origin,
-        )
+        Ok(ClassCaptureBinding {
+            owner,
+            field,
+            ty,
+            shared_cell: false,
+            enclosing_depth: 0,
+            semantic_receiver_depth: None,
+            receiver_source,
+            capture_identity: None,
+            lexical_binding: None,
+        })
+    }
+
+    /// How a read of the captured value `binding` stores reads it: from the constructor parameter
+    /// when the resolver placed the read in its class's constructor code, else from storage.
+    pub(super) fn capture_read_kind(
+        &mut self,
+        expression: crate::ast::ExprId,
+        binding: ClassCaptureBinding,
+    ) -> Result<FirExprKind, BodyCheckFailure> {
+        if let Some(read) = self.construction_capture_read(expression, binding)? {
+            return Ok(read);
+        }
+        let origin = self.expression_origin(expression)?;
+        self.class_storage_read_kind(binding, origin)
     }
 
     /// Publish the exact enclosing receiver captured by a local callable that constructs a local
@@ -675,6 +696,54 @@ impl BodyFirChecker<'_> {
                 .filter(|anchor| anchor.kind == DeclarationKind::Constructor)
                 .and_then(|anchor| anchor.owner)
                 == Some(owner)
+    }
+
+    /// A capture read the resolver placed in its class's constructor code, which reads the
+    /// constructor parameter (`None` for any other read).
+    ///
+    /// Only a direct read in a body that runs as part of the owner's constructor can be one: a
+    /// constructor body or default, a property initializer or delegate, or an `init` block. The
+    /// resolver's walk and this body disagreeing about that is an internal error.
+    pub(super) fn construction_capture_read(
+        &self,
+        expression: crate::ast::ExprId,
+        binding: ClassCaptureBinding,
+    ) -> Result<Option<FirExprKind>, BodyCheckFailure> {
+        if !self
+            .info
+            .local_class_capture_layouts
+            .construction_reads
+            .contains(&expression)
+        {
+            return Ok(None);
+        }
+        let constructing = self.nested_body_depth == 0
+            && binding.enclosing_depth == 0
+            && self
+                .index
+                .declaration_anchor(DeclarationId::from_raw(self.body.owner().raw()))
+                .filter(|anchor| {
+                    matches!(
+                        anchor.kind,
+                        DeclarationKind::Constructor
+                            | DeclarationKind::Initializer
+                            | DeclarationKind::Property
+                    )
+                })
+                .and_then(|anchor| anchor.owner)
+                == Some(binding.owner);
+        if !constructing {
+            return Err(self.failure(
+                self.file.expr_span(expression),
+                BodyCheckFailureKind::MissingStableCallTarget,
+            ));
+        }
+        Ok(Some(FirExprKind::ConstructorCaptureRead {
+            owner: binding.owner,
+            field: binding.field,
+            shared_cell: binding.shared_cell,
+            site: crate::fir::FirConstructorCaptureSite::Parameter,
+        }))
     }
 
     /// Carry a constructor-prefix capture into the callable that reads it, and answer WHERE that
@@ -1223,6 +1292,7 @@ impl BodyFirChecker<'_> {
                 capture_identity,
                 source,
                 receiver: capture.receiver.clone(),
+                stored: true,
             });
         }
         if !context.values.is_empty()
@@ -1615,10 +1685,18 @@ impl BodyFirChecker<'_> {
             "fir",
             "local class body captures declaration={declaration:?} statement={statement:?} captures={captures:?}",
         );
-        // A local class records the first-use order its checked body published.
-        let capture_order = match self.info.local_class_capture_orders.get(&transient) {
-            Some(order) if order.len() == captures.len() => order.clone(),
-            None if captures.is_empty() => Box::default(),
+        // A local class records the first-use order and the storage its checked body published.
+        let layouts = &self.info.local_class_capture_layouts;
+        let (capture_order, stored) = match (
+            layouts.orders.get(&transient),
+            layouts.stored.get(&transient),
+        ) {
+            (Some(order), Some(stored))
+                if order.len() == captures.len() && stored.len() == captures.len() =>
+            {
+                (order.clone(), stored.clone())
+            }
+            (None, None) if captures.is_empty() => (Box::default(), Box::default()),
             _ => {
                 return Err(self.failure(
                     Some(class.span),
@@ -1626,7 +1704,11 @@ impl BodyFirChecker<'_> {
                 ))
             }
         };
-        let captures = self.checked_class_captures(declaration, class.span, origin, &captures)?;
+        let mut captures =
+            self.checked_class_captures(declaration, class.span, origin, &captures)?;
+        for (capture, stored) in captures.iter_mut().zip(stored) {
+            capture.stored = stored;
+        }
         Ok(self.body.add_statement(FirStatement {
             origin,
             kind: FirStatementKind::LocalDeclaration {

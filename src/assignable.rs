@@ -107,7 +107,7 @@ pub(crate) fn platform_shape_upper_bound(lower: Ty) -> Ty {
     match lower {
         Ty::Obj(owner, arguments)
             if lower.is_reference_array()
-                && matches!(arguments, [argument] if argument.projection_inner().is_none()) =>
+                && matches!(arguments.as_slice(), [argument] if argument.projection_inner().is_none()) =>
         {
             Ty::obj_args_name(owner, &[Ty::out_projection(arguments[0])])
         }
@@ -210,7 +210,7 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
             return true;
         }
         if let Ty::TyParam(name, bound) = *original {
-            let tightened = declared_upper_bound(oracle, name, *bound, Ty::non_null);
+            let tightened = declared_upper_bound(oracle, name.as_str(), *bound, Ty::non_null);
             if tightened != *original && assignable_inner(cx, oracle, tightened, sup) {
                 return true;
             }
@@ -281,7 +281,7 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
             return true;
         }
         if let Ty::TyParam(name, bound) = sub {
-            return variable_bound_assignable(cx, oracle, sub, name, *bound, sup);
+            return variable_bound_assignable(cx, oracle, sub, name.as_str(), *bound, sup);
         }
         return is_assignable(cx, oracle, sub.non_null(), *inner);
     }
@@ -295,7 +295,14 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     // the target arm hides the only declared proof of that relation.
     if let (Ty::TyParam(source_name, source_bound), Ty::TyParam(target_name, _)) = (sub, sup) {
         if source_name != target_name {
-            return variable_bound_assignable(cx, oracle, sub, source_name, *source_bound, sup);
+            return variable_bound_assignable(
+                cx,
+                oracle,
+                sub,
+                source_name.as_str(),
+                *source_bound,
+                sup,
+            );
         }
     }
 
@@ -305,11 +312,11 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     // expanding the source `T` to its bound first loses that identity.
     if let Ty::TyParam(name, _) = sup {
         return cx
-            .lookup(name)
+            .lookup(name.as_str())
             .is_some_and(|target| target != sup && assignable_inner(cx, oracle, sub, target));
     }
     if let Ty::TyParam(name, bound) = sub {
-        return variable_bound_assignable(cx, oracle, sub, name, *bound, sup);
+        return variable_bound_assignable(cx, oracle, sub, name.as_str(), *bound, sup);
     }
 
     // Everything (a boxed primitive included) is assignable to `Any`/`Object`.
@@ -426,8 +433,8 @@ fn capture_projection_parameters(
 ) {
     match template {
         Ty::TyParam(name, _) => {
-            if cx.lookup(name).is_none() && actual != template {
-                cx.bind(name, actual.projection_inner().unwrap_or(actual));
+            if cx.lookup(name.as_str()).is_none() && actual != template {
+                cx.bind(name.as_str(), actual.projection_inner().unwrap_or(actual));
             }
         }
         Ty::Obj(_, template_args) => {
@@ -556,7 +563,7 @@ fn normalized_type_argument(cx: &TyCtx, ty: Ty) -> Ty {
         let Ty::TyParam(name, _) = current else {
             return current;
         };
-        let Some(next) = cx.lookup(name) else {
+        let Some(next) = cx.lookup(name.as_str()) else {
             return current;
         };
         if next == current || next == origin {

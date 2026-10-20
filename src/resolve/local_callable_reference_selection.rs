@@ -63,7 +63,7 @@ impl Checker<'_> {
                     expected.ret,
                 )?;
                 let call_sig = crate::libraries::CallSig {
-                    param_defaults: signature.param_defaults.clone(),
+                    param_defaults: signature.param_defaults,
                     required: signature.required,
                     vararg: signature.vararg(),
                     vararg_index: signature.vararg_index,

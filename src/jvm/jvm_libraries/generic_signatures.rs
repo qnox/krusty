@@ -89,7 +89,7 @@ pub(super) fn suspend_return_from_gsig(
                 // `kotlin/Unit` → `Ty::Unit`), so the recovered return unifies with the source-spelled type
                 // rather than a non-canonical `Obj("kotlin/String")`. A generic class (`List<Item>`) keeps its
                 // arguments via the general converter.
-                Ty::Obj(name, []) => {
+                Ty::Obj(name, args) if args.is_empty() => {
                     // Canonicalize a JVM built-in the generic signature spells in Java terms
                     // (`java/lang/String` → `kotlin/String`, `java/lang/Object` → `kotlin/Any`) so the
                     // recovered return unifies with the source-spelled type rather than a non-canonical

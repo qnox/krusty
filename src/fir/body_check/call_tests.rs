@@ -65,9 +65,9 @@ fn dependency_default_source(
         vec!["context".to_string(), "value".to_string()]
     };
     info.call_sig.param_defaults = if context_count == 0 {
-        vec![true]
+        vec![true].into()
     } else {
-        vec![false, true]
+        vec![false, true].into()
     };
     info.call_sig.required = context_count;
     // Provider defaults are deliberately value-only: the context prefix is not padding in this
@@ -4929,7 +4929,7 @@ fn postponed_provider_lambda_uses_the_enclosing_stable_type_parameter() {
         panic!("Continuation callback must receive Result<T>")
     };
     assert!(result.matches("kotlin/Result"));
-    assert!(matches!(arguments, [Ty::TyParam(name, _)] if name.starts_with('\0')));
+    assert!(matches!(arguments.as_slice(), [Ty::TyParam(name, _)] if name.starts_with('\0')));
 }
 
 #[test]

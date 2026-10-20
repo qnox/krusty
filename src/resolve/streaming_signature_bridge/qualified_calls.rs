@@ -84,7 +84,7 @@ impl ProductionSignatureSemantics<'_> {
                     candidate.semantic_params().into_owned(),
                     candidate.context_count,
                     candidate.call_sig.required,
-                    candidate.call_sig.param_defaults.clone(),
+                    candidate.call_sig.param_defaults,
                 ))
                 .collect::<Vec<_>>(),
         );

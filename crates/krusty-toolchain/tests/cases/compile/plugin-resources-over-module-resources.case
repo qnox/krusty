@@ -1,0 +1,95 @@
+A plugin that adds a resource directory a task provides to a module with resources of its own: the
+plugin's directory is copied after the module's own resources, so its file replaces the module's
+file of the same path.
+--- task
+:app:compileJvm
+--- project.yaml
+modules:
+  - app
+  - lib
+  - tools/pregenerated
+plugins:
+  - ./tools/pregenerated
+--- tools/pregenerated/module.yaml
+product: jvm/amper-plugin
+repositories:
+  - mavenLocal
+--- tools/pregenerated/plugin.yaml
+tasks:
+  declare:
+    action: !org.example.build.declareResources
+      resourceDir: ${module.rootDir}/generated-resources
+generated:
+  resources:
+    - directory: ${tasks.declare.action.resourceDir}
+--- tools/pregenerated/src/declareResources.kt
+package org.example.build
+
+import org.jetbrains.amper.plugins.Output
+import org.jetbrains.amper.plugins.TaskAction
+import java.nio.file.Path
+import kotlin.io.path.isDirectory
+
+@TaskAction
+fun declareResources(@Output resourceDir: Path) {
+    check(resourceDir.isDirectory()) { "Missing pre-generated resources: $resourceDir" }
+}
+--- lib/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+plugins:
+  pregenerated: enabled
+--- lib/src/Lib.kt
+object Lib
+--- lib/generated-resources/META-INF/build-info.properties
+version=1
+--- lib/resources/META-INF/build-info.properties
+version=0
+--- lib/resources/own.txt
+own
+--- app/module.yaml
+product: jvm/app
+repositories:
+  - mavenLocal
+dependencies:
+  - ../lib
+--- app/src/main.kt
+fun main() = println(Lib)
+--- m2/org/jetbrains/amper/amper-extensibility-api/0.13.0/amper-extensibility-api-0.13.0.pom
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.jetbrains.amper</groupId>
+  <artifactId>amper-extensibility-api</artifactId>
+  <version>0.13.0</version>
+</project>
+--- m2/org/jetbrains/amper/amper-extensibility-api/0.13.0/amper-extensibility-api-0.13.0.jar
+The plugin API the distribution ships replaces this when the toolchain runs.
+--- toolchain-plugin-module
+pregenerated
+--- krusty-argv
+-Xjdk-release=25
+-jdk-home=<directory>/jdk
+-classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-no-stdlib
+-module-name=lib
+-Xkotlin-reference-version=2.4.20
+-d
+<directory>/project/build/artifacts/CompiledJvmArtifact/libjvm/kotlin-output
+<directory>/project/lib/src/Lib.kt
+----
+-Xjdk-release=25
+-jdk-home=<directory>/jdk
+-classpath=<directory>/project/build/artifacts/CompiledJvmArtifact/libjvm/kotlin-output:<directory>/project/build/artifacts/CompiledJvmArtifact/libjvm/resources-output:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-no-stdlib
+-module-name=app
+-Xkotlin-reference-version=2.4.20
+-d
+<directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output
+<directory>/project/app/src/main.kt
+----
+--- outputs
+== libjvm/resources-output/META-INF/build-info.properties
+version=1
+== libjvm/resources-output/own.txt
+own

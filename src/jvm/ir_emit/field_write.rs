@@ -47,7 +47,11 @@ impl Emitter<'_> {
         }
         let class = self.ir.classes.get(class_id as usize)?;
         let argument = class.ctor_args.get(index as usize - 1)?;
-        if !argument.is_field {
+        // A capture read in constructor code reads its parameter, as kotlinc does, even when
+        // later code also needs the field.
+        if !argument.is_field
+            || argument.provenance == crate::ir::IrCtorParameterProvenance::Capture
+        {
             return None;
         }
         let field_index = argument.field_index?;

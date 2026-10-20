@@ -171,7 +171,7 @@ impl BodyLowering<'_> {
             return false;
         };
         self.index
-            .type_parameter_by_semantic_name(identity)
+            .type_parameter_by_semantic_name(identity.as_str())
             .and_then(|parameter| self.index.type_parameter_header(parameter))
             .is_some_and(|header| header.flags.is_reified())
     }

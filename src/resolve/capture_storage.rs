@@ -579,8 +579,9 @@ impl Checker<'_> {
         // its declaration body is parser-hoisted, so inspect that body's expressions explicitly and
         // make the enclosing local class carry every lexical value the anonymous constructor needs.
         let mut construction_bodies: Vec<ExprId> = Vec::new();
+        // A property's delegate expression is evaluated by the constructor, like its initializer.
         for p in &cl.body_props {
-            construction_bodies.extend(p.init);
+            construction_bodies.extend(p.init.into_iter().chain(p.delegate));
         }
         for step in &cl.init_order {
             if let ClassInit::Block(b) = step {

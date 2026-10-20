@@ -355,9 +355,9 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
     let signature = pair.generic_sig.as_ref().expect("generic member signature");
     assert!(matches!(
         signature.params[0],
-        Ty::TyParam("outer-semantic", _)
+        Ty::TyParam(name, _) if name == "outer-semantic"
     ));
-    assert!(matches!(signature.params[1], Ty::TyParam("U", _)));
+    assert!(matches!(signature.params[1], Ty::TyParam(name, _) if name == "U"));
 }
 
 #[test]
@@ -432,13 +432,13 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         .expect("triple metadata signature");
     assert!(matches!(
         signature.params[0],
-        Ty::TyParam("outer-semantic", _)
+        Ty::TyParam(name, _) if name == "outer-semantic"
     ));
     assert!(matches!(
         signature.params[1],
-        Ty::TyParam("middle-semantic", _)
+        Ty::TyParam(name, _) if name == "middle-semantic"
     ));
-    assert!(matches!(signature.params[2], Ty::TyParam("V", _)));
+    assert!(matches!(signature.params[2], Ty::TyParam(name, _) if name == "V"));
 }
 
 #[test]
@@ -492,7 +492,7 @@ fn member_type_parameter_bounds_can_reference_later_parameters() {
     assert_eq!(key.obj_internal(), Some(type_name("sample/Key")));
     assert!(matches!(
         key.type_args(),
-        [Ty::TyParam("T", _), Ty::TyParam("R", _)]
+        [Ty::TyParam(t, _), Ty::TyParam(r, _)] if *t == "T" && *r == "R"
     ));
 }
 

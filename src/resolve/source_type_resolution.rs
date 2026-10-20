@@ -401,7 +401,7 @@ pub(super) fn ty_of_ref_with(
     };
     let base = if reference.definitely_non_null() {
         match base {
-            Ty::TyParam(name, bound) => Ty::ty_param(name, bound.non_null()),
+            Ty::TyParam(name, bound) => Ty::ty_param(name.as_str(), bound.non_null()),
             other => other,
         }
     } else {

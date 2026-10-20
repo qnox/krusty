@@ -51,7 +51,7 @@ fn parameter(ty: Ty, parameters: &HashMap<String, ReifiedParameter>) -> Option<&
     let Ty::TyParam(identity, _) = ty.non_null() else {
         return None;
     };
-    parameters.get(identity)
+    parameters.get(identity.as_str())
 }
 
 /// kotlinc's `extractReificationArgument` for the element type of an array a reified body creates:
@@ -81,10 +81,10 @@ fn new_array_reification(
     let Ty::TyParam(identity, _) = current.non_null() else {
         return None;
     };
-    let parameter = parameters.get(identity)?;
+    let parameter = parameters.get(identity.as_str())?;
     let suffix = if nullable { "?" } else { "" };
     Some((
-        identity.to_owned(),
+        identity.to_owned().to_string(),
         format!("{}{}{suffix}", "[".repeat(depth), parameter.source_name),
     ))
 }
@@ -459,8 +459,8 @@ fn collect_type_reified_parameters(
 ) {
     match ty {
         Ty::TyParam(identity, _) => {
-            if parameters.contains_key(identity) {
-                found.insert(identity.to_owned());
+            if parameters.contains_key(identity.as_str()) {
+                found.insert(identity.to_owned().to_string());
             }
         }
         Ty::Obj(_, arguments) | Ty::Intersection(arguments) => arguments

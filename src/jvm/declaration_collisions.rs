@@ -1555,7 +1555,7 @@ fn qualified_type_name(ty: crate::types::Ty) -> Result<String, UndeterminedDiagn
             .map(|part| qualified_type_name(*part))
             .collect::<Result<Vec<_>, _>>()?
             .join(" & "),
-        Ty::TyParam(name, _) => crate::types::type_parameter_source_name(name).to_string(),
+        Ty::TyParam(name, _) => crate::types::type_parameter_source_name(name.as_str()).to_string(),
         Ty::Fun(signature) => {
             let parameters = signature
                 .params

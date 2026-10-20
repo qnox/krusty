@@ -484,7 +484,7 @@ impl FlexibleValue {
         binding: &dyn Fn(&str) -> Option<FlexibleValue>,
     ) -> FlexibleValue {
         match declared {
-            Ty::TyParam(name, _) => binding(name)
+            Ty::TyParam(name, _) => binding(name.as_str())
                 .map(|argument| self.overlay(&argument))
                 .unwrap_or_else(|| self.clone()),
             Ty::Nullable(inner) | Ty::DefinitelyNotNull(inner) => {

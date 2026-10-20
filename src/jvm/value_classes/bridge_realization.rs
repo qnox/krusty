@@ -121,13 +121,22 @@ pub(super) fn realize(
                     b.target_name = Some(b.name.clone());
                 }
                 // The bridge satisfies the (mangled) SUPERTYPE method, so it takes that method's
-                // mangled name: `vc_mangle` over the override's params + the SUPERTYPE's declared
-                // return. A VC param (`foo(i: Marker)`) mangles by the param; a literal-VC return
-                // (`fun bar(): Gx`) also mangles by the return; a generic `T` return (erased
-                // `Object`) does not.
+                // mangled name: `vc_mangle` over the SUPERTYPE's declared params and return. A VC
+                // param (`foo(i: Marker)`) mangles by the param; a literal-VC return (`fun bar():
+                // Gx`) also mangles by the return; a generic `T` (erased `Object`) does not.
                 // A bridge lives on a class (never a file class); its value-class return mangles.
                 if bridge_mentions_vc {
-                    naming.mangle_by_override(b);
+                    naming.mangle_by_supertype(b);
+                    // A supertype that mentions a value class elsewhere still declares a generic
+                    // slot (`I<T>.foo(x: T): IC` for `foo(x: IC2)`): the argument arrives boxed and
+                    // the target takes the carrier.
+                    if !owner_is_value {
+                        if let Some(parameters) =
+                            bridge_parameters::unbox_arguments(b, callable_under)
+                        {
+                            adapter.parameters = parameters;
+                        }
+                    }
                 }
                 // A value-class PARAM erases to its underlying in both the bridge descriptor and the
                 // target call (`foo-<hash>(Marker)` → `foo-<hash>(int)`). Done AFTER the mangle,
@@ -181,7 +190,7 @@ pub(super) fn realize(
                 if b.target_name.is_none() {
                     b.target_name = Some(b.name.clone());
                 }
-                naming.mangle_by_override(b);
+                naming.mangle_by_supertype(b);
                 for p in b.erased_params.iter_mut() {
                     *p = erase(p, callable_under);
                 }

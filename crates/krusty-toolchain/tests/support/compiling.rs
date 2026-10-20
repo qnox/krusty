@@ -16,7 +16,9 @@
 //! `recorder: <module> begins` on stderr, sleeps that many seconds, prints
 //! `recorder: <module> ends` on stderr and `recorder: compiled <module>` on stdout. The module
 //! `KRUSTY_RECORDER_FAIL_LATE` names instead prints `recorder: failing <module> late` on stderr
-//! after its sleep and exits with status 4.
+//! after its sleep and exits with status 4. It records no `compilation-fingerprint` request: it
+//! answers one with the contents of the file named for the module in the directory
+//! `KRUSTY_RECORDER_FINGERPRINTS` names, and fails one when there is none.
 //!
 //! The toolchain compiles through the Build Tools API, whose implementation it loads from its
 //! shared cache by Maven coordinates. krusty's implementation (`tools/krusty-build-tools`) is
@@ -24,19 +26,22 @@
 //! hand krusty. The implementation's sources are part of the oracle entry's identity; a live run
 //! builds it from them with its Gradle wrapper, in a scratch copy, run by the JDK
 //! `KRUSTY_BUILD_TOOLS_JAVA_HOME` names (else `JAVA_HOME`). The cached entry's stdout is the record,
-//! its stderr what `kotlin` printed, its code `kotlin`'s exit status.
+//! followed by a `==== outputs` line and the files the task left in the modules' artifact
+//! directories ([`artifact_outputs`]), its stderr what `kotlin` printed, its code `kotlin`'s exit status.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use crate::support::kotlin::{Compiler, Resolving};
+use crate::support::kotlin::{version, Compiler, Resolving};
 use crate::support::oracle::{scratch, script, Output};
 
 pub const JDK: &str = "jdk";
 pub const RECORD: &str = "record";
 /// The line the recorder writes after each invocation's arguments.
 pub const END_OF_INVOCATION: &str = "----";
+/// The line an oracle entry's stdout holds between the record and the run's artifact outputs.
+pub const OUTPUTS: &str = "==== outputs";
 
 const RECORDER: &str = "#!/bin/sh
 # The recorder writes no classes, so it takes no compilation fingerprint: the Build Tools API
@@ -57,10 +62,31 @@ if [ -n \"${KRUSTY_RECORDER_FAIL:-}\" ] && [ \"$module\" = \"$KRUSTY_RECORDER_FA
 fi
 ";
 
+/// What the recorder that compiles a run's toolchain plugin module adds to [`RECORDER`]: the
+/// invocation for the module `KRUSTY_RECORDER_PLUGIN` names, once recorded, is compiled by the
+/// Kotlin compiler `KRUSTY_RECORDER_KOTLINC` against the JDK `KRUSTY_RECORDER_JDK` instead of the
+/// run's stand-in JDK, so the toolchain finds the plugin's task actions and runs them.
+const PLUGIN_COMPILATION: &str = "if [ \"$module\" = \"$KRUSTY_RECORDER_PLUGIN\" ]; then
+  for argument do
+    shift
+    case $argument in
+      -jdk-home=*|-Xjdk-release=*|-Xkotlin-reference-version=*) ;;
+      *) set -- \"$@\" \"$argument\" ;;
+    esac
+  done
+  JAVA_HOME=$KRUSTY_RECORDER_JDK exec \"$KRUSTY_RECORDER_KOTLINC\" -jdk-home \"$KRUSTY_RECORDER_JDK\" \"$@\"
+fi
+";
+
 const TOOLCHAIN_RECORDER: &str = "#!/bin/sh
 for argument in \"$@\"; do
   case $argument in -module-name=*) module=${argument#-module-name=} ;; esac
 done
+if [ \"${1:-}\" = compilation-fingerprint ]; then
+  fingerprint=\"${KRUSTY_RECORDER_FINGERPRINTS:-}/$module\"
+  if [ -n \"${KRUSTY_RECORDER_FINGERPRINTS:-}\" ] && [ -f \"$fingerprint\" ]; then exec cat \"$fingerprint\"; fi
+  exit 1
+fi
 event() {
   if [ -n \"${KRUSTY_EVENTS:-}\" ]; then printf '%s %s\\n' \"$1\" \"$module\" >> \"$KRUSTY_EVENTS\"; fi
 }
@@ -100,8 +126,9 @@ fn recorders() -> &'static Path {
             std::env::temp_dir().join(format!("krusty-toolchain-recorder-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         for (name, script) in [
-            ("krusty", RECORDER),
-            ("krusty-toolchain-krusty", TOOLCHAIN_RECORDER),
+            ("krusty", RECORDER.to_string()),
+            ("krusty-compiling-plugin", plugin_compiling_recorder()),
+            ("krusty-toolchain-krusty", TOOLCHAIN_RECORDER.to_string()),
         ] {
             let path = directory.join(name);
             std::fs::write(&path, script).unwrap();
@@ -114,6 +141,10 @@ fn recorders() -> &'static Path {
 /// The recording krusty the toolchain runs.
 pub fn recorder() -> PathBuf {
     recorders().join("krusty")
+}
+
+fn plugin_compiling_recorder() -> String {
+    format!("{RECORDER}{PLUGIN_COMPILATION}")
 }
 
 /// The recording krusty krusty-toolchain runs.
@@ -243,7 +274,10 @@ pub struct RecordingKrusty;
 
 impl Compiler for RecordingKrusty {
     fn identity(&self) -> Vec<(String, Vec<u8>)> {
-        let mut identity = vec![("recorder".to_string(), RECORDER.as_bytes().to_vec())];
+        let mut identity = vec![
+            ("recorder".to_string(), RECORDER.as_bytes().to_vec()),
+            ("outputs".to_string(), OUTPUTS.as_bytes().to_vec()),
+        ];
         identity.extend(implementation_sources());
         identity
     }
@@ -261,15 +295,154 @@ impl Compiler for RecordingKrusty {
     }
 
     fn collect(&self, directory: &Path, ran: Output) -> Output {
-        let mut printed = ran.stdout;
-        printed.extend_from_slice(&ran.stderr);
-        Output {
-            root: ran.root,
-            code: ran.code,
-            stdout: std::fs::read(directory.join(RECORD)).unwrap_or_default(),
-            stderr: printed,
+        collect(directory, ran, None)
+    }
+}
+
+/// An oracle entry of a run in `directory`: the record and the artifact outputs, but the module
+/// `skipped`'s, on stdout, and what `kotlin` printed on stderr.
+fn collect(directory: &Path, ran: Output, skipped: Option<&str>) -> Output {
+    let mut printed = ran.stdout;
+    printed.extend_from_slice(&ran.stderr);
+    let mut stdout = std::fs::read(directory.join(RECORD)).unwrap_or_default();
+    stdout.extend_from_slice(format!("{OUTPUTS}\n").as_bytes());
+    stdout.extend_from_slice(artifact_outputs(directory, skipped).as_bytes());
+    Output {
+        root: ran.root,
+        code: ran.code,
+        stdout,
+        stderr: printed,
+    }
+}
+
+/// The toolchain compiling as with [`RecordingKrusty`], except that the toolchain plugin module
+/// `plugin` is really compiled: the toolchain compiles a plugin's module and runs its task actions
+/// before it compiles a module that enables it. The plugin module's invocation is recorded with
+/// the others, then compiled by the workspace's reference Kotlin compiler (`KRUSTY_KOTLINC`, else
+/// the one provisioned in its target directory) against the JDK `JAVA_HOME` names.
+///
+/// The toolchain runs a task action in a class loader of its own over the plugin's runtime
+/// classpath, which it resolves from the plugin module's repositories. A case lists `mavenLocal`
+/// there and holds the plugin API's `pom` and a stand-in jar in its local repository; the run's
+/// stand-in jars of the plugin API and of the standard library are replaced by real ones: the API
+/// the provisioned distribution ships and the reference compiler's standard library.
+pub struct RecordingKrustyCompilingPlugin<'a> {
+    pub plugin: &'a str,
+}
+
+/// Where the plugin API and the standard library lie in a run's local Maven repository.
+const PLUGIN_API_JAR: &str =
+    "org/jetbrains/amper/amper-extensibility-api/0.13.0/amper-extensibility-api-0.13.0.jar";
+const STDLIB_JAR: &str = "org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar";
+
+impl Compiler for RecordingKrustyCompilingPlugin<'_> {
+    fn identity(&self) -> Vec<(String, Vec<u8>)> {
+        let mut identity = vec![
+            (
+                "recorder".to_string(),
+                plugin_compiling_recorder().into_bytes(),
+            ),
+            ("plugin".to_string(), self.plugin.as_bytes().to_vec()),
+            ("outputs".to_string(), OUTPUTS.as_bytes().to_vec()),
+        ];
+        identity.extend(implementation_sources());
+        identity
+    }
+
+    fn prepare(&self, directory: &Path, command: &mut Command) {
+        RecordingKrusty.prepare(directory, command);
+        let workspace = implementation_directory().join("../..");
+        let kotlinc = std::env::var_os("KRUSTY_KOTLINC")
+            .map(PathBuf::from)
+            .into_iter()
+            .chain(
+                std::fs::read_dir(workspace.join("target/cache/kotlinc"))
+                    .into_iter()
+                    .flatten()
+                    .map(|entry| entry.unwrap().path().join("kotlinc/bin/kotlinc")),
+            )
+            .find(|kotlinc| kotlinc.is_file())
+            .expect("a reference Kotlin compiler (`KRUSTY_KOTLINC`) compiles the plugin module");
+        let jdk =
+            std::env::var_os("JAVA_HOME").expect("a JDK (`JAVA_HOME`) compiles the plugin module");
+        let wrapper = std::fs::read(script("kotlin")).expect("read the Kotlin Toolchain wrapper");
+        // The distribution the wrapper provisioned, where it puts it.
+        let distribution = std::env::var_os("KOTLIN_CLI_BOOTSTRAP_CACHE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/JetBrains/Kotlin/cli")
+            })
+            .join(format!("kotlin-cli-{}", version(&wrapper)));
+        let local = directory.join(Resolving::HOME).join(".m2/repository");
+        for (jar, real) in [
+            (
+                PLUGIN_API_JAR,
+                distribution.join("extra/jars/amper-extensibility-api-jvm.jar"),
+            ),
+            (
+                STDLIB_JAR,
+                kotlinc.parent().unwrap().join("../lib/kotlin-stdlib.jar"),
+            ),
+        ] {
+            assert!(
+                local.join(jar).is_file(),
+                "the case's local repository holds a stand-in for {jar}"
+            );
+            std::fs::copy(&real, local.join(jar))
+                .unwrap_or_else(|error| panic!("copy {}: {error}", real.display()));
+        }
+        command
+            .env("KRUSTY_BIN", recorders().join("krusty-compiling-plugin"))
+            .env("KRUSTY_RECORDER_PLUGIN", self.plugin)
+            .env("KRUSTY_RECORDER_KOTLINC", kotlinc)
+            .env("KRUSTY_RECORDER_JDK", jdk);
+    }
+
+    fn collect(&self, directory: &Path, ran: Output) -> Output {
+        // The toolchain really compiles the plugin module, and krusty-toolchain does not.
+        collect(directory, ran, Some(self.plugin))
+    }
+}
+
+/// The files the task left in the modules' artifact directories in a run's `directory`
+/// (`build/artifacts/CompiledJvmArtifact`), in path order: for each, a `== <path>` line, then its
+/// text. The artifact directory of the module `skipped` is left out.
+pub fn artifact_outputs(directory: &Path, skipped: Option<&str>) -> String {
+    fn walk(directory: &Path, prefix: &str, files: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let name = format!("{prefix}{}", entry.file_name().to_string_lossy());
+            if entry.file_type().unwrap().is_dir() {
+                walk(&entry.path(), &format!("{name}/"), files);
+            } else {
+                files.push((name, std::fs::read_to_string(entry.path()).unwrap()));
+            }
         }
     }
+    let artifacts = directory
+        .join(Resolving::PROJECT)
+        .join("build/artifacts/CompiledJvmArtifact");
+    let skipped = skipped.map(|module| format!("{module}jvm"));
+    let mut files = Vec::new();
+    for artifact in std::fs::read_dir(&artifacts).into_iter().flatten() {
+        let artifact = artifact.unwrap();
+        let name = artifact.file_name().to_string_lossy().into_owned();
+        if skipped.as_ref() != Some(&name) {
+            walk(&artifact.path(), &format!("{name}/"), &mut files);
+        }
+    }
+    files.sort();
+    files
+        .into_iter()
+        .map(|(name, text)| format!("== {name}\n{text}"))
+        .collect()
+}
+
+/// An oracle entry's stdout read back: the record, then the artifact outputs.
+pub fn record_and_outputs(stdout: &str) -> (&str, &str) {
+    stdout
+        .split_once(&format!("{OUTPUTS}\n"))
+        .expect("the oracle entry lists the artifact outputs after the record")
 }
 
 /// The invocations in a record, each its arguments with the sources (those after `-d <dir>`)

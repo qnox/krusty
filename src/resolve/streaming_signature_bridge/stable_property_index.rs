@@ -167,8 +167,9 @@ impl StableMemberIndex {
                         implicit_integer_coercion: class
                             .secondary_ctor_call_sigs
                             .get(ordinal)
-                            .map(|signature| signature.implicit_integer_coercion.clone())
-                            .unwrap_or_default(),
+                            .map(|signature| signature.implicit_integer_coercion)
+                            .unwrap_or_default()
+                            .to_vec(),
                     });
             }
         }

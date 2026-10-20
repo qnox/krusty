@@ -365,7 +365,7 @@ fn collect_type_parameters(ty: Ty, output: &mut Vec<String>) {
     match ty {
         Ty::TyParam(name, _) => {
             if !output.iter().any(|candidate| candidate == name) {
-                output.push(name.to_owned());
+                output.push(name.to_owned().to_string());
             }
         }
         Ty::Obj(_, arguments) => {
@@ -393,7 +393,7 @@ fn publish_selected(declared: Ty, selected: Ty, bindings: &HashMap<String, Ty>) 
     match (declared, selected) {
         (Ty::TyParam(name, declared_bound), selected) => {
             let publication = bindings
-                .get(name)
+                .get(name.as_str())
                 .copied()
                 .map(|publication| align_publication(publication, selected))
                 .unwrap_or(selected);

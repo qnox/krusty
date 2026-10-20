@@ -190,10 +190,10 @@ fn an_inner_class_decodes_within_the_outer_its_own_classpath_serves() {
     let shadowed = krusty::jvm::classpath::Classpath::new(vec![shadowing, inner_entry]);
     assert!(matches!(
         inner_get_return(&own),
-        krusty::types::Ty::TyParam("P", _)
+        krusty::types::Ty::TyParam(name, _) if name == "P"
     ));
     assert!(matches!(
         inner_get_return(&shadowed),
-        krusty::types::Ty::TyParam("Z", _)
+        krusty::types::Ty::TyParam(name, _) if name == "Z"
     ));
 }

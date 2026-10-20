@@ -85,7 +85,7 @@ fn primary_erasure_bounds(formals: &[String], formal_bounds: &[Vec<Ty>]) -> Hash
             return Ty::obj("kotlin/Any");
         }
         let bound = match direct.get(name).copied() {
-            Some(Ty::TyParam(other, _)) => resolve(other, direct, resolved, visiting),
+            Some(Ty::TyParam(other, _)) => resolve(other.as_str(), direct, resolved, visiting),
             Some(bound) => bound,
             None => Ty::nullable(Ty::obj("kotlin/Any")),
         };
@@ -1692,7 +1692,7 @@ fn decode_metadata_type(
         let Ty::Obj(_, outer_arguments) = outer.non_null() else {
             return None;
         };
-        args.extend_from_slice(outer_arguments);
+        args.extend_from_slice(outer_arguments.as_slice());
     }
     let flexible_upper_bound = node.flexible_upper_bound;
     let flexible_upper_bound_id = node.flexible_upper_bound_id;
@@ -2344,9 +2344,9 @@ fn ctor_params(ctx: &MetaCtx) -> MetadataResult<Vec<MetaConstructor>> {
                 let params = ParamList {
                     visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
                     names,
-                    defaults,
+                    defaults: defaults.into(),
                     types,
-                    recv_fun,
+                    recv_fun: recv_fun.into(),
                     vararg,
                     annotation: None,
                 };

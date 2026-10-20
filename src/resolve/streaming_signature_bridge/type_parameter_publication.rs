@@ -98,7 +98,7 @@ fn symbolic_from_resolved_bounds(
             .copied()
             .map(|bound| match bound {
                 Ty::TyParam(next, upper_bound) => parameter_reference(
-                    next,
+                    next.as_str(),
                     *upper_bound,
                     direct,
                     source_by_semantic,
@@ -124,7 +124,7 @@ fn symbolic_from_resolved_bounds(
         }
         for bound in direct.get(source).into_iter().flatten() {
             if let Ty::TyParam(semantic, _) = *bound {
-                if let Some(source) = source_by_semantic.get(semantic) {
+                if let Some(source) = source_by_semantic.get(semantic.as_str()) {
                     inherited_bounds(source, direct, source_by_semantic, visiting, inherited);
                     continue;
                 }
@@ -146,7 +146,7 @@ fn symbolic_from_resolved_bounds(
         let primary = declared.first().copied().unwrap_or(implicit);
         let primary = match primary {
             Ty::TyParam(parameter, upper_bound) => parameter_reference(
-                parameter,
+                parameter.as_str(),
                 *upper_bound,
                 &direct,
                 &source_by_semantic,
@@ -160,7 +160,7 @@ fn symbolic_from_resolved_bounds(
             let Ty::TyParam(parameter, _) = *bound else {
                 continue;
             };
-            let Some(source) = source_by_semantic.get(parameter) else {
+            let Some(source) = source_by_semantic.get(parameter.as_str()) else {
                 continue;
             };
             let mut inherited = Vec::new();
@@ -671,10 +671,11 @@ mod tests {
             panic!("BaseTerminal.I must be bounded by Interpreter: {bound:?}");
         };
         assert!(interpreter.matches("Interpreter"));
-        let [Ty::StarProjection(readable), _, Ty::TyParam(self_name, _)] = arguments else {
+        let [Ty::StarProjection(readable), _, Ty::TyParam(self_name, _)] = arguments.as_slice()
+        else {
             panic!("Interpreter bound must retain its three exact arguments: {arguments:?}");
         };
-        assert_eq!(*self_name, semantic);
+        assert_eq!(self_name.as_str(), semantic);
         let Ty::Obj(intermediary, parameters) = **readable else {
             panic!("Interpreter's first star must read as Intermediary<I>: {readable:?}");
         };

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use super::arguments::{arguments, Compilation};
 use super::classpath::classpath;
 use super::order::{compile_dependencies, compile_order};
-use super::{jdk, refusals, sources};
+use super::{jdk, plugins, refusals, sources};
 use crate::diagnostic::{Diagnostic, Diagnostics};
 use crate::maven::{missing, Coordinates, Metadata, OpenError, Problem, Store};
 use crate::model::Model;
@@ -31,11 +31,14 @@ pub struct Step {
     /// krusty's arguments; `None` when the fragment has no Kotlin sources, which the toolchain
     /// does not compile.
     pub arguments: Option<Vec<OsString>>,
-    /// Where the resources are copied. It holds exactly the resources directory's contents, and
-    /// nothing when the fragment has no resources directory.
+    /// Where the last successful compilation's inputs and output are recorded (`avoidance.rs`).
+    pub state: PathBuf,
+    /// Where the resources are copied. It holds exactly the resource directories' contents, and
+    /// nothing when the fragment has none.
     pub resources_output: PathBuf,
-    /// The fragment's resources directory, when it has one.
-    pub resources: Option<PathBuf>,
+    /// The fragment's resources directory, when it has one, then the directories of resources its
+    /// plugins add; a file of a later directory replaces the same file of an earlier one.
+    pub resources: Vec<PathBuf>,
     /// The earlier steps this one starts after: those of the modules the fragment compiles against
     /// directly, which start after the ones they compile against.
     pub waits: Vec<usize>,
@@ -58,6 +61,15 @@ fn artifact_directory(root: &Path, module: &str) -> PathBuf {
         .join("artifacts")
         .join("CompiledJvmArtifact")
         .join(format!("{module}jvm"))
+}
+
+/// Where krusty-toolchain records a module's last successful compilation, outside the toolchain's
+/// own artifacts.
+fn state_file(root: &Path, module: &str) -> PathBuf {
+    root.join("build")
+        .join("krusty-toolchain")
+        .join(format!("{module}jvm"))
+        .join("compilation.state")
 }
 
 /// The plan for compiling the modules `modules` of `model`, or `None` when something it needs is
@@ -123,9 +135,15 @@ pub fn plan(
             return Err(format!("module `{name}` is not configured"));
         };
         let settings = main.get("settings").ok_or("a fragment without settings")?;
+        let directory = header.file.parent().unwrap_or(Path::new(""));
+        let (generated, plugins_refused) =
+            match plugins::generated(name, directory, configuration, &model.project.plugins) {
+                Ok(generated) => (generated, Vec::new()),
+                Err(refused) => (plugins::Generated::default(), refused),
+            };
         let refused = refusals::refusals(name, configuration, main);
-        let compiles = refused.is_empty();
-        for diagnostic in refused {
+        let mut compiles = refused.is_empty() && plugins_refused.is_empty();
+        for diagnostic in plugins_refused.into_iter().chain(refused) {
             diagnostics.push(diagnostic);
         }
         let jdk_home = jdk::select(
@@ -136,8 +154,7 @@ pub fn plan(
         )
         .map_err(|diagnostic| diagnostics.push(diagnostic))
         .ok();
-        let directory = header.file.parent().unwrap_or(Path::new(""));
-        let layout = sources::layout(
+        let mut layout = sources::layout(
             directory,
             &configuration
                 .module
@@ -145,6 +162,7 @@ pub fn plan(
                 .and_then(|whole| whole.text_at(&["layout"]))
                 .unwrap_or_default(),
         );
+        layout.sources.extend(generated.sources);
         let found = match sources::find(&layout.sources) {
             Ok(found) => found,
             Err(error) => {
@@ -158,15 +176,46 @@ pub fn plan(
                 continue;
             }
         };
+        for file in &found.not_directories {
+            compiles = false;
+            diagnostics.push(Diagnostic::error(
+                file,
+                None,
+                format!(
+                    "Source directory at '{}' exists, but it's not a directory, this is currently unsupported",
+                    file.display()
+                ),
+            ));
+        }
         let artifacts = artifact_directory(root, name);
         let output = artifacts.join("kotlin-output");
         let resources_output = artifacts.join("resources-output");
-        let resources = layout.resources.is_dir().then(|| layout.resources.clone());
+        // The fragment's resources directory, then the plugins' resource directories, each copied
+        // over the ones before it as the toolchain does.
+        let resources: Vec<PathBuf> = layout
+            .resources
+            .is_dir()
+            .then(|| layout.resources.clone())
+            .into_iter()
+            .chain(generated.resources)
+            .collect();
+        // Copying a directory that holds the resources output would copy the output into itself.
+        if let Some(holding) = resources
+            .iter()
+            .find(|directory| resources_output.starts_with(directory))
+        {
+            compiles = false;
+            diagnostics.push(Diagnostic::project_error(format!(
+                "the resource directory `{}` of module `{name}` holds its resources output `{}`, and krusty-toolchain does not copy a directory into itself",
+                holding.display(),
+                resources_output.display()
+            )));
+        }
         outputs.insert(
             name,
             [
                 (!found.kotlin.is_empty()).then(|| output.clone()),
-                resources.as_ref().map(|_| resources_output.clone()),
+                (!resources.is_empty()).then(|| resources_output.clone()),
             ]
             .into_iter()
             .flatten()
@@ -225,6 +274,7 @@ pub fn plan(
                 classpath: &entries,
                 module_name: name,
                 java_parameters: settings.is_enabled(&["jvm", "storeParameterNames"]),
+                fragment_sources: (found.filled > 1).then_some(found.walked.as_slice()),
                 plugins: &plugins,
                 kotlin_version: &kotlin_version,
                 output: &output,
@@ -250,6 +300,7 @@ pub fn plan(
             module: name.to_string(),
             output,
             arguments,
+            state: state_file(root, name),
             resources_output,
             resources,
             waits,

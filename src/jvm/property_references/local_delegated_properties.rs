@@ -74,8 +74,9 @@ fn local_type_parameters(ty: Ty) -> Vec<LocalPropertyTypeParameter> {
             Ty::TyParam(name, bound) => {
                 if !out.iter().any(|parameter| parameter.semantic_name == name) {
                     out.push(LocalPropertyTypeParameter {
-                        source_name: crate::types::type_parameter_source_name(name).to_owned(),
-                        semantic_name: name.to_owned(),
+                        source_name: crate::types::type_parameter_source_name(name.as_str())
+                            .to_owned(),
+                        semantic_name: name.to_owned().to_string(),
                         upper_bound: *bound,
                     });
                     collect(*bound, out);
