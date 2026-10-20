@@ -8,6 +8,7 @@
 //! primary constructor for a value class.
 
 use super::*;
+use crate::types::TyKind;
 
 /// How an implementing class's compatibility forwarder reaches the inherited interface body.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -114,7 +115,7 @@ impl InheritedForwarder {
 /// `@NotNull`/`@Nullable` for one semantic type of a forwarder: reference types only, and never a
 /// bare type variable.
 fn forwarder_nullability(ty: Ty) -> Option<&'static str> {
-    if matches!(ty.non_null(), Ty::TyParam(..)) || !ir_ty_to_jvm(&ty).is_reference() {
+    if ty.non_null().is_ty_param() || !ir_ty_to_jvm(&ty).is_reference() {
         None
     } else if ty.is_nullable() {
         Some("Lorg/jetbrains/annotations/Nullable;")
@@ -322,21 +323,21 @@ fn forwarder_signature(
 
 /// Whether `ty` mentions a type parameter not named in `known`.
 fn mentions_other_type_parameter(ty: Ty, known: &[String]) -> bool {
-    match ty {
-        Ty::TyParam(name, _) => !known.iter().any(|known| known == name),
-        Ty::DefinitelyNotNull(inner)
-        | Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner)
-        | Ty::StarProjection(inner) => mentions_other_type_parameter(*inner, known),
-        Ty::Intersection(parts) => parts
+    match ty.kind() {
+        TyKind::TyParam(name, _) => !known.iter().any(|known| known == name),
+        TyKind::DefinitelyNotNull(inner)
+        | TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner) => mentions_other_type_parameter(inner, known),
+        TyKind::Intersection(parts) => parts
             .iter()
             .any(|part| mentions_other_type_parameter(*part, known)),
-        Ty::Obj(_, arguments) => arguments
+        TyKind::Obj(_, arguments) => arguments
             .iter()
             .any(|argument| mentions_other_type_parameter(*argument, known)),
-        Ty::Fun(signature) => {
+        TyKind::Fun(signature) => {
             mentions_other_type_parameter(signature.ret, known)
                 || signature
                     .params

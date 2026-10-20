@@ -125,3 +125,29 @@ fun box(): String = if (take<Int, IntBox>(IntBox()) == 41) "OK" else "nested bou
 "#;
     common::expect_box_same_as_kotlinc(src, "where_bound_nested_recarry");
 }
+
+/// A property's `where` clause precedes its initializer or delegate, as the grammar orders
+/// `typeConstraints` before `= expression` / `by expression`.
+#[test]
+fn an_extension_property_where_clause_precedes_its_delegate() {
+    let source = "import kotlin.properties.ReadOnlyProperty\n\
+         \n\
+         interface Named { val name: String }\n\
+         interface Sized { val size: Int }\n\
+         class Both : Named, Sized { override val name = \"O\"; override val size = 1 }\n\
+         \n\
+         fun <T> label(): ReadOnlyProperty<T, String> where T : Named, T : Sized =\n\
+         \x20   ReadOnlyProperty { thisRef, _ -> thisRef.name + \"K\".repeat(thisRef.size) }\n\
+         \n\
+         val <T> T.label: String where T : Named, T : Sized by label()\n\
+         \n\
+         fun box(): String = Both().label\n";
+    common::expect_box_ok_with_stdlib(source, "WhereDelegate");
+    let classes = common::classes_against_kotlinc_module(&[("WhereDelegate.kt", source)]);
+    let differences = classes.differences();
+    assert!(
+        differences.is_empty(),
+        "classes differ from kotlinc's:\n\n{}",
+        differences.join("\n\n")
+    );
+}

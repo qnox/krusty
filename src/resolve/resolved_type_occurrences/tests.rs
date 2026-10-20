@@ -4,7 +4,7 @@ use crate::diag::DiagSink;
 use crate::features::LangFeatures;
 use crate::libraries::EmptySymbolSource;
 use crate::source::SourceInput;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 fn local_class<'a>(
     file: &'a crate::ast::File,
@@ -272,10 +272,10 @@ fun make(): Any {
     let [root_argument] = root.type_args() else {
         panic!("Alias<U> expands to one Order argument: {root:?}")
     };
-    let Ty::TyParam(root_formal, root_bound) = *root_argument else {
+    let TyKind::TyParam(root_formal, root_bound) = root_argument.kind() else {
         panic!("Order argument retains U's semantic identity: {root_argument:?}")
     };
-    assert_eq!(*root_bound, Ty::obj("Floor"));
+    assert_eq!(root_bound, Ty::obj("Floor"));
 
     let spelling = info
         .resolved_declaration_spelling(alias_bound)
@@ -284,11 +284,11 @@ fun make(): Any {
     let [(alias_argument, _)] = spelling.alias_args.as_slice() else {
         panic!("Alias<U> retains one abbreviated argument")
     };
-    let Ty::TyParam(alias_formal, alias_bound) = *alias_argument else {
+    let TyKind::TyParam(alias_formal, alias_bound) = alias_argument.kind() else {
         panic!("abbreviated Alias argument retains U: {alias_argument:?}")
     };
     assert_eq!(alias_formal, root_formal);
-    assert_eq!(*alias_bound, Ty::obj("Floor"));
+    assert_eq!(alias_bound, Ty::obj("Floor"));
 }
 
 #[test]

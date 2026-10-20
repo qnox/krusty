@@ -1,5 +1,5 @@
 use krusty::ast::TypeRef;
-use krusty::types::Ty;
+use krusty::types::{Ty, TyKind};
 
 pub(crate) fn render_type(reference: &TypeRef) -> String {
     if reference.name == "<fun>" {
@@ -111,13 +111,13 @@ pub(crate) fn render_ty(ty: Ty) -> String {
 /// A nullable intersection is `A? & B?`. A function component is parenthesized so `?` does not
 /// bind only to its result.
 fn render_nullable(ty: Ty) -> String {
-    match ty {
-        Ty::Intersection(parts) => parts
+    match ty.kind() {
+        TyKind::Intersection(parts) => parts
             .iter()
             .copied()
             .map(|part| {
                 let rendered = render_ty(part);
-                if matches!(part, Ty::Fun(_)) {
+                if part.is_fun() {
                     format!("({rendered})?")
                 } else {
                     format!("{rendered}?")
@@ -125,7 +125,7 @@ fn render_nullable(ty: Ty) -> String {
             })
             .collect::<Vec<_>>()
             .join(" & "),
-        other => format!("{}?", render_ty(other)),
+        _ => format!("{}?", render_ty(ty)),
     }
 }
 

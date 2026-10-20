@@ -5,7 +5,7 @@ use std::cell::{Cell, RefCell};
 use super::{ty_subst_keep_unbound, unify_ty_from_symbols, GSigBinds};
 use crate::fx_hash::HashMap as FxHashMap;
 use crate::symbol_source::SymbolSource;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 thread_local! {
     /// Owned projection lists. These are hierarchy results, not `Ty::Obj` argument slices, so they
@@ -141,7 +141,7 @@ pub(crate) fn direct_supertypes(source: &dyn SymbolSource, ty: Ty) -> Vec<Ty> {
     // second edge; keeping it there makes a missing classifier record a frontend error instead of
     // silently bypassing the provider with a parallel hierarchy path.
     let key = ty.non_null();
-    if matches!(key, Ty::Fun(_)) {
+    if key.is_fun() {
         if let Some(cached) = projection_cache_get(key) {
             return cached;
         }
@@ -252,7 +252,7 @@ pub(crate) fn apply_subtype_arguments_from_supertype(
         .map(|argument| ty_subst_keep_unbound(*argument, &bindings))
         .collect::<Vec<_>>();
     if arguments.iter().zip(&classifier.type_params).all(
-        |(argument, formal)| !matches!(argument, Ty::TyParam(identity, _) if identity == formal),
+        |(argument, formal)| !matches!(argument.kind(), TyKind::TyParam(identity, _) if identity == formal),
     ) {
         Ty::obj_args_name(subtype_name, &arguments)
     } else {
@@ -359,8 +359,8 @@ pub(crate) fn classifier_value_receiver(
 /// Components of an intersection receiver. Member and supertype walks union these into the
 /// ordinary candidate list; the intersection itself has no classifier identity.
 pub(crate) fn intersection_components(ty: Ty) -> Option<&'static [Ty]> {
-    match ty.non_null() {
-        Ty::Intersection(parts) => Some(parts.as_slice()),
+    match ty.non_null().kind() {
+        TyKind::Intersection(parts) => Some(parts.as_slice()),
         _ => None,
     }
 }
@@ -373,10 +373,10 @@ pub(super) fn supertype_with_classifier(
     actual: Ty,
     owner: TypeName,
 ) -> Option<Ty> {
-    let roots = match actual {
-        Ty::Obj(found, _) if found == owner => return Some(actual),
-        Ty::Obj(_, _) => vec![actual],
-        Ty::Fun(_) => direct_supertypes(source, actual),
+    let roots = match actual.kind() {
+        TyKind::Obj(found, _) if found == owner => return Some(actual),
+        TyKind::Obj(_, _) => vec![actual],
+        TyKind::Fun(_) => direct_supertypes(source, actual),
         _ => return None,
     };
     roots
@@ -440,7 +440,7 @@ pub(crate) fn classifier_bindings(
                     // second star the readable bound `Rec<*, *>`, rather than the decoder placeholder
                     // `Any?`.
                     let metadata_star_bound = Ty::nullable(Ty::obj("kotlin/Any"));
-                    let argument = if matches!(argument, Ty::StarProjection(inner) if *inner == metadata_star_bound)
+                    let argument = if matches!(argument.kind(), TyKind::StarProjection(inner) if inner == metadata_star_bound)
                     {
                         let upper_bound = classifier
                             .type_param_bounds()
@@ -461,13 +461,13 @@ pub(crate) fn classifier_bindings(
                     // `MutableList<*>.add` collapse to `Nothing` and stay prohibited.
                     match (
                         classifier.type_param_variances.get(index).copied(),
-                        argument,
+                        argument.kind(),
                     ) {
                         (
                             Some(crate::types::TypeVariance::Out),
-                            Ty::OutProjection(inner) | Ty::StarProjection(inner),
-                        ) => *inner,
-                        (Some(crate::types::TypeVariance::In), Ty::InProjection(inner)) => *inner,
+                            TyKind::OutProjection(inner) | TyKind::StarProjection(inner),
+                        ) => inner,
+                        (Some(crate::types::TypeVariance::In), TyKind::InProjection(inner)) => inner,
                         _ => argument,
                     }
                 }),

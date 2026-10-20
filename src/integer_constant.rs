@@ -4,7 +4,7 @@
 //! (`2147483648u`, `UInt.MAX_VALUE`) and must keep every bit: truncating them to `i32` drops the
 //! constant and a sibling `ULong` can no longer adopt them.
 
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// A folded integer constant. Signed values are `Int` (`i32`). Unsigned values are the full `UInt`
 /// magnitude in `0..=u32::MAX`, carried in `u64` so a value above `i32::MAX` is not truncated.
@@ -39,9 +39,9 @@ impl IntegerConstant {
     pub(crate) fn division_by_zero_type(expected: Option<Ty>) -> Ty {
         expected
             .map(Ty::non_null)
-            .map(|expected| match expected {
-                Ty::TyParam(_, bound) => bound.non_null(),
-                expected => expected,
+            .map(|expected| match expected.kind() {
+                TyKind::TyParam(_, bound) => bound.non_null(),
+                _ => expected,
             })
             .filter(|ty| *ty == Ty::Long)
             .unwrap_or(Ty::Int)

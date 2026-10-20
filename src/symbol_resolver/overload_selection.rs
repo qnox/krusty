@@ -4,6 +4,7 @@
 //! the exact tied maximal declarations, in provider order, without repeating candidate lookup.
 
 use super::*;
+use crate::types::TyKind;
 
 pub(crate) enum CandidateSelectionWithTies<T> {
     None,
@@ -1231,14 +1232,14 @@ pub(super) fn semantic_arg_assignable(src: &dyn SymbolSource, param: &Ty, arg: &
     if param == arg {
         return true;
     }
-    if let Ty::TyParam(_, bound) = param.non_null() {
+    if let TyKind::TyParam(_, bound) = param.non_null().kind() {
         if *arg == Ty::Null {
             return param.admits_null();
         }
         let expected = if param.is_nullable() {
-            Ty::nullable(*bound)
+            Ty::nullable(bound)
         } else {
-            *bound
+            bound
         };
         return crate::assignable::is_assignable(
             &crate::assignable::TyCtx::new(),
@@ -1375,7 +1376,7 @@ fn best_by_args_at_priority_with_ties<'a>(
         }
         sam || fun_arg_matches(src, p, &arg.ty(), arg.is_lambda_literal())
             || semantic_arg_assignable(src, p, &arg.ty())
-            || (arg.ty() == Ty::Null && matches!(p.non_null(), Ty::TyParam(..)))
+            || (arg.ty() == Ty::Null && p.non_null().is_ty_param())
             || function_like_fits(p, arg)
             || arg.binds_result_to(src, *p)
     };
@@ -1510,15 +1511,15 @@ fn fun_arg_matches(src: &dyn SymbolSource, param: &Ty, arg: &Ty, lambda_literal:
     let Some(arg_arity) = arg.fun_arity() else {
         return false;
     };
-    let param = match param {
-        Ty::Nullable(inner) => **inner,
+    let param = match param.kind() {
+        TyKind::Nullable(inner) => inner,
         _ => *param,
     };
     // A lambda literal declares only value parameters: `{ name -> }` fits `Scope.(String) -> Unit`,
     // whose receiver and context parameters bind implicitly. A parameter type written on the
     // lambda must still accept the value the function type passes there.
-    let declares_value_parameters = |param: Ty| match (param, *arg) {
-        (Ty::Fun(param), Ty::Fun(lambda)) if lambda_literal => {
+    let declares_value_parameters = |param: Ty| match (param.kind(), arg.kind()) {
+        (TyKind::Fun(param), TyKind::Fun(lambda)) if lambda_literal => {
             let implicit = param.context_count + usize::from(param.has_receiver);
             !lambda.has_receiver
                 && lambda.context_count == 0
@@ -1526,8 +1527,8 @@ fn fun_arg_matches(src: &dyn SymbolSource, param: &Ty, arg: &Ty, lambda_literal:
                 && param.params.iter().skip(implicit).zip(&lambda.params).all(
                     |(passed, declared)| {
                         matches!(declared, Ty::Error)
-                            || matches!(passed.non_null(), Ty::TyParam(..))
-                            || matches!(declared.non_null(), Ty::TyParam(..))
+                            || passed.non_null().is_ty_param()
+                            || declared.non_null().is_ty_param()
                             || resolution_subtype(src, *passed, *declared)
                     },
                 )
@@ -1553,7 +1554,7 @@ pub(super) fn fun_return_compatible(
     let (Some(pr), Some(ar)) = (param.fun_ret(), arg.fun_ret()) else {
         return true;
     };
-    if matches!(pr.non_null(), Ty::TyParam(_, _))
+    if pr.non_null().is_ty_param()
         || matches!(pr, Ty::Error)
         || pr
             .non_null()

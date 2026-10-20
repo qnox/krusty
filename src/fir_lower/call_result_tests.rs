@@ -1,5 +1,5 @@
 use crate::ir::{Callee, IrExpr, IrTypeOp};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::tests::lower_single_source;
 
@@ -45,7 +45,10 @@ fn generic_call_result_boundary_keeps_declared_and_selected_types() {
     assert_eq!(boundaries.len(), 1, "{boundaries:?}");
     let (call, selected, declared) = boundaries[0];
     assert_eq!(selected, Ty::obj("SelectedResult"));
-    assert!(matches!(declared, Some(Ty::TyParam(_, _))));
+    assert!(matches!(
+        declared.map(Ty::kind),
+        Some(TyKind::TyParam(_, _))
+    ));
     assert_eq!(ir.logical_types.get(&call), None);
     assert_eq!(
         ir.logical_types.get(

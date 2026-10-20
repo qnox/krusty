@@ -1,5 +1,6 @@
 use crate::ir::IrExpr;
-use crate::types::{Ty, TypeName};
+use crate::types::TyKind;
+use crate::types::TypeName;
 
 fn lower(source: &str, stem: &str) -> crate::ir::IrFile {
     stdlib::lower(source, stem)
@@ -75,7 +76,7 @@ fn anonymous_type_arguments(ir: &crate::ir::IrFile, function: u32) -> Vec<TypeNa
         } = ir.expr(expression)
         {
             for substitution in substitutions {
-                if let Ty::Obj(name, _) = substitution.value.non_null() {
+                if let TyKind::Obj(name, _) = substitution.value.non_null().kind() {
                     if ir
                         .class_id_by_name(name)
                         .is_some_and(|class| ir.classes[class as usize].is_anonymous_object)

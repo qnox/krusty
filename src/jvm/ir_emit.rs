@@ -22,7 +22,7 @@ use crate::jvm::names::{
 use crate::jvm::property_references::local_delegated_properties::LocalDelegatedProperties;
 use crate::jvm::value_classes::instance_representation;
 use crate::kt_string::KtStringBuf;
-use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
+use crate::types::{stored_value_ty, Ty, TyKind, TypeName, TypeVariance};
 use companion_field::{add_companion_field, companion_field_access, emit_companion_init};
 use field_visibility::{declared_field_access, default_accessor_access, is_jvm_field};
 use inherited_default_forwarders::emit_default_impls_forwarders;
@@ -276,38 +276,6 @@ fn companion_of_interface(ir: &IrFile, c: &IrClass) -> bool {
 /// [`object_static_storage`] plus the interface-companion case — the storage rule emission keys on.
 fn static_storage(ir: &IrFile, c: &IrClass) -> bool {
     object_static_storage(c) || companion_of_interface(ir, c)
-}
-
-/// Whether a static-storage object's `init_body` reads `this` (`GetValue(0)`) anywhere OTHER than
-/// as the receiver of a store to its own (now static) field — those receivers are dropped by the
-/// `putstatic` lowering, so only remaining reads force materializing INSTANCE into a local.
-fn init_body_reads_this(ir: &IrFile, body: crate::ir::ExprId) -> bool {
-    fn walk(ir: &IrFile, e: crate::ir::ExprId, skip_self: bool) -> bool {
-        use crate::ir::IrExpr;
-        match ir.expr(e) {
-            IrExpr::GetValue(v) => *v == 0 && !skip_self,
-            IrExpr::SetField {
-                receiver, value, ..
-            } => {
-                let receiver_is_this = matches!(ir.expr(*receiver), IrExpr::GetValue(0));
-                (!receiver_is_this && walk(ir, *receiver, false)) || walk(ir, *value, false)
-            }
-            IrExpr::Block { stmts, value } => {
-                stmts.iter().any(|&s| walk(ir, s, false))
-                    || value.is_some_and(|v| walk(ir, v, false))
-            }
-            _ => {
-                let mut found = false;
-                crate::ir::for_each_child(&ir.exprs, e, &mut |child| {
-                    if walk(ir, child, false) {
-                        found = true;
-                    }
-                });
-                found
-            }
-        }
-    }
-    walk(ir, body, false)
 }
 
 fn has_ctor_marker_accessor(ir: &IrFile, class: &IrClass) -> bool {
@@ -2837,28 +2805,6 @@ fn emit_class(
         }
         .emit(secondary_ordinal as usize, sc);
     }
-    // The child-serializer cache's factories and its `…$cp` accessor follow that constructor, which
-    // is kotlinc's order for them. They are generated, so they carry no source order to sort by and
-    // the declared-member schedule leaves them out.
-    for &fid in c
-        .methods
-        .iter()
-        .filter(|fid| ir.serialization_cache_methods.contains(fid))
-    {
-        let f = &ir.functions[fid as usize];
-        if f.body.is_some() {
-            emit_method(
-                ir,
-                fid,
-                StaticOwner::Class(c.fq_name),
-                &fq_name,
-                facade,
-                &mut cw,
-                !f.is_static,
-                env,
-            );
-        }
-    }
     // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
     // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a full
     // mask — AFTER the declared methods (kotlinc's member order), at the primary's declared
@@ -2940,6 +2886,27 @@ fn emit_class(
                     }
                 }
             }
+        }
+    }
+    // The child-serializer cache's factories and `…$cp` accessor follow both constructors above
+    // (kotlinc's order). They are generated, so the declared-member schedule leaves them out.
+    for &fid in c
+        .methods
+        .iter()
+        .filter(|fid| ir.serialization_cache_methods.contains(fid))
+    {
+        let f = &ir.functions[fid as usize];
+        if f.body.is_some() {
+            emit_method(
+                ir,
+                fid,
+                StaticOwner::Class(c.fq_name),
+                &fq_name,
+                facade,
+                &mut cw,
+                !f.is_static,
+                env,
+            );
         }
     }
     jvm_static_members::emit_companion_bridges(ir, c, &mut cw, env);
@@ -4564,17 +4531,16 @@ fn emit_placed_method(
     // istore_<n>` into a synthetic `$i$f$<name>` int local covering the body — its inliner tracks
     // splice depth through these. Emitted after the parameter guards; the body's LineNumberTable
     // then naturally starts at the post-store pc.
-    let inline_marker: Option<(u16, u16)> = (ir.top_level_inline_functions.contains(&fid)
-        || (receiver_value && ir.inline_fns.contains(&fid)))
-    .then(|| {
-        let slot = e
-            .frame
-            .enter_temp(TempRole::InlineDepthMarker, Ty::Int)
-            .slot();
-        code.push_int(0, e.cw);
-        store(Ty::Int, slot, &mut code);
-        (slot, code.bytes.len() as u16)
-    });
+    let inline_marker: Option<(u16, u16)> =
+        function_debug::opens_with_inline_depth_marker(ir, fid, receiver_value).then(|| {
+            let slot = e
+                .frame
+                .enter_temp(TempRole::InlineDepthMarker, Ty::Int)
+                .slot();
+            code.push_int(0, e.cw);
+            store(Ty::Int, slot, &mut code);
+            (slot, code.bytes.len() as u16)
+        });
     // The marker and the parameter guards carry no line. The method's first entry is the first
     // statement, or the expression body — kotlinc does not also record the signature line there.
     // Building the machine: everything the discovery pass learned is in hand, so the entry,
@@ -4876,18 +4842,18 @@ fn parameterized_sig_at(
     ty: &Ty,
     wildcards: Wildcards,
 ) -> Option<String> {
-    let inner = match ty {
-        Ty::Nullable(t) | Ty::PlatformNullable(t) => t,
-        t => t,
+    let inner = match ty.kind() {
+        TyKind::Nullable(t) | TyKind::PlatformNullable(t) => t,
+        _ => *ty,
     };
-    match inner {
-        Ty::Obj(_, args) if !args.is_empty() => {
-            let sig = formatter.ty_at(inner, wildcards)?;
-            (sig != ir_type_desc(inner)).then_some(sig)
+    match inner.kind() {
+        TyKind::Obj(_, args) if !args.is_empty() => {
+            let sig = formatter.ty_at(&inner, wildcards)?;
+            (sig != ir_type_desc(&inner)).then_some(sig)
         }
-        Ty::Fun(_) => {
-            let sig = formatter.ty_at(inner, wildcards)?;
-            (sig != ir_type_desc(inner)).then_some(sig)
+        TyKind::Fun(_) => {
+            let sig = formatter.ty_at(&inner, wildcards)?;
+            (sig != ir_type_desc(&inner)).then_some(sig)
         }
         _ => None,
     }
@@ -5039,12 +5005,12 @@ fn method_parameterized_sig(
 ) -> Option<String> {
     // Runs for every emitted method — bail before building any string when no position can carry one.
     let is_parameterized = |t: &Ty| {
-        let inner = match t {
-            Ty::Nullable(t) | Ty::PlatformNullable(t) => t,
-            t => t,
+        let inner = match t.kind() {
+            TyKind::Nullable(t) | TyKind::PlatformNullable(t) => t,
+            _ => *t,
         };
-        matches!(inner, Ty::Fun(_) | Ty::Intersection(_))
-            || matches!(inner, Ty::Obj(_, arguments) if !arguments.is_empty())
+        matches!(inner.kind(), TyKind::Fun(_) | TyKind::Intersection(_))
+            || matches!(inner.kind(), TyKind::Obj(_, arguments) if !arguments.is_empty())
     };
     if !params
         .iter()
@@ -6833,9 +6799,9 @@ fn call_ret_ty(ret: &Ty) -> Ty {
 }
 
 fn norm_nothing(t: Ty) -> Ty {
-    match &t {
-        Ty::Obj(n, _)
-            if crate::jvm::jvm_class_map::type_name_maps_to_jvm_internal(*n, "java/lang/Void") =>
+    match t.kind() {
+        TyKind::Obj(n, _)
+            if crate::jvm::jvm_class_map::type_name_maps_to_jvm_internal(n, "java/lang/Void") =>
         {
             Ty::Nothing
         }

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::fir::FirValueParameterName;
+use crate::types::TyKind;
 
 impl BodyFirChecker<'_> {
     pub(super) fn lambda(
@@ -16,7 +17,7 @@ impl BodyFirChecker<'_> {
             self.info.semantic_ty(expression),
             self.info.expr_lowers.get(&expression),
         );
-        let Ty::Fun(signature) = self.info.semantic_ty(expression).non_null() else {
+        let TyKind::Fun(signature) = self.info.semantic_ty(expression).non_null().kind() else {
             return Err(self.failure(
                 self.file.expr_span(expression),
                 BodyCheckFailureKind::UnsupportedExpression(ExpressionForm::Lambda),

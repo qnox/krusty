@@ -4,6 +4,7 @@
 //! the checked receiver affect the reference compiler's diagnostic wording.
 
 use super::*;
+use crate::types::TyKind;
 
 /// `UNRESOLVED_REFERENCE` for a member looked up on an explicit receiver. A smart cast names the
 /// narrowed type, a safe call the non-null one, a platform type its Kotlin spelling, and the null
@@ -16,11 +17,14 @@ pub(crate) fn unresolved_member_message(
     if hidden_deprecated {
         return crate::diagnostic_wording::unresolved_reference_on(name, None);
     }
-    let rendered = match receiver {
-        Ty::Error | Ty::Pending | Ty::TyParam(..) | Ty::Nullable(Ty::TyParam(..)) => None,
-        Ty::Null => Some("Nothing?".to_string()),
-        Ty::PlatformNullable(inner) => Some(inner.source_name()),
-        other => Some(other.source_name()),
+    let rendered = match receiver.kind() {
+        TyKind::Error
+        | TyKind::Pending
+        | TyKind::TyParam(..)
+        | TyKind::Nullable(Ty::TyParam(..)) => None,
+        TyKind::Null => Some("Nothing?".to_string()),
+        TyKind::PlatformNullable(inner) => Some(inner.source_name()),
+        _ => Some(receiver.source_name()),
     };
     crate::diagnostic_wording::unresolved_reference_on(name, rendered.as_deref())
 }

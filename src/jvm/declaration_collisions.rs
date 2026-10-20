@@ -6,6 +6,7 @@
 
 use crate::diag::{DiagSink, Span};
 use crate::ir::{FunId, IrFile};
+use crate::types::TyKind;
 
 mod local_function_diagnostics;
 mod package_method_diagnostics;
@@ -1429,8 +1430,8 @@ fn rendered_callable_name(name: &str) -> String {
 }
 
 fn is_default_bound(bound: crate::types::Ty) -> bool {
-    matches!(bound, crate::types::Ty::Nullable(inner)
-        if matches!(*inner, crate::types::Ty::Obj(name, arguments)
+    matches!(bound.kind(), crate::types::TyKind::Nullable(inner)
+        if matches!(inner.kind(), crate::types::TyKind::Obj(name, arguments)
             if arguments.is_empty() && name == crate::types::wk::any()))
 }
 
@@ -1474,29 +1475,28 @@ fn source_type_name(ty: crate::types::Ty) -> Result<String, UndeterminedDiagnost
 }
 
 fn ensure_determined_type(ty: crate::types::Ty) -> Result<(), UndeterminedDiagnosticType> {
-    use crate::types::Ty;
-    match ty {
-        Ty::Error => Err(UndeterminedDiagnosticType::Error),
-        Ty::Pending => Err(UndeterminedDiagnosticType::Pending),
-        Ty::Obj(_, arguments) => {
+    match ty.kind() {
+        TyKind::Error => Err(UndeterminedDiagnosticType::Error),
+        TyKind::Pending => Err(UndeterminedDiagnosticType::Pending),
+        TyKind::Obj(_, arguments) => {
             for &argument in arguments {
                 ensure_determined_type(argument)?;
             }
             Ok(())
         }
-        Ty::Fun(signature) => {
+        TyKind::Fun(signature) => {
             for &parameter in &signature.params {
                 ensure_determined_type(parameter)?;
             }
             ensure_determined_type(signature.ret)
         }
-        Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner)
-        | Ty::StarProjection(inner)
-        | Ty::TyParam(_, inner) => ensure_determined_type(*inner),
-        Ty::Intersection(parts) => {
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner)
+        | TyKind::TyParam(_, inner) => ensure_determined_type(inner),
+        TyKind::Intersection(parts) => {
             for &part in parts {
                 ensure_determined_type(part)?;
             }
@@ -1540,7 +1540,7 @@ fn qualified_type_name(ty: crate::types::Ty) -> Result<String, UndeterminedDiagn
         }
         Ty::Nullable(inner) => {
             let rendered = qualified_type_name(*inner)?;
-            if matches!(*inner, Ty::Fun(_)) {
+            if inner.is_fun() {
                 format!("({rendered})?")
             } else {
                 format!("{rendered}?")

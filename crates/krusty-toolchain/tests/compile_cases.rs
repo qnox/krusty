@@ -13,6 +13,10 @@
 //! (the order it starts them in is checked by its own tests). Where the oracle runs, the
 //! toolchain's recorded invocations must be the `krusty-argv` ledger's, compared module by module
 //! (the toolchain may compile independent modules in either order), the sources of each as a set.
+//! A case's `outputs` section lists the files the task leaves in the modules' artifact directories
+//! (`compiling::artifact_outputs`; the recorder compiles nothing, so these are the resources
+//! outputs), which must be what krusty-toolchain and, where the oracle runs, the toolchain leave
+//! there; without it they leave none.
 //! A case whose modules enable a toolchain plugin names the plugin's module in a
 //! `toolchain-plugin-module` section: the toolchain compiles that module for real to run the
 //! plugin's tasks (`compiling::RecordingKrustyCompilingPlugin`), and its invocation, which
@@ -40,6 +44,7 @@ const REPOSITORY_SECTION: &str = "m2/";
 const TASK_SECTION: &str = "task";
 const ARGV_SECTION: &str = "krusty-argv";
 const PLUGIN_SECTION: &str = "toolchain-plugin-module";
+const OUTPUTS_SECTION: &str = "outputs";
 const PLACEHOLDER: &str = "<directory>";
 
 type Files = Vec<(String, String)>;
@@ -55,6 +60,9 @@ struct CompileCase {
     /// The toolchain plugin module the toolchain compiles, and krusty-toolchain does not, to run
     /// its tasks, when there is one.
     plugin_module: Option<String>,
+    /// The files the task leaves in the modules' artifact directories, as
+    /// [`compiling::artifact_outputs`] lists them: none without the section.
+    outputs: String,
 }
 
 fn files_below(directory: &Path, prefix: &str, files: &mut Files) {
@@ -86,6 +94,7 @@ fn compile_cases() -> Vec<CompileCase> {
                 task: String::new(),
                 argv: None,
                 plugin_module: None,
+                outputs: String::new(),
                 refusal: match case.krusty {
                     Some(KrustyExpected::Refusal(refused)) => Some(refused),
                     Some(KrustyExpected::Difference(_)) => {
@@ -103,6 +112,8 @@ fn compile_cases() -> Vec<CompileCase> {
                     compiled.argv = Some(text);
                 } else if file == PLUGIN_SECTION {
                     compiled.plugin_module = Some(text.trim().to_string());
+                } else if file == OUTPUTS_SECTION {
+                    compiled.outputs = text;
                 } else {
                     compiled.project.push((file, text));
                 }
@@ -126,6 +137,9 @@ fn compile_cases() -> Vec<CompileCase> {
 struct Ran {
     output: Output,
     record: String,
+    /// The files left in the modules' artifact directories, as [`compiling::artifact_outputs`]
+    /// lists them.
+    outputs: String,
     directory: PathBuf,
     /// Removes the run's directory when dropped.
     _temp: support::TempDir,
@@ -147,6 +161,7 @@ fn krusty_toolchain(
     Ran {
         output,
         record: placed(&directory.display().to_string(), record.as_bytes()),
+        outputs: compiling::artifact_outputs(&directory, None),
         directory,
         _temp: temp,
     }
@@ -218,7 +233,7 @@ fn ledger(problems: &[ExpectedDiagnostic]) -> String {
 fn every_compile_case_is_exact() {
     compiling::recorder();
     let cases = compile_cases();
-    assert_eq!(cases.len(), 15, "the cases are missing");
+    assert_eq!(cases.len(), 19, "the cases are missing");
     let mut failures = Vec::new();
     for case in &cases {
         let ran = krusty_toolchain(
@@ -229,20 +244,24 @@ fn every_compile_case_is_exact() {
         );
         let actual = &ran.output;
         let printed = format!(
-            "status {}, stdout\n{}stderr\n{}record\n{}",
+            "status {}, stdout\n{}stderr\n{}record\n{}outputs\n{}",
             actual.code,
             placed(&actual.root, &actual.stdout),
             placed(&actual.root, &actual.stderr),
-            ran.record
+            ran.record,
+            ran.outputs
         );
         match (&case.argv, &case.refusal) {
             (Some(argv), _) => {
                 let clean =
                     actual.code == 0 && actual.stdout.is_empty() && actual.stderr.is_empty();
-                if !clean || by_module_text(&ran.record) != by_module_text(argv) {
+                if !clean
+                    || by_module_text(&ran.record) != by_module_text(argv)
+                    || ran.outputs != case.outputs
+                {
                     failures.push(format!(
-                        "{}: krusty-toolchain did {printed}\nthe `krusty-argv` section expects status 0, no output and the record\n{argv}",
-                        case.name
+                        "{}: krusty-toolchain did {printed}\nthe case expects status 0, no output, the record\n{argv}and the outputs\n{}",
+                        case.name, case.outputs
                     ));
                 }
             }
@@ -347,7 +366,8 @@ fn every_compile_case_passes_the_arguments_the_toolchain_passes() {
     let outputs = kotlin::kotlin_all(&invocations);
     let mut failures = Vec::new();
     for (case, toolchain) in cases.iter().zip(outputs) {
-        let record = placed(&toolchain.root, &toolchain.stdout);
+        let stdout = placed(&toolchain.root, &toolchain.stdout);
+        let (record, outputs) = compiling::record_and_outputs(&stdout);
         let Some(argv) = case.argv.as_deref() else {
             // Both reject the project, with the same problems.
             let ran = krusty_toolchain(
@@ -369,6 +389,7 @@ fn every_compile_case_passes_the_arguments_the_toolchain_passes() {
             if toolchain.code == 0
                 || !unread.is_empty()
                 || !record.is_empty()
+                || !outputs.is_empty()
                 || refused.as_ref() != Some(&rejected)
             {
                 failures.push(format!(
@@ -381,7 +402,7 @@ fn every_compile_case_passes_the_arguments_the_toolchain_passes() {
             }
             continue;
         };
-        let mut recorded = by_module(&record);
+        let mut recorded = by_module(record);
         // The plugin module's invocation is the toolchain's alone: krusty-toolchain runs no task.
         let plugin_compiled = case.plugin_module.as_ref().is_none_or(|plugin| {
             let name = format!("-module-name={plugin}");
@@ -389,12 +410,17 @@ fn every_compile_case_passes_the_arguments_the_toolchain_passes() {
             recorded.retain(|invocation| !invocation.contains(&name));
             recorded.len() + 1 == before
         });
-        if toolchain.code != 0 || !plugin_compiled || recorded != by_module(argv) {
+        if toolchain.code != 0
+            || !plugin_compiled
+            || recorded != by_module(argv)
+            || outputs != case.outputs
+        {
             failures.push(format!(
-                "{}: the toolchain exited {} having printed\n{}and recorded\n{record}\nthe `krusty-argv` section is\n{argv}",
+                "{}: the toolchain exited {} having printed\n{}and recorded\n{record}\nwith the outputs\n{outputs}\nthe `krusty-argv` section is\n{argv}and the `outputs` section\n{}",
                 case.name,
                 toolchain.code,
-                placed(&toolchain.root, &toolchain.stderr)
+                placed(&toolchain.root, &toolchain.stderr),
+                case.outputs
             ));
         }
     }
@@ -496,6 +522,193 @@ fn a_rerun_leaves_no_output_of_removed_sources_or_resources() {
         assert!(!artifacts.join(gone).exists(), "{gone}");
     }
     assert!(artifacts.join("appjvm/kotlin-output").is_dir());
+}
+
+/// The `ksp` case with `files` added to its project.
+fn ksp_case(files: &[(&str, &str)]) -> CompileCase {
+    let mut case = case("ksp");
+    case.project.extend(
+        files
+            .iter()
+            .map(|(file, text)| (file.to_string(), text.to_string())),
+    );
+    case
+}
+
+/// Whether each invocation in a record runs KSP.
+fn runs_ksp(record: &str) -> Vec<bool> {
+    compiling::invocations(record)
+        .iter()
+        .map(|invocation| {
+            invocation
+                .iter()
+                .any(|argument| argument == "com.google.devtools.ksp.cmdline.KSPJvmMain")
+        })
+        .collect()
+}
+
+/// KSP failing on a module stops the task with KSP's status, after what KSP printed, before the
+/// module compiles.
+#[test]
+fn a_failing_ksp_run_stops_the_task_before_its_module_compiles() {
+    compiling::recorder();
+    let case = ksp_case(&[("app/ksp-fails", "processor: no registry\n")]);
+    let ran = krusty_toolchain("ksp-fails", &case, &[":consumer:compileJvm"], |_| {});
+    assert_eq!(
+        (
+            ran.output.code,
+            placed(&ran.output.root, &ran.output.stdout),
+            placed(&ran.output.root, &ran.output.stderr),
+            runs_ksp(&ran.record),
+            ran.outputs,
+        ),
+        (
+            5,
+            String::new(),
+            "processor: no registry\n\nERROR: Task ':app:kspJvm' failed: KSP exited with status 5\n"
+                .to_string(),
+            vec![true],
+            String::new(),
+        )
+    );
+}
+
+/// krusty-toolchain does not compile the sources KSP generates: a module KSP generates a source for
+/// fails before it compiles.
+#[test]
+fn a_ksp_run_that_generates_sources_fails_its_module() {
+    compiling::recorder();
+    let case = ksp_case(&[(
+        "app/ksp-generates/src/ksp/kotlin/generated/Registry.kt",
+        "package generated\n\nobject Registry\n",
+    )]);
+    let ran = krusty_toolchain("ksp-sources", &case, &[":consumer:compileJvm"], |_| {});
+    assert_eq!(
+        (
+            ran.output.code,
+            placed(&ran.output.root, &ran.output.stdout),
+            placed(&ran.output.root, &ran.output.stderr),
+            runs_ksp(&ran.record),
+            ran.outputs,
+        ),
+        (
+            1,
+            String::new(),
+            "\nERROR: KSP generated sources for module `app` (<directory>/project/build/generated/app/main/src/ksp/kotlin/generated/Registry.kt first), and krusty-toolchain does not compile generated sources yet\n"
+                .to_string(),
+            vec![true],
+            String::new(),
+        )
+    );
+}
+
+/// Each KSP run starts from empty output directories, so what an earlier run generated and this
+/// one does not is gone, from KSP's output and from the module's resources output.
+#[test]
+fn a_ksp_rerun_keeps_nothing_an_earlier_run_generated() {
+    compiling::recorder();
+    let case = case("ksp");
+    let first = krusty_toolchain("ksp-rerun", &case, &[":consumer:compileJvm"], |_| {});
+    assert_eq!(
+        first.output.code,
+        0,
+        "{}",
+        placed(&first.output.root, &first.output.stderr)
+    );
+    let project = first.directory.join(Resolving::PROJECT);
+    let generates = project.join("app/ksp-generates/resources/ksp");
+    std::fs::remove_dir_all(generates.join("META-INF")).unwrap();
+    std::fs::write(generates.join("other.txt"), "other\n").unwrap();
+    // A changed source, which KSP reads, so KSP runs again.
+    std::fs::write(
+        project.join("app/src/Model.kt"),
+        "class Model(val name: String)\n",
+    )
+    .unwrap();
+
+    let second = run_task(
+        &first.directory,
+        &project,
+        &[":consumer:compileJvm"],
+        |_| {},
+    );
+    assert_eq!(second.code, 0, "{}", placed(&second.root, &second.stderr));
+    let mut generated = Vec::new();
+    files_below(
+        &project.join("build/generated/app/main"),
+        "",
+        &mut generated,
+    );
+    generated.sort();
+    assert_eq!(
+        (
+            generated,
+            compiling::artifact_outputs(&first.directory, None)
+        ),
+        (
+            vec![
+                (
+                    "classes/ksp/generated/Registry.class".to_string(),
+                    "A stand-in for a generated class.\n".to_string()
+                ),
+                ("resources/ksp/other.txt".to_string(), "other\n".to_string()),
+            ],
+            "== appjvm/resources-output/other.txt\nother\n".to_string()
+        )
+    );
+}
+
+/// KSP does not run again while what it reads and what it generated are as its last successful run
+/// left them: its arguments (the processor options among them), the processors, and its output.
+#[test]
+fn an_unchanged_ksp_run_is_skipped() {
+    compiling::recorder();
+    let case = case("ksp");
+    let first = krusty_toolchain("ksp-skip", &case, &[":consumer:compileJvm"], |_| {});
+    assert_eq!(
+        first.output.code,
+        0,
+        "{}",
+        placed(&first.output.root, &first.output.stderr)
+    );
+    let project = first.directory.join(Resolving::PROJECT);
+    let record = first.directory.join(compiling::RECORD);
+    let ksp_runs = || {
+        runs_ksp(&std::fs::read_to_string(&record).unwrap())
+            .into_iter()
+            .filter(|&ksp| ksp)
+            .count()
+    };
+    let rerun = || {
+        let ran = run_task(
+            &first.directory,
+            &project,
+            &[":consumer:compileJvm"],
+            |_| {},
+        );
+        assert_eq!(ran.code, 0, "{}", placed(&ran.root, &ran.stderr));
+        ksp_runs()
+    };
+    let module = project.join("app/module.yaml");
+    let processor = first
+        .directory
+        .join(Resolving::HOME)
+        .join(".m2/repository/org/example/processor/1.0/processor-1.0.jar");
+    let generated = project.join("build/generated/app/main/resources/ksp/META-INF/registry.txt");
+    let mut runs = vec![ksp_runs(), rerun()];
+    let written = std::fs::read_to_string(&module).unwrap();
+    std::fs::write(&module, written.replace("alpha: first", "alpha: second")).unwrap();
+    runs.push(rerun());
+    std::fs::write(&processor, "Another processor.\n").unwrap();
+    runs.push(rerun());
+    std::fs::remove_file(&generated).unwrap();
+    runs.push(rerun());
+    runs.push(rerun());
+    assert_eq!(runs, [1, 1, 2, 3, 4, 4]);
+    assert_eq!(
+        std::fs::read_to_string(&generated).unwrap(),
+        "generated.Registry\n"
+    );
 }
 
 #[test]
@@ -846,6 +1059,7 @@ fn diamond() -> CompileCase {
         argv: None,
         refusal: None,
         plugin_module: None,
+        outputs: String::new(),
     }
 }
 
@@ -990,7 +1204,7 @@ fn a_failure_starts_no_module_and_waits_for_the_running_ones() {
 fn concurrent_failures_are_reported_in_plan_order() {
     compiling::recorder();
     for attempt in 0..4 {
-        let ran = timed_run(
+        let (code, stdout, stderr, events) = timed_run(
             &format!("siblings-{attempt}"),
             &[":app:compileJvm"],
             |command| {
@@ -1000,7 +1214,7 @@ fn concurrent_failures_are_reported_in_plan_order() {
             },
         );
         let base = "recorder: compiled base\n".to_string();
-        let expected = if parallel() {
+        let expected_output = if parallel() {
             (
                 4,
                 base,
@@ -1011,14 +1225,6 @@ fn concurrent_failures_are_reported_in_plan_order() {
                     sleeper("base"),
                     sleeper("left")
                 ),
-                lines(&[
-                    "start base",
-                    "end base",
-                    "start left",
-                    "start right",
-                    "end right",
-                    "end left",
-                ]),
             )
         } else {
             (
@@ -1030,21 +1236,51 @@ fn concurrent_failures_are_reported_in_plan_order() {
                     sleeper("base"),
                     sleeper("left")
                 ),
-                lines(&["start base", "end base", "start left", "end left"]),
             )
         };
-        let (code, stdout, stderr, events) = ran;
-        // `left` and `right` start together; `right` ends first.
-        let events = if parallel() {
-            settled(events, &[(2, 4)])
+        assert_eq!((code, stdout, stderr), expected_output, "attempt {attempt}");
+        if parallel() {
+            // The scheduler starts both siblings, but either child process may execute first. Each
+            // child records its start before its end, and `right` still finishes before `left`.
+            let mut exact_events = events.clone();
+            exact_events.sort();
+            assert_eq!(
+                exact_events,
+                lines(&[
+                    "end base",
+                    "end left",
+                    "end right",
+                    "start base",
+                    "start left",
+                    "start right",
+                ]),
+                "attempt {attempt}"
+            );
+            assert_eq!(
+                &events[..2],
+                lines(&["start base", "end base"]),
+                "attempt {attempt}"
+            );
+            let position = |event| events.iter().position(|actual| actual == event).unwrap();
+            assert!(
+                position("start left") < position("end left"),
+                "attempt {attempt}: {events:?}"
+            );
+            assert!(
+                position("start right") < position("end right"),
+                "attempt {attempt}: {events:?}"
+            );
+            assert!(
+                position("end right") < position("end left"),
+                "attempt {attempt}: {events:?}"
+            );
         } else {
-            events
-        };
-        assert_eq!(
-            (code, stdout, stderr, events),
-            expected,
-            "attempt {attempt}"
-        );
+            assert_eq!(
+                events,
+                lines(&["start base", "end base", "start left", "end left"]),
+                "attempt {attempt}"
+            );
+        }
     }
 }
 
@@ -1082,10 +1318,11 @@ fn several_tasks_compile_the_union_of_what_they_need_once() {
         repository: Some(&case.repository),
         compiler: Some(&compiling::RecordingKrusty),
     });
-    let recorded = placed(&toolchain.root, &toolchain.stdout);
+    let stdout = placed(&toolchain.root, &toolchain.stdout);
+    let (recorded, outputs) = compiling::record_and_outputs(&stdout);
     assert_eq!(
-        (toolchain.code, by_module(&recorded)),
-        (0, by_module(&ran.record)),
+        (toolchain.code, by_module(recorded), outputs),
+        (0, by_module(&ran.record), ran.outputs.as_str()),
         "the toolchain printed\n{}",
         placed(&toolchain.root, &toolchain.stderr)
     );

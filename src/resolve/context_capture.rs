@@ -5,7 +5,7 @@ use crate::resolve::{
     ImplicitReceiverSelection, ResolvedCall, ResolvedContextArgument, ResolvedSuperCall,
     StmtLowering,
 };
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// Semantic selections consumed by context-capture analysis. Keeping the related checker handoff
 /// maps together prevents each new selected operation from widening the shared traversal's API.
@@ -464,8 +464,9 @@ fn scan_context_sources(
             .get(e.0 as usize)
             .copied()
             .unwrap_or(Ty::Error)
+            .kind()
         {
-            Ty::Fun(sig) => Some(sig),
+            TyKind::Fun(sig) => Some(sig),
             _ => None,
         };
         let nested_params = match file.expr(e) {

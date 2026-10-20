@@ -4,24 +4,26 @@
 
 use super::{Callee, IrExpr, IrFile};
 use crate::fx_hash::HashSet;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// Push every classifier identity carried by `ty`, including nested generic/projection/function
 /// positions. Source spellings never participate in this inventory.
 pub(crate) fn collect_classifier_names(ty: Ty, out: &mut Vec<TypeName>) {
-    match ty {
-        Ty::Obj(classifier, arguments) => {
+    match ty.kind() {
+        TyKind::Obj(classifier, arguments) => {
             out.push(classifier);
             for argument in arguments {
                 collect_classifier_names(*argument, out);
             }
         }
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => collect_classifier_names(*inner, out),
-        Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
-            collect_classifier_names(*inner, out)
+        TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => {
+            collect_classifier_names(inner, out)
         }
-        Ty::TyParam(_, bound) => collect_classifier_names(*bound, out),
-        Ty::Fun(signature) => {
+        TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner) => collect_classifier_names(inner, out),
+        TyKind::TyParam(_, bound) => collect_classifier_names(bound, out),
+        TyKind::Fun(signature) => {
             for parameter in &signature.params {
                 collect_classifier_names(*parameter, out);
             }

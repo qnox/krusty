@@ -56,7 +56,7 @@ use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor
 use crate::jvm::operation_relocation::clone_below_representation_wrapper;
 use crate::jvm::physical_type::ir_ty_to_jvm;
 use crate::libraries::InlineKind;
-use crate::types::{existing_type_name, type_name, SemanticCallRole, Ty, TypeName};
+use crate::types::{existing_type_name, type_name, SemanticCallRole, Ty, TyKind, TypeName};
 use boxing_rewrites::{box_wrap, box_wrap_nullable, to_string_wrap};
 use call_results::CallTypes;
 pub(crate) use class_annotations::class_file_annotations;
@@ -580,7 +580,7 @@ pub(crate) fn lower_value_classes(
         reference_returns::value_class_reference_supertypes(classifiers, &under);
 
     // Members of a value class: their bodies operate on the BOXED object (only signatures erase).
-    let vc_methods = value_members::value_class_members(ir);
+    let vc_methods = value_members::value_class_members(ir, &under);
     // Exprs reachable from a value-class member body reference the BOXED class (`other is X`, `this.field`
     // in the synthesized `equals`) and must NOT be erased — those methods run on the boxed object.
     let mut vc_body_exprs: HashSet<ExprId> = HashSet::default();
@@ -702,34 +702,11 @@ pub(crate) fn lower_value_classes(
     // `(owner-internal, plain name, arity)` → mangled name for declaration-owned JVM synthetics:
     // annotation markers and override bridges that name their own target method.
     let mut mangle_map: HashMap<(TypeName, String, usize), String> = HashMap::default();
-    // Exact getters whose override pair diverges in semantic type (for example `Vid` over `Vid?`).
-    // The two declarations hash differently under JVM value-class mangling, so the accessor bridge
-    // owns their compatibility and the implementation getter keeps its ordinary spelling.
-    let mut divergent_getters = HashSet::default();
     let property_annotation_markers = ir
         .property_annotation_markers
         .values()
         .copied()
         .collect::<HashSet<_>>();
-    for (&owner, edges) in &ir.property_overrides {
-        let Some(class) = ir.classes.iter().find(|class| class.fq_name == owner) else {
-            continue;
-        };
-        for edge in edges {
-            if edge.implementation_owner != owner || edge.declared_type == edge.implementation_type
-            {
-                continue;
-            }
-            if let Some(getter) = class
-                .properties
-                .iter()
-                .find(|property| property.name == edge.name)
-                .and_then(|property| property.getter)
-            {
-                divergent_getters.insert(getter);
-            }
-        }
-    }
     // `(fid, param idx, boxed value-class Ty)` for DEFAULTED nullable-underlying value-class params —
     // the base method unboxes them (below), but its `$default` stub + call site keep them boxed.
     let mut default_boxed: Vec<(u32, usize, Ty)> = Vec::new();
@@ -751,10 +728,7 @@ pub(crate) fn lower_value_classes(
         // A USER value-class member function's body runs on the BOXED object; its value-class-typed
         // parameters/return stay boxed (a sibling member call passes `this` — a box — directly). The
         // SYNTHESIZED members (`-impl`, `equals`/`hashCode`/`toString`, `<init>`) operate on the
-        // underlying representation, so they erase like any other function. An exact
-        // type-divergent override getter also keeps its ordinary spelling; its bridge owns the
-        // representation difference.
-        let is_divergent_override_getter = divergent_getters.contains(&(fid as u32));
+        // underlying representation, so they erase like any other function.
         let synthesized = matches!(
             f.name.as_str(),
             "box-impl"
@@ -765,8 +739,7 @@ pub(crate) fn lower_value_classes(
                 | "hashCode-impl"
                 | "toString-impl"
                 | "<init>"
-        ) || is_divergent_override_getter
-            || property_annotation_markers.contains(&(fid as u32))
+        ) || property_annotation_markers.contains(&(fid as u32))
             || realized_members.any_delegators.contains(&(fid as u32));
         let vc_member = !synthesized && vc_methods.contains(&(fid as u32));
         let source_name = f.name.clone();
@@ -1547,7 +1520,7 @@ pub(crate) fn lower_value_classes(
             // element boxed (don't erase to the underlying); elements are `box-impl`'d when stored. A
             // non-value-class element is erased; a primitive array (`kotlin/IntArray`) has no element arg.
             IrExpr::Vararg { array_type, .. } | IrExpr::NewArray { array_type, .. } => {
-                if let Ty::Obj(n, args) = array_type.non_null() {
+                if let TyKind::Obj(n, args) = array_type.non_null().kind() {
                     if n.matches("kotlin/Array") {
                         if let Some(elem) = args.first().copied() {
                             let keep_boxed = elem
@@ -2469,8 +2442,8 @@ pub(crate) fn lower_value_classes(
                         }
                     }
                 }
-                if let Some(function) = function.filter(|_| !uses_default_stub) {
-                    ir.jvm_member_targets.insert(id, function);
+                if !uses_default_stub {
+                    ir.record_realized_member_target(id, function, module_target);
                 }
                 // The `-impl` of an override whose primitive result is boxed returns the wrapper.
                 let boxed_result = match (function, module_target) {
@@ -3613,8 +3586,8 @@ pub(crate) fn lower_value_classes(
             // A synthesized wrapper member such as `box-impl` keeps the boxed value-class result.
             // User declarations are absent from this branch: they were converted to static carrier
             // functions above and take the ordinary return-boundary path below.
-            if let Ty::Obj(fq, _) = &orig_rets[fid] {
-                let x = *fq;
+            if let TyKind::Obj(fq, _) = orig_rets[fid].kind() {
+                let x = fq;
                 if under.contains_key(&x) {
                     if let Some(body) = ir.functions[fid].body {
                         box_tail(ir, body, x, &under);
@@ -3647,7 +3620,7 @@ pub(crate) fn lower_value_classes(
                     true,
                 );
             }
-        } else if let Ty::Obj(x, _) = orig_rets[fid].non_null() {
+        } else if let TyKind::Obj(x, _) = orig_rets[fid].non_null().kind() {
             // A function returning the value class ITSELF (`fun test(): Z = a?.foo()!!`), or an `X?`
             // its carrier holds (a boxed `X?` took the branch above), `unbox-impl`s a BOXED tail: the
             // erased return is the underlying. A nullable tail is unboxed null-safely (`null_slot`).
@@ -3915,8 +3888,8 @@ impl ReprCtx<'_> {
     fn operand_nonnull(&self, id: ExprId) -> bool {
         operand_nonnull(self.exprs, self.rets, self.fields, self.slots, id)
             || matches!(
-                self.types.declared_result(id, self.under),
-                Some(Ty::Obj(..))
+                self.types.declared_result(id, self.under).map(Ty::kind),
+                Some(TyKind::Obj(..))
             )
     }
 
@@ -3966,7 +3939,7 @@ impl ReprCtx<'_> {
             type_operand,
         } = &self.exprs[id as usize]
         {
-            if !matches!(type_operand.non_null(), Ty::TyParam(..)) {
+            if !type_operand.non_null().is_ty_param() {
                 break;
             }
             id = *arg;
@@ -3995,8 +3968,8 @@ fn nullable_is_boxed(x: TypeName, under: &Under) -> bool {
 /// on it would wrongly reject a legal value). True when the value class's field type erases to a
 /// nullable reference (`X(val v: Int?)` → `Integer`; `X(val v: String?)` → `String?`).
 fn vc_underlying_nullable(t: &Ty, under: &Under) -> bool {
-    if let Ty::Obj(fq_name, _) = t {
-        if let Some(u) = under.get(fq_name) {
+    if let TyKind::Obj(fq_name, _) = t.kind() {
+        if let Some(u) = under.get(&fq_name) {
             return crate::value_classes::underlying_chain_accepts_null(*u, under);
         }
     }

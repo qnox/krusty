@@ -3,7 +3,7 @@
 //! underlying's own null can stand for the absent value.
 
 use super::meta_ids;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 pub(super) fn meta_descriptor_position(
     index: usize,
@@ -24,8 +24,8 @@ pub(super) fn meta_param_exact(
     };
     let ids = super::meta_ids();
     if name == ids.array {
-        return matches!(desc, Ty::Obj(n, args)
-            if *n == ids.array && args.first().copied().is_some_and(super::ty_erases_to_object));
+        return matches!(desc.kind(), TyKind::Obj(n, args)
+            if n == ids.array && args.first().copied().is_some_and(super::ty_erases_to_object));
     }
     if let Some(width) = super::prim_array_width(name) {
         return desc.obj_internal().and_then(super::prim_array_width) == Some(width);
@@ -67,7 +67,7 @@ pub(super) fn metadata_value_class_bound_carrier(
     let mut current = ty;
     let mut seen = crate::fx_hash::HashSet::default();
     let class_bound = loop {
-        let Ty::TyParam(name, _) = current.non_null() else {
+        let TyKind::TyParam(name, _) = current.non_null().kind() else {
             break current;
         };
         if !seen.insert(name) {
@@ -83,17 +83,20 @@ pub(super) fn metadata_value_class_bound_carrier(
         let next = bounds
             .iter()
             .copied()
-            .find(|bound| match bound.non_null() {
-                Ty::TyParam(..) => false,
-                concrete => concrete
-                    .obj_internal()
-                    .is_none_or(|classifier| !is_interface(classifier)),
+            .find(|bound| {
+                let concrete = bound.non_null();
+                match concrete.kind() {
+                    TyKind::TyParam(..) => false,
+                    _ => concrete
+                        .obj_internal()
+                        .is_none_or(|classifier| !is_interface(classifier)),
+                }
             })
             .or_else(|| {
                 bounds
                     .iter()
                     .copied()
-                    .find(|bound| matches!(bound.non_null(), Ty::TyParam(..)))
+                    .find(|bound| bound.non_null().is_ty_param())
             })?;
         let nullable = current.is_nullable() || next.is_nullable();
         current = if nullable {

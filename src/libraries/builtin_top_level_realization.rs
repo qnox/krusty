@@ -11,7 +11,7 @@ use crate::libraries::builtin_declaration::{
 use crate::libraries::{
     kotlin_array_factory_kind, CompilerIntrinsic, FnKind, FunctionInfo, PropKind, PropertyInfo,
 };
-use crate::types::{ArrayFactoryKind, Ty, TypeName};
+use crate::types::{ArrayFactoryKind, Ty, TyKind, TypeName};
 
 /// Attach every compiler-owned realization fact for one normalized top-level declaration.
 /// Providers call this only after constructing the complete semantic signature; consumers never
@@ -165,7 +165,7 @@ fn plain(facts: &BuiltinFunctionDeclaration<'_>, kind: FnKind) -> bool {
 }
 
 fn function_shape(ty: Ty, arity: usize, suspend: bool) -> bool {
-    matches!(ty.non_null(), Ty::Fun(signature)
+    matches!(ty.non_null().kind(), TyKind::Fun(signature)
         if signature.params.len() == arity
             && signature.context_count == 0
             && !signature.has_receiver
@@ -224,14 +224,14 @@ fn array_factory(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntri
             let [elements] = facts.params else {
                 return None;
             };
-            let Some(Ty::OutProjection(element)) = elements.array_elem() else {
+            let Some(TyKind::OutProjection(element)) = elements.array_elem().map(Ty::kind) else {
                 return None;
             };
             facts.type_parameter_count == 1
                 && facts.vararg == Some(0)
                 && elements.is_reference_array()
                 && facts.ret.is_reference_array()
-                && facts.ret.array_elem() == Some(*element)
+                && facts.ret.array_elem() == Some(element)
         }
         ArrayFactoryKind::ReferenceSize => {
             let [Ty::Int, initializer] = facts.params else {
@@ -322,7 +322,7 @@ fn kotlin_function(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerInt
                 && facts
                     .ret
                     .array_elem()
-                    .is_some_and(|element| matches!(element, Ty::TyParam(_, _))) =>
+                    .is_some_and(|element| element.is_ty_param()) =>
         {
             Some(CompilerIntrinsic::EnumValues)
         }
@@ -330,7 +330,7 @@ fn kotlin_function(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerInt
             if facts.type_parameter_count == 1
                 && facts.vararg.is_none()
                 && !facts.is_operator
-                && matches!(facts.ret, Ty::TyParam(_, _)) =>
+                && facts.ret.is_ty_param() =>
         {
             Some(CompilerIntrinsic::EnumValueOf)
         }
@@ -490,7 +490,7 @@ fn kotlin_test(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrins
         || facts.type_parameter_count != 1
         || facts.vararg.is_some()
         || facts.is_operator
-        || !matches!(facts.ret, Ty::TyParam(_, _))
+        || !facts.ret.is_ty_param()
     {
         return None;
     }
@@ -614,7 +614,7 @@ fn coroutine(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic
             ("startCoroutine", FnKind::Extension, Some(receiver), parameters)
                 if facts.type_parameter_count >= 1
                     && !facts.is_suspend
-                    && matches!(receiver.non_null(), Ty::Fun(signature)
+                    && matches!(receiver.non_null().kind(), TyKind::Fun(signature)
                         if signature.context_count == 0
                             && signature.suspend
                             && parameters.len() == signature.params.len() + 1

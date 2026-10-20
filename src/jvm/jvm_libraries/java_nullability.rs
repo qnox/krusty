@@ -6,7 +6,7 @@
 
 use super::super::JavaNullability;
 use crate::libraries::ResultEnhancement;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// Normalize a Java field type. An enum constant (`ACC_ENUM`) is not-null: kotlinc reports
 /// `Enum.ENTRY == null` as always false and emits no platform guard. Every other unqualified Java
@@ -28,8 +28,8 @@ pub(super) fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>
     // With no type-use qualifier, Java's flexibility applies recursively: `String[]` exposes
     // `Array<String!>!`, and `List<String>` exposes `List<String!>!`. Qualifying only the outer
     // classifier incorrectly rejects `null` as an expanded Java `String...` element.
-    let ty = match ty.non_null() {
-        Ty::Obj(name, arguments) if !arguments.is_empty() => {
+    let ty = match ty.non_null().kind() {
+        TyKind::Obj(name, arguments) if !arguments.is_empty() => {
             let arguments = arguments
                 .iter()
                 .map(|argument| java_type_argument_nullability(*argument))
@@ -38,7 +38,7 @@ pub(super) fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>
             // semantics derives `Array<out T>` as the upper bound of the surrounding platform type.
             Ty::obj_args_name(name, &arguments)
         }
-        Ty::Fun(signature) => Ty::fun_with_shape(
+        TyKind::Fun(signature) => Ty::fun_with_shape(
             signature
                 .params
                 .iter()
@@ -55,7 +55,7 @@ pub(super) fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>
         // and does not repeat the wrapper's flexibility, which a bare variable's bound records
         // only where it is an argument (`List<E>`). The parse leaves a placeholder `Any` here, and
         // read as the bound of `E & Any` it made `ArrayList<V?>.get` substitute the non-null `V`.
-        Ty::TyParam(name, bound) => Ty::ty_param(name.as_str(), Ty::nullable(bound.non_null())),
+        TyKind::TyParam(name, bound) => Ty::ty_param(name.as_str(), Ty::nullable(bound.non_null())),
         _ => ty,
     };
     // Java wrapper classes are Kotlin primitive types with Java's flexible/nullability qualifier.
@@ -82,13 +82,13 @@ pub(super) fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>
 /// Kotlin collection supertypes and source-declared generic operations. Use-site variance stays a
 /// projection whose interior is flexible.
 pub(super) fn java_type_argument_nullability(ty: Ty) -> Ty {
-    match ty {
-        Ty::TyParam(name, bound) => {
-            Ty::ty_param(name.as_str(), java_type_nullability(*bound, None))
+    match ty.kind() {
+        TyKind::TyParam(name, bound) => {
+            Ty::ty_param(name.as_str(), java_type_nullability(bound, None))
         }
-        Ty::InProjection(inner) => Ty::in_projection(java_type_argument_nullability(*inner)),
-        Ty::OutProjection(inner) => Ty::out_projection(java_type_argument_nullability(*inner)),
-        Ty::StarProjection(inner) => Ty::star_projection(java_type_argument_nullability(*inner)),
+        TyKind::InProjection(inner) => Ty::in_projection(java_type_argument_nullability(inner)),
+        TyKind::OutProjection(inner) => Ty::out_projection(java_type_argument_nullability(inner)),
+        TyKind::StarProjection(inner) => Ty::star_projection(java_type_argument_nullability(inner)),
         _ => java_type_nullability(ty, None),
     }
 }

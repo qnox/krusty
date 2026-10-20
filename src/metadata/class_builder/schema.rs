@@ -15,7 +15,7 @@ use crate::metadata::version_requirements::{
     INLINE_PARAMETER_NULL_CHECK,
 };
 use crate::metadata::{property_flags, protobuf::Pb};
-use crate::types::{Ty, TypeName, Visibility};
+use crate::types::{Ty, TyKind, TypeName, Visibility};
 
 /// Append a value parameter's `annotation` records (f7) — one per applied annotation, in DECLARATION
 /// order. `ValueParameter.flags` serializes BEFORE these and already carries `HAS_ANNOTATIONS` from
@@ -456,7 +456,7 @@ pub(crate) fn class_message(
     let mut supertype_msgs: Vec<Pb> = Vec::new();
     if tail.is_enum {
         for (index, supertype) in tail.supertypes.iter().enumerate() {
-            if matches!(supertype, Ty::Obj(classifier, _) if *classifier == crate::types::wk::kotlin_enum())
+            if matches!(supertype.kind(), TyKind::Obj(classifier, _) if classifier == crate::types::wk::kotlin_enum())
             {
                 continue;
             }

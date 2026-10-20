@@ -19,7 +19,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{ExprId, FunId, IrCtorArg, IrExpr, IrField, IrFile, IrSamTarget};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// JVM-only construction plans selected while realizing Kotlin function-value SAM wrappers.
 /// Common IR retains semantic nullability; this record identifies the physical `New` nodes whose
@@ -349,7 +349,13 @@ fn assign_expression_function(
 /// without the continuation (`() -> Unit` into `suspend fun invoke()` is a `Function0`).
 fn wrapped_function_arity(ir: &IrFile, value: ExprId, target: &IrSamTarget, arity: u8) -> usize {
     let suspend_carrier = usize::from(arity) + usize::from(target.suspend);
-    if let Some(Ty::Fun(signature)) = ir.logical_types.get(&value).copied().map(Ty::non_null) {
+    if let Some(TyKind::Fun(signature)) = ir
+        .logical_types
+        .get(&value)
+        .copied()
+        .map(Ty::non_null)
+        .map(Ty::kind)
+    {
         if target.suspend && !signature.suspend {
             return signature.params.len();
         }

@@ -581,9 +581,9 @@ fn superclass_function_override_edge_precedes_backend_erasure() {
         edge.declared_parameters.as_ref(),
         [parameter]
             if matches!(
-                parameter.get(),
-                crate::types::Ty::TyParam(_, bound)
-                    if *bound == crate::types::Ty::nullable(crate::types::Ty::obj("kotlin/Any"))
+                parameter.get().kind(),
+                crate::types::TyKind::TyParam(_, bound)
+                    if bound == crate::types::Ty::nullable(crate::types::Ty::obj("kotlin/Any"))
             )
     ));
     assert_eq!(

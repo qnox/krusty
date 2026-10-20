@@ -15,7 +15,7 @@
 
 use super::{JvmSignatureFormatter, Wildcards};
 use crate::fx_hash::{HashMap, HashSet};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// One classifier visited while expanding, so a cyclic chain stops as kotlinc's does.
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
@@ -34,7 +34,7 @@ impl JvmSignatureFormatter<'_> {
         wildcards: Wildcards,
     ) -> Option<(Ty, Wildcards)> {
         let semantic = ty.non_null();
-        if !matches!(semantic, Ty::Obj(..)) || self.underlying(semantic).is_none() {
+        if !matches!(semantic.kind(), TyKind::Obj(..)) || self.underlying(semantic).is_none() {
             return None;
         }
         let expanded = self.expanded(ty, &mut HashSet::default())?;
@@ -52,12 +52,12 @@ impl JvmSignatureFormatter<'_> {
     /// `computeExpandedTypeInner`.
     fn expanded(&self, ty: Ty, visited: &mut HashSet<Visited>) -> Option<Ty> {
         let semantic = ty.non_null();
-        match semantic {
-            Ty::TyParam(name, bound) => {
+        match semantic.kind() {
+            TyKind::TyParam(name, bound) => {
                 if !visited.insert(Visited::Parameter(name.as_str())) {
                     return None;
                 }
-                let upper = *bound;
+                let upper = bound;
                 let expanded = self.expanded(upper, visited)?;
                 let upper_is_scalar_or_value =
                     is_unboxed_jvm_scalar(upper) || self.underlying(upper.non_null()).is_some();
@@ -78,9 +78,9 @@ impl JvmSignatureFormatter<'_> {
                 let Some(underlying) = self.underlying(semantic) else {
                     return Some(ty);
                 };
-                let key = match semantic {
-                    Ty::Obj(classifier, _) => Visited::Class(classifier),
-                    unsigned => Visited::Unsigned(unsigned),
+                let key = match semantic.kind() {
+                    TyKind::Obj(classifier, _) => Visited::Class(classifier),
+                    _ => Visited::Unsigned(semantic),
                 };
                 if !visited.insert(key) {
                     return None;
@@ -103,7 +103,7 @@ impl JvmSignatureFormatter<'_> {
         if ty.is_unsigned() {
             return ty.scalar_value_repr();
         }
-        let Ty::Obj(classifier, arguments) = ty else {
+        let TyKind::Obj(classifier, arguments) = ty.kind() else {
             return None;
         };
         let (declared, parameters) = match self.current_class(classifier) {
@@ -148,12 +148,12 @@ fn substituted_underlying(declared: Ty, parameters: &[Ty], arguments: &[Ty]) -> 
         .iter()
         .zip(arguments)
         .map(|(parameter, argument)| {
-            let Ty::TyParam(identity, bound) = *parameter else {
+            let TyKind::TyParam(identity, bound) = parameter.kind() else {
                 panic!("a declared type parameter is a type-parameter type");
             };
-            let argument = match argument {
-                Ty::StarProjection(_) => *bound,
-                argument => argument.projection_inner().unwrap_or(*argument),
+            let argument = match argument.kind() {
+                TyKind::StarProjection(_) => bound,
+                _ => argument.projection_inner().unwrap_or(*argument),
             };
             (identity.to_string(), argument)
         })
@@ -166,26 +166,35 @@ fn substituted_underlying(declared: Ty, parameters: &[Ty], arguments: &[Ty]) -> 
 
 /// The upper bound of the type parameter `ty` is, or is an array (of arrays) of.
 fn type_parameter_or_array_thereof(ty: Ty) -> Option<Ty> {
-    match ty.non_null() {
-        Ty::TyParam(_, bound) => Some(*bound),
-        array if array.is_reference_array() => {
-            type_parameter_or_array_thereof(array.array_elem()?.projection_read_ty())
+    {
+        let array = ty.non_null();
+        match array.kind() {
+            TyKind::TyParam(_, bound) => Some(bound),
+            _ if array.is_reference_array() => {
+                type_parameter_or_array_thereof(array.array_elem()?.projection_read_ty())
+            }
+            _ => None,
         }
-        _ => None,
     }
 }
 
 /// `substituteUpperBound`: the type parameter in `ty` replaced by `upper`, keeping each array and
 /// `?` around it. An `in`-projected element can only be read as `Any?`.
 fn substitute_upper_bound(ty: Ty, upper: Ty) -> Ty {
-    let replaced = match ty.non_null() {
-        Ty::TyParam(..) => upper,
-        array => {
-            let element = match array.array_elem().expect("an array of a type parameter") {
-                Ty::InProjection(_) => Ty::nullable(Ty::obj("kotlin/Any")),
-                element => substitute_upper_bound(element.projection_read_ty(), upper),
-            };
-            Ty::obj_args_name(crate::types::wk::array(), &[element])
+    let replaced = {
+        let array = ty.non_null();
+        match array.kind() {
+            TyKind::TyParam(..) => upper,
+            _ => {
+                let element = {
+                    let element = array.array_elem().expect("an array of a type parameter");
+                    match element.kind() {
+                        TyKind::InProjection(_) => Ty::nullable(Ty::obj("kotlin/Any")),
+                        _ => substitute_upper_bound(element.projection_read_ty(), upper),
+                    }
+                };
+                Ty::obj_args_name(crate::types::wk::array(), &[element])
+            }
         }
     };
     if is_nullable_type(ty) {

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::resolve::{ReceiverFnValueOrigin, ResolvedCall, ResolvedContextArgument};
+use crate::types::TyKind;
 
 impl BodyFirChecker<'_> {
     pub(super) fn extension_function_binding(
@@ -18,7 +19,9 @@ impl BodyFirChecker<'_> {
                 BodyCheckFailureKind::UnsupportedCallShape,
             ));
         };
-        let (Ty::Fun(target), Ty::Fun(result)) = (target.non_null(), result.non_null()) else {
+        let (TyKind::Fun(target), TyKind::Fun(result)) =
+            (target.non_null().kind(), result.non_null().kind())
+        else {
             return Err(self.failure(
                 self.file.expr_span(expression),
                 BodyCheckFailureKind::UnsupportedCallShape,
@@ -348,7 +351,7 @@ impl BodyFirChecker<'_> {
                 // selected `InvokeKind::Function` signature is the authoritative checked shape.
                 // Both paths cross `ResolvedTy` below; neither can publish pending/error types.
                 let (context_params, parameters, ret, suspend) =
-                    if let Ty::Fun(signature) = callee_ty.non_null() {
+                    if let TyKind::Fun(signature) = callee_ty.non_null().kind() {
                         let implicit_context_count = context_params.len();
                         if signature.params.len()
                             != implicit_context_count.saturating_add(parameters.len())

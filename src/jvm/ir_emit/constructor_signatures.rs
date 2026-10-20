@@ -10,7 +10,7 @@ use super::declaration_types::class_ctor_jvm_tys;
 use super::signature_formatter::{ConstructorParameter, JvmSignatureFormatter};
 use super::type_descriptor;
 use crate::ir::{IrClass, IrCtorParameterProvenance, IrFile};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// The primary constructor's `Signature`, or `None` when it needs none.
 pub(super) fn primary_constructor_signature(
@@ -79,7 +79,7 @@ fn primary_constructor_parameters(ir: &IrFile, class: &IrClass) -> Vec<Construct
         .zip(descriptors)
         .map(|(argument, descriptor)| {
             if argument.provenance == IrCtorParameterProvenance::EnclosingInstance {
-                let Ty::Obj(outer, _) = argument.ty.non_null() else {
+                let TyKind::Obj(outer, _) = argument.ty.non_null().kind() else {
                     panic!("an inner class's outer instance is a classifier type");
                 };
                 return ConstructorParameter::OuterInstance(outer);

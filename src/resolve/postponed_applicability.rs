@@ -9,6 +9,7 @@
 //! overload and its unbound `R` leaked into the call's result.
 
 use super::*;
+use crate::types::TyKind;
 
 impl Checker<'_> {
     /// Whether a typed argument `actual` can still satisfy the parameter `declared`, which mentions
@@ -19,14 +20,14 @@ impl Checker<'_> {
         actual: Ty,
         formals: &[String],
     ) -> bool {
-        match declared.non_null() {
+        match declared.non_null().kind() {
             // `() -> T?` can infer `T` later, but it can never accept a known non-function value
             // (`generateSequence(1) { ... }` must not shape `1` as the seed function overload).
-            Ty::Fun(_) => actual.non_null().fun_arity().is_some(),
+            TyKind::Fun(_) => actual.non_null().fun_arity().is_some(),
             // A function value may still reach a generic functional interface by SAM conversion;
             // that conversion is judged by final selection, not by the constructor shape.
             _ if actual.non_null().fun_arity().is_some() => true,
-            Ty::Obj(..) => {
+            TyKind::Obj(..) => {
                 let shape = constructor_shape(declared, formals);
                 crate::assignable::is_assignable(
                     &crate::assignable::TyCtx::new(),
@@ -43,10 +44,10 @@ impl Checker<'_> {
 /// `declared` with every type argument that depends on an inferable formal replaced by a star
 /// projection, keeping the classifier and nullability fixed.
 fn constructor_shape(declared: Ty, formals: &[String]) -> Ty {
-    match declared {
-        Ty::Nullable(inner) => Ty::nullable(constructor_shape(*inner, formals)),
-        Ty::PlatformNullable(inner) => Ty::platform_nullable(constructor_shape(*inner, formals)),
-        Ty::Obj(name, arguments) => {
+    match declared.kind() {
+        TyKind::Nullable(inner) => Ty::nullable(constructor_shape(inner, formals)),
+        TyKind::PlatformNullable(inner) => Ty::platform_nullable(constructor_shape(inner, formals)),
+        TyKind::Obj(name, arguments) => {
             let arguments = arguments
                 .iter()
                 .map(|&argument| {
@@ -59,6 +60,6 @@ fn constructor_shape(declared: Ty, formals: &[String]) -> Ty {
                 .collect::<Vec<_>>();
             Ty::obj_args_name(name, &arguments)
         }
-        other => other,
+        _ => declared,
     }
 }

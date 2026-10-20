@@ -18,7 +18,7 @@ use crate::plugins::{
     FrontendExpressionContext, FrontendResolvedSingletonCall, PluginContext,
     PluginSynthesizedOperand,
 };
-use crate::types::{type_name, Ty, TypeName};
+use crate::types::{type_name, Ty, TyKind, TypeName};
 
 use super::constructed_standard_serializers::constructed_standard_serializer;
 use super::{kserializer_of, wrap_nullable_serializer, KSERIALIZER_FQ, SERIALIZABLE_FQ};
@@ -42,9 +42,9 @@ pub(super) fn plan(
     let arguments = checked
         .type_args()
         .iter()
-        .map(|argument| match argument {
-            Ty::StarProjection(_) => None,
-            Ty::OutProjection(inner) | Ty::InProjection(inner) => Some(**inner),
+        .map(|argument| match argument.kind() {
+            TyKind::StarProjection(_) => None,
+            TyKind::OutProjection(inner) | TyKind::InProjection(inner) => Some(inner),
             _ => Some(*argument),
         })
         .collect::<Option<Vec<_>>>()?;

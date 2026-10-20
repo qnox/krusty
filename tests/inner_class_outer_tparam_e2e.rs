@@ -189,11 +189,11 @@ fn an_inner_class_decodes_within_the_outer_its_own_classpath_serves() {
     let own = krusty::jvm::classpath::Classpath::new(vec![inner_entry.clone()]);
     let shadowed = krusty::jvm::classpath::Classpath::new(vec![shadowing, inner_entry]);
     assert!(matches!(
-        inner_get_return(&own),
-        krusty::types::Ty::TyParam(name, _) if name == "P"
+        inner_get_return(&own).kind(),
+        krusty::types::TyKind::TyParam(name, _) if name == "P"
     ));
     assert!(matches!(
-        inner_get_return(&shadowed),
-        krusty::types::Ty::TyParam(name, _) if name == "Z"
+        inner_get_return(&shadowed).kind(),
+        krusty::types::TyKind::TyParam(name, _) if name == "Z"
     ));
 }

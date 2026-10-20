@@ -11,7 +11,7 @@ use crate::libraries::{
     InlineBodyPlan, InlineCollectionAppend, InlineCollectionCapacity, InlineCollectionLocalNames,
     LibraryCallable,
 };
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::super::JvmLibraries;
 
@@ -151,8 +151,8 @@ fn collection_transform_lambda_parameter(
         .filter_map(|(parameter, ty)| {
             (parameter != callable.context_count)
                 .then_some(ty)
-                .and_then(|ty| match ty {
-                    Ty::Fun(action)
+                .and_then(|ty| match ty.kind() {
+                    TyKind::Fun(action)
                         if !action.suspend
                             && action.context_count == 0
                             && !action.has_receiver

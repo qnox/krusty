@@ -7,7 +7,7 @@ use crate::jvm::inline::{self, BranchTarget, Insn};
 use crate::libraries::{
     InlineBodyCall, InlineBodyPlan, InlineIterationIndex, InlineIterationTraversal, LibraryCallable,
 };
-use crate::types::{type_name, Ty};
+use crate::types::{type_name, Ty, TyKind};
 
 use super::super::JvmLibraries;
 
@@ -286,7 +286,7 @@ pub(super) fn recognize<'a>(
     {
         return None;
     }
-    let Ty::Fun(action) = callable.params[1] else {
+    let TyKind::Fun(action) = callable.params[1].kind() else {
         return None;
     };
     if action.suspend
@@ -447,14 +447,14 @@ fn counted_traversal<'a>(
 }
 
 fn iterable_action_matches(receiver: Ty, physical_receiver: Ty, element: Ty) -> bool {
-    matches!(receiver, Ty::Obj(name, args)
+    matches!(receiver.kind(), TyKind::Obj(name, args)
         if physical_receiver.obj_internal() == Some(name)
             && args.len() == 1
             && args[0].projection_read_ty() == element)
 }
 
 fn char_sequence_action_matches(receiver: Ty, physical_receiver: Ty, element: Ty) -> bool {
-    matches!(receiver, Ty::Obj(name, arguments)
+    matches!(receiver.kind(), TyKind::Obj(name, arguments)
         if physical_receiver.obj_internal() == Some(name) && arguments.is_empty())
         && element == Ty::Char
 }

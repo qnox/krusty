@@ -8,6 +8,7 @@
 //! open formal (`String` in `typealias Keyed<V> = Entry<String, V>`) are fixed by the alias itself.
 
 use super::*;
+use crate::types::TyKind;
 
 impl Checker<'_> {
     /// The target application a constructor call through the alias `name` denotes, or `None` when
@@ -114,7 +115,7 @@ impl Checker<'_> {
         else {
             return Some(applied);
         };
-        let Ty::Obj(owner, arguments) = applied else {
+        let TyKind::Obj(owner, arguments) = applied.kind() else {
             return Some(applied);
         };
         if !arguments

@@ -52,7 +52,7 @@ pub(super) fn specialization_template(ir: &IrFile, function: FunId) -> Option<Fu
 }
 
 use crate::ir::{ClassId, ExprId, FunId, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// Exact implementation identities retained across closure-class realization. Reification may
 /// normalize these bodies, but not unrelated member methods capturing the same generic parameter.
@@ -537,19 +537,23 @@ fn default_expression_lambda(ir: &IrFile, expression: ExprId) -> Option<FunId> {
 /// lambda's body in place of its value.
 fn inline_call_argument(ir: &IrFile, node: ExprId) -> bool {
     ir.exprs.iter().enumerate().any(|(call, expression)| {
+        let call = ExprId::try_from(call).expect("IR expression index exceeds ExprId");
+        if let Some(operands) = ir.compiled_inline_operands(call) {
+            // A `noinline` literal of a call inlined from a compiled body is a value the body
+            // receives, so it keeps its class.
+            return operands
+                .arguments
+                .iter()
+                .enumerate()
+                .any(|(parameter, &argument)| {
+                    argument == node
+                        && crate::jvm::inline_parameters::is_inline_parameter(ir, call, parameter)
+                            == Some(true)
+                });
+        }
         let IrExpr::Call { args, .. } = expression else {
             return false;
         };
-        let call = ExprId::try_from(call).expect("IR expression index exceeds ExprId");
-        if ir.compiled_inline_call(call).is_some() {
-            // A `noinline` literal of a call inlined from a compiled body is a value the body
-            // receives, so it keeps its class.
-            return args.iter().enumerate().any(|(parameter, &argument)| {
-                argument == node
-                    && crate::jvm::inline_parameters::is_inline_parameter(ir, call, parameter)
-                        == Some(true)
-            });
-        }
         (ir.inline_call_sites.contains(&call) || ir.module_inline_calls.contains(&call))
             && args.contains(&node)
     })
@@ -627,7 +631,7 @@ pub(super) fn realize(
         else {
             continue;
         };
-        let Ty::Fun(signature) = function_type.non_null() else {
+        let TyKind::Fun(signature) = function_type.non_null().kind() else {
             continue;
         };
         let high_arity = crate::jvm::names::uses_function_n(signature.params.len());
@@ -965,9 +969,9 @@ fn raw_supertype(ir: &IrFile, fid: FunId, signature: &crate::types::FnSig) -> bo
 /// Whether a value class's declared underlying type admits `null`: a nullable type, or a type
 /// parameter whose bound does (`Result<T>(val a: T)` over `T : Any?`).
 fn admits_null(underlying: Ty) -> bool {
-    match underlying {
-        Ty::TyParam(_, bound) => admits_null(*bound),
-        other => other.admits_null(),
+    match underlying.kind() {
+        TyKind::TyParam(_, bound) => admits_null(bound),
+        _ => underlying.admits_null(),
     }
 }
 

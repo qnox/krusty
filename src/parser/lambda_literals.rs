@@ -94,7 +94,7 @@ impl Parser<'_> {
     }
 
     pub(super) fn parse_lambda(&mut self) -> ExprId {
-        let lambda = self.parse_lambda_literal();
+        let lambda = self.with_newlines_significant(Self::parse_lambda_literal);
         let scopes = &self.lambda_label_scopes.scopes;
         if let Some(Some(name)) = scopes.last() {
             self.file.lambda_call_labels.insert(lambda.0, name.clone());

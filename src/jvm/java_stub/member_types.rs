@@ -179,6 +179,12 @@ pub(super) enum MemberTypeLookup {
     Ambiguous,
 }
 
+/// Declaration provenance remains available while access is checked at each inheritance edge.
+struct InheritedMemberType {
+    declaring_owner: String,
+    member: JavaMemberType,
+}
+
 /// Member-type lookup over the parsed Java sources and the world beyond them.
 pub(super) struct MemberTypes<'a> {
     world: &'a dyn JavaHeaderWorld,
@@ -237,7 +243,7 @@ impl<'a> MemberTypes<'a> {
         }
         match found.len() {
             0 => MemberTypeLookup::Absent,
-            1 => MemberTypeLookup::Found(found.pop().unwrap()),
+            1 => MemberTypeLookup::Found(found.pop().unwrap().member.internal),
             _ => MemberTypeLookup::Ambiguous,
         }
     }
@@ -254,28 +260,40 @@ impl<'a> MemberTypes<'a> {
         package: &str,
         source_supertypes: &dyn Fn(&str) -> Option<Vec<String>>,
         visited: &mut HashSet<String>,
-        found: &mut Vec<String>,
+        found: &mut Vec<InheritedMemberType>,
     ) {
         if !visited.insert(class.to_string()) {
             return;
         }
-        if let Some(declared) = self.declared_member_type(class, name) {
-            if inheritable(&declared, class, package) && !found.contains(&declared.internal) {
-                found.push(declared.internal);
+        let mut inherited = Vec::new();
+        if let Some(member) = self.declared_member_type(class, name) {
+            inherited.push(InheritedMemberType {
+                declaring_owner: class.to_string(),
+                member,
+            });
+        } else {
+            let inheriting_package = package_of(class);
+            for supertype in self.direct_supertypes(class, source_supertypes) {
+                self.collect_inherited(
+                    &supertype,
+                    name,
+                    inheriting_package,
+                    source_supertypes,
+                    visited,
+                    &mut inherited,
+                );
             }
-            return;
         }
-        let inheriting_package = package_of(class);
-        for supertype in self.direct_supertypes(class, source_supertypes) {
-            self.collect_inherited(
-                &supertype,
-                name,
-                inheriting_package,
-                source_supertypes,
-                visited,
-                found,
-            );
+        for candidate in inherited {
+            if inheritable(&candidate.member, &candidate.declaring_owner, package)
+                && !found
+                    .iter()
+                    .any(|known| known.member.internal == candidate.member.internal)
+            {
+                found.push(candidate);
+            }
         }
+        visited.remove(class);
     }
 
     fn declared_member_type(&self, owner: &str, name: &str) -> Option<JavaMemberType> {

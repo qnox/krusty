@@ -16,7 +16,7 @@ use crate::libraries::{
     FnKind, InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyPlan,
     InlineBodyValue, InlineIterationIndex, LibraryCallable, LibraryMember,
 };
-use crate::types::{type_name, Ty};
+use crate::types::{type_name, Ty, TyKind};
 
 type MethodTarget<'a> = (&'a str, &'a str, &'a str, bool);
 
@@ -893,8 +893,8 @@ impl JvmLibraries {
             .get(invoke + 1..)
             .and_then(|suffix| exact_lambda_return_parameter(suffix, &parameter_at));
         let semantic_lambda_matches = matches!(
-            callable.params.get(lambda_parameter).copied(),
-            Some(Ty::Fun(lambda)) if lambda.params.len() == invoke_argument_slots.len()
+            callable.params.get(lambda_parameter).copied().map(Ty::kind),
+            Some(TyKind::Fun(lambda)) if lambda.params.len() == invoke_argument_slots.len()
         );
         if semantic_lambda_matches {
             if let Some(decoded) = recovery::decode(
@@ -955,8 +955,8 @@ impl JvmLibraries {
                 .and_then(|signature| signature.receiver)
                 .is_some()
             && matches!(
-                callable.params.get(lambda_parameter).copied(),
-                Some(Ty::Fun(lambda))
+                callable.params.get(lambda_parameter).copied().map(Ty::kind),
+                Some(TyKind::Fun(lambda))
                     if !lambda.suspend
                         && lambda.context_count == 0
                         && !lambda.has_receiver
@@ -1067,7 +1067,7 @@ impl JvmLibraries {
         if !exact_roles {
             return None;
         }
-        let Ty::Fun(lambda) = callable.params.get(lambda_parameter).copied()? else {
+        let TyKind::Fun(lambda) = (callable.params.get(lambda_parameter).copied()?).kind() else {
             return None;
         };
         if !lambda.params.is_empty() || lambda.context_count != 0 || lambda.has_receiver {

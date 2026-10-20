@@ -12,7 +12,7 @@ use super::{erase, is_ref, nullable_is_boxed, Under};
 use crate::fir::ResolvedFunctionOverrideTarget;
 use crate::fx_hash::HashSet;
 use crate::ir::{IrExpr, IrFile, IrTypeOp, IrValueClassSuspendResult};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// Record the representation of every suspend function's result and of every suspend call's
 /// result. Returns the suspend functions whose value-class result an override forces into its box.
@@ -222,9 +222,12 @@ fn force_boxed_results(
 /// Whether an overridden declaration's result names another classifier than `classifier`, a type
 /// parameter included: a type parameter has no classifier of its own, whatever its bound.
 fn declares_another_classifier(overridden: Ty, classifier: TypeName) -> bool {
-    let overridden = match overridden.non_null() {
-        Ty::TyParam(..) => None,
-        result => result.obj_internal(),
+    let overridden = {
+        let result = overridden.non_null();
+        match result.kind() {
+            TyKind::TyParam(..) => None,
+            _ => result.obj_internal(),
+        }
     };
     overridden != Some(classifier)
 }

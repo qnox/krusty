@@ -1,4 +1,5 @@
 use super::*;
+use crate::types::TyKind;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum MemberExtensionSelection {
@@ -110,7 +111,7 @@ pub(super) fn solved_member_extension_type_argument(
     let solution = bindings.get(formal).copied()?;
     (solution != Ty::Error
         && !solution.mentions_pending()
-        && !matches!(solution.non_null(), Ty::TyParam(identity, _) if identity == formal))
+        && !matches!(solution.non_null().kind(), TyKind::TyParam(identity, _) if identity == formal))
     .then_some(solution)
 }
 
@@ -680,7 +681,7 @@ pub(super) fn member_extension_lambda_shape_with(
                 continue;
             };
             lambda_shape.argument_parameters[source_index] = parameter;
-            let Ty::Fun(signature) = parameter.non_null() else {
+            let TyKind::Fun(signature) = parameter.non_null().kind() else {
                 continue;
             };
             shapes_postponed_argument |= call

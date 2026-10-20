@@ -1,6 +1,6 @@
 //! Small, backend-agnostic JVM naming/descriptor helpers (relocated out of the retired AST emitter).
 
-use crate::types::{InternalName, Ty, TypeName};
+use crate::types::{InternalName, Ty, TyKind, TypeName};
 
 /// Kotlin's JVM runtime provides numbered function interfaces only through `Function22`.
 pub(crate) const MAX_NUMBERED_FUNCTION_ARITY: usize = 22;
@@ -299,11 +299,11 @@ pub(crate) fn parse_method_descriptor(desc: &str) -> Option<(Vec<&str>, &str)> {
 }
 
 pub(crate) fn reference_array_element(ty: Ty) -> Ty {
-    match ty {
-        Ty::Nullable(inner) => Ty::nullable(reference_array_element(*inner)),
-        Ty::Unit => Ty::obj("kotlin/Unit"),
-        Ty::Nothing => Ty::obj("kotlin/Nothing"),
-        other => other.boxed_ref().unwrap_or(other),
+    match ty.kind() {
+        TyKind::Nullable(inner) => Ty::nullable(reference_array_element(inner)),
+        TyKind::Unit => Ty::obj("kotlin/Unit"),
+        TyKind::Nothing => Ty::obj("kotlin/Nothing"),
+        _ => ty.boxed_ref().unwrap_or(ty),
     }
 }
 

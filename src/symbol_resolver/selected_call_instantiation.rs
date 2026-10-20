@@ -12,6 +12,7 @@
 //! Extracted from the resolver root, which is migration debt that may not grow.
 
 use super::*;
+use crate::types::TyKind;
 
 /// Materialize the default-argument bridge attached to the already-selected declaration. The bridge
 /// is realization data only: semantic parameters, generic signature, visibility, and overload identity
@@ -158,7 +159,7 @@ impl<'a> SymbolResolver<'a> {
         // them (`D<in R>.getValue(thisRef: R, ...)`). Method generic signatures intentionally list
         // only method-owned formals, so retain the argument constraints for the owner's distinct
         // stable formals here.
-        if let Ty::Obj(owner, arguments) = receiver.non_null() {
+        if let TyKind::Obj(owner, arguments) = receiver.non_null().kind() {
             if arguments.is_empty() {
                 if let Some(classifier) = self.src.classifier(owner) {
                     for formal in &classifier.type_params {
@@ -189,8 +190,8 @@ impl<'a> SymbolResolver<'a> {
                 )
             })
             .collect::<Vec<_>>();
-        let applied_receiver = match receiver.non_null() {
-            Ty::Obj(owner, arguments) => self
+        let applied_receiver = match receiver.non_null().kind() {
+            TyKind::Obj(owner, arguments) => self
                 .src
                 .classifier(owner)
                 .and_then(|classifier| {

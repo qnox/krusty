@@ -15,7 +15,7 @@ pub(crate) fn classifier_callable_signatures(source: &dyn SymbolSource, ty: Ty) 
     let mut seen = crate::fx_hash::HashSet::default();
     let mut signatures = Vec::new();
     while let Some(current) = queue.pop_front() {
-        if matches!(current.non_null(), Ty::Fun(_)) {
+        if current.non_null().is_fun() {
             let callable = current.non_null();
             if !signatures.contains(&callable) {
                 signatures.push(callable);

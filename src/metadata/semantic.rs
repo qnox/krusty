@@ -12,7 +12,7 @@ use crate::metadata::decode::{
     decode_module_optional_annotations, decode_package_fragment, strip_builtins_header,
     ClassAnnotationProtocol,
 };
-use crate::types::{Ty, Visibility};
+use crate::types::{Ty, TyKind, Visibility};
 
 pub use crate::metadata::decode::PackageFragmentDecodeError;
 
@@ -565,12 +565,12 @@ pub(crate) fn kotlin_type(internal: &str, mut args: Vec<Ty>, shape: KotlinFuncti
 
 /// Convert the metadata carrier of a suspend function type back to its Kotlin source shape.
 fn source_suspend_function_type(ty: Ty) -> Ty {
-    let Ty::Fun(signature) = ty else {
+    let TyKind::Fun(signature) = ty.kind() else {
         return ty;
     };
     let mut params = signature.params.clone();
-    let ret = match params.last().copied().map(Ty::non_null) {
-        Some(Ty::Obj(continuation, args))
+    let ret = match params.last().copied().map(|ty| ty.non_null().kind()) {
+        Some(TyKind::Obj(continuation, args))
             if continuation.matches("kotlin/coroutines/Continuation") =>
         {
             let ret = args
@@ -763,7 +763,7 @@ mod tests {
                 suspend: false,
             },
         };
-        let Ty::Fun(signature) = semantic_ty(&extension, &HashMap::default()) else {
+        let TyKind::Fun(signature) = semantic_ty(&extension, &HashMap::default()).kind() else {
             panic!("function classifier must become a semantic function type");
         };
         assert_eq!(signature.params.as_slice(), &[Ty::String, Ty::Int]);
@@ -797,7 +797,7 @@ mod tests {
                 ..Default::default()
             },
         };
-        let Ty::Fun(signature) = semantic_ty(&suspend, &HashMap::default()) else {
+        let TyKind::Fun(signature) = semantic_ty(&suspend, &HashMap::default()).kind() else {
             panic!("suspend classifier must become a semantic function type");
         };
         assert_eq!(signature.params.as_slice(), &[Ty::Int]);

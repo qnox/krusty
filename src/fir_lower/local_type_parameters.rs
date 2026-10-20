@@ -19,7 +19,7 @@ use crate::fir::{
 };
 use crate::fx_hash::HashMap;
 use crate::ir::{IrGenericSig, IrTypeParameter};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// The type parameters `body` captures, each as the type that names it, in the order its closure
 /// first sees them. `published` gives the closure of a local function declared outside `body`.
@@ -118,35 +118,39 @@ struct Closure<'a> {
 
 impl Closure<'_> {
     fn see(&mut self, ty: Ty) {
-        match ty {
-            Ty::TyParam(name, bound) => {
+        match ty.kind() {
+            TyKind::TyParam(name, bound) => {
                 if self.own.contains(&name.as_str())
                     || self
                         .captured
                         .iter()
-                        .any(|captured| matches!(captured, Ty::TyParam(seen, _) if *seen == name))
+                        .any(|captured| matches!(captured.kind(), TyKind::TyParam(seen, _) if *seen == name))
                 {
                     return;
                 }
                 self.captured.push(ty);
-                self.see(*bound);
+                self.see(bound);
             }
-            Ty::Obj(_, arguments) => arguments.iter().for_each(|&argument| self.see(argument)),
-            Ty::Fun(signature) => {
+            TyKind::Obj(_, arguments) => arguments.iter().for_each(|&argument| self.see(argument)),
+            TyKind::Fun(signature) => {
                 signature
                     .params
                     .iter()
                     .for_each(|&parameter| self.see(parameter));
                 self.see(signature.ret);
             }
-            Ty::DefinitelyNotNull(inner)
-            | Ty::Nullable(inner)
-            | Ty::PlatformNullable(inner)
-            | Ty::InProjection(inner)
-            | Ty::OutProjection(inner) => self.see(*inner),
-            Ty::Intersection(parts) => parts.iter().for_each(|&part| self.see(part)),
-            Ty::StarProjection(_) | Ty::Unit | Ty::Null | Ty::Nothing | Ty::Error | Ty::Pending => {
-            }
+            TyKind::DefinitelyNotNull(inner)
+            | TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner) => self.see(inner),
+            TyKind::Intersection(parts) => parts.iter().for_each(|&part| self.see(part)),
+            TyKind::StarProjection(_)
+            | TyKind::Unit
+            | TyKind::Null
+            | TyKind::Nothing
+            | TyKind::Error
+            | TyKind::Pending => {}
         }
     }
 }
@@ -201,7 +205,7 @@ impl BodyLowering<'_> {
     /// The declaration of a captured type parameter: a module declaration's, or the one an
     /// enclosing local function signs.
     fn captured_type_parameter(&self, ty: Ty) -> IrTypeParameter {
-        let Ty::TyParam(semantic_name, _) = ty else {
+        let TyKind::TyParam(semantic_name, _) = ty.kind() else {
             unreachable!("a closure captures type parameters only");
         };
         if let Some(parameter) =

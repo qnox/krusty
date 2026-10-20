@@ -4,7 +4,7 @@
 
 use super::{box_wrap, erase, is_ref, value_class_name, Under};
 use crate::ir::{Callee, ExprId, IrExpr, IrFile};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// Box an unboxed value-class result at every tail position of `id` (recursing `when`/block/return
 /// tails). `prim_only` (the lambda `() -> T` case) boxes only a primitive-underlying result — a
@@ -90,8 +90,10 @@ fn unboxed_vc_class(
                 callee
                     .source_function()
                     .expect("guarded same-file function call") as usize,
-            ) {
-            Some(Ty::Obj(fq_name, _)) if under.contains_key(fq_name) => Some(*fq_name),
+            )
+            .map(|ty| ty.kind())
+        {
+            Some(TyKind::Obj(fq_name, _)) if under.contains_key(&fq_name) => Some(fq_name),
             _ => None,
         },
         IrExpr::Block { value: Some(v), .. } => unboxed_vc_class(exprs, rets, under, *v, calls),

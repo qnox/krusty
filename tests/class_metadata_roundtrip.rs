@@ -14,7 +14,7 @@ use krusty::metadata::class_builder::{
     build_class, CapturedTypeParameters, ClassTail, CtorMeta, FnMeta, JvmClassSignatures,
     JvmConstructorSignature, DEFAULT_CLASS_FLAGS, EQUALS_FN_FLAGS,
 };
-use krusty::types::{type_name, Ty, TypeVariance};
+use krusty::types::{type_name, Ty, TyKind, TypeVariance};
 
 /// Wrap built `(d1_bytes, d2)` into a `ClassInfo` the reader consumes. `d1` is the protobuf payload with
 /// one byte per `char` (the constant pool writes it as modified-UTF-8, the reader decodes it back).
@@ -354,10 +354,10 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         .expect("pair metadata");
     let signature = pair.generic_sig.as_ref().expect("generic member signature");
     assert!(matches!(
-        signature.params[0],
-        Ty::TyParam(name, _) if name == "outer-semantic"
+        signature.params[0].kind(),
+        TyKind::TyParam(name, _) if name == "outer-semantic"
     ));
-    assert!(matches!(signature.params[1], Ty::TyParam(name, _) if name == "U"));
+    assert!(matches!(signature.params[1].kind(), TyKind::TyParam(name, _) if name == "U"));
 }
 
 #[test]
@@ -431,14 +431,14 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         .and_then(|function| function.generic_sig.as_ref())
         .expect("triple metadata signature");
     assert!(matches!(
-        signature.params[0],
-        Ty::TyParam(name, _) if name == "outer-semantic"
+        signature.params[0].kind(),
+        TyKind::TyParam(name, _) if name == "outer-semantic"
     ));
     assert!(matches!(
-        signature.params[1],
-        Ty::TyParam(name, _) if name == "middle-semantic"
+        signature.params[1].kind(),
+        TyKind::TyParam(name, _) if name == "middle-semantic"
     ));
-    assert!(matches!(signature.params[2], Ty::TyParam(name, _) if name == "V"));
+    assert!(matches!(signature.params[2].kind(), TyKind::TyParam(name, _) if name == "V"));
 }
 
 #[test]

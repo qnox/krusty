@@ -5,6 +5,7 @@
 //! to decide whether a source compound assignment is in-place.
 
 use super::*;
+use crate::types::TyKind;
 
 enum ReceiverOperatorRung {
     Selected {
@@ -197,7 +198,7 @@ impl ProductionSignatureSemantics<'_> {
         receiver: crate::fir::ResolvedTy,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
     ) -> Option<Ty> {
-        let Ty::Fun(signature) = local_operator.get().non_null() else {
+        let TyKind::Fun(signature) = local_operator.get().non_null().kind() else {
             return None;
         };
         let context_count = signature.context_count.min(signature.params.len());

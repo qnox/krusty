@@ -11,7 +11,7 @@ use crate::libraries::{
     PropKind, PropertyInfo, PropertySet, ResolvedSymbols,
 };
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{stored_value_ty, Ty, TypeName};
+use crate::types::{stored_value_ty, Ty, TyKind, TypeName};
 
 use super::{DeclarationFlags, DeclarationId, DeclarationKind, ResolvedModuleIndex, SourceFileId};
 
@@ -310,7 +310,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         projected.callable_signatures = supertype_templates
             .iter()
             .copied()
-            .filter(|supertype| matches!(supertype.non_null(), Ty::Fun(_)))
+            .filter(|supertype| supertype.non_null().is_fun())
             .collect();
         projected.callable_signature = projected.callable_signatures.first().copied();
         // Beside its callable shape, a function supertype is an edge to the function classifier it
@@ -907,21 +907,21 @@ impl<'a> StreamedModuleSymbols<'a> {
         };
         let lambda_param_types = parameters
             .iter()
-            .map(|parameter| match parameter.non_null() {
-                Ty::Fun(signature) => signature.params.clone(),
+            .map(|parameter| match parameter.non_null().kind() {
+                TyKind::Fun(signature) => signature.params.clone(),
                 _ => Vec::new(),
             })
             .collect::<Vec<_>>();
         let lambda_receivers = parameters
             .iter()
             .map(|parameter| {
-                matches!(parameter.non_null(), Ty::Fun(signature) if signature.has_receiver)
+                matches!(parameter.non_null().kind(), TyKind::Fun(signature) if signature.has_receiver)
             })
             .collect::<Vec<_>>();
         let lambda_context_counts = parameters
             .iter()
-            .map(|parameter| match parameter.non_null() {
-                Ty::Fun(signature) => signature.context_count,
+            .map(|parameter| match parameter.non_null().kind() {
+                TyKind::Fun(signature) => signature.context_count,
                 _ => 0,
             })
             .collect::<Vec<_>>();

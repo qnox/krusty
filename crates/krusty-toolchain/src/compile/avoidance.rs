@@ -11,7 +11,7 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use sha2::{Digest, Sha256};
@@ -32,6 +32,33 @@ pub fn inputs(krusty: &Path, arguments: &[OsString]) -> Option<String> {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
     (ran.status.success() && is_digest).then(|| fingerprint.to_string())
+}
+
+/// The fingerprint of the inputs of a run of another tool than krusty (KSP): its `arguments`, then
+/// each of `reads` by path and, for a file, its contents, for a directory, the path and contents of
+/// every file below it. A path that does not exist is fingerprinted as missing.
+pub fn tool_inputs(arguments: &[OsString], reads: &[PathBuf]) -> io::Result<String> {
+    let mut digest = Sha256::new();
+    field(&mut digest, &(arguments.len() as u32).to_be_bytes());
+    for argument in arguments {
+        field(&mut digest, argument.as_encoded_bytes());
+    }
+    for read in reads {
+        field(&mut digest, read.as_os_str().as_encoded_bytes());
+        match std::fs::metadata(read) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => field(&mut digest, b"missing"),
+            Err(error) => return Err(error),
+            Ok(metadata) if metadata.is_dir() => {
+                field(&mut digest, b"directory");
+                field(&mut digest, output_contents(read)?.as_bytes());
+            }
+            Ok(_) => {
+                field(&mut digest, b"file");
+                field(&mut digest, &Sha256::digest(std::fs::read(read)?));
+            }
+        }
+    }
+    Ok(hex(&digest.finalize()))
 }
 
 /// Whether the last successful compilation, recorded in `state`, had `inputs` and left `output`

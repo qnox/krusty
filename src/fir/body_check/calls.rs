@@ -2001,6 +2001,7 @@ impl BodyFirChecker<'_> {
                     })?,
                     selected.member.params[0],
                 )?,
+                ends_inlined_call: selected.member.inline.can_inline(),
             });
         }
         let primitive_operation = match selected.member.realization {
@@ -2064,7 +2065,7 @@ impl BodyFirChecker<'_> {
             });
         }
         if primitive_operation == Some(crate::libraries::CompilerIntrinsic::PrimitiveCompare) {
-            return self.primitive_compare_call(expression, receiver, arguments, &selected);
+            return self.primitive_compare_call(expression, receiver, arguments, selected);
         }
         if let Some(crate::libraries::CompilerIntrinsic::PrimitiveUnary(operation)) =
             primitive_operation

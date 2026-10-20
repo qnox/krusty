@@ -14,6 +14,7 @@
 //! deprecation warning until `ReportReificationProblemsInDnnAndFlexible`.
 
 use super::*;
+use crate::types::TyKind;
 
 /// One type argument the call selected at an expression reifies.
 struct ReifiedTypeArgument {
@@ -231,8 +232,8 @@ impl Checker<'_> {
             // A projected element (`out T`, `in T`, `*`) is not materialized.
             for (index, &element) in elements.iter().enumerate() {
                 if !matches!(
-                    element,
-                    Ty::InProjection(_) | Ty::OutProjection(_) | Ty::StarProjection(_)
+                    element.kind(),
+                    TyKind::InProjection(_) | TyKind::OutProjection(_) | TyKind::StarProjection(_)
                 ) {
                     self.reified_problems(
                         scope,
@@ -251,8 +252,8 @@ impl Checker<'_> {
             return;
         }
         let features = &self.file.reified_type_arguments;
-        match argument {
-            Ty::TyParam(name, _) => {
+        match argument.kind() {
+            TyKind::TyParam(name, _) => {
                 if !reified_type_parameter(scope, name.as_str()) {
                     problems.push(ReifiedProblem::TypeParameter {
                         name: name.as_str(),
@@ -261,7 +262,7 @@ impl Checker<'_> {
                     });
                 }
             }
-            Ty::Nullable(&Ty::TyParam(name, _)) => {
+            TyKind::Nullable(Ty::TyParam(name, _)) => {
                 if !reified_type_parameter(scope, name.as_str()) {
                     problems.push(ReifiedProblem::TypeParameter {
                         name: name.as_str(),
@@ -270,22 +271,22 @@ impl Checker<'_> {
                     });
                 }
             }
-            Ty::DefinitelyNotNull(original) => {
+            TyKind::DefinitelyNotNull(original) => {
                 self.reified_problems(
-                    scope, None, provenance, *original, None, in_array, true, problems,
+                    scope, None, provenance, original, None, in_array, true, problems,
                 );
             }
-            Ty::Nothing => problems.push(ReifiedProblem::ForbiddenSubstitution("Nothing")),
-            Ty::Null | Ty::Nullable(&Ty::Nothing) if !features.nullable_nothing => {
+            TyKind::Nothing => problems.push(ReifiedProblem::ForbiddenSubstitution("Nothing")),
+            TyKind::Null | TyKind::Nullable(Ty::Nothing) if !features.nullable_nothing => {
                 problems.push(ReifiedProblem::ForbiddenSubstitution("Nothing?"));
             }
-            Ty::Intersection(parts) => problems.push(ReifiedProblem::Intersection {
+            TyKind::Intersection(parts) => problems.push(ReifiedProblem::Intersection {
                 parts: parts.to_vec(),
                 in_dnn_or_flexible: through_indirect,
             }),
-            Ty::PlatformNullable(lower) => {
+            TyKind::PlatformNullable(lower) => {
                 self.reified_problems(
-                    scope, spelling, provenance, *lower, None, in_array, true, problems,
+                    scope, spelling, provenance, lower, None, in_array, true, problems,
                 );
             }
             _ => {}
@@ -389,9 +390,11 @@ fn reified_type_parameter(scope: &CheckerScope<'_>, identity: &str) -> bool {
 
 /// The type arguments of a fully expanded `kotlin.Array` type, nullable or not.
 fn array_type_arguments(ty: Ty) -> Option<&'static [Ty]> {
-    match ty {
-        Ty::Obj(name, arguments) if name == crate::types::wk::array() => Some(arguments.as_slice()),
-        Ty::Nullable(&Ty::Obj(name, arguments)) if name == crate::types::wk::array() => {
+    match ty.kind() {
+        TyKind::Obj(name, arguments) if name == crate::types::wk::array() => {
+            Some(arguments.as_slice())
+        }
+        TyKind::Nullable(Ty::Obj(name, arguments)) if name == crate::types::wk::array() => {
             Some(arguments.as_slice())
         }
         _ => None,

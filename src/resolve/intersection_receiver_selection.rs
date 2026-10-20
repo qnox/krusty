@@ -1,6 +1,7 @@
 //! Receiver views committed after selection from a semantic intersection.
 
 use super::*;
+use crate::types::TyKind;
 
 impl Checker<'_> {
     /// Project a flow intersection onto the constituent that owns the member being used. Candidate
@@ -105,7 +106,7 @@ impl Checker<'_> {
         receiver: Ty,
         selected: &crate::libraries::FunctionInfo,
     ) -> Option<Ty> {
-        let Ty::Intersection(bounds) = receiver.non_null() else {
+        let TyKind::Intersection(bounds) = receiver.non_null().kind() else {
             return None;
         };
         let matching = bounds

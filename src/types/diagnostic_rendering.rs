@@ -5,6 +5,7 @@
 //! type parameter's owner wording, and Java collection mutability flexibility.
 
 use super::{type_parameter_source_name, FnSig, Ty, TypeName};
+use crate::types::TyKind;
 
 pub(super) fn function_type(
     signature: &FnSig,
@@ -38,13 +39,13 @@ pub(super) fn function_type(
     };
     // kotlinc parenthesizes a receiver whose rendering is not a plain classifier.
     let receiver = receiver
-        .map(|receiver| match receiver {
-            Ty::TyParam(..)
-            | Ty::Nullable(_)
-            | Ty::PlatformNullable(_)
-            | Ty::DefinitelyNotNull(_)
-            | Ty::Intersection(_)
-            | Ty::Fun(_) => format!("({}).", render(receiver)),
+        .map(|receiver| match receiver.kind() {
+            TyKind::TyParam(..)
+            | TyKind::Nullable(_)
+            | TyKind::PlatformNullable(_)
+            | TyKind::DefinitelyNotNull(_)
+            | TyKind::Intersection(_)
+            | TyKind::Fun(_) => format!("({}).", render(receiver)),
             _ => format!("{}.", render(receiver)),
         })
         .unwrap_or_default();
@@ -62,7 +63,7 @@ pub(super) fn qualified_type_parameter(
     nullable: bool,
     render: &dyn Fn(&str) -> String,
 ) -> String {
-    let Ty::TyParam(parameter, _) = parameter else {
+    let TyKind::TyParam(parameter, _) = parameter.kind() else {
         unreachable!("caller only delegates type parameters")
     };
     let marker = if nullable { "?" } else { "!" };
@@ -88,7 +89,9 @@ pub(super) fn platform_type(
         ty.source_name_with_classifier_in(context, type_parameter, classifier, platform_upper_bound)
     };
     let upper = platform_upper_bound(inner);
-    let (Ty::Obj(lower_owner, arguments), Ty::Obj(upper_owner, _)) = (inner, upper) else {
+    let (TyKind::Obj(lower_owner, arguments), TyKind::Obj(upper_owner, _)) =
+        (inner.kind(), upper.kind())
+    else {
         return format!("{}!", render(inner));
     };
     if lower_owner == upper_owner {
@@ -108,9 +111,14 @@ pub(super) fn platform_type(
     let arguments = arguments
         .iter()
         .map(|argument| {
-            let flexible = match *argument {
-                Ty::TyParam(..) | Ty::Obj(..) | Ty::Fun(_) => Ty::platform_nullable(*argument),
-                argument => argument,
+            let flexible = {
+                let argument = *argument;
+                match argument.kind() {
+                    TyKind::TyParam(..) | TyKind::Obj(..) | TyKind::Fun(_) => {
+                        Ty::platform_nullable(argument)
+                    }
+                    _ => argument,
+                }
             };
             render(flexible)
         })

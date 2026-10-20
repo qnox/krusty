@@ -1,6 +1,6 @@
 //! What a toolchain plugin's `plugin.yaml` declares, as far as krusty-toolchain implements it: the
-//! Kotlin source directories it adds to the main fragment of a module that enables it
-//! (`generated.sources`), each written as the argument of a task's action that is a directory of
+//! Kotlin source directories and the resource directories it adds to the main fragment of a module
+//! that enables it (`generated.sources`, `generated.resources`), each written as the argument of a task's action that is a directory of
 //! that module (`${tasks.<task>.action.<argument>}`), or as that directory itself
 //! (`${module.rootDir}/…`). The toolchain rejects a directory written out that no task's action
 //! argument is, for each module that enables the plugin (`super`).
@@ -15,8 +15,8 @@ use crate::diagnostic::{Diagnostic, Diagnostics};
 use crate::reading::{read_document, FileReader, Value};
 use crate::yaml::{NodeId, Span};
 
-/// A Kotlin source directory a plugin adds to a module.
-pub(super) struct GeneratedSources {
+/// A Kotlin source or resource directory a plugin adds to a module.
+pub(super) struct GeneratedDirectory {
     /// The directory below the module's directory, as path segments.
     pub below_module: Vec<String>,
     /// The task whose action argument names the directory, when one does.
@@ -30,7 +30,8 @@ pub(super) struct Declaration {
     pub file: PathBuf,
     /// The whole document, where the toolchain reports a problem with a generated directory.
     pub document: Option<Span>,
-    pub sources: Vec<GeneratedSources>,
+    pub sources: Vec<GeneratedDirectory>,
+    pub resources: Vec<GeneratedDirectory>,
 }
 
 const MODULE_ROOT: &str = "${module.rootDir}";
@@ -75,7 +76,7 @@ pub(super) fn read(id: &str, file: &Path) -> Result<Declaration, Vec<Diagnostic>
             format!("krusty-toolchain reads the `plugin.yaml` of plugin `{id}` only as a mapping"),
         ),
     }
-    let sources = generated
+    let (sources, resources) = generated
         .map(|generated| read_generated(id, &mut reader, generated, &tasks))
         .unwrap_or_default();
     if diagnostics.has_errors() {
@@ -85,6 +86,7 @@ pub(super) fn read(id: &str, file: &Path) -> Result<Declaration, Vec<Diagnostic>
         file: file.to_path_buf(),
         document: document_span,
         sources,
+        resources,
     })
 }
 
@@ -136,47 +138,100 @@ fn read_tasks<'d>(id: &str, reader: &mut FileReader<'d>, node: NodeId, tasks: &m
     }
 }
 
-/// `generated:`: its Kotlin `sources`.
+/// `generated:`: its Kotlin `sources` and its `resources`.
 fn read_generated(
     id: &str,
     reader: &mut FileReader<'_>,
     node: NodeId,
     tasks: &Tasks<'_>,
-) -> Vec<GeneratedSources> {
+) -> (Vec<GeneratedDirectory>, Vec<GeneratedDirectory>) {
     let Value::Mapping(entries) = reader.value(node) else {
         reader.error(
             node,
             format!("krusty-toolchain reads `generated` of plugin `{id}` only as a mapping"),
         );
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let mut sources = Vec::new();
+    let mut resources = Vec::new();
     for &(key, value) in entries {
-        match reader.key(key) {
-            "sources" => {
-                let Value::Sequence(items) = reader.value(value) else {
-                    reader.error(
-                        value,
-                        format!("krusty-toolchain reads `generated.sources` of plugin `{id}` only as a list"),
-                    );
-                    continue;
-                };
-                for &item in items {
-                    if let Some(source) = read_source(id, reader, item, tasks) {
-                        sources.push(source);
-                    }
-                }
-            }
+        let kind = reader.key(key).to_string();
+        let (read, directories): (Reader, _) = match kind.as_str() {
+            "sources" => (read_source, &mut sources),
+            "resources" => (read_resources, &mut resources),
             other => {
                 let other = other.to_string();
                 reader.error(
                     key,
                     format!("plugin `{id}` declares `generated.{other}`, and krusty-toolchain does not implement it"),
                 );
+                continue;
+            }
+        };
+        let Value::Sequence(items) = reader.value(value) else {
+            reader.error(
+                value,
+                format!(
+                    "krusty-toolchain reads `generated.{kind}` of plugin `{id}` only as a list"
+                ),
+            );
+            continue;
+        };
+        directories.extend(
+            items
+                .iter()
+                .filter_map(|&item| read(id, reader, item, tasks)),
+        );
+    }
+    (sources, resources)
+}
+
+/// How one item of a `generated` list is read.
+type Reader = fn(&str, &mut FileReader<'_>, NodeId, &Tasks<'_>) -> Option<GeneratedDirectory>;
+
+/// One `generated.resources` item: its `directory`.
+fn read_resources(
+    id: &str,
+    reader: &mut FileReader<'_>,
+    item: NodeId,
+    tasks: &Tasks<'_>,
+) -> Option<GeneratedDirectory> {
+    let Value::Mapping(properties) = reader.value(item) else {
+        reader.error(
+            item,
+            format!("krusty-toolchain reads a `generated.resources` item of plugin `{id}` only as a mapping"),
+        );
+        return None;
+    };
+    let mut directory = None;
+    let mut fine = true;
+    for &(key, value) in properties {
+        match reader.key(key) {
+            "directory" => directory = Some(value),
+            other => {
+                fine = false;
+                let other = other.to_string();
+                reader.error(
+                    key,
+                    format!("plugin `{id}` sets `{other}` on generated resources, and krusty-toolchain does not implement it"),
+                );
             }
         }
     }
-    sources
+    let Some(directory) = directory else {
+        reader.error(
+            item,
+            format!("generated resources of plugin `{id}` name no `directory`"),
+        );
+        return None;
+    };
+    let span = reader.span(directory);
+    let (below_module, task) = directory_of(id, reader, directory, tasks)?;
+    fine.then_some(GeneratedDirectory {
+        below_module,
+        task,
+        span,
+    })
 }
 
 /// One `generated.sources` item: `language: kotlin` and its `directory`.
@@ -185,7 +240,7 @@ fn read_source(
     reader: &mut FileReader<'_>,
     item: NodeId,
     tasks: &Tasks<'_>,
-) -> Option<GeneratedSources> {
+) -> Option<GeneratedDirectory> {
     let Value::Mapping(properties) = reader.value(item) else {
         reader.error(
             item,
@@ -235,7 +290,7 @@ fn read_source(
     };
     let span = reader.span(directory);
     let (below_module, task) = directory_of(id, reader, directory, tasks)?;
-    fine.then_some(GeneratedSources {
+    fine.then_some(GeneratedDirectory {
         below_module,
         task,
         span,

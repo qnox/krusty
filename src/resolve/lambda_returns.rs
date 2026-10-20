@@ -1,7 +1,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ast::{Expr, ExprId, File, StmtId};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::{Checker, CheckerScope};
 
@@ -491,7 +491,7 @@ impl Checker<'_> {
         if Self::type_is_lexically_fixed(scope, sam.ret) {
             return false;
         }
-        let Ty::Fun(signature) = function else {
+        let TyKind::Fun(signature) = function.kind() else {
             return false;
         };
         if signature.params != sam.params
