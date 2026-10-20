@@ -17795,13 +17795,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   written on a bodyless `get`/`set` or through `@get:JvmName`/`@set:JvmName`. The JVM backend
   realizes it from the accessor's checked annotations before emission, for a member, an object, a
   file-facade property and a companion property whose storage is hoisted onto the outer class. The
-  declaration, same-file calls, a callable reference (`C::p`, `::top`), the property's
-  `JvmPropertySignature` and its `$annotations` marker all use it. An explicit `@JvmName` is not changed further: an internal member keeps it without the
-  `$<module>` suffix (a function, a declared accessor or a default one), and a value-class-typed
-  property keeps it without the value-class hash. A companion's synthesized default accessors also
-  carry the annotations written on them (`@get:Deprecated`). Known gaps: a call from another file
-  of the module still names a member's Kotlin accessor or function (the stable header records no
-  member annotation arguments), a `@JvmStatic` companion property has no outer static wrapper, and
+  declaration, calls from the same file or from another file of the module, a callable reference
+  (`C::p`, `::top`), the property's `JvmPropertySignature` and its `$annotations` marker all use it.
+  One fact serves every use. Pass 1 publishes, under the property's stable identity, the checked
+  applications that land on each accessor (written on it, or targeted from the property, including
+  a constructor `val`/`var`), checking a use-site target against the property that owns it. The
+  module property record carries them as annotation identities with their string arguments, and
+  the JVM backend alone turns a `kotlin/jvm/JvmName` among them into the accessor's name. The
+  stable header records a member function's annotation arguments like a top-level one's, so a
+  call from another file to `@JvmName("compute") fun f()` names `compute`. The marker and the
+  value-class pass read the name module realization gave the declaration rather than reading the
+  annotation again. An explicit `@JvmName` is not changed further: an internal member keeps it
+  without the `$<module>` suffix (a function, a declared accessor or a default one), and a
+  value-class-typed property keeps it without the value-class hash. A companion's synthesized
+  default accessors also carry the annotations written on them (`@get:Deprecated`). Known gaps: a
+  `@JvmStatic` companion property has no outer static wrapper, and
   a top-level `lateinit var`, which has no checked body, carries no accessor annotations. A
   top-level property's retained `PROPERTY`-targeted annotation gets no `$annotations` marker at all
   (with or without `@JvmName`); only a suppressed SOURCE application's empty marker is emitted there.

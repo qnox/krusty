@@ -39,20 +39,13 @@ pub(super) fn stamp_synthesized(ir: &mut IrFile, under: &Under) {
             .iter()
             .enumerate()
             .filter(|(_, property)| property.getter.is_none() && property.backing_field.is_some())
-            .map(|(index, property)| {
-                let written = |annotations| {
-                    crate::jvm::module_calls::applied_jvm_name(Some(annotations))
-                        .ok()
-                        .flatten()
-                        .map(str::to_owned)
-                };
-                DefaultAccessors {
-                    index,
-                    name: property.name.clone(),
-                    ty: property.ty,
-                    written_getter: written(&property.accessor_annotations.getter),
-                    written_setter: written(&property.accessor_annotations.setter),
-                }
+            .map(|(index, property)| DefaultAccessors {
+                index,
+                name: property.name.clone(),
+                ty: property.ty,
+                // Module realization already gave a default accessor its written `@JvmName`.
+                written_getter: property.getter_jvm_name.clone(),
+                written_setter: property.setter_jvm_name.clone(),
             })
             .collect();
         for DefaultAccessors {

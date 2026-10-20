@@ -1,6 +1,7 @@
 //! Constant string arguments of declaration annotations, extracted once while streaming headers.
 
-use super::{DeclarationId, File};
+use super::{DeclarationAnchor, DeclarationId, DeclarationIds, DeclarationKind, File};
+use crate::ast::Decl;
 
 /// Provider-neutral constant payload for declaration annotations needed during signature solving.
 /// The arena is deliberately generic: `@JvmName`, plugin annotations, and future signature-affecting
@@ -13,7 +14,73 @@ pub(super) struct HeaderAnnotationStringArena {
 }
 
 impl HeaderAnnotationStringArena {
-    pub(super) fn add(
+    /// Record the annotation arguments of every top-level declaration of `file` and of the
+    /// functions and properties its classes declare. A member's arguments are read by other files
+    /// exactly like a top-level declaration's, under the stable identity the inventory interned.
+    pub(super) fn add_file(
+        &mut self,
+        file: &File,
+        source: crate::fir::SourceFileId,
+        stable_by_transient: &crate::fx_hash::HashMap<crate::ast::DeclId, DeclarationId>,
+        declarations: &DeclarationIds,
+    ) {
+        for &declaration in &file.decls {
+            let Some(&stable) = stable_by_transient.get(&declaration) else {
+                continue;
+            };
+            match file.decl(declaration) {
+                Decl::Fun(function) => {
+                    self.add(
+                        stable,
+                        file,
+                        &function.annotations,
+                        &function.annotation_args,
+                    );
+                }
+                Decl::Property(property) => {
+                    self.add(
+                        stable,
+                        file,
+                        &property.annotations,
+                        &property.annotation_args,
+                    );
+                }
+                Decl::Class(class) => {
+                    self.add(stable, file, &class.annotations, &class.annotation_args);
+                    let member = |range, kind, sibling: usize| {
+                        declarations.get(DeclarationAnchor {
+                            source,
+                            range,
+                            owner: Some(stable),
+                            kind,
+                            sibling: u32::try_from(sibling).expect("too many class members"),
+                        })
+                    };
+                    for (sibling, method) in class.methods.iter().enumerate() {
+                        if let Some(member) =
+                            member(method.span, DeclarationKind::Function, sibling)
+                        {
+                            self.add(member, file, &method.annotations, &method.annotation_args);
+                        }
+                    }
+                    for (sibling, property) in class.body_props.iter().enumerate() {
+                        if let Some(member) =
+                            member(property.span, DeclarationKind::Property, sibling)
+                        {
+                            self.add(
+                                member,
+                                file,
+                                &property.annotations,
+                                &property.annotation_args,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn add(
         &mut self,
         declaration: DeclarationId,
         file: &File,

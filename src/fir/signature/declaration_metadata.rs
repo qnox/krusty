@@ -36,6 +36,68 @@ impl BodyLocalOwnership {
     }
 }
 
+/// One accessor of a property, as a key for the annotations that apply to it.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum PropertyAccessor {
+    Getter,
+    Setter,
+}
+
+/// The declaration site a set of checked annotation applications lands on. A compiler-default
+/// accessor has no declaration of its own, so an accessor site is named by its property.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum CheckedApplicationSite {
+    Declaration(DeclarationId),
+    Accessor(DeclarationId, PropertyAccessor),
+}
+
+/// Fully checked annotation applications. Values are folded against the selected annotation
+/// constructor and keyed by stable site; consumers never join them back to the identity-only
+/// header list by ordinal.
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct CheckedAnnotationApplications {
+    sites: HashMap<CheckedApplicationSite, Box<[crate::types::ResolvedAnnotation]>>,
+}
+
+impl CheckedAnnotationApplications {
+    fn get(&self, site: CheckedApplicationSite) -> &[crate::types::ResolvedAnnotation] {
+        self.sites.get(&site).map(Box::as_ref).unwrap_or_default()
+    }
+
+    fn publish(
+        &mut self,
+        site: CheckedApplicationSite,
+        annotations: impl IntoIterator<Item = crate::types::ResolvedAnnotation>,
+    ) {
+        let annotations = annotations
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        if annotations.is_empty() {
+            return;
+        }
+        assert!(
+            self.sites.insert(site, annotations).is_none(),
+            "a declaration site may publish checked annotation applications only once"
+        );
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.sites.is_empty()
+    }
+
+    pub(super) fn storage_payload_bytes(&self) -> usize {
+        self.sites
+            .values()
+            .map(|annotations| {
+                std::mem::size_of::<CheckedApplicationSite>()
+                    + std::mem::size_of::<Box<[crate::types::ResolvedAnnotation]>>()
+                    + annotations.len() * std::mem::size_of::<crate::types::ResolvedAnnotation>()
+            })
+            .sum()
+    }
+}
+
 /// The superclass constructor a generated no-arg constructor (kotlinc's no-arg plugin) delegates
 /// to, selected by the frontend.
 ///
@@ -290,10 +352,20 @@ impl ResolvedModuleIndex {
         &self,
         declaration: DeclarationId,
     ) -> &[crate::types::ResolvedAnnotation] {
-        self.declaration_applied_annotations
-            .get(&declaration)
-            .map(Box::as_ref)
-            .unwrap_or_default()
+        self.checked_annotation_applications
+            .get(CheckedApplicationSite::Declaration(declaration))
+    }
+
+    /// The checked applications on `property`'s `accessor`, whether written on the accessor or
+    /// targeted at it from the property declaration (`@get:A`, `@set:A`), in source order with the
+    /// targeted ones first.
+    pub fn property_accessor_applied_annotations(
+        &self,
+        property: DeclarationId,
+        accessor: PropertyAccessor,
+    ) -> &[crate::types::ResolvedAnnotation] {
+        self.checked_annotation_applications
+            .get(CheckedApplicationSite::Accessor(property, accessor))
     }
 
     pub fn declaration_annotation_string_arguments(
@@ -407,18 +479,21 @@ impl ResolvedModuleIndex {
         declaration: DeclarationId,
         annotations: impl IntoIterator<Item = crate::types::ResolvedAnnotation>,
     ) {
-        let annotations = annotations
-            .into_iter()
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        if annotations.is_empty() {
-            return;
-        }
-        assert!(
-            self.declaration_applied_annotations
-                .insert(declaration, annotations)
-                .is_none(),
-            "a stable declaration may publish checked annotation applications only once"
+        self.checked_annotation_applications.publish(
+            CheckedApplicationSite::Declaration(declaration),
+            annotations,
+        );
+    }
+
+    pub fn publish_property_accessor_applied_annotations(
+        &mut self,
+        property: DeclarationId,
+        accessor: PropertyAccessor,
+        annotations: impl IntoIterator<Item = crate::types::ResolvedAnnotation>,
+    ) {
+        self.checked_annotation_applications.publish(
+            CheckedApplicationSite::Accessor(property, accessor),
+            annotations,
         );
     }
 
