@@ -58,6 +58,12 @@ impl DependencyTemplateCache {
         self.source = Some(source);
     }
 
+    /// Whether this compilation has a template source. A compilation without one, such as one
+    /// whose dependencies are classfiles, calls every dependency function as declared.
+    pub(crate) fn provides_templates(&self) -> bool {
+        self.source.is_some()
+    }
+
     /// The template of `target` in `ir`, lowering it the first time it is asked for.
     pub(crate) fn template(
         &mut self,

@@ -991,7 +991,7 @@ impl BodyLowering<'_> {
             semantic_role: None,
             overridden_declarations: &[],
             suspend: false,
-            inline: crate::libraries::InlineKind::None,
+            inline: crate::fir::InlineKind::None,
             inline_plan: None,
             substitutions: &[],
             extension_receiver_parameter: None,

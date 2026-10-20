@@ -11,6 +11,8 @@ mod context_parameters;
 pub(super) mod value_parameters;
 pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParameter};
 pub(crate) mod debug_lines;
+/// Whether a checked dependency call must, may, or may not be expanded from the callee's body.
+pub use crate::libraries::InlineKind;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
 mod capture_order;
 mod class_captures;

@@ -4,7 +4,6 @@
 //! extensions it declares, and its `companion { … }` block members. Inherited members are core's
 //! hierarchy walk over the direct supertypes the record lists.
 
-use super::builtin_realizations;
 use super::classifier_signatures::{SignedClassifier, SignedConstructor};
 use super::external_identities::ExternalIdentities;
 use super::inventory::PackageInventory;
@@ -48,7 +47,6 @@ pub(super) fn classifier_record(
         {
             published.callable.semantic_role = Some(crate::types::SemanticCallRole::DataClassCopy);
         }
-        builtin_realizations::realize_member(identity, &mut published);
         shape.members.push(member_record(&published));
         functions.push((function.declaration.name.clone(), published));
     }
@@ -56,8 +54,7 @@ pub(super) fn classifier_record(
         .properties
         .iter()
         .map(|property| {
-            let mut published = published_property(identities, property, member, enclosing);
-            builtin_realizations::realize_member_property(identity, &mut published);
+            let published = published_property(identities, property, member, enclosing);
             (property.declaration.name.clone(), published)
         })
         .collect::<Vec<_>>();

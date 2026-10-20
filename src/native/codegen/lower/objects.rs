@@ -2272,6 +2272,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         let name = internal.render();
         if let Some(omitted) = defaulted {
+            // A runtime throwable's declared defaults are the runtime's: it implements the class.
+            if let Some(descriptor) =
+                super::super::super::intrinsics::throwable_descriptor(internal)
+                    .filter(|_| args.is_empty())
+            {
+                let descriptor = self.file.import_data(descriptor)?;
+                let descriptor = self.data_address(descriptor);
+                return self.runtime_call(
+                    "kt_throwable_new_defaulted",
+                    &[any()],
+                    any(),
+                    &[descriptor],
+                );
+            }
             return self.defaulted_construction(internal, args, selected, omitted);
         }
         // `Any()` is declared in no file and needs none: the root has no state and no constructor,
@@ -2284,6 +2298,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         if is_runtime_constructed(self.file, internal) {
             return self.runtime_construction(internal, args, selected);
+        }
+        if let Some(constructed) = self.value_construction(internal, args) {
+            return constructed;
+        }
+        if let Some(constructed) = self.range_class_construction(internal, args) {
+            return constructed;
         }
         let class = self.file.class_of(internal, "construction of")?;
         let declaration = &self.file.ir.classes[class as usize];

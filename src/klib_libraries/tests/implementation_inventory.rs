@@ -7,7 +7,6 @@
 
 use std::rc::Rc;
 
-use super::super::builtin_realizations;
 use super::super::declaration_signatures::SignedFunction;
 use super::super::inventory::{ArchivePackageInput, PackageInventory};
 use super::super::lookup::{published_function, published_property};
@@ -72,9 +71,6 @@ fn normalized_function(
     enclosing: &crate::libraries::EnclosingBounds,
 ) -> FunctionInfo {
     let mut function = published_function(&libraries.identities, signed, placement, enclosing);
-    if let CallablePlacement::Member { owner, .. } = placement {
-        builtin_realizations::realize_member(owner, &mut function);
-    }
     let realization = libraries
         .external_callable(
             function
@@ -99,11 +95,7 @@ fn normalized_property(
     placement: CallablePlacement,
     enclosing: &crate::libraries::EnclosingBounds,
 ) -> PropertyInfo {
-    let mut property = published_property(&libraries.identities, signed, placement, enclosing);
-    if let CallablePlacement::Member { owner, .. } = placement {
-        builtin_realizations::realize_member_property(owner, &mut property);
-    }
-    property
+    published_property(&libraries.identities, signed, placement, enclosing)
 }
 
 fn record_callable(

@@ -213,9 +213,11 @@ pub(crate) fn lower_body_with_context(
         index,
         ir,
         has_dispatch_receiver,
-        HashMap::default(),
-        vec![HashMap::default()],
-        local_callables.realizations.clone(),
+        BodyScopes {
+            capture_slots: HashMap::default(),
+            local_callable_scopes: vec![HashMap::default()],
+            published_local_callables: local_callables.realizations.clone(),
+        },
         &mut local_callables.dependency_templates,
     );
     let root_is_default = body.is_default_fragment();
@@ -558,20 +560,29 @@ struct CapturedDeclaration {
     declaration: crate::ir::IrCapturedDeclaration,
 }
 
+/// The captures and local callables a body is lowered within: its own capture slots, the local
+/// callables of each enclosing scope, and those the file has published so far.
+struct BodyScopes {
+    capture_slots: HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
+    local_callable_scopes: Vec<HashMap<crate::fir::LocalCallableId, LocalCallableRealization>>,
+    published_local_callables:
+        HashMap<crate::fir::BodyLocalCallableDeclarationId, LocalCallableRealization>,
+}
+
 impl<'a> BodyLowering<'a> {
     fn new(
         body: &'a FirBody,
         index: &'a ResolvedModuleIndex,
         ir: &'a mut IrFile,
         has_dispatch_receiver: bool,
-        capture_slots: HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
-        local_callable_scopes: Vec<HashMap<crate::fir::LocalCallableId, LocalCallableRealization>>,
-        published_local_callables: HashMap<
-            crate::fir::BodyLocalCallableDeclarationId,
-            LocalCallableRealization,
-        >,
+        scopes: BodyScopes,
         dependency_templates: &'a mut dependency_templates::DependencyTemplateCache,
     ) -> Self {
+        let BodyScopes {
+            capture_slots,
+            local_callable_scopes,
+            published_local_callables,
+        } = scopes;
         let context_parameter_count = u32::try_from(body.context_receiver_types().len())
             .expect("too many FIR context parameters");
         let context_value_count = body.context_value_count();

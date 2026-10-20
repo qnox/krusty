@@ -20,6 +20,9 @@ use krusty::native::{CraneliftBackend, Entry, NativeTarget};
 use super::box_lane::{self, Lane, Libraries, Outcome};
 use super::box_ratchet::Platform;
 
+#[path = "native_library_inline_bodies.rs"]
+mod library_inline_bodies;
+
 /// Native cases are analyzed against the Kotlin/Native stdlib KLIB, as kotlinc-native compiles them.
 const LIBRARIES: Libraries = Libraries::StdlibKlib;
 

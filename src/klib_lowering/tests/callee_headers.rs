@@ -120,14 +120,15 @@ impl Record {
 
     fn callable(&self) -> KlibCallable<'_> {
         KlibCallable::new(
-            self.name,
-            ExternalCallableKind::TopLevel,
-            &self.params,
-            self.ret,
-            &self.identities,
-            0,
-            None,
-            None,
+            crate::libraries::KlibBodyCallableShape {
+                name: self.name,
+                kind: ExternalCallableKind::TopLevel,
+                params: &self.params,
+                ret: self.ret,
+                parameter_identities: &self.identities,
+                context_count: 0,
+                compiler_intrinsic: None,
+            },
             None,
             None,
             None,

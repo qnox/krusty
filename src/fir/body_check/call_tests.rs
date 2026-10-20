@@ -1256,12 +1256,12 @@ fn suspend_coroutine_is_an_ordinary_inline_suspend_call() {
     else {
         panic!("suspendCoroutine must remain an explicit checked call")
     };
-    // kotlinc inlines the stdlib's own body: the declaration carries no compiler intrinsic.
+    // kotlinc inlines the stdlib's own `@InlineOnly` body: no intrinsic, and no direct-call fallback.
     assert!(matches!(
         call.target,
         FirCallTarget::External {
             suspend: true,
-            inline: crate::libraries::InlineKind::CanInline,
+            inline: crate::libraries::InlineKind::MustInline,
             ..
         }
     ));

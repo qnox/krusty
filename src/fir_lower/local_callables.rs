@@ -1215,9 +1215,11 @@ impl BodyLowering<'_> {
             self.index,
             self.ir,
             false,
-            capture_slots,
-            scopes,
-            self.published_local_callables.clone(),
+            super::BodyScopes {
+                capture_slots,
+                local_callable_scopes: scopes,
+                published_local_callables: self.published_local_callables.clone(),
+            },
             self.dependency_templates,
         );
         nested.enclosure = declaration_enclosure;

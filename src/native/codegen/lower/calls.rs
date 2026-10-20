@@ -605,8 +605,13 @@ impl BodyLowering<'_, '_, '_> {
                 }
                 // A callable reference reaches this ordinary dependency-call path, while retaining
                 // the exact compiler intrinsic the source-form operation uses.
+                // A member's operation travels as its realization; a package function's as its
+                // intrinsic. Either is the same exact provider fact.
                 if let Some(realized) = self.compiler_intrinsic_call(
-                    realization.compiler_intrinsic,
+                    site,
+                    realization
+                        .compiler_intrinsic
+                        .or(realization.member_realization.compiler_intrinsic()),
                     dispatch_receiver,
                     args,
                     *extension_receiver_parameter,
@@ -1063,6 +1068,11 @@ impl BodyLowering<'_, '_, '_> {
                         {
                             return self.assertion(symbol, compared, args);
                         }
+                        if let Some(operation) =
+                            super::super::super::intrinsics::result_operation(owner, &name, params)
+                        {
+                            return self.result_operation(operation, args, *ret);
+                        }
                         if super::super::super::intrinsics::is_assert_fails_with(
                             owner, &name, params,
                         ) {
@@ -1089,6 +1099,34 @@ impl BodyLowering<'_, '_, '_> {
                                 return Ok(None);
                             }
                             return self.runtime_call(symbol, params, *ret, &arguments);
+                        }
+                        // `x in range` through a facade extension an expanded library body
+                        // calls, with the range at its serialized extension-receiver slot.
+                        if name == "contains"
+                            && signature.receiver.is_some()
+                            && super::super::super::intrinsics::is_ranges_facade(owner)
+                        {
+                            if let [range, value] = args {
+                                return self.facade_range_contains(*range, *value);
+                            }
+                        }
+                        // The stdlib's unsigned division helpers, which the unsigned types' own
+                        // `div` and `rem` bodies call: the same unsigned operation.
+                        if let Some(operation) =
+                            super::super::super::intrinsics::unsigned_division_helper(owner, &name)
+                        {
+                            if let ([dividend, divisor], [element, _]) = (args, &params[..]) {
+                                if let Some(realized) = self.unsigned_member(
+                                    *element,
+                                    operation,
+                                    &[*element],
+                                    *ret,
+                                    *dividend,
+                                    &[*divisor],
+                                ) {
+                                    return realized;
+                                }
+                            }
                         }
                         let Some(symbol) =
                             super::super::super::intrinsics::runtime_function(signature)

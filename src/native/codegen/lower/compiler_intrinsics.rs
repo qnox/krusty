@@ -39,12 +39,49 @@ impl BodyLowering<'_, '_, '_> {
         Ok(Some(self.bits_of(value, clif)))
     }
 
+    fn primitive_unary(
+        &mut self,
+        operation: crate::backend::BackendCompilerIntrinsic,
+        operand: u32,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        use crate::backend::BackendCompilerIntrinsic;
+        use crate::libraries::PrimitiveUnaryIntrinsic;
+
+        let Some(value) = self.coerce(operand, ret)? else {
+            return Err("a primitive unary operator on `Unit`".into());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let floating = matches!(ret.non_null(), Ty::Float | Ty::Double);
+        Ok(Some(match operation {
+            BackendCompilerIntrinsic::PrimitiveBitNot if !floating => {
+                self.builder.ins().bnot(value)
+            }
+            BackendCompilerIntrinsic::PrimitiveUnary(PrimitiveUnaryIntrinsic::Identity) => value,
+            BackendCompilerIntrinsic::PrimitiveUnary(PrimitiveUnaryIntrinsic::Negate) => {
+                if floating {
+                    self.builder.ins().fneg(value)
+                } else {
+                    self.builder.ins().ineg(value)
+                }
+            }
+            _ => {
+                return Err(declined!(
+                    "the primitive operator `{operation:?}` on `{ret:?}`"
+                ))
+            }
+        }))
+    }
+
     /// Realize an exact provider intrinsic reached through an ordinary member call.
     ///
     /// Returns `None` only when the selected declaration has no operation handled here, allowing
     /// the caller to continue through ordinary dependency realization.
     pub(super) fn compiler_intrinsic_call(
         &mut self,
+        site: u32,
         intrinsic: Option<crate::backend::BackendCompilerIntrinsic>,
         receiver: Option<u32>,
         args: &[u32],
@@ -70,6 +107,28 @@ impl BodyLowering<'_, '_, '_> {
                 }
             };
             return Some(self.reinterpret_bits(operand, from, ret));
+        }
+        // A primitive operator member — `a.and(b)` in an expanded library body — is the binary
+        // operation its source operator form lowers to.
+        if let Some(op) = intrinsic.and_then(primitive_binary_operation) {
+            let (Some(lhs), [rhs]) = (receiver, args) else {
+                return Some(Err("a primitive operator with malformed operands".into()));
+            };
+            return Some(self.binary(site, op, lhs, *rhs));
+        }
+        // `a.inv()`, `a.unaryMinus()` and `a.unaryPlus()` — the operators with no operand but
+        // the receiver, at the result's carrier as the source operator forms are.
+        if let Some(
+            operation @ (crate::backend::BackendCompilerIntrinsic::PrimitiveBitNot
+            | crate::backend::BackendCompilerIntrinsic::PrimitiveUnary(_)),
+        ) = intrinsic
+        {
+            let (Some(operand), []) = (receiver, args) else {
+                return Some(Err(
+                    "a primitive unary operator with malformed operands".into()
+                ));
+            };
+            return Some(self.primitive_unary(operation, operand, ret));
         }
         let floating_extension_operand = |operand: Ty| {
             let value = exact_extension_operand(receiver, args, extension_receiver_parameter)?;
@@ -157,6 +216,31 @@ impl BodyLowering<'_, '_, '_> {
             _ => None,
         }
     }
+}
+
+/// The common-IR operation of a provider's primitive binary operator.
+fn primitive_binary_operation(
+    intrinsic: crate::backend::BackendCompilerIntrinsic,
+) -> Option<IrBinOp> {
+    use crate::backend::BackendCompilerIntrinsic;
+    use crate::libraries::PrimitiveBinaryIntrinsic;
+
+    Some(match intrinsic {
+        BackendCompilerIntrinsic::PrimitiveBinary(operation) => match operation {
+            PrimitiveBinaryIntrinsic::Add => IrBinOp::Add,
+            PrimitiveBinaryIntrinsic::Subtract => IrBinOp::Sub,
+            PrimitiveBinaryIntrinsic::Multiply => IrBinOp::Mul,
+            PrimitiveBinaryIntrinsic::Divide => IrBinOp::Div,
+            PrimitiveBinaryIntrinsic::Remainder => IrBinOp::Rem,
+        },
+        BackendCompilerIntrinsic::PrimitiveBitAnd => IrBinOp::BitAnd,
+        BackendCompilerIntrinsic::PrimitiveBitOr => IrBinOp::BitOr,
+        BackendCompilerIntrinsic::PrimitiveBitXor => IrBinOp::BitXor,
+        BackendCompilerIntrinsic::PrimitiveShiftLeft => IrBinOp::Shl,
+        BackendCompilerIntrinsic::PrimitiveShiftRight => IrBinOp::Shr,
+        BackendCompilerIntrinsic::PrimitiveUnsignedShiftRight => IrBinOp::Ushr,
+        _ => return None,
+    })
 }
 
 /// The two common-IR representations of one exact top-level extension receiver. A checked source

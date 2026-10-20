@@ -1845,6 +1845,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
                 self.throwable_field_read(symbol, receiver)
             }
+            // `array.size` read through its getter, as an expanded library body reads it.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                result,
+                ..
+            }) if self.is_array_size(target) => {
+                self.intrinsic(IrIntrinsic::ArraySize, result, Some(receiver), &[])
+            }
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                result,
+                ..
+            }) if self.is_unsigned_storage_read(target) => {
+                self.unsigned_storage_read(receiver, result)
+            }
             // `cs.length` where the receiver is typed `CharSequence`: a string, on this target.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
                 target,
