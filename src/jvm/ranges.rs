@@ -3,8 +3,8 @@
 use std::rc::Rc;
 
 use super::{classpath::Classpath, jvm_libraries::JvmLibraries};
-use crate::fir::FirRangeOperation;
-use crate::ir::{Callee, ExprId, IrCheckedOperation, IrExpr, IrFile, IrTypeOp};
+use crate::fir::{FirRangeOperation, SyntheticOriginKind};
+use crate::ir::{Callee, ExprId, IrCheckedOperation, IrExpr, IrFile, IrNodeOrigin, IrTypeOp};
 use crate::types::Ty;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -245,8 +245,18 @@ fn coerce(ir: &mut IrFile, cause: ExprId, value: ExprId, source: Ty, target: Ty)
     value
 }
 
+/// Give a part of the realized construction (a coerced bound, a trailing `null`, the physical call
+/// under a result coercion) the construction's source facts. Only the construction itself ends an
+/// inlined call, so a part takes the cause of that provenance as its own origin.
 fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if let Some(origin) = ir.fir_origins.get(&source).copied() {
+        let origin = match origin {
+            IrNodeOrigin::Synthetic {
+                cause,
+                kind: SyntheticOriginKind::InlinedCall,
+            } => IrNodeOrigin::Fir(cause),
+            origin => origin,
+        };
         ir.fir_origins.insert(target, origin);
     }
     if let Some(line) = ir.expr_lines.get(&source).copied() {
