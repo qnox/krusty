@@ -56,6 +56,14 @@ impl<'a> Realizations<'a> {
                 function.flags = function.flags.with_deprecated_hidden(true);
             }
             function.set_deprecation(self.deprecation(&function.jvm_name, function.jvm_desc));
+            // Metadata records a function's annotations only under `AnnotationsInMetadata`; a
+            // library compiled without it states them on the realization, where kotlinc reads them
+            // (`@LowPriorityInOverloadResolution` among them).
+            if function.annotations.is_empty() {
+                if let Some(method) = self.method(&function.jvm_name, function.jvm_desc) {
+                    function.annotations = method.annotations.to_vec();
+                }
+            }
         }
         functions
     }

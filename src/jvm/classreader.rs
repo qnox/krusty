@@ -55,6 +55,9 @@ pub struct MethodSig {
     /// For a Java `@interface` element: the declaration has an `AnnotationDefault`, so a use site
     /// may omit it. Always false for an ordinary method.
     pub has_annotation_default: bool,
+    /// The classes of the annotations applied to this method (`RuntimeVisibleAnnotations` and
+    /// `RuntimeInvisibleAnnotations`), other than nullability qualifiers.
+    pub annotations: Box<[crate::types::TypeName]>,
 }
 
 impl MethodSig {
@@ -175,6 +178,7 @@ struct MemberAttributes {
     type_use_nullability: TypeUseNullability,
     deprecated_hidden_since: Option<LanguageVersion>,
     deprecation: DeprecationAttributes,
+    annotations: Vec<crate::types::TypeName>,
 }
 
 /// The deprecation facts one declaration's attributes carry: Kotlin's `@Deprecated` and
@@ -1112,6 +1116,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             deprecated_hidden_since: member.attributes.deprecated_hidden_since,
             deprecation: member.attributes.deprecation.declared(kotlin_class),
             has_annotation_default: member.attributes.annotation_default.is_some(),
+            annotations: member.attributes.annotations.into_boxed_slice(),
         })
         .collect();
 
@@ -1702,6 +1707,7 @@ fn read_member_attributes(r: &mut Reader, cp: &[C]) -> Result<MemberAttributes, 
                     &mut attributes.deprecated_hidden,
                     &mut attributes.deprecated_hidden_since,
                     &mut attributes.deprecation,
+                    &mut attributes.annotations,
                 )?;
             }
             // An omitted element is never written into an applied annotation, but instantiating
@@ -1750,6 +1756,7 @@ fn read_declaration_annotations(
     deprecated_hidden_out: &mut bool,
     deprecated_hidden_since_out: &mut Option<LanguageVersion>,
     deprecation_out: &mut DeprecationAttributes,
+    annotations_out: &mut Vec<crate::types::TypeName>,
 ) -> Result<(), ReadError> {
     let utf8 = |index: u16| match cp.get(index as usize) {
         Some(C::Utf8(value)) => value.as_str(),
@@ -1760,6 +1767,9 @@ fn read_declaration_annotations(
     for _ in 0..annotation_count {
         let start = r.i;
         let annotation = utf8(r.u2()?);
+        if descriptor_nullability_qualifier(annotation).is_none() {
+            annotations_out.extend(descriptor_classifier(annotation));
+        }
         if DeprecationAttributes::states_deprecation(annotation) {
             r.i = start;
             let annotation = read_resolved_annotation(&mut r, cp)?;
