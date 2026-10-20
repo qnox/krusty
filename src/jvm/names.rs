@@ -446,8 +446,7 @@ fn descriptor_shape(ty: Ty) -> DescriptorShape {
             DescriptorShape::Class(classfile_internal_name_of(crate::types::wk::string()))
         }
         TyKind::Obj(name, args) => {
-            let object = Ty::Obj(name, args);
-            if object.is_reference_array() {
+            if ty.is_reference_array() {
                 let element = args
                     .first()
                     .copied()
@@ -460,7 +459,7 @@ fn descriptor_shape(ty: Ty) -> DescriptorShape {
                 }
                 return DescriptorShape::Array(element);
             }
-            if let Some(element) = object.array_elem() {
+            if let Some(element) = ty.array_elem() {
                 return DescriptorShape::Array(element);
             }
             DescriptorShape::Class(classfile_internal_name_of(name))
@@ -930,7 +929,7 @@ mod tests {
             Ty::obj("kotlin/Function1"),
             Ty::obj("kotlin/jvm/functions/Function1"),
             Ty::ty_param("T", Ty::obj("kotlin/CharSequence")),
-            Ty::DefinitelyNotNull(crate::types::intern_ty(Ty::ty_param(
+            Ty::from(TyKind::DefinitelyNotNull(Ty::ty_param(
                 "D",
                 Ty::nullable(Ty::obj("kotlin/Any")),
             ))),
@@ -994,11 +993,11 @@ mod tests {
             ("function return error", Ty::fun(Vec::new(), Ty::Error)),
             (
                 "definitely non-null pending",
-                Ty::DefinitelyNotNull(crate::types::intern_ty(Ty::Pending)),
+                Ty::from(TyKind::DefinitelyNotNull(Ty::Pending)),
             ),
             (
                 "definitely non-null error",
-                Ty::DefinitelyNotNull(crate::types::intern_ty(Ty::Error)),
+                Ty::from(TyKind::DefinitelyNotNull(Ty::Error)),
             ),
         ];
 

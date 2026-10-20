@@ -262,13 +262,15 @@ impl Checker<'_> {
                     });
                 }
             }
-            TyKind::Nullable(Ty::TyParam(name, _)) => {
-                if !reified_type_parameter(scope, name.as_str()) {
-                    problems.push(ReifiedProblem::TypeParameter {
-                        name: name.as_str(),
-                        in_array,
-                        in_dnn_or_flexible: through_indirect,
-                    });
+            TyKind::Nullable(inner) if inner.is_ty_param() => {
+                if let TyKind::TyParam(name, _) = inner.kind() {
+                    if !reified_type_parameter(scope, name.as_str()) {
+                        problems.push(ReifiedProblem::TypeParameter {
+                            name: name.as_str(),
+                            in_array,
+                            in_dnn_or_flexible: through_indirect,
+                        });
+                    }
                 }
             }
             TyKind::DefinitelyNotNull(original) => {
@@ -394,9 +396,12 @@ fn array_type_arguments(ty: Ty) -> Option<&'static [Ty]> {
         TyKind::Obj(name, arguments) if name == crate::types::wk::array() => {
             Some(arguments.as_slice())
         }
-        TyKind::Nullable(Ty::Obj(name, arguments)) if name == crate::types::wk::array() => {
-            Some(arguments.as_slice())
-        }
+        TyKind::Nullable(inner) => match inner.kind() {
+            TyKind::Obj(name, arguments) if name == crate::types::wk::array() => {
+                Some(arguments.as_slice())
+            }
+            _ => None,
+        },
         _ => None,
     }
 }

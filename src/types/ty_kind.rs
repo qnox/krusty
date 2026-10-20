@@ -3,7 +3,7 @@
 //! Code that takes a type apart matches on [`Ty::kind`] instead of on `Ty` itself. A `TyKind`
 //! carries its component types by value, so a match never depends on how `Ty` stores them.
 
-use super::{FnSig, Ty, TyList, TyParamName, TypeName};
+use super::{intern_ty, FnSig, Ty, TyList, TyParamName, TypeName};
 
 /// One layer of a [`Ty`], with its component types by value. Mirrors the variants of `Ty`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -81,6 +81,29 @@ impl Ty {
     }
 }
 
+impl From<TyKind> for Ty {
+    /// The type with this outermost layer: the inverse of [`Ty::kind`].
+    fn from(kind: TyKind) -> Ty {
+        match kind {
+            TyKind::Unit => Ty::Unit,
+            TyKind::Obj(name, args) => Ty::Obj(name, args),
+            TyKind::Null => Ty::Null,
+            TyKind::Nothing => Ty::Nothing,
+            TyKind::Error => Ty::Error,
+            TyKind::Pending => Ty::Pending,
+            TyKind::Fun(signature) => Ty::Fun(signature),
+            TyKind::Nullable(inner) => Ty::Nullable(intern_ty(inner)),
+            TyKind::PlatformNullable(inner) => Ty::PlatformNullable(intern_ty(inner)),
+            TyKind::InProjection(inner) => Ty::InProjection(intern_ty(inner)),
+            TyKind::OutProjection(inner) => Ty::OutProjection(intern_ty(inner)),
+            TyKind::StarProjection(inner) => Ty::StarProjection(intern_ty(inner)),
+            TyKind::TyParam(name, bound) => Ty::TyParam(name, intern_ty(bound)),
+            TyKind::DefinitelyNotNull(inner) => Ty::DefinitelyNotNull(intern_ty(inner)),
+            TyKind::Intersection(components) => Ty::Intersection(components),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +113,7 @@ mod tests {
         let string = Ty::obj("kotlin/String");
         assert_eq!(Ty::nullable(string).kind(), TyKind::Nullable(string));
         assert_eq!(Ty::Unit.kind(), TyKind::Unit);
+        assert_eq!(Ty::from(TyKind::Nullable(string)), Ty::nullable(string));
         assert!(matches!(string.kind(), TyKind::Obj(_, args) if args.is_empty()));
         assert_eq!(Ty::Int.kind(), TyKind::INT);
         assert_eq!(Ty::String.kind(), TyKind::STRING);

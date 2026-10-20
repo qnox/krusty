@@ -121,7 +121,7 @@ pub(super) fn lower_file(
                 || call_targets
                     .singleton_extension_unread_receiver(target)
                     .is_some_and(|effect| {
-                        effect.semantic_type() == Ty::Obj(classifier, crate::types::TyList::EMPTY)
+                        effect.semantic_type() == Ty::obj_name(classifier)
                             && !effect.evaluate_source()
                     })
         },
@@ -173,7 +173,7 @@ pub(super) fn lower_file(
         };
         let mut parameters = Vec::new();
         if let Some(owner) = function.dispatch_receiver {
-            parameters.push(Ty::Obj(owner, crate::types::TyList::EMPTY));
+            parameters.push(Ty::obj_name(owner));
         }
         parameters.extend(function.params.iter().copied());
         let mut body = Body::new(
@@ -310,10 +310,13 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         TyKind::Nullable(Ty::String) => STRING,
         // Every object, interface and `Any` value, and a type parameter's: a reference the
         // frontend checked, cast to its class where one is read (see `super::super::objects`).
-        TyKind::Obj(..) | TyKind::TyParam(..) | TyKind::DefinitelyNotNull(Ty::TyParam(..)) => {
+        TyKind::Obj(..) | TyKind::TyParam(..) => REFERENCE,
+        TyKind::DefinitelyNotNull(inner) if inner.is_ty_param() => REFERENCE,
+        TyKind::Nullable(inner)
+            if matches!(inner.kind(), TyKind::Obj(..) | TyKind::TyParam(..)) =>
+        {
             REFERENCE
         }
-        TyKind::Nullable(Ty::Obj(..) | Ty::TyParam(..)) => REFERENCE,
         _ => return Err(format!("the type `{}`", describe(ty))),
     }))
 }

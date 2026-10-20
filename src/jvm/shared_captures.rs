@@ -738,9 +738,9 @@ mod tests {
         assert!(matches!(
             ir.expr(operand),
             IrExpr::Variable {
-                ty: Ty::TyParam(name, _),
+                ty,
                 ..
-            } if *name == "R"
+            } if ty.ty_param_name() == Some("R")
         ));
 
         let IrExpr::RefNew {
@@ -879,9 +879,9 @@ mod tests {
         assert!(matches!(
             ir.expr(cell),
             IrExpr::RefNew {
-                elem: Ty::TyParam(name, _),
+                elem,
                 ..
-            } if *name == "R"
+            } if elem.ty_param_name() == Some("R")
         ));
     }
 
@@ -982,13 +982,13 @@ mod tests {
         assert!(matches!(
             ir.expr(cell),
             IrExpr::RefNew {
-                elem: Ty::TyParam(name, _),
+                elem,
                 ..
-            } if *name == "R"
+            } if elem.ty_param_name() == Some("R")
         ));
         assert!(matches!(
             ir.functions[specialized as usize].params.as_slice(),
-            [Ty::TyParam(name, _)] if *name == "R"
+            [parameter] if parameter.ty_param_name() == Some("R")
         ));
         assert!(matches!(
             ir.shared_capture_parameters.get(&(specialized, 0)).map(|ty| ty.kind()),
@@ -1005,9 +1005,9 @@ mod tests {
         assert!(matches!(
             ir.expr(*moved),
             IrExpr::RefGet {
-                elem: Ty::TyParam(name, _),
+                elem,
                 ..
-            } if *name == "R"
+            } if elem.ty_param_name() == Some("R")
         ));
     }
 

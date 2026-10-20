@@ -3823,7 +3823,7 @@ fn erased_type_key(t: Ty) -> ErasedTypeKey {
                 .unwrap_or_else(|| Ty::obj("kotlin/Any"));
             Ty::obj_args("kotlin/Array", &[erased_key_ty(erased_type_key(e))])
         }
-        TyKind::Obj(n, _) => Ty::Obj(n, crate::types::TyList::EMPTY),
+        TyKind::Obj(n, _) => Ty::obj_name(n),
         TyKind::Null | TyKind::Nothing | TyKind::Error => Ty::obj("kotlin/Any"),
         TyKind::Fun(s) => return ErasedTypeKey::Function(s.params.len() + usize::from(s.suspend)),
         TyKind::Nullable(inner) => match inner {
@@ -17831,7 +17831,7 @@ impl<'a> Checker<'a> {
                             receiver_ty = self.expr_inner_name(scope, callee, fname.clone(), None);
                         }
                         let argument_receiver_ty = receiver_function
-                            .map(|(signature, _)| Ty::Fun(signature))
+                            .map(|(signature, _)| Ty::from(TyKind::Fun(signature)))
                             .unwrap_or(receiver_ty);
                         let arg_tys =
                             self.invoke_operator_arg_tys(scope, call, argument_receiver_ty, args);
@@ -19325,7 +19325,7 @@ impl<'a> Checker<'a> {
                                 let checked = self.check_argument_expected(
                                     scope,
                                     a,
-                                    Ty::Fun(signature),
+                                    Ty::from(TyKind::Fun(signature)),
                                     has_receiver,
                                     call_implicit_lambda_label(self.file, call)
                                         .map(str::to_string)
@@ -19826,7 +19826,9 @@ impl<'a> Checker<'a> {
                         let expected_callable = expected_parameter
                             .and_then(|parameter| self.functional_parameter_shape(parameter));
                         if matches!(self.file.expr(a), Expr::CallableRef { .. }) {
-                            if let Some(expected_callable @ Ty::Fun(_)) = expected_callable {
+                            if let Some(expected_callable) =
+                                expected_callable.filter(|ty| ty.is_fun())
+                            {
                                 let postponed_formals = sig
                                     .generic_sig
                                     .as_ref()
@@ -24655,20 +24657,21 @@ fun rejected(owner: Owner) { owner.hidden() }
         let [semantic] = info.resolved_declaration_type_parameters(declaration_start) else {
             panic!("one declaration-owned type-parameter identity expected");
         };
-        let Some(ExprLowering::ClassLiteral {
-            unbound: Some(Ty::TyParam(actual, _)),
-        }) = info.expr_lowers.get(&literal)
+        let Some(TyKind::TyParam(actual, _)) =
+            info.expr_lowers.get(&literal).and_then(|lowering| {
+                let ExprLowering::ClassLiteral { unbound } = lowering else {
+                    return None;
+                };
+                unbound.map(|ty| ty.kind())
+            })
         else {
             panic!(
                 "class literal must carry a semantic TyParam, got {:?}",
                 info.expr_lowers.get(&literal)
             );
         };
-        assert_eq!(*actual, semantic.as_str());
-        assert_ne!(
-            *actual, "T",
-            "semantic identity must not be source spelling"
-        );
+        assert_eq!(actual, semantic.as_str());
+        assert_ne!(actual, "T", "semantic identity must not be source spelling");
     }
 
     #[test]
@@ -37235,7 +37238,7 @@ impl<'a> Checker<'a> {
                 suspend_conversion: expected.suspend && !selected.callable.suspend,
             },
         );
-        Ty::Fun(expected)
+        Ty::from(TyKind::Fun(expected))
     }
 
     /// Map an expected function value's parameters onto one declaration. Each target parameter is
@@ -37442,7 +37445,10 @@ impl<'a> Checker<'a> {
         {
             let companion_candidates = self.callable_ref_candidates(companion_ty, name);
             if self
-                .select_bound_callable_ref(&companion_candidates, Some(Ty::Fun(expected)))
+                .select_bound_callable_ref(
+                    &companion_candidates,
+                    Some(Ty::from(TyKind::Fun(expected))),
+                )
                 .is_some()
                 || matches!(
                     self.selected_extension_ref(
@@ -37836,11 +37842,11 @@ impl<'a> Checker<'a> {
             self.expr_lowers.insert(
                 expression,
                 ExprLowering::UnavailableCallableReference {
-                    signature: Ty::Fun(adapted_expected),
+                    signature: Ty::from(TyKind::Fun(adapted_expected)),
                     reason: "selected callable reference has no backend realization",
                 },
             );
-            return Some(Ty::Fun(adapted_expected));
+            return Some(Ty::from(TyKind::Fun(adapted_expected)));
         }
         if *needs_adapter {
             return Some(self.record_adapted_top_level_function_ref(
@@ -39619,7 +39625,7 @@ impl<'a> Checker<'a> {
                 // not required when a concrete function expectation already supplies the complete
                 // callable shape (notably while checking common expect defaults against a platform
                 // actual with a declaration-only symbol provider).
-                Some(function @ Ty::Fun(_)) => Some(function),
+                Some(function) if function.is_fun() => Some(function),
                 Some(_) | None => None,
             })?;
         self.expr_lowers.insert(
@@ -39851,7 +39857,7 @@ impl<'a> Checker<'a> {
             "expression={expression:?} binding={binding:?} member={}.{} expected={:?} natural_params={natural_params:?} natural_ret={:?} mapping={argument_mapping:?} exact={exact_shape}",
             member.owner.map(TypeName::render).unwrap_or_default(),
             member.name,
-            Ty::Fun(expected),
+            Ty::from(TyKind::Fun(expected)),
             member.ret,
         );
         self.expr_lowers.insert(
@@ -43011,7 +43017,10 @@ impl<'a> Checker<'a> {
         name: &str,
         arguments: &[ExprId],
     ) -> bool {
-        let Some((Ty::Fun(signature), _)) = self.local_callable_type(scope, name) else {
+        let Some(TyKind::Fun(signature)) = self
+            .local_callable_type(scope, name)
+            .map(|(ty, _)| ty.kind())
+        else {
             // Callable objects perform their own overload applicability selection.
             return true;
         };
@@ -45500,7 +45509,10 @@ impl<'a> Checker<'a> {
             out.push((path, Ty::nullable(Ty::Nothing)));
             return;
         }
-        if let Some((name, Ty::Nullable(_))) = self.closure_mutated_decline(scope, &path, site) {
+        if let Some((name, _)) = self
+            .closure_mutated_decline(scope, &path, site)
+            .filter(|(_, ty)| ty.is_nullable())
+        {
             if self.closure_writes_only_null(&name, site) {
                 out.push((path, Ty::nullable(Ty::Nothing)));
             }
@@ -52208,7 +52220,10 @@ impl<'a> Checker<'a> {
         let &(shape, definitely_non_null) = parameter_shapes.get(slot)?;
         let (name, nullable) = match shape.kind() {
             TyKind::TyParam(name, _) => (name, false),
-            TyKind::Nullable(Ty::TyParam(name, _)) => (name, true),
+            TyKind::Nullable(inner) => match inner.kind() {
+                TyKind::TyParam(name, _) => (name, true),
+                _ => return None,
+            },
             _ => return None,
         };
         class
@@ -54225,8 +54240,8 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if pt.is_none() && matches!(self.file.expr(x), Expr::Lambda { .. }) {
-                    if let Some(expected @ Ty::Fun(signature)) =
-                        expected_callable.map(Ty::non_null)
+                    if let Some((expected, TyKind::Fun(signature))) =
+                        expected_callable.map(|ty| (ty.non_null(), ty.non_null().kind()))
                     {
                         crate::trace_compiler!(
                             "lambda_apply",
@@ -58946,7 +58961,7 @@ impl<'a> Checker<'a> {
             result_ty
         };
         if t != Ty::Error {
-            if let Some(function @ Ty::Fun(_)) = expected {
+            if let Some(function) = expected.filter(|ty| ty.is_fun()) {
                 self.callable_reference_types.insert(e, function);
             }
         }
@@ -59083,7 +59098,7 @@ impl<'a> Checker<'a> {
         // signature in metadata. Overload selection consumes that semantic signature; the original
         // nominal expectation remains below to determine the expression's reflection API type.
         let selection_expected = expected.and_then(|expected| match expected.non_null() {
-            function @ Ty::Fun(_) => Some(function),
+            function if function.is_fun() => Some(function),
             _ => {
                 crate::symbol_resolver::classifier_callable_signature(&self.fed_source(), expected)
             }
@@ -59887,7 +59902,9 @@ impl<'a> Checker<'a> {
                                 stmt_id: candidate.statement,
                                 bound_receiver: false,
                                 argument_mapping: plan.clone(),
-                                signature: Ty::Fun(expected_function.expect("adapted reference")),
+                                signature: Ty::from(TyKind::Fun(
+                                    expected_function.expect("adapted reference"),
+                                )),
                                 suspend_conversion: *suspend_conversion,
                             },
                         );
@@ -59903,7 +59920,7 @@ impl<'a> Checker<'a> {
                             Ty::fun(candidate.parameters.clone(), candidate.ret)
                         }
                     },
-                    Ty::Fun,
+                    |signature| Ty::from(TyKind::Fun(signature)),
                 );
                 return Some(ty);
             }
@@ -60338,10 +60355,10 @@ impl<'a> Checker<'a> {
                                                 member: Box::new(member),
                                             },
                                             argument_mapping: plan,
-                                            signature: Ty::Fun(expected),
+                                            signature: Ty::from(TyKind::Fun(expected)),
                                         },
                                     );
-                                    return self.set(e, Ty::Fun(expected));
+                                    return self.set(e, Ty::from(TyKind::Fun(expected)));
                                 }
                             }
                         }
@@ -60495,16 +60512,16 @@ impl<'a> Checker<'a> {
                                     true,
                                 ) =>
                             {
-                                Ty::Fun(expected)
+                                Ty::from(TyKind::Fun(expected))
                             }
                             Some(TyKind::Fun(_)) => Ty::Error,
-                            Some(_) | None => Ty::Fun(function),
+                            Some(_) | None => Ty::from(TyKind::Fun(function)),
                         };
                         if selected != Ty::Error {
                             self.expr_lowers.insert(
                                 e,
                                 ExprLowering::FunctionInvokeReference {
-                                    target: Ty::Fun(function),
+                                    target: Ty::from(TyKind::Fun(function)),
                                     signature: selected,
                                 },
                             );
@@ -60619,9 +60636,9 @@ impl<'a> Checker<'a> {
                                     stmt_id: candidate.statement,
                                     bound_receiver: true,
                                     argument_mapping: plan.clone(),
-                                    signature: Ty::Fun(
+                                    signature: Ty::from(TyKind::Fun(
                                         expected_function.expect("adapted reference"),
-                                    ),
+                                    )),
                                     suspend_conversion: *suspend_conversion,
                                 },
                             );
@@ -60637,7 +60654,7 @@ impl<'a> Checker<'a> {
                                 Ty::fun(candidate.parameters.clone(), candidate.ret)
                             }
                         },
-                        Ty::Fun,
+                        |signature| Ty::from(TyKind::Fun(signature)),
                     );
                     return self.set(e, ty);
                 }
@@ -64611,23 +64628,24 @@ impl<'a> Checker<'a> {
         actual: Ty,
         bindings: &mut crate::symbol_resolver::GSigBinds,
     ) {
-        match (declared.non_null(), actual.non_null()) {
-            (Ty::TyParam(formal, _), actual @ Ty::TyParam(actual_name, _))
+        match (declared.non_null().kind(), actual.non_null().kind()) {
+            (TyKind::TyParam(formal, _), TyKind::TyParam(actual_name, _))
                 if actual_name == formal =>
             {
-                bindings.insert(formal.to_string(), actual);
+                bindings.insert(formal.to_string(), actual.non_null());
                 return;
             }
-            (Ty::Obj(declared_owner, declared_args), Ty::Obj(actual_owner, actual_args))
-                if declared_owner == actual_owner =>
-            {
+            (
+                TyKind::Obj(declared_owner, declared_args),
+                TyKind::Obj(actual_owner, actual_args),
+            ) if declared_owner == actual_owner => {
                 for (&declared, &actual) in declared_args.iter().zip(actual_args) {
                     Self::constrain_constructor_parameter(declared, actual, bindings);
                 }
             }
-            (Ty::InProjection(declared), Ty::InProjection(actual))
-            | (Ty::OutProjection(declared), Ty::OutProjection(actual)) => {
-                Self::constrain_constructor_parameter(*declared, *actual, bindings);
+            (TyKind::InProjection(declared), TyKind::InProjection(actual))
+            | (TyKind::OutProjection(declared), TyKind::OutProjection(actual)) => {
+                Self::constrain_constructor_parameter(declared, actual, bindings);
             }
             _ => {}
         }
@@ -65218,7 +65236,7 @@ impl<'a> Checker<'a> {
             && expected.context_count == actual.context_count
             && expected.has_receiver == actual.has_receiver
             && (!actual.suspend || expected.suspend))
-            .then_some(Ty::Fun(expected))
+            .then_some(Ty::from(TyKind::Fun(expected)))
     }
 
     /// Run `f` with the Pass-2 probes a member-extension candidate consults for this call's

@@ -4922,11 +4922,17 @@ fn postponed_provider_lambda_uses_the_enclosing_stable_type_parameter() {
     let TyKind::Fun(signature) = callback.ty.get().kind() else {
         panic!("Continuation callback must retain its checked function type")
     };
-    let [Ty::Obj(result, arguments)] = signature.params.as_slice() else {
+    let [result] = signature.params.as_slice() else {
+        panic!("Continuation callback must receive Result<T>")
+    };
+    let TyKind::Obj(result, arguments) = result.kind() else {
         panic!("Continuation callback must receive Result<T>")
     };
     assert!(result.matches("kotlin/Result"));
-    assert!(matches!(arguments.as_slice(), [Ty::TyParam(name, _)] if name.starts_with('\0')));
+    assert!(matches!(
+        arguments.as_slice(),
+        [argument] if argument.ty_param_name().is_some_and(|name| name.starts_with('\0'))
+    ));
 }
 
 #[test]

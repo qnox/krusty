@@ -492,7 +492,7 @@ fn member_type_parameter_bounds_can_reference_later_parameters() {
     assert_eq!(key.obj_internal(), Some(type_name("sample/Key")));
     assert!(matches!(
         key.type_args(),
-        [Ty::TyParam(t, _), Ty::TyParam(r, _)] if *t == "T" && *r == "R"
+        [t, r] if t.ty_param_name() == Some("T") && r.ty_param_name() == Some("R")
     ));
 }
 

@@ -182,7 +182,7 @@ pub(crate) fn ty_subst_alias_expansion(ty: Ty, bindings: &HashMap<String, Ty>) -
             TyKind::Nullable(inner) => Ty::nullable(normalize(inner)),
             TyKind::PlatformNullable(inner) => Ty::platform_nullable(normalize(inner)),
             TyKind::DefinitelyNotNull(inner) => {
-                Ty::DefinitelyNotNull(super::intern_ty(normalize(inner)))
+                Ty::from(TyKind::DefinitelyNotNull(normalize(inner)))
             }
             TyKind::InProjection(inner) => Ty::in_projection(normalize(inner)),
             TyKind::OutProjection(inner) => Ty::out_projection(normalize(inner)),
@@ -212,7 +212,7 @@ pub(crate) fn ty_subst_alias_expansion(ty: Ty, bindings: &HashMap<String, Ty>) -
             TyKind::Nullable(inner) => Ty::nullable(function_component(inner)),
             TyKind::PlatformNullable(inner) => Ty::platform_nullable(function_component(inner)),
             TyKind::DefinitelyNotNull(inner) => {
-                Ty::DefinitelyNotNull(super::intern_ty(function_component(inner)))
+                Ty::from(TyKind::DefinitelyNotNull(function_component(inner)))
             }
             _ => ty,
         }
@@ -258,9 +258,9 @@ pub(crate) fn ty_with_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
             signature.has_receiver,
             signature.suspend,
         ),
-        TyKind::DefinitelyNotNull(inner) => {
-            Ty::DefinitelyNotNull(super::intern_ty(ty_with_param_bounds(inner, bounds)))
-        }
+        TyKind::DefinitelyNotNull(inner) => Ty::from(TyKind::DefinitelyNotNull(
+            ty_with_param_bounds(inner, bounds),
+        )),
         TyKind::Nullable(inner) => Ty::nullable(ty_with_param_bounds(inner, bounds)),
         TyKind::PlatformNullable(inner) => {
             Ty::platform_nullable(ty_with_param_bounds(inner, bounds))
@@ -314,7 +314,7 @@ pub(crate) fn ty_with_transitive_param_bounds(ty: Ty, bounds: &HashMap<String, T
                 signature.suspend,
             ),
             TyKind::DefinitelyNotNull(inner) => {
-                Ty::DefinitelyNotNull(super::intern_ty(hydrate(inner, bounds, visiting)))
+                Ty::from(TyKind::DefinitelyNotNull(hydrate(inner, bounds, visiting)))
             }
             TyKind::Nullable(inner) => Ty::nullable(hydrate(inner, bounds, visiting)),
             TyKind::PlatformNullable(inner) => {
@@ -366,9 +366,9 @@ pub(crate) fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>)
             signature.has_receiver,
             signature.suspend,
         ),
-        TyKind::DefinitelyNotNull(inner) => {
-            Ty::DefinitelyNotNull(super::intern_ty(ty_rename_params(inner, identities)))
-        }
+        TyKind::DefinitelyNotNull(inner) => Ty::from(TyKind::DefinitelyNotNull(ty_rename_params(
+            inner, identities,
+        ))),
         TyKind::Nullable(inner) => Ty::nullable(ty_rename_params(inner, identities)),
         TyKind::PlatformNullable(inner) => {
             Ty::platform_nullable(ty_rename_params(inner, identities))
@@ -431,7 +431,6 @@ pub(crate) fn ty_subst_applied_arguments(ty: Ty, bindings: &HashMap<String, Ty>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::intern_ty;
 
     fn nullable_bounded_parameter(name: &'static str) -> Ty {
         Ty::ty_param(name, Ty::nullable(Ty::obj("kotlin/Any")))
@@ -440,12 +439,15 @@ mod tests {
     #[test]
     fn identity_only_transforms_preserve_definitely_non_null_provenance() {
         let original = nullable_bounded_parameter("owner:T");
-        let intersection = Ty::DefinitelyNotNull(intern_ty(original));
+        let intersection = Ty::from(TyKind::DefinitelyNotNull(original));
         let identities = HashMap::from_iter([("owner:T", "call:T")]);
 
         let renamed = ty_rename_params(intersection, &identities);
         let renamed_original = nullable_bounded_parameter("call:T");
-        assert_eq!(renamed, Ty::DefinitelyNotNull(intern_ty(renamed_original)));
+        assert_eq!(
+            renamed,
+            Ty::from(TyKind::DefinitelyNotNull(renamed_original))
+        );
         assert_eq!(Ty::nullable(renamed), Ty::nullable(renamed_original));
 
         let rebound = ty_with_param_bounds(
@@ -453,7 +455,10 @@ mod tests {
             &HashMap::from_iter([("owner:T".to_string(), Ty::nullable(Ty::obj("demo/Payload")))]),
         );
         let rebound_original = Ty::ty_param("owner:T", Ty::nullable(Ty::obj("demo/Payload")));
-        assert_eq!(rebound, Ty::DefinitelyNotNull(intern_ty(rebound_original)));
+        assert_eq!(
+            rebound,
+            Ty::from(TyKind::DefinitelyNotNull(rebound_original))
+        );
         assert_eq!(Ty::nullable(rebound), Ty::nullable(rebound_original));
     }
 
@@ -481,7 +486,7 @@ mod tests {
     #[test]
     fn substitution_preserves_symbolic_provenance_and_consumes_concrete_bindings() {
         let declared = nullable_bounded_parameter("callee:T");
-        let intersection = Ty::DefinitelyNotNull(intern_ty(declared));
+        let intersection = Ty::from(TyKind::DefinitelyNotNull(declared));
 
         assert_eq!(
             ty_subst_keep_unbound(intersection, &HashMap::default()),
@@ -497,7 +502,7 @@ mod tests {
             intersection,
             &HashMap::from_iter([("callee:T".to_string(), caller)]),
         );
-        assert_eq!(symbolic, Ty::DefinitelyNotNull(intern_ty(caller)));
+        assert_eq!(symbolic, Ty::from(TyKind::DefinitelyNotNull(caller)));
         assert_eq!(Ty::nullable(symbolic), Ty::nullable(caller));
 
         let concrete = ty_subst_keep_unbound(

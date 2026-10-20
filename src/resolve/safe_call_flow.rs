@@ -120,10 +120,11 @@ impl Checker<'_> {
             match self.stable_path_ty(scope, &path, site).map(Ty::kind) {
                 Some(TyKind::Nullable(inner)) => out.push((path, inner)),
                 _ => {
-                    if let Some((name, Ty::Nullable(inner))) =
-                        self.closure_mutated_decline(scope, &path, site)
+                    if let Some((name, mutated)) = self.closure_mutated_decline(scope, &path, site)
                     {
-                        declined.push((name, *inner));
+                        if let TyKind::Nullable(inner) = mutated.kind() {
+                            declined.push((name, inner));
+                        }
                     }
                 }
             }

@@ -42,10 +42,7 @@ impl Body<'_> {
 
     /// The type `class`'s instances have.
     fn object_type(&self, class: ClassId) -> Ty {
-        Ty::Obj(
-            self.ir.classes[class as usize].fq_name,
-            crate::types::TyList::EMPTY,
-        )
+        Ty::obj_name(self.ir.classes[class as usize].fq_name)
     }
 
     /// Push `id`, a value of a class type, as `class`'s struct.
@@ -338,7 +335,7 @@ impl Body<'_> {
         if params.len() != args.len() {
             return Err("a call whose arguments do not match its parameters".into());
         }
-        self.value(receiver, Ty::Obj(owner, crate::types::TyList::EMPTY))?;
+        self.value(receiver, Ty::obj_name(owner))?;
         for (arg, param) in args.iter().zip(params) {
             self.value(*arg, param)?;
         }
@@ -472,7 +469,7 @@ impl Body<'_> {
                 let receiver = receiver.ok_or_else(|| {
                     "a receiver-less read of a cross-file member property".to_string()
                 })?;
-                self.value(receiver, Ty::Obj(entry.owner, crate::types::TyList::EMPTY))?;
+                self.value(receiver, Ty::obj_name(entry.owner))?;
                 self.code.call(entry.getter);
                 return Ok(());
             }
@@ -538,7 +535,7 @@ impl Body<'_> {
                 let setter = entry
                     .setter
                     .ok_or_else(|| "a read-only cross-file property was written".to_string())?;
-                self.value(receiver, Ty::Obj(entry.owner, crate::types::TyList::EMPTY))?;
+                self.value(receiver, Ty::obj_name(entry.owner))?;
                 self.value(value, entry.ty)?;
                 self.code.call(setter);
                 return Ok(());
@@ -865,7 +862,7 @@ impl Body<'_> {
 
 /// `kotlin.Any`, the type every class value is read as before its class is tested.
 fn any() -> Ty {
-    Ty::Obj(crate::types::wk::any(), crate::types::TyList::EMPTY)
+    Ty::obj_name(crate::types::wk::any())
 }
 
 /// Push the default value of a `value` field.
@@ -891,7 +888,7 @@ pub(super) fn define_class_functions(
         let id = id as ClassId;
         let form = &classes.forms[id as usize];
         if let Some(constructor) = form.constructor {
-            let mut parameters = vec![Ty::Obj(class.fq_name, crate::types::TyList::EMPTY)];
+            let mut parameters = vec![Ty::obj_name(class.fq_name)];
             parameters.extend(class.ctor_args.iter().map(|arg| arg.ty));
             let mut declared = crate::fx_hash::HashMap::default();
             for &root in class
@@ -909,7 +906,7 @@ pub(super) fn define_class_functions(
         }
         for (ordinal, &constructor) in form.secondaries.iter().enumerate() {
             let secondary = &class.secondary_ctors[ordinal];
-            let mut parameters = vec![Ty::Obj(class.fq_name, crate::types::TyList::EMPTY)];
+            let mut parameters = vec![Ty::obj_name(class.fq_name)];
             parameters.extend(secondary.prefix_params.iter().copied());
             parameters.extend(secondary.params.iter().copied());
             let mut declared = crate::fx_hash::HashMap::default();

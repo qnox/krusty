@@ -367,7 +367,7 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
 #[cfg(test)]
 mod tests {
     use super::jvm_builtin_scalar;
-    use crate::types::{type_name, Ty};
+    use crate::types::{type_name, Ty, TyKind};
 
     #[test]
     fn every_class_descriptor_is_a_reference_slot_without_semantic_nullability() {
@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn a_definitely_non_null_type_parameter_erases_through_its_declared_bound() {
-        let nullable_any = Ty::DefinitelyNotNull(crate::types::intern_ty(Ty::ty_param(
+        let nullable_any = Ty::from(TyKind::DefinitelyNotNull(Ty::ty_param(
             "T",
             Ty::nullable(Ty::obj("kotlin/Any")),
         )));
@@ -539,7 +539,7 @@ mod tests {
         assert_eq!(any_carrier, Ty::obj("java/lang/Object"));
         assert!(any_carrier.is_reference());
 
-        let nullable_int = Ty::DefinitelyNotNull(crate::types::intern_ty(Ty::ty_param(
+        let nullable_int = Ty::from(TyKind::DefinitelyNotNull(Ty::ty_param(
             "N",
             Ty::nullable(Ty::Int),
         )));

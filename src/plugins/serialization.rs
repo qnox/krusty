@@ -564,15 +564,13 @@ fn serialized_type_spelling(
 fn serialized_ty(spelling: &[TypeName]) -> Option<Ty> {
     match spelling {
         [classifier] => Some(Ty::obj_name(*classifier)),
-        [classifier, arguments @ ..] => Some(Ty::Obj(
+        [classifier, arguments @ ..] => Some(Ty::obj_args_name(
             *classifier,
-            crate::types::TyList::new(crate::types::intern_tys(
-                &arguments
-                    .iter()
-                    .copied()
-                    .map(Ty::obj_name)
-                    .collect::<Vec<_>>(),
-            )),
+            &arguments
+                .iter()
+                .copied()
+                .map(Ty::obj_name)
+                .collect::<Vec<_>>(),
         )),
         [] => None,
     }

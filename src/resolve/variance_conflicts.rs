@@ -702,7 +702,7 @@ impl Checker<'_> {
     fn displayed_type(&self, walk: &Walk<'_, '_>, ty: Ty, origin: &Origin<'_>) -> Ty {
         match ty.kind() {
             TyKind::TyParam(..) if written_definitely_non_null(origin) => {
-                Ty::DefinitelyNotNull(crate::types::intern_ty(ty))
+                Ty::from(TyKind::DefinitelyNotNull(ty))
             }
             TyKind::Nullable(inner) => Ty::nullable(self.displayed_type(walk, inner, origin)),
             TyKind::Obj(classifier, arguments) if !arguments.is_empty() => {

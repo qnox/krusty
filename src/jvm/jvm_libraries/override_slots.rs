@@ -27,7 +27,7 @@ fn normalized_input(libraries: &JvmLibraries, ty: Ty) -> Ty {
                 .unwrap_or_else(|| Ty::obj("kotlin/Any"));
             Ty::obj_args("kotlin/Array", &[normalized_input(libraries, element)])
         }
-        TyKind::Obj(name, _) => Ty::Obj(name, crate::types::TyList::EMPTY),
+        TyKind::Obj(name, _) => Ty::obj_name(name),
         TyKind::Null | TyKind::Nothing => Ty::obj("kotlin/Any"),
         // An unresolved frontend type is not a valid provider declaration fact. Preserve the
         // sentinel in the opaque key so it cannot accidentally match a real `Any` slot.

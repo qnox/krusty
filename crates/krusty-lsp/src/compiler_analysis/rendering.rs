@@ -132,12 +132,12 @@ fn render_nullable(ty: Ty) -> String {
 #[cfg(test)]
 mod tests {
     use super::render_ty;
-    use krusty::types::{intern_ty, Ty};
+    use krusty::types::{Ty, TyKind};
 
     #[test]
     fn a_definitely_non_null_parameter_renders_as_an_intersection() {
         let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
-        let intersection = Ty::DefinitelyNotNull(intern_ty(parameter));
+        let intersection = Ty::from(TyKind::DefinitelyNotNull(parameter));
         assert_eq!(render_ty(intersection), "T & Any");
     }
 

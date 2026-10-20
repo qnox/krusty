@@ -4177,10 +4177,13 @@ fn explicit_type_arguments_specialize_a_projected_sam_lambda_in_pass_one() {
         panic!("compareWith retains Comparator as its first parameter: {comparator:?}")
     };
     assert!(comparator.matches("Comparator"));
-    let [Ty::InProjection(projected)] = arguments.as_slice() else {
+    let [projected] = arguments.as_slice() else {
         panic!("Comparator retains its written `in T` argument: {arguments:?}")
     };
-    let TyKind::TyParam(projected, _) = (**projected).kind() else {
+    let TyKind::InProjection(projected) = projected.kind() else {
+        panic!("Comparator retains its written `in T` argument: {arguments:?}")
+    };
+    let TyKind::TyParam(projected, _) = projected.kind() else {
         panic!("Comparator projection retains T: {projected:?}")
     };
     assert_eq!(first.ty_param_name(), Some(projected.as_str()));
@@ -4834,7 +4837,7 @@ fn compact_star_bounds_preserve_the_classifier_inside_a_vararg_array() {
         element.obj_internal(),
         Some(crate::types::type_name("Token"))
     );
-    assert!(matches!(element.type_args(), [Ty::StarProjection(_)]));
+    assert!(matches!(element.type_args(), [argument] if argument.is_star_projection()));
 }
 
 #[test]
