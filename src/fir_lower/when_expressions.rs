@@ -72,6 +72,7 @@ impl BodyLowering<'_> {
                 let candidate = match candidate {
                     FirWhenCondition::SubjectEquals {
                         candidate,
+                        mode,
                         numeric,
                         nullable_ieee754,
                     } => {
@@ -97,8 +98,9 @@ impl BodyLowering<'_> {
                                 dispatch_receiver: None,
                                 args: vec![subject, candidate],
                             }),
-                            None => self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            None => self.ir.add_expr(IrExpr::Equality {
                                 op: IrBinOp::Eq,
+                                mode,
                                 lhs: subject,
                                 rhs: candidate,
                             }),

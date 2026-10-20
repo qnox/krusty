@@ -8,7 +8,7 @@ use crate::fir::{
     FirExpr, FirExprId, FirWhenBranch, FirWhenCondition, FirWhenSubjectNumericEquality, ResolvedTy,
     SyntheticOriginKind,
 };
-use crate::types::Ty;
+use crate::types::{EqualityMode, Ty};
 
 use super::{BodyCheckFailure, BodyFirChecker, FirExprKind};
 
@@ -160,8 +160,29 @@ impl BodyFirChecker<'_> {
                                 })
                                 .transpose()?;
                             let nullable_ieee754 = nullable_ieee754.map(resolved).transpose()?;
+                            let subject_ty = numeric
+                                .map(|plan| {
+                                    plan.subject_widening.unwrap_or(plan.subject_unbox).get()
+                                })
+                                .unwrap_or_else(|| {
+                                    self.body
+                                        .expr(subject.expect("subject equality has a subject"))
+                                        .expect("the subject was just checked")
+                                        .ty
+                                        .get()
+                                });
+                            let candidate_ty = numeric
+                                .and_then(|plan| plan.candidate_widening)
+                                .unwrap_or_else(|| {
+                                    self.body
+                                        .expr(checked)
+                                        .expect("the candidate was just checked")
+                                        .ty
+                                })
+                                .get();
                             FirWhenCondition::SubjectEquals {
                                 candidate: checked,
+                                mode: EqualityMode::of_source_operands(subject_ty, candidate_ty),
                                 numeric,
                                 nullable_ieee754,
                             }

@@ -37,7 +37,6 @@ impl Emitter<'_> {
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
                 (matches!(op, Lt | Le | Gt | Ge | Eq | Ne) && self.value_ty(*lhs).is_jvm_scalar())
                     || matches!(op, RefEq | RefNe)
-                    || (matches!(op, Eq | Ne) && self.is_primitive_to_object_comparison(*lhs, *rhs))
                     || (matches!(op, Eq | Ne)
                         && (matches!(self.ir.expr(*lhs), IrExpr::Const(IrConst::Null))
                             || matches!(self.ir.expr(*rhs), IrExpr::Const(IrConst::Null))))
@@ -407,10 +406,8 @@ impl Emitter<'_> {
             }
             return true;
         }
-        // An `EQEQ` the frontend recorded no mode for (a `when` subject's value condition) is
-        // kotlinc's `Equals` intrinsic too, which selects this comparison from the operand types.
         if matches!(op, Eq | Ne)
-            && (recorded_structural || mode.is_none())
+            && recorded_structural
             && self.emit_primitive_to_object_branch(op, lhs, rhs, target, jt, code)
         {
             return true;

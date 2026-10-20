@@ -4360,7 +4360,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   comparison at `Int`, a nullable candidate, and a `Float`/`Double` narrowed from a non-nullable
   type. A floating comparison with a nullable operand is fir2ir's `ieee754equals`, the typed
   `Intrinsics.areEqual(Ljava/lang/Double;D)Z`, whether or not an arm narrowed the subject.
-  `tests/when_narrowed_equality_order_e2e.rs`.
+  Checked FIR records the equality mode from the adapted semantic operand types. Inline
+  substitution preserves that mode: a generic `when (a) { b -> ... }` instantiated at `Double`
+  keeps structural equality (`NaN` equals itself and signed zeroes differ), while a direct
+  `Double` comparison uses IEEE equality. Generated primitive comparisons retain their separate
+  IR contract. `tests/when_narrowed_equality_order_e2e.rs`,
+  `tests/ieee754_inline_equality_e2e.rs`.
 - **`x ?: return` smart-casts `x` for the code that follows** (also `?: throw`/`break`/`continue`/a
   `Nothing`-typed call): completing an elvis whose right-hand side is `Nothing` proves a stable
   `val`/parameter non-null, exactly like an `if (x == null) return` guard. A nullable-primitive local

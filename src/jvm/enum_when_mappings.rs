@@ -139,11 +139,12 @@ impl EnumWhenLowering {
     ) {
         match ir.expr(expression) {
             IrExpr::When { .. } => self.transform_branches(ir, subject_when, expression, provider),
-            &IrExpr::PrimitiveBinOp {
+            &IrExpr::Equality {
                 op: IrBinOp::Eq,
+                mode: crate::ir::EqualityMode::Structural,
                 lhs,
                 rhs,
-            } => self.transform_enum_equals(ir, subject_when, lhs, rhs, provider),
+            } => self.transform_enum_equals(ir, subject_when, expression, lhs, rhs, provider),
             _ => {}
         }
     }
@@ -152,6 +153,7 @@ impl EnumWhenLowering {
         &mut self,
         ir: &mut IrFile,
         subject_when: &EnumSwitchWhen,
+        expression: ExprId,
         lhs: ExprId,
         rhs: ExprId,
         provider: &mut OrdinalProvider,
@@ -189,5 +191,11 @@ impl EnumWhenLowering {
         ir.exprs[rhs as usize] = key;
         ir.logical_types.remove(&lhs);
         ir.logical_types.remove(&rhs);
+        // The checked enum equality is now a generated integer-key comparison.
+        ir.exprs[expression as usize] = IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Eq,
+            lhs,
+            rhs,
+        };
     }
 }
