@@ -262,17 +262,11 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
         .filter(|member| member.kind == MappedBuiltinMemberKind::Function)
         .map(|member| {
             let declared = &member.generic_sig;
-            // kotlinc types every parameter of a `remove` stub `Any?`, the `Object` its JDK
-            // counterpart takes.
-            let parameters: Vec<Ty> = if member.source_name == "remove" {
-                vec![Ty::nullable(Ty::obj("kotlin/Any")); declared.params.len()]
-            } else {
-                declared
-                    .params
-                    .iter()
-                    .map(|ty| ty_subst(*ty, &bindings))
-                    .collect()
-            };
+            let parameters: Vec<Ty> = declared
+                .params
+                .iter()
+                .map(|ty| ty_subst(*ty, &bindings))
+                .collect();
             let result = ty_subst(declared.ret, &bindings);
             let erased_parameters = jvm_tys(
                 &declared
