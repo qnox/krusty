@@ -112,6 +112,10 @@ pub enum CompilerIntrinsic {
     /// kotlinc's `RangeContainsLowering` compares against the bounds of a range literal it is
     /// called on instead of calling it; a user extension of the same shape is called.
     ClosedRangeContains,
+    /// The `kotlin.ranges` `rangeTo` extension of a `Comparable` value (kotlinc's
+    /// `ComparableRangeToHandler`). Membership in the closed range it builds compares the value
+    /// with both bounds through `Comparable.compareTo` instead of building the range.
+    ComparableRangeTo,
     /// `kotlin.ranges` progression builders a counted `for` loop reads through instead of calling
     /// (kotlinc's `ForLoopsLowering` handlers). Outside a loop header they are ordinary calls.
     RangeDownTo,

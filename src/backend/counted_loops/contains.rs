@@ -11,6 +11,9 @@
 //! exclusive one a step above it (`x < 11` for `x in 1..10`), as kotlinc's `RangeToHandler` builds
 //! the header both loops and membership read. The conjunction is a `when` that yields `false` when
 //! the first comparison fails; `!in` negates it.
+//!
+//! A range `Comparable.rangeTo` builds is compared through the checked `compareTo` member instead:
+//! `0 <= x.compareTo(a) && x.compareTo(b) <= 0`, with the same evaluation order.
 
 use crate::fir::FirRangeOperation;
 use crate::ir::{Callee, ExprId, IrBinOp, IrConst, IrExpr, IrIntrinsic, IrTypeOp};
@@ -28,6 +31,16 @@ pub(super) struct Membership {
     pub(super) comparison: Ty,
 }
 
+/// The operands after [`Realizer::ordered_operands`]: the declarations of those it stored, then
+/// what each comparison reads.
+struct OrderedOperands {
+    statements: Vec<ExprId>,
+    value: ExprId,
+    lower: ExprId,
+    upper: ExprId,
+    lower_first: bool,
+}
+
 /// The bounds `x` is compared with: `lower <= x` and `x <= upper` (`x < upper` when exclusive).
 struct Bounds {
     lower: ExprId,
@@ -42,8 +55,92 @@ impl Realizer<'_> {
     pub(super) fn range_contains(&mut self, membership: &Membership) -> IrExpr {
         let comparison = membership.comparison;
         let bounds = self.membership_bounds(membership);
-        let mut statements = Vec::new();
         let value = self.cast(membership.value, comparison);
+        let ordered = self.ordered_operands(value, &bounds);
+        let lower = self.cast(ordered.lower, comparison);
+        let upper = self.cast(ordered.upper, comparison);
+        let value_for_lower = self.reread(ordered.value);
+        let lower_clause = self.lower_clause(comparison, lower, value_for_lower);
+        let value_for_upper = self.reread(ordered.value);
+        let upper_operation = if bounds.upper_inclusive {
+            IrBinOp::Le
+        } else {
+            IrBinOp::Lt
+        };
+        let upper_clause = self.upper_clause(upper_operation, comparison, value_for_upper, upper);
+        self.conjunction(ordered, lower_clause, upper_clause)
+    }
+
+    /// The node testing membership in the closed range `Comparable.rangeTo` builds (kotlinc's
+    /// `ComparableRangeInfo`): `0 <= value.compareTo(start) && value.compareTo(end) <= 0`, both
+    /// through the checked `compareTo` call `lower` holds, with the operands ordered and stored as
+    /// for a numeric range.
+    pub(super) fn comparable_range_contains(&mut self, lower: ExprId, end: ExprId) -> IrExpr {
+        let IrExpr::Call {
+            dispatch_receiver: Some(value),
+            ref args,
+            ..
+        } = *self.ir.expr(lower)
+        else {
+            unreachable!("checked comparable membership holds a `compareTo` member call");
+        };
+        let [start] = args[..] else {
+            unreachable!("`compareTo` takes the bound as its one argument");
+        };
+        // The checker published the `Comparable` dispatch view as a cast of the value. kotlinc
+        // orders and stores the value itself and casts each use of it.
+        let (operand, view) = match *self.ir.expr(value) {
+            IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg,
+                ..
+            } => (arg, Some(value)),
+            _ => (value, None),
+        };
+        let bounds = Bounds {
+            lower: start,
+            upper: end,
+            upper_inclusive: true,
+            upper_first: false,
+        };
+        let ordered = self.ordered_operands(operand, &bounds);
+        let value_for_upper = self.receiver_use(ordered.value, view);
+        let upper_call = crate::ir::clone_with_operands(self.ir, lower, |operand| {
+            if operand == value {
+                value_for_upper
+            } else {
+                ordered.upper
+            }
+        });
+        let value_for_lower = self.receiver_use(ordered.value, view);
+        let lower_bound = ordered.lower;
+        let lower_call = crate::ir::clone_with_operands(self.ir, lower, |operand| {
+            if operand == value {
+                value_for_lower
+            } else {
+                lower_bound
+            }
+        });
+        let zero = self.add_checked(IrExpr::Const(IrConst::Int(0)), Ty::Int);
+        let lower_clause = self.primitive_comparison(IrBinOp::Le, Ty::Int, zero, lower_call);
+        let zero = self.add_checked(IrExpr::Const(IrConst::Int(0)), Ty::Int);
+        let upper_clause = self.primitive_comparison(IrBinOp::Le, Ty::Int, upper_call, zero);
+        self.conjunction(ordered, lower_clause, upper_clause)
+    }
+
+    /// One use of the compared value, in the dispatch view `view` casts it to.
+    fn receiver_use(&mut self, value: ExprId, view: Option<ExprId>) -> ExprId {
+        let read = self.reread(value);
+        match view {
+            Some(view) => crate::ir::clone_with_operands(self.ir, view, |_| read),
+            None => read,
+        }
+    }
+
+    /// `RangeContainsLowering`'s evaluation order: which operands are stored, and which comparison
+    /// goes first.
+    fn ordered_operands(&mut self, value: ExprId, bounds: &Bounds) -> OrderedOperands {
+        let mut statements = Vec::new();
         let (value_stored, value) = self.temporary_if_necessary(value);
         let (lower, upper, lower_first) = if let Some(value_declaration) = value_stored {
             let (lower_declaration, lower) = self.temporary_if_necessary(bounds.lower);
@@ -70,18 +167,23 @@ impl Realizer<'_> {
         } else {
             (bounds.lower, bounds.upper, true)
         };
-        let lower = self.cast(lower, comparison);
-        let upper = self.cast(upper, comparison);
-        let value_for_lower = self.reread(value);
-        let lower_clause = self.lower_clause(comparison, lower, value_for_lower);
-        let value_for_upper = self.reread(value);
-        let upper_operation = if bounds.upper_inclusive {
-            IrBinOp::Le
-        } else {
-            IrBinOp::Lt
-        };
-        let upper_clause = self.upper_clause(upper_operation, comparison, value_for_upper, upper);
-        let (first, second) = if lower_first {
+        OrderedOperands {
+            statements,
+            value,
+            lower,
+            upper,
+            lower_first,
+        }
+    }
+
+    /// The comparisons joined by `&&` in their evaluation order, after the stored operands.
+    fn conjunction(
+        &mut self,
+        ordered: OrderedOperands,
+        lower_clause: ExprId,
+        upper_clause: ExprId,
+    ) -> IrExpr {
+        let (first, second) = if ordered.lower_first {
             (lower_clause, upper_clause)
         } else {
             (upper_clause, lower_clause)
@@ -90,12 +192,12 @@ impl Realizer<'_> {
         let conjunction = IrExpr::When {
             branches: vec![(Some(first), second), (None, false_value)],
         };
-        if statements.is_empty() {
+        if ordered.statements.is_empty() {
             conjunction
         } else {
             let conjunction = self.add_checked(conjunction, Ty::Boolean);
             IrExpr::Block {
-                stmts: statements,
+                stmts: ordered.statements,
                 value: Some(conjunction),
             }
         }

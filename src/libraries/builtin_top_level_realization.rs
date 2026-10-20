@@ -580,6 +580,25 @@ fn progression_builder(facts: &BuiltinFunctionDeclaration<'_>) -> Option<Compile
     }
 }
 
+/// `ComparableRangeToHandler`: an operator `rangeTo` extension of a `Comparable` receiver with one
+/// `Comparable` parameter, building a closed range.
+fn comparable_range_to(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
+    use crate::types::wk;
+    if facts.kind != FnKind::Extension
+        || facts.name != "rangeTo"
+        || !facts.is_operator
+        || facts.params.len() != 1
+        || facts.context_count != 0
+        || facts.vararg.is_some()
+    {
+        return None;
+    }
+    let comparable = facts.receiver?.obj_internal()? == wk::comparable()
+        && facts.params[0].obj_internal()? == wk::comparable();
+    (comparable && facts.ret.obj_internal()? == wk::closed_range())
+        .then_some(CompilerIntrinsic::ComparableRangeTo)
+}
+
 /// `matchStdlibExtensionContainsCall`: an operator `contains` extension of a closed range with one
 /// parameter.
 fn closed_range_contains(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
@@ -692,11 +711,13 @@ fn function_realization_with_stdlib_owner(
     } else if facts.package.matches("kotlin/reflect") {
         reflection(&facts)
     } else if facts.package == crate::types::wk::kotlin_ranges_package() {
-        progression_builder(&facts).or_else(|| {
-            compiler_builtin_owner
-                .then(|| closed_range_contains(&facts))
-                .flatten()
-        })
+        progression_builder(&facts)
+            .or_else(|| comparable_range_to(&facts))
+            .or_else(|| {
+                compiler_builtin_owner
+                    .then(|| closed_range_contains(&facts))
+                    .flatten()
+            })
     } else {
         None
     }

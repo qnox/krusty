@@ -1164,6 +1164,15 @@ pub enum FirExprKind {
         call: FirCall,
         negated: bool,
     },
+    /// `value in start..end` over the closed range `Comparable.rangeTo` builds (kotlinc's
+    /// `RangeContainsLowering` with a `ComparableRangeToHandler` header): `lower` is the selected
+    /// `Comparable.compareTo` of the value with `start`; the value is compared with `upper_bound`
+    /// through the same member. Neither the range nor its `contains` is called.
+    ComparableRangeContainment {
+        lower: FirCall,
+        upper_bound: FirExprId,
+        negated: bool,
+    },
     CallableReference {
         target: FirCallableReferenceTarget,
         /// Exact callable shape selected by the checker. This remains a function type even when
@@ -1538,7 +1547,10 @@ impl FirExprKind {
                 target_parameters, ..
             } => target_parameters.len() * std::mem::size_of::<ResolvedTy>(),
             FirExprKind::ComparisonCall { call, .. }
-            | FirExprKind::ContainmentCall { call, .. } => call.storage_payload_bytes(),
+            | FirExprKind::ContainmentCall { call, .. }
+            | FirExprKind::ComparableRangeContainment { lower: call, .. } => {
+                call.storage_payload_bytes()
+            }
             FirExprKind::Lambda {
                 type_parameters,
                 body,
@@ -2689,7 +2701,8 @@ impl FirBody {
             match &expression.kind {
                 FirExprKind::Call(call)
                 | FirExprKind::ComparisonCall { call, .. }
-                | FirExprKind::ContainmentCall { call, .. } => {
+                | FirExprKind::ContainmentCall { call, .. }
+                | FirExprKind::ComparableRangeContainment { lower: call, .. } => {
                     if let Some(callable) = call.target.module() {
                         callables.insert(callable);
                     }

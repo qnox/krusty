@@ -369,7 +369,8 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &HashMap<TypeNam
             }
             return;
         }
-        IrCheckedOperation::IllegalProgressionStep { .. } => return,
+        IrCheckedOperation::IllegalProgressionStep { .. }
+        | IrCheckedOperation::ComparableRangeContains { .. } => return,
         IrCheckedOperation::PropertyReference {
             target,
             substitutions,

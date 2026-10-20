@@ -2052,7 +2052,8 @@ fn specialize_checked_operation(
         }
         IrCheckedOperation::RangeContains { counter, .. }
         | IrCheckedOperation::RangeLoop { counter, .. } => specialize_ty(counter, bindings),
-        IrCheckedOperation::IllegalProgressionStep { .. } => {}
+        IrCheckedOperation::IllegalProgressionStep { .. }
+        | IrCheckedOperation::ComparableRangeContains { .. } => {}
         IrCheckedOperation::PropertyReference {
             target,
             substitutions,

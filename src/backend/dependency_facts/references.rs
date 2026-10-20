@@ -261,6 +261,7 @@ impl ReferencedDependencies {
             | IrCheckedOperation::BackingFieldRead { .. }
             | IrCheckedOperation::BackingFieldWrite { .. }
             | IrCheckedOperation::RangeConstruction { .. }
+            | IrCheckedOperation::ComparableRangeContains { .. }
             | IrCheckedOperation::IllegalProgressionStep { .. } => {}
         }
     }

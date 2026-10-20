@@ -572,18 +572,7 @@ impl<'a> Checker<'a> {
         }
         self.expect_call_args(scope, &params, false, arg_exprs, arg_tys);
         let target = if selected.kind == crate::libraries::FnKind::Member {
-            let mut member = selected.member_with_return(ret);
-            member.params = params;
-            ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
-                receiver,
-                physical_params: selected.callable.physical_params.clone(),
-                context_args: Vec::new(),
-                ret,
-                member,
-                projected_return_hazard: selected.projected_return_hazard,
-                suspend: selected.flags.suspend,
-                origin: selected.callable.origin.clone(),
-            })
+            selected_member_call(receiver, &selected, params, ret)
         } else {
             let vararg = selected
                 .call_sig
@@ -706,7 +695,11 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         self.resolved_in_range_comparisons.remove(&e);
         let convention = range_operator(kind);
-        for operator in [convention.key, SyntheticOperatorCall::Contains] {
+        for operator in [
+            convention.key,
+            SyntheticOperatorCall::Contains,
+            SyntheticOperatorCall::CompareTo,
+        ] {
             self.resolved_operator_calls.remove(&(e, operator));
             self.resolved_builtin_operator_accesses
                 .remove(&(e, operator));
@@ -872,10 +865,58 @@ impl<'a> Checker<'a> {
                 // live in stdlib metadata. Scalar storage is irrelevant to source applicability.
                 let contains = ordinary_contains
                     .unwrap_or_else(|| self.range_contains_call(scope, e, range_ty, vt, value));
-                self.finish_range_contains(&operands, range_ty, range_call, contains)
+                let comparable_range = range_call.range_provider_realization()
+                    == Some(crate::libraries::MemberRealization::Intrinsic(
+                        crate::libraries::CompilerIntrinsic::ComparableRangeTo,
+                    ))
+                    && matches!(contains, Some((Ty::Boolean, ResolvedCall::Member(_))));
+                let ty = self.finish_range_contains(&operands, range_ty, range_call, contains);
+                if comparable_range && ty == Ty::Boolean {
+                    self.select_comparable_range_ordering(e, range_ty);
+                }
+                ty
             }
         };
         self.set(e, t)
+    }
+
+    /// kotlinc's `RangeContainsLowering` over a `ComparableRangeToHandler` range: the range's own
+    /// `contains` is replaced by `Comparable.compareTo` of the value with each bound. Select that
+    /// member on `Comparable<T>` for the range's element `T`, through the ordinary member
+    /// candidate selection, and record it beside the range and `contains` calls it stands in for.
+    /// The bounds keep the boundaries `rangeTo` gave them, so the selection sees only the element
+    /// type.
+    fn select_comparable_range_ordering(&mut self, expression: ExprId, range_ty: Ty) {
+        let Some(&element) = range_ty.type_args().first() else {
+            return;
+        };
+        let comparable = Ty::obj_args_name(crate::types::wk::comparable(), &[element]);
+        let (mut functions, _) = self
+            .stable_receiver_callables(comparable, "compareTo")
+            .into_parts();
+        functions.overloads.retain(|candidate| {
+            candidate.flags.operator
+                && candidate.kind == crate::libraries::FnKind::Member
+                && candidate.context_count == 0
+        });
+        let callables = crate::libraries::Callables::Functions(functions);
+        let crate::symbol_resolver::CandidateSelection::Selected((selected, params, Ty::Int)) =
+            self.resolver()
+                .select_receiver_function_with_params_tracking(
+                    comparable,
+                    "compareTo",
+                    &[crate::symbol_resolver::CallArgKind::Typed(element)],
+                    &[],
+                    &callables,
+                    None,
+                )
+        else {
+            return;
+        };
+        self.resolved_operator_calls.insert(
+            (expression, SyntheticOperatorCall::CompareTo),
+            selected_member_call(comparable, &selected, params, Ty::Int),
+        );
     }
 
     /// The `contains` operator call testing membership of `value` in a range of `range_ty`.
@@ -953,6 +994,27 @@ impl<'a> Checker<'a> {
         );
         Ty::Boolean
     }
+}
+
+/// The call target of a selected member operator over `receiver`.
+fn selected_member_call(
+    receiver: Ty,
+    selected: &crate::libraries::FunctionInfo,
+    params: Vec<Ty>,
+    ret: Ty,
+) -> ResolvedCall {
+    let mut member = selected.member_with_return(ret);
+    member.params = params;
+    ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
+        receiver,
+        physical_params: selected.callable.physical_params.clone(),
+        context_args: Vec::new(),
+        ret,
+        member,
+        projected_return_hazard: selected.projected_return_hazard,
+        suspend: selected.flags.suspend,
+        origin: selected.callable.origin.clone(),
+    })
 }
 
 /// `computeComparisonClass`: the widest numeric type of a range literal's bounds and the value.

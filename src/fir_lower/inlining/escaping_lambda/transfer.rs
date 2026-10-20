@@ -1937,6 +1937,7 @@ fn checked_substitutions(operation: &IrCheckedOperation) -> Option<&[IrCheckedSu
         | IrCheckedOperation::BackingFieldWrite { .. }
         | IrCheckedOperation::RangeConstruction { .. }
         | IrCheckedOperation::RangeContains { .. }
+        | IrCheckedOperation::ComparableRangeContains { .. }
         | IrCheckedOperation::IllegalProgressionStep { .. }
         | IrCheckedOperation::RangeLoop { .. } => None,
     }
