@@ -2433,6 +2433,8 @@ mod secondary_ctor_noprimary_e2e;
 mod secondary_ctor_this_sibling_e2e;
 #[path = "self_call_type_variables_e2e.rs"]
 mod self_call_type_variables_e2e;
+#[path = "serializable_noarg_constructor_order_e2e.rs"]
+mod serializable_noarg_constructor_order_e2e;
 #[path = "serializable_value_class_e2e.rs"]
 mod serializable_value_class_e2e;
 #[path = "serialization_class_serial_name_e2e.rs"]

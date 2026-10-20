@@ -2837,28 +2837,6 @@ fn emit_class(
         }
         .emit(secondary_ordinal as usize, sc);
     }
-    // The child-serializer cache's factories and its `…$cp` accessor follow that constructor, which
-    // is kotlinc's order for them. They are generated, so they carry no source order to sort by and
-    // the declared-member schedule leaves them out.
-    for &fid in c
-        .methods
-        .iter()
-        .filter(|fid| ir.serialization_cache_methods.contains(fid))
-    {
-        let f = &ir.functions[fid as usize];
-        if f.body.is_some() {
-            emit_method(
-                ir,
-                fid,
-                StaticOwner::Class(c.fq_name),
-                &fq_name,
-                facade,
-                &mut cw,
-                !f.is_static,
-                env,
-            );
-        }
-    }
     // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
     // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a full
     // mask — AFTER the declared methods (kotlinc's member order), at the primary's declared
@@ -2940,6 +2918,29 @@ fn emit_class(
                     }
                 }
             }
+        }
+    }
+    // The child-serializer cache's factories and its `…$cp` accessor follow the deserialization
+    // constructor and the no-arg convenience constructor, which is kotlinc's order for them. They
+    // are generated, so they carry no source order to sort by and the declared-member schedule
+    // leaves them out.
+    for &fid in c
+        .methods
+        .iter()
+        .filter(|fid| ir.serialization_cache_methods.contains(fid))
+    {
+        let f = &ir.functions[fid as usize];
+        if f.body.is_some() {
+            emit_method(
+                ir,
+                fid,
+                StaticOwner::Class(c.fq_name),
+                &fq_name,
+                facade,
+                &mut cw,
+                !f.is_static,
+                env,
+            );
         }
     }
     jvm_static_members::emit_companion_bridges(ir, c, &mut cw, env);
