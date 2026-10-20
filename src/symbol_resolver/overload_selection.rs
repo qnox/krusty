@@ -1526,7 +1526,7 @@ fn fun_arg_matches(src: &dyn SymbolSource, param: &Ty, arg: &Ty, lambda_literal:
                 && param.params.len().saturating_sub(implicit) == lambda.params.len()
                 && param.params.iter().skip(implicit).zip(&lambda.params).all(
                     |(passed, declared)| {
-                        matches!(declared, Ty::Error)
+                        matches!(*declared, Ty::Error)
                             || passed.non_null().is_ty_param()
                             || declared.non_null().is_ty_param()
                             || resolution_subtype(src, *passed, *declared)

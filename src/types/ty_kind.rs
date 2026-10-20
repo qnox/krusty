@@ -1,27 +1,66 @@
 //! The structural view of a [`Ty`].
 //!
 //! Code that takes a type apart matches on [`Ty::kind`] instead of on `Ty` itself. A `TyKind`
-//! carries its component types by value, so a match never depends on how `Ty` stores them.
+//! carries its component types by value; `Ty` itself is only an id into the type table.
 
-use super::{intern_ty, FnSig, Ty, TyList, TyParamName, TypeName};
+use super::{FnSig, Ty, TyList, TyParamName, TypeName};
 
-/// One layer of a [`Ty`], with its component types by value. Mirrors the variants of `Ty`.
+/// One layer of a [`Ty`], with its component types by value.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum TyKind {
     Unit,
+    /// A reference type by internal name (e.g. `demo/Point`), with its generic type arguments
+    /// (`List<Int>` → `Obj("kotlin/collections/List", [Int])`). Arguments are interned (`intern_tys`)
+    /// so equal instantiations share a pointer and the front end can recover element/member types.
+    /// Empty for a non-generic class.
     Obj(TypeName, TyList),
+    /// The type of the `null` literal — assignable only to nullable types.
     Null,
+    /// The bottom type (`Nothing`): the type of `throw`/`return` expressions. Assignable to every
+    /// type; an expression of this type never yields a value (it always diverges).
     Nothing,
+    /// Placeholder after a type error, suppresses cascading diagnostics.
     Error,
+    /// A declaration whose type is NOT DETERMINED YET — recorded by signature collection for an
+    /// implicitly-typed declaration the resolution engine has not resolved.
+    ///
+    /// Distinct from [`TyKind::Error`] on purpose. Spelling "not yet" and "gave up" the same way is what
+    /// forces every read site to be taught the difference by hand: a reader that finds `Error`
+    /// cannot know whether asking the engine would help, so each place has to be patched
+    /// individually and any place that is missed silently publishes a wrong type. `Pending` is
+    /// answerable — a read of it demands the declaration, and it must never reach emission or
+    /// `@Metadata`, which is an invariant that can be asserted rather than hoped for.
     Pending,
+    /// A Kotlin function type `(A, B) -> R`. The front end keeps the real parameter/return types
+    /// (interned `FnSig`) so a call through a `Fun` value recovers its return type.
     Fun(&'static FnSig),
+    /// A nullable type `T?`. Wraps the interned non-null type. Kotlin has no `T??`, so the inner type
+    /// is never itself `Nullable` (the [`Ty::nullable`] constructor enforces this).
     Nullable(Ty),
+    /// A Java platform type `T!`: flexible between `T` and `T?`. Unlike [`Nullable`](TyKind::Nullable),
+    /// direct member access is permitted; assignability accepts it at either nullability bound.
     PlatformNullable(Ty),
+    /// Use-site type projections. These occur only as generic arguments (`Box<in T>`, `Box<out T>`,
+    /// and `Box<*>`) and remain semantic until assignability/inference consumes their variance. A
+    /// star retains its readable upper bound, but stays distinct from an explicitly written `out`
+    /// projection because Kotlin metadata and JVM generic signatures encode those forms differently.
     InProjection(Ty),
     OutProjection(Ty),
     StarProjection(Ty),
+    /// A generic type-parameter reference (`T`), carrying its name and declared upper bound
+    /// (`<T : CharSequence>` → bound `CharSequence`; unbounded `<T>` → bound `kotlin/Any`). The checker
+    /// reasons about `T` as `T` (subtyping against the bound, substitution at instantiation); runtime
+    /// erasure is a backend concern.
     TyParam(TyParamName, Ty),
+    /// Kotlin's definitely-non-null type `T & Any`.
+    ///
+    /// The wrapped type is the original type parameter, including a bound that still admits null.
+    /// This is distinct from a parameter declared `T : Any`: `(T & Any)?` reopens to that original
+    /// `T?`, while `T : Any` keeps its recorded bound when used as `T?`.
     DefinitelyNotNull(Ty),
+    /// A denotable intersection `A & B & …` produced when a type variable's only constraints are
+    /// incompatible upper bounds (`Int & String`). It is a subtype of each component and is not
+    /// [`TyKind::Nothing`]: the value still exists at run time.
     Intersection(TyList),
 }
 
@@ -44,27 +83,6 @@ impl TyKind {
 }
 
 impl Ty {
-    /// This type's outermost layer, for matching.
-    pub fn kind(self) -> TyKind {
-        match self {
-            Ty::Unit => TyKind::Unit,
-            Ty::Obj(name, args) => TyKind::Obj(name, args),
-            Ty::Null => TyKind::Null,
-            Ty::Nothing => TyKind::Nothing,
-            Ty::Error => TyKind::Error,
-            Ty::Pending => TyKind::Pending,
-            Ty::Fun(signature) => TyKind::Fun(signature),
-            Ty::Nullable(inner) => TyKind::Nullable(*inner),
-            Ty::PlatformNullable(inner) => TyKind::PlatformNullable(*inner),
-            Ty::InProjection(inner) => TyKind::InProjection(*inner),
-            Ty::OutProjection(inner) => TyKind::OutProjection(*inner),
-            Ty::StarProjection(inner) => TyKind::StarProjection(*inner),
-            Ty::TyParam(name, bound) => TyKind::TyParam(name, *bound),
-            Ty::DefinitelyNotNull(inner) => TyKind::DefinitelyNotNull(*inner),
-            Ty::Intersection(components) => TyKind::Intersection(components),
-        }
-    }
-
     /// Whether this is a function type.
     pub fn is_fun(self) -> bool {
         matches!(self.kind(), TyKind::Fun(_))
@@ -84,23 +102,7 @@ impl Ty {
 impl From<TyKind> for Ty {
     /// The type with this outermost layer: the inverse of [`Ty::kind`].
     fn from(kind: TyKind) -> Ty {
-        match kind {
-            TyKind::Unit => Ty::Unit,
-            TyKind::Obj(name, args) => Ty::Obj(name, args),
-            TyKind::Null => Ty::Null,
-            TyKind::Nothing => Ty::Nothing,
-            TyKind::Error => Ty::Error,
-            TyKind::Pending => Ty::Pending,
-            TyKind::Fun(signature) => Ty::Fun(signature),
-            TyKind::Nullable(inner) => Ty::Nullable(intern_ty(inner)),
-            TyKind::PlatformNullable(inner) => Ty::PlatformNullable(intern_ty(inner)),
-            TyKind::InProjection(inner) => Ty::InProjection(intern_ty(inner)),
-            TyKind::OutProjection(inner) => Ty::OutProjection(intern_ty(inner)),
-            TyKind::StarProjection(inner) => Ty::StarProjection(intern_ty(inner)),
-            TyKind::TyParam(name, bound) => Ty::TyParam(name, intern_ty(bound)),
-            TyKind::DefinitelyNotNull(inner) => Ty::DefinitelyNotNull(intern_ty(inner)),
-            TyKind::Intersection(components) => Ty::Intersection(components),
-        }
+        Ty::intern(kind)
     }
 }
 

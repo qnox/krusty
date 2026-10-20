@@ -197,7 +197,7 @@ impl Emitter<'_> {
                 narrows(slot, *type_operand).then_some(ErasedResult::Coerced { call: *arg, slot })
             }
             crate::ir::IrExpr::InvokeFunction { ret, .. } => {
-                (!matches!(ret, Ty::Unit | Ty::Nothing)
+                (!matches!(*ret, Ty::Unit | Ty::Nothing)
                     && narrows(Ty::obj("java/lang/Object"), *ret))
                 .then_some(ErasedResult::Invocation)
             }

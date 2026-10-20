@@ -1616,7 +1616,7 @@ fn secondary_constructors(c: &IrClass, ir: &IrFile) -> Vec<(SecondaryConstructor
                 for ((_, declared), parameter) in record.params.iter_mut().zip(&constructor.params)
                 {
                     // `Unit` is the `kotlin.Unit` singleton as a parameter.
-                    if matches!(parameter, Ty::Unit) || parameter.is_reference() {
+                    if matches!(*parameter, Ty::Unit) || parameter.is_reference() {
                         *declared = Ty::nullable(*declared);
                     }
                 }
