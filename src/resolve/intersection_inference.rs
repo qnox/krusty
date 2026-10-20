@@ -177,7 +177,7 @@ fn reified_provenance_of_ty_with_declaration(
             reified_provenance_of_ty_with_declaration(*inner, declaration)
         }
         Ty::TyParam(identity, occurrence_bound) => ReifiedArgumentProvenance {
-            through_definitely_non_null: declaration(identity)
+            through_definitely_non_null: declaration(identity.as_str())
                 .and_then(|declared| match declared.non_null() {
                     Ty::TyParam(declared_identity, declared_bound)
                         if declared_identity == identity =>
@@ -909,7 +909,7 @@ impl Checker<'_> {
         );
 
         let result_formal = match signature.ret {
-            Ty::TyParam(formal, _) => Some(formal),
+            Ty::TyParam(formal, _) => Some(formal.as_str()),
             Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner.ty_param_name(),
             _ => None,
         };

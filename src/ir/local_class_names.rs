@@ -108,7 +108,7 @@ fn ty(value: Ty, names: &HashMap<TypeName, TypeName>) -> Ty {
         Ty::InProjection(inner) => Ty::in_projection(ty(*inner, names)),
         Ty::OutProjection(inner) => Ty::out_projection(ty(*inner, names)),
         Ty::StarProjection(inner) => Ty::star_projection(ty(*inner, names)),
-        Ty::TyParam(parameter, bound) => Ty::ty_param(parameter, ty(*bound, names)),
+        Ty::TyParam(parameter, bound) => Ty::ty_param(parameter.as_str(), ty(*bound, names)),
         Ty::DefinitelyNotNull(inner) => {
             Ty::DefinitelyNotNull(crate::types::intern_ty(ty(*inner, names)))
         }

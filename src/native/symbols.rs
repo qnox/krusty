@@ -135,7 +135,7 @@ fn mangle_ty(out: &mut String, ty: crate::types::Ty) -> Option<()> {
         }
         Ty::TyParam(name, _) => {
             let mut spelled = String::new();
-            mangle_name(&mut spelled, name);
+            mangle_name(&mut spelled, name.as_str());
             out.push_str(&format!("P{}_{spelled}", spelled.len()));
         }
         Ty::Fun(signature) => {

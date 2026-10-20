@@ -226,8 +226,11 @@ impl Unification<'_> {
             return true;
         }
         if let Some(Ty::TyParam(name, _)) = parameters_type {
-            if self.variables.contains(&name) {
-                if result.get(name).is_some_and(|known| *known != original) {
+            if self.variables.contains(&name.as_str()) {
+                if result
+                    .get(name.as_str())
+                    .is_some_and(|known| *known != original)
+                {
                     return false;
                 }
                 result.insert(name.to_string(), original);

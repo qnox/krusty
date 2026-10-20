@@ -125,7 +125,7 @@ impl Checker<'_> {
             // declaration identity exposed by an individual constituent differs. Selection has
             // already committed at this point; use the complete candidate families only to recover
             // the unique concrete receiver view, never to repeat overload selection.
-            _ => self.intersection_member_receiver(bounds, &selected.callable.name),
+            _ => self.intersection_member_receiver(bounds.as_slice(), &selected.callable.name),
         }
     }
 

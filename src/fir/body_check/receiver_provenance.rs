@@ -53,7 +53,8 @@ impl BodyFirChecker<'_> {
         else {
             return None;
         };
-        (ty.get() == Ty::Obj(*classifier, &[]) && expected == ty.get()).then_some(*classifier)
+        (ty.get() == Ty::Obj(*classifier, crate::types::TyList::EMPTY) && expected == ty.get())
+            .then_some(*classifier)
     }
 
     /// Semantic receiver frame exposed to a nested callable. Direct callable receivers are ordinary

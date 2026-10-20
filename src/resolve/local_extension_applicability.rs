@@ -377,7 +377,7 @@ impl Checker<'_> {
                             return None;
                         }
                         let call_sig = crate::libraries::CallSig {
-                            param_defaults: declared.param_defaults.clone(),
+                            param_defaults: declared.param_defaults,
                             required: declared.required,
                             vararg: declared.vararg(),
                             vararg_index: declared.vararg_index,

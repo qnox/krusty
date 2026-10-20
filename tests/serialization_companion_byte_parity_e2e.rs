@@ -2518,7 +2518,7 @@ fn metadata_constructors(bytes: &[u8], owner: &str) -> Vec<ConstructorMetadataSh
         .map(|constructor| ConstructorMetadataShape {
             visibility: constructor.params.visibility,
             names: constructor.params.names.clone(),
-            defaults: constructor.params.defaults.clone(),
+            defaults: constructor.params.defaults.clone().to_vec(),
             types: constructor.params.types.clone(),
             jvm_name: constructor.jvm_name,
             jvm_descriptor: constructor.jvm_desc,

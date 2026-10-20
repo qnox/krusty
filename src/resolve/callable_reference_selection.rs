@@ -138,9 +138,9 @@ fn alpha_equivalent_type(
         return true;
     }
     match (left, right) {
-        (Ty::TyParam(left, _), Ty::TyParam(right, _)) => {
-            formals.get(left).is_some_and(|mapped| mapped == right)
-        }
+        (Ty::TyParam(left, _), Ty::TyParam(right, _)) => formals
+            .get(left.as_str())
+            .is_some_and(|mapped| mapped == right),
         (Ty::Nullable(left), Ty::Nullable(right))
         | (Ty::PlatformNullable(left), Ty::PlatformNullable(right))
         | (Ty::InProjection(left), Ty::InProjection(right))

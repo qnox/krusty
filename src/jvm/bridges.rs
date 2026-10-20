@@ -1044,11 +1044,11 @@ fn bridge_erasure_visiting(ty: Ty, visiting: &mut crate::fx_hash::HashSet<&'stat
         // `<T : S>` where `S : Entity` erases to `Entity`, whether `S` is declared on the method
         // or on the enclosing classifier. A cycle (`T : S`, `S : T`) has no class bound.
         Ty::TyParam(name, bound) => {
-            if !visiting.insert(name) {
+            if !visiting.insert(name.as_str()) {
                 return Ty::obj("kotlin/Any");
             }
             let erased = stored_value_ty(bridge_erasure_visiting(*bound, visiting));
-            visiting.remove(name);
+            visiting.remove(name.as_str());
             erased
         }
         Ty::Nullable(inner) => Ty::nullable(bridge_erasure_visiting(*inner, visiting)),

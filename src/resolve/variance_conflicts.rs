@@ -614,7 +614,7 @@ impl Checker<'_> {
                 if written_definitely_non_null(site.origin) && !walk.dnn_and_flexible {
                     return;
                 }
-                let Some(declared) = walk.variances.get(parameter).copied() else {
+                let Some(declared) = walk.variances.get(parameter.as_str()).copied() else {
                     return;
                 };
                 if site.position.allows(declared)
@@ -624,7 +624,7 @@ impl Checker<'_> {
                 }
                 conflicts.push(Conflict {
                     span: site.span,
-                    parameter,
+                    parameter: parameter.as_str(),
                     declared,
                     position: site.position,
                     abbreviated: site.abbreviated,

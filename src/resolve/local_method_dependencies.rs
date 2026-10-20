@@ -726,7 +726,7 @@ impl Checker<'_> {
                 .iter()
                 .position(|parameter| parameter.is_vararg),
             required: crate::libraries::required_arity(params.len(), &defaults),
-            param_defaults: defaults,
+            param_defaults: defaults.into(),
             exact_params: function
                 .params
                 .iter()

@@ -141,7 +141,7 @@
 1	src/plugins/mod.rs	large size difference between variants: the entire enum is at least 1384 bytes
 1	src/plugins/mod.rs	this `map_or` can be simplified
 1	src/plugins/serialization.rs	the following explicit lifetimes could be elided: 'ir
-1	src/plugins/serialization/intrinsic_serializer.rs	large size difference between variants: the entire enum is at least 1360 bytes
+1	src/plugins/serialization/intrinsic_serializer.rs	large size difference between variants: the entire enum is at least 1136 bytes
 1	src/resolve.rs	called `expect` on `current_owner` after checking its variant with `is_some`
 1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `&hidden`
 1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `matches_qual`
@@ -169,7 +169,7 @@
 1	src/resolve/generic_call_bindings.rs	this function has too many arguments (8/7)
 1	src/resolve/interface_delegation.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if setter { Ty::Unit } else { property_type }`
 1	src/resolve/interface_delegation.rs	you are using an explicit closure for copying elements
-1	src/resolve/local_method_dependencies.rs	large size difference between variants: the entire enum is at least 1600 bytes
+1	src/resolve/local_method_dependencies.rs	large size difference between variants: the entire enum is at least 1328 bytes
 1	src/resolve/local_method_dependencies.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let (inherited, provider) = self.inherited_body_local_default_candidate(owner, candidate)?;`
 1	src/resolve/member_extension_properties.rs	this function has too many arguments (8/7)
 1	src/resolve/member_extension_properties.rs	very complex type used. Consider factoring parts into `type` definitions

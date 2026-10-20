@@ -19,9 +19,12 @@ pub(super) fn java_annotation_parameter_list(class: &ClassInfo) -> Option<ParamL
     let kotlin_class_element = |semantic: Ty| {
         let arguments = match semantic.non_null() {
             Ty::Obj(_, arguments) => arguments,
-            _ => &[],
+            _ => crate::types::TyList::EMPTY,
         };
-        Ty::obj_args_name(crate::types::type_name("kotlin/reflect/KClass"), arguments)
+        Ty::obj_args_name(
+            crate::types::type_name("kotlin/reflect/KClass"),
+            arguments.as_slice(),
+        )
     };
     let mut elements = class
         .methods
@@ -67,7 +70,7 @@ pub(super) fn java_annotation_parameter_list(class: &ClassInfo) -> Option<ParamL
         names: elements.iter().map(|(name, _, _)| name.clone()).collect(),
         defaults: elements.iter().map(|(_, _, default)| *default).collect(),
         types: elements.iter().map(|(_, ty, _)| *ty).collect(),
-        recv_fun: vec![false; elements.len()],
+        recv_fun: vec![false; elements.len()].into(),
         vararg: value_vararg.then_some(0),
         annotation: Some(AnnotationParameterPolicy {
             positional,

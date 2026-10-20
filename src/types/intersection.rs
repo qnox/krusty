@@ -56,7 +56,7 @@ pub(super) fn canonical(parts: &[Ty]) -> Ty {
         [one] if all_nullable => Ty::nullable(*one),
         [one] => *one,
         many => {
-            let intersection = Ty::Intersection(intern_tys(many));
+            let intersection = Ty::Intersection(crate::types::TyList::new(intern_tys(many)));
             if all_nullable {
                 Ty::nullable(intersection)
             } else {
@@ -119,7 +119,7 @@ fn component_order(left: Ty, right: Ty) -> Ordering {
     match (left, right) {
         (Ty::Obj(left_name, left_args), Ty::Obj(right_name, right_args)) => {
             type_path_cmp(left_name, right_name)
-                .then_with(|| slice_cmp(left_args, right_args, component_order))
+                .then_with(|| slice_cmp(&left_args, &right_args, component_order))
         }
         _ => structural_cmp(left, right),
     }
@@ -144,7 +144,7 @@ fn structural_cmp(left: Ty, right: Ty) -> Ordering {
         .then_with(|| match (left, right) {
             (Ty::Obj(left_name, left_args), Ty::Obj(right_name, right_args)) => {
                 type_name_cmp(left_name, right_name)
-                    .then_with(|| slice_cmp(left_args, right_args, structural_cmp))
+                    .then_with(|| slice_cmp(&left_args, &right_args, structural_cmp))
             }
             (Ty::Fun(left), Ty::Fun(right)) => left
                 .suspend
@@ -162,10 +162,10 @@ fn structural_cmp(left: Ty, right: Ty) -> Ordering {
                 structural_cmp(*left, *right)
             }
             (Ty::TyParam(left_name, left_bound), Ty::TyParam(right_name, right_bound)) => left_name
-                .cmp(right_name)
+                .cmp(&right_name)
                 .then_with(|| structural_cmp(*left_bound, *right_bound)),
             (Ty::Intersection(left), Ty::Intersection(right)) => {
-                slice_cmp(left, right, structural_cmp)
+                slice_cmp(&left, &right, structural_cmp)
             }
             _ => Ordering::Equal,
         })
@@ -222,7 +222,7 @@ pub(crate) fn declaration_approximation(
         Ty::Nullable(inner) if matches!(*inner, Ty::Intersection(_)) => {
             Some(Ty::nullable(Ty::obj_name(super::wk::any())))
         }
-        Ty::Intersection(parts) => approximate_parts(parts, variance_at),
+        Ty::Intersection(parts) => approximate_parts(parts.as_slice(), variance_at),
         other => Some(other),
     }
 }
@@ -540,7 +540,7 @@ mod tests {
         match declaration_approximation(contravariant, &mut in_variance) {
             Some(Ty::Obj(name, arguments)) => {
                 assert!(name.matches("demo/Inn"));
-                assert!(matches!(arguments, [Ty::StarProjection(_)]));
+                assert!(matches!(arguments.as_slice(), [Ty::StarProjection(_)]));
             }
             other => panic!("expected a star argument, got {other:?}"),
         }

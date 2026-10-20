@@ -320,7 +320,7 @@ impl Generator<'_, '_> {
         let nullable = ty.is_nullable();
         let inner = ty.non_null();
         let arguments = if let Ty::TyParam(identity, _) = inner {
-            let (parameter, container) = self.parameters.declaration(identity)?;
+            let (parameter, container) = self.parameters.declaration(identity.as_str())?;
             if !type_parameter_bound && parameter.reified {
                 let suffix = if nullable { "?" } else { "" };
                 self.push(TypeOfInsn::ReifiedMarker(format!(
@@ -330,17 +330,21 @@ impl Generator<'_, '_> {
                 self.push(TypeOfInsn::AconstNull);
                 return Ok(());
             }
-            if let Some(&temp) = self.stored.get(identity) {
+            if let Some(&temp) = self.stored.get(identity.as_str()) {
                 self.push(TypeOfInsn::LoadTemp(temp));
             } else if self.recursive_bounds
-                && parameter_is_self_recursive(self.parameters, identity)
+                && parameter_is_self_recursive(self.parameters, identity.as_str())
             {
-                self.materialize_recursive(identity)?;
-                let temp = self.stored[identity];
+                self.materialize_recursive(identity.as_str())?;
+                let temp = self.stored[identity.as_str()];
                 self.push(TypeOfInsn::LoadTemp(temp));
             } else {
                 if !self.recursive_bounds
-                    && references_recursive_bound(self.parameters, identity, &mut Vec::new())?
+                    && references_recursive_bound(
+                        self.parameters,
+                        identity.as_str(),
+                        &mut Vec::new(),
+                    )?
                 {
                     return Err(TypeOfError::RecursiveBound(parameter.name.clone()));
                 }
@@ -724,7 +728,9 @@ fn type_reaches_parameter(
     seen: &mut Vec<String>,
 ) -> bool {
     match ty.non_null() {
-        Ty::TyParam(identity, _) => reaches_itself(parameters, start, identity, seen, false),
+        Ty::TyParam(identity, _) => {
+            reaches_itself(parameters, start, identity.as_str(), seen, false)
+        }
         Ty::PlatformNullable(inner) | Ty::InProjection(inner) | Ty::OutProjection(inner) => {
             type_reaches_parameter(parameters, start, *inner, seen)
         }
@@ -763,7 +769,7 @@ fn type_references_recursive_bound(
     used: &mut Vec<String>,
 ) -> Result<bool, TypeOfError> {
     match ty.non_null() {
-        Ty::TyParam(identity, _) => references_recursive_bound(parameters, identity, used),
+        Ty::TyParam(identity, _) => references_recursive_bound(parameters, identity.as_str(), used),
         Ty::PlatformNullable(inner) | Ty::InProjection(inner) | Ty::OutProjection(inner) => {
             type_references_recursive_bound(parameters, *inner, used)
         }

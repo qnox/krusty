@@ -892,14 +892,15 @@ fn collection_element(ty: Ty) -> Option<Ty> {
         return Some(element.canonical_semantic());
     }
     match ty {
-        Ty::Obj(owner, [element])
-            if classifier_matches(owner, "kotlin/collections/Iterable")
-                || classifier_matches(owner, "kotlin/collections/Iterator")
-                || classifier_matches(owner, "kotlin/collections/Collection")
-                || classifier_matches(owner, "kotlin/collections/List")
-                || classifier_matches(owner, "kotlin/collections/Set")
-                || classifier_matches(owner, "kotlin/collections/MutableCollection")
-                || classifier_matches(owner, "kotlin/collections/MutableList") =>
+        Ty::Obj(owner, obj_args)
+            if let [element] = obj_args.as_slice()
+                && (classifier_matches(owner, "kotlin/collections/Iterable")
+                    || classifier_matches(owner, "kotlin/collections/Iterator")
+                    || classifier_matches(owner, "kotlin/collections/Collection")
+                    || classifier_matches(owner, "kotlin/collections/List")
+                    || classifier_matches(owner, "kotlin/collections/Set")
+                    || classifier_matches(owner, "kotlin/collections/MutableCollection")
+                    || classifier_matches(owner, "kotlin/collections/MutableList")) =>
         {
             Some(
                 element
@@ -908,7 +909,10 @@ fn collection_element(ty: Ty) -> Option<Ty> {
                     .canonical_semantic(),
             )
         }
-        Ty::Obj(owner, [key, value]) if classifier_matches(owner, "kotlin/collections/Map") => {
+        Ty::Obj(owner, obj_args)
+            if let [key, value] = obj_args.as_slice()
+                && classifier_matches(owner, "kotlin/collections/Map") =>
+        {
             Some(Ty::obj_args(
                 "kotlin/collections/Map$Entry",
                 &[
@@ -951,23 +955,23 @@ fn binary_function(ty: Ty, first: Ty, second: Ty) -> Option<Ty> {
 
 fn list_result(ty: Ty, element: Ty) -> bool {
     matches!(
-        ty.non_null(),
-        Ty::Obj(owner, [actual])
+        ty.non_null().obj_parts(),
+        Some((owner, [actual]))
             if classifier_matches(owner, "kotlin/collections/List")
                 && actual.canonical_semantic() == element.canonical_semantic()
     )
 }
 
 fn indexed_result(ty: Ty, shape: &str, element: Ty) -> bool {
-    let Ty::Obj(owner, [entry]) = ty.non_null() else {
+    let Some((owner, [entry])) = ty.non_null().obj_parts() else {
         return false;
     };
     if !classifier_matches(owner, shape) {
         return false;
     }
     matches!(
-        entry.non_null(),
-        Ty::Obj(indexed, [actual])
+        entry.non_null().obj_parts(),
+        Some((indexed, [actual]))
             if classifier_matches(indexed, "kotlin/collections/IndexedValue")
                 && actual.canonical_semantic() == element.canonical_semantic()
     )
@@ -975,8 +979,8 @@ fn indexed_result(ty: Ty, shape: &str, element: Ty) -> bool {
 
 fn single_argument_result(ty: Ty, shape: &str, element: Ty) -> bool {
     matches!(
-        ty.non_null(),
-        Ty::Obj(owner, [actual])
+        ty.non_null().obj_parts(),
+        Some((owner, [actual]))
             if classifier_matches(owner, shape)
                 && actual.canonical_semantic() == element.canonical_semantic()
     )
@@ -990,8 +994,8 @@ fn iterable_argument(ty: Ty, element: Ty) -> bool {
         return true;
     }
     matches!(
-        ty.non_null(),
-        Ty::Obj(owner, [actual])
+        ty.non_null().obj_parts(),
+        Some((owner, [actual]))
             if (classifier_matches(owner, "kotlin/collections/Iterable")
                 || classifier_matches(owner, "kotlin/sequences/Sequence"))
                 && actual.projection_inner().unwrap_or(*actual).canonical_semantic()
@@ -1001,8 +1005,8 @@ fn iterable_argument(ty: Ty, element: Ty) -> bool {
 
 fn comparator_of(ty: Ty, element: Ty) -> bool {
     matches!(
-        ty.non_null(),
-        Ty::Obj(owner, [actual])
+        ty.non_null().obj_parts(),
+        Some((owner, [actual]))
             if classifier_matches(owner, "kotlin/Comparator")
                 && actual.projection_inner().unwrap_or(*actual).canonical_semantic()
                     == element.canonical_semantic()
@@ -1046,7 +1050,7 @@ pub(super) fn collection_algorithm(
         .package_is(crate::types::wk::kotlin_sequences_package())
     {
         let receiver = signature.receiver?.non_null();
-        let Ty::Obj(owner, [element]) = receiver else {
+        let Some((owner, [element])) = receiver.obj_parts() else {
             return None;
         };
         let element = element
@@ -1249,7 +1253,7 @@ pub(super) fn collection_algorithm(
             Some(CollectionAlgorithm::SortWith)
         }
         ("plusAssign", [operand]) if signature.ret == Ty::Unit => {
-            let Ty::Obj(owner, [receiver_element]) = receiver.non_null() else {
+            let Some((owner, [receiver_element])) = receiver.non_null().obj_parts() else {
                 return None;
             };
             if !classifier_matches(owner, "kotlin/collections/MutableCollection") {
@@ -1262,7 +1266,7 @@ pub(super) fn collection_algorithm(
             let all_elements = operand
                 .array_read_elem()
                 .or_else(|| {
-                    let Ty::Obj(owner, [element]) = operand.non_null() else {
+                    let Some((owner, [element])) = operand.non_null().obj_parts() else {
                         return None;
                     };
                     (classifier_matches(owner, "kotlin/collections/Iterable")

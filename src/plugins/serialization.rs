@@ -566,13 +566,13 @@ fn serialized_ty(spelling: &[TypeName]) -> Option<Ty> {
         [classifier] => Some(Ty::obj_name(*classifier)),
         [classifier, arguments @ ..] => Some(Ty::Obj(
             *classifier,
-            crate::types::intern_tys(
+            crate::types::TyList::new(crate::types::intern_tys(
                 &arguments
                     .iter()
                     .copied()
                     .map(Ty::obj_name)
                     .collect::<Vec<_>>(),
-            ),
+            )),
         )),
         [] => None,
     }
@@ -921,12 +921,12 @@ fn build_polymorphic_serializer(ir: &mut IrFile, classifier: TypeName) -> ExprId
 /// for, with the serializer it was selected for. A record without that accessor, or for another
 /// serializer, is an inconsistent lowering, not a reason to realize the serializer another way: it
 /// fails hard instead of falling back to the `new X(KClass)` convention.
-fn recorded_custom_serializer_construction<'ir>(
-    ir: &'ir IrFile,
+fn recorded_custom_serializer_construction(
+    ir: &IrFile,
     class_name: TypeName,
     custom: TypeName,
     frontend_owner: TypeName,
-) -> Option<&'ir crate::ir::IrCustomSerializerConstruction> {
+) -> Option<&crate::ir::IrCustomSerializerConstruction> {
     let construction = ir.custom_serializer_constructions.get(&class_name)?;
     assert!(
         construction.serializer == custom,

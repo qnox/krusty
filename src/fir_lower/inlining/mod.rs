@@ -58,7 +58,7 @@ pub(super) fn specialize_inline_copy(
         IrExpr::Variable {
             ty, named: false, ..
         } => match ty.non_null() {
-            Ty::TyParam(name, _) if !runtime.contains_key(name) => Some(*ty),
+            Ty::TyParam(name, _) if !runtime.contains_key(name.as_str()) => Some(*ty),
             Ty::DefinitelyNotNull(inner)
                 if inner
                     .ty_param_name()
