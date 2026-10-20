@@ -3,6 +3,7 @@
 
 mod retained_defaults;
 mod return_labels;
+mod span_index;
 mod statement_render;
 mod traversal;
 use crate::diag::Span;
@@ -1587,6 +1588,7 @@ pub struct File {
     pub(crate) retained_expr_spans: crate::fx_hash::HashMap<ExprId, Span>,
     pub(crate) local_declarations: crate::fx_hash::HashSet<DeclId>,
     pub stmt_spans: Vec<Span>,
+    pub(crate) span_index: span_index::SpanIndex,
     /// Sparse source locations for the value-introducing `=` associated with an expression: property
     /// and local initializers, parameter defaults, and assignment RHS expressions. Diagnostics point
     /// at Kotlin's operator location without retaining source text or adding a span field to every AST
@@ -1994,6 +1996,7 @@ impl File {
         self.stmt_arena = Vec::new();
         self.expr_spans = Vec::new();
         self.stmt_spans = Vec::new();
+        self.forget_span_index();
         self.expr_lines = Vec::new();
         self.expr_source_lines = Vec::new();
         self.expr_end_lines = Vec::new();
