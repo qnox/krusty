@@ -72,6 +72,9 @@ pub(in crate::jvm) fn position(ir: &IrFile, class: &IrClass, identity: u32) -> u
 /// prefix follow its physical order; a prefix value with no field (a capture only constructor code
 /// reads, a forwarded super-constructor argument) has no entry. Every other field keeps its place
 /// after them. Without a recorded order the prefix fields already lead in prefix order.
+///
+/// A prefix value with no constructor argument, a field index past the field table, and two prefix
+/// values naming one field are malformed IR.
 pub(in crate::jvm) fn physical_fields<T>(ir: &IrFile, class: &IrClass, items: Vec<T>) -> Vec<T> {
     if order(ir, class.fq_name).is_none() {
         return items;
@@ -79,13 +82,127 @@ pub(in crate::jvm) fn physical_fields<T>(ir: &IrFile, class: &IrClass, items: Ve
     let prefix = (0..class.constructor_prefix_count).collect();
     let prefix_fields = physical(ir, class, prefix)
         .into_iter()
-        .filter_map(|identity| class.ctor_args.get(identity as usize)?.field_index)
+        .filter_map(|identity| {
+            class
+                .ctor_args
+                .get(identity as usize)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "malformed IR: constructor prefix value {identity} of {} has no argument",
+                        class.fq_name()
+                    )
+                })
+                .field_index
+        })
         .collect::<Vec<_>>();
     let mut items = items.into_iter().map(Some).collect::<Vec<_>>();
     let mut placed = prefix_fields
         .iter()
-        .filter_map(|&field| items.get_mut(field as usize)?.take())
+        .map(|&field| {
+            items
+                .get_mut(field as usize)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "malformed IR: constructor prefix field {field} of {} is not a field",
+                        class.fq_name()
+                    )
+                })
+                .take()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "malformed IR: two constructor prefix values of {} store field {field}",
+                        class.fq_name()
+                    )
+                })
+        })
         .collect::<Vec<_>>();
     placed.extend(items.into_iter().flatten());
     placed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::physical_fields;
+    use crate::ir::{IrClass, IrCtorArg, IrCtorParameterProvenance, IrField, IrFile};
+    use crate::types::{ContextParameterKind, Ty};
+
+    fn capture(field_index: Option<u32>) -> IrCtorArg {
+        IrCtorArg {
+            name: None,
+            context_kind: ContextParameterKind::None,
+            ty: Ty::Int,
+            declared_ty: None,
+            is_field: field_index.is_some(),
+            field_index,
+            has_default: false,
+            is_vararg: false,
+            type_param: None,
+            check: None,
+            anonymous_super_forward: None,
+            capture: None,
+            provenance: IrCtorParameterProvenance::Capture,
+            capture_identity: None,
+        }
+    }
+
+    /// A local class with `fields` and the constructor prefix `prefix`, emitted in `order`.
+    fn layout(fields: &[&str], prefix: Vec<IrCtorArg>, order: &[u32]) -> (IrFile, u32) {
+        let mut ir = IrFile::default();
+        let mut class = IrClass::synthetic(crate::types::type_name("Local"));
+        class.fields = fields
+            .iter()
+            .map(|name| IrField::new((*name).to_string(), Ty::Int))
+            .collect();
+        class.constructor_prefix_count = u32::try_from(order.len()).expect("small fixture");
+        class.ctor_args = prefix;
+        let class = ir.add_class(class);
+        ir.class_capture_order.insert(class, order.into());
+        (ir, class)
+    }
+
+    fn placed(fields: &[&str], prefix: Vec<IrCtorArg>, order: &[u32]) -> Vec<String> {
+        let (ir, class) = layout(fields, prefix, order);
+        let names = fields.iter().map(|name| (*name).to_string()).collect();
+        physical_fields(&ir, &ir.classes[class as usize], names)
+    }
+
+    /// The constructor takes `(c, b, a)`; `c` has no field, so the fields are `$b`, `$a`, then
+    /// the class's own field.
+    #[test]
+    fn a_prefix_value_without_a_field_has_no_entry() {
+        assert_eq!(
+            placed(
+                &["$a", "$b", "own"],
+                vec![capture(Some(0)), capture(Some(1)), capture(None)],
+                &[2, 1, 0],
+            ),
+            ["$b", "$a", "own"]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "malformed IR: constructor prefix value 1 of Local has no argument")]
+    fn a_prefix_value_without_an_argument_is_malformed() {
+        placed(&["$a"], vec![capture(Some(0))], &[1, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "malformed IR: constructor prefix field 2 of Local is not a field")]
+    fn a_prefix_field_past_the_field_table_is_malformed() {
+        placed(
+            &["$a", "$b"],
+            vec![capture(Some(0)), capture(Some(2))],
+            &[1, 0],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "malformed IR: two constructor prefix values of Local store field 0")]
+    fn two_prefix_values_storing_one_field_are_malformed() {
+        placed(
+            &["$a", "$b"],
+            vec![capture(Some(0)), capture(Some(0))],
+            &[1, 0],
+        );
+    }
 }
