@@ -140,8 +140,8 @@ impl Coordinates {
     }
 }
 
-/// Whether `part` of coordinates can be one name in a path, and only that.
-fn is_safe_file_name(part: &str) -> bool {
+/// Whether `part` of coordinates, or a file name, can be one name in a path, and only that.
+pub(super) fn is_safe_file_name(part: &str) -> bool {
     !part.is_empty() && part != "." && part != ".." && !part.contains(['/', '\\', ':', '\0'])
 }
 

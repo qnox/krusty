@@ -46,6 +46,9 @@ pub struct Variant {
     pub dependency_constraints: Vec<Dependency>,
     pub available_at: Option<AvailableAt>,
     pub capabilities: Vec<Capability>,
+    /// The `url` of each file the variant publishes, relative to the metadata file; `None` for a
+    /// file that names none.
+    pub files: Vec<Option<String>>,
 }
 
 pub const CATEGORY: &str = "org.gradle.category";
@@ -181,6 +184,9 @@ fn variant(object: &Map<String, Value>) -> Result<Variant, String> {
                 })
             })
             .collect::<Result<_, String>>()?,
+        files: objects(object, "files")
+            .map(|file| string(file, "url"))
+            .collect(),
     })
 }
 
@@ -233,5 +239,6 @@ mod tests {
         assert_eq!(dependency.classifier.as_deref(), Some("x"));
         assert_eq!(variant.dependency_constraints[0].module, "c");
         assert_eq!(variant.capabilities[0].name, "m");
+        assert_eq!(variant.files, [Some("m-1.jar".to_string())]);
     }
 }
