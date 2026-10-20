@@ -92,54 +92,6 @@ fn declared_accessors(ir: &IrFile, target: PropertyId) -> DeclaredAccessors {
     }
 }
 
-/// The `@JvmName` written on each compiler-default accessor of a property this file declares.
-/// The selected spelling is the accessor convention, and a written name replaces it on the
-/// declaration, so the reference must call the written one. A source-written accessor is an
-/// ordinary function, renamed with its callers.
-fn written_default_accessor_names(
-    ir: &IrFile,
-    target: PropertyId,
-) -> Result<(Option<String>, Option<String>), ()> {
-    let (annotations, getter, setter) = match ir.local_property_layouts.get(&target) {
-        Some(IrLocalPropertyLayout::Member {
-            class,
-            property,
-            getter,
-            setter,
-            ..
-        }) => (
-            ir.classes
-                .get(*class as usize)
-                .and_then(|class| class.properties.get(*property as usize))
-                .map(|property| &property.accessor_annotations),
-            *getter,
-            *setter,
-        ),
-        Some(IrLocalPropertyLayout::TopLevelStorage { getter, setter, .. }) => {
-            (ir.accessor_annotations.get(&target), *getter, *setter)
-        }
-        Some(
-            IrLocalPropertyLayout::TopLevelAccessor { .. }
-            | IrLocalPropertyLayout::MemberExtension { .. },
-        )
-        | None => return Ok((None, None)),
-    };
-    let Some(annotations) = annotations else {
-        return Ok((None, None));
-    };
-    let written = |annotations, declared: Option<FunId>| {
-        Ok::<_, ()>(
-            super::module_calls::applied_jvm_name(Some(annotations))?
-                .filter(|_| declared.is_none())
-                .map(str::to_owned),
-        )
-    };
-    Ok((
-        written(&annotations.getter, getter)?,
-        written(&annotations.setter, setter)?,
-    ))
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PropertyReferenceRealizationTarget {
     Module(PropertyId),
@@ -257,17 +209,24 @@ pub(super) fn realize(
                 reflection_owner,
                 ..
             } => {
-                let (written_getter, written_setter) = written_default_accessor_names(ir, property)
-                    .map_err(|()| PropertyReferenceRealizationTarget::Module(property))?;
+                let failure = PropertyReferenceRealizationTarget::Module(property);
+                let declaration = ir
+                    .referenced_module_properties
+                    .get(&property)
+                    .ok_or(failure)?;
                 // A written name is the accessor's whole JVM name: no module suffix follows it.
-                let (written_getter, written_setter) =
-                    (written_getter.as_deref(), written_setter.as_deref());
+                let written_getter =
+                    super::module_calls::module_property_written_accessor_name(declaration, false)
+                        .map_err(|()| failure)?;
+                let written_setter =
+                    super::module_calls::module_property_written_accessor_name(declaration, true)
+                        .map_err(|()| failure)?;
                 let getter_name = written_getter.unwrap_or(getter_name.as_ref()).to_owned();
                 let setter_name = written_setter.or(setter_name.as_deref()).map(str::to_owned);
+                let (written_getter, written_setter) =
+                    (written_getter.is_some(), written_setter.is_some());
                 let (property_ref, mut realization) = module_property(
-                    ir.referenced_module_properties
-                        .get(&property)
-                        .ok_or(PropertyReferenceRealizationTarget::Module(property))?,
+                    declaration,
                     facades,
                     property,
                     mutable,
@@ -285,8 +244,8 @@ pub(super) fn realize(
                         .map_err(|()| PropertyReferenceRealizationTarget::Module(property))?,
                     },
                 )?;
-                realization.module_suffix_getter &= written_getter.is_none();
-                realization.module_suffix_setter &= written_setter.is_none();
+                realization.module_suffix_getter &= !written_getter;
+                realization.module_suffix_setter &= !written_setter;
                 (property_ref, realization)
             }
             FirPropertyReferenceTarget::Classifier {

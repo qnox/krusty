@@ -23,8 +23,6 @@ impl Checker<'_> {
     ) -> Option<Ty> {
         let (formals, expansion) = if let Some(alias) = scope.type_alias(name) {
             (alias.formals, alias.expansion)
-        } else if let Some(alias) = self.qualified_body_local_type_alias(scope, name) {
-            (alias.formals, alias.expansion)
         } else {
             let identity = self.scoped_source_alias_identity(scope, name)?;
             self.source_alias_expansion(identity)?

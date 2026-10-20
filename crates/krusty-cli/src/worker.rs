@@ -836,13 +836,7 @@ mod tests {
 
     #[test]
     fn the_real_argument_surface_translates() {
-        // `--progressive` is part of the real request but refused while it turns on features krusty
-        // does not implement. Keep exercising every other field of that request here.
-        let request = intellij_request()
-            .into_iter()
-            .filter(|argument| argument != "--progressive")
-            .collect::<Vec<_>>();
-        let unit = translate(&request).expect("must translate");
+        let unit = translate(&intellij_request()).expect("must translate");
         assert_eq!(unit.output_jar, PathBuf::from("out/util.jar"));
         assert_eq!(unit.abi_jar, Some(PathBuf::from("out/util.abi.jar")));
         assert_eq!(
@@ -872,6 +866,7 @@ mod tests {
             "-api-version",
             "2.4",
             "-language-version",
+            "-progressive",
         ] {
             assert!(
                 unit.kotlinc_args.iter().any(|a| a == expected),
@@ -885,25 +880,20 @@ mod tests {
         );
     }
 
-    /// The worker and batch surfaces must not disagree about a semantic option. Until progressive
-    /// language features are implemented, neither the rule-owned spelling nor a forwarded
-    /// kotlinc spelling may compile while silently using ordinary language semantics.
+    /// The worker and batch surfaces must not disagree about a semantic option: every progressive
+    /// feature is modeled, so the rule-owned spelling and a forwarded kotlinc spelling both reach
+    /// the shared compiler.
     #[test]
-    fn progressive_is_refused_through_every_worker_surface() {
-        for progressive in [
-            vec!["--progressive"],
-            vec!["--kotlinc-arg", "-progressive"],
-            vec!["--kotlinc-arg", "-Xprogressive"],
+    fn progressive_is_forwarded_through_every_worker_surface() {
+        for (progressive, forwarded) in [
+            (vec!["--progressive"], "-progressive"),
+            (vec!["--kotlinc-arg", "-progressive"], "-progressive"),
+            (vec!["--kotlinc-arg", "-Xprogressive"], "-Xprogressive"),
         ] {
             let mut request = progressive;
             request.extend(["--srcs", "A.kt", "--out", "o.jar"]);
-            let refusal = translate(&args(&request)).unwrap_err();
-            assert_eq!(
-                refusal,
-                Refusal::Unsupported(
-                    "krusty does not implement the language feature 'ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier' selected by '-progressive'".to_string()
-                )
-            );
+            let unit = translate(&args(&request)).expect("progressive is modeled");
+            assert_eq!(unit.kotlinc_args, [forwarded.to_string()]);
         }
     }
 

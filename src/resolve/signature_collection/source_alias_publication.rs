@@ -11,6 +11,9 @@ use super::*;
 /// One source alias declaration to publish under its qualified identity.
 pub(in crate::resolve) struct SourceAlias<'a> {
     pub(in crate::resolve) identity: TypeName,
+    /// The classifier whose body declares the alias, and the alias's name there; `None` for a
+    /// top-level alias.
+    pub(in crate::resolve) nested_in: Option<(TypeName, &'a str)>,
     pub(in crate::resolve) formals: &'a [String],
     pub(in crate::resolve) target: &'a TypeRef,
 }
@@ -57,6 +60,11 @@ pub(in crate::resolve) fn publish_source_alias(
     );
     if let Some(target) = crate::libraries::type_alias_target_classifier(expansion) {
         table.source_alias_fqns.insert(alias.identity, target);
+    }
+    if let Some((owner, name)) = alias.nested_in {
+        table
+            .nested_type_aliases
+            .insert((owner, name.to_owned()), alias.identity);
     }
     let formals = alias.formals.to_vec();
     table

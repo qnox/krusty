@@ -54,28 +54,6 @@ pub struct ModuleDeclarations {
     pub maven_local: bool,
 }
 
-/// The value at `path` below `node`.
-fn value<'a>(node: &'a Node, path: &[&str]) -> Option<&'a Value> {
-    let mut current = node;
-    for segment in path {
-        current = current.get(segment)?;
-    }
-    Some(&current.value)
-}
-
-fn string(node: &Node, path: &[&str]) -> Option<String> {
-    match value(node, path)? {
-        Value::String(text) => Some(text.clone()),
-        Value::Enum(_, text) => Some(text.to_string()),
-        Value::Int(number) => Some(number.to_string()),
-        _ => None,
-    }
-}
-
-fn enabled(node: &Node, path: &[&str]) -> bool {
-    matches!(value(node, path), Some(Value::Boolean(true)))
-}
-
 /// Read every module's declarations; `modules` and `configured` are in project order and every
 /// configuration is complete.
 pub fn read(
@@ -98,10 +76,14 @@ pub fn read(
                 return Err(format!("module `{}` is not configured", module.name));
             };
             let settings = main.get("settings").ok_or("a fragment without settings")?;
-            let jdk = string(settings, &["jvm", "jdk", "version"])
+            let jdk = settings
+                .text_at(&["jvm", "jdk", "version"])
                 .and_then(|version| version.parse::<u32>().ok())
                 .unwrap_or(25);
-            let blocklist = match value(settings, &["internal", "excludeDependencies"]) {
+            let blocklist = match settings
+                .at(&["internal", "excludeDependencies"])
+                .map(|node| &node.value)
+            {
                 Some(Value::List(items)) => items
                     .iter()
                     .filter_map(|item| match &item.value {
@@ -131,12 +113,15 @@ pub fn read(
 
 /// Whether the module lists the local Maven repository among those it resolves from.
 fn resolves_from_maven_local(module: &Node) -> bool {
-    let Some(Value::List(repositories)) = value(module, &["repositories"]) else {
+    let Some(Value::List(repositories)) = module.get("repositories").map(|node| &node.value) else {
         return false;
     };
     repositories.iter().any(|repository| {
-        string(repository, &["url"]).as_deref() == Some(MAVEN_LOCAL)
-            && !matches!(value(repository, &["resolve"]), Some(Value::Boolean(false)))
+        repository.text_at(&["url"]).as_deref() == Some(MAVEN_LOCAL)
+            && !matches!(
+                repository.get("resolve").map(|node| &node.value),
+                Some(Value::Boolean(false))
+            )
     })
 }
 
@@ -186,12 +171,12 @@ fn declaration(
             module.name
         ));
     };
-    let (compile, runtime) = match string(item, &["scope"]).as_deref() {
+    let (compile, runtime) = match item.text_at(&["scope"]).as_deref() {
         Some("compile-only") => (true, false),
         Some("runtime-only") => (false, true),
         _ => (true, true),
     };
-    let exported = enabled(item, &["exported"]);
+    let exported = item.is_enabled(&["exported"]);
     let target = if std::ptr::eq(*object, &EXTERNAL_MAVEN) {
         Target::Maven {
             coordinates: maven_coordinates(item),
@@ -213,7 +198,7 @@ fn declaration(
             trace: String::new(),
         }
     } else if std::ptr::eq(*object, &INTERNAL) {
-        let Some(Value::Path(path)) = value(item, &["path"]) else {
+        let Some(Value::Path(path)) = item.get("path").map(|node| &node.value) else {
             return Err(format!(
                 "module `{}` depends on a module without a path",
                 module.name
@@ -254,7 +239,7 @@ fn unsupported_catalog(module: &ModuleHeader) -> String {
 }
 
 fn maven_coordinates(node: &Node) -> Coordinates {
-    let part = |name: &str| string(node, &[name]);
+    let part = |name: &str| node.text_at(&[name]);
     Coordinates::with_selector(
         &part("groupId").unwrap_or_default(),
         &part("artifactId").unwrap_or_default(),
@@ -289,8 +274,8 @@ fn implicit_maven(
 
 /// The dependencies the toolchain adds to a JVM fragment (`calculateImplicitDependencies`).
 fn implicit(settings: &Node, test: bool, product: ProductType) -> Vec<Declaration> {
-    let kotlin = string(settings, &["kotlin", "version"]).unwrap_or_default();
-    let version = |path: &[&str]| string(settings, path).unwrap_or_default();
+    let kotlin = settings.text_at(&["kotlin", "version"]).unwrap_or_default();
+    let version = |path: &[&str]| settings.text_at(path).unwrap_or_default();
     let mut implicit = vec![implicit_maven(
         "org.jetbrains.kotlin",
         "kotlin-stdlib",
@@ -299,7 +284,7 @@ fn implicit(settings: &Node, test: bool, product: ProductType) -> Vec<Declaratio
         None,
     )];
     if test {
-        let engine = string(settings, &["junit"]).unwrap_or_default();
+        let engine = settings.text_at(&["junit"]).unwrap_or_default();
         let reason = format!("because the test engine is {engine}");
         implicit.push(match engine.as_str() {
             "junit-4" => implicit_maven(
@@ -319,7 +304,7 @@ fn implicit(settings: &Node, test: bool, product: ProductType) -> Vec<Declaratio
             _ => implicit_maven("org.jetbrains.kotlin", "kotlin-test", &kotlin, false, None),
         });
     }
-    if enabled(settings, &["kotlin", "serialization", "enabled"]) {
+    if settings.is_enabled(&["kotlin", "serialization", "enabled"]) {
         let serialization = version(&["kotlin", "serialization", "version"]);
         implicit.push(implicit_maven(
             "org.jetbrains.kotlinx",
@@ -328,7 +313,7 @@ fn implicit(settings: &Node, test: bool, product: ProductType) -> Vec<Declaratio
             false,
             Some("because Kotlinx Serialization is enabled"),
         ));
-        if let Some(format) = string(settings, &["kotlin", "serialization", "format"]) {
+        if let Some(format) = settings.text_at(&["kotlin", "serialization", "format"]) {
             if format != "none" {
                 implicit.push(implicit_maven(
                     "org.jetbrains.kotlinx",
@@ -340,7 +325,7 @@ fn implicit(settings: &Node, test: bool, product: ProductType) -> Vec<Declaratio
             }
         }
     }
-    if enabled(settings, &["kotlin", "dataframe", "enabled"]) {
+    if settings.is_enabled(&["kotlin", "dataframe", "enabled"]) {
         implicit.push(implicit_maven(
             "org.jetbrains.kotlinx",
             "dataframe-core",
@@ -349,7 +334,7 @@ fn implicit(settings: &Node, test: bool, product: ProductType) -> Vec<Declaratio
             Some("because Kotlin DataFrame is enabled"),
         ));
     }
-    if enabled(settings, &["kotlin", "powerAssert", "enabled"]) {
+    if settings.is_enabled(&["kotlin", "powerAssert", "enabled"]) {
         implicit.push(implicit_maven(
             "org.jetbrains.kotlin",
             "kotlin-power-assert-runtime",
@@ -358,7 +343,7 @@ fn implicit(settings: &Node, test: bool, product: ProductType) -> Vec<Declaratio
             Some("because PowerAssert is enabled"),
         ));
     }
-    if enabled(settings, &["lombok", "enabled"]) {
+    if settings.is_enabled(&["lombok", "enabled"]) {
         implicit.push(implicit_maven(
             "org.projectlombok",
             "lombok",
@@ -367,7 +352,7 @@ fn implicit(settings: &Node, test: bool, product: ProductType) -> Vec<Declaratio
             Some("because Lombok is enabled"),
         ));
     }
-    if enabled(settings, &["compose", "enabled"]) {
+    if settings.is_enabled(&["compose", "enabled"]) {
         let compose = version(&["compose", "version"]);
         let reason = Some("because Compose is enabled");
         implicit.push(implicit_maven(
@@ -385,7 +370,7 @@ fn implicit(settings: &Node, test: bool, product: ProductType) -> Vec<Declaratio
             reason,
         ));
     }
-    if enabled(settings, &["kotlin", "rpc", "enabled"]) {
+    if settings.is_enabled(&["kotlin", "rpc", "enabled"]) {
         let rpc = version(&["kotlin", "rpc", "version"]);
         implicit.push(implicit_maven(
             "org.jetbrains.kotlinx",
@@ -394,7 +379,7 @@ fn implicit(settings: &Node, test: bool, product: ProductType) -> Vec<Declaratio
             false,
             Some("because kotlinx.rpc is enabled"),
         ));
-        if enabled(settings, &["kotlin", "rpc", "applyBom"]) {
+        if settings.is_enabled(&["kotlin", "rpc", "applyBom"]) {
             implicit.push(implicit_maven(
                 "org.jetbrains.kotlinx",
                 "kotlinx-rpc-bom",
@@ -404,7 +389,7 @@ fn implicit(settings: &Node, test: bool, product: ProductType) -> Vec<Declaratio
             ));
         }
     }
-    if enabled(settings, &["ktor", "enabled"]) && enabled(settings, &["ktor", "applyBom"]) {
+    if settings.is_enabled(&["ktor", "enabled"]) && settings.is_enabled(&["ktor", "applyBom"]) {
         implicit.push(implicit_maven(
             "io.ktor",
             "ktor-bom",
@@ -413,8 +398,8 @@ fn implicit(settings: &Node, test: bool, product: ProductType) -> Vec<Declaratio
             Some("because Ktor is enabled and ktor.applyBom=true"),
         ));
     }
-    if enabled(settings, &["springBoot", "enabled"])
-        && enabled(settings, &["springBoot", "applyBom"])
+    if settings.is_enabled(&["springBoot", "enabled"])
+        && settings.is_enabled(&["springBoot", "applyBom"])
     {
         implicit.push(implicit_maven(
             "org.springframework.boot",

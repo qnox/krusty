@@ -4,6 +4,7 @@
 //! [`configuration`], report their [`diagnostic`]s and [`show`] them. Discovery, the file system
 //! boundary, YAML, the schema and the build files' readers are this crate's own.
 
+pub mod compile;
 pub mod configuration;
 pub mod dependencies;
 pub mod diagnostic;

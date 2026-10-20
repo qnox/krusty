@@ -26,6 +26,7 @@ fn every_project_case_is_read_as_the_toolchain_reads_it() {
             case: &case.name,
             files: &case.files,
             repository: None,
+            compiler: None,
             args: &["show", "modules"],
         })
         .collect();

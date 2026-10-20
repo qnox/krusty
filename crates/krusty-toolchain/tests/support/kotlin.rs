@@ -1,6 +1,7 @@
 //! JetBrains' `kotlin`, run through the toolchain's own wrapper (`scripts/kotlin-toolchain/kotlin`),
 //! which pins the exact version and checksum of the distribution it runs.
 
+use std::path::Path;
 use std::process::Command;
 use std::sync::Once;
 
@@ -16,6 +17,20 @@ pub struct Invocation<'a> {
     /// The files of the user's local Maven repository, by `/`-separated path below it, for a
     /// command that resolves dependencies; see [`Resolving`].
     pub repository: Option<&'a [(String, String)]>,
+    /// The compiler a command that compiles runs, which needs a repository too; see [`Compiler`].
+    pub compiler: Option<&'a dyn Compiler>,
+}
+
+/// What a command that compiles compiles with: what identifies it in the cache beside the
+/// invocation, how a live run's directory and command are prepared for it, and what of the run
+/// is kept.
+pub trait Compiler: Sync {
+    /// The parts of its identity, each a name and bytes.
+    fn identity(&self) -> Vec<(String, Vec<u8>)>;
+    /// Prepare the run in `directory`, laid out as [`Resolving`] lays it out, before it starts.
+    fn prepare(&self, directory: &Path, command: &mut Command);
+    /// What is cached of the run in `directory`, which did `ran`.
+    fn collect(&self, directory: &Path, ran: Output) -> Output;
 }
 
 /// How a command that resolves dependencies runs, for `kotlin` and krusty-toolchain alike: in a
@@ -42,7 +57,7 @@ impl Resolving {
 }
 
 /// The toolchain version the wrapper pins: the cache's slot.
-fn version(wrapper: &[u8]) -> String {
+pub fn version(wrapper: &[u8]) -> String {
     let text = String::from_utf8_lossy(wrapper);
     text.lines()
         .find_map(|line| line.strip_prefix("kotlin_cli_version="))
@@ -72,6 +87,17 @@ pub fn kotlin(invocation: &Invocation<'_>) -> Output {
     for (path, text) in &repository {
         parts.push(path.as_bytes());
         parts.push(text.as_bytes());
+    }
+    let identity = invocation
+        .compiler
+        .map(|compiler| compiler.identity())
+        .unwrap_or_default();
+    if invocation.compiler.is_some() {
+        parts.push(b"compiler");
+    }
+    for (name, bytes) in &identity {
+        parts.push(name.as_bytes());
+        parts.push(bytes);
     }
     let reference = Reference {
         slot: format!("kotlin-{}", version(&wrapper)),
@@ -114,9 +140,23 @@ pub fn kotlin(invocation: &Invocation<'_>) -> Output {
                     .env("KOTLIN_SHARED_CACHE_DIR", directory.join(Resolving::CACHE))
                     .env_remove("AMPER_SHARED_CACHE_DIR")
                     .env_remove("M2_HOME");
-                run_captured(command, &directory)
+                match invocation.compiler {
+                    Some(compiler) => {
+                        compiler.prepare(&directory, &mut command);
+                        let ran = run_captured(command, &directory);
+                        compiler.collect(&directory, ran)
+                    }
+                    None => run_captured(command, &directory),
+                }
             }
-            None => run_captured(command, &root),
+            None => {
+                assert!(
+                    invocation.compiler.is_none(),
+                    "{}: a command that compiles resolves dependencies",
+                    invocation.case
+                );
+                run_captured(command, &root)
+            }
         };
         let _ = std::fs::remove_dir_all(&directory);
         output
@@ -126,7 +166,7 @@ pub fn kotlin(invocation: &Invocation<'_>) -> Output {
 /// Downloads the distribution the wrapper pins, once per process, before any live run. A run that
 /// downloads it prints its progress to stdout, and runs that start while another downloads print
 /// that they wait for it; neither belongs in a recorded output.
-fn provision() {
+pub fn provision() {
     static PROVISIONED: Once = Once::new();
     PROVISIONED.call_once(|| {
         let directory = scratch();

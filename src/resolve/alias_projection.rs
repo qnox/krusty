@@ -265,17 +265,6 @@ impl Checker<'_> {
                 reference.span,
             ));
         }
-        if let Some(alias) = self.qualified_body_local_type_alias(scope, &reference.name) {
-            return Some(self.alias_application_ty_with_spelling(
-                scope,
-                alias.formals,
-                alias.expansion,
-                alias.expansion_spelling,
-                &reference.name,
-                AliasArguments::of(reference),
-                reference.span,
-            ));
-        }
         let identity = self.scoped_source_alias_identity(scope, &reference.name)?;
         Some(self.source_alias_application_ty(
             scope,

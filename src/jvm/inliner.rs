@@ -87,6 +87,8 @@ pub(crate) enum InlineError {
     MalformedFinallyMarker,
     /// The selected call did not publish the substitution named by a reified marker.
     MissingReifiedArgument(String),
+    /// The declaration of the enum a reified `enumEntries` reads could not be read at this call.
+    UnknownEnumEntries(String),
     /// The body's data flow could not be followed (`markPlacesForInlineAndRemoveInlinable`).
     Analysis(String),
     /// An inline-call stack already present in the body could not be normalized before this body
@@ -115,6 +117,7 @@ pub(in crate::jvm) struct InliningContext<'a> {
     pub lines: &'a mut dyn SourceLines,
     pub classes: &'a dyn ClassRoles,
     pub objects: &'a mut dyn AnonymousObjects,
+    pub enum_entries: &'a mut dyn crate::jvm::reified_arguments::EnumEntriesReads,
 }
 
 /// Rewrite `callee` into the code that replaces a call to it: kotlinc's `MethodInliner.doInline`
@@ -135,7 +138,7 @@ pub(in crate::jvm) fn inline(
     call: InliningContext<'_>,
 ) -> Result<MethodNode, InlineError> {
     let mut node = callee.clone();
-    reified::specialize(&mut node, reified_arguments)?;
+    reified::specialize(&mut node, reified_arguments, call.enum_entries)?;
     let mut node = preparation::prepare(&node, inline_only, parameters);
     try_blocks::move_try_starts_to_their_first_instruction(&mut node)?;
     let mut node = preprocess_node_before_inline(node)?;

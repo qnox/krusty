@@ -360,6 +360,31 @@ fn krusty_builds_the_ir_of_calls_and_constants_as_kotlinc_does() {
     assert_eq!(std::fs::read_to_string(out).unwrap(), expected);
 }
 
+/// A file written with `\r\n` line breaks and one lone `\r`, which kotlinc reads as `\n`s: its
+/// offsets, lines and columns are kotlinc's.
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn krusty_measures_a_file_with_carriage_returns_as_kotlinc_reads_it() {
+    let (runtime, _) = runtime();
+    let text = std::fs::read_to_string(CALLS)
+        .unwrap()
+        .replace('\n', "\r\n")
+        .replacen("\r\n", "\r", 3);
+    assert!(text.contains("\r\n") && text.contains("\r\r"));
+    let directory = temporary("carriage-returns");
+    std::fs::create_dir_all(&directory).unwrap();
+    let source = directory.join("CarriageReturns.kt");
+    std::fs::write(&source, text).unwrap();
+    let source = source.to_str().unwrap();
+    let module = krusty_ir(&runtime, source);
+    let expected = kotlinc_dump(&runtime, source);
+    let out = temporary("krusty-carriage-returns-dump.txt");
+    let mut host = host_with_dump(&runtime, &out);
+    host.generate(&module)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(std::fs::read_to_string(out).unwrap(), expected);
+}
+
 #[test]
 #[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
 fn ir_the_host_cannot_build_is_refused_and_leaves_the_session_able_to_build_its_module() {
@@ -503,7 +528,8 @@ fn a_function_with_what_the_plugin_ir_does_not_carry_is_refused_where_it_is_writ
     let source_path = source.to_str().unwrap().to_string();
     for (text, spanned, what) in cases {
         std::fs::write(&source, text).unwrap();
-        let (module, diags) = krusty_ir_at(&runtime, &source_path, &[source_path.clone()]);
+        let (module, diags) =
+            krusty_ir_at(&runtime, &source_path, std::slice::from_ref(&source_path));
         assert_eq!(module, None, "{text}");
         let lo = text.find(spanned).unwrap() as u32;
         let diagnostics: Vec<(u32, u32, u32, &str)> = diags
