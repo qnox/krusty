@@ -105,7 +105,15 @@ impl Emitter<'_> {
                 anchored = self.close_copied_function_inline_frame(block, code);
             }
         }
+        // kotlinc returns to the call's line once the inlined body ends, before the statement
+        // discards its result: the `pop` occupies that line, so the cleanup drops the frame's
+        // closing `nop`.
+        let frame_closed_before_discard =
+            discard_after_frame.is_some() && !self.ir.callable_scopes.contains(&block);
         if let Some(words) = discard_after_frame {
+            if frame_closed_before_discard {
+                self.close_spliced_lambda_frame(block, false, code);
+            }
             discard_stack_words(words, code);
         }
         if let Some(expression) = emit_after_frame_close {
@@ -123,7 +131,10 @@ impl Emitter<'_> {
         // terminal `Unit` that keeps its own mapped line has already written this `nop`.
         let unit_wrote_body_line = emit_after_frame_close
             .is_some_and(|unit| self.has_retained_mapped_inline_unit_line(unit));
-        if !self.ir.callable_scopes.contains(&block) && !unit_wrote_body_line {
+        if !self.ir.callable_scopes.contains(&block)
+            && !unit_wrote_body_line
+            && !frame_closed_before_discard
+        {
             self.close_spliced_lambda_frame(block, false, code);
         }
         if retains_postfix_temporary {
@@ -581,6 +592,16 @@ impl Emitter<'_> {
         self.erased_invocations.remove(&result);
         let words = code.stack_height() - before;
         (!code.is_dead() && matches!(words, 1 | 2)).then_some(words as u16)
+    }
+
+    /// Whether an inlined lambda's trailing value is a value the JVM stack carries out of the
+    /// lambda frame. A `when` discards in its branches, as kotlinc's pop propagation leaves it.
+    fn leaves_lambda_result(&self, value: u32) -> bool {
+        !matches!(self.value_ty(value), Ty::Unit | Ty::Nothing | Ty::Error)
+            && !matches!(self.ir.expr(value), IrExpr::When { .. })
+            && !self.diverges(value)
+            && self.transformed_result(value).is_none()
+            && !self.machine_suspensions.contains_key(&value)
     }
 
     fn erases_copied_frame_result(&self, block: u32) -> bool {
@@ -1204,6 +1225,17 @@ impl Emitter<'_> {
                 } else if opens_lambda_frame {
                     self.emit_value(value, code);
                     discard_after_frame_close = Some(value);
+                } else if close_statement_lambda
+                    && self.opens_spliced_lambda_frame(&stmts)
+                    && self.leaves_lambda_result(value)
+                {
+                    // kotlinc leaves an inlined lambda's result on the stack until the inline
+                    // call has returned to its own line; the statement discards it there.
+                    let before = code.stack_height();
+                    self.emit_value(value, code);
+                    let words = code.stack_height() - before;
+                    discard_after_frame =
+                        (!code.is_dead() && matches!(words, 1 | 2)).then_some(words as u16);
                 } else {
                     self.emit_discarding(value, code);
                 }
