@@ -60,9 +60,10 @@ mod tests {
         let classifier = libraries
             .classifier(type_name("kotlin/Function30"))
             .expect("semantic Function30 classifier");
-        let crate::types::Ty::Fun(signature) = classifier
+        let crate::types::TyKind::Fun(signature) = classifier
             .callable_signature
             .expect("Function30 callable shape")
+            .kind()
         else {
             panic!("Function30 callable signature is not a function")
         };

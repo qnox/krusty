@@ -3,6 +3,7 @@ use crate::features::LangFeatures;
 use crate::fir::DeclarationFlags;
 use crate::libraries::EmptySymbolSource;
 use crate::source::SourceInput;
+use crate::types::TyKind;
 
 use super::driver::check_and_dispatch_bound_body_in_session;
 use super::test_support::root_expression;
@@ -2960,7 +2961,7 @@ fn imported_nested_typealiases_publish_bound_constructions_and_unbound_construct
         Some(crate::types::type_name("test/Foo$Inner"))
     );
     assert_eq!(constructor_reference.1.get().type_args(), &[Ty::String]);
-    let Ty::Fun(reference_shape) = constructor_reference.2.get() else {
+    let TyKind::Fun(reference_shape) = constructor_reference.2.get().kind() else {
         panic!("constructor reference must publish a function shape")
     };
     assert_eq!(reference_shape.params.len(), 2);

@@ -4,6 +4,7 @@
 //! This module materializes the value that leaves the body this checker owns.
 
 use super::*;
+use crate::types::TyKind;
 
 impl BodyFirChecker<'_> {
     pub(super) fn default_return_target(&self) -> ReturnTarget {
@@ -34,7 +35,8 @@ impl BodyFirChecker<'_> {
                 })
                 .or_else(|| ResolvedTy::new(self.info.semantic_ty(source)).ok()),
             Some(ReturnTarget::Lambda(lambda)) => {
-                let Ty::Fun(signature) = self.info.semantic_ty(*lambda).non_null() else {
+                let TyKind::Fun(signature) = self.info.semantic_ty(*lambda).non_null().kind()
+                else {
                     return Err(self.failure(
                         self.file.expr_span(source),
                         BodyCheckFailureKind::UnsupportedExpression(ExpressionForm::Return),
@@ -88,7 +90,7 @@ impl BodyFirChecker<'_> {
         let target_type = if Some(*lambda) == self.lambda_return_source {
             self.body.result_type()
         } else {
-            let Ty::Fun(signature) = self.info.semantic_ty(*lambda).non_null() else {
+            let TyKind::Fun(signature) = self.info.semantic_ty(*lambda).non_null().kind() else {
                 return Err(self.failure(
                     self.file.expr_span(*lambda),
                     BodyCheckFailureKind::UnsupportedExpression(ExpressionForm::Return),

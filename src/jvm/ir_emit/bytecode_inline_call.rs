@@ -1227,7 +1227,7 @@ impl Emitter<'_> {
                 .get(&argument)
                 .copied()
                 .unwrap_or_else(|| self.value_ty(argument));
-            matches!(semantic.non_null(), Ty::Fun(_))
+            semantic.non_null().is_fun()
         };
         let in_place = target.inline_only
             && !args.is_empty()

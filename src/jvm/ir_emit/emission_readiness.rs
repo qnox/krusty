@@ -2,12 +2,13 @@
 //! been realized, and no checked operation, plugin placeholder or local delegate access remains.
 
 use super::{Callee, IrExpr, IrFile, Ty};
+use crate::types::TyKind;
 
 pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
     fn ty_ok(t: &Ty) -> bool {
-        match t.non_null() {
-            Ty::Fun(s) => s.params.iter().all(ty_ok) && ty_ok(&s.ret),
-            Ty::Obj(_, type_args) => type_args.iter().all(ty_ok),
+        match t.non_null().kind() {
+            TyKind::Fun(s) => s.params.iter().all(ty_ok) && ty_ok(&s.ret),
+            TyKind::Obj(_, type_args) => type_args.iter().all(ty_ok),
             _ => true,
         }
     }

@@ -11,7 +11,7 @@ use crate::fx_hash::HashMap;
 use crate::ir::{FunId, IrExpr, IrFile, IrParameterRole, IrTypeOp, IrTypeParameter};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::protobuf::Pb;
-use crate::types::{Ty, TypeName, TypeVariance};
+use crate::types::{Ty, TyKind, TypeName, TypeVariance};
 
 const MAIN_PREFIX: &str = "default/ir/";
 const PREPARED_PREFIX: &str = "default/ir_inlinable_functions/";
@@ -323,11 +323,11 @@ fn reified_type_test(
 fn supported_type(ty: Ty, parameters: &[IrTypeParameter]) -> bool {
     match ty {
         Ty::Unit | Ty::Nothing | Ty::Boolean => true,
-        Ty::Obj(_, arguments) => arguments.iter().all(|argument| match argument {
-            Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
-                supported_type(**inner, parameters)
-            }
-            other => supported_type(*other, parameters),
+        Ty::Obj(_, arguments) => arguments.iter().all(|argument| match argument.kind() {
+            TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner)
+            | TyKind::StarProjection(inner) => supported_type(inner, parameters),
+            _ => supported_type(*argument, parameters),
         }),
         Ty::Nullable(inner) => supported_type(*inner, parameters),
         Ty::InProjection(_) | Ty::OutProjection(_) | Ty::StarProjection(_) => false,
@@ -731,8 +731,8 @@ impl FileWriter {
     }
 
     fn ty(&mut self, ty: Ty, parameters: &[(usize, &PreparedTypeParameter, u64)]) -> u32 {
-        let (inner, nullability) = match ty {
-            Ty::Nullable(inner) => (*inner, 0),
+        let (inner, nullability) = match ty.kind() {
+            TyKind::Nullable(inner) => (inner, 0),
             _ => (ty, 1),
         };
         let (classifier, arguments) = match inner {
@@ -757,11 +757,11 @@ impl FileWriter {
         let arguments = arguments
             .iter()
             .map(|argument| {
-                let (variance, ty) = match argument {
-                    Ty::InProjection(inner) => (2, **inner),
-                    Ty::OutProjection(inner) => (3, **inner),
-                    Ty::StarProjection(_) => return 0,
-                    other => (1, *other),
+                let (variance, ty) = match argument.kind() {
+                    TyKind::InProjection(inner) => (2, inner),
+                    TyKind::OutProjection(inner) => (3, inner),
+                    TyKind::StarProjection(_) => return 0,
+                    _ => (1, *argument),
                 };
                 (u64::from(self.ty(ty, parameters)) << 2) | variance
             })

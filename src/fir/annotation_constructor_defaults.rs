@@ -5,13 +5,13 @@
 //! has been checked and before a later file's construction is lowered.
 
 use crate::fx_hash::{HashMap, HashSet};
+use crate::types::TyKind;
 
 use crate::fir::{
     CallableId, DefaultArgumentStore, FirBody, FirCallArgument, FirConstant, FirConstructorTarget,
     FirConversion, FirConversionKind, FirExprId, FirExprKind, ResolvedModuleIndex, ResolvedTy,
 };
 use crate::libraries::DefaultValue;
-use crate::types::Ty;
 
 pub(crate) fn publish_checked_annotation_defaults(
     index: &mut ResolvedModuleIndex,
@@ -174,7 +174,7 @@ impl Folder<'_> {
         if plan.members.len() != plan.defaults.len() {
             return None;
         }
-        let Ty::Obj(classifier, _) = ty.get() else {
+        let TyKind::Obj(classifier, _) = ty.get().kind() else {
             return None;
         };
         let seeded = self.defaults(*declaration);

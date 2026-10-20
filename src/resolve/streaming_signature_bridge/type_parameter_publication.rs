@@ -2,7 +2,7 @@
 
 use crate::ast::TypeRef;
 use crate::libraries::GenericSig;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::super::SymbolTable;
 
@@ -96,16 +96,16 @@ fn symbolic_from_resolved_bounds(
             .get(source)
             .and_then(|bounds| bounds.first())
             .copied()
-            .map(|bound| match bound {
-                Ty::TyParam(next, upper_bound) => parameter_reference(
+            .map(|bound| match bound.kind() {
+                TyKind::TyParam(next, upper_bound) => parameter_reference(
                     next.as_str(),
-                    *upper_bound,
+                    upper_bound,
                     direct,
                     source_by_semantic,
                     visiting,
                     implicit,
                 ),
-                bound => bound,
+                _ => bound,
             })
             .unwrap_or(resolved_upper_bound);
         visiting.remove(semantic);
@@ -123,7 +123,7 @@ fn symbolic_from_resolved_bounds(
             return;
         }
         for bound in direct.get(source).into_iter().flatten() {
-            if let Ty::TyParam(semantic, _) = *bound {
+            if let TyKind::TyParam(semantic, _) = bound.kind() {
                 if let Some(source) = source_by_semantic.get(semantic.as_str()) {
                     inherited_bounds(source, direct, source_by_semantic, visiting, inherited);
                     continue;
@@ -144,20 +144,20 @@ fn symbolic_from_resolved_bounds(
             .expect("provisional declaration type parameter must retain its semantic identity");
         let declared = direct.get(name.as_str()).map(Vec::as_slice).unwrap_or(&[]);
         let primary = declared.first().copied().unwrap_or(implicit);
-        let primary = match primary {
-            Ty::TyParam(parameter, upper_bound) => parameter_reference(
+        let primary = match primary.kind() {
+            TyKind::TyParam(parameter, upper_bound) => parameter_reference(
                 parameter.as_str(),
-                *upper_bound,
+                upper_bound,
                 &direct,
                 &source_by_semantic,
                 &mut crate::fx_hash::HashSet::default(),
                 implicit,
             ),
-            primary => primary,
+            _ => primary,
         };
         let mut extra = declared.iter().copied().skip(1).collect::<Vec<_>>();
         for bound in declared {
-            let Ty::TyParam(parameter, _) = *bound else {
+            let TyKind::TyParam(parameter, _) = bound.kind() else {
                 continue;
             };
             let Some(source) = source_by_semantic.get(parameter.as_str()) else {
@@ -584,11 +584,11 @@ pub(super) fn publish_source_declarations(
 }
 
 fn mentions_external_formal(ty: Ty, own_formals: &[String]) -> bool {
-    match ty {
+    match ty.kind() {
         // The occurrence identity is the declaration relation. Its inline bound is descriptive
         // metadata and may recursively mention other formals without adding a source edge here.
-        Ty::TyParam(name, _) => !own_formals.iter().any(|formal| formal == name),
-        Ty::Fun(shape) => {
+        TyKind::TyParam(name, _) => !own_formals.iter().any(|formal| formal == name),
+        TyKind::Fun(shape) => {
             shape
                 .params
                 .iter()
@@ -596,12 +596,12 @@ fn mentions_external_formal(ty: Ty, own_formals: &[String]) -> bool {
                 .any(|parameter| mentions_external_formal(parameter, own_formals))
                 || mentions_external_formal(shape.ret, own_formals)
         }
-        Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner)
-        | Ty::StarProjection(inner) => mentions_external_formal(*inner, own_formals),
-        Ty::Obj(_, arguments) => arguments
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner) => mentions_external_formal(inner, own_formals),
+        TyKind::Obj(_, arguments) => arguments
             .iter()
             .copied()
             .any(|argument| mentions_external_formal(argument, own_formals)),
@@ -667,7 +667,7 @@ mod tests {
         let [bound] = header.bounds.as_ref() else {
             panic!("BaseTerminal.I must have one bound: {:?}", header.bounds);
         };
-        let Ty::Obj(interpreter, arguments) = bound.ty.get() else {
+        let TyKind::Obj(interpreter, arguments) = bound.ty.get().kind() else {
             panic!("BaseTerminal.I must be bounded by Interpreter: {bound:?}");
         };
         assert!(interpreter.matches("Interpreter"));
@@ -676,7 +676,7 @@ mod tests {
             panic!("Interpreter bound must retain its three exact arguments: {arguments:?}");
         };
         assert_eq!(self_name.as_str(), semantic);
-        let Ty::Obj(intermediary, parameters) = **readable else {
+        let TyKind::Obj(intermediary, parameters) = (**readable).kind() else {
             panic!("Interpreter's first star must read as Intermediary<I>: {readable:?}");
         };
         assert!(intermediary.matches("Interpreter$Intermediary"));

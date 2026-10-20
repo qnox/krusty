@@ -7,7 +7,7 @@
 //! Callable naming does not ask these questions: kotlinc mangles by the semantic identity.
 
 use crate::ir::IrFile;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// Whether the type model carries `classifier` as a native scalar rather than a class reference.
 pub(super) fn has_native_carrier(classifier: TypeName) -> bool {
@@ -55,7 +55,7 @@ fn parameter_bound_underlying(declared: Ty) -> Ty {
     let mut nullable = declared.is_nullable();
     let mut current = declared.non_null();
     let mut seen = crate::fx_hash::HashSet::default();
-    while let Ty::TyParam(name, bound) = current {
+    while let TyKind::TyParam(name, bound) = current.kind() {
         assert!(
             seen.insert(name),
             "a checked type-parameter bound chain is acyclic"
@@ -172,7 +172,7 @@ pub(super) fn is_ref(t: &Ty) -> bool {
     // bound names a primitive-like Kotlin class. Treating `T` as non-reference loses the boxing
     // boundary in `Holder<T>(value: T)` and stores an unboxed value-class carrier as `Integer`
     // instead of the value class's boxed wrapper.
-    if matches!(t.non_null(), Ty::TyParam(..)) {
+    if t.non_null().is_ty_param() {
         return true;
     }
     // A JVM scalar (`Int`/`Long`/… AND the unsigned `UInt`/`ULong`, which are unboxed primitives) is NOT a
@@ -185,7 +185,7 @@ pub(super) fn is_ref(t: &Ty) -> bool {
     // references with no `kotlin_class_internal`, and the `None => false` fallback below silently
     // stripped their `checkNotNullParameter` guards (kotlinc guards a `block: () -> Unit` like any
     // other non-null reference parameter).
-    if matches!(t, Ty::Fun(_)) || t.is_array() {
+    if t.is_fun() || t.is_array() {
         return true;
     }
     // `kotlin_class_internal` (not `obj_internal`): a bare `Ty::String` variant is a REFERENCE but has no

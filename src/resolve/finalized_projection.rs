@@ -112,7 +112,7 @@ fn project_classifier_parents(
         let parent = relative(parent.get());
         if let Some(owner) = parent.obj_internal() {
             interfaces.push((owner, parent.type_args().to_vec()));
-        } else if matches!(parent, crate::types::Ty::Fun(_)) {
+        } else if parent.is_fun() {
             // A function supertype is a complete semantic callable shape, not an applied nominal
             // classifier. Keep it in the dedicated source-model channel; a target backend may later
             // choose its own nominal representation without that identity entering stable FIR.

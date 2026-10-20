@@ -13,6 +13,7 @@
 //! checked, and a template renames them to the call's fresh variables exactly as solving did.
 
 use super::*;
+use crate::types::TyKind;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SelectedGenericDeclaration {
@@ -431,17 +432,20 @@ impl Checker<'_> {
                 }),
         };
         fn is_declaration_fallback(symbolic: Ty, actual: Ty, formals: &[String]) -> bool {
-            match (symbolic, actual) {
-                (Ty::TyParam(formal, bound), actual)
+            match (symbolic.kind(), actual.kind()) {
+                (TyKind::TyParam(formal, bound), _)
                     if formals.iter().any(|declared| declared == formal) =>
                 {
                     // An alias formal (`E` of `typealias HashSet<E> = java.util.HashSet<E>`) is
                     // bounded by `Any?`; the Java target completes the same position from its own
                     // flexible bound `Any!`. Both are the declaration fallback.
-                    actual == *bound
-                        || matches!(actual, Ty::PlatformNullable(inner) if Ty::nullable(*inner) == *bound)
+                    actual == bound
+                        || matches!(actual.kind(), TyKind::PlatformNullable(inner) if Ty::nullable(inner) == bound)
                 }
-                (Ty::Obj(symbolic_name, symbolic_args), Ty::Obj(actual_name, actual_args)) => {
+                (
+                    TyKind::Obj(symbolic_name, symbolic_args),
+                    TyKind::Obj(actual_name, actual_args),
+                ) => {
                     symbolic_name == actual_name
                         && (actual_args.is_empty()
                             && symbolic_args.iter().any(|&argument| {
@@ -456,12 +460,12 @@ impl Checker<'_> {
                                     },
                                 ))
                 }
-                (Ty::Nullable(symbolic), Ty::Nullable(actual))
-                | (Ty::PlatformNullable(symbolic), Ty::PlatformNullable(actual))
-                | (Ty::InProjection(symbolic), Ty::InProjection(actual))
-                | (Ty::OutProjection(symbolic), Ty::OutProjection(actual))
-                | (Ty::StarProjection(symbolic), Ty::StarProjection(actual)) => {
-                    is_declaration_fallback(*symbolic, *actual, formals)
+                (TyKind::Nullable(symbolic), TyKind::Nullable(actual))
+                | (TyKind::PlatformNullable(symbolic), TyKind::PlatformNullable(actual))
+                | (TyKind::InProjection(symbolic), TyKind::InProjection(actual))
+                | (TyKind::OutProjection(symbolic), TyKind::OutProjection(actual))
+                | (TyKind::StarProjection(symbolic), TyKind::StarProjection(actual)) => {
+                    is_declaration_fallback(symbolic, actual, formals)
                 }
                 _ => symbolic == actual,
             }

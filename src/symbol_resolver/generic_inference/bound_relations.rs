@@ -10,7 +10,7 @@ use super::{
     ty_subst_keep_unbound, unify_ty_from_symbols, ExplicitTypeArgumentFixity, GSigBinds,
     GenericSig, SourceOracle, SymbolSource,
 };
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// The type an unsolved `formal` stands for before its call-site evidence arrives: its declared
 /// `bound` under `bindings`. A recursive bound (`R : Comparable<R>`) names the formal itself; that
@@ -176,7 +176,7 @@ pub(super) fn complete_dependent_bound_bindings(
                 continue;
             };
             for bound in bounds {
-                let Ty::TyParam(bound_formal, _) = bound.non_null() else {
+                let TyKind::TyParam(bound_formal, _) = bound.non_null().kind() else {
                     continue;
                 };
                 let Some(bound_index) = generic_sig
@@ -319,7 +319,7 @@ pub(crate) fn resolve_bound_violating_bindings(
                         // traversal-order overwrite would be unstable. A bare type-parameter bound
                         // (`C : T`) carries no class position to read.
                         if known != solution
-                            && matches!(bound.non_null(), Ty::Obj(..))
+                            && matches!(bound.non_null().kind(), TyKind::Obj(..))
                             && formal_variance_in_type(source, *bound, &candidate)
                                 == Some(crate::types::TypeVariance::Out)
                         {
@@ -376,7 +376,7 @@ pub(crate) fn resolve_bound_violating_bindings(
             continue;
         };
         for bound in bounds {
-            let Ty::TyParam(open, _) = bound.non_null() else {
+            let TyKind::TyParam(open, _) = bound.non_null().kind() else {
                 continue;
             };
             let Some(open_index) = generic_sig
@@ -394,7 +394,7 @@ pub(crate) fn resolve_bound_violating_bindings(
             };
             for open_bound in open_bounds {
                 let Some(position) = open_bound.type_args().iter().position(
-                    |argument| matches!(argument.non_null(), Ty::TyParam(name, _) if name == open),
+                    |argument| matches!(argument.non_null().kind(), TyKind::TyParam(name, _) if name == open),
                 ) else {
                     continue;
                 };
@@ -435,7 +435,7 @@ pub(crate) fn resolve_bound_violating_bindings(
             // Only a bound that mentions the formal ITSELF can be re-solved this way: it is what
             // ties the variable to a position in its own hierarchy.
             let Some(position) = bound.type_args().iter().position(
-                |argument| matches!(argument.non_null(), Ty::TyParam(name, _) if name == formal),
+                |argument| matches!(argument.non_null().kind(), TyKind::TyParam(name, _) if name == formal),
             ) else {
                 continue;
             };

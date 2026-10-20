@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use crate::metadata::{protobuf::Pb, serialize_string_table_types};
 use crate::spelling::Spelled;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// kotlinc's `JvmNameResolverBase.PREDEFINED_STRINGS`, indexed by `Record.predefined_index`.
 /// This is also the decoder's canonical table; a test below prevents the two directions drifting.
@@ -850,10 +850,10 @@ fn encode_type_with_parameter(
             return Ok(reference);
         }
     }
-    let (nullable, flexible, base) = match ty {
-        Ty::Nullable(inner) => (true, false, *inner),
-        Ty::PlatformNullable(inner) => (false, true, *inner),
-        other => (false, spelled.flexible_upper_bound.is_some(), other),
+    let (nullable, flexible, base) = match ty.kind() {
+        TyKind::Nullable(inner) => (true, false, inner),
+        TyKind::PlatformNullable(inner) => (false, true, inner),
+        _ => (false, spelled.flexible_upper_bound.is_some(), ty),
     };
     if flexible {
         // A provider has already normalized the exact upper face. Encode the lower first, then the
@@ -894,23 +894,23 @@ fn encode_type_with_parameter(
         return Ok(message);
     }
 
-    match base {
+    match base.kind() {
         // The engine turns an undetermined declaration into a decline before anything is written,
         // so a pending type here is a broken invariant rather than a shape to encode.
-        Ty::Pending => return Err(TypeEncodeError::NotDetermined),
-        Ty::DefinitelyNotNull(inner) => {
+        TyKind::Pending => return Err(TypeEncodeError::NotDetermined),
+        TyKind::DefinitelyNotNull(inner) => {
             let mut intersection = spelled.clone();
             intersection.definitely_non_null = true;
             return encode_type_with_parameter(
                 strings,
-                *inner,
+                inner,
                 &intersection,
                 type_parameters,
                 forced_parameter,
                 expansion,
             );
         }
-        Ty::TyParam(name, _) => {
+        TyKind::TyParam(name, _) => {
             let reference = type_parameters.get(name.as_str()).ok_or_else(|| {
                 TypeEncodeError::MissingTypeParameter(name.to_owned().to_string())
             })?;
@@ -932,7 +932,7 @@ fn encode_type_with_parameter(
             let annotations = type_annotations(strings, spelled);
             add_type_annotations(&mut message, strings, annotations);
         }
-        Ty::Obj(classifier_name, arguments) => {
+        TyKind::Obj(classifier_name, arguments) => {
             // kotlinc interns the enclosing classifier before recursively interning its arguments,
             // even though protobuf field order writes `argument` before `class_name`.
             let classifier = strings.class_id(classifier_name);
@@ -987,19 +987,19 @@ fn encode_type_with_parameter(
             }
             add_type_annotations(&mut message, strings, annotations);
         }
-        Ty::Unit => {
+        TyKind::Unit => {
             encode_classifier(&mut message, strings, "kotlin/Unit", nullable);
             let annotations = type_annotations(strings, spelled);
             encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
             add_type_annotations(&mut message, strings, annotations);
         }
-        Ty::Nothing => {
+        TyKind::Nothing => {
             encode_classifier(&mut message, strings, "kotlin/Nothing", nullable);
             let annotations = type_annotations(strings, spelled);
             encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
             add_type_annotations(&mut message, strings, annotations);
         }
-        Ty::Fun(signature) => {
+        TyKind::Fun(signature) => {
             let arity = signature.params.len() + usize::from(signature.suspend);
             // Kotlin metadata has synthesized `kotlin.Function$arity` classifiers beyond the 23
             // numbered JVM interfaces. The JVM representation becomes `FunctionN`, but metadata
@@ -1048,7 +1048,7 @@ fn encode_type_with_parameter(
                 message.field_varint(1, 1); // Type.flags: SUSPEND_TYPE
             }
         }
-        Ty::Intersection(parts) => {
+        TyKind::Intersection(parts) => {
             let semantic = if nullable {
                 Ty::nullable(Ty::Intersection(parts))
             } else {
@@ -1067,13 +1067,13 @@ fn encode_type_with_parameter(
                 expansion,
             );
         }
-        Ty::Null
-        | Ty::Error
-        | Ty::Nullable(_)
-        | Ty::PlatformNullable(_)
-        | Ty::InProjection(_)
-        | Ty::OutProjection(_)
-        | Ty::StarProjection(_) => return Err(TypeEncodeError::NonMetadataType(ty)),
+        TyKind::Null
+        | TyKind::Error
+        | TyKind::Nullable(_)
+        | TyKind::PlatformNullable(_)
+        | TyKind::InProjection(_)
+        | TyKind::OutProjection(_)
+        | TyKind::StarProjection(_) => return Err(TypeEncodeError::NonMetadataType(ty)),
     }
     Ok(message)
 }
@@ -1103,7 +1103,7 @@ fn encode_arguments(
     expansion: Expansion,
 ) -> Result<(), TypeEncodeError> {
     for (index, argument) in arguments.iter().enumerate() {
-        if matches!(argument, Ty::StarProjection(_)) {
+        if argument.is_star_projection() {
             let mut encoded_argument = Pb::new();
             // Type.Argument.Projection.STAR. A star has no nested Type message: its bound is a
             // frontend semantic read fact, not part of the Kotlin metadata wire representation.
@@ -1111,10 +1111,10 @@ fn encode_arguments(
             message.repeated_message(2, &encoded_argument);
             continue;
         }
-        let (projection, argument) = match argument {
-            Ty::InProjection(inner) => (Some(0), **inner),
-            Ty::OutProjection(inner) => (Some(1), **inner),
-            ordinary => (None, *ordinary),
+        let (projection, argument) = match argument.kind() {
+            TyKind::InProjection(inner) => (Some(0), inner),
+            TyKind::OutProjection(inner) => (Some(1), inner),
+            _ => (None, *argument),
         };
         let mut encoded_argument = Pb::new();
         if let Some(projection) = projection {
@@ -1158,16 +1158,16 @@ pub(crate) fn encode_alias_reference(
     let alias_id = strings.class_id(alias);
     let mut message = Pb::new();
     for (ty, argument_spelling) in &spelled.alias_args {
-        if matches!(ty, Ty::StarProjection(_)) {
+        if ty.is_star_projection() {
             let mut encoded_argument = Pb::new();
             encoded_argument.field_varint(1, 3);
             message.repeated_message(2, &encoded_argument);
             continue;
         }
-        let (projection, ty) = match ty {
-            Ty::InProjection(inner) => (Some(0), **inner),
-            Ty::OutProjection(inner) => (Some(1), **inner),
-            ordinary => (None, *ordinary),
+        let (projection, ty) = match ty.kind() {
+            TyKind::InProjection(inner) => (Some(0), inner),
+            TyKind::OutProjection(inner) => (Some(1), inner),
+            _ => (None, *ty),
         };
         let mut encoded_argument = Pb::new();
         if let Some(projection) = projection {

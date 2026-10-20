@@ -1,5 +1,6 @@
 //! Kotlin @Metadata emission (protobuf payload + encoding). WIP — Phase 4b.
 
+use crate::types::TyKind;
 use protobuf::Pb;
 
 pub mod annotations;
@@ -93,11 +94,16 @@ pub(crate) mod property_flags {
 /// unprojected — it travels separately as `ValueParameter.vararg_element_type`.
 pub(crate) fn vararg_recorded_type(ty: crate::types::Ty) -> crate::types::Ty {
     use crate::types::Ty;
-    let Ty::Obj(name, args) = ty else { return ty };
+    let TyKind::Obj(name, args) = ty.kind() else {
+        return ty;
+    };
     match args.first().copied() {
         Some(element)
             if ty.is_reference_array()
-                && !matches!(element, Ty::OutProjection(_) | Ty::StarProjection(_)) =>
+                && !matches!(
+                    element.kind(),
+                    TyKind::OutProjection(_) | TyKind::StarProjection(_)
+                ) =>
         {
             Ty::obj_args_name(name, &[Ty::out_projection(element)])
         }

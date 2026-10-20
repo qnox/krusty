@@ -6,6 +6,7 @@
 //! ordinary selector, then exposes only the selected declaration's constraints for commitment.
 
 use super::*;
+use crate::types::TyKind;
 
 pub(super) struct PostponedCallableFamily {
     callables: crate::libraries::Callables,
@@ -92,23 +93,23 @@ pub(super) fn collect_type_parameters(
     ty: Ty,
     parameters: &mut crate::fx_hash::HashSet<&'static str>,
 ) {
-    match ty {
-        Ty::TyParam(name, _) => {
+    match ty.kind() {
+        TyKind::TyParam(name, _) => {
             parameters.insert(name.as_str());
         }
-        Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner) => collect_type_parameters(*inner, parameters),
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner) => collect_type_parameters(inner, parameters),
         // A star's upper bound is a computed capture fact, not a source occurrence that can
         // constrain a postponed call's type parameters.
-        Ty::StarProjection(_) => {}
-        Ty::Obj(_, arguments) => {
+        TyKind::StarProjection(_) => {}
+        TyKind::Obj(_, arguments) => {
             for argument in arguments {
                 collect_type_parameters(*argument, parameters);
             }
         }
-        Ty::Fun(signature) => {
+        TyKind::Fun(signature) => {
             for parameter in &signature.params {
                 collect_type_parameters(*parameter, parameters);
             }
@@ -166,11 +167,11 @@ impl ProductionSignatureSemantics<'_> {
                 .iter()
                 .map(|shape| resolver.functional_expectation(shape[index]))
                 .collect::<Option<Vec<_>>>()?;
-            let Ty::Fun(first) = functions.first()?.non_null() else {
+            let TyKind::Fun(first) = functions.first()?.non_null().kind() else {
                 return None;
             };
             let same_inputs = functions.iter().all(|function| {
-                matches!(function.non_null(), Ty::Fun(signature)
+                matches!(function.non_null().kind(), TyKind::Fun(signature)
                     if signature.params == first.params
                         && signature.context_count == first.context_count
                         && signature.has_receiver == first.has_receiver
@@ -180,7 +181,7 @@ impl ProductionSignatureSemantics<'_> {
                 return None;
             }
             let same_result = functions.iter().all(
-                |function| matches!(function.non_null(), Ty::Fun(signature) if signature.ret == first.ret),
+                |function| matches!(function.non_null().kind(), TyKind::Fun(signature) if signature.ret == first.ret),
             );
             if !same_result
                 && matches!(
@@ -606,7 +607,7 @@ impl ProductionSignatureSemantics<'_> {
                 );
             if contextual_call || postponed_callable || typed_refresh {
                 expectations[source] = parameters.get(slot).copied().and_then(|parameter| {
-                    (contextual_call || matches!(parameter.non_null(), Ty::Fun(_)))
+                    (contextual_call || parameter.non_null().is_fun())
                         .then(|| crate::fir::ResolvedTy::new(parameter).ok())
                         .flatten()
                 });
@@ -631,7 +632,7 @@ impl ProductionSignatureSemantics<'_> {
                 let expectation = resolver
                     .functional_expectation(parameter)
                     .unwrap_or(parameter);
-                let Ty::Fun(signature) = expectation.non_null() else {
+                let TyKind::Fun(signature) = expectation.non_null().kind() else {
                     return expectation;
                 };
                 let has_receiver = selected

@@ -10,7 +10,7 @@ use crate::ast::ExprId;
 use crate::fir::DeclarationId;
 use crate::fx_hash::HashMap;
 use crate::spelling::Spelled;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// The provider-owned flexible occurrences carried by one checked value. Unlike [`Ty`], this is
 /// publication-only provenance: ordinary Kotlin inference must continue to see a selected source
@@ -215,14 +215,17 @@ impl FlexibleValue {
         if let Some(upper) = self.upper {
             spelling.flexible_upper_bound = Some(upper);
         }
-        let ty = match ty.non_null() {
-            Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
-                *inner
+        let ty = {
+            let other = ty.non_null();
+            match other.kind() {
+                TyKind::InProjection(inner)
+                | TyKind::OutProjection(inner)
+                | TyKind::StarProjection(inner) => inner,
+                _ => other,
             }
-            other => other,
         };
-        if let (FlexibleShape::Obj(fact_owner, arguments), Ty::Obj(owner, type_arguments)) =
-            (&self.shape, ty)
+        if let (FlexibleShape::Obj(fact_owner, arguments), TyKind::Obj(owner, type_arguments)) =
+            (&self.shape, ty.kind())
         {
             if *fact_owner != owner || arguments.len() != type_arguments.len() {
                 return;
@@ -245,8 +248,8 @@ impl FlexibleValue {
                 params,
                 ret,
             },
-            Ty::Fun(signature),
-        ) = (&self.shape, ty)
+            TyKind::Fun(signature),
+        ) = (&self.shape, ty.kind())
         {
             if signature.suspend
                 || *context_count != signature.context_count
@@ -286,14 +289,14 @@ impl FlexibleValue {
     }
 
     fn rigid_shape(ty: Ty) -> Self {
-        match ty {
-            Ty::Nullable(inner)
-            | Ty::PlatformNullable(inner)
-            | Ty::DefinitelyNotNull(inner)
-            | Ty::InProjection(inner)
-            | Ty::OutProjection(inner)
-            | Ty::StarProjection(inner) => Self::rigid_shape(*inner),
-            Ty::Obj(owner, arguments) => FlexibleValue {
+        match ty.kind() {
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::DefinitelyNotNull(inner)
+            | TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner)
+            | TyKind::StarProjection(inner) => Self::rigid_shape(inner),
+            TyKind::Obj(owner, arguments) => FlexibleValue {
                 source: Some(ty),
                 publication: None,
                 upper: None,
@@ -302,7 +305,7 @@ impl FlexibleValue {
                     arguments.iter().copied().map(Self::rigid_shape).collect(),
                 ),
             },
-            Ty::Fun(signature) if !signature.suspend => FlexibleValue {
+            TyKind::Fun(signature) if !signature.suspend => FlexibleValue {
                 source: Some(ty),
                 publication: None,
                 upper: None,
@@ -323,10 +326,10 @@ impl FlexibleValue {
     }
 
     fn semantic(ty: Ty, upper_bound: &dyn Fn(Ty) -> Ty) -> Self {
-        match ty {
-            Ty::PlatformNullable(inner) => {
+        match ty.kind() {
+            TyKind::PlatformNullable(inner) => {
                 let lower = inner.platform_lower_bound();
-                let mut fact = Self::semantic(*inner, upper_bound);
+                let mut fact = Self::semantic(inner, upper_bound);
                 fact.publication = Some(FlexiblePublication {
                     lower,
                     shape: fact.shape.clone(),
@@ -334,13 +337,13 @@ impl FlexibleValue {
                 fact.upper = Some(upper_bound(lower));
                 fact
             }
-            Ty::Nullable(inner) | Ty::DefinitelyNotNull(inner) => {
-                Self::semantic(*inner, upper_bound).without_head()
+            TyKind::Nullable(inner) | TyKind::DefinitelyNotNull(inner) => {
+                Self::semantic(inner, upper_bound).without_head()
             }
-            Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
-                Self::semantic(*inner, upper_bound)
-            }
-            Ty::Obj(owner, arguments) => FlexibleValue {
+            TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner)
+            | TyKind::StarProjection(inner) => Self::semantic(inner, upper_bound),
+            TyKind::Obj(owner, arguments) => FlexibleValue {
                 source: Some(ty),
                 publication: None,
                 upper: None,
@@ -353,7 +356,7 @@ impl FlexibleValue {
                         .collect(),
                 ),
             },
-            Ty::Fun(signature) if !signature.suspend => FlexibleValue {
+            TyKind::Fun(signature) if !signature.suspend => FlexibleValue {
                 source: Some(ty),
                 publication: None,
                 upper: None,
@@ -371,7 +374,7 @@ impl FlexibleValue {
             },
             // A suspend function's metadata result occupies its continuation slot. This sidecar
             // deliberately does not reconstruct that physical layout.
-            Ty::Fun(_) => FlexibleValue::default(),
+            TyKind::Fun(_) => FlexibleValue::default(),
             _ => FlexibleValue::default(),
         }
     }
@@ -404,7 +407,7 @@ impl FlexibleValue {
             pair => pair,
         };
 
-        if matches!(declared, Ty::TyParam(_, bound) if matches!(*bound, Ty::PlatformNullable(_))) {
+        if matches!(declared.kind(), TyKind::TyParam(_, bound) if bound.is_platform_nullable()) {
             let upper =
                 (!selected.is_nullable()).then(|| upper_bound(selected.platform_lower_bound()));
             // A Java type-parameter occurrence is flexible as a whole, but its selected lower face
@@ -423,8 +426,8 @@ impl FlexibleValue {
             };
         }
 
-        let shape = match (declared, selected) {
-            (Ty::Obj(declared_owner, declared), Ty::Obj(selected_owner, selected))
+        let shape = match (declared.kind(), selected.kind()) {
+            (TyKind::Obj(declared_owner, declared), TyKind::Obj(selected_owner, selected))
                 if declared_owner == selected_owner && declared.len() == selected.len() =>
             {
                 FlexibleShape::Obj(
@@ -439,7 +442,7 @@ impl FlexibleValue {
                         .collect(),
                 )
             }
-            (Ty::Fun(declared), Ty::Fun(selected))
+            (TyKind::Fun(declared), TyKind::Fun(selected))
                 if !declared.suspend
                     && !selected.suspend
                     && declared.context_count == selected.context_count
@@ -483,18 +486,18 @@ impl FlexibleValue {
         declared: Ty,
         binding: &dyn Fn(&str) -> Option<FlexibleValue>,
     ) -> FlexibleValue {
-        match declared {
-            Ty::TyParam(name, _) => binding(name.as_str())
+        match declared.kind() {
+            TyKind::TyParam(name, _) => binding(name.as_str())
                 .map(|argument| self.overlay(&argument))
                 .unwrap_or_else(|| self.clone()),
-            Ty::Nullable(inner) | Ty::DefinitelyNotNull(inner) => {
-                self.substitute(*inner, binding).without_head()
+            TyKind::Nullable(inner) | TyKind::DefinitelyNotNull(inner) => {
+                self.substitute(inner, binding).without_head()
             }
-            Ty::PlatformNullable(inner)
-            | Ty::InProjection(inner)
-            | Ty::OutProjection(inner)
-            | Ty::StarProjection(inner) => self.substitute(*inner, binding),
-            Ty::Obj(owner, arguments) => match &self.shape {
+            TyKind::PlatformNullable(inner)
+            | TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner)
+            | TyKind::StarProjection(inner) => self.substitute(inner, binding),
+            TyKind::Obj(owner, arguments) => match &self.shape {
                 FlexibleShape::Obj(fact_owner, facts)
                     if owner == *fact_owner && arguments.len() == facts.len() =>
                 {
@@ -520,7 +523,7 @@ impl FlexibleValue {
                     shape: FlexibleShape::None,
                 },
             },
-            Ty::Fun(signature) if !signature.suspend => match &self.shape {
+            TyKind::Fun(signature) if !signature.suspend => match &self.shape {
                 FlexibleShape::Fun {
                     context_count,
                     has_receiver,
@@ -555,7 +558,7 @@ impl FlexibleValue {
                     shape: FlexibleShape::None,
                 },
             },
-            Ty::Fun(_) => FlexibleValue::default(),
+            TyKind::Fun(_) => FlexibleValue::default(),
             _ => self.clone(),
         }
     }
@@ -677,9 +680,12 @@ impl Checker<'_> {
         // the publication shape still belongs to the selected producer's lower classifier. Start
         // from that exact checked source identity when present; never zip its arguments onto the
         // adapted classifier by position.
-        let actual = match fact.source.unwrap_or(actual).non_null() {
-            Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
-            other => other,
+        let actual = {
+            let other = fact.source.unwrap_or(actual).non_null();
+            match other.kind() {
+                TyKind::InProjection(inner) | TyKind::OutProjection(inner) => inner,
+                _ => other,
+            }
         };
         let class = actual.kotlin_class_internal()?;
         if class == target {
@@ -1147,7 +1153,7 @@ impl Checker<'_> {
 
     fn constructor_flexible_publication(&self, expression: ExprId) -> FlexibleValue {
         let selected = self.expr_types[expression.0 as usize];
-        let Ty::Obj(owner, selected_arguments) = selected.non_null() else {
+        let TyKind::Obj(owner, selected_arguments) = selected.non_null().kind() else {
             return FlexibleValue::default();
         };
         if self

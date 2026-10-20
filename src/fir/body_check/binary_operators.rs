@@ -2,14 +2,18 @@
 //! operations, operand types, and the conversions that bring each operand to its selected type.
 
 use super::*;
+use crate::types::TyKind;
 
 /// Semantic operand type used to select Kotlin's built-in equality shape. A bare type parameter
 /// contributes its declared upper bound, including that bound's nullability. This is deliberately
 /// separate from range selection: flexible platform nullability remains part of equality.
 fn equality_operand_type(ty: Ty) -> Ty {
-    match ty.canonical_semantic() {
-        Ty::TyParam(_, bound) => equality_operand_type(*bound),
-        ty => ty,
+    {
+        let ty = ty.canonical_semantic();
+        match ty.kind() {
+            TyKind::TyParam(_, bound) => equality_operand_type(bound),
+            _ => ty,
+        }
     }
 }
 

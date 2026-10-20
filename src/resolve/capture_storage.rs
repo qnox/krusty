@@ -19,6 +19,7 @@
 //! storage, and checked FIR is then unable to represent the source capture at all.
 
 use super::*;
+use crate::types::TyKind;
 
 /// What the checker knows about a binding when it decides how a capture of it is represented.
 ///
@@ -313,7 +314,7 @@ fn anonymous_body_uses_name(file: &File, declaration: DeclId, name: &str, ty: Ty
     expressions
         .iter()
         .any(|expression| file.expr_uses_name_deep(*expression, name))
-        || matches!(ty, Ty::Fun(signature) if signature.has_receiver)
+        || matches!(ty.kind(), TyKind::Fun(signature) if signature.has_receiver)
             && expressions
                 .into_iter()
                 .any(|expression| expression_has_member_call_named(file, expression, name))

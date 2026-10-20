@@ -4,7 +4,7 @@
 //! descriptor planning does not call back into emission.
 
 use crate::jvm::names::reference_array_element;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// Signed scalar and `String` classifiers rewritten from an object type at the JVM physical-type
 /// boundary. Unsigned classifiers, `Unit`, and `Nothing` stay with the other representation arms.
@@ -244,15 +244,15 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
     // A nullable PRIMITIVE is a JVM reference — its boxed wrapper (`Int?` → `java/lang/Integer`, a
     // 1-slot reference), NOT the unboxed scalar. Map it before peeling `?`, so descriptors, slots and
     // stackmap frames all see the reference. A nullable REFERENCE keeps its descriptor (peel below).
-    if let Ty::Nullable(inner) | Ty::PlatformNullable(inner) = t {
-        if **inner == Ty::Nothing {
+    if let TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) = t.kind() {
+        if inner == Ty::Nothing {
             // In a VALUE position this is the null-only bottom type, which also arises when generic
             // inference combines only `null` arguments. Keep its erased top representation here;
             // declaration descriptors use `jvm_declared_ty` and name inferred or explicit
             // `Nothing?` as Void.
             return Ty::obj("kotlin/Any");
         }
-        if **inner == Ty::Unit {
+        if inner == Ty::Unit {
             return Ty::obj("kotlin/Unit");
         }
         if inner.is_unsigned() {
@@ -315,9 +315,11 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
                             // A projection is valid here as the ARRAY classifier's type argument, even
                             // though it is never a value type of its own. Erase it at this boundary:
                             // `out X` has the readable element `X`; `in X` can only be read as `Any`.
-                            let semantic = match e.non_null() {
-                                Ty::OutProjection(inner) | Ty::StarProjection(inner) => *inner,
-                                Ty::InProjection(_) => Ty::obj("kotlin/Any"),
+                            let semantic = match e.non_null().kind() {
+                                TyKind::OutProjection(inner) | TyKind::StarProjection(inner) => {
+                                    inner
+                                }
+                                TyKind::InProjection(_) => Ty::obj("kotlin/Any"),
                                 _ => *e,
                             };
                             let boxed = jvm_reference_array_element(semantic);

@@ -4,7 +4,7 @@ use crate::fir::{
     FirAdaptedReferenceArgument, FirCallableReferenceBinding, FirReferenceAdaptation, ResolvedTy,
 };
 use crate::ir::{ExprId, IrExpr, IrFunction};
-use crate::types::{ArrayFactoryKind, Ty};
+use crate::types::{ArrayFactoryKind, Ty, TyKind};
 
 use super::{BodyLowering, FirLoweringFailure};
 
@@ -21,7 +21,7 @@ impl BodyLowering<'_> {
         reference_ty: Ty,
         reflective: bool,
     ) -> Result<ExprId, FirLoweringFailure> {
-        let Ty::Fun(reference) = reference_ty.non_null() else {
+        let TyKind::Fun(reference) = reference_ty.non_null().kind() else {
             return Err(FirLoweringFailure::UnsupportedIntrinsicCall);
         };
         if binding != FirCallableReferenceBinding::Static || reflective {

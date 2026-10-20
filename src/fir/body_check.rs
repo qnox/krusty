@@ -200,7 +200,7 @@ impl CheckedBodyParameter<'_> {
     fn inline_expansion_mode(&self) -> crate::types::InlineExpansionMode {
         crate::types::InlineExpansionMode::declared(
             false,
-            matches!(self.ty.get(), Ty::Fun(_)),
+            self.ty.get().is_fun(),
             self.inline_modifier,
         )
     }

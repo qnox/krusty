@@ -5,6 +5,7 @@
 //! class-literal LHS's already-resolved semantic type; this checker never repeats name lookup.
 
 use super::*;
+use crate::types::TyKind;
 
 impl Checker<'_> {
     /// Check the class literal whose left-hand side `lhs` resolved to classifier type `ty`.
@@ -51,9 +52,9 @@ fn contains_array_of(ty: Ty, element: Ty) -> bool {
 
 /// The semantic type carried by an ordinary or projected type argument; stars name no type.
 fn argument_type(argument: Ty) -> Option<Ty> {
-    match argument {
-        Ty::StarProjection(_) => None,
-        Ty::InProjection(inner) | Ty::OutProjection(inner) => Some(*inner),
-        other => Some(other),
+    match argument.kind() {
+        TyKind::StarProjection(_) => None,
+        TyKind::InProjection(inner) | TyKind::OutProjection(inner) => Some(inner),
+        _ => Some(argument),
     }
 }

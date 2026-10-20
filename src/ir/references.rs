@@ -8,6 +8,7 @@
 //! recovered from a property's spelling, and nothing later re-derives them.
 
 use super::*;
+use crate::types::TyKind;
 
 /// Language-level identity of a callable-reference value whose invocation has already been lowered
 /// to a common-IR adapter. The target is used for Kotlin reflection/equality only; a backend must
@@ -95,7 +96,7 @@ impl IrFile {
         let IrExpr::CallableReference(reference) = self.expr(expression) else {
             return None;
         };
-        let Ty::Fun(signature) = reference.function_type.non_null() else {
+        let TyKind::Fun(signature) = reference.function_type.non_null().kind() else {
             return None;
         };
         if signature.suspend || reference.declaration_suspend {

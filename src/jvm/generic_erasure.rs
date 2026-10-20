@@ -11,15 +11,13 @@
 use super::default_parameter_representation::primitive_wrapper;
 use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{IrFile, IrTypeParameter};
-use crate::types::{wk, Ty};
+use crate::types::{wk, Ty, TyKind};
 
 pub(super) fn declared_primary_bound(parameter: &IrTypeParameter) -> Option<Ty> {
     parameter
         .bounds
         .iter()
-        .find(|(bound, is_interface)| {
-            !*is_interface && !matches!(bound.non_null(), Ty::TyParam(..))
-        })
+        .find(|(bound, is_interface)| !*is_interface && !bound.non_null().is_ty_param())
         .or_else(|| parameter.bounds.first())
         .map(|(bound, _)| *bound)
 }
@@ -50,11 +48,18 @@ fn resolve_primary_bound(
     }
     let bound = parameter_named(name, parameters, referenced)
         .and_then(declared_primary_bound)
-        .map(|bound| match bound.non_null() {
-            Ty::TyParam(other, _) => {
-                resolve_primary_bound(other.as_str(), parameters, referenced, resolved, visiting)
+        .map(|bound| {
+            let concrete = bound.non_null();
+            match concrete.kind() {
+                TyKind::TyParam(other, _) => resolve_primary_bound(
+                    other.as_str(),
+                    parameters,
+                    referenced,
+                    resolved,
+                    visiting,
+                ),
+                _ => concrete.erased_recv(),
             }
-            concrete => concrete.erased_recv(),
         })
         .unwrap_or_else(|| Ty::obj_name(wk::any()));
     visiting.remove(name);
@@ -70,18 +75,18 @@ fn resolve_primary_bound(
 /// `$default` stub takes the JDK wrapper instead. An unsigned or other value-class bound is not a
 /// JVM primitive and erases like any other bound.
 fn physical_type(ty: Ty, erasures: &HashMap<String, Ty>) -> Ty {
-    match ty {
-        Ty::TyParam(name, _) => match erasures.get(name.as_str()).copied() {
+    match ty.kind() {
+        TyKind::TyParam(name, _) => match erasures.get(name.as_str()).copied() {
             Some(_) if primitive_bound(ty) => ty,
             Some(erasure) if ty.upper_bound_admits_null() => Ty::nullable(erasure),
             Some(erasure) => erasure,
             None => ty,
         },
-        Ty::Nullable(inner) if matches!(*inner, Ty::TyParam(..)) => {
-            Ty::nullable(physical_type(*inner, erasures))
+        TyKind::Nullable(inner) if inner.is_ty_param() => {
+            Ty::nullable(physical_type(inner, erasures))
         }
-        Ty::PlatformNullable(inner) if matches!(*inner, Ty::TyParam(..)) => {
-            Ty::platform_nullable(physical_type(*inner, erasures))
+        TyKind::PlatformNullable(inner) if inner.is_ty_param() => {
+            Ty::platform_nullable(physical_type(inner, erasures))
         }
         _ => ty,
     }
@@ -89,7 +94,7 @@ fn physical_type(ty: Ty, erasures: &HashMap<String, Ty>) -> Ty {
 
 /// Whether `ty` is a non-null type-parameter occurrence whose bound is itself a JVM primitive.
 fn primitive_bound(ty: Ty) -> bool {
-    matches!(ty, Ty::TyParam(_, bound) if primitive_wrapper(*bound).is_some())
+    matches!(ty.kind(), TyKind::TyParam(_, bound) if primitive_wrapper(bound).is_some())
 }
 
 /// JVM primary erasure for each declaration-owned type parameter. Reified-operation realization

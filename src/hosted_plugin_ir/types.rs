@@ -2,7 +2,7 @@
 
 use krusty_plugin_ir::{ClassName, Classifier, TypeArgument, TypeIdentity, TypeParameterOwner};
 
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// The type parameters a type may name, by their declared names: a dependency callable's own, in
 /// declaration order. A module function's body names none.
@@ -15,37 +15,37 @@ impl TypeParameters<'_> {
 
 /// `ty` as a [`TypeIdentity`], or what it is when the plugin IR cannot spell it yet.
 pub(super) fn identity(ty: Ty, parameters: TypeParameters<'_>) -> Result<TypeIdentity, String> {
-    let (ty, nullable) = match ty {
-        Ty::Nullable(inner) => (*inner, true),
+    let (ty, nullable) = match ty.kind() {
+        TyKind::Nullable(inner) => (inner, true),
         // The type of the `null` literal is `Nothing?`.
-        Ty::Null => (Ty::Nothing, true),
-        other => (other, false),
+        TyKind::Null => (Ty::Nothing, true),
+        _ => (ty, false),
     };
-    let classifier = match ty {
-        Ty::Unit => kotlin_class("Unit"),
-        Ty::Nothing => kotlin_class("Nothing"),
-        Ty::Obj(name, arguments) => Classifier::Class {
+    let classifier = match ty.kind() {
+        TyKind::Unit => kotlin_class("Unit"),
+        TyKind::Nothing => kotlin_class("Nothing"),
+        TyKind::Obj(name, arguments) => Classifier::Class {
             class: class_name(name),
             arguments: arguments
                 .iter()
                 .map(|argument| type_argument(*argument, parameters))
                 .collect::<Result<_, _>>()?,
         },
-        Ty::TyParam(name, _) => match parameters.0.iter().position(|formal| formal == name) {
+        TyKind::TyParam(name, _) => match parameters.0.iter().position(|formal| formal == name) {
             Some(index) => Classifier::TypeParameter {
                 owner: TypeParameterOwner::Callable,
                 index: index as u32,
             },
             None => return Err(format!("the type parameter `{name}` of a class")),
         },
-        Ty::PlatformNullable(_) => return Err("a platform type".into()),
-        Ty::Fun(_) => return Err("a function type".into()),
-        Ty::DefinitelyNotNull(_) => return Err("a definitely non-null type".into()),
-        Ty::Intersection(_) => return Err("an intersection type".into()),
-        Ty::InProjection(_) | Ty::OutProjection(_) | Ty::StarProjection(_) => {
+        TyKind::PlatformNullable(_) => return Err("a platform type".into()),
+        TyKind::Fun(_) => return Err("a function type".into()),
+        TyKind::DefinitelyNotNull(_) => return Err("a definitely non-null type".into()),
+        TyKind::Intersection(_) => return Err("an intersection type".into()),
+        TyKind::InProjection(_) | TyKind::OutProjection(_) | TyKind::StarProjection(_) => {
             return Err("a projection outside a type argument".into())
         }
-        Ty::Null | Ty::Nullable(_) | Ty::Error | Ty::Pending => {
+        TyKind::Null | TyKind::Nullable(_) | TyKind::Error | TyKind::Pending => {
             return Err(format!("the unchecked type {ty:?}"))
         }
     };
@@ -57,11 +57,11 @@ pub(super) fn identity(ty: Ty, parameters: TypeParameters<'_>) -> Result<TypeIde
 }
 
 fn type_argument(ty: Ty, parameters: TypeParameters<'_>) -> Result<TypeArgument, String> {
-    Ok(match ty {
-        Ty::StarProjection(_) => TypeArgument::Star,
-        Ty::InProjection(inner) => TypeArgument::In(identity(*inner, parameters)?),
-        Ty::OutProjection(inner) => TypeArgument::Out(identity(*inner, parameters)?),
-        other => TypeArgument::Invariant(identity(other, parameters)?),
+    Ok(match ty.kind() {
+        TyKind::StarProjection(_) => TypeArgument::Star,
+        TyKind::InProjection(inner) => TypeArgument::In(identity(inner, parameters)?),
+        TyKind::OutProjection(inner) => TypeArgument::Out(identity(inner, parameters)?),
+        _ => TypeArgument::Invariant(identity(ty, parameters)?),
     })
 }
 

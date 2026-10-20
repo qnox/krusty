@@ -5,6 +5,7 @@
 //! numbered suffix whose own spelling is checked in turn.
 
 use crate::fx_hash::HashSet;
+use crate::types::TyKind;
 
 use crate::ir::IrFile;
 
@@ -120,11 +121,11 @@ fn mangle_ty(out: &mut String, ty: crate::types::Ty) -> Option<()> {
         out.push(tag);
         mangle_ty(out, inner)
     };
-    match ty {
-        Ty::Unit => out.push('U'),
-        Ty::Null => out.push('Z'),
-        Ty::Nothing => out.push('W'),
-        Ty::Obj(name, arguments) => {
+    match ty.kind() {
+        TyKind::Unit => out.push('U'),
+        TyKind::Null => out.push('Z'),
+        TyKind::Nothing => out.push('W'),
+        TyKind::Obj(name, arguments) => {
             let mut spelled = String::new();
             mangle_name(&mut spelled, &name.render());
             out.push_str(&format!("L{}_{spelled}", spelled.len()));
@@ -133,12 +134,12 @@ fn mangle_ty(out: &mut String, ty: crate::types::Ty) -> Option<()> {
             }
             out.push('E');
         }
-        Ty::TyParam(name, _) => {
+        TyKind::TyParam(name, _) => {
             let mut spelled = String::new();
             mangle_name(&mut spelled, name.as_str());
             out.push_str(&format!("P{}_{spelled}", spelled.len()));
         }
-        Ty::Fun(signature) => {
+        TyKind::Fun(signature) => {
             out.push_str(&format!(
                 "F{}_{}_{}_",
                 signature.context_count,
@@ -151,20 +152,20 @@ fn mangle_ty(out: &mut String, ty: crate::types::Ty) -> Option<()> {
             out.push('R');
             mangle_ty(out, signature.ret)?;
         }
-        Ty::Intersection(components) => {
+        TyKind::Intersection(components) => {
             out.push('I');
             for component in components {
                 mangle_ty(out, *component)?;
             }
             out.push('E');
         }
-        Ty::Nullable(inner) => nested(out, 'N', *inner)?,
-        Ty::PlatformNullable(inner) => nested(out, 'Q', *inner)?,
-        Ty::InProjection(inner) => nested(out, 'M', *inner)?,
-        Ty::OutProjection(inner) => nested(out, 'O', *inner)?,
-        Ty::StarProjection(bound) => nested(out, 'S', *bound)?,
-        Ty::DefinitelyNotNull(inner) => nested(out, 'D', *inner)?,
-        Ty::Error | Ty::Pending => return None,
+        TyKind::Nullable(inner) => nested(out, 'N', inner)?,
+        TyKind::PlatformNullable(inner) => nested(out, 'Q', inner)?,
+        TyKind::InProjection(inner) => nested(out, 'M', inner)?,
+        TyKind::OutProjection(inner) => nested(out, 'O', inner)?,
+        TyKind::StarProjection(bound) => nested(out, 'S', bound)?,
+        TyKind::DefinitelyNotNull(inner) => nested(out, 'D', inner)?,
+        TyKind::Error | TyKind::Pending => return None,
     }
     Some(())
 }

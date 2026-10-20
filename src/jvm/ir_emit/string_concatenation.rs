@@ -4,6 +4,7 @@
 //! semantic values to the physical reference slots those shapes consume.
 
 use super::*;
+use crate::types::TyKind;
 
 impl Emitter<'_> {
     pub(super) fn emit_string_concat(
@@ -330,7 +331,7 @@ fn string_builder_slot(ty: Ty) -> Ty {
 
 fn is_string(ty: Ty) -> bool {
     matches!(ty, Ty::String)
-        || matches!(ty, Ty::Obj(name, _) if name == "java/lang/String" || name == "kotlin/String")
+        || matches!(ty.kind(), TyKind::Obj(name, _) if name == "java/lang/String" || name == "kotlin/String")
 }
 
 /// The `String.valueOf` overload descriptor for a single interpolated value's type (`"$x"`).

@@ -9,6 +9,7 @@
 //! `B<String>.p` must not fix `T` when the member `B<T>.p` wins the write.
 
 use super::*;
+use crate::types::TyKind;
 
 /// The statement being checked and its already-typed value.
 struct ExplicitWriteSite<'n> {
@@ -251,9 +252,9 @@ impl Checker<'_> {
                 span,
                 format!("overload resolution ambiguity for extension property '{name}'"),
             ),
-            ExplicitPropertyWrite::None => match rt {
-                Ty::Error => {}
-                Ty::Obj(..) => {
+            ExplicitPropertyWrite::None => match rt.kind() {
+                TyKind::Error => {}
+                TyKind::Obj(..) => {
                     let hidden_deprecated = self
                         .resolver()
                         .receiver_has_hidden_deprecated_property_accessor(

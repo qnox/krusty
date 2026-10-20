@@ -5,6 +5,7 @@ use super::{
     member_is_inheritable, PropKind, PropertyAccess, SelectedMemberProperty, SymbolResolver, Ty,
 };
 use crate::symbol_source::SymbolSource;
+use crate::types::TyKind;
 
 impl SymbolResolver<'_> {
     /// The declared type of the member property `name` on `recv` — the property itself, with no
@@ -66,7 +67,7 @@ impl SymbolResolver<'_> {
         property_applicable: impl Fn(&crate::libraries::PropertyInfo) -> Option<(bool, usize)>,
     ) -> Option<SelectedMemberProperty> {
         if recv.is_nullable()
-            || (!matches!(recv.non_null(), Ty::Intersection(_))
+            || (!matches!(recv.non_null().kind(), TyKind::Intersection(_))
                 && recv.kotlin_class_internal().is_none())
         {
             return None;

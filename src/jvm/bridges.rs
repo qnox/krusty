@@ -17,7 +17,7 @@ use crate::ir::{
 use crate::jvm::backend::SkipReason;
 use crate::jvm::names::method_descriptor;
 use crate::names::{property_getter_name, property_setter_name};
-use crate::types::{stored_value_ty, Ty};
+use crate::types::{stored_value_ty, Ty, TyKind};
 
 /// Every bridge family this class needs, appended to `IrClass::bridges`.
 pub(super) fn derive_bridges(
@@ -1056,20 +1056,22 @@ pub(super) fn bridge_erasure(ty: Ty) -> Ty {
 }
 
 fn bridge_erasure_visiting(ty: Ty, visiting: &mut crate::fx_hash::HashSet<&'static str>) -> Ty {
-    match ty {
+    match ty.kind() {
         // `<T : S>` where `S : Entity` erases to `Entity`, whether `S` is declared on the method
         // or on the enclosing classifier. A cycle (`T : S`, `S : T`) has no class bound.
-        Ty::TyParam(name, bound) => {
+        TyKind::TyParam(name, bound) => {
             if !visiting.insert(name.as_str()) {
                 return Ty::obj("kotlin/Any");
             }
-            let erased = stored_value_ty(bridge_erasure_visiting(*bound, visiting));
+            let erased = stored_value_ty(bridge_erasure_visiting(bound, visiting));
             visiting.remove(name.as_str());
             erased
         }
-        Ty::Nullable(inner) => Ty::nullable(bridge_erasure_visiting(*inner, visiting)),
-        Ty::Obj(internal, _) if internal == crate::types::TypeName::ROOT => Ty::obj("kotlin/Any"),
-        other => other,
+        TyKind::Nullable(inner) => Ty::nullable(bridge_erasure_visiting(inner, visiting)),
+        TyKind::Obj(internal, _) if internal == crate::types::TypeName::ROOT => {
+            Ty::obj("kotlin/Any")
+        }
+        _ => ty,
     }
 }
 

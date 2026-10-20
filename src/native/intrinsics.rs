@@ -8,7 +8,7 @@
 //! provider owns it in the package. The provider's callable kind records that it is top-level;
 //! the backend never infers that fact from a rendered owner or a `Kt` suffix.
 
-use crate::types::{SemanticCallableOwner, Ty, TypeName};
+use crate::types::{SemanticCallableOwner, Ty, TyKind, TypeName};
 
 /// Exact selected declaration owner as the native runtime tables see it.
 ///
@@ -336,14 +336,14 @@ pub(super) enum ThrowableMessage {
 /// other one-argument form and answers `None`, because this `Throwable` has no cause field and
 /// accepting it would silently drop what the program passed.
 pub(super) fn throwable_message(ty: &Ty) -> Option<ThrowableMessage> {
-    match ty {
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => throwable_message(inner),
-        Ty::Obj(owner, _) if classifier_matches(*owner, "kotlin/String") => {
+    match ty.kind() {
+        TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => throwable_message(&inner),
+        TyKind::Obj(owner, _) if classifier_matches(owner, "kotlin/String") => {
             Some(ThrowableMessage::Verbatim)
         }
         // A `cause`, under any name in the hierarchy.
-        Ty::Obj(owner, _) if throwable_descriptor(*owner).is_some() => None,
-        Ty::Obj(_, _) => Some(ThrowableMessage::Rendered),
+        TyKind::Obj(owner, _) if throwable_descriptor(owner).is_some() => None,
+        TyKind::Obj(_, _) => Some(ThrowableMessage::Rendered),
         // `AssertionError(42)` and its siblings: Java gives each width its own overload, and every
         // one of them reports the value's text.
         _ if ty.is_jvm_scalar() => Some(ThrowableMessage::Rendered),
@@ -564,7 +564,7 @@ pub(super) fn is_assert_fails_with(owner: DeclarationOwner, name: &str, params: 
         return true;
     }
     name == "assertFailsWith"
-        && matches!(params.last(), Some(Ty::Fun(_)))
+        && matches!(params.last().map(|ty| ty.kind()), Some(TyKind::Fun(_)))
         && match params {
             [_] => true,
             [message, _] => is_string_type(message),
@@ -687,7 +687,9 @@ pub(super) fn precondition(
         // is one, is the block.
         PreconditionShape::Present => matches!(params, [_] | [_, Ty::Fun(_)]),
         // `error(Any)`. Its message is NOT a block, which is what keeps it apart from the others.
-        PreconditionShape::Always => matches!(params, [param] if !matches!(param, Ty::Fun(_))),
+        PreconditionShape::Always => {
+            matches!(params, [param] if !param.is_fun())
+        }
     };
     admitted.then_some(Precondition {
         descriptor,
@@ -698,9 +700,9 @@ pub(super) fn precondition(
 
 /// Is this `kotlin.String`, at either nullability and under either spelling?
 fn is_string_type(ty: &Ty) -> bool {
-    match ty {
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => is_string_type(inner),
-        Ty::Obj(owner, _) => classifier_matches(*owner, "kotlin/String"),
+    match ty.kind() {
+        TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => is_string_type(&inner),
+        TyKind::Obj(owner, _) => classifier_matches(owner, "kotlin/String"),
         _ => false,
     }
 }
@@ -891,8 +893,8 @@ fn collection_element(ty: Ty) -> Option<Ty> {
     if let Some(element) = ty.array_read_elem() {
         return Some(element.canonical_semantic());
     }
-    match ty {
-        Ty::Obj(owner, obj_args)
+    match ty.kind() {
+        TyKind::Obj(owner, obj_args)
             if let [element] = obj_args.as_slice()
                 && (classifier_matches(owner, "kotlin/collections/Iterable")
                     || classifier_matches(owner, "kotlin/collections/Iterator")
@@ -909,7 +911,7 @@ fn collection_element(ty: Ty) -> Option<Ty> {
                     .canonical_semantic(),
             )
         }
-        Ty::Obj(owner, obj_args)
+        TyKind::Obj(owner, obj_args)
             if let [key, value] = obj_args.as_slice()
                 && classifier_matches(owner, "kotlin/collections/Map") =>
         {
@@ -929,7 +931,7 @@ fn collection_element(ty: Ty) -> Option<Ty> {
 }
 
 fn unary_function(ty: Ty, parameter: Ty) -> Option<Ty> {
-    let Ty::Fun(function) = ty.non_null() else {
+    let TyKind::Fun(function) = ty.non_null().kind() else {
         return None;
     };
     (function.context_count == 0
@@ -941,7 +943,7 @@ fn unary_function(ty: Ty, parameter: Ty) -> Option<Ty> {
 }
 
 fn binary_function(ty: Ty, first: Ty, second: Ty) -> Option<Ty> {
-    let Ty::Fun(function) = ty.non_null() else {
+    let TyKind::Fun(function) = ty.non_null().kind() else {
         return None;
     };
     (function.context_count == 0
@@ -1089,8 +1091,8 @@ pub(super) fn collection_algorithm(
                 .then_some(CollectionAlgorithm::WithIndex)
         }
         ("joinToString", [separator, prefix, postfix, limit, truncated, transform]) => {
-            let transform = match transform.non_null() {
-                Ty::Fun(function)
+            let transform = match transform.non_null().kind() {
+                TyKind::Fun(function)
                     if function.context_count == 0
                         && !function.has_receiver
                         && !function.suspend
@@ -1349,7 +1351,7 @@ pub(super) fn iteration_runtime_member(
         .semantic_classifier()
         .and_then(primitive_iterator_element);
     let next = match name {
-        "next" if matches!(ret, Ty::TyParam(..)) || primitive_next == Some(ret) => true,
+        "next" if ret.is_ty_param() || primitive_next == Some(ret) => true,
         "nextBoolean" if ret == Ty::Boolean => true,
         "nextByte" if ret == Ty::Byte => true,
         "nextChar" if ret == Ty::Char => true,
@@ -1581,7 +1583,7 @@ pub(super) fn case_sensitive_text_member(
         [text] | [text, Ty::Boolean] => text,
         _ => return None,
     };
-    if !matches!(*text, Ty::Obj(named, _) if is_char_sequence(named) || classifier_matches(named, "kotlin/String"))
+    if !matches!(text.kind(), TyKind::Obj(named, _) if is_char_sequence(named) || classifier_matches(named, "kotlin/String"))
     {
         return None;
     }
@@ -2062,7 +2064,7 @@ fn any_declaration_symbol(
     let nullable_any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
     match (name, params, ret) {
         ("toString", [], result)
-            if !matches!(result, Ty::Nullable(_)) && is_string_type(&result) =>
+            if !matches!(result.kind(), TyKind::Nullable(_)) && is_string_type(&result) =>
         {
             Some("kt_to_string")
         }

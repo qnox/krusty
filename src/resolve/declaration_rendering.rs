@@ -15,7 +15,7 @@
 
 use crate::libraries::{CallSig, FunctionInfo, LibraryMember, PropertyInfo};
 use crate::symbol_source::SymbolSource;
-use crate::types::{CollectionKind, MappedCollection, Ty, TypeName, TypeVariance};
+use crate::types::{CollectionKind, MappedCollection, Ty, TyKind, TypeName, TypeVariance};
 
 /// The tail of `NOTHING_TO_OVERRIDE`: each candidate as substituted at the supertype, one per line,
 /// under kotlinc's heading, or nothing when there is no candidate.
@@ -684,14 +684,16 @@ pub(super) fn inner_class_declaration(
 
 /// The bound a Kotlin type parameter has when none is written.
 fn implicit_upper_bound(bound: Ty) -> bool {
-    matches!(bound, Ty::Nullable(inner) if inner.is_erased_top())
+    matches!(bound.kind(), TyKind::Nullable(inner) if inner.is_erased_top())
 }
 
 /// A type as kotlinc renders it for readability.
 pub(super) fn readable_type(source: &dyn SymbolSource, ty: Ty) -> String {
-    match ty {
-        Ty::Obj(name, arguments) => classifier_display(source, name, arguments.as_slice(), false),
-        Ty::Fun(function) => {
+    match ty.kind() {
+        TyKind::Obj(name, arguments) => {
+            classifier_display(source, name, arguments.as_slice(), false)
+        }
+        TyKind::Fun(function) => {
             let context = if function.context_count == 0 {
                 String::new()
             } else {
@@ -727,56 +729,56 @@ pub(super) fn readable_type(source: &dyn SymbolSource, ty: Ty) -> String {
                 readable_type(source, function.ret)
             )
         }
-        Ty::Nullable(inner) => match *inner {
-            Ty::Fun(_) | Ty::DefinitelyNotNull(_) | Ty::Intersection(_) => {
-                format!("({})?", readable_type(source, *inner))
+        TyKind::Nullable(inner) => match inner.kind() {
+            TyKind::Fun(_) | TyKind::DefinitelyNotNull(_) | TyKind::Intersection(_) => {
+                format!("({})?", readable_type(source, inner))
             }
-            Ty::TyParam(name, _) => {
+            TyKind::TyParam(name, _) => {
                 format!(
                     "{}?",
                     crate::types::type_parameter_source_name(name.as_str())
                 )
             }
-            inner => format!("{}?", readable_type(source, inner)),
+            _ => format!("{}?", readable_type(source, inner)),
         },
-        Ty::PlatformNullable(inner) => match *inner {
-            Ty::Obj(name, arguments) => {
+        TyKind::PlatformNullable(inner) => match inner.kind() {
+            TyKind::Obj(name, arguments) => {
                 format!(
                     "{}!",
                     classifier_display(source, name, arguments.as_slice(), true)
                 )
             }
-            Ty::TyParam(name, _) => {
+            TyKind::TyParam(name, _) => {
                 format!(
                     "{}!",
                     crate::types::type_parameter_source_name(name.as_str())
                 )
             }
-            Ty::Fun(_) | Ty::DefinitelyNotNull(_) | Ty::Intersection(_) => {
-                format!("({})!", readable_type(source, *inner))
+            TyKind::Fun(_) | TyKind::DefinitelyNotNull(_) | TyKind::Intersection(_) => {
+                format!("({})!", readable_type(source, inner))
             }
-            inner => format!("{}!", readable_type(source, inner)),
+            _ => format!("{}!", readable_type(source, inner)),
         },
-        Ty::InProjection(inner) => format!("in {}", readable_type(source, *inner)),
-        Ty::OutProjection(inner) => format!("out {}", readable_type(source, *inner)),
-        Ty::StarProjection(_) => "*".to_string(),
-        Ty::TyParam(name, bound) => format!(
+        TyKind::InProjection(inner) => format!("in {}", readable_type(source, inner)),
+        TyKind::OutProjection(inner) => format!("out {}", readable_type(source, inner)),
+        TyKind::StarProjection(_) => "*".to_string(),
+        TyKind::TyParam(name, bound) => format!(
             "{}{}",
             crate::types::type_parameter_source_name(name.as_str()),
-            if matches!(*bound, Ty::PlatformNullable(_)) {
+            if bound.is_platform_nullable() {
                 "!"
             } else {
                 ""
             }
         ),
-        Ty::DefinitelyNotNull(inner) => format!("{} & Any", readable_type(source, *inner)),
-        Ty::Intersection(parts) => parts
+        TyKind::DefinitelyNotNull(inner) => format!("{} & Any", readable_type(source, inner)),
+        TyKind::Intersection(parts) => parts
             .iter()
             .copied()
             .map(|ty| readable_type(source, ty))
             .collect::<Vec<_>>()
             .join(" & "),
-        other => other.source_name(),
+        _ => ty.source_name(),
     }
 }
 
@@ -784,12 +786,12 @@ pub(super) fn readable_type(source: &dyn SymbolSource, ty: Ty) -> String {
 /// function type: a nullable, flexible, function or intersection type.
 fn function_receiver_display(source: &dyn SymbolSource, receiver: Ty) -> String {
     let display = readable_type(source, receiver);
-    match receiver {
-        Ty::Nullable(_)
-        | Ty::PlatformNullable(_)
-        | Ty::Fun(_)
-        | Ty::DefinitelyNotNull(_)
-        | Ty::Intersection(_) => format!("({display})"),
+    match receiver.kind() {
+        TyKind::Nullable(_)
+        | TyKind::PlatformNullable(_)
+        | TyKind::Fun(_)
+        | TyKind::DefinitelyNotNull(_)
+        | TyKind::Intersection(_) => format!("({display})"),
         _ => display,
     }
 }
@@ -922,8 +924,10 @@ fn classifier_segment_display(
         .copied()
         .map(|argument| {
             let display = readable_type(source, argument);
-            match argument {
-                Ty::InProjection(_) | Ty::OutProjection(_) | Ty::StarProjection(_) => display,
+            match argument.kind() {
+                TyKind::InProjection(_) | TyKind::OutProjection(_) | TyKind::StarProjection(_) => {
+                    display
+                }
                 _ if reference_array => format!("(out) {display}"),
                 _ => display,
             }

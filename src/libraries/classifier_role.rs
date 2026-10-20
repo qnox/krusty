@@ -1,7 +1,8 @@
 //! The role a classifier record plays in type checks and casts, read off its declaration facts.
 
 use super::LibraryType;
-use crate::types::{ClassifierRole, Ty};
+use crate::types::ClassifierRole;
+use crate::types::TyKind;
 
 impl LibraryType {
     /// The role this declaration plays in type checks and casts: a mapped collection face, or a
@@ -14,8 +15,8 @@ impl LibraryType {
         if !self.represents_function_type() {
             return None;
         }
-        match self.callable_signature? {
-            Ty::Fun(signature) => {
+        match (self.callable_signature?).kind() {
+            TyKind::Fun(signature) => {
                 let arity = u8::try_from(signature.params.len()).ok()?;
                 Some(if signature.suspend {
                     ClassifierRole::SuspendFunctionOfArity(arity)

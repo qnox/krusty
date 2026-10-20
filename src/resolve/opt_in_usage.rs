@@ -135,7 +135,7 @@ impl Checker<'_> {
         };
         self.add_classifier_requirements(classifier, requirements);
         for argument in ty.type_args() {
-            if !matches!(argument, Ty::StarProjection(_)) {
+            if !argument.is_star_projection() {
                 self.add_type_requirements(argument.projection_read_ty(), requirements);
             }
         }

@@ -7,6 +7,7 @@
 //! it; and, for a lambda that captures nothing, the `<clinit>` of its `INSTANCE`.
 
 use super::*;
+use crate::types::TyKind;
 
 /// Write the class of the lambda `c` realizes.
 pub(super) fn emit_lambda_class(
@@ -436,8 +437,8 @@ fn capture_signature(
     ty: &Ty,
     wildcards: Wildcards,
 ) -> Option<String> {
-    match ty.non_null() {
-        Ty::TyParam(..) => formatter.ty_at(ty, wildcards),
+    match ty.non_null().kind() {
+        TyKind::TyParam(..) => formatter.ty_at(ty, wildcards),
         _ => parameterized_sig_at(formatter, ty, wildcards),
     }
 }

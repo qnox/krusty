@@ -13,14 +13,14 @@ use crate::symbol_resolver::{
     TypePosition, UnboundSpecialization,
 };
 use crate::symbol_source::SymbolSource;
-use crate::types::{FnSig, Ty};
+use crate::types::{FnSig, Ty, TyKind};
 
 use super::callable_reference_selection::AdaptedRefArgument;
 use super::{Checker, CheckerScope, Signature};
 
 pub(super) fn function_expectation(expected: Option<Ty>) -> Option<&'static FnSig> {
-    match expected {
-        Some(Ty::Fun(function)) => Some(function),
+    match expected.map(Ty::kind) {
+        Some(TyKind::Fun(function)) => Some(function),
         _ => None,
     }
 }
@@ -466,8 +466,8 @@ fn specialize_local_extension_signature(
     selected.lambda_param_types = selected
         .params
         .iter()
-        .map(|parameter| match parameter {
-            Ty::Fun(function) => function.params.clone(),
+        .map(|parameter| match parameter.kind() {
+            TyKind::Fun(function) => function.params.clone(),
             _ => Vec::new(),
         })
         .collect();

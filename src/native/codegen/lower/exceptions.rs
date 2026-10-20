@@ -17,6 +17,7 @@
 //! common IR, and not to a single test written against it.
 
 use super::*;
+use crate::types::TyKind;
 
 impl BodyLowering<'_, '_, '_> {
     /// Emit a call, then the check that turns a callee's `throw` into propagation.
@@ -539,9 +540,12 @@ impl BodyLowering<'_, '_, '_> {
         for catch in catches {
             // A reified catch keeps its semantic type parameter in common IR. Native runtime
             // dispatch, like the JVM exception table, tests that parameter's declaration bound.
-            let runtime_type = match catch.ty.non_null() {
-                Ty::TyParam(_, bound) => *bound,
-                concrete => concrete,
+            let runtime_type = {
+                let concrete = catch.ty.non_null();
+                match concrete.kind() {
+                    TyKind::TyParam(_, bound) => bound,
+                    _ => concrete,
+                }
             };
             let Some(descriptor) = self.file.type_descriptor(runtime_type)? else {
                 return Err(declined!(

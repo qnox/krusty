@@ -3,7 +3,7 @@
 
 use crate::libraries::{CallSig, FunctionInfo};
 use crate::symbol_source::SymbolSource;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdaptedRefArgument {
@@ -137,18 +137,18 @@ fn alpha_equivalent_type(
     if left == right {
         return true;
     }
-    match (left, right) {
-        (Ty::TyParam(left, _), Ty::TyParam(right, _)) => formals
+    match (left.kind(), right.kind()) {
+        (TyKind::TyParam(left, _), TyKind::TyParam(right, _)) => formals
             .get(left.as_str())
             .is_some_and(|mapped| mapped == right),
-        (Ty::Nullable(left), Ty::Nullable(right))
-        | (Ty::PlatformNullable(left), Ty::PlatformNullable(right))
-        | (Ty::InProjection(left), Ty::InProjection(right))
-        | (Ty::OutProjection(left), Ty::OutProjection(right))
-        | (Ty::StarProjection(left), Ty::StarProjection(right)) => {
-            alpha_equivalent_type(*left, *right, formals)
+        (TyKind::Nullable(left), TyKind::Nullable(right))
+        | (TyKind::PlatformNullable(left), TyKind::PlatformNullable(right))
+        | (TyKind::InProjection(left), TyKind::InProjection(right))
+        | (TyKind::OutProjection(left), TyKind::OutProjection(right))
+        | (TyKind::StarProjection(left), TyKind::StarProjection(right)) => {
+            alpha_equivalent_type(left, right, formals)
         }
-        (Ty::Obj(left, left_arguments), Ty::Obj(right, right_arguments)) => {
+        (TyKind::Obj(left, left_arguments), TyKind::Obj(right, right_arguments)) => {
             left == right
                 && left_arguments.len() == right_arguments.len()
                 && left_arguments
@@ -156,7 +156,7 @@ fn alpha_equivalent_type(
                     .zip(right_arguments)
                     .all(|(&left, &right)| alpha_equivalent_type(left, right, formals))
         }
-        (Ty::Fun(left), Ty::Fun(right)) => {
+        (TyKind::Fun(left), TyKind::Fun(right)) => {
             left.params.len() == right.params.len()
                 && left.context_count == right.context_count
                 && left.has_receiver == right.has_receiver
@@ -185,8 +185,13 @@ fn receiver_validated_projected_formals(
     declared_receiver: Ty,
     actual_receiver: Ty,
 ) -> crate::fx_hash::HashSet<String> {
-    let (Ty::Obj(declared_owner, declared_arguments), Ty::Obj(actual_owner, actual_arguments)) =
-        (declared_receiver.non_null(), actual_receiver.non_null())
+    let (
+        TyKind::Obj(declared_owner, declared_arguments),
+        TyKind::Obj(actual_owner, actual_arguments),
+    ) = (
+        declared_receiver.non_null().kind(),
+        actual_receiver.non_null().kind(),
+    )
     else {
         return crate::fx_hash::HashSet::default();
     };
@@ -202,7 +207,7 @@ fn receiver_validated_projected_formals(
     let mut alpha = crate::fx_hash::HashMap::default();
     for (&declared, classifier_formal) in declared_arguments.iter().zip(&classifier.type_params) {
         let declared = declared.projection_inner().unwrap_or(declared);
-        if let Ty::TyParam(method_formal, _) = declared {
+        if let TyKind::TyParam(method_formal, _) = declared.kind() {
             if generic.formals.iter().any(|formal| formal == method_formal) {
                 alpha.insert(method_formal.to_string(), classifier_formal.clone());
             }
@@ -215,7 +220,7 @@ fn receiver_validated_projected_formals(
             continue;
         }
         let declared = declared.projection_inner().unwrap_or(declared);
-        let Ty::TyParam(method_formal, _) = declared else {
+        let TyKind::TyParam(method_formal, _) = declared.kind() else {
             continue;
         };
         let Some(method_index) = generic
@@ -453,8 +458,8 @@ pub(super) fn is_compatible(
         .all(|(expected, actual)| {
             let expected =
                 crate::symbol_resolver::ty_subst_keep_unbound(*expected, &result_bindings);
-            match expected.non_null() {
-                Ty::TyParam(_, bound) => is_assignable(*actual, *bound),
+            match expected.non_null().kind() {
+                TyKind::TyParam(_, bound) => is_assignable(*actual, bound),
                 _ => is_assignable(expected, *actual),
             }
         })
@@ -531,9 +536,9 @@ pub(super) fn input_parameter_fits(
     target: Ty,
     mut is_assignable: impl FnMut(Ty, Ty) -> bool,
 ) -> bool {
-    match (expected.non_null(), target.non_null()) {
-        (Ty::TyParam(_, bound), _) => is_assignable(target, *bound),
-        (_, Ty::TyParam(_, bound)) => is_assignable(expected, *bound),
+    match (expected.non_null().kind(), target.non_null().kind()) {
+        (TyKind::TyParam(_, bound), _) => is_assignable(target, bound),
+        (_, TyKind::TyParam(_, bound)) => is_assignable(expected, bound),
         _ => is_assignable(expected, target),
     }
 }
@@ -793,13 +798,14 @@ pub(super) fn select_adapted_instance_candidate(
             if !input_parameter_fits(expected_receiver, receiver, &mut is_assignable) {
                 return None;
             }
-            let Ty::Fun(method) = Ty::fun_with_shape(
+            let TyKind::Fun(method) = Ty::fun_with_shape(
                 expected_values.to_vec(),
                 expected.ret,
                 expected.context_count,
                 false,
                 expected.suspend,
-            ) else {
+            )
+            .kind() else {
                 unreachable!("unbound member expectation is always a function")
             };
             method
@@ -881,7 +887,7 @@ mod tests {
     #[test]
     fn repeated_outer_formal_preserves_distinct_reference_constraints() {
         let formal = Ty::ty_param("outer:T", Ty::nullable(Ty::obj("kotlin/Any")));
-        let Ty::Fun(expected) = Ty::fun(vec![formal], formal) else {
+        let TyKind::Fun(expected) = Ty::fun(vec![formal], formal).kind() else {
             unreachable!()
         };
 

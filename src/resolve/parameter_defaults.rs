@@ -6,7 +6,7 @@
 
 use super::{Checker, CheckerScope, PlatformNarrowing};
 use crate::ast::ExprId;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 #[derive(Clone, Copy)]
 pub(super) enum ParameterDefaultFlow {
@@ -27,7 +27,8 @@ impl Checker<'_> {
         expression: ExprId,
         expected: Ty,
     ) {
-        let has_receiver = matches!(expected, Ty::Fun(function) if function.has_receiver);
+        let has_receiver =
+            matches!(expected.kind(), TyKind::Fun(function) if function.has_receiver);
         let actual = self.check_argument_expected(scope, expression, expected, has_receiver, None);
         // A default fills its parameter. A platform result committed to a parameter that rejects
         // null is guarded in the `$default` method, the same transition a call argument guards.

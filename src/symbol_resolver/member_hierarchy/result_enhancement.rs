@@ -15,7 +15,7 @@
 use super::{override_parameter_types_match, resolution_subtype};
 use crate::libraries::{enhance_from_overridden, FunctionInfo, FunctionSet, ResultEnhancement};
 use crate::symbol_source::SymbolSource;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// The head nullability qualifier one overridden declaration contributes to an override's result
 /// (`AbstractSignatureParts.nullabilityQualifier`): a nullable result is `NULLABLE`, a flexible one
@@ -27,9 +27,9 @@ enum NullabilityQualifier {
 }
 
 fn result_qualifier(declaration: &FunctionInfo) -> Option<NullabilityQualifier> {
-    match declaration.ret.apply(declaration.callable.ret) {
-        Ty::PlatformNullable(_) | Ty::Error | Ty::Pending => None,
-        Ty::Nullable(_) => Some(NullabilityQualifier::Nullable),
+    match declaration.ret.apply(declaration.callable.ret).kind() {
+        TyKind::PlatformNullable(_) | TyKind::Error | TyKind::Pending => None,
+        TyKind::Nullable(_) => Some(NullabilityQualifier::Nullable),
         _ if matches!(
             declaration.call_sig.result_enhancement,
             ResultEnhancement::Flexible(_) | ResultEnhancement::MappedFlexible(_)
@@ -108,10 +108,11 @@ pub(super) fn enhance_overriding_flexible_results(
         else {
             continue;
         };
-        if !matches!(
-            implementation.ret.apply(implementation.callable.ret),
-            Ty::PlatformNullable(_)
-        ) {
+        if !implementation
+            .ret
+            .apply(implementation.callable.ret)
+            .is_platform_nullable()
+        {
             continue;
         }
         let overridden = declarations

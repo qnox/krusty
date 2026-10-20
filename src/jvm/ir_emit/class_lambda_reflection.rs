@@ -6,7 +6,7 @@
 
 use crate::ir::type_reflection::type_parameters_named_by;
 use crate::ir::{IrFile, IrParameterRole, IrTypeParameter};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::signature_formatter::{JvmSignatureFormatter, Wildcards};
 
@@ -30,7 +30,7 @@ pub(super) fn reflect_source(
         .recorded_lambda_type_parameters(impl_fn)
         .ok_or("a source class lambda does not publish its type parameters")?;
     let function_type = approximate_unpublished_type_parameters(function_type, recorded);
-    let Ty::Fun(signature) = function_type.non_null() else {
+    let TyKind::Fun(signature) = function_type.non_null().kind() else {
         return Err("a source class lambda's type is not a function type".to_string());
     };
     let own = signature
@@ -137,9 +137,9 @@ fn approximate_type_parameters(ty: Ty, names: &[&str]) -> Ty {
         return ty;
     }
     let approximate = |ty: Ty| approximate_type_parameters(ty, names);
-    match ty {
-        Ty::TyParam(name, bound) if names.contains(&name.as_str()) => approximate(*bound),
-        Ty::Fun(signature) => Ty::fun_with_shape(
+    match ty.kind() {
+        TyKind::TyParam(name, bound) if names.contains(&name.as_str()) => approximate(bound),
+        TyKind::Fun(signature) => Ty::fun_with_shape(
             signature
                 .params
                 .iter()
@@ -150,19 +150,19 @@ fn approximate_type_parameters(ty: Ty, names: &[&str]) -> Ty {
             signature.has_receiver,
             signature.suspend,
         ),
-        Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+        TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
             name,
             &arguments
                 .iter()
                 .map(|&argument| approximate(argument))
                 .collect::<Vec<_>>(),
         ),
-        Ty::Nullable(inner) => Ty::nullable(approximate(*inner)),
-        Ty::DefinitelyNotNull(inner) => approximate(*inner).non_null(),
-        Ty::PlatformNullable(inner) => Ty::platform_nullable(approximate(*inner)),
-        Ty::InProjection(inner) => Ty::in_projection(approximate(*inner)),
-        Ty::OutProjection(inner) => Ty::out_projection(approximate(*inner)),
-        Ty::Intersection(parts) => Ty::intersection(
+        TyKind::Nullable(inner) => Ty::nullable(approximate(inner)),
+        TyKind::DefinitelyNotNull(inner) => approximate(inner).non_null(),
+        TyKind::PlatformNullable(inner) => Ty::platform_nullable(approximate(inner)),
+        TyKind::InProjection(inner) => Ty::in_projection(approximate(inner)),
+        TyKind::OutProjection(inner) => Ty::out_projection(approximate(inner)),
+        TyKind::Intersection(parts) => Ty::intersection(
             &parts
                 .iter()
                 .map(|&part| approximate(part))

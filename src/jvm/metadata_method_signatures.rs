@@ -7,7 +7,7 @@
 
 use crate::fx_hash::HashSet;
 
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// `requiresFunctionSignature`: `value_parameters` exclude context parameters, which the
 /// reconstruction never sees, so a function with any records its descriptor. A classifier in
@@ -53,27 +53,32 @@ fn map_type_default(ty: Ty, local_classifiers: &HashSet<TypeName>) -> Option<Str
     // before applying ClassMapperLite so `kotlin.Unit` is reconstructed as method-result `V`, not
     // mistaken for the physical `Lkotlin/Unit;` carrier of a field or parameter.
     let ty = ty.non_null().canonical_semantic();
-    Some(match ty {
-        Ty::Obj(classifier, _) if local_classifiers.contains(&classifier) => return None,
-        Ty::Obj(classifier, _) => super::jvm_class_map::class_mapper_lite_descriptor(classifier),
-        Ty::Unit => "V".to_owned(),
-        Ty::Nothing => super::jvm_class_map::class_mapper_lite_nothing_descriptor(),
+    Some(match ty.kind() {
+        TyKind::Obj(classifier, _) if local_classifiers.contains(&classifier) => return None,
+        TyKind::Obj(classifier, _) => {
+            super::jvm_class_map::class_mapper_lite_descriptor(classifier)
+        }
+        TyKind::Unit => "V".to_owned(),
+        TyKind::Nothing => super::jvm_class_map::class_mapper_lite_nothing_descriptor(),
         // `T & Any` is still the type parameter. A class tightened the same way keeps its class id.
-        Ty::DefinitelyNotNull(inner) => {
-            return match *inner {
-                Ty::TyParam(..) => None,
-                other => map_type_default(other, local_classifiers),
+        TyKind::DefinitelyNotNull(inner) => {
+            return {
+                let other = inner;
+                match other.kind() {
+                    TyKind::TyParam(..) => None,
+                    _ => map_type_default(other, local_classifiers),
+                }
             };
         }
         // FIR's class id of a function type is its kind and arity, receiver and context included.
-        Ty::Fun(signature) => super::jvm_class_map::class_mapper_lite_function_descriptor(
+        TyKind::Fun(signature) => super::jvm_class_map::class_mapper_lite_function_descriptor(
             signature.params.len(),
             signature.suspend,
         ),
         // An intersection's descriptor is its shared carrier (`Inv<String> & Inv<Int>` is `Inv`,
         // unrelated classes are `Object`). That carrier is what a reader rebuilds after the
         // declaration is approximated, so the physical descriptor stays derivable.
-        Ty::Intersection(parts) => {
+        TyKind::Intersection(parts) => {
             return map_type_default(
                 super::physical_type::intersection_jvm_carrier(parts.as_slice()),
                 local_classifiers,

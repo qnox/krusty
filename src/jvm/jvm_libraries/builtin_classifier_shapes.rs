@@ -163,7 +163,7 @@ pub(super) fn builtin_library_type(
         .supertype_templates
         .iter()
         .copied()
-        .filter(|supertype| matches!(supertype, Ty::Fun(_)))
+        .filter(|supertype| supertype.is_fun())
         .collect::<Vec<_>>();
     let callable_signature = callable_signatures.first().copied();
     LibraryType {

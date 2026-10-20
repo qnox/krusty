@@ -1383,8 +1383,8 @@ impl BodyLowering<'_> {
                 body,
             } => {
                 let suspend = matches!(
-                    expression.ty.get().non_null(),
-                    crate::types::Ty::Fun(signature) if signature.suspend
+                    expression.ty.get().non_null().kind(),
+                    crate::types::TyKind::Fun(signature) if signature.suspend
                 );
                 let unit_method = self.unit_method_lambda.take() == Some(expression_id);
                 let lambda = self.checked_lambda(*callable, body, suspend, unit_method)?;

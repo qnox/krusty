@@ -33,7 +33,7 @@ use crate::metadata::klib_ir::{
 use crate::metadata::semantic::{KotlinFunction, KotlinPackage};
 use crate::metadata::semantic::{KotlinFunctionTypeShape, KotlinType};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{type_name, Ty, TypeName, Visibility};
+use crate::types::{type_name, Ty, TyKind, TypeName, Visibility};
 
 /// The fact the backend handoff freezes for the one function of `package` named `name` with this
 /// receiver and these value parameters.
@@ -1872,8 +1872,10 @@ fn wasm_numbers_bodies_link_their_internal_wasm_op_by_exact_intrinsic_identity()
         assert_eq!(unit.ir().functions.len(), 1);
         assert_eq!(unit.ir().functions[function as usize].ret, result);
         if name == "fromBits" {
-            let Ty::Obj(receiver, arguments) =
-                fact.source_receiver.expect("fromBits is an extension")
+            let TyKind::Obj(receiver, arguments) = fact
+                .source_receiver
+                .expect("fromBits is an extension")
+                .kind()
             else {
                 panic!("fromBits has a singleton classifier receiver")
             };

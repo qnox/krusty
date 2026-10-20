@@ -5,6 +5,7 @@
 use super::{type_argument_of_ref, ClassNames, HashMap, TParams, Ty, TypeName, TypeRef};
 use crate::diag::DiagSink;
 use crate::spelling::Spelled;
+use crate::types::TyKind;
 
 /// Reconstruct the exact written type tree the parser retained before expanding source aliases.
 /// Alias arguments are expanded before their enclosing spelling is parked, so restoration must be
@@ -389,8 +390,8 @@ fn substituted_parameter_spelling(occurrence: &Spelled, argument: Spelled) -> Sp
 /// arguments, or a function type's parameters followed by its return, which a suspend function
 /// type's spelling has no slot for (see [`spelling_of_ref_with`]).
 fn spelled_arguments(ty: Ty) -> Vec<Ty> {
-    match ty.non_null() {
-        Ty::Fun(signature) => {
+    match ty.non_null().kind() {
+        TyKind::Fun(signature) => {
             let mut arguments = signature.params.to_vec();
             if !signature.suspend {
                 arguments.push(signature.ret);
@@ -414,7 +415,7 @@ fn substitute_expansion_spelling(
     bindings: &crate::symbol_resolver::GSigBinds,
 ) -> Spelled {
     let template_inner = template.projection_inner().unwrap_or(template);
-    if let Ty::TyParam(name, _) = template_inner {
+    if let TyKind::TyParam(name, _) = template_inner.kind() {
         if let Some(index) = formals.iter().position(|formal| formal == name) {
             let argument = use_site
                 .get(index)

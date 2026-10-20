@@ -174,7 +174,7 @@ fn check_supported(ir: &IrFile, class: &IrClass) -> Result<(), Unsupported> {
     } else if class
         .supertypes
         .iter()
-        .any(|supertype| matches!(supertype.non_null(), Ty::Fun(_)))
+        .any(|supertype| supertype.non_null().is_fun())
     {
         "a class implementing a function type"
     } else if let Some(outside) = class

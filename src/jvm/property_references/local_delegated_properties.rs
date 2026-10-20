@@ -9,7 +9,7 @@ use crate::fx_hash::HashMap;
 use crate::fir::LocalDelegatedPropertyId;
 use crate::ir::{IrExpr, IrFile};
 use crate::metadata::local_properties::{LocalPropertyMeta, LocalPropertyTypeParameter};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// Each container's local delegated properties, in `<v#N>` order.
 #[derive(Default)]
@@ -70,30 +70,30 @@ impl LocalDelegatedProperties {
 
 fn local_type_parameters(ty: Ty) -> Vec<LocalPropertyTypeParameter> {
     fn collect(ty: Ty, out: &mut Vec<LocalPropertyTypeParameter>) {
-        match ty {
-            Ty::TyParam(name, bound) => {
+        match ty.kind() {
+            TyKind::TyParam(name, bound) => {
                 if !out.iter().any(|parameter| parameter.semantic_name == name) {
                     out.push(LocalPropertyTypeParameter {
                         source_name: crate::types::type_parameter_source_name(name.as_str())
                             .to_owned(),
                         semantic_name: name.to_owned().to_string(),
-                        upper_bound: *bound,
+                        upper_bound: bound,
                     });
-                    collect(*bound, out);
+                    collect(bound, out);
                 }
             }
-            Ty::Nullable(inner)
-            | Ty::PlatformNullable(inner)
-            | Ty::DefinitelyNotNull(inner)
-            | Ty::InProjection(inner)
-            | Ty::OutProjection(inner) => collect(*inner, out),
-            Ty::StarProjection(_) => {}
-            Ty::Obj(_, arguments) => {
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::DefinitelyNotNull(inner)
+            | TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner) => collect(inner, out),
+            TyKind::StarProjection(_) => {}
+            TyKind::Obj(_, arguments) => {
                 for &argument in arguments {
                     collect(argument, out);
                 }
             }
-            Ty::Fun(signature) => {
+            TyKind::Fun(signature) => {
                 for &parameter in &signature.params {
                     collect(parameter, out);
                 }

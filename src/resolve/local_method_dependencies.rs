@@ -6,6 +6,7 @@
 //! checker and scope chain, and marks it consumed so the ordinary stream never checks it twice.
 
 use super::*;
+use crate::types::TyKind;
 
 #[derive(Clone)]
 pub(super) struct LocalMethodDependency {
@@ -684,8 +685,8 @@ impl Checker<'_> {
             .params
             .iter()
             .map(
-                |parameter| match self.type_ref_ty_silent(method_scope, &parameter.ty) {
-                    Ty::Fun(shape) => shape.params.clone(),
+                |parameter| match self.type_ref_ty_silent(method_scope, &parameter.ty).kind() {
+                    TyKind::Fun(shape) => shape.params.clone(),
                     _ => Vec::new(),
                 },
             )

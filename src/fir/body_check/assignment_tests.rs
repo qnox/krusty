@@ -3,6 +3,7 @@ use super::test_support::{
     root_expression,
 };
 use super::*;
+use crate::types::TyKind;
 
 fn first_statement_call(body: &FirBody) -> &FirCall {
     let FirExprKind::Block { statements, .. } =
@@ -554,8 +555,10 @@ fn generic_member_set_calls_retain_receiver_applied_parameter_types() {
         .expect("selected module callable")
         .declaration;
     assert!(matches!(
-        index.signature(declaration).unwrap().parameters[1].get(),
-        Ty::TyParam(..)
+        index.signature(declaration).unwrap().parameters[1]
+            .get()
+            .kind(),
+        TyKind::TyParam(..)
     ));
 }
 

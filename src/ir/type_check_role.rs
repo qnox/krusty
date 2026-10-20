@@ -8,7 +8,9 @@
 
 use super::referenced_classifiers::{collect_classifier_names, referenced_classifier_names};
 use super::{Callee, IrExpr, IrFile, IrIntrinsic};
-use crate::types::{ClassifierFactSource, ClassifierRole, CollectionKind, MappedCollection};
+use crate::types::{
+    ClassifierFactSource, ClassifierRole, CollectionKind, MappedCollection, TyKind,
+};
 use crate::types::{Ty, TypeName};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -69,8 +71,8 @@ impl IrFile {
 
     /// The role of the target `ty` of an `is` or `as` (nullability aside).
     pub fn type_check_role(&self, ty: Ty) -> Option<TypeCheckRole> {
-        match ty.non_null() {
-            Ty::Obj(name, _) => match self.classifier_role(name)? {
+        match ty.non_null().kind() {
+            TyKind::Obj(name, _) => match self.classifier_role(name)? {
                 ClassifierRole::MappedCollection(collection) => collection
                     .mutable
                     .then_some(TypeCheckRole::MutableCollection(collection.kind)),
@@ -81,7 +83,9 @@ impl IrFile {
                     Some(TypeCheckRole::SuspendFunctionOfArity(arity))
                 }
             },
-            Ty::Fun(signature) => function_check_arity(signature.params.len(), signature.suspend),
+            TyKind::Fun(signature) => {
+                function_check_arity(signature.params.len(), signature.suspend)
+            }
             _ => None,
         }
     }

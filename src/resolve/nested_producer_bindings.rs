@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::libraries::GenericSig;
+use crate::types::TyKind;
 
 /// The outer formal `declared` names when it is a bare variable of the call that no explicit type
 /// argument fixes. Its current binding is then lower-bound evidence the other arguments supplied.
@@ -16,7 +17,7 @@ pub(super) fn open_variable<'a>(
     type_args: &[Ty],
     declared: Ty,
 ) -> Option<&'a str> {
-    let Ty::TyParam(name, _) = declared.non_null() else {
+    let TyKind::TyParam(name, _) = declared.non_null().kind() else {
         return None;
     };
     let index = signature
