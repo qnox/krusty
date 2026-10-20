@@ -5274,7 +5274,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   function in this module (public, or declared in the caller's own file; not a companion-block
   member, which its class compiles) with no suspend function-typed parameter or receiver, no
   `crossinline` parameter, and a template without lambdas, callable references, local classes,
-  nested expansions or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
+  or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
   called with every argument from any body outside a suspend state machine: a named function, an
   inline function (whose compiled body then holds the nested callee's code, as kotlinc's does), a
   lambda's method, a local function, a property initializer, an `init` block, a constructor or an
@@ -5292,7 +5292,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A callee whose body inlines another same-module callee is compiled after it, as kotlinc compiles
   a callee's node when a call first needs it; the node carries its method's own source map (the
   lines it inlined are numbered past its file's own line count, not the caller's), so the caller
-  maps a nested line through it back to the nested callee's source. A body bracketed for FixStack
+  maps a nested line through it back to the nested callee's source. A template that itself expands
+  another same-module call in IR is compiled the same way: the callee's compiled body holds that
+  expansion, and a reified type parameter it forwards to the nested call is recorded on the nested
+  call as the outer parameter, which the inliner substitutes when it inlines the outer body. An
+  operator call (`a + b`, `a..b`, `a < b`) publishes the type arguments its selection solved, as
+  the explicit `a.plus(b)` does, so a reified operator receives its argument the same way. An
+  inlined line joins only the last range of its file, or else the first, when that range came from
+  the same call and covers it or lies at the output frontier (`FileMapping.mapNewLineNumber`);
+  a second copy of a body on the same line therefore continues the range its nested callee opened
+  last rather than reusing an earlier range that covers it. A body bracketed for FixStack
   over caller operands runs over an empty stack inside the bracket, so a literal it expands is
   bracketed again only for operands of its own, and a literal that always throws leaves none open;
   a body it cannot compile or inline fails the emission, never becoming a real call. The call

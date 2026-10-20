@@ -173,13 +173,13 @@ impl SourceMap {
     /// `call_line` of this class's own source.
     ///
     /// Lines are mapped one at a time, in the order the inlined code carries them, the way the
-    /// reference compiler does it: a line joins an existing range of its file when that range came
-    /// from the same call and already covers it — or, for the range at the frontier of the output
-    /// space, lies within [`FRONTIER_SLACK`] past its end — and otherwise opens a new range at the
-    /// next free output line. So a body whose lines are 1739 and 1814..=1816 takes two rows, not one
+    /// reference compiler does it (`FileMapping.mapNewLineNumber`): a line joins its file's last
+    /// range, or else its first, when that range came from the same call and already covers it —
+    /// or, for the range at the frontier of the output space, lies within [`FRONTIER_SLACK`] past
+    /// its end — and otherwise opens a new range at the next free output line. So a body whose lines are 1739 and 1814..=1816 takes two rows, not one
     /// row spanning the whole distance between them.
     pub fn map_line(&mut self, name: &str, path: &str, source: u16, call_line: u16) -> Option<u16> {
-        self.map(name, path, source, Some(call_line))
+        self.map_new_line(name, path, source, Some(call_line))
     }
 
     /// The output line of synthetic line `id` (`mapSyntheticLineNumber`): a line of kotlinc's fake
@@ -703,15 +703,16 @@ mod tests {
     }
 
     /// A private inline function (line 4) that inlines a published one (line 3), both expanded at
-    /// line 5: the closing line 4 returns to the range that already covers it rather than
-    /// stretching the published function's frontier range.
+    /// line 5: line 4 opens its own range, and line 3 of the second call cannot join the first
+    /// call's range. A line the same call revisits keeps its first output through the caller's
+    /// visited lines, not through this map.
     #[test]
-    fn a_covered_line_keeps_its_range_over_the_frontier() {
+    fn a_line_from_another_call_opens_its_own_range() {
         let mut map = SourceMap::new("A.kt", "inl/AKt", 6);
         let outputs = map_all(&mut map, "A.kt", "inl/AKt", &[3], 4);
         assert_eq!(outputs, vec![7]);
-        let outputs = map_all(&mut map, "A.kt", "inl/AKt", &[4, 3, 4], 5);
-        assert_eq!(outputs, vec![8, 9, 8]);
+        let outputs = map_all(&mut map, "A.kt", "inl/AKt", &[4, 3], 5);
+        assert_eq!(outputs, vec![8, 9]);
         assert_eq!(
             map.render().expect("a map"),
             "SMAP\nA.kt\nKotlin\n*S Kotlin\n*F\n\
@@ -795,19 +796,21 @@ mod tests {
         );
     }
 
+    /// kotlinc's `mapNewLineNumber` offers a line only to its file's last range, or else its
+    /// first: a line a middle range covers opens a new range at the next free output line.
     #[test]
-    fn a_revisited_middle_range_keeps_its_original_output() {
+    fn a_middle_range_is_not_reused() {
         let mut map = SourceMap::new("Main.kt", "MainKt", 2);
         assert_eq!(
             map_all(&mut map, "Lib.kt", "LibKt", &[1, 20, 40, 20], 1),
-            vec![3, 4, 5, 4]
+            vec![3, 4, 5, 6]
         );
         assert_eq!(
             map.render().expect("a map"),
             "SMAP\nMain.kt\nKotlin\n*S Kotlin\n*F\n\
              + 1 Main.kt\nMainKt\n+ 2 Lib.kt\nLibKt\n\
-             *L\n1#1,2:1\n1#2:3\n20#2:4\n40#2:5\n\
-             *S KotlinDebug\n*F\n+ 1 Main.kt\nMainKt\n*L\n1#1:3\n1#1:4\n1#1:5\n*E\n"
+             *L\n1#1,2:1\n1#2:3\n20#2:4\n40#2:5\n20#2:6\n\
+             *S KotlinDebug\n*F\n+ 1 Main.kt\nMainKt\n*L\n1#1:3\n1#1:4\n1#1:5\n1#1:6\n*E\n"
         );
     }
 
