@@ -6480,6 +6480,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/reified_catch_e2e.rs`. Corpus:
   `codegen/box/reified/catchParameter/tryCatchReifiedType.kt`.
 
+- **A reified enum operation inlined for a concrete enum calls that enum's own member.** A reified
+  body writes `enumValueOf<T>(s)`, `enumValues<T>()` and `enumEntries<T>()` as
+  `Intrinsics.reifiedOperationMarker(5, "T")` followed by an erased placeholder:
+  `aconst_null; aload s; invokestatic Enum.valueOf(Class, String)`, `iconst_0; anewarray Enum`,
+  or `aconst_null; checkcast EnumEntries`. The bytecode inliner reads the operation from the marker's
+  mode and the placeholder's shape, never from a function name, as kotlinc's
+  `ReifiedTypeInliner.processSpecialEnumFunction` does: for a concrete enum `E` it erases the marker
+  and writes `E.valueOf(String)` (dropping the `aconst_null`), `E.values()` or `E.getEntries()` in
+  place of the placeholder. A forwarded parameter renames the marker and keeps the placeholder for
+  the outer caller. Only the canonical erased placeholders count: a non-interface `invokestatic`
+  of `java/lang/Enum.valueOf(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;`,
+  `anewarray java/lang/Enum`, and `checkcast kotlin/enums/EnumEntries`. A mode-5 marker followed
+  by any other shape (another owner or descriptor, an interface call, an array of another class)
+  is malformed and fails the splice. The reified argument carries its semantic classifier
+  identity beside its JVM class, and `E`'s entries are read through the accessor its declaration
+  publishes, found by that identity (`enum_entries_accessor`, which every provider normalizes: an
+  enum of the module being compiled always has one; a Kotlin classpath enum has one when its class
+  file declares the static `getEntries()`; a Java enum never does). Without one,
+  `enumEntries<E>()` becomes `getstatic Owner$EntriesIntrinsicMappings.entries$N`, as in kotlinc:
+  the calling file's synthetic class (`ACC_PUBLIC | ACC_FINAL | ACC_SUPER | ACC_SYNTHETIC`, an
+  inner class of the file facade or class) holds one `public static final synthetic` field per
+  enum in first-use order, typed `EnumEntries<E>` and filled in `<clinit>` from
+  `EnumEntriesKt.enumEntries((Enum[]) E.values())`. Not yet matched: kotlinc's separate
+  `$EntriesMappings` class for a direct `E.entries` read of such an enum outside a reified body.
+  Tests: `tests/inline_reified_enum_operations_e2e.rs`, `src/jvm/inliner/reified.rs`.
+
 - **An escaping lambda inside `inline fun <reified T>` specializes `T` at the call that creates it.**
   `func = { it as? T }` stores a closure, so the body is not spliced into the caller. The
   declaration's implementation keeps the reified marker. Each call copies that implementation,

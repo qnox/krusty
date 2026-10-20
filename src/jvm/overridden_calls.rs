@@ -249,6 +249,7 @@ mod tests {
             value_declaration: None,
             role: None,
             companion: None,
+            enum_entries_accessor: None,
         })
     }
 

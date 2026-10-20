@@ -179,6 +179,7 @@ mod constructor_delegation_arguments;
 pub(super) mod jvm_static_members;
 mod method_placement;
 use method_placement::MethodPlacement;
+mod entries_mappings;
 mod primary_super_call;
 mod secondary_constructor;
 mod static_accessors;
@@ -389,6 +390,9 @@ pub(crate) struct EmitRun {
     regenerated_object_names: bytecode_inline_call::RegeneratedObjectNames,
     /// The `$WhenMappings` tables of the classes this pass emits enum switches in.
     when_mappings: std::cell::RefCell<when_mappings::WhenMappingTables>,
+    /// The `$EntriesIntrinsicMappings` fields of the classes this pass inlines reified
+    /// `enumEntries` into.
+    entries_mappings: std::cell::RefCell<entries_mappings::EntriesMappingTables>,
 }
 
 impl EmitRun {
@@ -1464,6 +1468,7 @@ fn emit_pass(
     env.run.machine_classes.borrow_mut().clear();
     env.run.regenerated_object_names.clear();
     env.run.when_mappings.borrow_mut().clear();
+    env.run.entries_mappings.borrow_mut().clear();
     if !jvm_can_emit(ir) {
         emission_readiness::trace_residual_nodes(ir);
         return None;
@@ -1686,6 +1691,7 @@ fn emit_pass(
     out.extend(drain_lambda_classes(env, opts));
     out.extend(env.run.machine_classes.borrow_mut().drain(..));
     out.extend(env.run.when_mappings.borrow().write_classes(env, opts));
+    out.extend(env.run.entries_mappings.borrow().write_classes(env, opts));
     if env.run.emission_failed() {
         return None; // malformed backend input — discard every class from this pass
     }
