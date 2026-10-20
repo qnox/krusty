@@ -12438,6 +12438,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   argument and calls the entry. krusty named the static function from the bridge
   (`compareTo-impl(I)I`), which does not exist. Tests: `tests/explicit_backing_field_e2e.rs`.
   Corpus: `properties/backingField/genericSupertypeWithValueClassExplicitBackingField`.
+- **A member is named by its own value-class result, once, whatever it overrides.** kotlinc
+  (`InlineClassAbi.hashSuffix`) hashes a non-facade member's value parameters and its own return
+  type into ONE suffix whenever that return is a value class. An override is no exception: an
+  override getter `val key: Z` of `Map.Entry<K, V>.key` is `getKey-a_XrcN0()I` with a boxing
+  bridge `getKey()Object`, `override val p: Z` of `val p: Z?` is `getP-a_XrcN0()I` with a bridge
+  `getP-m98lmvQ()LZ;` under the supertype's own name, and a custom getter takes the same name as
+  a stored property's. A value class's interface entry is the member itself on the box, so it
+  takes the static member's name unchanged (`get-ayyZXx8(I)LZ;` for `get(key: Z): Z?`), never a
+  second hash over its physical result (`get-ayyZXx8--zXLvJo`). A function and a property
+  getter decide bridge necessity by the same rule: a value-class result that differs from the
+  overridden one needs a bridge even where the unerased descriptors agree.
+  Tests: `tests/value_class_return_mangling_e2e.rs`. Corpus:
+  `inlineClasses/inlineClassCollection/inlineMapOfInlineClass`.
 - **A value class's suspend interface entry is the CPS method on the box.** The overriding member
   is the static `build-impl(carrier, Continuation)Object`. The box implements the interface with
   `build(Continuation)Object`: it reads the carrier and calls that static method, passing the
