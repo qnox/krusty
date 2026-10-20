@@ -3547,7 +3547,7 @@ fn select_extension_property_ref(property: PropertyInfo) -> Option<ResolvedPrope
         name,
         extension_facade: Some(facade),
         getter,
-        setter,
+        setter: setter.map(|setter| *setter),
         getter_visibility,
         setter_visibility,
         reflection_owner,
@@ -3590,7 +3590,7 @@ fn build_property_reference_from_declaration(
     Some(ResolvedPropertyRef {
         name: property.name.clone(),
         getter,
-        setter,
+        setter: setter.map(|setter| *setter),
         getter_visibility,
         setter_visibility,
         reflection_owner: recv,
@@ -3812,7 +3812,7 @@ fn member_property_write_from_declaration(
     // Writability is the presence of a one-argument setter. Kotlin setters return `Unit`; a Java
     // bean setter may return the receiver or any other value, and the assignment discards it.
     (setter.params.len() == 1).then_some(ResolvedPropertySetter {
-        callable: setter,
+        callable: *setter,
         visibility: declaration.setter_visibility,
         source_member: declaration.source_member,
         stable_declaration: declaration

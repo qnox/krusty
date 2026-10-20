@@ -315,7 +315,7 @@ pub(super) fn select(
                                 stable_declaration: property.stable_declaration,
                                 source_member: property.source_member,
                                 getter: Some(property.getter.clone()),
-                                setter: property.setter.clone(),
+                                setter: property.setter.as_deref().cloned(),
                             })
                         }),
                 );
