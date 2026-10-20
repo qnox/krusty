@@ -457,6 +457,28 @@ fun box(): String {
     );
 }
 
+/// The stdlib's `context(value) { ... }` expands from its prepared inline body. A `Unit` block
+/// whose statements return from the enclosing function leaves nothing on the stack for the
+/// expansion's discarded result.
+#[test]
+fn wasm_a_stdlib_context_block_of_unit_statements_expands() {
+    expect_wasm_box(
+        r#"// LANGUAGE: +ContextParameters
+class Prefix(val value: String)
+
+context(prefix: Prefix) fun read() = prefix.value
+
+fun box(): String {
+    context(Prefix("O")) {
+        if (read() != "O") return "fail"
+    }
+    return "OK"
+}
+"#,
+        "wasmStdlibContextUnitBlock",
+    );
+}
+
 #[test]
 fn wasm_declines_an_instruction_wrapper_whose_body_lowering_does_not_model() {
     // `pow` reaches fdlibm's `__ieee754_pow`, whose locals have no initializer: the wrapper is not

@@ -492,7 +492,8 @@ impl<'a> BodyLowering<'a> {
     }
 
     /// The type a read of `symbol` the body types `serialized` has: a function-typed parameter of
-    /// an erased body is read at its declared type, which its invocations convert from.
+    /// an erased body is read at its declared type, which its invocations convert from. The
+    /// erasure also drops the markers of a function type's context parameters and receiver.
     fn read_type(&self, symbol: &KlibIrSymbol, serialized: Ty) -> Ty {
         if self.locals.get(symbol).is_some() {
             return serialized;
@@ -500,7 +501,10 @@ impl<'a> BodyLowering<'a> {
         match self.header.value(symbol) {
             Some(parameter) if parameter.erased.is_none() => {
                 let declared = self.header.slot_type(parameter.index);
-                if self.header.erased(declared) == serialized {
+                let erased = self.header.erased(declared);
+                if erased == serialized
+                    || super::function_lowering::plain_function_type(erased) == serialized
+                {
                     declared
                 } else {
                     serialized
