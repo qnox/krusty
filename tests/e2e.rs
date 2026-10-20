@@ -530,6 +530,8 @@ mod computed_frames_e2e;
 mod computed_prop_e2e;
 #[path = "computed_prop_generic_return_e2e.rs"]
 mod computed_prop_generic_return_e2e;
+#[path = "default_stub_lines_e2e.rs"]
+mod default_stub_lines_e2e;
 #[path = "e2e/conditional_resolution.rs"]
 mod conditional_resolution;
 #[path = "conformance_score_report_e2e.rs"]
