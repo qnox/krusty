@@ -62,7 +62,9 @@ pub(crate) fn class_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
         // takes the enclosing instance (kotlinc: `inner class Item` flags 518).
         | (u64::from(c.is_inner_class) << 9)
         | (u64::from(c.is_data) << 10)
-        | (u64::from(c.is_value) << 13)
+        // `IS_VALUE` (bit 13) is the declaration's `value` modifier, whether the JVM unboxes the
+        // class (`@JvmInline`) or keeps it boxed (`+FullValueClasses`).
+        | (u64::from(c.is_value || c.is_full_value) << 13)
         | (u64::from(c.is_fun_interface) << 14)
         | (u64::from(c.is_enum) << 15)
 }

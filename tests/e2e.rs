@@ -1527,6 +1527,8 @@ mod metadata_return_value_status_e2e;
 mod metadata_synthetic_classes_e2e;
 mod metadata_type_modules;
 metadata_type_modules::declare!();
+#[path = "metadata_value_class_synthesized_members_e2e.rs"]
+mod metadata_value_class_synthesized_members_e2e;
 #[path = "metadata_version_requirement_e2e.rs"]
 mod metadata_version_requirement_e2e;
 #[path = "method_access_flags_e2e.rs"]
