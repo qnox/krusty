@@ -13,10 +13,20 @@ pub(crate) enum CandidateSelectionWithTies<T> {
 
 pub(crate) enum ReceiverFunctionSelection {
     None,
-    /// `FunctionInfo` alone is ~1.2 KiB and is what makes this variant large; the rest of the
-    /// tuple is a `Vec` and two `Copy` `Ty`s, so only the callable is boxed.
-    Selected((Box<FunctionInfo>, Vec<Ty>, Ty, Ty)),
+    Selected(SelectedReceiverFunction),
     Ambiguous(Vec<FunctionInfo>),
+}
+
+/// One selected receiver callable instantiated at its call site from a single binding set: the
+/// parameter vector, the result, the applied receiver, and the type-parameter bindings that
+/// produced them. The bindings are the call's solved type arguments, which the call publishes.
+pub(crate) struct SelectedReceiverFunction {
+    /// `FunctionInfo` alone is ~1.2 KiB; only the callable is boxed.
+    pub(crate) function: Box<FunctionInfo>,
+    pub(crate) params: Vec<Ty>,
+    pub(crate) ret: Ty,
+    pub(crate) applied_receiver: Ty,
+    pub(crate) bindings: GSigBinds,
 }
 
 impl<T> CandidateSelectionWithTies<T> {
@@ -1587,7 +1597,8 @@ pub(super) fn fun_return_compatible(
 #[cfg(test)]
 mod tests {
     use super::{
-        select_fixed_or_more_specific_vararg, CandidateSelectionWithTies, ReceiverFunctionSelection,
+        select_fixed_or_more_specific_vararg, CandidateSelectionWithTies,
+        ReceiverFunctionSelection, SelectedReceiverFunction,
     };
     use crate::libraries::{CallSig, FnKind, FunctionInfo, LibraryCallable};
     use crate::types::Ty;
@@ -1615,7 +1626,12 @@ mod tests {
 
     #[test]
     fn a_receiver_selection_carries_a_pointer_to_its_callable() {
-        assert_eq!(std::mem::size_of::<ReceiverFunctionSelection>(), 96);
+        use std::mem::size_of;
+        assert!(
+            size_of::<ReceiverFunctionSelection>()
+                <= size_of::<SelectedReceiverFunction>() + size_of::<usize>()
+        );
+        assert!(size_of::<SelectedReceiverFunction>() < size_of::<FunctionInfo>() / 4);
     }
 
     #[test]

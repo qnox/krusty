@@ -102,7 +102,7 @@ use member_specialization::{
 #[cfg(test)]
 use overload_selection::fun_return_compatible;
 pub(crate) use overload_selection::{
-    best_by_args, CandidateSelectionWithTies, ReceiverFunctionSelection,
+    best_by_args, CandidateSelectionWithTies, ReceiverFunctionSelection, SelectedReceiverFunction,
 };
 use overload_selection::{
     generic_bounds_admit, generic_bounds_admit_slots, indexed_call_shape, integer_literal_overload,
@@ -1483,8 +1483,8 @@ impl<'a> SymbolResolver<'a> {
             callables,
             expected_result,
         ) {
-            ReceiverFunctionSelection::Selected((selected, params, ret, _)) => {
-                CandidateSelection::Selected((*selected, params, ret))
+            ReceiverFunctionSelection::Selected(selected) => {
+                CandidateSelection::Selected((*selected.function, selected.params, selected.ret))
             }
             ReceiverFunctionSelection::None => CandidateSelection::None,
             ReceiverFunctionSelection::Ambiguous(_) => CandidateSelection::Ambiguous,

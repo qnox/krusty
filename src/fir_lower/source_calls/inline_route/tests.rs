@@ -134,3 +134,51 @@ fn literals_reading_an_inline_parameter_keep_their_call_expanded_in_the_template
     assert!(named(&compiled, "ownLiteral"), "{compiled:?}");
     assert!(named(&compiled, "notInlined"), "{compiled:?}");
 }
+
+const NESTED_TEMPLATES: &str = r#"import kotlin.enums.enumEntries
+
+enum class Color { RED, GREEN }
+
+inline fun <reified T> named(): String = T::class.java.simpleName
+
+inline fun <reified T> forwardsReified(): String = named<T>()
+
+inline fun <reified T : Enum<T>> parsed(s: String): T = enumValueOf<T>(s)
+
+@OptIn(ExperimentalStdlibApi::class)
+inline fun <reified T : Enum<T>> listed(): String = enumEntries<T>().toString()
+
+inline fun concrete(): String = enumValueOf<Color>("RED").name
+
+fun box(): String {
+    forwardsReified<Color>()
+    parsed<Color>("GREEN")
+    listed<Color>()
+    concrete()
+    return "OK"
+}
+"#;
+
+// A template that expands another inline call is inlined from its compiled body: a forwarded
+// reified parameter, a reified enum operation and a concrete one alike.
+#[test]
+fn templates_with_nested_expansions_are_inlined_from_compiled_bodies() {
+    let ir = lowered_for_compiled_bodies(NESTED_TEMPLATES);
+    let (compiled, _) = routed_bodies(&ir);
+    let box_calls = |name: &str| {
+        let function = ir
+            .functions
+            .iter()
+            .find(|function| function.name == "box")
+            .expect("box");
+        reaches(&ir, function.body.expect("box body"), &|e| {
+            ir.compiled_inline_call(e)
+                .is_some_and(|function| ir.functions[function as usize].name == name)
+        })
+    };
+    assert!(compiled.contains(&"box"), "{compiled:?}");
+    assert!(box_calls("forwardsReified"));
+    assert!(box_calls("concrete"));
+    assert!(box_calls("parsed"));
+    assert!(box_calls("listed"));
+}
