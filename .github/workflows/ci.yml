@@ -178,6 +178,10 @@ jobs:
           # The e2e suite is one process. An instrumented run is about seventeen minutes; thirty
           # minutes leaves room for a slow runner and still fails a hung binary.
           KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 1800
+          # A change to what krusty-toolchain's oracle entries hold re-runs every Kotlin Toolchain
+          # case live (a pull request restores, but never saves, the oracle cache), which takes
+          # compile_cases past the ordinary 120 seconds.
+          KRUSTY_COVERAGE_TEST_TIMEOUT_SECONDS: 600
           KRUSTY_BUILD_TOOLS_JAVA_HOME: ${{ env.JAVA_HOME_21_X64 }}
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           # This job's archive only. The conformance job publishes a separate one.
