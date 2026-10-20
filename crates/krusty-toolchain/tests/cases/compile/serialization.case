@@ -1,0 +1,136 @@
+Kotlin serialization adds its runtime library to the dependencies and the serialization compiler
+plugin of the module's Kotlin version to the compilation, from the repository that holds it.
+--- task
+:app:compileJvm
+--- project.yaml
+modules:
+  - app
+--- app/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+settings:
+  kotlin:
+    serialization: enabled
+--- app/src/Model.kt
+@kotlinx.serialization.Serializable
+class Model(val name: String)
+--- m2/org/jetbrains/kotlin/kotlin-serialization-compiler-plugin-embeddable/2.4.20/kotlin-serialization-compiler-plugin-embeddable-2.4.20.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.jetbrains.kotlin</groupId>
+  <artifactId>kotlin-serialization-compiler-plugin-embeddable</artifactId>
+  <version>2.4.20</version>
+</project>
+--- m2/org/jetbrains/kotlin/kotlin-serialization-compiler-plugin-embeddable/2.4.20/kotlin-serialization-compiler-plugin-embeddable-2.4.20.jar
+--- m2/org/jetbrains/kotlinx/kotlinx-serialization-core/1.11.0/kotlinx-serialization-core-1.11.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.jetbrains.kotlinx</groupId>
+  <artifactId>kotlinx-serialization-core</artifactId>
+  <version>1.11.0</version>
+  <!-- do_not_remove: published-with-gradle-metadata -->
+</project>
+--- m2/org/jetbrains/kotlinx/kotlinx-serialization-core/1.11.0/kotlinx-serialization-core-1.11.0.module
+{
+  "formatVersion": "1.1",
+  "component": { "group": "org.jetbrains.kotlinx", "module": "kotlinx-serialization-core", "version": "1.11.0" },
+  "variants": [
+    {
+      "name": "jvmApiElements-published",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "java-api",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "available-at": {
+        "url": "../../kotlinx-serialization-core-jvm/1.11.0/kotlinx-serialization-core-jvm-1.11.0.module",
+        "group": "org.jetbrains.kotlinx",
+        "module": "kotlinx-serialization-core-jvm",
+        "version": "1.11.0"
+      }
+    },
+    {
+      "name": "jvmRuntimeElements-published",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "java-runtime",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "available-at": {
+        "url": "../../kotlinx-serialization-core-jvm/1.11.0/kotlinx-serialization-core-jvm-1.11.0.module",
+        "group": "org.jetbrains.kotlinx",
+        "module": "kotlinx-serialization-core-jvm",
+        "version": "1.11.0"
+      }
+    }
+  ]
+}
+--- m2/org/jetbrains/kotlinx/kotlinx-serialization-core-jvm/1.11.0/kotlinx-serialization-core-jvm-1.11.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.jetbrains.kotlinx</groupId>
+  <artifactId>kotlinx-serialization-core-jvm</artifactId>
+  <version>1.11.0</version>
+  <!-- do_not_remove: published-with-gradle-metadata -->
+</project>
+--- m2/org/jetbrains/kotlinx/kotlinx-serialization-core-jvm/1.11.0/kotlinx-serialization-core-jvm-1.11.0.module
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "org.jetbrains.kotlinx",
+    "module": "kotlinx-serialization-core-jvm",
+    "version": "1.11.0",
+    "url": "../../kotlinx-serialization-core/1.11.0/kotlinx-serialization-core-1.11.0.module"
+  },
+  "variants": [
+    {
+      "name": "jvmApiElements-published",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "java-api",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "dependencies": [
+        { "group": "org.jetbrains.kotlin", "module": "kotlin-stdlib", "version": { "requires": "2.4.20" } }
+      ],
+      "files": [
+        { "name": "kotlinx-serialization-core-jvm-1.11.0.jar", "url": "kotlinx-serialization-core-jvm-1.11.0.jar" }
+      ]
+    },
+    {
+      "name": "jvmRuntimeElements-published",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "java-runtime",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "dependencies": [
+        { "group": "org.jetbrains.kotlin", "module": "kotlin-stdlib", "version": { "requires": "2.4.20" } }
+      ],
+      "files": [
+        { "name": "kotlinx-serialization-core-jvm-1.11.0.jar", "url": "kotlinx-serialization-core-jvm-1.11.0.jar" }
+      ]
+    }
+  ]
+}
+--- m2/org/jetbrains/kotlinx/kotlinx-serialization-core-jvm/1.11.0/kotlinx-serialization-core-jvm-1.11.0.jar
+--- krusty-argv
+-Xjdk-release=25
+-jdk-home=<directory>/jdk
+-classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar:<directory>/home/.m2/repository/org/jetbrains/kotlinx/kotlinx-serialization-core-jvm/1.11.0/kotlinx-serialization-core-jvm-1.11.0.jar
+-no-stdlib
+-module-name=app
+-Xplugin=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-serialization-compiler-plugin-embeddable/2.4.20/kotlin-serialization-compiler-plugin-embeddable-2.4.20.jar
+-Xkotlin-reference-version=2.4.20
+-d
+<directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output
+<directory>/project/app/src/Model.kt
+----

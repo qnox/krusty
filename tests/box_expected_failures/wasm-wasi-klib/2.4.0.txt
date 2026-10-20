@@ -2446,7 +2446,6 @@ extensionFunctions/extensionFunctionInInnerClass.kt
 extensionFunctions/extensionFunctionInSAMInterface.kt
 extensionFunctions/extensionFunctionInValueClass.kt
 extensionFunctions/extensionFunctionNestedInExtensionFunction.kt
-extensionFunctions/extensionFunctionOverride.kt
 extensionFunctions/extensionFunctionWithExtensionAsAReceiver.kt
 extensionFunctions/extensionFunctionWithExtensionInSAMInterface.kt
 extensionFunctions/extensionFunctionWithInlineModifier.kt
@@ -2496,16 +2495,11 @@ extensionProperties/extensionProperyWithExtensionType.kt
 extensionProperties/genericContextOverride.kt
 extensionProperties/genericValForPrimitiveType.kt
 extensionProperties/genericVarForPrimitiveType.kt
-extensionProperties/inClass.kt
-extensionProperties/inClassLongTypeInReceiver.kt
 extensionProperties/inClassWithGetter.kt
 extensionProperties/inClassWithPrivateGetter.kt
-extensionProperties/inClassWithPrivateSetter.kt
-extensionProperties/inClassWithSetter.kt
 extensionProperties/kt46952.kt
 extensionProperties/kt9897.kt
 extensionProperties/kt9897_topLevel.kt
-extensionProperties/nonAbstractInInterface.kt
 extensionProperties/propertyWithExtensionNestedType.kt
 fakeOverride/fakeOverrideWithMissingClassInSignature.kt
 fakeOverride/internalFromFriendModule.kt
@@ -3140,7 +3134,6 @@ inline/nameBasedDestructuring.kt
 inline/noInlineLambda.kt
 inline/params.kt
 inline/positionBasedDestructuring.kt
-inline/privateProperty.kt
 inline/propertyAccessorInline.kt
 inline/redundantCoercionsCleaner.kt
 inline/redundantCoercionsCleanerKT48876.kt
@@ -4334,7 +4327,6 @@ multiplatform/k2/basic/extensionFunctionAsASupertypeConversion.kt
 multiplatform/k2/basic/extensionFunctionAsAType.kt
 multiplatform/k2/basic/extensionFunctionAsAnonymous.kt
 multiplatform/k2/basic/extensionFunctionInDelegatedSam.kt
-multiplatform/k2/basic/extensionMember.kt
 multiplatform/k2/basic/extensionPropertyWithAnonymousExtension.kt
 multiplatform/k2/basic/fakeOverridesInPlatformModule.kt
 multiplatform/k2/basic/interfaceMethodFromSuperTypeIsImplementedInOtherExpectSuperClass.kt
@@ -4538,7 +4530,6 @@ objects/companionObjectAccess/privateCompanionObjectUsedInNestedClass.kt
 objects/companionObjectAccess/protectedCompanionObjectAccessedFromNestedClass.kt
 objects/compoundAssignmentToArrayAccessToExtensionPropertyImportedFromObject.kt
 objects/compoundAssignmentToArrayAccessToPropertyImportedFromObject.kt
-objects/compoundAssignmentToExtensionPropertyImportedFromObject.kt
 objects/compoundAssignmentToObjectFromCall.kt
 objects/flist.kt
 objects/initializationOrder.kt

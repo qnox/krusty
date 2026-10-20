@@ -1,0 +1,35 @@
+An artifact whose metadata is in a repository but whose file is not would be downloaded by the
+toolchain; krusty-toolchain does not download artifacts.
+--- task
+:app:compileJvm
+--- project.yaml
+modules:
+  - app
+--- app/module.yaml
+product: jvm/app
+repositories:
+  - mavenLocal
+dependencies:
+  - org.example:present:1.0
+  - org.example:absent-jar:1.0
+--- app/src/main.kt
+fun main() = Unit
+--- m2/org/example/present/1.0/present-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>present</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/present/1.0/present-1.0.jar
+--- m2/org/example/absent-jar/1.0/absent-jar-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>absent-jar</artifactId>
+  <version>1.0</version>
+</project>
+--- krusty-refusal
+error	ERROR: The file `absent-jar-1.0.jar` of org.example:absent-jar:1.0 is in no local repository, and krusty-toolchain does not download artifacts

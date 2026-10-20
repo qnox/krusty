@@ -374,6 +374,44 @@ pub(super) fn anonymous_descendant_writes_name(
 }
 
 impl Checker<'_> {
+    /// Keep a capture whose binding the class-body analysis could not represent. What it costs is
+    /// lowering's decision: the frontend records the semantic value even when it is read during
+    /// construction, and lowering either realizes that field/constructor flow or reports its own
+    /// capability failure.
+    pub(super) fn keep_unsupported_local_class_capture(
+        &self,
+        scope: &CheckerScope<'_>,
+        captures: &mut LocalClassCaptures,
+    ) {
+        let Some(captured) = captures.unsupported.take() else {
+            return;
+        };
+        let Some(local) = self.lookup(scope, &captured) else {
+            return;
+        };
+        captures.values.push(AnonymousObjectCapture {
+            ty: local.ty,
+            shared_cell: CapturedBinding {
+                delegated: local.delegate_storage_ty.is_some(),
+                mutable: local.is_var,
+                already_shared: local.shared_storage_cell,
+                written_here: self.fn_reassigned.contains(&captured),
+                source_var: self.local_properties.is_source_var(local.flow_identity),
+            }
+            .is_shared_cell(),
+            storage_ty: local.delegate_storage_ty,
+            name: captured,
+            source: AnonymousObjectCaptureSource::LexicalValue,
+            receiver_label: None,
+            receiver: None,
+            semantic_receiver: None,
+            lexical_shadow_depth: 0,
+            capture_dependency: None,
+            receiver_capture: None,
+            receiver_role: None,
+        });
+    }
+
     /// Whether a local function's capture of `name` must be a shared cell: its body (or a lambda in
     /// it) writes the name, or the enclosing function reassigns a `var` the body reads.
     pub(super) fn local_capture_needs_shared_cell(
@@ -796,6 +834,8 @@ impl Checker<'_> {
                 receiver_role,
             });
         }
+        // Field order only; the published constructor layout follows kotlinc's first use, which is
+        // known once the class body has been checked.
         captured.sort();
         for name in captured {
             let Some(local) = self.lookup(scope, &name) else {

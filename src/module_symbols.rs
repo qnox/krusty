@@ -73,9 +73,15 @@ impl<'a> ModuleSymbols<'a> {
         name: &str,
     ) -> Option<crate::libraries::AliasExpansion> {
         let identity = match namespace {
-            SymbolNamespace::Package(package) | SymbolNamespace::Classifier(package) => {
+            SymbolNamespace::Package(package) => {
                 crate::types::existing_type_name_child(package, name)?
             }
+            // A nested alias is a declaration of its owner's classifier namespace, keyed by the
+            // owner's identity: a local or hoisted owner's runtime name is not the alias's path.
+            SymbolNamespace::Classifier(owner) => *self
+                .syms
+                .nested_type_aliases
+                .get(&(owner, name.to_owned()))?,
         };
         self.type_alias_binding(identity)
     }
@@ -399,25 +405,9 @@ impl<'a> ModuleSymbols<'a> {
         } else {
             crate::libraries::TypeKind::Class
         };
-        let enum_entries_accessor = enum_entries.as_ref().map(|_| {
-            // Describe the accessor the backend emits even though it has no source declaration. This
-            // is the same LibraryMember capability dependency providers expose, so consumers retain
-            // one origin-independent target and lowering need not reconstruct its JVM call. Keep the
-            // logical name uncallable: `Enum.getEntries()` is not a Kotlin source function; only the
-            // synthetic `Enum.entries` property may select its physical name.
-            let mut entries = LibraryMember::new(
-                "<enum-entries-accessor>".to_string(),
-                Vec::new(),
-                Ty::obj_args(
-                    "kotlin/enums/EnumEntries",
-                    &[Ty::obj_name(c.internal_name())],
-                ),
-                "()Lkotlin/enums/EnumEntries;".to_string(),
-            );
-            entries.owner = Some(c.internal_name());
-            entries.physical_name = Some("getEntries".to_string());
-            entries
-        });
+        let enum_entries_accessor = enum_entries
+            .as_ref()
+            .map(|_| LibraryMember::source_enum_entries_accessor(c.internal_name()));
         let enum_entries = enum_entries.unwrap_or_default();
         let sealed_subclasses = if c.is_sealed() {
             self.syms.subclass_names_of(c.internal_name()).into()
@@ -913,8 +903,8 @@ impl<'a> ModuleSymbols<'a> {
                 implicit_integer_coercion: false,
                 compile_time_constant: None,
                 metadata_constant_read: false,
-                deprecated_hidden: false,
-                accessor_availability: Default::default(),
+                deprecated_hidden: declaration.deprecated_hidden(),
+                accessor_availability: declaration.accessor_availability(),
                 is_final: false,
                 visibility: declaration.visibility(),
                 owner: internal,

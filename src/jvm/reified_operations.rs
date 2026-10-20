@@ -125,6 +125,7 @@ pub(super) fn splice_type_map(
             let argument = forwarded(*ty).or_else(|| {
                 Some(ReifiedArgument::Class {
                     internal: reified_class_internal(*ty)?,
+                    classifier: reified_classifier(*ty),
                     nullable: ty.is_nullable(),
                     intrinsic: ir.type_check_role(*ty),
                     rendered: render(ty.non_null()),
@@ -151,6 +152,20 @@ fn reified_class_internal(ty: Ty) -> Option<String> {
     }
     let internal = stored_value_ty(ty).kotlin_class_internal()?.render();
     Some(super::jvm_class_map::to_jvm_internal(&internal).to_owned())
+}
+
+/// The semantic classifier a reified argument names, kept beside its JVM class so declaration
+/// facts are read by identity: none for a function type, an array, or a bottom/null-only type,
+/// whose JVM class stands for no declared classifier.
+fn reified_classifier(ty: Ty) -> Option<crate::types::TypeName> {
+    let value = ty.non_null();
+    if jvm_function_erasure(ty).is_some()
+        || matches!(value, Ty::Nothing | Ty::Null)
+        || value.is_array()
+    {
+        return None;
+    }
+    value.obj_internal()
 }
 
 /// JVM function interface a function type erases to. A suspend function counts its continuation,
@@ -695,6 +710,7 @@ mod tests {
                     "T".to_owned(),
                     ReifiedArgument::Class {
                         internal: "kotlin/Unit".to_owned(),
+                        classifier: None,
                         nullable: false,
                         intrinsic: None,
                         rendered: String::new(),
@@ -704,6 +720,7 @@ mod tests {
                     "R".to_owned(),
                     ReifiedArgument::Class {
                         internal: "java/lang/String".to_owned(),
+                        classifier: Some(crate::types::type_name("kotlin/String")),
                         nullable: false,
                         intrinsic: None,
                         rendered: String::new(),
@@ -732,6 +749,7 @@ mod tests {
                     "N".to_owned(),
                     ReifiedArgument::Class {
                         internal: "java/lang/Void".to_owned(),
+                        classifier: None,
                         nullable: true,
                         intrinsic: None,
                         rendered: "Nothing".to_owned(),
@@ -741,6 +759,7 @@ mod tests {
                     "Z".to_owned(),
                     ReifiedArgument::Class {
                         internal: "java/lang/Void".to_owned(),
+                        classifier: None,
                         nullable: false,
                         intrinsic: None,
                         rendered: "Null".to_owned(),

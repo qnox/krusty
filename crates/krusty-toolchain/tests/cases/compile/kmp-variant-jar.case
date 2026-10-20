@@ -1,0 +1,210 @@
+A multiplatform library's root points its JVM variants at another module (`available-at`) and puts
+no file on the classpath; the module it points at does, with the file its variant publishes. A BOM
+and a POM-packaged artifact put none either, though what they lead to does.
+--- task
+:app:compileJvm
+--- project.yaml
+modules:
+  - app
+--- app/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - org.example:multi:1.0
+  - bom: org.example:platform:1.0
+  - org.example:managed
+  - org.example:aggregate:1.0
+--- app/src/App.kt
+class App
+--- m2/org/example/multi/1.0/multi-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>multi</artifactId>
+  <version>1.0</version>
+  <!-- do_not_remove: published-with-gradle-metadata -->
+</project>
+--- m2/org/example/multi/1.0/multi-1.0.module
+{
+  "formatVersion": "1.1",
+  "component": { "group": "org.example", "module": "multi", "version": "1.0" },
+  "variants": [
+    {
+      "name": "jvmApiElements-published",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "java-api",
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "available-at": {
+        "url": "../../multi-jvm/1.0/multi-jvm-1.0.module",
+        "group": "org.example",
+        "module": "multi-jvm",
+        "version": "1.0"
+      }
+    },
+    {
+      "name": "jvmRuntimeElements-published",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "java-runtime",
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "available-at": {
+        "url": "../../multi-jvm/1.0/multi-jvm-1.0.module",
+        "group": "org.example",
+        "module": "multi-jvm",
+        "version": "1.0"
+      }
+    },
+    {
+      "name": "metadataApiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "kotlin-metadata",
+        "org.jetbrains.kotlin.platform.type": "common"
+      },
+      "files": [
+        { "name": "multi-1.0.jar", "url": "multi-1.0.jar" }
+      ]
+    }
+  ]
+}
+--- m2/org/example/multi/1.0/multi-1.0.jar
+--- m2/org/example/multi-jvm/1.0/multi-jvm-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>multi-jvm</artifactId>
+  <version>1.0</version>
+  <!-- do_not_remove: published-with-gradle-metadata -->
+</project>
+--- m2/org/example/multi-jvm/1.0/multi-jvm-1.0.module
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "org.example",
+    "module": "multi-jvm",
+    "version": "1.0",
+    "url": "../../multi/1.0/multi-1.0.module"
+  },
+  "variants": [
+    {
+      "name": "jvmApiElements-published",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "java-api",
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "dependencies": [
+        { "group": "org.example", "module": "multi-dep", "version": { "requires": "1.0" } }
+      ],
+      "files": [
+        { "name": "multi-jvm-1.0.jar", "url": "multi-jvm-1.0.jar" }
+      ]
+    },
+    {
+      "name": "jvmRuntimeElements-published",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "java-runtime",
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "dependencies": [
+        { "group": "org.example", "module": "multi-dep", "version": { "requires": "1.0" } }
+      ],
+      "files": [
+        { "name": "multi-jvm-1.0.jar", "url": "multi-jvm-1.0.jar" }
+      ]
+    },
+    {
+      "name": "jvmSourcesElements-published",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.docstype": "sources",
+        "org.gradle.usage": "java-runtime",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "files": [
+        { "name": "multi-jvm-1.0-sources.jar", "url": "multi-jvm-1.0-sources.jar" }
+      ]
+    }
+  ]
+}
+--- m2/org/example/multi-jvm/1.0/multi-jvm-1.0.jar
+--- m2/org/example/multi-jvm/1.0/multi-jvm-1.0-sources.jar
+--- m2/org/example/multi-dep/1.0/multi-dep-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>multi-dep</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/multi-dep/1.0/multi-dep-1.0.jar
+--- m2/org/example/platform/1.0/platform-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>platform</artifactId>
+  <version>1.0</version>
+  <packaging>pom</packaging>
+  <dependencyManagement>
+    <dependencies>
+      <dependency><groupId>org.example</groupId><artifactId>managed</artifactId><version>3.0</version></dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>
+--- m2/org/example/managed/3.0/managed-3.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>managed</artifactId>
+  <version>3.0</version>
+</project>
+--- m2/org/example/managed/3.0/managed-3.0.jar
+--- m2/org/example/aggregate/1.0/aggregate-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>aggregate</artifactId>
+  <version>1.0</version>
+  <packaging>pom</packaging>
+  <dependencies>
+    <dependency><groupId>org.example</groupId><artifactId>aggregated</artifactId><version>1.0</version></dependency>
+  </dependencies>
+</project>
+--- m2/org/example/aggregated/1.0/aggregated-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>aggregated</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/aggregated/1.0/aggregated-1.0.jar
+--- krusty-argv
+-Xjdk-release=25
+-jdk-home=<directory>/jdk
+-classpath=<directory>/home/.m2/repository/org/example/managed/3.0/managed-3.0.jar:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/example/multi-jvm/1.0/multi-jvm-1.0.jar:<directory>/home/.m2/repository/org/example/aggregated/1.0/aggregated-1.0.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar:<directory>/home/.m2/repository/org/example/multi-dep/1.0/multi-dep-1.0.jar
+-no-stdlib
+-module-name=app
+-Xkotlin-reference-version=2.4.20
+-d
+<directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output
+<directory>/project/app/src/App.kt
+----

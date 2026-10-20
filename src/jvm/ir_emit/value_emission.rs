@@ -8,7 +8,7 @@ use crate::types::Ty;
 
 use super::{
     access_bridges, array_jvm_element, bottom_values, boxed_descriptor, bytecode_inline_call,
-    captured_storage, class_ctor_jvm_tys, constant_emission, constructor_accessors,
+    capture_order, captured_storage, class_ctor_jvm_tys, constant_emission, constructor_accessors,
     declared_jvm_interface, default_mask_count, emit_constructor_default_arguments,
     instance_field_jvm_name, ir_ty_to_jvm, jvm_declared_ty, jvm_function_interface,
     jvm_function_invoke_descriptor, jvm_function_params, jvm_static_members, jvm_tys, jvm_value_ty,
@@ -214,7 +214,8 @@ impl super::Emitter<'_> {
                 defaults: default_parameters,
                 default_prefix_count,
             } => {
-                let args = args.clone();
+                // A local class takes its captures, which lead its arguments, in its physical order.
+                let args = capture_order::physical_for(self.ir, *internal, args.clone());
                 if self.emit_nullable_sam_wrapper_new(e, *internal, &args, code) {
                     return;
                 }
@@ -228,14 +229,21 @@ impl super::Emitter<'_> {
                 let (desc, use_accessor, base_parameter_count, source_parameter_count) =
                     if let Some(d) = ctor_desc {
                         debug_assert!(default_parameters.is_empty());
-                        (d.clone(), false, args.len(), args.len())
+                        // Every parameter of a verbatim descriptor is a supplied operand; the
+                        // descriptor, not the argument count, says how many there are.
+                        let parameters = self.constructor_physical_params(e, d).len();
+                        (d.clone(), false, parameters, parameters)
                     } else {
                         let mut field_tys: Vec<Ty> = match ctor_params {
-                            Some(ps) => jvm_tys(ps),
+                            Some(ps) => jvm_tys(&capture_order::physical_for(
+                                self.ir,
+                                *internal,
+                                ps.clone(),
+                            )),
                             None => self
                                 .ir
                                 .class_id_by_name(*internal)
-                                .map(|c| class_ctor_jvm_tys(&self.ir.classes[c as usize]))
+                                .map(|c| class_ctor_jvm_tys(self.ir, &self.ir.classes[c as usize]))
                                 .unwrap_or_default(),
                         };
                         // A class whose primary ctor takes a value-class param has a PRIVATE primary + a
@@ -278,11 +286,44 @@ impl super::Emitter<'_> {
                     };
                 let physical_params = self.constructor_physical_params(e, &desc);
                 let aw = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
+                let omitted_parameter = |parameter: usize| {
+                    parameter >= *default_prefix_count as usize
+                        && default_parameters.contains(
+                            &u32::try_from(parameter - *default_prefix_count as usize)
+                                .expect("too many constructor parameters"),
+                        )
+                };
+                // The parameter slot each supplied argument fills. A construction supplying a
+                // different number of arguments is malformed IR: refuse it before `new`, as a call
+                // refuses a descriptor it cannot fill, rather than drop or invent an operand.
+                let supplied_slots = physical_params
+                    .iter()
+                    .copied()
+                    .take(base_parameter_count)
+                    .enumerate()
+                    .filter(|&(parameter, _)| !omitted_parameter(parameter))
+                    .map(|(_, physical)| physical)
+                    .collect::<Vec<_>>();
+                if let Err(mismatch) = super::call_operands::DescriptorArityMismatch::check(
+                    None,
+                    args.len(),
+                    supplied_slots.len(),
+                ) {
+                    self.bail_descriptor_arity(&mismatch, self.value_ty(e), code);
+                    return;
+                }
                 if args.iter().any(|&a| self.spills_operand_prefix(a)) {
                     // An argument that enters a handler, suspends, or leaves for a loop target can't
                     // run with `[new, dup]` on the stack. Evaluate all args into temps first (clean
-                    // stack), then build. An ordinary branch keeps them, as kotlinc does.
-                    let temps = self.spill_to_temps(&args, code);
+                    // stack), then build. An ordinary branch keeps them, as kotlinc does. Each
+                    // supplied argument is evaluated against the parameter slot it fills.
+                    let temps = match self.spill_operands_at_slots(&args, &supplied_slots, code) {
+                        Ok(temps) => temps,
+                        Err(mismatch) => {
+                            self.bail_descriptor_arity(&mismatch, self.value_ty(e), code);
+                            return;
+                        }
+                    };
                     crate::jvm::reified_anonymous::guard_reified_construction(
                         self.ir, self.cw, code, *internal,
                     );
@@ -302,11 +343,7 @@ impl super::Emitter<'_> {
                         .take(base_parameter_count)
                         .enumerate()
                     {
-                        let omitted = parameter >= *default_prefix_count as usize
-                            && default_parameters.contains(
-                                &u32::try_from(parameter - *default_prefix_count as usize)
-                                    .expect("too many constructor parameters"),
-                            );
+                        let omitted = omitted_parameter(parameter);
                         self.mark_synthesized_run_start(e, omitted, &mut inside_run, code);
                         if omitted {
                             push_zero(physical, code, self.cw);
@@ -359,11 +396,7 @@ impl super::Emitter<'_> {
                         .take(base_parameter_count)
                         .enumerate()
                     {
-                        let omitted = parameter >= *default_prefix_count as usize
-                            && default_parameters.contains(
-                                &u32::try_from(parameter - *default_prefix_count as usize)
-                                    .expect("too many constructor parameters"),
-                            );
+                        let omitted = omitted_parameter(parameter);
                         self.mark_synthesized_run_start(e, omitted, &mut inside_run, code);
                         if omitted {
                             push_zero(physical, code, self.cw);
@@ -379,14 +412,16 @@ impl super::Emitter<'_> {
                                         self.ir.fir_origins.get(&e),
                                     )
                                 });
-                            self.emit_value(argument, code);
+                            let source = match self.emit_erased_scalar_box(argument, physical, code)
+                            {
+                                Some(erased) => erased,
+                                None => {
+                                    self.emit_value(argument, code);
+                                    self.value_ty(argument)
+                                }
+                            };
                             self.adapt_physical_constructor_operand_for(
-                                e,
-                                parameter,
-                                argument,
-                                self.value_ty(argument),
-                                physical,
-                                code,
+                                e, parameter, argument, source, physical, code,
                             );
                         }
                     }
@@ -1079,15 +1114,14 @@ impl super::Emitter<'_> {
                         let result_narrow = ordinary_virtual
                             .then(|| self.ir.jvm_overridden_call_realizations.get(&e))
                             .flatten()
-                            .map(|realization| {
+                            .and_then(|realization| {
                                 let narrow = (realization.descriptor != descriptor
                                     && ret.is_reference())
                                 .then(|| crate::jvm::names::instanceof_internal_name(ret));
                                 name = realization.physical_name.clone();
                                 descriptor = realization.descriptor.clone();
                                 narrow
-                            })
-                            .flatten();
+                            });
                         let call_parameters = bridge.as_ref().map_or(ptys.as_slice(), |bridge| {
                             bridge.bridge_parameters.as_slice()
                         });

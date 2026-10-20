@@ -678,6 +678,7 @@ impl Emitter<'_> {
                     false,
                     SourceMap::default(),
                 ),
+                enum_entries: &mut self.call_enum_entries(false),
             },
         ) {
             crate::trace_compiler!("splice", "unified inliner declines: {error:?}");
@@ -1031,6 +1032,17 @@ impl Emitter<'_> {
             lines
                 .emitter
                 .call_objects(call_expression, target.name, true, lambda_lines.clone());
+        let (classifiers, run, owner) = (
+            lines.emitter.classifiers,
+            lines.emitter.run,
+            lines.emitter.owner.clone(),
+        );
+        let mut enum_entries = entries_mappings::CallEnumEntries {
+            classifiers,
+            run,
+            owner: &owner,
+            commit: true,
+        };
         let inlined = inliner::inline(
             callee,
             parameters,
@@ -1042,6 +1054,7 @@ impl Emitter<'_> {
                 lines: &mut lines,
                 classes: &bodies,
                 objects: &mut objects,
+                enum_entries: &mut enum_entries,
             },
         );
         let inlined = match inlined {
@@ -1215,11 +1228,7 @@ impl Emitter<'_> {
             && !args.is_empty()
             && !args.iter().any(|&argument| function_typed(argument))
             && inliner::can_inline_arguments_in_place(declared)
-            && in_place_arguments::arguments_movable(self.ir, args, &|construction| {
-                !self
-                    .sam_wrapper_realizations
-                    .is_nullable_construction(construction)
-            });
+            && in_place_arguments::arguments_movable(self.ir, args, self);
         let mut supplies = Vec::with_capacity(args.len());
         for (index, &argument) in args.iter().enumerate() {
             if let Some(supply) =

@@ -48,7 +48,7 @@ pub(super) fn emit(
     // companion-instance accessor. A class hiding a value-class primary places the marker after
     // all of its static accessors.
     if marker_accessor {
-        let physical_parameters = class_ctor_jvm_tys(class);
+        let physical_parameters = class_ctor_jvm_tys(ir, class);
         let parameter_identities = crate::jvm::method_parameters::primary_constructor_identities(
             ir,
             class,

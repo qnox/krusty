@@ -205,12 +205,15 @@ pub fn target() -> KotlinVersion {
     *TARGET.get_or_init(|| configured_target().unwrap_or_else(|error| panic!("{error}")))
 }
 
+/// The environment variable that selects the reference version when no flag does.
+pub const REFERENCE_VERSION_VARIABLE: &str = "KRUSTY_LANGUAGE_VERSION";
+
 /// Validate the environment-selected reference version without fixing the process-wide target.
 /// Drivers use this to turn a bad build configuration into an ordinary compilation error; library
 /// callers that read [`target`] directly still fail loudly instead of silently compiling as a
 /// different Kotlin release.
 pub fn configured_target() -> Result<KotlinVersion, String> {
-    match std::env::var("KRUSTY_LANGUAGE_VERSION") {
+    match std::env::var(REFERENCE_VERSION_VARIABLE) {
         Ok(value) => target_from(Some(value)),
         Err(std::env::VarError::NotPresent) => target_from(None),
         Err(std::env::VarError::NotUnicode(_)) => Err(

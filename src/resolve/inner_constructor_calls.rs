@@ -185,6 +185,39 @@ impl Checker<'_> {
         }
     }
 
+    /// A classifier qualifier has no value, so the constructor of an `inner` class it selects has
+    /// no dispatch receiver, even where an implicit receiver of the outer class is in scope
+    /// (`pkg.Outer.Inner()`, `Outer<Int>.Inner()` inside `Outer`). kotlinc reports
+    /// `INNER_CLASS_CONSTRUCTOR_NO_RECEIVER` at the constructor's name and the call has no type.
+    /// Returns whether `internal` is such a classifier.
+    pub(super) fn report_inner_constructor_through_qualifier(
+        &mut self,
+        callee: ExprId,
+        name: &str,
+        internal: TypeName,
+    ) -> bool {
+        let Some(shape) = self
+            .resolver()
+            .classifier(internal)
+            .filter(|classifier| classifier.outer_instance.is_some())
+        else {
+            return false;
+        };
+        let declaration = super::declaration_rendering::inner_class_declaration(
+            &self.fed_source(),
+            internal,
+            &shape,
+        );
+        self.diags.error(
+            self.member_name_span(callee, name),
+            format!(
+                "constructor of the inner class '{declaration}' can only be called with a \
+                 receiver of the containing class."
+            ),
+        );
+        true
+    }
+
     pub(super) fn report_ambiguous_inner_classifier(&mut self, call: ExprId, name: &str) {
         self.diags.error(
             self.call_callee_name_span(call),

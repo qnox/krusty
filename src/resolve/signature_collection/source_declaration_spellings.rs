@@ -76,8 +76,9 @@ pub(in crate::resolve) fn base_class_type_ref(
         arg: None,
         targs: type_args.to_vec(),
         span,
-        fun_params: Vec::new(),
+        fun_params: Box::new([]),
         fun_context_count: 0,
+        qualifier_arguments: Default::default(),
     }
 }
 

@@ -12,6 +12,31 @@ fn run(src: &str) {
     assert_eq!(got, "OK");
 }
 
+fn run_source_set_same_as_kotlinc(common_source: &str, platform_source: &str) {
+    let classes = common::classes_against_kotlinc_source_set(
+        &[
+            ("Common.kt", common_source),
+            ("Platform.kt", platform_source),
+        ],
+        1,
+    );
+    let stdlib = common::stdlib_jar();
+    for (compiler, output) in [("kotlinc", &classes.reference), ("krusty", &classes.krusty)] {
+        let output = output
+            .iter()
+            .map(|(name, bytes)| (name.clone(), bytes.clone()))
+            .collect::<Vec<_>>();
+        let box_class =
+            common::find_box_class(&output).unwrap_or_else(|| panic!("{compiler} emitted no box"));
+        assert_eq!(
+            common::run_box(&output, &box_class, std::slice::from_ref(&stdlib))
+                .unwrap_or_else(|| panic!("{compiler} box did not run")),
+            "OK",
+            "{compiler} source-set box result"
+        );
+    }
+}
+
 /// Expect fun + expect val (extension receivers distinguish the two `k`s) replaced by actuals.
 #[test]
 fn expect_fun_and_extension_val_actualized() {
@@ -202,25 +227,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let classes = common::classes_against_kotlinc_source_set(
-        &[("Common.kt", COMMON), ("Platform.kt", PLATFORM)],
-        1,
-    );
-    let stdlib = common::stdlib_jar();
-    for (compiler, output) in [("kotlinc", &classes.reference), ("krusty", &classes.krusty)] {
-        let output = output
-            .iter()
-            .map(|(name, bytes)| (name.clone(), bytes.clone()))
-            .collect::<Vec<_>>();
-        let box_class =
-            common::find_box_class(&output).unwrap_or_else(|| panic!("{compiler} emitted no box"));
-        assert_eq!(
-            common::run_box(&output, &box_class, std::slice::from_ref(&stdlib))
-                .unwrap_or_else(|| panic!("{compiler} box did not run")),
-            "OK",
-            "{compiler} used the wrong per-parameter default provider"
-        );
-    }
+    run_source_set_same_as_kotlinc(COMMON, PLATFORM);
 }
 
 /// An interface actual's default is what an override's call site inserts. The expect string is not.
@@ -273,17 +280,20 @@ fun box(): String = if (rep("X") == "XX") "OK" else "FAIL"
 /// the checked FIR and emitted default ABI belong to the actual constructor.
 #[test]
 fn expect_constructor_default_is_realized_by_actual_constructor() {
-    run(r#"// LANGUAGE: +MultiPlatformProjects
+    const COMMON: &str = r#"// LANGUAGE: +MultiPlatformProjects
 expect class C(value: String = "OK") {
     fun get(): String
 }
+"#;
 
+    const PLATFORM: &str = r#"// LANGUAGE: +MultiPlatformProjects
 actual class C actual constructor(private val value: String) {
     actual fun get(): String = value
 }
 
 fun box(): String = C().get()
-"#);
+"#;
+    run_source_set_same_as_kotlinc(COMMON, PLATFORM);
 }
 
 /// Body-less `expect val`/`var` (incl. extension receivers) parse as headers and strip away.

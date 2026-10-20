@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use krusty_toolchain::compile;
 use krusty_toolchain::dependencies;
 use krusty_toolchain::diagnostic::{Diagnostics, Severity};
 use krusty_toolchain::model::{self, Model, Problems, Start, Stopped};
@@ -15,7 +16,8 @@ use krusty_toolchain::show;
 const USAGE: &str =
     "usage: krusty-toolchain [--project-dir=<path>] show modules [--format=plain|table]
        krusty-toolchain [--project-dir=<path>] show settings [-m <module>]... [--all-modules]
-       krusty-toolchain [--project-dir=<path>] show dependencies [-m <module>]... [--all-modules] [--include-tests]";
+       krusty-toolchain [--project-dir=<path>] show dependencies [-m <module>]... [--all-modules] [--include-tests]
+       krusty-toolchain [--project-dir=<path>] task :<module>:compileJvm";
 
 #[derive(Clone, Copy)]
 enum Format {
@@ -38,9 +40,15 @@ enum Show {
     },
 }
 
+enum Action {
+    Show(Show),
+    /// Run the task named `:<module>:<task>`.
+    Task(String),
+}
+
 struct Command {
     project_dir: Option<PathBuf>,
-    show: Show,
+    action: Action,
 }
 
 fn parse(arguments: &[String]) -> Result<Command, String> {
@@ -99,25 +107,30 @@ fn parse(arguments: &[String]) -> Result<Command, String> {
     {
         ["show", "modules"] => Ok(Command {
             project_dir,
-            show: Show::Modules(format),
+            action: Action::Show(Show::Modules(format)),
         }),
         ["show", "settings"] => Ok(Command {
             project_dir,
-            show: Show::Settings(Selection {
+            action: Action::Show(Show::Settings(Selection {
                 names: modules,
                 all: all_modules,
-            }),
+            })),
         }),
         ["show", "dependencies"] => Ok(Command {
             project_dir,
-            show: Show::Dependencies {
+            action: Action::Show(Show::Dependencies {
                 modules: Selection {
                     names: modules,
                     all: all_modules,
                 },
                 include_tests,
-            },
+            }),
         }),
+        ["task", task] => Ok(Command {
+            project_dir,
+            action: Action::Task(task.to_string()),
+        }),
+        ["task"] => Err("`task` needs the task to run, such as `:<module>:compileJvm`".to_string()),
         [] => Err("no command given".to_string()),
         other => Err(format!(
             "krusty-toolchain does not implement the command `{}`",
@@ -136,6 +149,8 @@ enum Failure {
     Model,
     /// A mistake by the user that is not a problem in a file, such as an unknown module name.
     User(String),
+    /// krusty failed on a module, exiting with `code`; it reported why.
+    Compiler { task: String, code: i32 },
 }
 
 fn run(command: Command) -> Result<(), Failure> {
@@ -160,7 +175,11 @@ fn run(command: Command) -> Result<(), Failure> {
         Stopped::NotUnique(message) | Stopped::Failed(message) => Failure::User(message),
     })?;
     let root = model.project.root.clone();
-    match command.show {
+    let show = match command.action {
+        Action::Show(show) => show,
+        Action::Task(task) => return run_task(&model, &task),
+    };
+    match show {
         Show::Modules(Format::Table) => print!("{}", show::modules_table(&model.modules)),
         Show::Modules(Format::Plain) => {
             for name in show::module_names(&model.modules) {
@@ -197,6 +216,51 @@ fn run(command: Command) -> Result<(), Failure> {
         }
     }
     Ok(())
+}
+
+/// Run the task `task` (`:<module>:compileJvm`, the only task krusty-toolchain runs) of `model`.
+fn run_task(model: &Model, task: &str) -> Result<(), Failure> {
+    let not_found = || Failure::User(format!("Task '{task}' was not found in the project"));
+    let (module, name) = task
+        .strip_prefix(':')
+        .and_then(|task| task.split_once(':'))
+        .ok_or_else(not_found)?;
+    if !model.modules.iter().any(|header| header.name == module) {
+        return Err(not_found());
+    }
+    if name != compile::TASK {
+        return Err(Failure::User(format!(
+            "krusty-toolchain does not implement the task '{task}': it runs only `:<module>:{}`",
+            compile::TASK
+        )));
+    }
+    let environment = compile::Environment {
+        java_home: std::env::var_os("JAVA_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+    };
+    let mut diagnostics = Diagnostics::default();
+    let plan =
+        compile::plan(model, module, &environment, &mut diagnostics).map_err(Failure::User)?;
+    report(&diagnostics, Some(&model.project.root));
+    let Some(plan) = plan else {
+        return Err(Failure::Reported);
+    };
+    let krusty = std::env::var_os("KRUSTY_BIN")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            Failure::User(
+                "KRUSTY_BIN is not set: krusty-toolchain compiles with the krusty binary it names, and does not search PATH for one".to_string(),
+            )
+        })?;
+    compile::run(&plan, &krusty).map_err(|failure| match failure {
+        compile::RunFailure::Compiler { module, code } => Failure::Compiler {
+            task: format!(":{module}:{}", compile::TASK),
+            code,
+        },
+        compile::RunFailure::Io(message) => Failure::User(message),
+    })
 }
 
 /// Print problems where the toolchain prints them: errors on stderr, warnings on stdout before the
@@ -261,6 +325,10 @@ fn main() -> ExitCode {
             eprintln!("\nERROR: failed to read Kotlin project model, refer to the errors above")
         }
         Failure::User(message) => eprintln!("\nERROR: {message}"),
+        Failure::Compiler { task, code } => {
+            eprintln!("\nERROR: Task '{task}' failed: krusty exited with status {code}");
+            return ExitCode::from(u8::try_from(code).ok().filter(|&code| code != 0).unwrap_or(1));
+        }
     }
     ExitCode::FAILURE
 }

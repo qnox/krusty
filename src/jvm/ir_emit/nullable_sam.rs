@@ -29,7 +29,7 @@ impl<'a> Emitter<'a> {
         let parameters = self
             .ir
             .class_id_by_name(internal)
-            .map(|class| super::class_ctor_jvm_tys(&self.ir.classes[class as usize]))
+            .map(|class| super::class_ctor_jvm_tys(self.ir, &self.ir.classes[class as usize]))
             .expect("a nullable SAM wrapper names its generated class");
         let &[capture_ty] = parameters.as_slice() else {
             unreachable!("a nullable SAM wrapper constructor takes its function");

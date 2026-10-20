@@ -3,6 +3,7 @@
 
 mod retained_defaults;
 mod return_labels;
+mod span_index;
 mod statement_render;
 mod traversal;
 use crate::diag::Span;
@@ -15,16 +16,18 @@ use traversal::{any_class_decl_expr, any_fun_decl_expr, any_property_decl_expr};
 mod binary_reference_tokens;
 mod call_shape;
 mod classifier_owners;
+mod compound_assignments;
 mod constructors;
 mod declaration_prefixes;
 pub(crate) mod definitely_evaluated;
 mod destructuring;
 mod external_modifier_targets;
+mod import_path;
 mod operators;
 mod property_initializers;
 mod property_shape;
 mod type_refs;
-pub use type_refs::TrFlags;
+pub use type_refs::{QualifierArgumentLists, QualifierSegmentArguments, TrFlags, TypeRef};
 mod use_site_annotations;
 pub use binary_reference_tokens::BinaryReferenceTokens;
 pub(crate) use call_shape::explicit_call_receiver;
@@ -33,6 +36,7 @@ pub use constructors::{CtorDelegation, CtorDelegationCall, PrimaryCtorLines, Sec
 pub use declaration_prefixes::{DeclarationPrefix, DeclarationPrefixes};
 pub use destructuring::{DestructureProperty, DestructuringSyntax};
 pub use external_modifier_targets::{ExternalModifierTarget, ExternalModifierUse};
+pub use import_path::ImportPath;
 pub use operators::{BinOp, UnOp};
 pub(crate) use property_shape::setter_param_or_value;
 pub use property_shape::{
@@ -498,27 +502,6 @@ pub struct ForRange {
 }
 
 #[derive(Clone, Debug)]
-pub struct TypeRef {
-    pub name: String,
-    /// Nullability, function-type shape, and use-site projection flags.
-    pub flags: TrFlags,
-    /// The return type of function syntax. Classifier type arguments, including `Array<T>`, live in
-    /// `targs`; keeping one generic classifier in a second representation loses projections and makes
-    /// every type decoder grow an Array-only branch.
-    pub arg: Option<Box<TypeRef>>,
-    /// All generic type arguments on a class type (`Map<K, V>` → `[K, V]`). Empty for non-generic
-    /// types. JVM-erased in descriptors but kept so the front end recovers member/element types.
-    pub targs: Vec<TypeRef>,
-    pub span: Span,
-    /// For function types `(A, B) -> R`: the parameter types. Empty for non-function types and
-    /// zero-argument function types. `arg` holds the return type; see
-    /// [`TypeRef::is_function_type_syntax`] for the structural discriminator.
-    pub fun_params: Vec<TypeRef>,
-    /// Leading physical parameters that bind as context receivers in a lambda.
-    pub fun_context_count: u32,
-}
-
-#[derive(Clone, Debug)]
 pub struct AnnotationRef {
     /// Source spelling used only as input to name resolution.
     pub name: String,
@@ -547,6 +530,9 @@ pub struct AnnotatedTypeParameter {
 pub struct Param {
     pub name: String,
     pub ty: TypeRef,
+    /// The whole parameter as written: its annotations and modifiers, name, type and default. This
+    /// is the range kotlinc gives the parameter's IR.
+    pub span: Span,
     /// Exact role written in a `context(...)` clause. This distinguishes Kotlin 2.4 anonymous
     /// context parameters (`_: T`) from legacy unnamed context receivers (`T`); both lack a source
     /// binding but have different target debug/reflection conventions.
@@ -1493,33 +1479,6 @@ pub struct LiftingStep {
     pub position: u32,
 }
 
-/// One parsed import directive with the source span of each path segment.
-#[derive(Clone, Debug)]
-pub struct ImportPath {
-    pub segments: Vec<(String, Span)>,
-    pub wildcard: bool,
-    pub alias: Option<String>,
-}
-
-impl ImportPath {
-    pub fn path(&self) -> String {
-        self.segments
-            .iter()
-            .map(|(segment, _)| segment.as_str())
-            .collect::<Vec<_>>()
-            .join(".")
-    }
-
-    pub fn imported_name(&self) -> Option<&str> {
-        if self.wildcard {
-            return None;
-        }
-        self.alias
-            .as_deref()
-            .or_else(|| self.segments.last().map(|(segment, _)| segment.as_str()))
-    }
-}
-
 /// A top-level `expect` declaration and the keyword that introduced it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExpectDeclaration {
@@ -1629,6 +1588,7 @@ pub struct File {
     pub(crate) retained_expr_spans: crate::fx_hash::HashMap<ExprId, Span>,
     pub(crate) local_declarations: crate::fx_hash::HashSet<DeclId>,
     pub stmt_spans: Vec<Span>,
+    pub(crate) span_index: span_index::SpanIndex,
     /// Sparse source locations for the value-introducing `=` associated with an expression: property
     /// and local initializers, parameter defaults, and assignment RHS expressions. Diagnostics point
     /// at Kotlin's operator location without retaining source text or adding a span field to every AST
@@ -1640,6 +1600,8 @@ pub struct File {
     pub when_subject_variables: crate::fx_hash::HashSet<u32>,
     /// Assignment lvalue spans keyed by statement ID.
     pub assignment_target_spans: crate::fx_hash::HashMap<u32, Span>,
+    /// Source-name spans keyed by the synthetic read expression made for `target op= value`.
+    pub compound_assignment_read_spans: crate::fx_hash::HashMap<u32, Span>,
     /// Source span of the `init` KEYWORD introducing each initializer block, keyed by the block
     /// expression [`ClassInit::Block`] records. A diagnostic about an `init` block points at the
     /// keyword, which the block expression's own span (the `{`) does not cover.
@@ -1691,9 +1653,10 @@ pub struct File {
     /// Exact `(` locations for syntactically empty calls. For non-empty calls, diagnostics can point at
     /// the first argument; keeping this map sparse avoids adding location fields to every call node.
     pub empty_call_open_paren_spans: crate::fx_hash::HashMap<u32, Span>,
-    /// Exact raw name locations when a member name cannot be recovered from the expression end:
-    /// backticked members and safe calls with argument lists. Kept sparse rather than widening every
-    /// expression node.
+    /// Exact raw name locations for parsed member accesses, and for other name-bearing expressions
+    /// whose member location cannot be recovered from the expression end (for example safe calls
+    /// with argument lists). Parsed members retain this unconditionally so synthetic reads preserve
+    /// the terminal segment's source provenance without spelling recovery.
     pub exact_member_name_spans: crate::fx_hash::HashMap<u32, Span>,
     /// Exact operator tokens the expression span cannot locate: the `..`/`..<`/`until`/`downTo` of a
     /// range value or membership test, and the `!in` a negated `contains` call stands for. Kept
@@ -1727,11 +1690,19 @@ pub struct File {
     /// `<…>` span in one retained value prevents compaction from remapping semantic input while
     /// leaving diagnostic syntax under an obsolete `ExprId`. Absent means no explicit arguments.
     pub call_type_args: crate::fx_hash::HashMap<u32, CallTypeArguments>,
+    /// Outermost parentheses written around an expression (`((pkg)).f()` keeps the outer pair),
+    /// keyed by the wrapped expression. Parentheses leave no AST node, but a parenthesized package
+    /// qualifier is reported at them.
+    pub parenthesized_expression_spans: crate::fx_hash::HashMap<u32, Span>,
     /// Qualifier expressions whose explicit type-argument list ends the postfix expression
     /// (`val u = Unit<Any>`). The selected classifier identity, not this syntax marker, decides
     /// whether the access is a deprecated or invalid singleton value access.
     pub standalone_type_argument_qualifiers: crate::fx_hash::HashSet<u32>,
     pub anonymous_object_classes: crate::fx_hash::HashMap<ExprId, DeclId>,
+    /// The `<…>` lists written on an annotation name's segments before the last one
+    /// (`@part1<Int>.part2.Anno`), keyed by the annotation reference's start.
+    pub annotation_qualifier_arguments:
+        crate::fx_hash::HashMap<u32, Vec<QualifierSegmentArguments>>,
     /// Anonymous class declaration → exact lexically enclosing source function.
     pub anonymous_object_enclosing_functions:
         crate::fx_hash::HashMap<DeclId, AnonymousEnclosingFunction>,
@@ -1963,6 +1934,8 @@ pub struct File {
     /// The exact deprecation message selected by this compilation's reference release. Releases
     /// before the warning/error split leave this absent and report the construct as a plain error.
     pub value_class_recursion_via_type_parameters_warning: Option<String>,
+    /// Declaration-use deprecation migrations selected at the language-feature boundary.
+    pub deprecation_migrations: crate::features::DeprecationMigrations,
     /// `+ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects`: a non-overriding `operator fun
     /// equals` in an enum entry or anonymous object is an error rather than a deprecation warning.
     pub forbid_operator_equals_in_enum_entries_and_anonymous_objects: bool,
@@ -1981,6 +1954,16 @@ pub struct File {
     /// Release-owned warning formatting for class-literal diagnostics whose declaration-specific
     /// leading message is known only after classifier selection.
     pub useless_type_arguments_warning_format: Option<crate::features::DeprecationWarningFormat>,
+    /// `+ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier`: an annotated or
+    /// type-argument segment cannot name a package, and a parenthesized package qualifier is an
+    /// error rather than a deprecation warning.
+    pub forbid_package_qualifier_forms: bool,
+    /// Exact warning text for a parenthesized package qualifier before that transition; `None` for
+    /// a release without it.
+    pub parenthesized_package_qualifier_warning: Option<String>,
+    /// Exact warning text for type arguments on an earlier package segment before that
+    /// transition; `None` for a release without it.
+    pub package_qualifier_type_arguments_warning: Option<String>,
     /// Exact per-compilation warning text for the useless-type-argument transition.
     pub type_arguments_not_allowed_warning: Option<String>,
     /// Exact warning text when the same transition applies to a standalone singleton value.
@@ -2027,6 +2010,7 @@ impl File {
         self.stmt_arena = Vec::new();
         self.expr_spans = Vec::new();
         self.stmt_spans = Vec::new();
+        self.forget_span_index();
         self.expr_lines = Vec::new();
         self.expr_source_lines = Vec::new();
         self.expr_end_lines = Vec::new();
@@ -2038,6 +2022,7 @@ impl File {
         // Both return-label span tables are keyed by the arenas released here.
         self.return_label_spans.clear();
         self.assignment_target_spans = Default::default();
+        self.compound_assignment_read_spans = Default::default();
         self.init_block_keywords = Default::default();
         self.incdec_accesses = Default::default();
         self.call_arg_names = Default::default();
@@ -2054,6 +2039,8 @@ impl File {
         self.trailing_call_close_paren_ends = Default::default();
         self.infix_calls = Default::default();
         self.call_type_args = Default::default();
+        self.parenthesized_expression_spans = Default::default();
+        self.annotation_qualifier_arguments = Default::default();
         self.standalone_type_argument_qualifiers = Default::default();
         self.anonymous_object_classes = Default::default();
         self.anonymous_object_enclosing_functions = Default::default();
@@ -2092,6 +2079,17 @@ impl File {
             .get(id.0 as usize)
             .copied()
             .or_else(|| self.retained_expr_spans.get(&id).copied())
+    }
+
+    /// The span of the name the member access `member` (`receiver.name`, or a safe call
+    /// `receiver?.name(...)`) selects: recorded where the expression's end cannot locate it,
+    /// otherwise its last `name.len()` bytes.
+    pub fn member_name_span(&self, member: ExprId, name: &str) -> Span {
+        if let Some(span) = self.exact_member_name_spans.get(&member.0) {
+            return *span;
+        }
+        let span = self.expr_spans[member.0 as usize];
+        Span::new(span.hi.saturating_sub(name.len() as u32), span.hi)
     }
 
     pub fn is_local_declaration(&self, id: DeclId) -> bool {

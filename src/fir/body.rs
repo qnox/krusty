@@ -1755,6 +1755,9 @@ pub enum FirStatementKind {
     LocalDeclaration {
         declaration: DeclarationId,
         captures: Box<[FirLocalClassCapture]>,
+        /// The capture fields in kotlinc's first-use order, which the JVM backend lays the
+        /// fields and constructor prefix out in. Every other phase keeps field order.
+        capture_order: Box<[u32]>,
     },
     LocalFunction {
         declaration: BodyLocalCallableDeclarationId,
@@ -2946,8 +2949,13 @@ impl FirBody {
                     | FirStatementKind::Loop { .. }
                     | FirStatementKind::InterfaceDelegationInitializer { .. }
                     | FirStatementKind::LocalTypeAlias => 0,
-                    FirStatementKind::LocalDeclaration { captures, .. } => {
+                    FirStatementKind::LocalDeclaration {
+                        captures,
+                        capture_order,
+                        ..
+                    } => {
                         captures.len() * std::mem::size_of::<FirLocalClassCapture>()
+                            + std::mem::size_of_val(capture_order.as_ref())
                             + captures
                                 .iter()
                                 .map(FirLocalClassCapture::storage_payload_bytes)
