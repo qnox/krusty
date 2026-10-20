@@ -1105,6 +1105,8 @@ mod import_resolution_diag_e2e;
 mod import_scope_conformance_e2e;
 #[path = "imported_companion_property_e2e.rs"]
 mod imported_companion_property_e2e;
+#[path = "in_place_call_argument_e2e.rs"]
+mod in_place_call_argument_e2e;
 #[path = "in_place_property_receiver_e2e.rs"]
 mod in_place_property_receiver_e2e;
 #[path = "increment_statement_e2e.rs"]
