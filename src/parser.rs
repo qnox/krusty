@@ -649,6 +649,9 @@ struct Parser<'a> {
     /// used where a following `{` belongs to an enclosing construct (a `: I by Impl()` delegate, whose
     /// `{` opens the class body, not a lambda on the delegate call).
     no_trailing_lambda: bool,
+    /// Whether physical line breaks are whitespace, as inside `(…)` and `[…]`; see
+    /// `parser/line_breaks.rs`.
+    newlines_insignificant: bool,
     /// Whether the statement list currently being parsed belongs to a block whose trailing
     /// expression is semantically consumed (lambda and `if`/`when`/`try` value blocks). Function,
     /// accessor, constructor, init, loop, and `finally` blocks discard a trailing expression; they
@@ -809,6 +812,7 @@ impl<'a> Parser<'a> {
             context_receivers: features.has("ContextReceivers"),
             when_guards: features.has("WhenGuards"),
             no_trailing_lambda: false,
+            newlines_insignificant: false,
             block_trailing_is_value: false,
             bare_branch_value: false,
             value_modifier_span: None,
@@ -929,6 +933,7 @@ impl<'a> Parser<'a> {
         if self.i + 1 < self.t.len() {
             self.i += 1;
         }
+        self.skip_insignificant_newlines();
         t
     }
     fn eat(&mut self, k: TokenKind) -> bool {
@@ -3641,6 +3646,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_anon_object(&mut self, span: Span) -> ExprId {
+        self.with_newlines_significant(|parser| parser.parse_anon_object_body(span))
+    }
+
+    fn parse_anon_object_body(&mut self, span: Span) -> ExprId {
         self.bump(); // 'object'
         let name = format!("Anon$anon${}", span.lo);
         let (
@@ -4164,44 +4173,6 @@ impl<'a> Parser<'a> {
     }
 
     // ---- statements ----
-    fn parse_block_expr(&mut self, trailing_is_value: bool) -> ExprId {
-        let start = self.tok().span;
-        self.expect(TokenKind::LBrace, "'{'");
-        let saved_block_value = self.block_trailing_is_value;
-        let classifier_shadow_count = self.lexical_type_parameters.shadow_count();
-        self.block_trailing_is_value = trailing_is_value;
-        let mut stmts = Vec::new();
-        loop {
-            self.skip_newlines();
-            if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
-                break;
-            }
-            stmts.push(self.parse_stmt());
-        }
-        self.block_trailing_is_value = saved_block_value;
-        self.lexical_type_parameters
-            .truncate_shadows(classifier_shadow_count);
-        let end = self.tok().span;
-        self.expect(TokenKind::RBrace, "'}'");
-        // A trailing bare expression is the block's value.
-        let mut trailing = None;
-        if let Some(&last) = stmts.last() {
-            if let Stmt::Expr(e) = self.file.stmt(last) {
-                let e = *e;
-                trailing = Some(e);
-                stmts.pop();
-                // The statement's annotations (`@Suppress("NAME") call()`) annotate the value.
-                if let Some(mut annotations) = self.file.statement_annotations.remove(&last) {
-                    if let Some(own) = self.file.expression_annotations.remove(&e) {
-                        annotations.extend(own);
-                    }
-                    self.file.expression_annotations.insert(e, annotations);
-                }
-            }
-        }
-        self.file
-            .add_expr(Expr::Block { stmts, trailing }, Span::new(start.lo, end.hi))
-    }
 
     /// The default-value expression for a type (`var x: T` deferred init): `0`/`false`/`'\0'`/`null`.
     fn default_init_expr(&mut self, ty: &TypeRef, span: Span) -> ExprId {

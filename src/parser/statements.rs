@@ -547,4 +547,48 @@ impl Parser<'_> {
             }
         }
     }
+
+    /// A `{…}` block restores statement-terminating line breaks inside any enclosing parentheses.
+    pub(super) fn parse_block_expr(&mut self, trailing_is_value: bool) -> ExprId {
+        self.with_newlines_significant(|parser| parser.parse_block_body(trailing_is_value))
+    }
+
+    fn parse_block_body(&mut self, trailing_is_value: bool) -> ExprId {
+        let start = self.tok().span;
+        self.expect(TokenKind::LBrace, "'{'");
+        let saved_block_value = self.block_trailing_is_value;
+        let classifier_shadow_count = self.lexical_type_parameters.shadow_count();
+        self.block_trailing_is_value = trailing_is_value;
+        let mut stmts = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
+                break;
+            }
+            stmts.push(self.parse_stmt());
+        }
+        self.block_trailing_is_value = saved_block_value;
+        self.lexical_type_parameters
+            .truncate_shadows(classifier_shadow_count);
+        let end = self.tok().span;
+        self.expect(TokenKind::RBrace, "'}'");
+        // A trailing bare expression is the block's value.
+        let mut trailing = None;
+        if let Some(&last) = stmts.last() {
+            if let Stmt::Expr(e) = self.file.stmt(last) {
+                let e = *e;
+                trailing = Some(e);
+                stmts.pop();
+                // The statement's annotations (`@Suppress("NAME") call()`) annotate the value.
+                if let Some(mut annotations) = self.file.statement_annotations.remove(&last) {
+                    if let Some(own) = self.file.expression_annotations.remove(&e) {
+                        annotations.extend(own);
+                    }
+                    self.file.expression_annotations.insert(e, annotations);
+                }
+            }
+        }
+        self.file
+            .add_expr(Expr::Block { stmts, trailing }, Span::new(start.lo, end.hi))
+    }
 }
