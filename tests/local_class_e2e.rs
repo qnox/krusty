@@ -1,4 +1,4 @@
-//! A local class/interface declared inside a function body (`class L { … }`) is hoisted to a
+//! A local class declared inside a function body (`class L { … }`) is hoisted to a
 //! top-level-equivalent class and lowered like any other class. Slice 1: non-capturing local classes
 //! (a capturing one — e.g. a super-constructor argument referencing an outer local — stays unsupported
 //! and the file skips, never miscompiles). Round-tripped under `-Xverify:all`.
@@ -25,21 +25,35 @@ fn local_class_basic() {
 }
 
 #[test]
-fn local_data_class_and_interface() {
-    // A local `data class` (component/equals via the data-class machinery) and a local `interface`
-    // implemented by a local class — all non-capturing (slice 1).
+fn local_data_class() {
+    // A local `data class` uses component/equals via the data-class machinery.
     const SRC: &str = "fun box(): String {\n\
     data class Point(val x: Int, val y: Int)\n\
     val p = Point(3, 4)\n\
     if (p.x + p.y != 7) return \"fail data\"\n\
     if (p != Point(3, 4)) return \"fail eq\"\n\
-    interface Greeter { fun hi(): String }\n\
-    class En : Greeter { override fun hi() = \"hi\" }\n\
-    if (En().hi() != \"hi\") return \"fail iface\"\n\
     return \"OK\"\n\
 }\n";
-    let out = common::expect_box_run_with_stdlib(SRC, "C");
-    assert_eq!(out, "OK");
+    common::expect_box_same_as_kotlinc(SRC, "LocalDataClass");
+}
+
+#[test]
+fn named_local_interface_is_rejected() {
+    const SRC: &str = r#"fun box(): String {
+    interface Greeter { fun hi(): String }
+    return "OK"
+}
+"#;
+    let result = common::compiler_diagnostics(&[("Main.kt", SRC)], &[]);
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    let expected = [common::CompilerError {
+        file: "Main.kt".to_string(),
+        line: 2,
+        column: 5,
+        message: "interface 'Greeter' cannot be local. Try to use an anonymous object or abstract class instead.".to_string(),
+    }];
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), expected);
 }
 
 #[test]
@@ -60,6 +74,59 @@ fn local_class_inheritance_with_modifiers() {
 }\n";
     let out = run(SRC).expect("local class inheritance should compile + run");
     assert_eq!(out, "OK");
+}
+
+#[test]
+fn local_inferred_properties_and_no_arg_super_constructor_publish_before_body_checking() {
+    const SRC: &str = "fun box(): String {\n\
+    open class K {\n\
+        val o = \"O\"\n\
+    }\n\
+    class Bar : K() {\n\
+        val k = \"K\"\n\
+    }\n\
+    return K().o + Bar().k\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("complete local source ABIs publish before the enclosing body is checked"),
+        "OK"
+    );
+}
+
+#[test]
+fn transitively_inherited_inferred_local_member_is_visible_in_the_enclosing_body() {
+    const SRC: &str = "fun box(): String {\n\
+    val result = \"OK\"\n\
+    open class Local {\n\
+        fun result() = result\n\
+    }\n\
+    open class Middle : Local()\n\
+    class Derived : Middle()\n\
+    return Derived().result()\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("the active local-member union must include inherited checked members"),
+        "OK"
+    );
+}
+
+#[test]
+fn local_secondary_constructor_uses_a_listed_superclass_header() {
+    const SRC: &str = "open class Root(val value: String)\n\
+fun box(): String {\n\
+    val captured = \"OK\"\n\
+    open class Base : Root {\n\
+        constructor(): super(captured)\n\
+    }\n\
+    class Derived : Base {\n\
+        constructor(): super()\n\
+    }\n\
+    return Derived().value\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("a superclass listed without a header call keeps its finalized identity"),
+        "OK"
+    );
 }
 
 #[test]
@@ -152,4 +219,105 @@ class A(\n\
 )\n\
 fun box(): String = A().a\n";
     common::expect_box_same_as_kotlinc(SRC, "LocalClassInParameterInitializer");
+}
+
+#[test]
+fn a_body_local_interface_is_not_validated_as_a_superclass() {
+    const SRC: &str = r#"// LANGUAGE: +SuspendFunctionAsSupertype
+interface Operation : suspend (String) -> Int
+
+fun operation(): Operation = object : Operation {
+    override suspend fun invoke(value: String): Int = value.length
+}
+
+fun box(): String {
+    operation()
+    return "OK"
+}
+"#;
+    common::expect_box_same_as_kotlinc(SRC, "BodyLocalInterfaceRole");
+}
+
+#[test]
+fn a_body_local_final_superclass_keeps_the_exact_diagnostic() {
+    const SRC: &str = "fun box(): String {\n\
+    class Final\n\
+    class Child : Final()\n\
+    return \"OK\"\n\
+}\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", SRC)], &[]);
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    let expected = [common::CompilerError {
+        file: "Main.kt".to_string(),
+        line: 3,
+        column: 15,
+        message: "this type is final, so it cannot be extended.".to_string(),
+    }];
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), expected);
+}
+
+#[test]
+fn an_explicit_body_local_property_contract_precedes_its_member_bodies() {
+    const SRC: &str = r#"interface Holder {
+    fun install(value: suspend (String) -> Unit)
+    suspend fun fire()
+}
+
+fun holder(): Holder = object : Holder {
+    var callback: suspend (String) -> Unit = {}
+    override fun install(value: suspend (String) -> Unit) { callback = value }
+    override suspend fun fire() { callback("K") }
+}
+
+fun box(): String {
+    holder().install {}
+    return "OK"
+}
+"#;
+    common::expect_box_same_as_kotlinc(SRC, "BodyLocalExplicitProperty");
+}
+
+#[test]
+fn a_retained_inline_body_waits_for_its_body_local_owner() {
+    const SRC: &str = r#"fun add(left: Int, right: Int): Int {
+    val holder = object {
+        inline fun add(left: Int, right: Int): Int = left + right
+    }
+    return holder.add(left, right)
+}
+
+fun box(): String = if (add(1, 1) == 2) "OK" else "FAIL"
+"#;
+    common::expect_box_same_as_kotlinc(SRC, "BodyLocalRetainedInline");
+}
+
+#[test]
+fn a_retained_default_waits_for_its_body_local_owner() {
+    const SRC: &str = r#"fun box(): String {
+    open class Base {
+        open fun value(prefix: String, suffix: String = "K"): String = prefix + suffix
+    }
+    class Derived : Base() {
+        override fun value(prefix: String, suffix: String): String =
+            super.value(prefix, suffix)
+    }
+    return Derived().value("O")
+}
+"#;
+    common::expect_box_same_as_kotlinc(SRC, "BodyLocalRetainedDefault");
+}
+
+#[test]
+fn a_body_local_extension_property_keeps_its_receiver() {
+    const SRC: &str = r#"interface ExtensionBase { val String.tag: String }
+
+fun box(): String {
+    class Extension : ExtensionBase {
+        override val String.tag: String get() = this
+    }
+    return with(Extension()) { "OK".tag }
+}
+"#;
+    common::expect_box_same_as_kotlinc(SRC, "BodyLocalExtensionProperty");
 }

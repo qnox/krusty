@@ -182,6 +182,7 @@ fn local_class_declaration_keeps_stable_identity_and_ordered_capture_sources() {
             FirStatementKind::LocalDeclaration {
                 declaration,
                 captures,
+                ..
             } => Some((*declaration, captures.as_ref())),
             _ => None,
         })

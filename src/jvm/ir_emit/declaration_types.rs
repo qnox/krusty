@@ -82,7 +82,22 @@ pub(super) fn field_jvm_tys(fields: &[IrField]) -> Vec<Ty> {
     fields.iter().map(|field| jvm_value_ty(&field.ty)).collect()
 }
 
-pub(in crate::jvm) fn class_ctor_jvm_tys(class: &IrClass) -> Vec<Ty> {
+/// The primary constructor's physical parameter types, a local class's captures in kotlinc's order.
+pub(in crate::jvm) fn class_ctor_jvm_tys(ir: &IrFile, class: &IrClass) -> Vec<Ty> {
+    super::capture_order::physical(ir, class, ctor_jvm_tys_by_identity(class))
+}
+
+/// A secondary constructor's capture prefix types, in the class's physical capture order.
+pub(in crate::jvm) fn secondary_prefix_jvm_tys(
+    ir: &IrFile,
+    class: &IrClass,
+    constructor: &crate::ir::IrSecondaryCtor,
+) -> Vec<Ty> {
+    super::capture_order::physical(ir, class, jvm_tys(&constructor.prefix_params))
+}
+
+/// The primary constructor's parameter types with its captures in field (identity) order.
+pub(in crate::jvm) fn ctor_jvm_tys_by_identity(class: &IrClass) -> Vec<Ty> {
     // A constructor parameter is a value slot. `Unit` is the `kotlin.Unit` singleton there;
     // `V` is only a method result and is not a legal parameter descriptor.
     if class.ctor_args.is_empty() {

@@ -76,6 +76,14 @@ enum ActiveDeclarationRef {
     Generated,
 }
 
+fn file_declaration_binding(file: &File, parser: DeclId) -> ActiveDeclarationRef {
+    match file.decl(parser) {
+        Decl::Fun(_) => ActiveDeclarationRef::Function(parser),
+        Decl::Class(_) => ActiveDeclarationRef::Classifier(parser),
+        Decl::Property(_) => ActiveDeclarationRef::Property(ActivePropertyRef::TopLevel(parser)),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ActiveSourceBindingError {
     InventoryLength,
@@ -795,14 +803,34 @@ impl ActiveSourceDeclarations {
     /// Nested members are reached through their stable owner; this reverse map is only for choosing
     /// the bounded root that the parser handed to the checker.
     pub(crate) fn file_declaration(&self, file: &File, parser: DeclId) -> Option<DeclarationId> {
-        let binding = match file.decl(parser) {
-            Decl::Fun(_) => ActiveDeclarationRef::Function(parser),
-            Decl::Class(_) => ActiveDeclarationRef::Classifier(parser),
-            Decl::Property(_) => {
-                ActiveDeclarationRef::Property(ActivePropertyRef::TopLevel(parser))
-            }
-        };
-        self.first_bound(binding)
+        self.first_bound(file_declaration_binding(file, parser))
+    }
+
+    /// Selected stable identity carried by one parser file declaration.
+    ///
+    /// Default actualization binds the removed expect provider and surviving actual target to the
+    /// same parser declaration. The bounded default pass selects the provider's lexical root, so
+    /// it must consume that exact identity rather than whichever alias has the lowest declaration
+    /// number. More than one selected identity on one parser node is an invalid bounded selection.
+    pub(crate) fn selected_file_declaration(
+        &self,
+        file: &File,
+        parser: DeclId,
+        selected: &crate::fx_hash::HashSet<DeclarationId>,
+    ) -> Option<DeclarationId> {
+        let declarations = self
+            .by_binding
+            .get(&file_declaration_binding(file, parser))?;
+        let mut matches = declarations
+            .iter()
+            .copied()
+            .filter(|declaration| selected.contains(declaration));
+        let declaration = matches.next()?;
+        assert!(
+            matches.next().is_none(),
+            "one parser root cannot carry multiple selected stable identities",
+        );
+        Some(declaration)
     }
 
     pub(crate) fn top_level_property_declaration(&self, parser: DeclId) -> Option<DeclarationId> {

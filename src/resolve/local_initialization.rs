@@ -138,6 +138,7 @@ struct Analysis<'c, 'a> {
 impl Checker<'_> {
     /// Records that `statement` writes the lexical local `target` resolved to, when it is one.
     pub(super) fn record_local_write(&mut self, statement: StmtId, target: Option<Local>) {
+        self.record_class_storage_write(statement, target);
         if let Some(local) = target.filter(|local| local.origin == ReceiverFnValueOrigin::Local) {
             self.local_initialization
                 .write(statement, local.flow_identity);

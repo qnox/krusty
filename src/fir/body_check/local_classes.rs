@@ -1446,12 +1446,6 @@ impl BodyFirChecker<'_> {
                 conversion: None,
             }));
         }
-        if selected.classifier.is_some() {
-            // No exact capture field owns this classifier. The caller must materialize its stable
-            // enclosing-class path; the local capture table below is coordinate-addressed for
-            // non-class receivers and must not reinterpret a class identity by depth.
-            return Ok(None);
-        }
         let owner = DeclarationId::from_raw(self.body.owner().raw());
         let Some(classifier) = self.index.enclosing_classifier(owner) else {
             return Ok(None);
@@ -1482,28 +1476,52 @@ impl BodyFirChecker<'_> {
                     })
             }
         };
-        let Some(captures) = transient
-            .and_then(|declaration| self.info.local_class_captures_by_class.get(&declaration))
+        let captures_by_class = if header
+            .flags
+            .has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT)
+        {
+            &self.info.anonymous_object_captures_by_class
+        } else {
+            &self.info.local_class_captures_by_class
+        };
+        let Some(captures) = transient.and_then(|declaration| captures_by_class.get(&declaration))
         else {
             return Ok(None);
         };
-        let Some(source_depth) = selected_depth.checked_sub(self.owned_receiver_count) else {
-            return Ok(None);
+        // A selected class receiver is addressed by the resolved classifier retained on the
+        // checked capture. Its old receiver-tower depth is not an identity: another same-depth
+        // receiver can become visible when this constructor body is checked in isolation. A
+        // non-class receiver has no classifier identity and retains its exact semantic coordinate.
+        let selected_classifier = match selected.classifier {
+            Some(declaration) => {
+                let Some(header) = self.index.classifier_header(declaration) else {
+                    return Ok(None);
+                };
+                Some(header.classifier)
+            }
+            None => None,
         };
-        let Some((field, capture)) = captures
-            .iter()
-            .enumerate()
-            .find(|(_, capture)| match capture.source {
-                AnonymousObjectCaptureSource::ImplicitReceiver { depth, .. } => {
-                    depth == source_depth
-                }
-                AnonymousObjectCaptureSource::EnclosingInstance { depth, .. } => {
+        let source_depth = selected_depth.checked_sub(self.owned_receiver_count);
+        let Some((field, capture)) = captures.iter().enumerate().find(|(_, capture)| {
+            if let Some(selected_classifier) = selected_classifier {
+                return matches!(
+                    capture.receiver.as_ref(),
+                    Some(FirCapturedReceiver::Enclosing { classifier })
+                        if *classifier == selected_classifier
+                );
+            }
+            let Some(source_depth) = source_depth else {
+                return false;
+            };
+            match capture.source {
+                AnonymousObjectCaptureSource::ImplicitReceiver { depth, .. }
+                | AnonymousObjectCaptureSource::EnclosingInstance { depth, .. } => {
                     depth == source_depth
                 }
                 AnonymousObjectCaptureSource::LexicalValue
                 | AnonymousObjectCaptureSource::ClassStorage { .. } => false,
-            })
-        else {
+            }
+        }) else {
             return Ok(None);
         };
         if capture.ty.canonical_semantic() != selected_ty.get() {
@@ -1566,10 +1584,22 @@ impl BodyFirChecker<'_> {
             "fir",
             "local class body captures declaration={declaration:?} statement={statement:?} captures={captures:?}",
         );
+        // A local class records the first-use order its checked body published.
+        let capture_order = match self.info.local_class_capture_orders.get(&transient) {
+            Some(order) if order.len() == captures.len() => order.clone(),
+            None if captures.is_empty() => Box::default(),
+            _ => {
+                return Err(self.failure(
+                    Some(class.span),
+                    BodyCheckFailureKind::MissingStableCallTarget,
+                ))
+            }
+        };
         let captures = self.checked_class_captures(declaration, class.span, origin, &captures)?;
         Ok(self.body.add_statement(FirStatement {
             origin,
             kind: FirStatementKind::LocalDeclaration {
+                capture_order,
                 declaration,
                 captures,
             },

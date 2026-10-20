@@ -40,6 +40,7 @@ mod bridge_emission;
 mod builtin_member_emission;
 mod bytecode_inline_call;
 mod call_operands;
+pub(in crate::jvm) mod capture_order;
 mod captured_storage;
 mod checked_facts;
 mod class_lambda_reflection;
@@ -178,6 +179,7 @@ mod constructor_delegation_arguments;
 pub(super) mod jvm_static_members;
 mod method_placement;
 use method_placement::MethodPlacement;
+mod entries_mappings;
 mod primary_super_call;
 mod secondary_constructor;
 mod static_accessors;
@@ -203,10 +205,10 @@ use type_parameter_signatures::{jvm_class_signature, jvm_type_params};
 
 use super::method_parameters::OwnerConstructorPrefix;
 pub(crate) use checked_facts::{CheckedEmitFacts, EmitMetadata};
-pub(super) use declaration_types::class_ctor_jvm_tys;
 pub(super) use declaration_types::function_descriptor;
 use declaration_types::ir_method_desc;
 pub(crate) use declaration_types::jvm_tys;
+pub(super) use declaration_types::{class_ctor_jvm_tys, secondary_prefix_jvm_tys};
 use declaration_types::{field_jvm_tys, jvm_declared_ty, jvm_value_ty, signature_function_params};
 use declaration_types::{
     ir_type_desc, jvm_function_params, jvm_is_erased_top, local_variable_desc,
@@ -388,6 +390,9 @@ pub(crate) struct EmitRun {
     regenerated_object_names: bytecode_inline_call::RegeneratedObjectNames,
     /// The `$WhenMappings` tables of the classes this pass emits enum switches in.
     when_mappings: std::cell::RefCell<when_mappings::WhenMappingTables>,
+    /// The `$EntriesIntrinsicMappings` fields of the classes this pass inlines reified
+    /// `enumEntries` into.
+    entries_mappings: std::cell::RefCell<entries_mappings::EntriesMappingTables>,
 }
 
 impl EmitRun {
@@ -660,24 +665,22 @@ pub(crate) fn strip_call_assertions(ir: &mut IrFile) {
     }
 }
 
-/// The primary constructor's parameter descriptors. Only the LEADING `ctor_param_count` fields are
-/// constructor parameters — a BODY property (`val y: Int = 2`) is a field but not a ctor argument.
 /// The primary constructor's JVM descriptor: every constructor argument, property-backed or plain.
-fn primary_ctor_descriptor(c: &IrClass) -> String {
-    format!("({})V", primary_ctor_parameter_descs(c))
+fn primary_ctor_descriptor(ir: &IrFile, c: &IrClass) -> String {
+    format!("({})V", primary_ctor_parameter_descs(ir, c))
 }
 
-fn primary_ctor_parameter_descs(c: &IrClass) -> String {
-    class_ctor_jvm_tys(c)
+fn primary_ctor_parameter_descs(ir: &IrFile, c: &IrClass) -> String {
+    class_ctor_jvm_tys(ir, c)
         .into_iter()
         .map(crate::jvm::names::type_descriptor)
         .collect()
 }
 
-fn ctor_field_descs(c: &IrClass) -> String {
-    c.fields
-        .iter()
-        .take(c.ctor_param_count as usize)
+fn ctor_field_descs(ir: &IrFile, c: &IrClass) -> String {
+    let fields = c.fields.iter().take(c.ctor_param_count as usize).collect();
+    capture_order::physical(ir, c, fields)
+        .into_iter()
         .map(|f| crate::jvm::names::type_descriptor(f.ty))
         .collect()
 }
@@ -859,7 +862,7 @@ fn attach_synth_nullability(
         .iter()
         .map(|parameter| nullability_annotation(parameter.nullability))
         .collect();
-    let ctor_desc = primary_ctor_descriptor(c);
+    let ctor_desc = primary_ctor_descriptor(ir, c);
     if ctor_params.iter().any(|p| p.is_some()) {
         cw.set_method_nullability("<init>", &ctor_desc, None, &ctor_params);
     }
@@ -1465,6 +1468,7 @@ fn emit_pass(
     env.run.machine_classes.borrow_mut().clear();
     env.run.regenerated_object_names.clear();
     env.run.when_mappings.borrow_mut().clear();
+    env.run.entries_mappings.borrow_mut().clear();
     if !jvm_can_emit(ir) {
         emission_readiness::trace_residual_nodes(ir);
         return None;
@@ -1687,6 +1691,7 @@ fn emit_pass(
     out.extend(drain_lambda_classes(env, opts));
     out.extend(env.run.machine_classes.borrow_mut().drain(..));
     out.extend(env.run.when_mappings.borrow().write_classes(env, opts));
+    out.extend(env.run.entries_mappings.borrow().write_classes(env, opts));
     if env.run.emission_failed() {
         return None; // malformed backend input — discard every class from this pass
     }
@@ -2321,14 +2326,16 @@ fn emit_class(
                 format!("(Lkotlin/coroutines/Continuation<-L{fq_name};>;)V")
             }
         })
-        .or_else(|| constructor_signatures::primary_constructor_signature(&signature_formatter, c));
+        .or_else(|| {
+            constructor_signatures::primary_constructor_signature(&signature_formatter, ir, c)
+        });
     let value_param_ctor = ir.has_value_param_ctor(&fq_name);
     let ctor_access =
         method_access::primary_constructor_access(ir, c, is_continuation, value_param_ctor);
     let ctor_signature = method_signatures::written_signature(
         ctor_access,
         false,
-        &primary_ctor_descriptor(c),
+        &primary_ctor_descriptor(ir, c),
         ctor_signature,
     );
     // An anonymous object carries kotlinc's minimal record (see the metadata assembly below) and
@@ -2404,7 +2411,7 @@ fn emit_class(
     let mut field_order: Vec<(usize, &crate::ir::IrField)> = if static_storage(ir, c) {
         Vec::new()
     } else {
-        c.fields.iter().enumerate().collect()
+        capture_order::physical(ir, c, c.fields.iter().enumerate().collect())
     };
     // kotlinc appends captures and the outer instance (the constructor prefix) after declared fields.
     let prefix = (c.constructor_prefix_count as usize).min(field_order.len());
@@ -2523,7 +2530,8 @@ fn emit_class(
     // is written so an unused local's store is not removed as a temporary.
     let mut init_locals: Vec<(u16, u16, u16, String, String)> = Vec::new();
     let mut primary_ctor_debug = None;
-    let param_tys = class_ctor_jvm_tys(c);
+    let param_tys = class_ctor_jvm_tys(ir, c);
+    let value_tys = declaration_types::ctor_jvm_tys_by_identity(c);
     crate::trace_compiler!(
         "lower",
         "JVM constructor layout class={} params={:?} ctor_args={:?} fields={:?} prefix={} property_params={} explicit_stores={}",
@@ -2568,7 +2576,7 @@ fn emit_class(
     // A class with NO primary constructor emits no primary `<init>` — every `<init>` comes from a
     // secondary constructor (below). Otherwise emit the primary `<init>` here.
     if c.has_primary_ctor {
-        let ctor_desc = primary_ctor_descriptor(c);
+        let ctor_desc = primary_ctor_descriptor(ir, c);
         let ctor_parameters = if env.java_parameters {
             if is_continuation {
                 super::method_parameters::continuation_constructor(c)
@@ -2617,10 +2625,10 @@ fn emit_class(
             e.record_locals = byte_parity;
             let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj_name(c.fq_name));
             e.slots.insert(0, (receiver, Ty::obj_name(c.fq_name)));
-            for (vi, t) in param_tys.iter().enumerate() {
-                let value = vi as u32 + 1;
-                let s = e.frame.enter(FrameKey::Value(value), *t);
-                e.slots.insert(value, (s, *t));
+            for identity in capture_order::physical(ir, c, (0..value_tys.len()).collect()) {
+                let (value, t) = (identity as u32 + 1, value_tys[identity]);
+                let s = e.frame.enter(FrameKey::Value(value), t);
+                e.slots.insert(value, (s, t));
             }
             // kotlinc guards each non-null reference constructor parameter with checkNotNullParameter at
             // the very start of `<init>` — before the super() call.
@@ -2640,7 +2648,7 @@ fn emit_class(
                 }
             }
             let ctor_param_fields = primary_ctor_parameter_fields(c, param_tys.len());
-            let debug_start = e.emit_pre_super_field_stores(c, &fq_name, &param_tys, &mut ctor);
+            let debug_start = e.emit_pre_super_field_stores(c, &fq_name, &value_tys, &mut ctor);
             primary_ctor_debug = Some((
                 ctor_desc.clone(),
                 u16::try_from(debug_start).expect("a JVM method body fits in u16"),
@@ -2660,8 +2668,7 @@ fn emit_class(
             // SKIPPED when `explicit_param_stores` is set — a desugared class already stores them via
             // explicit `SetField`s at the head of `init_body`; auto-storing too would double-store.
             if !c.explicit_param_stores {
-                let mut slot = 1u16;
-                for (i, t) in param_tys.iter().enumerate() {
+                for (i, t) in value_tys.iter().enumerate() {
                     if let Some(field_i) = ctor_param_fields.get(i).copied().flatten() {
                         // Fields already stored before `super(…)` are not stored again here. The cutoff
                         // is semantic constructor metadata, independent of their physical ABI names.
@@ -2677,14 +2684,13 @@ fn emit_class(
                                 ctor_lines.push((pc, line));
                             }
                             ctor.aload(0);
-                            load(*t, slot, &mut ctor);
+                            load(*t, e.slots[&(i as u32 + 1)].0, &mut ctor);
                             let physical_name = instance_field_jvm_name(ir, env.run, c, field_i);
                             let fref =
                                 e.cw.fieldref(&fq_name, &physical_name, &type_descriptor(*t));
                             ctor.putfield(fref, slot_words(*t) as i32);
                         }
                     }
-                    slot += slot_words(*t);
                 }
             }
             if !initializer_rest.is_empty() {
@@ -2776,7 +2782,7 @@ fn emit_class(
             // (The stub emits its own LineNumberTable — class line, per-fill parameter lines, the
             // ctor's closing-`)` line at `return` — collapsed for single-line declarations.)
             let prefix_count = c.constructor_prefix_count as usize;
-            let (prefix_params, source_params) = param_tys
+            let (prefix_params, source_params) = value_tys
                 .split_at_checked(prefix_count)
                 .expect("constructor default prefix exceeds its parameters");
             let source_defaults = defaults
@@ -2788,7 +2794,7 @@ fn emit_class(
                     owner: &fq_name,
                     owner_identity: c.fq_name,
                     facade,
-                    physical_prefix: prefix_params,
+                    prefix: prefix_params,
                     logical_prefix_count: prefix_count,
                     real_params: source_params,
                     defaults: source_defaults,
@@ -2861,7 +2867,7 @@ fn emit_class(
     // adds none beside it.
     let declares_no_arg_ctor = c.secondary_ctors.iter().any(|sc| sc.params.is_empty());
     if c.has_primary_ctor && !declares_no_arg_ctor {
-        let param_tys = class_ctor_jvm_tys(c);
+        let param_tys = class_ctor_jvm_tys(ir, c);
         let value_param_ctor = ir.has_value_param_ctor(&fq_name);
         let ctor_access = if is_continuation || c.is_anonymous_object {
             0x0000
@@ -3490,13 +3496,13 @@ fn emit_enum_class(
     // (bridges emitted after the methods below — `emit_bridges` references emitted method refs)
     let n_params = c.ctor_param_count as usize;
     let user_tys: Vec<Ty> = field_tys[..n_params].to_vec();
-    let all_param_tys = class_ctor_jvm_tys(c);
+    let all_param_tys = class_ctor_jvm_tys(ir, c);
     let ctor_params: Vec<Ty> = [Ty::String, Ty::Int]
         .into_iter()
         .chain(all_param_tys.iter().copied())
         .collect();
     let ctor_desc = method_descriptor(&ctor_params, Ty::Unit);
-    let ctor_sig = constructor_signatures::enum_constructor_signature(&signature_formatter, c)
+    let ctor_sig = constructor_signatures::enum_constructor_signature(&signature_formatter, ir, c)
         .expect("an enum constructor always signs its source parameters");
     let ctor_parameters = if env.java_parameters {
         super::method_parameters::enum_constructor(c).to_vec()
@@ -3722,7 +3728,7 @@ fn emit_enum_class(
                 owner: &fq,
                 owner_identity: c.fq_name,
                 facade,
-                physical_prefix: &[Ty::String, Ty::Int],
+                prefix: &[Ty::String, Ty::Int],
                 logical_prefix_count: 0,
                 real_params: &all_param_tys,
                 defaults,

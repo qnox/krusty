@@ -66,7 +66,7 @@ pub(crate) struct TableOrders {
 }
 
 struct TableOrder {
-    candidates: Vec<InnerClassSpec>,
+    candidates: Vec<Rc<InnerClassSpec>>,
     paths: DeclarationPaths,
     declaring: Rc<HashMap<String, String>>,
     /// The candidate index each table row takes, in table order.
@@ -78,7 +78,11 @@ struct TableOrder {
 const KEPT_TABLE_ORDERS: usize = 4;
 
 impl TableOrders {
-    fn find(&self, candidates: &[InnerClassSpec], local: &LocalDeclarations) -> Option<Vec<usize>> {
+    fn find(
+        &self,
+        candidates: &[Rc<InnerClassSpec>],
+        local: &LocalDeclarations,
+    ) -> Option<Vec<usize>> {
         self.known
             .borrow()
             .iter()
@@ -92,7 +96,7 @@ impl TableOrders {
 
     fn remember(
         &self,
-        candidates: Vec<InnerClassSpec>,
+        candidates: Vec<Rc<InnerClassSpec>>,
         local: &LocalDeclarations,
         order: Vec<usize>,
     ) {
@@ -157,19 +161,19 @@ impl ClassWriter {
         {
             return;
         }
-        self.inner_class_candidates.push(spec);
+        self.inner_class_candidates.push(Rc::new(spec));
     }
 
     /// Register several candidates, in order, exactly as [`Self::add_inner_class`] would one at a
     /// time. A file's whole nest is registered on each of its class writers, so the duplicate check
     /// goes through one set instead of a scan of the candidates per entry.
-    pub(crate) fn add_inner_classes(&mut self, specs: &[InnerClassSpec]) {
+    pub(crate) fn add_inner_classes(&mut self, specs: &[Rc<InnerClassSpec>]) {
         let mut known: HashSet<&str> = self
             .inner_class_candidates
             .iter()
             .map(|spec| spec.inner.as_str())
             .collect();
-        let added: Vec<InnerClassSpec> = specs
+        let added: Vec<Rc<InnerClassSpec>> = specs
             .iter()
             .filter(|spec| known.insert(spec.inner.as_str()))
             .cloned()
@@ -337,7 +341,7 @@ impl ClassWriter {
     /// Presence only ever adds a row, so the kept rows are the least fixpoint however it is reached:
     /// each row is first judged against the pool once, and a row's seeds then revisit only the row
     /// they name.
-    fn retained_inner_rows(&self) -> Vec<InnerClassSpec> {
+    fn retained_inner_rows(&self) -> Vec<Rc<InnerClassSpec>> {
         let specs = &self.inner_class_candidates;
         let by_inner: HashMap<&str, usize> = specs
             .iter()
@@ -371,7 +375,7 @@ impl ClassWriter {
             .iter()
             .zip(retained)
             .filter(|&(_, keep)| keep)
-            .map(|(spec, _)| spec.clone())
+            .map(|(spec, _)| Rc::clone(spec))
             .collect()
     }
 
@@ -415,12 +419,12 @@ impl ClassWriter {
                     continue;
                 };
                 known.insert(inner);
-                discovered.push(InnerClassSpec {
+                discovered.push(Rc::new(InnerClassSpec {
                     inner: inner.clone(),
                     outer: details.outer,
                     name: details.name,
                     access: details.access,
-                });
+                }));
             }
             self.inner_class_candidates.extend(discovered);
         }
@@ -516,7 +520,7 @@ impl ClassWriter {
 /// The rows of `ordered` sharing a qualified name with another, by name, leaving out each row
 /// declared in or declaring another row's class: the declaring class stays first.
 fn tied_groups(
-    ordered: &[(String, usize, InnerClassSpec)],
+    ordered: &[(String, usize, Rc<InnerClassSpec>)],
     declaring: &HashMap<String, String>,
 ) -> Vec<Vec<String>> {
     let rows: HashSet<&str> = ordered
@@ -559,9 +563,9 @@ fn tied_groups(
 /// A stable Kahn walk makes the contract a real total order, using the ordinary sorted position as
 /// the priority among rows whose declaring ancestors have already been emitted.
 fn declaration_order(
-    mut rows: Vec<(String, usize, InnerClassSpec)>,
+    mut rows: Vec<(String, usize, Rc<InnerClassSpec>)>,
     declaring: &HashMap<String, String>,
-) -> Vec<(String, usize, InnerClassSpec)> {
+) -> Vec<(String, usize, Rc<InnerClassSpec>)> {
     rows.sort_by(|(key, rank, _), (other_key, other_rank, _)| {
         key.cmp(other_key).then(rank.cmp(other_rank))
     });
@@ -618,7 +622,7 @@ fn declaration_order(
 /// kotlinc's `fqNameWhenAvailable` of each row's class: from `paths` for a class declared in
 /// executable code, otherwise its outer class's name and its own simple name, or the dotted
 /// internal name of a top-level class.
-fn qualified_names(rows: &[InnerClassSpec], paths: &HashMap<String, String>) -> Vec<String> {
+fn qualified_names(rows: &[Rc<InnerClassSpec>], paths: &HashMap<String, String>) -> Vec<String> {
     fn name(
         inner: &str,
         rows: &HashMap<&str, &InnerClassSpec>,
@@ -639,8 +643,10 @@ fn qualified_names(rows: &[InnerClassSpec], paths: &HashMap<String, String>) -> 
             _ => inner.replace('/', "."),
         }
     }
-    let by_inner: HashMap<&str, &InnerClassSpec> =
-        rows.iter().map(|row| (row.inner.as_str(), row)).collect();
+    let by_inner: HashMap<&str, &InnerClassSpec> = rows
+        .iter()
+        .map(|row| (row.inner.as_str(), &**row))
+        .collect();
     rows.iter()
         .map(|row| name(&row.inner, &by_inner, paths, 0))
         .collect()
@@ -651,16 +657,16 @@ mod tests {
     use super::{declaration_order, HashMap, HashSet, InnerClassSpec, Rc, TableOrders};
     use crate::jvm::classfile::{ClassWriter, ACC_FINAL, ACC_PUBLIC, ACC_STATIC};
 
-    fn row(key: &str, inner: &str) -> (String, usize, InnerClassSpec) {
+    fn row(key: &str, inner: &str) -> (String, usize, Rc<InnerClassSpec>) {
         (
             key.to_string(),
             usize::MAX,
-            InnerClassSpec {
+            Rc::new(InnerClassSpec {
                 inner: inner.to_string(),
                 outer: None,
                 name: None,
                 access: 0,
-            },
+            }),
         )
     }
 
@@ -718,7 +724,7 @@ mod tests {
 
         let ordered = declaration_order(rows, &declaring)
             .into_iter()
-            .map(|(_, _, spec)| spec.inner)
+            .map(|(_, _, spec)| spec.inner.clone())
             .collect::<Vec<_>>();
 
         assert_eq!(ordered, ["Unrelated", "Parent", "Child"]);
@@ -734,7 +740,7 @@ mod tests {
 
         let ordered = declaration_order(rows, &declaring)
             .into_iter()
-            .map(|(_, _, spec)| spec.inner)
+            .map(|(_, _, spec)| spec.inner.clone())
             .collect::<Vec<_>>();
 
         assert_eq!(ordered, ["Root", "Child"]);
@@ -759,7 +765,7 @@ mod tests {
 
     fn table_order(nest: &[InnerClassSpec], file: Option<&FileNest>) -> Vec<String> {
         let mut writer = ClassWriter::new("app/Outer", "java/lang/Object");
-        writer.add_inner_classes(nest);
+        writer.add_inner_classes(&nest.iter().cloned().map(Rc::new).collect::<Vec<_>>());
         if let Some(file) = file {
             writer.set_declaration_paths(file.paths.clone());
             writer.set_declaring_classes(file.declaring.clone());

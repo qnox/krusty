@@ -516,4 +516,17 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn applied_argument_substitution_preserves_nullability_against_a_synthetic_bottom_bound() {
+        let placeholder = Ty::ty_param("\0signature-type-argument-0", Ty::Nothing);
+        let template = Ty::obj_args("sample/Box", &[placeholder]);
+        let nullable = Ty::nullable(Ty::obj("kotlin/Any"));
+        let bindings = HashMap::from_iter([("\0signature-type-argument-0".to_string(), nullable)]);
+
+        assert_eq!(
+            ty_subst_applied_arguments(template, &bindings),
+            Ty::obj_args("sample/Box", &[nullable])
+        );
+    }
 }

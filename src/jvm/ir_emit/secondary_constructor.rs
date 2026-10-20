@@ -2,8 +2,9 @@
 
 use super::frame_map::FrameKey;
 use super::{
-    constructor_default_masks, instance_field_jvm_name, jvm_tys, load, method_descriptor,
-    slot_words, type_descriptor, ClassWriter, CodeBuilder, EmitEnv, Emitter,
+    capture_order, constructor_default_masks, instance_field_jvm_name, jvm_tys, load,
+    method_descriptor, secondary_prefix_jvm_tys, slot_words, type_descriptor, ClassWriter,
+    CodeBuilder, EmitEnv, Emitter,
 };
 use crate::ir::{IrClass, IrConstructorTarget, IrCtorParameterProvenance, IrFile, IrSecondaryCtor};
 use crate::jvm::declared_type_nullability::declared_annotation;
@@ -51,7 +52,11 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             owner_prefix_tys.is_empty() || sc.prefix_params.is_empty(),
             "a constructor prefix is an owner's synthetic one or a capture list, never both"
         );
-        let sc_prefix_tys = jvm_tys(&sc.prefix_params);
+        // A local class takes its captures in its physical order: `prefix_identities[position]` is
+        // the capture value at that position. Value ids and the default stub keep identity order.
+        let prefix_identities =
+            capture_order::physical(ir, c, (0..sc.prefix_params.len()).collect());
+        let sc_prefix_tys = secondary_prefix_jvm_tys(ir, c, sc);
         let sc_source_tys = jvm_tys(&sc.params);
         let sc_param_tys = owner_prefix_tys
             .iter()
@@ -212,10 +217,14 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             }
             // Value ids count the DECLARED parameters only, so the owner's prefix is skipped in
             // the numbering while still consuming its slots.
-            for (vi, t) in sc_prefix_tys.iter().chain(&sc_source_tys).enumerate() {
-                let value = vi as u32 + 1;
-                let s = e.frame.enter(FrameKey::Value(value), *t);
-                e.slots.insert(value, (s, *t));
+            let values = prefix_identities
+                .iter()
+                .zip(&sc_prefix_tys)
+                .map(|(&identity, &t)| (identity as u32 + 1, t))
+                .chain((sc_prefix_tys.len() as u32 + 1..).zip(sc_source_tys.iter().copied()));
+            for (value, t) in values {
+                let s = e.frame.enter(FrameKey::Value(value), t);
+                e.slots.insert(value, (s, t));
             }
             e.record_locals = !generated;
             // kotlinc guards each checked parameter at the very start, ahead of the delegation.
@@ -261,9 +270,10 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     target,
                     default_masks,
                 } => {
+                    let params = capture_order::physical_for(ir, *owner, target_params.clone());
                     let owner =
                         crate::jvm::jvm_class_map::to_jvm_internal(&owner.render()).to_string();
-                    (owner, jvm_tys(target_params), *target, default_masks)
+                    (owner, jvm_tys(&params), *target, default_masks)
                 }
                 CtorDelegateTarget::ImplicitEnumBase => (
                     "java/lang/Enum".to_string(),
@@ -272,10 +282,21 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     &[],
                 ),
             };
-            let target_params = match &sc.delegate {
-                CtorDelegateTarget::This { target_params, .. }
-                | CtorDelegateTarget::Super { target_params, .. } => target_params.as_slice(),
-                CtorDelegateTarget::ImplicitEnumBase => &[],
+            // A local superclass takes its captures in its own physical order; a `this(…)` call
+            // forwards this constructor's prefix, which its arguments do not include.
+            let (delegate_args, target_params) = match &sc.delegate {
+                CtorDelegateTarget::This { target_params, .. } => {
+                    (sc.delegate_args.clone(), target_params.clone())
+                }
+                CtorDelegateTarget::Super {
+                    owner,
+                    target_params,
+                    ..
+                } => (
+                    capture_order::physical_for(ir, *owner, sc.delegate_args.clone()),
+                    capture_order::physical_for(ir, *owner, target_params.clone()),
+                ),
+                CtorDelegateTarget::ImplicitEnumBase => (sc.delegate_args.clone(), Vec::new()),
             };
             let target_owner = match &sc.delegate {
                 CtorDelegateTarget::Super { owner, .. } => *owner,
@@ -287,7 +308,9 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             let forwards_owner_prefix =
                 delegates_to_this || matches!(sc.delegate, CtorDelegateTarget::ImplicitEnumBase);
             if !delegates_to_this {
-                for &(parameter, field_index) in &c.pre_super_param_fields {
+                let mut stores = c.pre_super_param_fields.clone();
+                stores.sort_by_key(|&(parameter, _)| capture_order::position(ir, c, parameter));
+                for (parameter, field_index) in stores {
                     if parameter >= sc.prefix_params.len() as u32 {
                         continue;
                     }
@@ -299,12 +322,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     if encloses && !generated && sc.lines.decl_line != 0 {
                         sctor.mark_line(sc.lines.decl_line);
                     }
-                    let parameter = parameter as usize + owner_prefix_tys.len();
-                    let ty = sc_param_tys[parameter];
-                    let slot = 1 + sc_param_tys[..parameter]
-                        .iter()
-                        .map(|ty| slot_words(*ty))
-                        .sum::<u16>();
+                    let (slot, ty) = e.slots[&(parameter + 1)];
                     let Some(field) = c.fields.get(field_index as usize) else {
                         e.run.set_emit_error(
                             "secondary constructor prefix store references a missing field"
@@ -335,8 +353,8 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 &[]
             };
             e.emit_constructor_delegation_arguments(
-                &sc.delegate_args,
-                target_params,
+                &delegate_args,
+                &target_params,
                 forwarded,
                 &mut sctor,
             );
@@ -414,11 +432,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                         );
                         continue;
                     };
-                    let ty = sc_param_tys[parameter];
-                    let slot = 1 + sc_param_tys[..parameter]
-                        .iter()
-                        .map(|ty| slot_words(*ty))
-                        .sum::<u16>();
+                    let (slot, ty) = e.slots[&(parameter as u32 + 1)];
                     sctor.aload(0);
                     load(ty, slot, &mut sctor);
                     let physical_name = instance_field_jvm_name(ir, e.run, c, parameter);
@@ -611,7 +625,11 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     owner: fq_name,
                     owner_identity: c.fq_name,
                     facade,
-                    physical_prefix: &forwarded_prefix_tys,
+                    prefix: &owner_prefix_tys
+                        .iter()
+                        .copied()
+                        .chain(jvm_tys(&sc.prefix_params))
+                        .collect::<Vec<_>>(),
                     logical_prefix_count: sc_prefix_tys.len(),
                     real_params: &sc_source_tys,
                     defaults: &sc.defaults,

@@ -22,6 +22,21 @@ fn main() {
         run_cinterop(&argv[1..]);
         return;
     }
+    // `krusty compilation-fingerprint <kotlinc arguments>` prints the digest of everything that
+    // compilation reads; a build tool keeps the previous output while it is unchanged.
+    if argv
+        .first()
+        .is_some_and(|command| command == "compilation-fingerprint")
+    {
+        match krusty_cli::compilation_fingerprint::fingerprint(argv[1..].to_vec()) {
+            Ok(fingerprint) => println!("{fingerprint}"),
+            Err(error) => {
+                eprintln!("error: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     // Bazel starts a persistent worker by appending `--persistent_worker` to the tool's command
     // line; every actual compilation then arrives as a work request on stdin.
     if argv

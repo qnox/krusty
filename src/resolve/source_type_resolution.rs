@@ -6,9 +6,39 @@
 
 use crate::ast::{File, TypeRef};
 use crate::diag::{DiagSink, Span};
-use crate::types::{Ty, TypeName};
+use crate::types::{type_name, Ty, TypeName};
 
-use super::{typeref_classifier, ClassNames, ClassifierBindingError, SymbolTable, TParams};
+use super::{ClassNames, ClassifierBindingError, SymbolTable, TParams};
+
+fn default_classifier_internal(name: &str) -> Option<TypeName> {
+    let name = name.strip_prefix("kotlin.").unwrap_or(name);
+    if Ty::from_name(name).is_some()
+        || Ty::primitive_array_element(name).is_some()
+        || name == "Array"
+    {
+        return Some(type_name(&format!("kotlin/{name}")));
+    }
+    None
+}
+
+pub(crate) fn classifier_over_default(name: &str, resolved: Option<TypeName>) -> Option<TypeName> {
+    let resolved = resolved?;
+    (default_classifier_internal(name) != Some(resolved)).then_some(resolved)
+}
+
+/// A parameterized type is always represented by its classifier plus type arguments, including a
+/// default-imported classifier such as `Array<T>`. Bare builtin spellings still fall through to
+/// their canonical `Ty` leaf (`Int`, `String`, ...).
+pub(super) fn typeref_classifier(
+    reference: &TypeRef,
+    resolved: Option<TypeName>,
+) -> Option<TypeName> {
+    if reference.targs.is_empty() {
+        classifier_over_default(&reference.name, resolved)
+    } else {
+        resolved.or_else(|| default_classifier_internal(&reference.name))
+    }
+}
 
 /// A bound-name → JVM-internal resolver over a `SymbolTable`: the merged class-name map, which binds
 /// a bare contract/tparam-bound name to its internal for both module and classpath classes (and
@@ -262,6 +292,15 @@ pub(super) fn ty_of_ref_with(
     tparams: &TParams,
     diags: &mut DiagSink,
 ) -> Ty {
+    let without_package_arguments =
+        classes
+            .classifier_segment(&reference.name)
+            .and_then(|segment| {
+                super::package_qualifier_type_arguments::without_package_arguments(
+                    reference, segment,
+                )
+            });
+    let reference = without_package_arguments.as_ref().unwrap_or(reference);
     if reference.definitely_non_null() && !tparams.contains(&reference.name) {
         diags.error(
             reference.span,

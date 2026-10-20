@@ -1,7 +1,9 @@
 //! Reified marker specialization over the symbolic method tree.
 
 use crate::jvm::method_node::{Constant, Insn, LabelId, MethodNode, Node};
-use crate::jvm::reified_arguments::{ReifiedArgument, ReifiedArguments};
+use crate::jvm::reified_arguments::{
+    EnumEntriesRead, EnumEntriesReads, ReifiedArgument, ReifiedArguments,
+};
 use crate::jvm::type_of::{TypeOfInsn, TYPE_OF_MARKER};
 
 use super::reified_type_checks::{self, ReifiedTarget};
@@ -14,6 +16,19 @@ const MARKER_DESCRIPTOR: &str = "(ILjava/lang/String;)V";
 /// `ReifiedTypeInliner` mode for `catch (e: T)`. The marker is the handler's first instructions;
 /// the exception table still names the parameter's erasure until a concrete argument replaces it.
 const CATCH_MARKER: i32 = 7;
+/// `ReifiedTypeInliner` mode for `enumValueOf<T>`, `enumValues<T>` and `enumEntries<T>`: the marker
+/// precedes an erased placeholder that a concrete argument rewrites into the enum's own member
+/// (`processSpecialEnumFunction`).
+const ENUM_MARKER: i32 = 5;
+const ACONST_NULL: u8 = 0x01;
+const ICONST_0: u8 = 0x03;
+const ALOAD: u8 = 0x19;
+const ANEWARRAY: u8 = 0xbd;
+const CHECKCAST: u8 = 0xc0;
+const GETSTATIC: u8 = 0xb2;
+const ENUM_ENTRIES: &str = "kotlin/enums/EnumEntries";
+const ENUM: &str = "java/lang/Enum";
+const ERASED_VALUE_OF: &str = "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;";
 
 enum Repoint {
     Class {
@@ -34,6 +49,117 @@ enum Repoint {
     },
     /// A concrete `catch (e: T)`: rewrite every agreeing typed entry of this handler to `class`.
     Catch { class: String },
+    /// A concrete enum operation: `placeholder` is replaced by `with`, and `consumed` (the rest of
+    /// the erased form) is removed.
+    Enum {
+        placeholder: usize,
+        with: Vec<Node>,
+        consumed: usize,
+    },
+}
+
+/// The erased form a mode-5 marker at `call` precedes, as kotlinc's reified enum templates write
+/// it: `aconst_null; aload; invokestatic Enum.valueOf`, `iconst_0; anewarray`, or
+/// `aconst_null; checkcast EnumEntries`.
+enum EnumOperation {
+    ValueOf { placeholder: usize, call: usize },
+    Values { placeholder: usize, array: usize },
+    Entries { placeholder: usize, cast: usize },
+}
+
+fn enum_operation(node: &MethodNode, call: usize) -> Option<EnumOperation> {
+    let at = |offset: usize| node.nodes.get(call + offset);
+    match (at(1)?, at(2)?) {
+        (Node::Insn(Insn::Op(ACONST_NULL)), Node::Insn(Insn::Var { op: ALOAD, .. })) => {
+            is_erased_value_of(at(3)?).then_some(EnumOperation::ValueOf {
+                placeholder: call + 1,
+                call: call + 3,
+            })
+        }
+        (
+            Node::Insn(Insn::Op(ICONST_0)),
+            Node::Insn(Insn::Type {
+                op: ANEWARRAY,
+                class,
+            }),
+        ) if class == ENUM => Some(EnumOperation::Values {
+            placeholder: call + 1,
+            array: call + 2,
+        }),
+        (
+            Node::Insn(Insn::Op(ACONST_NULL)),
+            Node::Insn(Insn::Type {
+                op: CHECKCAST,
+                class,
+            }),
+        ) if class == ENUM_ENTRIES => Some(EnumOperation::Entries {
+            placeholder: call + 1,
+            cast: call + 2,
+        }),
+        _ => None,
+    }
+}
+
+/// The erased call a reified `enumValueOf` template ends with: exactly the static, non-interface
+/// `java/lang/Enum.valueOf(Class, String)`.
+fn is_erased_value_of(node: &Node) -> bool {
+    matches!(
+        node,
+        Node::Insn(Insn::Method {
+            op: INVOKESTATIC,
+            owner,
+            name,
+            desc,
+            interface: false,
+        }) if owner == ENUM && name == "valueOf" && desc == ERASED_VALUE_OF
+    )
+}
+
+/// The concrete form of `operation` for enum `class` (semantic identity `classifier`): its own
+/// static `valueOf(String)` and `values()`, and its entries as the call site reads them, by the
+/// declaration `classifier` names. kotlinc writes the entries operation as
+/// `aconst_null; checkcast EnumEntries`, so the accessor call or mapping read replaces the
+/// `aconst_null` and the `checkcast` goes.
+fn enum_repoint(
+    operation: EnumOperation,
+    class: &str,
+    classifier: Option<crate::types::TypeName>,
+    enum_entries: &mut dyn EnumEntriesReads,
+) -> Result<Repoint, InlineError> {
+    let invoke =
+        |name: &str, desc: String| vec![Node::Insn(method(INVOKESTATIC, class, name, &desc))];
+    Ok(match operation {
+        EnumOperation::ValueOf { placeholder, call } => Repoint::Enum {
+            placeholder: call,
+            with: invoke("valueOf", format!("(Ljava/lang/String;)L{class};")),
+            consumed: placeholder,
+        },
+        EnumOperation::Values { placeholder, array } => Repoint::Enum {
+            placeholder,
+            with: invoke("values", format!("()[L{class};")),
+            consumed: array,
+        },
+        EnumOperation::Entries { placeholder, cast } => Repoint::Enum {
+            placeholder,
+            with: match classifier
+                .and_then(|classifier| enum_entries.entries(classifier, class))
+                .ok_or_else(|| InlineError::UnknownEnumEntries(class.to_owned()))?
+            {
+                EnumEntriesRead::Accessor {
+                    owner,
+                    name,
+                    descriptor,
+                } => vec![Node::Insn(method(INVOKESTATIC, &owner, &name, &descriptor))],
+                EnumEntriesRead::Mapping { class, field } => vec![Node::Insn(Insn::Field {
+                    op: GETSTATIC,
+                    owner: class,
+                    name: field,
+                    desc: format!("L{ENUM_ENTRIES};"),
+                })],
+            },
+            consumed: cast,
+        },
+    })
 }
 
 struct Marker {
@@ -60,8 +186,9 @@ pub(in crate::jvm) fn has_reified_markers(node: &MethodNode) -> bool {
 pub(super) fn specialize(
     node: &mut MethodNode,
     arguments: &ReifiedArguments,
+    enum_entries: &mut dyn EnumEntriesReads,
 ) -> Result<(), InlineError> {
-    let markers = plan(node, arguments)?;
+    let markers = plan(node, arguments, enum_entries)?;
 
     // Replacements that change the node count are applied last to first, so every recorded index
     // still names its node when its turn comes. Recursive `typeOf` temporaries start above the
@@ -102,6 +229,15 @@ pub(super) fn specialize(
                 retarget_catch(node, marker.operation, class)?;
                 erase_marker(node, marker);
             }
+            Repoint::Enum {
+                placeholder,
+                with,
+                consumed,
+            } => {
+                erase_marker(node, marker);
+                replacements.push((*placeholder, with.clone()));
+                replacements.push((*consumed, Vec::new()));
+            }
             Repoint::TypeOf {
                 placeholder,
                 argument,
@@ -126,7 +262,11 @@ pub(super) fn specialize(
 }
 
 /// Every marker of `node` and what `arguments` make of it.
-fn plan(node: &MethodNode, arguments: &ReifiedArguments) -> Result<Vec<Marker>, InlineError> {
+fn plan(
+    node: &MethodNode,
+    arguments: &ReifiedArguments,
+    enum_entries: &mut dyn EnumEntriesReads,
+) -> Result<Vec<Marker>, InlineError> {
     let mut markers = Vec::new();
 
     for (call, entry) in node.nodes.iter().enumerate() {
@@ -171,6 +311,20 @@ fn plan(node: &MethodNode, arguments: &ReifiedArguments) -> Result<Vec<Marker>, 
             }
         } else if mode == CATCH_MARKER {
             catch_repoint(node, operation, name_instruction, argument, arguments)?
+        } else if mode == ENUM_MARKER {
+            let erased = enum_operation(node, call).ok_or(InlineError::MalformedReifiedMarker)?;
+            match arguments.classes.get(argument) {
+                Some(ReifiedArgument::Class {
+                    internal,
+                    classifier,
+                    ..
+                }) => enum_repoint(erased, internal, *classifier, enum_entries)?,
+                Some(ReifiedArgument::Forwarded { name, nullable }) => Repoint::Forwarded {
+                    name_instruction,
+                    name: forwarded_marker_name(name, *nullable, argument),
+                },
+                None => return Err(InlineError::MissingReifiedArgument(argument.to_owned())),
+            }
         } else {
             let target = (call + 1..node.nodes.len())
                 .find(|&at| is_type_bearing(node.nodes.get(at)))
@@ -185,6 +339,7 @@ fn plan(node: &MethodNode, arguments: &ReifiedArguments) -> Result<Vec<Marker>, 
                     nullable,
                     intrinsic,
                     rendered,
+                    ..
                 }) => Repoint::Class {
                     instruction: target,
                     mode,
@@ -521,6 +676,7 @@ fn method(op: u8, owner: &str, name: &str, desc: &str) -> Insn {
 #[cfg(test)]
 mod tests {
     use crate::fx_hash::HashMap;
+    use crate::jvm::reified_arguments::NoEnumEntriesReads;
 
     use super::*;
     use crate::jvm::method_node::TryCatchBlock;
@@ -551,6 +707,7 @@ mod tests {
                 "T".to_owned(),
                 ReifiedArgument::Class {
                     internal: "java/lang/String".to_owned(),
+                    classifier: None,
                     nullable: false,
                     intrinsic: None,
                     rendered: String::new(),
@@ -559,7 +716,7 @@ mod tests {
             ..Default::default()
         };
 
-        specialize(&mut node, &arguments).expect("specializes");
+        specialize(&mut node, &arguments, &mut NoEnumEntriesReads).expect("specializes");
 
         assert!(node.nodes[..3]
             .iter()
@@ -584,6 +741,7 @@ mod tests {
                     "T".to_owned(),
                     ReifiedArgument::Class {
                         internal: "java/lang/String".to_owned(),
+                        classifier: None,
                         nullable,
                         intrinsic: None,
                         rendered: String::new(),
@@ -592,7 +750,7 @@ mod tests {
                 ..Default::default()
             };
 
-            specialize(&mut node, &arguments).expect("specializes");
+            specialize(&mut node, &arguments, &mut NoEnumEntriesReads).expect("specializes");
 
             // The first two labels a fresh method mints are the ones the check introduced.
             let mut fresh = MethodNode::new(0x0008, "isT", "(Ljava/lang/Object;)Z");
@@ -641,6 +799,7 @@ mod tests {
                 "T".to_owned(),
                 ReifiedArgument::Class {
                     internal: "kotlin/jvm/functions/Function1".to_owned(),
+                    classifier: None,
                     nullable: false,
                     intrinsic: Some(crate::ir::TypeCheckRole::SuspendFunctionOfArity(0)),
                     rendered: String::new(),
@@ -649,7 +808,7 @@ mod tests {
             ..Default::default()
         };
 
-        specialize(&mut node, &arguments).expect("specializes");
+        specialize(&mut node, &arguments, &mut NoEnumEntriesReads).expect("specializes");
 
         let mut fresh = MethodNode::new(0x0008, "isT", "(Ljava/lang/Object;)Z");
         let fail = fresh.new_label();
@@ -716,7 +875,7 @@ mod tests {
             ..Default::default()
         };
 
-        specialize(&mut node, &arguments).expect("forwards");
+        specialize(&mut node, &arguments, &mut NoEnumEntriesReads).expect("forwards");
 
         assert!(matches!(
             &node.nodes[1],
@@ -741,7 +900,7 @@ mod tests {
             ..Default::default()
         };
 
-        specialize(&mut node, &arguments).expect("specializes typeOf");
+        specialize(&mut node, &arguments, &mut NoEnumEntriesReads).expect("specializes typeOf");
 
         assert!(matches!(
             &node.nodes[3],
@@ -760,7 +919,11 @@ mod tests {
         let original = node.clone();
 
         assert_eq!(
-            specialize(&mut node, &ReifiedArguments::default()),
+            specialize(
+                &mut node,
+                &ReifiedArguments::default(),
+                &mut NoEnumEntriesReads
+            ),
             Err(InlineError::MissingReifiedArgument("T".to_owned())),
         );
         assert_eq!(node, original);
@@ -781,8 +944,194 @@ mod tests {
         let original = node.clone();
 
         assert_eq!(
-            specialize(&mut node, &ReifiedArguments::default()),
+            specialize(
+                &mut node,
+                &ReifiedArguments::default(),
+                &mut NoEnumEntriesReads
+            ),
             Err(InlineError::MalformedReifiedMarker),
+        );
+        assert_eq!(node, original);
+    }
+
+    fn concrete_enum() -> ReifiedArguments {
+        ReifiedArguments {
+            classes: HashMap::from_iter([(
+                "T".to_owned(),
+                ReifiedArgument::Class {
+                    internal: "Color".to_owned(),
+                    classifier: Some(crate::types::type_name("Color")),
+                    nullable: false,
+                    intrinsic: None,
+                    rendered: String::new(),
+                },
+            )]),
+            ..Default::default()
+        }
+    }
+
+    /// A mode-5 marker followed by the erased `enumValueOf` form, ending with `call`.
+    fn enum_value_of(call: Insn) -> MethodNode {
+        let mut node = MethodNode::new(0x0008, "parsed", "(Ljava/lang/String;)Ljava/lang/Enum;");
+        node.nodes = marker("T", ENUM_MARKER);
+        node.nodes.extend([
+            Node::Insn(Insn::Op(ACONST_NULL)),
+            Node::Insn(Insn::Var { op: ALOAD, slot: 0 }),
+            Node::Insn(call),
+        ]);
+        node
+    }
+
+    fn rejected_unchanged(mut node: MethodNode) {
+        let original = node.clone();
+        assert_eq!(
+            specialize(&mut node, &concrete_enum(), &mut NoEnumEntriesReads),
+            Err(InlineError::MalformedReifiedMarker),
+        );
+        assert_eq!(node, original);
+    }
+
+    #[test]
+    fn the_canonical_enum_value_of_becomes_the_enum_s_own_value_of() {
+        let mut node = enum_value_of(method(INVOKESTATIC, ENUM, "valueOf", ERASED_VALUE_OF));
+        specialize(&mut node, &concrete_enum(), &mut NoEnumEntriesReads).expect("specializes");
+        assert_eq!(
+            node.nodes[3..],
+            [
+                Node::Insn(Insn::Var { op: ALOAD, slot: 0 }),
+                Node::Insn(method(
+                    INVOKESTATIC,
+                    "Color",
+                    "valueOf",
+                    "(Ljava/lang/String;)LColor;"
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_enum_value_of_with_another_owner_is_malformed() {
+        rejected_unchanged(enum_value_of(method(
+            INVOKESTATIC,
+            "Color",
+            "valueOf",
+            ERASED_VALUE_OF,
+        )));
+    }
+
+    #[test]
+    fn an_enum_value_of_with_another_descriptor_is_malformed() {
+        rejected_unchanged(enum_value_of(method(
+            INVOKESTATIC,
+            ENUM,
+            "valueOf",
+            "(Ljava/lang/String;)Ljava/lang/Enum;",
+        )));
+    }
+
+    #[test]
+    fn an_interface_enum_value_of_is_malformed() {
+        let Insn::Method {
+            op,
+            owner,
+            name,
+            desc,
+            ..
+        } = method(INVOKESTATIC, ENUM, "valueOf", ERASED_VALUE_OF)
+        else {
+            unreachable!()
+        };
+        rejected_unchanged(enum_value_of(Insn::Method {
+            op,
+            owner,
+            name,
+            desc,
+            interface: true,
+        }));
+    }
+
+    #[test]
+    fn an_enum_values_array_of_another_class_is_malformed() {
+        let mut node = MethodNode::new(0x0008, "all", "()[Ljava/lang/Enum;");
+        node.nodes = marker("T", ENUM_MARKER);
+        node.nodes.extend([
+            Node::Insn(Insn::Op(ICONST_0)),
+            Node::Insn(Insn::Type {
+                op: ANEWARRAY,
+                class: "java/lang/Object".to_owned(),
+            }),
+        ]);
+        rejected_unchanged(node);
+    }
+
+    /// A mode-5 marker followed by `aconst_null; checkcast class`.
+    fn enum_entries_of(class: &str) -> MethodNode {
+        let mut node = MethodNode::new(0x0008, "listed", "()Ljava/util/List;");
+        node.nodes = marker("T", ENUM_MARKER);
+        node.nodes.extend([
+            Node::Insn(Insn::Op(ACONST_NULL)),
+            Node::Insn(Insn::Type {
+                op: CHECKCAST,
+                class: class.to_owned(),
+            }),
+        ]);
+        node
+    }
+
+    #[test]
+    fn an_enum_entries_cast_to_another_class_is_malformed() {
+        rejected_unchanged(enum_entries_of("java/util/List"));
+    }
+
+    /// Answers every entries read with one accessor and records the identity it was asked about.
+    struct RecordedAccessor(Vec<(crate::types::TypeName, String)>);
+
+    impl EnumEntriesReads for RecordedAccessor {
+        fn entries(
+            &mut self,
+            classifier: crate::types::TypeName,
+            internal: &str,
+        ) -> Option<EnumEntriesRead> {
+            self.0.push((classifier, internal.to_owned()));
+            Some(EnumEntriesRead::Accessor {
+                owner: "Color".to_owned(),
+                name: "getEntries".to_owned(),
+                descriptor: format!("()L{ENUM_ENTRIES};"),
+            })
+        }
+    }
+
+    #[test]
+    fn enum_entries_call_the_accessor_the_classifier_s_declaration_publishes() {
+        let mut node = enum_entries_of(ENUM_ENTRIES);
+        let mut reads = RecordedAccessor(Vec::new());
+        specialize(&mut node, &concrete_enum(), &mut reads).expect("specializes");
+        assert_eq!(
+            reads.0,
+            [(crate::types::type_name("Color"), "Color".to_owned())]
+        );
+        assert_eq!(
+            node.nodes[3..],
+            [Node::Insn(method(
+                INVOKESTATIC,
+                "Color",
+                "getEntries",
+                &format!("()L{ENUM_ENTRIES};")
+            ))]
+        );
+    }
+
+    #[test]
+    fn enum_entries_of_an_argument_without_a_classifier_are_refused() {
+        let mut node = enum_entries_of(ENUM_ENTRIES);
+        let original = node.clone();
+        let mut arguments = concrete_enum();
+        if let Some(ReifiedArgument::Class { classifier, .. }) = arguments.classes.get_mut("T") {
+            *classifier = None;
+        }
+        assert_eq!(
+            specialize(&mut node, &arguments, &mut RecordedAccessor(Vec::new())),
+            Err(InlineError::UnknownEnumEntries("Color".to_owned())),
         );
         assert_eq!(node, original);
     }
@@ -793,6 +1142,7 @@ mod tests {
                 "E".to_owned(),
                 ReifiedArgument::Class {
                     internal: "ChildFailure".to_owned(),
+                    classifier: None,
                     nullable: false,
                     intrinsic: None,
                     rendered: String::new(),
@@ -841,7 +1191,7 @@ mod tests {
     #[test]
     fn a_concrete_catch_argument_repoints_the_exception_table_and_erases_the_marker() {
         let mut node = catch_handler("E");
-        specialize(&mut node, &child_failure()).expect("specializes");
+        specialize(&mut node, &child_failure(), &mut NoEnumEntriesReads).expect("specializes");
 
         assert_eq!(
             node.try_catch_blocks[0].catch_type.as_deref(),
@@ -875,7 +1225,7 @@ mod tests {
             ..Default::default()
         };
 
-        specialize(&mut node, &arguments).expect("forwards");
+        specialize(&mut node, &arguments, &mut NoEnumEntriesReads).expect("forwards");
 
         assert!(matches!(
             &node.nodes[3],
@@ -914,7 +1264,7 @@ mod tests {
             catch_type: Some("java/lang/Throwable".to_owned()),
         }];
 
-        specialize(&mut node, &child_failure()).expect("specializes");
+        specialize(&mut node, &child_failure(), &mut NoEnumEntriesReads).expect("specializes");
 
         assert_eq!(
             node.try_catch_blocks[0].catch_type.as_deref(),
@@ -938,7 +1288,7 @@ mod tests {
         let original = node.clone();
 
         assert_eq!(
-            specialize(&mut node, &child_failure()),
+            specialize(&mut node, &child_failure(), &mut NoEnumEntriesReads),
             Err(InlineError::MalformedReifiedMarker),
         );
         assert_eq!(node, original);
@@ -951,7 +1301,7 @@ mod tests {
         let original = node.clone();
 
         assert_eq!(
-            specialize(&mut node, &child_failure()),
+            specialize(&mut node, &child_failure(), &mut NoEnumEntriesReads),
             Err(InlineError::MalformedReifiedMarker),
         );
         assert_eq!(node, original);
@@ -965,7 +1315,7 @@ mod tests {
         let original = node.clone();
 
         assert_eq!(
-            specialize(&mut node, &child_failure()),
+            specialize(&mut node, &child_failure(), &mut NoEnumEntriesReads),
             Err(InlineError::MalformedReifiedMarker),
         );
         assert_eq!(node, original);
@@ -979,7 +1329,7 @@ mod tests {
         let original = node.clone();
 
         assert_eq!(
-            specialize(&mut node, &child_failure()),
+            specialize(&mut node, &child_failure(), &mut NoEnumEntriesReads),
             Err(InlineError::MalformedReifiedMarker),
         );
         assert_eq!(node, original);
@@ -993,7 +1343,7 @@ mod tests {
         let original = node.clone();
 
         assert_eq!(
-            specialize(&mut node, &child_failure()),
+            specialize(&mut node, &child_failure(), &mut NoEnumEntriesReads),
             Err(InlineError::MalformedReifiedMarker),
         );
         assert_eq!(node, original);
@@ -1007,7 +1357,7 @@ mod tests {
         second.end = node.new_label();
         node.try_catch_blocks.insert(1, second);
 
-        specialize(&mut node, &child_failure()).expect("specializes");
+        specialize(&mut node, &child_failure(), &mut NoEnumEntriesReads).expect("specializes");
 
         assert_eq!(
             node.try_catch_blocks[0].catch_type.as_deref(),
@@ -1061,7 +1411,7 @@ mod tests {
             },
         ];
 
-        specialize(&mut node, &child_failure()).expect("specializes");
+        specialize(&mut node, &child_failure(), &mut NoEnumEntriesReads).expect("specializes");
 
         assert_eq!(
             node.try_catch_blocks[0].catch_type.as_deref(),

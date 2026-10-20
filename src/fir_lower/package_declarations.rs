@@ -8,7 +8,8 @@ use crate::fir::{
     DeclarationFlags, DeclarationId, DeclarationKind, ResolvedModuleIndex, SourceFileId,
 };
 use crate::ir::{
-    IrEntryPoint, IrFile, IrPackageFunction, IrPackageProperty, IrPackageTypeParameter, IrTypeAlias,
+    IrEntryPoint, IrFile, IrPackageFunction, IrPackageProperty, IrPackageTypeParameter,
+    IrTypeAlias, IrTypeAliasFormal,
 };
 
 use super::FirFileLoweringFailure;
@@ -275,7 +276,10 @@ pub(super) fn publish(
                         .to_owned(),
                     formals: type_parameters(index, declaration)
                         .into_iter()
-                        .map(|parameter| parameter.name)
+                        .map(|parameter| IrTypeAliasFormal {
+                            source_name: parameter.name,
+                            semantic_name: parameter.semantic_name,
+                        })
                         .collect(),
                     expansion: alias.expansion.get(),
                     visibility: header.visibility,

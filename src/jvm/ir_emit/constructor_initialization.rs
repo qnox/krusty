@@ -81,13 +81,14 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) -> usize {
         let mut debug_start = code.bytes.len();
-        for &(param_i, field_i) in &class.pre_super_param_fields {
+        // Stored in the order the constructor takes them, a local class's captures physically.
+        let mut stores = class.pre_super_param_fields.clone();
+        stores.sort_by_key(|&(param_i, _)| super::capture_order::position(self.ir, class, param_i));
+        for (param_i, field_i) in stores {
             let param_i = param_i as usize;
             let field = &class.fields[field_i as usize];
-            let param_slot = 1 + param_tys[..param_i]
-                .iter()
-                .map(|ty| slot_words(*ty))
-                .sum::<u16>();
+            // The parameter's slot is where the constructor entered it, in its physical position.
+            let param_slot = self.slots[&(param_i as u32 + 1)].0;
             code.aload(0);
             load(param_tys[param_i], param_slot, code);
             let physical_name = instance_field_jvm_name(self.ir, self.run, class, field_i as usize);

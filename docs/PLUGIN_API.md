@@ -330,6 +330,19 @@ value arguments. A test compiles the same source with kotlinc and an IR plugin t
 with its offsets, then builds krusty's IR for it in the host under the same plugin, and requires the
 two dumps to be identical.
 
+krusty builds that `ModuleIr` from checked FIR: `hosted_plugin_ir::plugin_module_ir` analyzes the
+module and runs Pass 2 with a `CheckedBodyObserver` that sees each checked body before common
+lowering consumes it. Declarations come from the parser's unit and the resolved index, statements
+and expressions from checked FIR, offsets from source spans converted to UTF-16. kotlinc's own
+conventions are kept where they differ from the syntax: a call through a receiver starts at the
+callee's name, and a member call names the member as the receiver's class sees it, a fake override
+where that class inherits it (`hashCode` through a `String` is `kotlin.String.hashCode`). A nullability
+widening is not an element of kotlinc's IR; every other conversion, and any construct the plugin IR
+does not cover yet, refuses the module with the diagnostic "compiler plugins cannot run on this code
+yet: krusty's plugin IR does not cover …", naming what it met. A second test builds a source of
+private and internal functions, every constant kind, member and extension calls on a `String`, a
+generic dependency call, and non-ASCII names in krusty and in kotlinc, and requires identical dumps.
+
 The adapter builds against every supported compiler. Where kotlinc's IR API changed between
 releases (`IrFileImpl` takes its module as a constructor argument from 2.4.20), the version-specific
 source lives under `adapter/compat/<first release>/`, and `adapter.rs` lists the exact releases each

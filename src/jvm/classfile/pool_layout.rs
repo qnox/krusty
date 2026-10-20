@@ -187,12 +187,13 @@ impl<'a> Layout<'a> {
         // Where in kotlinc's visit order each entry is first named, and each method's code begins.
         let mut first_named = vec![usize::MAX; count];
         let code_starts = method_code_starts(read);
+        let mut named = Reach::new(read);
         for (position, slot) in read.visit_order().enumerate() {
             let rewritten = matches!(
                 slot.holder,
                 Holder::Code(method, _) if by_method.contains_key(&method)
             );
-            for index in reached_from(read, slot.index) {
+            for &index in named.from(read, slot.index) {
                 if !std::mem::replace(&mut visited[index], true) {
                     first_named[index] = position;
                     if !rewritten {
@@ -425,12 +426,13 @@ fn orphan_anchors(
             }
         }
     };
+    let mut named = Reach::new(read);
     for (position, slot) in read.visit_order().enumerate() {
         let code = match slot.holder {
             Holder::Code(at, _) if !by_method.contains_key(&at) => Some(at),
             _ => None,
         };
-        let reached = reached_from(read, slot.index);
+        let reached = named.from(read, slot.index);
         let Some(at) = code else {
             // ASM interns a method's code entries as it writes that code, so an orphan the code
             // names first is placed right after the last entry the method names, whatever is
@@ -441,7 +443,7 @@ fn orphan_anchors(
             // A rewrite-owned entry whose first remaining use comes after that method's code is
             // interned at that later visit, not at the position of the removed instruction. This
             // includes an `InnerClasses` row retaining a holder class that CapturedVars removed.
-            for &index in &reached {
+            for &index in reached {
                 if orphaned[index]
                     && !seen[index]
                     && owner[index]
@@ -473,7 +475,7 @@ fn orphan_anchors(
         }
         in_code = true;
         header_max = 0;
-        for index in reached {
+        for &index in reached {
             if orphaned[index] && !seen[index] {
                 pending.push(index);
             } else if !seen[index] && !orphaned[index] {
@@ -489,25 +491,49 @@ fn orphan_anchors(
     anchored
 }
 
-/// `index` and every entry it names, each once.
-fn reached_from(read: &ClassSlots, index: u16) -> Vec<usize> {
-    let mut reached = Vec::new();
-    let mut seen = vec![false; read.entries.len()];
-    fn visit(read: &ClassSlots, index: u16, seen: &mut [bool], reached: &mut Vec<usize>) {
-        let at = usize::from(index);
-        if seen.get(at).copied().unwrap_or(true) {
-            return;
+/// Scratch for the entries one query names. Queries run once per slot of a class, so the entries a
+/// query has seen are stamped with its number instead of cleared or allocated per query.
+struct Reach {
+    seen: Vec<u32>,
+    query: u32,
+    reached: Vec<usize>,
+}
+
+impl Reach {
+    fn new(read: &ClassSlots) -> Self {
+        Reach {
+            seen: vec![0; read.entries.len()],
+            query: 0,
+            reached: Vec::new(),
         }
-        seen[at] = true;
-        if let Some(entry) = &read.entries[at] {
-            for component in entry.named() {
-                visit(read, component, seen, reached);
-            }
-        }
-        reached.push(at);
     }
-    visit(read, index, &mut seen, &mut reached);
-    reached
+
+    /// `index` and every entry it names, each once.
+    fn from(&mut self, read: &ClassSlots, index: u16) -> &[usize] {
+        fn visit(
+            read: &ClassSlots,
+            index: u16,
+            query: u32,
+            seen: &mut [u32],
+            reached: &mut Vec<usize>,
+        ) {
+            let at = usize::from(index);
+            match seen.get_mut(at) {
+                Some(stamp) if *stamp != query => *stamp = query,
+                _ => return,
+            }
+            if let Some(entry) = &read.entries[at] {
+                for component in entry.named() {
+                    visit(read, component, query, seen, reached);
+                }
+            }
+            reached.push(at);
+        }
+        self.query += 1;
+        self.reached.clear();
+        visit(read, index, self.query, &mut self.seen, &mut self.reached);
+        &self.reached
+    }
 }
 
 fn part_order(part: Part) -> usize {

@@ -12,3 +12,7 @@ krusty-plugin-ir = { path = "../krusty-plugin-ir" }
 sha2 = "0.11"
 # The Windows JDKs ship as zip archives; the Unix ones are tarballs that the system `tar` unpacks.
 zip = { version = "9", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+# The differential tests build a module's plugin IR with the compiler itself.
+krusty = { path = "../.." }

@@ -31,6 +31,7 @@ mod lexical_type_parameters;
 mod line_breaks;
 mod nesting;
 mod properties;
+mod qualified_type_arguments;
 mod return_labels;
 mod statements;
 mod superclass_references;
@@ -137,8 +138,9 @@ fn simple_type_ref(name: &str, span: crate::diag::Span) -> TypeRef {
         arg: None,
         targs: Vec::new(),
         span,
-        fun_params: Vec::new(),
+        fun_params: Box::new([]),
         fun_context_count: 0,
+        qualifier_arguments: Default::default(),
     }
 }
 
@@ -1581,7 +1583,12 @@ impl<'a> Parser<'a> {
     /// resolver commits the exact annotation identity for this occurrence.
     fn parse_annotation_reference(&mut self) -> (String, Span) {
         let annotation_span = self.tok().span;
-        let qname = self.parse_qualified_name();
+        let (qname, qualifier_arguments) = self.parse_annotation_name();
+        if !qualifier_arguments.is_empty() {
+            self.file
+                .annotation_qualifier_arguments
+                .insert(annotation_span.lo, qualifier_arguments);
+        }
         if !qname.is_empty() {
             let mut reference = simple_type_ref(&qname, annotation_span);
             reference.flags = reference.flags.with_annotation(true);
@@ -1607,7 +1614,6 @@ impl<'a> Parser<'a> {
                     .insert(annotation_span.lo, suppressions);
             }
         }
-        self.parse_type_args(); // `@Foo<Bar>` (rare) — real type-arg parse
         (qname, annotation_span)
     }
 
@@ -3269,7 +3275,7 @@ impl<'a> Parser<'a> {
                         // representation later; parsing must not erase the declared supertype.
                         ifaces.push(ft);
                     } else {
-                        let mut targs = ft.fun_params.clone();
+                        let mut targs = ft.fun_params.to_vec();
                         if let Some(ret) = ft.arg.as_deref() {
                             targs.push(ret.clone());
                         }
@@ -3287,6 +3293,7 @@ impl<'a> Parser<'a> {
                             span: sup_span,
                             fun_params: ft.fun_params.clone(),
                             fun_context_count: ft.fun_context_count,
+                            qualifier_arguments: Default::default(),
                         });
                     }
                     if let Some(delegation) = self.parse_interface_delegation(
@@ -3396,8 +3403,9 @@ impl<'a> Parser<'a> {
                         arg: None,
                         targs,
                         span: sup_span,
-                        fun_params: Vec::new(),
+                        fun_params: Box::new([]),
                         fun_context_count: 0,
+                        qualifier_arguments: Default::default(),
                     });
                     delegation_supertype = u32::try_from(ifaces.len() - 1).ok();
                 }
@@ -3956,8 +3964,9 @@ impl<'a> Parser<'a> {
                     arg: Some(Box::new(ret)),
                     targs: Vec::new(),
                     span,
-                    fun_params,
+                    fun_params: fun_params.into_boxed_slice(),
                     fun_context_count,
+                    qualifier_arguments: Default::default(),
                 }
             } else if let [_] = params.as_slice() {
                 // A PARENTHESIZED type used for grouping (no `->` follows the `)`), most commonly to make
@@ -3984,6 +3993,7 @@ impl<'a> Parser<'a> {
             }
         } else if self.at(TokenKind::Ident) {
             let mut name = self.text().to_string();
+            let mut segment = 0;
             self.bump();
             // A qualified type name — a nested class `Outer.Inner` (registered as `Outer.Inner`) or a
             // package-qualified type (`kotlin.reflect.KClass`). Consume the dotted path.
@@ -3997,10 +4007,12 @@ impl<'a> Parser<'a> {
                 name.push('.');
                 name.push_str(self.text());
                 self.bump();
+                segment += 1;
             }
             // Every classifier uses the same type-argument structure. Projection semantics belong to
             // resolution; the parser retains exactly what was written.
-            let mut targs = self.parse_type_args();
+            let mut qualifier_arguments = Vec::new();
+            let mut targs = self.parse_segment_type_arguments(segment, &mut qualifier_arguments);
             let arg = None;
             // A generic-qualified nested type `Outer<A>.Inner<B>.Innermost<C>`: the dotted-path loop
             // above stops at the `<` after `Outer`, so continue consuming `.Nested` segments. The
@@ -4017,14 +4029,14 @@ impl<'a> Parser<'a> {
                 name.push('.');
                 name.push_str(self.text());
                 self.bump(); // nested type name
-                let mut segment_targs = if self.at(TokenKind::Lt) {
-                    self.parse_type_args()
-                } else {
-                    Vec::new()
-                };
+                segment += 1;
+                let mut segment_targs =
+                    self.parse_segment_type_arguments(segment, &mut qualifier_arguments);
                 segment_targs.extend(targs);
                 targs = segment_targs;
             }
+            // The last segment's list is the classifier's own.
+            qualifier_arguments.retain(|list: &QualifierSegmentArguments| list.segment != segment);
             let nullable = self.eat_type_nullable(); // `T?`
             let base = TypeRef {
                 name,
@@ -4034,8 +4046,9 @@ impl<'a> Parser<'a> {
                 arg,
                 targs,
                 span,
-                fun_params: Vec::new(),
+                fun_params: Box::new([]),
                 fun_context_count: 0,
+                qualifier_arguments: qualifier_arguments.into(),
             };
             // Receiver (extension) function type `Recv.() -> R` ≡ `Function1<Recv, R>`, and
             // `Recv.(A) -> R` ≡ `Function2<Recv, A, R>`. The receiver folds in as the first function
@@ -4073,70 +4086,6 @@ impl<'a> Parser<'a> {
             return (false, true, Some(span));
         }
         (false, false, None)
-    }
-
-    /// Parse a generic type-argument list `< (variance? type | *),+ >` via the real grammar
-    /// (recursing through `parse_type`, so nested generics like `Map<K, List<V>>` parse correctly).
-    /// The arguments are returned for completeness but JVM-erased, so callers may discard them.
-    fn parse_type_args(&mut self) -> Vec<TypeRef> {
-        self.parse_type_argument_list().0
-    }
-
-    /// [`Self::parse_type_args`], also returning the span of the written `<…>` list.
-    fn parse_type_argument_list(&mut self) -> (Vec<TypeRef>, Span) {
-        let open = self.tok().span;
-        let args = self.parse_type_argument_list_contents();
-        let close = self.t[self.i.saturating_sub(1)].span;
-        (args, Span::new(open.lo, close.hi.max(open.hi)))
-    }
-
-    fn parse_type_argument_list_contents(&mut self) -> Vec<TypeRef> {
-        let mut args = Vec::new();
-        if !self.eat(TokenKind::Lt) {
-            return args;
-        }
-        self.skip_newlines();
-        while !self.at(TokenKind::Gt) && !self.at(TokenKind::Eof) {
-            let (in_projection, out_projection, projection_span) = self.skip_variance();
-            self.skip_plain_newlines();
-            if self.at(TokenKind::Star) {
-                // Star projection `<*>` — erased to `Any?`.
-                let span = self.tok().span;
-                self.bump();
-                args.push(TypeRef {
-                    name: "Any".to_string(),
-                    flags: TrFlags::default()
-                        .with_nullable(true)
-                        .with_definitely_non_null(false)
-                        // `Any?` is the correct semantic bound, while this marker retains the one
-                        // source distinction needed by erased runtime checks. Without it,
-                        // `Function1<*, *>` and `Function1<Any?, Any?>` become indistinguishable:
-                        // Kotlin permits the former in `is` and rejects the latter as erased.
-                        .with_star_projection(true),
-                    arg: None,
-                    targs: Vec::new(),
-                    span,
-                    fun_params: Vec::new(),
-                    fun_context_count: 0,
-                });
-            } else {
-                let mut argument = self.parse_type();
-                argument.set_projection(in_projection, out_projection);
-                if let Some(projection_span) = projection_span {
-                    self.file
-                        .type_projection_spans
-                        .insert(argument.span, projection_span);
-                }
-                args.push(argument);
-            }
-            self.skip_newlines();
-            if !self.eat(TokenKind::Comma) {
-                break;
-            }
-            self.skip_newlines();
-        }
-        self.expect(TokenKind::Gt, "'>'");
-        args
     }
 
     fn parse_receiver_and_declaration_name(
@@ -4206,8 +4155,9 @@ impl<'a> Parser<'a> {
                 arg: None,
                 targs: receiver_targs,
                 span: Span::new(receiver_start, receiver_hi),
-                fun_params: Vec::new(),
+                fun_params: Box::new([]),
                 fun_context_count: 0,
+                qualifier_arguments: Default::default(),
             }),
             declaration_name,
         )

@@ -77,7 +77,8 @@ pub(super) fn attach_synth_debug_tables(
     // Before Kotlin 2.4.20 an anonymous context parameter has no LVT row; since then its generated
     // reflection/assertion label names the physical constructor local too.
     let constructor_locals = crate::jvm::parameter_names::constructor_local_variables(ir, c);
-    for (argument, name) in c.ctor_args.iter().zip(constructor_locals) {
+    let arguments = c.ctor_args.iter().zip(constructor_locals).collect();
+    for (argument, name) in super::capture_order::physical(ir, c, arguments) {
         if let Some(name) = name {
             ctor_locals.push((name, local_variable_desc(argument.ty), slot));
         }
@@ -125,7 +126,7 @@ pub(super) fn attach_synth_debug_tables(
             MARKER.to_string(),
             marker_slot,
         ));
-        let acc_desc = format!("({}{MARKER})V", ctor_field_descs(c));
+        let acc_desc = format!("({}{MARKER})V", ctor_field_descs(ir, c));
         cw.set_method_debug("<init>", &acc_desc, None, &acc_locals);
     }
     // Synthesized property setters guard by the declared type's nullability, independent of the
