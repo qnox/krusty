@@ -702,11 +702,11 @@ impl Body<'_> {
         let value = self.local(REFERENCE);
         self.value(arg, any())?;
         self.code.local_tee(value);
-        match tested {
-            Ty::String => {
+        match tested.kind() {
+            TyKind::STRING => {
                 self.code.ref_test(nullable, STRING_HEAP);
             }
-            Ty::Obj(name, _) if name == crate::types::wk::any() => {
+            TyKind::Obj(name, _) if name == crate::types::wk::any() => {
                 self.code.ref_test(nullable, HeapType::Eq);
             }
             _ => match self.class_of_type(tested) {

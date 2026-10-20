@@ -25,6 +25,24 @@ pub enum TyKind {
     Intersection(TyList),
 }
 
+/// The built-in classifier types, as kinds: `TyKind::INT` is the kind of [`Ty::Int`], so a match on
+/// a kind can name them alongside its structural arms.
+impl TyKind {
+    pub const BOOLEAN: TyKind = TyKind::Obj(super::KOTLIN_BOOLEAN, TyList::EMPTY);
+    pub const BYTE: TyKind = TyKind::Obj(super::KOTLIN_BYTE, TyList::EMPTY);
+    pub const SHORT: TyKind = TyKind::Obj(super::KOTLIN_SHORT, TyList::EMPTY);
+    pub const INT: TyKind = TyKind::Obj(super::KOTLIN_INT, TyList::EMPTY);
+    pub const LONG: TyKind = TyKind::Obj(super::KOTLIN_LONG, TyList::EMPTY);
+    pub const CHAR: TyKind = TyKind::Obj(super::KOTLIN_CHAR, TyList::EMPTY);
+    pub const FLOAT: TyKind = TyKind::Obj(super::KOTLIN_FLOAT, TyList::EMPTY);
+    pub const DOUBLE: TyKind = TyKind::Obj(super::KOTLIN_DOUBLE, TyList::EMPTY);
+    pub const UBYTE: TyKind = TyKind::Obj(super::KOTLIN_UBYTE, TyList::EMPTY);
+    pub const USHORT: TyKind = TyKind::Obj(super::KOTLIN_USHORT, TyList::EMPTY);
+    pub const UINT: TyKind = TyKind::Obj(super::KOTLIN_UINT, TyList::EMPTY);
+    pub const ULONG: TyKind = TyKind::Obj(super::KOTLIN_ULONG, TyList::EMPTY);
+    pub const STRING: TyKind = TyKind::Obj(super::KOTLIN_STRING, TyList::EMPTY);
+}
+
 impl Ty {
     /// This type's outermost layer, for matching.
     pub fn kind(self) -> TyKind {
@@ -73,5 +91,7 @@ mod tests {
         assert_eq!(Ty::nullable(string).kind(), TyKind::Nullable(string));
         assert_eq!(Ty::Unit.kind(), TyKind::Unit);
         assert!(matches!(string.kind(), TyKind::Obj(_, args) if args.is_empty()));
+        assert_eq!(Ty::Int.kind(), TyKind::INT);
+        assert_eq!(Ty::String.kind(), TyKind::STRING);
     }
 }

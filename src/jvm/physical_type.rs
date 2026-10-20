@@ -270,31 +270,31 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
     }
     // Nullability is otherwise erased at the JVM-type level (a nullable reference keeps its descriptor),
     // so peel the `?` first.
-    match t.non_null() {
-        Ty::Unit => Ty::Unit,
-        Ty::Nothing => Ty::Nothing,
+    match t.non_null().kind() {
+        TyKind::Unit => Ty::Unit,
+        TyKind::Nothing => Ty::Nothing,
         // `null` has its own JVM verification type. Preserve it through slot lowering so loop and
         // resume frames describe an always-null local as `Null`, not as the unusable `Top` type.
-        Ty::Null => Ty::Null,
+        TyKind::Null => Ty::Null,
         // Bare scalar/`String` variants are already JVM types — pass through. (Checked/common-IR types
         // can arrive either as these variants or as their `Obj("kotlin/…")` spelling; both must map here.)
-        Ty::Int => Ty::Int,
-        Ty::Long => Ty::Long,
-        Ty::Short => Ty::Short,
-        Ty::Byte => Ty::Byte,
-        Ty::Boolean => Ty::Boolean,
-        Ty::Char => Ty::Char,
-        Ty::Double => Ty::Double,
-        Ty::Float => Ty::Float,
-        Ty::String => Ty::String,
+        TyKind::INT => Ty::Int,
+        TyKind::LONG => Ty::Long,
+        TyKind::SHORT => Ty::Short,
+        TyKind::BYTE => Ty::Byte,
+        TyKind::BOOLEAN => Ty::Boolean,
+        TyKind::CHAR => Ty::Char,
+        TyKind::DOUBLE => Ty::Double,
+        TyKind::FLOAT => Ty::Float,
+        TyKind::STRING => Ty::String,
         // Unsigned scalars are inline classes over the signed primitive; unboxed they ARE that primitive
         // (`UInt` = `int`, `ULong` = `long`) — same JVM slots and `istore`/`iload`/arithmetic. Unsigned
         // semantics live in the intrinsic calls (`Integer.compareUnsigned`, …) common lowering inserted.
-        Ty::UByte => Ty::Byte,
-        Ty::UShort => Ty::Short,
-        Ty::UInt => Ty::Int,
-        Ty::ULong => Ty::Long,
-        Ty::Obj(fq_name, type_args) => {
+        TyKind::UBYTE => Ty::Byte,
+        TyKind::USHORT => Ty::Short,
+        TyKind::UINT => Ty::Int,
+        TyKind::ULONG => Ty::Long,
+        TyKind::Obj(fq_name, type_args) => {
             // Arrays are regular class types the JVM backend lowers to JVM array types here. Every
             // primitive specialized array, signed and unsigned alike, goes through the one operation
             // that identifies them and the one that decides an element's width — see
@@ -343,7 +343,7 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         }
         // The JVM representation of a function type is `kotlin/jvm/functions/FunctionN`. A `suspend`
         // function type carries a trailing `Continuation` parameter, so its arity is one greater.
-        Ty::Fun(s) => Ty::obj(&crate::jvm::names::function_interface_internal_name(
+        TyKind::Fun(s) => Ty::obj(&crate::jvm::names::function_interface_internal_name(
             s.params.len() + usize::from(s.suspend),
         )),
         // JVM erasure of a type parameter: collapse `T` to its declared upper bound (which itself
@@ -351,15 +351,15 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         // concrete JVM type.
         // A nullable occurrence keeps its `?` on the bound, as kotlinc's type mapper does: `T?` over
         // `T : Int` is `Integer`, never `int`.
-        Ty::TyParam(_, bound) if t.is_nullable() => ir_ty_to_jvm(&Ty::nullable(*bound)),
-        Ty::TyParam(_, bound) => ir_ty_to_jvm(bound),
+        TyKind::TyParam(_, bound) if t.is_nullable() => ir_ty_to_jvm(&Ty::nullable(bound)),
+        TyKind::TyParam(_, bound) => ir_ty_to_jvm(&bound),
         // `T & Any` is non-null semantically, but its JVM representation is still the type
         // parameter's erased bound. Keep the original `T` intact until this backend boundary so a
         // nullable primitive bound continues to erase to its wrapper rather than its scalar.
-        Ty::DefinitelyNotNull(inner) => ir_ty_to_jvm(inner),
+        TyKind::DefinitelyNotNull(inner) => ir_ty_to_jvm(&inner),
         // A bound that already determines one carrier is published as that bound, not an
         // intersection. What remains shares one erased class, or it is `Object`.
-        Ty::Intersection(parts) => ir_ty_to_jvm(&intersection_jvm_carrier(parts.as_slice())),
+        TyKind::Intersection(parts) => ir_ty_to_jvm(&intersection_jvm_carrier(parts.as_slice())),
         _ => Ty::Error,
     }
 }

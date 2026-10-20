@@ -3813,27 +3813,27 @@ fn erased_key_ty(key: ErasedTypeKey) -> Ty {
 /// inline primitives fold to their signed representation, nullable primitives box, and type parameters
 /// erase to their bound.
 fn erased_type_key(t: Ty) -> ErasedTypeKey {
-    let key = match t {
-        u if u.is_unsigned() => u.scalar_value_repr().unwrap(),
-        Ty::String => Ty::obj("kotlin/String"),
-        Ty::Obj(n, args) if n.matches("kotlin/Array") => {
+    let key = match t.kind() {
+        _ if t.is_unsigned() => t.scalar_value_repr().unwrap(),
+        TyKind::STRING => Ty::obj("kotlin/String"),
+        TyKind::Obj(n, args) if n.matches("kotlin/Array") => {
             let e = args
                 .first()
                 .copied()
                 .unwrap_or_else(|| Ty::obj("kotlin/Any"));
             Ty::obj_args("kotlin/Array", &[erased_key_ty(erased_type_key(e))])
         }
-        Ty::Obj(n, _) => Ty::Obj(n, crate::types::TyList::EMPTY),
-        Ty::Null | Ty::Nothing | Ty::Error => Ty::obj("kotlin/Any"),
-        Ty::Fun(s) => return ErasedTypeKey::Function(s.params.len() + usize::from(s.suspend)),
-        Ty::Nullable(inner) => match *inner {
+        TyKind::Obj(n, _) => Ty::Obj(n, crate::types::TyList::EMPTY),
+        TyKind::Null | TyKind::Nothing | TyKind::Error => Ty::obj("kotlin/Any"),
+        TyKind::Fun(s) => return ErasedTypeKey::Function(s.params.len() + usize::from(s.suspend)),
+        TyKind::Nullable(inner) => match inner {
             Ty::UInt => Ty::obj("kotlin/UInt"),
             Ty::ULong => Ty::obj("kotlin/ULong"),
             other if other.boxed_ref().is_some() => other.boxed_ref().unwrap_or(other),
             other => erased_key_ty(erased_type_key(other)),
         },
-        Ty::TyParam(_, bound) => erased_key_ty(erased_type_key(*bound)),
-        other => other,
+        TyKind::TyParam(_, bound) => erased_key_ty(erased_type_key(bound)),
+        _ => t,
     };
     ErasedTypeKey::Ty(key)
 }

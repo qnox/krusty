@@ -293,26 +293,28 @@ struct FileContext<'a> {
 /// The wasm value a Kotlin type is carried as; `None` for a type with no value (`Unit`,
 /// `Nothing`).
 pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
-    Ok(Some(match ty {
-        Ty::Unit | Ty::Nothing => return Ok(None),
-        Ty::Boolean
-        | Ty::Byte
-        | Ty::Short
-        | Ty::Char
-        | Ty::Int
-        | Ty::UByte
-        | Ty::UShort
-        | Ty::UInt => ValType::I32,
-        Ty::Long | Ty::ULong => ValType::I64,
-        Ty::Float => ValType::F32,
-        Ty::Double => ValType::F64,
-        Ty::String | Ty::Null => STRING,
-        Ty::Nullable(&Ty::String) => STRING,
+    Ok(Some(match ty.kind() {
+        TyKind::Unit | TyKind::Nothing => return Ok(None),
+        TyKind::BOOLEAN
+        | TyKind::BYTE
+        | TyKind::SHORT
+        | TyKind::CHAR
+        | TyKind::INT
+        | TyKind::UBYTE
+        | TyKind::USHORT
+        | TyKind::UINT => ValType::I32,
+        TyKind::LONG | TyKind::ULONG => ValType::I64,
+        TyKind::FLOAT => ValType::F32,
+        TyKind::DOUBLE => ValType::F64,
+        TyKind::STRING | TyKind::Null => STRING,
+        TyKind::Nullable(Ty::String) => STRING,
         // Every object, interface and `Any` value, and a type parameter's: a reference the
         // frontend checked, cast to its class where one is read (see `super::super::objects`).
-        Ty::Obj(..) | Ty::TyParam(..) | Ty::DefinitelyNotNull(Ty::TyParam(..)) => REFERENCE,
-        Ty::Nullable(Ty::Obj(..) | Ty::TyParam(..)) => REFERENCE,
-        other => return Err(format!("the type `{}`", describe(other))),
+        TyKind::Obj(..) | TyKind::TyParam(..) | TyKind::DefinitelyNotNull(Ty::TyParam(..)) => {
+            REFERENCE
+        }
+        TyKind::Nullable(Ty::Obj(..) | Ty::TyParam(..)) => REFERENCE,
+        _ => return Err(format!("the type `{}`", describe(ty))),
     }))
 }
 
@@ -1574,7 +1576,8 @@ impl<'a> Body<'a> {
         let ty = self.type_of(id)?;
         self.expression(id)?;
         let function = match ty {
-            Some(Ty::String | Ty::Null | Ty::Nullable(&Ty::String)) => self.runtime.string_or_null,
+            Some(Ty::String | Ty::Null) => self.runtime.string_or_null,
+            Some(ty) if ty == Ty::nullable(Ty::String) => self.runtime.string_or_null,
             Some(Ty::Int | Ty::Short | Ty::Byte) => self.runtime.string_of_i32,
             Some(Ty::Long) => self.runtime.string_of_i64,
             Some(Ty::Char) => self.runtime.string_of_char,

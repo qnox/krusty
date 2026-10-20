@@ -39,22 +39,22 @@ pub(crate) fn render_type(reference: &TypeRef) -> String {
 }
 
 pub(crate) fn render_ty(ty: Ty) -> String {
-    match ty {
-        Ty::Int => "Int".to_string(),
-        Ty::Byte => "Byte".to_string(),
-        Ty::Short => "Short".to_string(),
-        Ty::Long => "Long".to_string(),
-        Ty::Float => "Float".to_string(),
-        Ty::Double => "Double".to_string(),
-        Ty::Boolean => "Boolean".to_string(),
-        Ty::Char => "Char".to_string(),
-        Ty::UByte => "UByte".to_string(),
-        Ty::UShort => "UShort".to_string(),
-        Ty::UInt => "UInt".to_string(),
-        Ty::ULong => "ULong".to_string(),
-        Ty::String => "String".to_string(),
-        Ty::Unit => "Unit".to_string(),
-        Ty::Obj(name, arguments) => {
+    match ty.kind() {
+        TyKind::INT => "Int".to_string(),
+        TyKind::BYTE => "Byte".to_string(),
+        TyKind::SHORT => "Short".to_string(),
+        TyKind::LONG => "Long".to_string(),
+        TyKind::FLOAT => "Float".to_string(),
+        TyKind::DOUBLE => "Double".to_string(),
+        TyKind::BOOLEAN => "Boolean".to_string(),
+        TyKind::CHAR => "Char".to_string(),
+        TyKind::UBYTE => "UByte".to_string(),
+        TyKind::USHORT => "UShort".to_string(),
+        TyKind::UINT => "UInt".to_string(),
+        TyKind::ULONG => "ULong".to_string(),
+        TyKind::STRING => "String".to_string(),
+        TyKind::Unit => "Unit".to_string(),
+        TyKind::Obj(name, arguments) => {
             let mut rendered = name
                 .render()
                 .rsplit('/')
@@ -75,10 +75,10 @@ pub(crate) fn render_ty(ty: Ty) -> String {
             }
             rendered
         }
-        Ty::Null => "Nothing?".to_string(),
-        Ty::Nothing => "Nothing".to_string(),
-        Ty::Error => "ERROR".to_string(),
-        Ty::Fun(signature) => {
+        TyKind::Null => "Nothing?".to_string(),
+        TyKind::Nothing => "Nothing".to_string(),
+        TyKind::Error => "ERROR".to_string(),
+        TyKind::Fun(signature) => {
             let suspend = if signature.suspend { "suspend " } else { "" };
             let parameters = signature
                 .params
@@ -89,22 +89,22 @@ pub(crate) fn render_ty(ty: Ty) -> String {
                 .join(", ");
             format!("{suspend}({parameters}) -> {}", render_ty(signature.ret))
         }
-        Ty::Nullable(inner) => render_nullable(*inner),
-        Ty::PlatformNullable(inner) => format!("{}!", render_ty(*inner)),
-        Ty::DefinitelyNotNull(inner) => format!("{} & Any", render_ty(*inner)),
-        Ty::Intersection(parts) => parts
+        TyKind::Nullable(inner) => render_nullable(inner),
+        TyKind::PlatformNullable(inner) => format!("{}!", render_ty(inner)),
+        TyKind::DefinitelyNotNull(inner) => format!("{} & Any", render_ty(inner)),
+        TyKind::Intersection(parts) => parts
             .iter()
             .copied()
             .map(render_ty)
             .collect::<Vec<_>>()
             .join(" & "),
-        Ty::TyParam(name, _) => name.to_string(),
-        Ty::InProjection(inner) => format!("in {}", render_ty(*inner)),
-        Ty::OutProjection(inner) => format!("out {}", render_ty(*inner)),
-        Ty::StarProjection(_) => "*".to_string(),
+        TyKind::TyParam(name, _) => name.to_string(),
+        TyKind::InProjection(inner) => format!("in {}", render_ty(inner)),
+        TyKind::OutProjection(inner) => format!("out {}", render_ty(inner)),
+        TyKind::StarProjection(_) => "*".to_string(),
         // Editor surface: a declaration the resolution engine has not resolved yet has no type to
         // show. It reaches here only while analysis is mid-flight.
-        Ty::Pending => "…".to_string(),
+        TyKind::Pending => "…".to_string(),
     }
 }
 

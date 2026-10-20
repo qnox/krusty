@@ -247,18 +247,21 @@ pub(super) fn validated(ir: &IrFile) {
 }
 
 pub(super) fn type_name_of(ty: Ty) -> String {
-    match ty {
-        Ty::Int => "Int".to_owned(),
-        Ty::Long => "Long".to_owned(),
-        Ty::Float => "Float".to_owned(),
-        Ty::Double => "Double".to_owned(),
-        Ty::Boolean => "Boolean".to_owned(),
-        Ty::String => "String".to_owned(),
-        Ty::Nothing => "Nothing".to_owned(),
-        Ty::Unit => "Unit".to_owned(),
+    match ty.kind() {
+        TyKind::INT => "Int".to_owned(),
+        TyKind::LONG => "Long".to_owned(),
+        TyKind::FLOAT => "Float".to_owned(),
+        TyKind::DOUBLE => "Double".to_owned(),
+        TyKind::BOOLEAN => "Boolean".to_owned(),
+        TyKind::STRING => "String".to_owned(),
+        TyKind::Nothing => "Nothing".to_owned(),
+        TyKind::Unit => "Unit".to_owned(),
         // Any other class without type arguments, by its qualified name (a test rendering).
-        Ty::Obj(name, arguments) if arguments.is_empty() => name.render(),
-        other => format!("{other:?}"),
+        TyKind::Obj(name, arguments) if arguments.is_empty() => name.render(),
+        _ => {
+            let other = ty;
+            format!("{other:?}")
+        }
     }
 }
 

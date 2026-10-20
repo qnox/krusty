@@ -2,6 +2,7 @@
 //! switches, and the chain of conditional branches.
 
 use super::*;
+use crate::types::TyKind;
 
 mod java_hash_map;
 mod switch;
@@ -100,10 +101,10 @@ impl Emitter<'_> {
         // Distinct reference classes meet as Object in the StackMapTable.
         if last.is_reference() {
             let internal = |ty: &Ty| -> Option<String> {
-                match *ty {
-                    Ty::String => Some("java/lang/String".to_string()),
+                match ty.kind() {
+                    TyKind::STRING => Some("java/lang/String".to_string()),
                     _ if ty.is_array() => Some(type_descriptor(*ty)),
-                    Ty::Obj(name, _) => Some(name.to_string()),
+                    TyKind::Obj(name, _) => Some(name.to_string()),
                     _ => None,
                 }
             };
