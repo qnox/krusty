@@ -18501,8 +18501,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   divergence is constant-pool/method order only). Reads/writes route statically at every level:
   the synthesized accessors, `IrExpr::GetField`/`SetField` (receiver evaluated only for effects),
   and the declared-property direct-field path (`PropertyAccess::Field { is_static }`). A pure list
-  of own-field stores needs no local (kotlinc's `ldc; putstatic` sequence); only an initializer
-  actually reading `this` materializes INSTANCE into slot 0 (`init_body_reads_this`).
+  of own-field stores needs no local (kotlinc's `ldc; putstatic` sequence). `<clinit>` holds no
+  local for the instance either: each read of `this` in an initializer or `init` block loads
+  `INSTANCE` again (`getstatic INSTANCE; pop` before an own-field access, `getstatic INSTANCE` as a
+  call receiver or argument), and a property's own initializer store, including a singleton
+  serializer's `descriptor`, loads no receiver. krusty used to store INSTANCE into slot 0 whenever
+  an initializer read `this`. Test: `tests/object_initializer_receiver_e2e.rs`.
   Local/anonymous objects and companions keep instance fields (companion static hoisting to the
   outer class is a separate, upcoming relayout).
 
