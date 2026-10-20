@@ -148,6 +148,7 @@ impl BodyFirChecker<'_> {
     /// dispatch receiver and is not.
     pub(super) fn range_literal(
         &mut self,
+        expression: ExprId,
         kind: RangeKind,
         start: ExprId,
         end: ExprId,
@@ -171,7 +172,20 @@ impl BodyFirChecker<'_> {
             start_type,
             end: end_value,
             end_type,
+            ends_inlined_call: self.selected_range_inlines(expression, kind.operator_name()),
         })
+    }
+
+    /// Whether the declaration selected for a range operator is an inline function, from its
+    /// metadata `inline` flag. kotlinc inlines `UInt.rangeTo` and its kin, so the construction that
+    /// realizes one in place ends an inlined call; a builtin `Int.rangeTo` or a non-inline `until`
+    /// is called or intrinsified and ends none.
+    pub(super) fn selected_range_inlines(&self, expression: ExprId, convention: &str) -> bool {
+        match self.info.resolved_operator_call(expression, convention) {
+            Some(ResolvedCall::Member(selected)) => selected.member.inline.can_inline(),
+            Some(ResolvedCall::Extension(selected)) => selected.callable.inline.can_inline(),
+            _ => false,
+        }
     }
 
     /// The comparison resolution selected for a counted loop over `class` when its counter is
@@ -223,6 +237,7 @@ impl BodyFirChecker<'_> {
                 end,
                 start_type,
                 end_type,
+                ..
             } if Ty::range_counter_type_for(start_type.get(), end_type.get())
                 .and_then(FirRangeCounterKind::of)
                 .is_some() =>

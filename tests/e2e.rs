@@ -1701,6 +1701,8 @@ mod value_class_object_carrier_generic_result_e2e;
 mod value_class_parameters_e2e;
 #[path = "value_class_private_member_access_e2e.rs"]
 mod value_class_private_member_access_e2e;
+#[path = "value_class_return_mangling_e2e.rs"]
+mod value_class_return_mangling_e2e;
 #[path = "value_class_secondary_constructor_default_e2e.rs"]
 mod value_class_secondary_constructor_default_e2e;
 #[path = "value_class_secondary_constructor_return_e2e.rs"]
@@ -2718,6 +2720,8 @@ mod unsigned_narrow_carrier_e2e;
 mod unsigned_property_getter_e2e;
 #[path = "unsigned_range_contains_e2e.rs"]
 mod unsigned_range_contains_e2e;
+#[path = "unsigned_range_inline_line_e2e.rs"]
+mod unsigned_range_inline_line_e2e;
 #[path = "unsigned_toplevel_e2e.rs"]
 mod unsigned_toplevel_e2e;
 #[path = "use_inline_finally_e2e.rs"]
