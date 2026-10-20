@@ -14,7 +14,7 @@ use crate::types::{type_name, TypeName};
 /// The complete ordered candidate list for one IR file. Every class writer receives the same list;
 /// `ClassWriter::finish` retains only entries referenced by that classfile.
 pub(super) struct InnerClasses {
-    specs: Vec<InnerClassSpec>,
+    specs: Vec<Rc<InnerClassSpec>>,
     paths: DeclarationPaths,
     /// The class each class declared in executable code is declared in, by internal name.
     declaring: Rc<HashMap<String, String>>,
@@ -224,7 +224,7 @@ impl InnerClasses {
             })
             .collect();
         Self {
-            specs,
+            specs: specs.into_iter().map(Rc::new).collect(),
             paths: Rc::new(paths),
             declaring: Rc::new(declaring),
             call_sites: Rc::new(call_site_regenerated_lambdas(ir)),
@@ -348,6 +348,17 @@ fn independent_capture_holders(
         if ir.foreign_inline_templates.contains(&function) {
             continue;
         }
+        // Few bodies allocate a holder, and finding a body's owner is the costly part.
+        let allocations: Vec<_> = crate::ir::value_namespace_expressions(ir, body)
+            .into_iter()
+            .filter(|&expression| {
+                matches!(ir.expr(expression), crate::ir::IrExpr::RefNew { .. })
+                    && ir.inline_copy_provenance(expression).is_none()
+            })
+            .collect();
+        if allocations.is_empty() {
+            continue;
+        }
         let owner = match crate::jvm::ir_emit::lambda_class_names::class_realized_function_location(
             ir,
             function,
@@ -367,13 +378,10 @@ fn independent_capture_holders(
                 owner
             }
         };
-        for expression in crate::ir::value_namespace_expressions(ir, body) {
+        for expression in allocations {
             let crate::ir::IrExpr::RefNew { elem, .. } = ir.expr(expression) else {
                 continue;
             };
-            if ir.inline_copy_provenance(expression).is_some() {
-                continue;
-            }
             let holder = crate::jvm::shared_captures::holder_ty(elem)
                 .obj_internal()
                 .expect("a shared-capture holder has an object identity");
@@ -842,7 +850,7 @@ mod tests {
         );
         assert_eq!(
             prepared.specs,
-            vec![
+            [
                 InnerClassSpec {
                     inner: "sample/Outer$$serializer".to_string(),
                     outer: Some("sample/Outer".to_string()),
@@ -862,6 +870,7 @@ mod tests {
                     access: 0x0019,
                 },
             ]
+            .map(Rc::new)
         );
     }
 
@@ -920,6 +929,7 @@ mod tests {
                     access: 0x0019,
                 },
             ]
+            .map(Rc::new)
         );
     }
 

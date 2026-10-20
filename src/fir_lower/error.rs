@@ -57,6 +57,8 @@ pub enum FirLoweringFailure {
         field: u32,
     },
     InvalidConstructorCaptureArgument(FirExprId),
+    /// A local class's capture order is not a permutation of its capture fields.
+    InvalidCaptureOrder(crate::fir::DeclarationId),
     MissingEnumClassifier(crate::types::TypeName),
     UnsupportedPropertyReferenceTarget,
     MissingParameter {

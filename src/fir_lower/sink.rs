@@ -5,6 +5,7 @@ use crate::fir::{
 use crate::ir::{FnParamInfo, IrFile, IrFunction};
 
 use super::{
+    body_local_ownership::{semantic_owner, SemanticOwner},
     constructors::{
         accept_constructor_body, finalize_constructor_field_indices, finalize_constructors,
         predeclare_constructors,
@@ -27,6 +28,9 @@ use super::{
     tailrec::{finish_tailrec_body, Frame as TailrecFrame},
     FileLoweringContext, FirLoweringFailure,
 };
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirFileLoweringFailure {
@@ -321,17 +325,32 @@ impl<'a> CommonIrBodySink<'a> {
         self.predeclare_functions(index)
     }
 
-    /// Consume retained Pass-1 inline FIR before any ordinary caller is accepted.
+    /// Consume retained Pass-1 inline FIR whose exact semantic owners are complete.
+    ///
+    /// The compiler invokes this before ordinary callers for already-complete declarations and
+    /// again after active Pass-2 groups for body-local owners completed there.
     pub fn accept_inline_bodies(
         &mut self,
         index: &ResolvedModuleIndex,
         bodies: &InlineBodyStore,
     ) -> Result<(), FirFileLoweringFailure> {
+        // A retained body-local template whose exact owner is still deferred has no common-IR
+        // callable yet; its first checked caller may materialize it through
+        // `accept_inline_dependencies` after owner publication and declaration refresh. The final
+        // source sweep materializes completed templates that had no caller.
         let mut callables = bodies
             .bodies_for_source(index, self.source)
             .into_iter()
             .map(|(callable, _)| callable)
             .chain(bodies.default_dependencies_for_source(index, self.source))
+            .filter(|callable| {
+                index.callable(*callable).is_none_or(|header| {
+                    matches!(
+                        semantic_owner(index, header.declaration),
+                        SemanticOwner::Complete(_)
+                    )
+                })
+            })
             .collect::<Vec<_>>();
         callables.sort_unstable_by_key(|callable| callable.raw());
         callables.dedup();
@@ -662,15 +681,25 @@ impl<'a> CommonIrBodySink<'a> {
         Ok(())
     }
 
-    /// Consume Pass-1 checked parameter defaults after the owning ordinary constructor/function
-    /// body has been attached. The store is drained per source, so no default FIR survives its
-    /// target file's common-lowering boundary.
+    /// Consume Pass-1 checked parameter defaults whose exact semantic owner is complete.
+    ///
+    /// Stable callable defaults are attached before ordinary bodies so tailrec lowering can expand
+    /// an omitted self-call argument into the loop step. Defaults under an incomplete body-local
+    /// classifier remain retained until its active Pass-2 group publishes that owner.
     pub fn accept_default_arguments(
         &mut self,
         index: &ResolvedModuleIndex,
+        inline_bodies: &InlineBodyStore,
         bodies: &mut crate::fir::DefaultArgumentStore,
     ) -> Result<(), FirFileLoweringFailure> {
-        for (callable, body) in bodies.take_for_source(index, self.source) {
+        let ready = bodies.take_for_source_matching(index, self.source, |_, body| {
+            let declaration = DeclarationId::from_raw(body.owner().raw());
+            matches!(
+                semantic_owner(index, declaration),
+                SemanticOwner::Complete(_)
+            )
+        });
+        for (callable, body) in ready {
             // A materialized inline template has already consumed its defaults.
             if self.materialized_inline_callables.contains(&callable) {
                 continue;
@@ -682,7 +711,7 @@ impl<'a> CommonIrBodySink<'a> {
             {
                 return Err(FirFileLoweringFailure::MissingCallable(declaration));
             }
-            self.accept_body(index, body.owner(), body)?;
+            self.accept_streamed_body(index, inline_bodies, body.owner(), body)?;
         }
         Ok(())
     }
@@ -953,12 +982,16 @@ impl<'a> CommonIrBodySink<'a> {
                     let Some(parameter) = index.type_parameter(alias, ordinal) else {
                         break;
                     };
-                    formals.push(
-                        index
+                    formals.push(crate::ir::IrTypeAliasFormal {
+                        source_name: index
                             .type_parameter_name(parameter)
                             .ok_or(FirFileLoweringFailure::UnsupportedCallableOwner(alias))?
                             .to_owned(),
-                    );
+                        semantic_name: index
+                            .type_parameter_semantic_name(parameter)
+                            .ok_or(FirFileLoweringFailure::UnsupportedCallableOwner(alias))?
+                            .to_owned(),
+                    });
                 }
                 type_aliases.push(crate::ir::IrTypeAlias {
                     name,
@@ -1230,6 +1263,10 @@ impl<'a> CommonIrBodySink<'a> {
             if index.is_suppressed_generated_callable(declaration) {
                 continue;
             }
+            let enclosing = match semantic_owner(index, declaration) {
+                SemanticOwner::Complete(enclosing) => enclosing,
+                SemanticOwner::Deferred => continue,
+            };
             let Some(callable) = index.callable_for_declaration(declaration) else {
                 if index.is_body_local_declaration(declaration) {
                     continue;
@@ -1293,7 +1330,6 @@ impl<'a> CommonIrBodySink<'a> {
                     );
                 }
             }
-            let enclosing = index.enclosing_classifier(declaration);
             let entry_class = anchor
                 .owner
                 .and_then(|owner| self.ir.checked_enum_entry_classes.get(&owner).copied());

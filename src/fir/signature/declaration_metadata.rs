@@ -2,6 +2,102 @@
 
 use super::*;
 
+/// Stable lexical ownership and the later checked-completion state for body-local classifiers.
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct BodyLocalOwnership {
+    roots: HashMap<DeclarationId, DeclarationId>,
+    completed: crate::fx_hash::HashSet<DeclarationId>,
+}
+
+impl BodyLocalOwnership {
+    pub(super) fn root(&self, declaration: DeclarationId) -> Option<DeclarationId> {
+        self.roots.get(&declaration).copied()
+    }
+
+    pub(super) fn publish_roots(&mut self, roots: HashMap<DeclarationId, DeclarationId>) {
+        assert!(
+            self.roots.is_empty(),
+            "local-classifier lexical ownership may be published only once"
+        );
+        self.roots = roots;
+    }
+
+    fn complete(&mut self, declaration: DeclarationId) {
+        self.completed.insert(declaration);
+    }
+
+    fn is_complete(&self, declaration: DeclarationId) -> bool {
+        self.completed.contains(&declaration)
+    }
+
+    pub(super) fn storage_payload_bytes(&self) -> usize {
+        self.roots.len() * (std::mem::size_of::<DeclarationId>() * 2)
+            + self.completed.len() * std::mem::size_of::<DeclarationId>()
+    }
+}
+
+/// One accessor of a property, as a key for the annotations that apply to it.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum PropertyAccessor {
+    Getter,
+    Setter,
+}
+
+/// The declaration site a set of checked annotation applications lands on. A compiler-default
+/// accessor has no declaration of its own, so an accessor site is named by its property.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum CheckedApplicationSite {
+    Declaration(DeclarationId),
+    Accessor(DeclarationId, PropertyAccessor),
+}
+
+/// Fully checked annotation applications. Values are folded against the selected annotation
+/// constructor and keyed by stable site; consumers never join them back to the identity-only
+/// header list by ordinal.
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct CheckedAnnotationApplications {
+    sites: HashMap<CheckedApplicationSite, Box<[crate::types::ResolvedAnnotation]>>,
+}
+
+impl CheckedAnnotationApplications {
+    fn get(&self, site: CheckedApplicationSite) -> &[crate::types::ResolvedAnnotation] {
+        self.sites.get(&site).map(Box::as_ref).unwrap_or_default()
+    }
+
+    fn publish(
+        &mut self,
+        site: CheckedApplicationSite,
+        annotations: impl IntoIterator<Item = crate::types::ResolvedAnnotation>,
+    ) {
+        let annotations = annotations
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        if annotations.is_empty() {
+            return;
+        }
+        assert!(
+            self.sites.insert(site, annotations).is_none(),
+            "a declaration site may publish checked annotation applications only once"
+        );
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.sites.is_empty()
+    }
+
+    pub(super) fn storage_payload_bytes(&self) -> usize {
+        self.sites
+            .values()
+            .map(|annotations| {
+                std::mem::size_of::<CheckedApplicationSite>()
+                    + std::mem::size_of::<Box<[crate::types::ResolvedAnnotation]>>()
+                    + annotations.len() * std::mem::size_of::<crate::types::ResolvedAnnotation>()
+            })
+            .sum()
+    }
+}
+
 /// The superclass constructor a generated no-arg constructor (kotlinc's no-arg plugin) delegates
 /// to, selected by the frontend.
 ///
@@ -22,6 +118,175 @@ pub enum NoArgSuperConstructor {
 }
 
 impl ResolvedModuleIndex {
+    pub fn local_classifier_lexical_root(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<DeclarationId> {
+        self.body_local_ownership.root(declaration)
+    }
+
+    pub(in crate::fir) fn publish_local_classifier_lexical_roots(
+        &mut self,
+        roots: HashMap<DeclarationId, DeclarationId>,
+    ) {
+        self.body_local_ownership.publish_roots(roots);
+    }
+
+    pub(crate) fn is_actualized_away(&self, declaration: DeclarationId) -> bool {
+        self.actualized_away_declarations.contains(&declaration)
+    }
+
+    pub(crate) fn publish_actualized_away_declarations(
+        &mut self,
+        declarations: &crate::fx_hash::HashSet<DeclarationId>,
+    ) {
+        assert!(
+            self.actualized_away_declarations.is_empty(),
+            "actualization exclusions may be published only once",
+        );
+        assert!(
+            declarations
+                .iter()
+                .all(|declaration| self.declaration_anchor(*declaration).is_some()),
+            "an actualized-away declaration must retain a stable anchor",
+        );
+        self.actualized_away_declarations
+            .extend(declarations.iter().copied());
+    }
+
+    /// Mark exact body-local classifier groups whose checked semantic publication completed.
+    pub(crate) fn publish_body_local_owner_completions(
+        &mut self,
+        declarations: impl IntoIterator<Item = DeclarationId>,
+    ) {
+        for declaration in declarations {
+            assert!(
+                self.declaration_header(declaration).is_some_and(|header| {
+                    header.kind == DeclarationKind::Classifier
+                        && header.flags.has(DeclarationFlags::LOCAL_CLASS)
+                }),
+                "body-local owner completion requires a stable local classifier"
+            );
+            assert!(
+                self.body_local_owner_semantically_complete(declaration),
+                "body-local owner completion requires a complete semantic declaration group"
+            );
+            self.body_local_ownership.complete(declaration);
+        }
+    }
+
+    /// Whether the active lexical group for this exact local classifier completed publication.
+    pub(crate) fn body_local_owner_complete(&self, declaration: DeclarationId) -> bool {
+        self.body_local_ownership.is_complete(declaration)
+    }
+
+    /// Whether a body-local classifier and every callable in its exact lexical member group have
+    /// complete semantic headers. Generated capture storage is published after checked capture
+    /// discovery and is not part of the source declaration group.
+    pub(crate) fn body_local_owner_semantically_complete(
+        &self,
+        declaration: DeclarationId,
+    ) -> bool {
+        self.declaration_header(declaration).is_some_and(|header| {
+            header.kind == DeclarationKind::Classifier
+                && header.flags.has(DeclarationFlags::LOCAL_CLASS)
+        }) && self.declaration_semantic_header_complete(declaration)
+            && self
+                .owned_declarations(declaration)
+                .iter()
+                .copied()
+                .filter(|candidate| {
+                    self.declaration_anchor(*candidate).is_some_and(|anchor| {
+                        matches!(
+                            anchor.kind,
+                            DeclarationKind::Function
+                                | DeclarationKind::Constructor
+                                | DeclarationKind::Property
+                                | DeclarationKind::Accessor
+                        )
+                    })
+                })
+                .filter(|candidate| !self.is_suppressed_generated_callable(*candidate))
+                .filter(|candidate| {
+                    !self.declaration_header(*candidate).is_some_and(|header| {
+                        header.flags.has(DeclarationFlags::COMPILER_GENERATED)
+                            && header.kind == DeclarationKind::Property
+                    })
+                })
+                .all(|candidate| self.declaration_semantic_header_complete(candidate))
+    }
+
+    /// Whether every stable semantic record required by a declaration header is published.
+    /// Source-spelling sidecars are independent metadata and deliberately do not participate in
+    /// this lifecycle decision.
+    pub(crate) fn declaration_semantic_header_complete(&self, declaration: DeclarationId) -> bool {
+        let Some(anchor) = self.declaration_anchor(declaration) else {
+            return false;
+        };
+        match anchor.kind {
+            DeclarationKind::Classifier => {
+                self.classifier_header(declaration).is_some()
+                    && self.classifier_type_arguments(declaration).is_some()
+                    && self.classifier_hierarchy(declaration).is_some()
+                    && self.declaration_type_parameters_complete(declaration)
+            }
+            DeclarationKind::Function
+            | DeclarationKind::Constructor
+            | DeclarationKind::Accessor => {
+                self.signature(declaration).is_some()
+                    && self.callable_for_declaration(declaration).is_some()
+                    && self.declaration_type_parameters_complete(declaration)
+            }
+            DeclarationKind::Property => {
+                self.signature(declaration).is_some()
+                    && self.property_for_declaration(declaration).is_some()
+                    && self.declaration_type_parameters_complete(declaration)
+            }
+            DeclarationKind::EnumEntry
+            | DeclarationKind::TypeAlias
+            | DeclarationKind::Initializer
+            | DeclarationKind::Script => false,
+        }
+    }
+
+    /// Complete the primary-constructor parameter role of an already-published classifier
+    /// spelling record. Classifier parents, bounds, and context parameters can be demanded in
+    /// Pass 1 while the primary constructor remains body-local Pass-2 work (for example, a vararg
+    /// constructor). The empty parameter vector is the deliberate partial-state marker; no other
+    /// spelling role may be replaced here.
+    pub(crate) fn complete_classifier_primary_parameter_spellings(
+        &mut self,
+        declaration: DeclarationId,
+        parameters: Vec<crate::spelling::Spelled>,
+    ) {
+        assert_eq!(
+            self.declaration_anchor(declaration)
+                .map(|anchor| anchor.kind),
+            Some(DeclarationKind::Classifier),
+            "primary-parameter spelling completion belongs to a classifier"
+        );
+        let record = self
+            .declaration_spellings
+            .get_mut(&declaration)
+            .expect("classifier spelling completion requires its stable Pass-1 record");
+        assert!(
+            record.params.is_empty(),
+            "classifier primary-parameter spellings may be completed only once"
+        );
+        record.params = parameters;
+    }
+
+    pub(crate) fn publish_type_alias_spelling(
+        &mut self,
+        declaration: DeclarationId,
+        spelling: crate::spelling::Spelled,
+    ) {
+        self.type_aliases
+            .get_mut(&declaration)
+            .expect("a type-alias spelling requires its published semantic header")
+            .expansion_spelling = spelling;
+    }
+
     /// The position `declaration`'s continuation class takes in its scope's generated-class
     /// sequence, or `None` when the declaration is not a source `suspend` function.
     pub fn continuation_ordinal(&self, declaration: DeclarationId) -> Option<u32> {
@@ -87,10 +352,20 @@ impl ResolvedModuleIndex {
         &self,
         declaration: DeclarationId,
     ) -> &[crate::types::ResolvedAnnotation] {
-        self.declaration_applied_annotations
-            .get(&declaration)
-            .map(Box::as_ref)
-            .unwrap_or_default()
+        self.checked_annotation_applications
+            .get(CheckedApplicationSite::Declaration(declaration))
+    }
+
+    /// The checked applications on `property`'s `accessor`, whether written on the accessor or
+    /// targeted at it from the property declaration (`@get:A`, `@set:A`), in source order with the
+    /// targeted ones first.
+    pub fn property_accessor_applied_annotations(
+        &self,
+        property: DeclarationId,
+        accessor: PropertyAccessor,
+    ) -> &[crate::types::ResolvedAnnotation] {
+        self.checked_annotation_applications
+            .get(CheckedApplicationSite::Accessor(property, accessor))
     }
 
     pub fn declaration_annotation_string_arguments(
@@ -204,18 +479,21 @@ impl ResolvedModuleIndex {
         declaration: DeclarationId,
         annotations: impl IntoIterator<Item = crate::types::ResolvedAnnotation>,
     ) {
-        let annotations = annotations
-            .into_iter()
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        if annotations.is_empty() {
-            return;
-        }
-        assert!(
-            self.declaration_applied_annotations
-                .insert(declaration, annotations)
-                .is_none(),
-            "a stable declaration may publish checked annotation applications only once"
+        self.checked_annotation_applications.publish(
+            CheckedApplicationSite::Declaration(declaration),
+            annotations,
+        );
+    }
+
+    pub fn publish_property_accessor_applied_annotations(
+        &mut self,
+        property: DeclarationId,
+        accessor: PropertyAccessor,
+        annotations: impl IntoIterator<Item = crate::types::ResolvedAnnotation>,
+    ) {
+        self.checked_annotation_applications.publish(
+            CheckedApplicationSite::Accessor(property, accessor),
+            annotations,
         );
     }
 

@@ -271,7 +271,10 @@ mod tests {
         let mut members = file_members();
         members.aliases.push(TypeAliasMeta {
             name: "Boxed".to_string(),
-            formals: vec!["T".to_string()],
+            formals: vec![crate::metadata::builder::TypeAliasFormalMeta {
+                source_name: "T".to_string(),
+                semantic_name: "T".to_string(),
+            }],
             expansion: Ty::obj_args("fixture/Box", &[Ty::ty_param("T", upper)]),
             visibility: crate::types::Visibility::Public,
             expansion_spelling: Default::default(),
@@ -293,6 +296,44 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["T"]
         );
+        assert_eq!(
+            alias.expansion,
+            KotlinType::Class {
+                internal: "fixture/Box".to_string(),
+                args: vec![KotlinType::Param {
+                    name: "T".to_string(),
+                    id: crate::metadata::semantic::KotlinTypeParameterId(0),
+                    nullable: false,
+                }],
+                nullable: false,
+                shape: Default::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_alpha_renamed_type_alias_formal_is_emitted_under_its_source_name() {
+        let upper = Ty::nullable(Ty::obj("kotlin/Any"));
+        let semantic = "\0tp:fixture:0";
+        let mut members = file_members();
+        members.aliases.push(TypeAliasMeta {
+            name: "Boxed".to_string(),
+            formals: vec![crate::metadata::builder::TypeAliasFormalMeta {
+                source_name: "T".to_string(),
+                semantic_name: semantic.to_string(),
+            }],
+            expansion: Ty::obj_args("fixture/Box", &[Ty::ty_param(semantic, upper)]),
+            visibility: crate::types::Visibility::Public,
+            expansion_spelling: Default::default(),
+            decl_order: 2,
+        });
+
+        let fragment = package_fragment(&["fixture"], &members, &[], true);
+        let package = parse_package_fragment_checked(&fragment).expect("a decodable fragment");
+        let [alias] = package.type_aliases.as_slice() else {
+            panic!("expected exactly one retained type alias");
+        };
+        assert_eq!(alias.formals[0].name, "T");
         assert_eq!(
             alias.expansion,
             KotlinType::Class {

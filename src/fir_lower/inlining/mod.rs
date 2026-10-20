@@ -2006,6 +2006,8 @@ fn specialize_checked_operation(
             substitutions,
             ..
         } => {
+            // The declared parameters name the dependency constructor's own formals, which an
+            // inline call's bindings never substitute.
             if let crate::ir::IrCheckedConstructorTarget::External { parameters, .. } = target {
                 specialize_tys(parameters, bindings);
             }

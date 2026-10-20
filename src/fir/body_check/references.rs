@@ -437,6 +437,15 @@ impl BodyFirChecker<'_> {
                     declaration,
                     classifier: constructor_owner,
                     parameters: target_parameters.clone().into_boxed_slice(),
+                    declared_parameters: constructor
+                        .constructor_declaration_params()
+                        .iter()
+                        .copied()
+                        .map(ResolvedTy::new)
+                        .collect::<Result<Box<[_]>, _>>()
+                        .map_err(|error| {
+                            self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
+                        })?,
                     annotation: None,
                 }
             } else {

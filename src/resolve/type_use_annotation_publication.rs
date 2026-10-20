@@ -107,6 +107,7 @@ pub(crate) fn publish_checked_type_use_annotations(
     for spelling in index.type_alias_spellings_mut() {
         spelling.seal(&checked, &mut unchecked);
     }
+    index.seal_deferred_declaration_spellings(&checked, &mut unchecked);
     // A missing value is an application the checker rejected, which it reported. Without such a
     // report the fragment failed to reach an application it was required to fold.
     if !diags.has_errors() {

@@ -1,0 +1,74 @@
+An application compiles after the library it depends on, each with the sources of its `src`
+directory: the library's compiled output, then its resources output, are first on the
+application's classpath, then the Maven artifacts in the order a breadth-first walk of the resolved
+graph meets them, the implicit standard library last among the direct ones.
+--- task
+:app:compileJvm
+--- project.yaml
+modules:
+  - app
+  - lib
+--- app/module.yaml
+product: jvm/app
+repositories:
+  - mavenLocal
+dependencies:
+  - ../lib
+  - org.example:app-dep:1.0
+--- app/src/main.kt
+fun main() = println(greeting() + helper())
+--- app/src/extra/Helper.kt
+fun helper() = "!"
+--- app/src/notes.txt
+not a source
+--- lib/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+--- lib/src/Greeting.kt
+fun greeting() = "hello"
+--- lib/resources/greeting.txt
+hello
+--- m2/org/example/app-dep/1.0/app-dep-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>app-dep</artifactId>
+  <version>1.0</version>
+  <dependencies>
+    <dependency><groupId>org.example</groupId><artifactId>app-dep-child</artifactId><version>2.0</version></dependency>
+  </dependencies>
+</project>
+--- m2/org/example/app-dep/1.0/app-dep-1.0.jar
+--- m2/org/example/app-dep-child/2.0/app-dep-child-2.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>app-dep-child</artifactId>
+  <version>2.0</version>
+</project>
+--- m2/org/example/app-dep-child/2.0/app-dep-child-2.0.jar
+--- krusty-argv
+-Xjdk-release=25
+-jdk-home=<directory>/jdk
+-classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-no-stdlib
+-module-name=lib
+-Xkotlin-reference-version=2.4.20
+-d
+<directory>/project/build/artifacts/CompiledJvmArtifact/libjvm/kotlin-output
+<directory>/project/lib/src/Greeting.kt
+----
+-Xjdk-release=25
+-jdk-home=<directory>/jdk
+-classpath=<directory>/project/build/artifacts/CompiledJvmArtifact/libjvm/kotlin-output:<directory>/project/build/artifacts/CompiledJvmArtifact/libjvm/resources-output:<directory>/home/.m2/repository/org/example/app-dep/1.0/app-dep-1.0.jar:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/example/app-dep-child/2.0/app-dep-child-2.0.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-no-stdlib
+-module-name=app
+-Xkotlin-reference-version=2.4.20
+-d
+<directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output
+<directory>/project/app/src/extra/Helper.kt
+<directory>/project/app/src/main.kt
+----

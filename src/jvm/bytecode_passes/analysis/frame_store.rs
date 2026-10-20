@@ -4,6 +4,10 @@
 //! they cost two allocations per node (the locals and the operand stack) and as many frees when the
 //! result is dropped, on every pass that analyzes the method. Here every frame's values sit side by
 //! side in one vector, and a node holds only where its own values start.
+//!
+//! An analysis may also leave a reached node's frame out (see [`super::analyze_kept`]): the node
+//! is then known to be reached, and asking for its frame is a bug in the pass that chose not to
+//! keep it.
 
 use super::frame::{Frame, Interpreter, Value};
 
@@ -12,7 +16,17 @@ use super::frame::{Frame, Interpreter, Value};
 pub(crate) struct Frames<V> {
     /// Every recorded frame's locals followed by its operand stack, bottom first.
     values: Vec<V>,
-    slots: Vec<Option<Slot>>,
+    slots: Vec<Entry>,
+}
+
+/// What the analysis knows of one node.
+#[derive(Clone, Copy, Debug)]
+enum Entry {
+    /// No path reaches the node.
+    Unreached,
+    /// A path reaches the node, and the analysis did not keep its frame.
+    Reached,
+    Recorded(Slot),
 }
 
 /// Where a node's frame sits in [`Frames::values`].
@@ -46,7 +60,7 @@ impl<V: Value> Frames<V> {
     pub(super) fn new(count: usize) -> Self {
         Frames {
             values: Vec::new(),
-            slots: vec![None; count],
+            slots: vec![Entry::Unreached; count],
         }
     }
 
@@ -56,8 +70,13 @@ impl<V: Value> Frames<V> {
     }
 
     /// The frame before node `index`; `None` when no path reaches it or it is past the end.
+    /// Panics for a reached node whose frame the analysis was told not to keep.
     pub(crate) fn get(&self, index: usize) -> Option<FrameView<'_, V>> {
-        let slot = (*self.slots.get(index)?)?;
+        let slot = match *self.slots.get(index)? {
+            Entry::Unreached => return None,
+            Entry::Reached => panic!("the analysis did not keep the frame before node {index}"),
+            Entry::Recorded(slot) => slot,
+        };
         let locals_end = slot.start + slot.locals;
         Some(FrameView {
             locals: &self.values[slot.start..locals_end],
@@ -75,7 +94,20 @@ impl<V: Value> Frames<V> {
 
     /// Whether a frame was recorded before node `index`.
     pub(super) fn is_recorded(&self, index: usize) -> bool {
-        self.slots[index].is_some()
+        matches!(self.slots[index], Entry::Recorded(_))
+    }
+
+    /// Whether some path reaches node `index`, whether or not its frame was kept.
+    pub(crate) fn is_reached(&self, index: usize) -> bool {
+        !matches!(self.slots[index], Entry::Unreached)
+    }
+
+    /// Note that a path reaches node `index` without keeping its frame. A frame recorded there
+    /// earlier stays: the analysis replaces it rather than calling this.
+    pub(super) fn mark_reached(&mut self, index: usize) {
+        if let Entry::Unreached = self.slots[index] {
+            self.slots[index] = Entry::Reached;
+        }
     }
 
     /// Replace `frame`'s locals and stack with the ones recorded before node `index`, keeping its
@@ -93,7 +125,7 @@ impl<V: Value> Frames<V> {
         let start = self.values.len();
         self.values.extend_from_slice(&state.locals);
         self.values.extend_from_slice(&state.stack);
-        self.slots[index] = Some(Slot {
+        self.slots[index] = Entry::Recorded(Slot {
             start,
             locals: state.locals.len(),
             stack: state.stack.len(),
@@ -107,7 +139,9 @@ impl<V: Value> Frames<V> {
         if recorded.locals == state.locals.as_slice() && recorded.stack == state.stack.as_slice() {
             return false;
         }
-        let slot = self.slots[index].expect("the slot holds a frame");
+        let Entry::Recorded(slot) = self.slots[index] else {
+            panic!("the slot holds a frame");
+        };
         if slot.locals != state.locals.len() || slot.room < state.stack.len() {
             self.record(index, state);
             return true;
@@ -116,7 +150,7 @@ impl<V: Value> Frames<V> {
         let (locals, stack) = region.split_at_mut(slot.locals);
         locals.clone_from_slice(&state.locals);
         stack.clone_from_slice(&state.stack);
-        self.slots[index] = Some(Slot {
+        self.slots[index] = Entry::Recorded(Slot {
             stack: state.stack.len(),
             ..slot
         });
@@ -131,7 +165,9 @@ impl<V: Value> Frames<V> {
         state: &Frame<V>,
         interpreter: &mut I,
     ) -> Result<bool, String> {
-        let slot = self.slots[index].expect("the slot holds a frame");
+        let Entry::Recorded(slot) = self.slots[index] else {
+            panic!("the slot holds a frame");
+        };
         if slot.stack != state.stack.len() {
             return Err("incompatible stack heights".to_string());
         }
@@ -159,7 +195,12 @@ impl<V: Value> Frames<V> {
 /// Two analyses agree when they hold the same frame before every node, wherever each stored it.
 impl<V: Value> PartialEq for Frames<V> {
     fn eq(&self, other: &Self) -> bool {
-        self.iter().eq(other.iter())
+        self.len() == other.len()
+            && (0..self.len()).all(|index| match (self.slots[index], other.slots[index]) {
+                (Entry::Recorded(_), Entry::Recorded(_)) => self.get(index) == other.get(index),
+                (Entry::Unreached, Entry::Unreached) | (Entry::Reached, Entry::Reached) => true,
+                _ => false,
+            })
     }
 }
 

@@ -544,7 +544,11 @@ pub(super) fn finalize_constructors(
                 declaration,
             ));
         }
-        let (owner, parameters, target, external_target) = match target {
+        // Arguments map onto the selected parameters as checked at this delegation; the operand
+        // destinations retained for the target are the declaration's own parameters. A module
+        // declaration's signature is both; a dependency's generic constructor keeps `T` apart
+        // from the specialized `Money` it was selected with.
+        let (owner, parameters, declared_parameters, target, external_target) = match target {
             IrCheckedConstructorTarget::Module(callable) => {
                 let callable = index
                     .callable(callable)
@@ -557,13 +561,15 @@ pub(super) fn finalize_constructors(
                     .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?;
                 let target = module_constructor_target(index, callable.declaration)
                     .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
+                let parameters = signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect::<Vec<_>>();
                 (
                     classifier.classifier,
-                    signature
-                        .parameters
-                        .iter()
-                        .map(|parameter| parameter.get())
-                        .collect::<Vec<_>>(),
+                    parameters.clone(),
+                    parameters,
                     target,
                     None,
                 )
@@ -574,9 +580,11 @@ pub(super) fn finalize_constructors(
                 declaration,
                 classifier,
                 parameters,
+                declared_parameters,
             } => (
                 classifier,
                 parameters,
+                declared_parameters,
                 IrConstructorTarget::UNRESTRICTED_PRIMARY,
                 Some(crate::ir::IrExternalConstructorTarget::unresolved(
                     declaration,
@@ -593,7 +601,12 @@ pub(super) fn finalize_constructors(
         };
         let (mut arguments, default_parameters) =
             constructor_arguments(arguments, &parameters, ir, declaration, delegation_line)?;
-        let mut parameters = parameters;
+        if declared_parameters.len() != parameters.len() {
+            return Err(FirFileLoweringFailure::UnsupportedCallableOwner(
+                declaration,
+            ));
+        }
+        let mut parameters = declared_parameters;
         let outer_shift = u32::from(outer_receiver.is_some());
         if let Some((outer_receiver, outer_parameter)) = outer_receiver.zip(outer_parameter) {
             arguments.insert(0, outer_receiver);

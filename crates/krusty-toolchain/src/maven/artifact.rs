@@ -7,6 +7,7 @@ use std::hash::Hash;
 use std::path::Path;
 use std::rc::Rc;
 
+use super::coordinates::{artifact_extension, is_safe_file_name};
 use super::gradle_module::{self, Variant};
 use super::metadata::missing;
 use super::pom::Pom;
@@ -82,6 +83,11 @@ pub struct ConstraintId(u32);
 pub struct Declared {
     pub children: Vec<ArtifactId>,
     pub constraints: Vec<ConstraintId>,
+    /// The names of the files the artifact puts on the scope's classpath, in its directory of the
+    /// repository: none for a BOM, a POM-packaged artifact, or a library whose variant points at
+    /// another module (`available-at`). A file its metadata names in a way that is no file name in
+    /// that directory is a problem of the classpath, not of the dependency graph.
+    pub files: Vec<Result<String, Problem>>,
     /// Why the artifact could not be (completely) read.
     pub problems: Vec<Problem>,
     /// The artifacts reading it read too.
@@ -93,6 +99,7 @@ pub struct Declared {
 struct Read {
     children: Vec<Artifact>,
     constraints: Vec<Constraint>,
+    files: Vec<Result<String, Problem>>,
     problems: Vec<Problem>,
 }
 
@@ -246,6 +253,7 @@ impl<'a> ArtifactResolver<'a> {
                 .iter()
                 .map(|constraint| ConstraintId(self.constraints.intern(constraint)))
                 .collect(),
+            files: read.files,
             problems: read.problems,
             reads,
         });
@@ -325,6 +333,9 @@ impl<'a> ArtifactResolver<'a> {
                     is_bom: false,
                 })
                 .collect();
+            declared
+                .files
+                .extend(pom_file(&artifact.coordinates, project.packaging.as_deref()).map(Ok));
         }
         declared
     }
@@ -431,6 +442,17 @@ impl<'a> ArtifactResolver<'a> {
                     &context,
                     &mut declared.problems,
                 ));
+                for file in &variant.files {
+                    match file.as_deref().filter(|name| is_safe_file_name(name)) {
+                        Some(name) => declared.files.push(Ok(name.to_string())),
+                        None => declared.files.push(Err(in_file(format!(
+                            "A file of variant `{}` of {} names no file beside its module metadata: {}",
+                            variant.name,
+                            coordinates.pretty(None),
+                            file.as_deref().map_or("it has no `url`".to_string(), |url| format!("`{url}`"))
+                        )))),
+                    }
+                }
                 if let Some(available) = &variant.available_at {
                     if !self.blocked(&available.group, &available.module) {
                         let coordinates = Coordinates::new(
@@ -626,6 +648,23 @@ fn constraints(variant: &Variant) -> impl Iterator<Item = Constraint> + '_ {
                 version: constraint.version.clone()?,
             })
         })
+}
+
+/// The file a library read through its POM puts on a classpath: by its declared packaging type,
+/// else its POM's; none for a `pom` packaging.
+fn pom_file(coordinates: &Coordinates, packaging: Option<&str>) -> Option<String> {
+    let packaging = coordinates
+        .packaging
+        .as_deref()
+        .or(packaging)
+        .unwrap_or("jar");
+    (packaging != "pom").then(|| {
+        format!(
+            "{}.{}",
+            coordinates.file_stem(),
+            artifact_extension(packaging)
+        )
+    })
 }
 
 /// A BOM POM's constraints: its managed versions (`resolveDependenciesConstraints`).

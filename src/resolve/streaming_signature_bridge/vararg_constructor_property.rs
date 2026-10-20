@@ -32,6 +32,33 @@ pub(super) fn is_vararg(
         .is_some_and(|parameter| parameter.flags.is_property() && parameter.flags.is_vararg())
 }
 
+pub(super) fn primary_constructor_owns_vararg_property(
+    headers: &StreamedHeaderModule,
+    stub: &DeclarationStub,
+    anchor: DeclarationAnchor,
+) -> bool {
+    if stub.kind != DeclarationKind::Constructor || anchor.sibling != 0 {
+        return false;
+    }
+    let Some(owner) = anchor
+        .owner
+        .and_then(|owner| headers.syntax.declaration(owner))
+    else {
+        return false;
+    };
+    let HeaderDeclarationKind::Classifier {
+        primary_parameters, ..
+    } = owner.kind
+    else {
+        return false;
+    };
+    headers
+        .syntax
+        .parameters(primary_parameters)
+        .iter()
+        .any(|parameter| parameter.flags.is_property() && parameter.flags.is_vararg())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::diag::DiagSink;

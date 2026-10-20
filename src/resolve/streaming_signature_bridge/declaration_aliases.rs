@@ -94,6 +94,7 @@ pub(in crate::resolve) fn publish_compact_nested_aliases(
         // never the backend nested-class (`$`) relation.
         let alias = crate::resolve::signature_collection::SourceAlias {
             identity: crate::types::type_name_child(owner_identity, alias),
+            nested_in: Some((owner_identity, alias)),
             formals,
             target,
         };

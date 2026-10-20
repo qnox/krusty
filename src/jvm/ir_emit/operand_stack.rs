@@ -1,13 +1,19 @@
 //! Operand sequencing: evaluation order, spilling across operands that cannot carry the stack, and the
 //! representation adapter each consumer applies as an operand lands.
 
+use super::backend_temporaries::TemporaryLease;
+use super::call_operands::DescriptorArityMismatch;
 use super::*;
 
 /// Whether a sequence's consumer materializes each operand at its own slot type.
 #[derive(Clone, Copy)]
-enum OperandUse {
+enum OperandUse<'s> {
     /// The adapter coerces to the consumer's slot, so an erased generic result stays erased.
     Materialized,
+    /// As `Materialized`, with each operand's physical slot known before it is emitted. An erased
+    /// scalar result bound for a reference slot is consumed as the box its callee returned, as
+    /// kotlinc coerces the call's own `Object` value straight to the slot.
+    Slots(&'s [Ty]),
     /// A reference comparison consumes an erased scalar result as the box already occupying its
     /// generic `Object` slot. Other values materialize normally and scalars are boxed by the
     /// comparison's adapter.
@@ -183,6 +189,30 @@ impl Emitter<'_> {
         self.sequence_operands(default_plan, ops, code, OperandUse::Materialized, adapt);
     }
 
+    /// [`Self::emit_operands_adapted`] for a consumer whose physical slot for each operand is
+    /// `slots[i]`, so a reference slot reads an erased scalar result without unboxing it first.
+    ///
+    /// Every operand must have its slot. A count that disagrees is malformed IR, refused before
+    /// anything is pushed rather than emitted against a guessed slot.
+    pub(super) fn emit_operands_at_slots<F>(
+        &mut self,
+        default_plan: Option<(
+            u32,
+            &[crate::jvm::default_call_operands::DefaultOperandOrigin],
+        )>,
+        ops: &[u32],
+        slots: &[Ty],
+        code: &mut CodeBuilder,
+        adapt: F,
+    ) -> Result<(), DescriptorArityMismatch>
+    where
+        F: FnMut(&mut Self, Ty, &mut CodeBuilder),
+    {
+        DescriptorArityMismatch::check(None, ops.len(), slots.len())?;
+        self.sequence_operands(default_plan, ops, code, OperandUse::Slots(slots), adapt);
+        Ok(())
+    }
+
     /// Push operands into reference-comparison slots, preserving a box already returned through an
     /// erased generic boundary instead of unboxing and allocating an equivalent replacement box.
     pub(super) fn emit_reference_comparison_operands(
@@ -207,20 +237,14 @@ impl Emitter<'_> {
         )>,
         ops: &[u32],
         code: &mut CodeBuilder,
-        operand_use: OperandUse,
+        operand_use: OperandUse<'_>,
         mut adapt: F,
     ) where
         F: FnMut(&mut Self, Ty, &mut CodeBuilder),
     {
         let mut inside_run = false;
         if ops.iter().skip(1).any(|&o| self.spills_operand_prefix(o)) {
-            let temps = ops
-                .iter()
-                .map(|&o| {
-                    let source = self.emit_sequenced_operand(o, operand_use, code);
-                    self.spill_operand(o, source, code)
-                })
-                .collect::<Vec<_>>();
+            let temps = self.spill_sequenced_operands(ops, operand_use, code);
             for (operand_index, (&(slot, t, _), _)) in temps.iter().zip(ops).enumerate() {
                 self.mark_synthesized_operand_run(
                     default_plan,
@@ -240,21 +264,63 @@ impl Emitter<'_> {
                     &mut inside_run,
                     code,
                 );
-                let source = self.emit_sequenced_operand(o, operand_use, code);
+                let source = self.emit_sequenced_operand(o, operand_index, operand_use, code);
                 adapt(self, source, code);
             }
         }
+    }
+
+    /// Evaluate `ops` into fresh temporaries, in order, each emitted against its consumer's
+    /// physical slot `slots[i]` as [`Self::emit_operands_at_slots`] would push it. For a consumer
+    /// that must evaluate its operands on a clean stack before it can place them (a construction's
+    /// `new; dup`); the caller loads, adapts, and releases them with
+    /// [`Self::release_operand_spills`]. The same arity contract: a missing slot is refused before
+    /// anything is evaluated.
+    pub(super) fn spill_operands_at_slots(
+        &mut self,
+        ops: &[u32],
+        slots: &[Ty],
+        code: &mut CodeBuilder,
+    ) -> Result<Vec<(u16, Ty, TemporaryLease)>, DescriptorArityMismatch> {
+        DescriptorArityMismatch::check(None, ops.len(), slots.len())?;
+        Ok(self.spill_sequenced_operands(ops, OperandUse::Slots(slots), code))
+    }
+
+    fn spill_sequenced_operands(
+        &mut self,
+        ops: &[u32],
+        operand_use: OperandUse<'_>,
+        code: &mut CodeBuilder,
+    ) -> Vec<(u16, Ty, TemporaryLease)> {
+        ops.iter()
+            .enumerate()
+            .map(|(operand_index, &o)| {
+                let source = self.emit_sequenced_operand(o, operand_index, operand_use, code);
+                self.spill_operand(o, source, code)
+            })
+            .collect()
     }
 
     /// Emit one operand of a sequence, answering the stack type its adapter or spill receives.
     fn emit_sequenced_operand(
         &mut self,
         o: u32,
-        operand_use: OperandUse,
+        operand_index: usize,
+        operand_use: OperandUse<'_>,
         code: &mut CodeBuilder,
     ) -> Ty {
         match operand_use {
             OperandUse::Materialized => self.emit_consumed_operand(o, code),
+            OperandUse::Slots(slots) => {
+                // The entry points refuse a slot count that disagrees with the operands, so every
+                // operand has its slot. Only an operand that is not an erased scalar result bound
+                // for a reference slot takes the ordinary materialization.
+                let slot = slots[operand_index];
+                match self.emit_erased_scalar_box(o, slot, code) {
+                    Some(erased) => erased,
+                    None => self.emit_consumed_operand(o, code),
+                }
+            }
             OperandUse::ReferenceComparison => match self.erased_scalar_result(o) {
                 Some((source, slot)) => {
                     self.emit_value(source, code);

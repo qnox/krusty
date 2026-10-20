@@ -409,6 +409,15 @@ impl EmitRun {
         {
             class.add_inner_class(mappings);
         }
+        // A class that inlines a reified `enumEntries` of an enum without `getEntries()` declares
+        // its `$EntriesIntrinsicMappings` nested class.
+        if let Some(mappings) = self
+            .entries_mappings
+            .borrow()
+            .inner_class(&class.internal_name)
+        {
+            class.add_inner_class(mappings);
+        }
         let finished = class.finish_with_coroutines();
         for failure in finished.failures {
             self.set_emit_error(failure);

@@ -78,6 +78,13 @@ impl TypeInfo {
     }
 }
 
+/// The declaration that owns a property, which decides the targets its annotations may name.
+#[derive(Clone, Copy)]
+pub(super) enum PropertyAnnotationOwner {
+    File,
+    Classifier { owner_is_interface: bool },
+}
+
 #[derive(Clone, Copy)]
 enum AnnotationApplicationHost {
     Unspecified,
@@ -157,9 +164,8 @@ impl Checker<'_> {
         self.check_property_annotation_applications(
             scope,
             property,
-            "top level property without backing field or delegate",
-            "top level property with backing field",
-            false,
+            PropertyAnnotationOwner::File,
+            &|_| true,
         )
     }
 
@@ -175,25 +181,40 @@ impl Checker<'_> {
         let policy_depth = self.check_property_annotation_applications(
             scope,
             property,
-            "member property without backing field or delegate",
-            "member property with backing field",
-            owner_is_interface,
+            PropertyAnnotationOwner::Classifier { owner_is_interface },
+            &|_| true,
         );
         self.active_lexical_policies.truncate(policy_depth);
     }
 
     /// Check the applications of one property against both the resolved annotation declaration and
-    /// the semantic storage shape of their host declaration.
-    fn check_property_annotation_applications(
+    /// the semantic storage shape of their host declaration. Only the applications `include`
+    /// selects are checked; the returned depth closes the property's declaration policies.
+    pub(super) fn check_property_annotation_applications(
         &mut self,
         scope: &CheckerScope<'_>,
         property: &PropDecl,
-        fieldless_description: &'static str,
-        field_description: &'static str,
-        owner_forbids_fields: bool,
+        owner: PropertyAnnotationOwner,
+        include: &dyn Fn(&AnnotationRef) -> bool,
     ) -> usize {
-        let policy_depth =
-            self.push_declaration_policies(scope, &property.annotations, &property.annotation_args);
+        let (fieldless_description, field_description, owner_forbids_fields) = match owner {
+            PropertyAnnotationOwner::File => (
+                "top level property without backing field or delegate",
+                "top level property with backing field",
+                false,
+            ),
+            PropertyAnnotationOwner::Classifier { owner_is_interface } => (
+                "member property without backing field or delegate",
+                "member property with backing field",
+                owner_is_interface,
+            ),
+        };
+        let policy_depth = self.push_selected_declaration_policies(
+            scope,
+            &property.annotations,
+            &property.annotation_args,
+            include,
+        );
         // The parser hoists a `companion { ... }` property as a classifier-associated extension,
         // but an initialized/lateinit/explicit-field declaration still owns static storage on the
         // declaring classifier. Validate its `@field:` site from that semantic storage shape, not
@@ -205,6 +226,9 @@ impl Checker<'_> {
         let has_backing_field = !owner_forbids_fields
             && (crate::ast::has_backing_field(property) || companion_block_storage);
         for (annotation, arguments) in property.annotations.iter().zip(&property.annotation_args) {
+            if !include(annotation) {
+                continue;
+            }
             self.check_annotation_application_for_host(
                 scope,
                 annotation,
@@ -235,13 +259,34 @@ impl Checker<'_> {
         parameter: &crate::ast::PropParam,
         owner_is_annotation: bool,
     ) {
-        let policy_depth = self.push_declaration_policies(
+        self.check_selected_constructor_parameter_annotations(
+            scope,
+            parameter,
+            owner_is_annotation,
+            &|_| true,
+        );
+    }
+
+    /// [`Self::check_constructor_parameter_annotations`] for only the applications `include`
+    /// selects.
+    pub(super) fn check_selected_constructor_parameter_annotations(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        parameter: &crate::ast::PropParam,
+        owner_is_annotation: bool,
+        include: &dyn Fn(&AnnotationRef) -> bool,
+    ) {
+        let policy_depth = self.push_selected_declaration_policies(
             scope,
             &parameter.annotations,
             &parameter.annotation_args,
+            include,
         );
         for (annotation, arguments) in parameter.annotations.iter().zip(&parameter.annotation_args)
         {
+            if !include(annotation) {
+                continue;
+            }
             let host = if parameter.is_property {
                 AnnotationApplicationHost::Property {
                     declaration_target: "value parameter",
@@ -369,8 +414,14 @@ impl Checker<'_> {
                 arg: None,
                 targs: Vec::new(),
                 span: annotation.span,
-                fun_params: Vec::new(),
+                fun_params: Box::new([]),
                 fun_context_count: 0,
+                qualifier_arguments: self
+                    .file
+                    .annotation_qualifier_arguments
+                    .get(&annotation.span.lo)
+                    .map(|arguments| arguments.clone().into())
+                    .unwrap_or_default(),
             };
             self.type_ref_ty_reported(scope, &reference)
                 .kotlin_class_internal()?

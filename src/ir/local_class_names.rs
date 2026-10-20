@@ -296,11 +296,13 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &HashMap<TypeNam
             if let super::IrCheckedConstructorTarget::External {
                 classifier,
                 parameters,
+                declared_parameters,
                 ..
             } = target
             {
                 name(classifier, names);
                 tys(parameters, names);
+                tys(declared_parameters, names);
             }
             if let Some(outer) = outer_parameter {
                 *outer = ty(*outer, names);

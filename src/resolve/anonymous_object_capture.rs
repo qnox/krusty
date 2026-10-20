@@ -47,6 +47,10 @@ pub struct AnonymousObjectCapture {
     /// construction site. This is a bounded-checker coordinate, not a source location; checked FIR
     /// consumes it while the active lexical scopes still exist.
     pub(crate) lexical_shadow_depth: u32,
+    /// Lexical identity of the captured value's binding: two same-named values (a shadowing local
+    /// and the context value it hides) are two captures with distinct identities. Absent for a
+    /// receiver, and for a value that is not a function-local binding.
+    pub(crate) lexical_binding: Option<u32>,
     /// Semantic closure field forwarded by this capture. Direct captures leave this absent and
     /// establish their own identity when checked; transitive captures preserve the upstream field.
     pub(crate) capture_dependency: Option<crate::fir::ClassCaptureIdentity>,
@@ -167,6 +171,8 @@ pub(super) struct AnonymousCaptureCandidate {
     pub(super) receiver_label: Option<Box<str>>,
     pub(super) receiver: Option<crate::fir::FirCapturedReceiver>,
     pub(super) semantic_receiver: Option<AnonymousObjectReceiverSource>,
+    /// Lexical identity of a function-local value's binding.
+    pub(super) lexical_binding: Option<u32>,
     /// Exact live checker-scope identity when this candidate is a receiver. It exists only long
     /// enough to project a direct nested anonymous object's use onto this class's capture field.
     pub(super) receiver_identity: Option<(usize, usize)>,
@@ -188,6 +194,71 @@ fn receiver_capture_source(
 }
 
 impl Checker<'_> {
+    /// Whether this construction-site receiver candidate is the enclosing instance selected for
+    /// the anonymous classifier's inner-super constructor. The selected delegation may have been
+    /// cached before receiver-use accounting starts, so this exact semantic edge is independent of
+    /// the ordinary body-use counter.
+    fn selected_anonymous_super_outer_candidate(
+        &self,
+        declaration: DeclId,
+        candidate: &AnonymousCaptureCandidate,
+    ) -> bool {
+        let Some(selected) = self.resolved_primary_ctor_delegations.get(&declaration) else {
+            return false;
+        };
+        let Some(receiver) = selected.outer_receiver.as_ref() else {
+            return false;
+        };
+        let super_outer = match &selected.target {
+            super::ResolvedCtorDelegationTarget::Super {
+                implicit_outer: Some(classifier),
+                ..
+            } => *classifier,
+            _ => return false,
+        };
+        if let Some(stable) = receiver.classifier {
+            let Some(classifier) = self
+                .resolved_index
+                .and_then(|index| index.classifier_header(stable))
+                .map(|header| header.classifier)
+            else {
+                return false;
+            };
+            if classifier != super_outer {
+                return false;
+            }
+        }
+        let Some(AnonymousObjectReceiverSource::EnclosingInstance { .. }) =
+            candidate.semantic_receiver
+        else {
+            return false;
+        };
+        candidate.ty == receiver.ty
+            && candidate.receiver_role
+                == Some(super::ReceiverDeclarationRole::EnclosingClass(super_outer))
+    }
+
+    pub(super) fn keep_anonymous_receiver(
+        &self,
+        declaration: DeclId,
+        candidate: &AnonymousCaptureCandidate,
+        receiver_identity: (usize, usize),
+        uses_before: usize,
+        extension_use: Option<(Span, usize)>,
+        finalized: &[AnonymousObjectCapture],
+    ) -> bool {
+        let semantically_used = self.implicit_receiver_identity_use_count(receiver_identity)
+            > uses_before
+            || extension_use.is_some_and(|(declaration, before)| {
+                self.extension_receiver_use_count(declaration) > before
+            });
+        semantically_used
+            || self.selected_anonymous_super_outer_candidate(declaration, candidate)
+            || finalized
+                .iter()
+                .any(|capture| capture.name == candidate.name && capture.source == candidate.source)
+    }
+
     pub(super) fn refresh_anonymous_receiver_capture_fields(
         &mut self,
         declaration: DeclId,
@@ -304,6 +375,7 @@ impl Checker<'_> {
                         },
                     ),
                     lexical_shadow_depth: 0,
+                    lexical_binding: None,
                     capture_dependency: None,
                     receiver_capture,
                     receiver_role: receiver.receiver_role,
@@ -582,9 +654,7 @@ impl Checker<'_> {
                 continue;
             }
             let Some(superclass) = self
-                .resolved_body_local_supertypes
-                .get(&nested_owner)
-                .and_then(|supertypes| supertypes.first())
+                .applied_declared_supertype(nested_owner)
                 .and_then(|supertype| supertype.kotlin_class_internal())
             else {
                 continue;
@@ -729,6 +799,7 @@ mod receiver_remap_tests {
                 depth,
             }),
             lexical_shadow_depth: 0,
+            lexical_binding: None,
             capture_dependency: None,
             receiver_capture: Some(identity),
             receiver_role: Some(role),
@@ -1123,6 +1194,7 @@ pub(super) fn record_anonymous_construction_captures(
             receiver: candidate.receiver.clone(),
             semantic_receiver: candidate.semantic_receiver,
             lexical_shadow_depth: 0,
+            lexical_binding: candidate.lexical_binding,
             capture_dependency: None,
             receiver_capture: candidate.receiver_capture,
             receiver_role: candidate.receiver_role,

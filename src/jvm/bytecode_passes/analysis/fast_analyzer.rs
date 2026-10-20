@@ -96,6 +96,24 @@ pub(crate) fn analyze_with<I: Interpreter, E: Executor<I>>(
     executor: &mut E,
     options: AnalyzerOptions,
 ) -> Result<Frames<I::V>, AnalyzerError> {
+    analyze_kept(method, owner, interpreter, executor, options, |_, _| true)
+}
+
+/// [`analyze_with`], keeping the frame only before the nodes `keep` accepts (given each node's
+/// index and the node), the merge nodes, and the nodes the walk had to queue. Every other reached
+/// node is only marked reached ([`Frames::is_reached`]). A pass that reads the frame at a few
+/// kinds of node saves recording a copy of the whole frame before every instruction of the
+/// method. The frames it keeps are the ones [`analyze_with`] gives, and the walk visits nodes in
+/// the same order, except that it may walk on past a node it does not keep with a frame that node
+/// already had, since nothing is left there to compare with.
+pub(crate) fn analyze_kept<I: Interpreter, E: Executor<I>>(
+    method: &MethodNode,
+    owner: &str,
+    interpreter: &mut I,
+    executor: &mut E,
+    options: AnalyzerOptions,
+    keep: impl Fn(usize, &Node) -> bool,
+) -> Result<Frames<I::V>, AnalyzerError> {
     let count = method.nodes.len();
     if count == 0 {
         return Ok(Frames::new(0));
@@ -145,6 +163,12 @@ pub(crate) fn analyze_with<I: Interpreter, E: Executor<I>>(
         merge_nodes: merge_nodes(method, &positions),
         fast_merge: options.fast_merge,
     };
+    let kept: Vec<bool> = method
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| keep(index, node))
+        .collect();
     // Reused for every instruction. Cloning a fresh frame per node allocated the local and stack
     // buffers again at every visit; these two keep their capacity and are copied into the store only
     // when a node's frame is new or changed. The return value never changes, so both keep the
@@ -152,58 +176,94 @@ pub(crate) fn analyze_with<I: Interpreter, E: Executor<I>>(
     let mut scratch = entry.clone();
     let mut handler_frame = entry.clone();
     work.install(0, 0, &entry, interpreter)?;
-    while let Some(index) = work.queue.pop() {
-        work.queued[index] = false;
-        let insn = match &method.nodes[index] {
-            Node::Insn(insn) if opcode(insn) != NOP => Some(insn),
-            _ => None,
-        };
-        let op = insn.map(opcode);
-        let reaches_handlers = !options.prune_exception_edges
-            || op.is_some_and(|op| (ISTORE..=ASTORE).contains(&op) || op == IINC)
-            || tcb_start[index];
-        // The stored frame is the state BEFORE this node and stays there for the result.
-        match insn {
-            None => {
-                work.frames.copy_into(index, &mut scratch);
-                work.install(index, index + 1, &scratch, interpreter)?;
+    while let Some(head) = work.queue.pop() {
+        work.queued[head] = false;
+        work.frames.copy_into(head, &mut scratch);
+        // `scratch` holds the frame before `index`. The walk goes on to the next node while that
+        // node is the one the queue would hand out next anyway (see `Worklist::continues_to`).
+        let mut index = head;
+        loop {
+            let insn = match &method.nodes[index] {
+                Node::Insn(insn) if opcode(insn) != NOP => Some(insn),
+                _ => None,
+            };
+            let op = insn.map(opcode);
+            let reaches_handlers = (!options.prune_exception_edges
+                || op.is_some_and(|op| (ISTORE..=ASTORE).contains(&op) || op == IINC)
+                || tcb_start[index])
+                && !handlers[index].is_empty();
+            // Handlers see the frame before this node, not the executed one.
+            if reaches_handlers {
+                handler_frame.locals.clone_from(&scratch.locals);
             }
-            Some(insn) => {
-                if opcode(insn) != RETURN {
-                    work.frames.copy_into(index, &mut scratch);
-                    executor.execute(&mut scratch, &At { index, insn }, interpreter)?;
-                    // A straight-line instruction has one successor. Building the successor list
-                    // allocated on every one of those, which is most of a method.
-                    if insn.falls_through()
-                        && !matches!(
-                            insn,
-                            Insn::Jump { .. }
-                                | Insn::TableSwitch { .. }
-                                | Insn::LookupSwitch { .. }
-                        )
-                    {
-                        work.install(index, index + 1, &scratch, interpreter)?;
-                    } else {
-                        let mut targets = successors(insn, index, &positions);
-                        if let Some(last) = targets.pop() {
-                            for target in targets {
-                                work.edge(index, target, &scratch, interpreter)?;
+            let mut fall_through = None;
+            match insn {
+                None => fall_through = Some(index + 1),
+                Some(insn) => {
+                    if opcode(insn) != RETURN {
+                        executor.execute(&mut scratch, &At { index, insn }, interpreter)?;
+                        // A straight-line instruction has one successor. Building the successor
+                        // list allocated on every one of those, which is most of a method.
+                        if insn.falls_through()
+                            && !matches!(
+                                insn,
+                                Insn::Jump { .. }
+                                    | Insn::TableSwitch { .. }
+                                    | Insn::LookupSwitch { .. }
+                            )
+                        {
+                            fall_through = Some(index + 1);
+                        } else {
+                            let mut targets = successors(insn, index, &positions);
+                            if let Some(last) = targets.pop() {
+                                for target in targets {
+                                    work.edge(index, target, &scratch, interpreter)?;
+                                }
+                                work.install(index, last, &scratch, interpreter)?;
                             }
-                            work.install(index, last, &scratch, interpreter)?;
                         }
                     }
                 }
             }
-        }
-        // Handlers see the stored pre-instruction frame, not the executed one.
-        if reaches_handlers {
-            for &(handler, catch_type) in &handlers[index] {
-                work.frames.copy_into(index, &mut handler_frame);
-                handler_frame.stack.clear();
-                handler_frame
-                    .stack
-                    .push(interpreter.new_exception_value(catch_type));
-                work.install(index, handler, &handler_frame, interpreter)?;
+            let mut next = None;
+            if let Some(dest) = fall_through {
+                if work.continues_to(dest) {
+                    if work.frames.is_recorded(dest) || kept[dest] {
+                        if work.install_unqueued(dest, &scratch) {
+                            next = Some(dest);
+                        }
+                    } else {
+                        work.frames.mark_reached(dest);
+                        next = Some(dest);
+                    }
+                } else {
+                    work.install(index, dest, &scratch, interpreter)?;
+                }
+            }
+            if reaches_handlers {
+                for &(handler, catch_type) in &handlers[index] {
+                    handler_frame.stack.clear();
+                    handler_frame
+                        .stack
+                        .push(interpreter.new_exception_value(catch_type));
+                    work.install(index, handler, &handler_frame, interpreter)?;
+                }
+            }
+            match next {
+                // A handler queued below `dest` must still go first.
+                Some(dest) if work.queue.lowest().is_none_or(|lowest| lowest > dest) => {
+                    index = dest;
+                }
+                Some(dest) => {
+                    // Keep what the walk would have queued.
+                    if !work.frames.is_recorded(dest) {
+                        work.frames.record(dest, &scratch);
+                    }
+                    work.queued[dest] = true;
+                    work.queue.push(dest);
+                    break;
+                }
+                None => break,
             }
         }
     }
@@ -256,6 +316,14 @@ impl Queue {
             Queue::Ordered(heap) => heap.pop().map(|std::cmp::Reverse(index)| index),
         }
     }
+
+    /// The lowest queued index, which an ordered queue hands out next.
+    fn lowest(&self) -> Option<usize> {
+        match self {
+            Queue::Stack(stack) => stack.iter().copied().min(),
+            Queue::Ordered(heap) => heap.peek().map(|std::cmp::Reverse(index)| *index),
+        }
+    }
 }
 
 struct Worklist<V> {
@@ -275,6 +343,30 @@ impl<V: super::frame::Value> Worklist<V> {
         interpreter: &mut I,
     ) -> Result<(), AnalyzerError> {
         self.install(from, to, state, interpreter)
+    }
+
+    /// Whether the walk may carry on into `dest` with the frame it holds instead of queueing it:
+    /// the queue hands out the lowest index next, and `dest` has the node before it as its only
+    /// predecessor, so taking it at once is what the queue would do as long as nothing below it
+    /// is queued when the step ends (checked then). A merge node is always installed, since its
+    /// frame meets every edge.
+    fn continues_to(&self, dest: usize) -> bool {
+        matches!(self.queue, Queue::Ordered(_))
+            && dest < self.frames.len()
+            && !self.merge_nodes[dest]
+            && !self.queued[dest]
+    }
+
+    /// Store `state` before the non-merge node `dest` the walk continues into, without queueing
+    /// it; `true` when the frame there is new or changed, which is when the queue would have
+    /// handed `dest` out again.
+    fn install_unqueued(&mut self, dest: usize, state: &Frame<V>) -> bool {
+        if self.frames.is_recorded(dest) {
+            self.frames.replace(dest, state)
+        } else {
+            self.frames.record(dest, state);
+            true
+        }
     }
 
     /// Record `state` as the frame before `dest`. A first arrival copies it into the slot. A
@@ -458,6 +550,116 @@ mod tests {
         let before_return = frames.get(7).expect("the exit is reached");
         assert_eq!(before_return.locals, vec![BasicValue::Int]);
         assert_eq!(before_return.stack, vec![BasicValue::Int]);
+    }
+
+    /// A loop with a branch inside a protected range: every kind of edge the walk carries on
+    /// past or queues.
+    fn looping_branch_in_a_handler() -> MethodNode {
+        let mut method = MethodNode::new(0x0009, "f", "(I)I");
+        method.max_locals = 2;
+        let (start, end, handler) = (method.new_label(), method.new_label(), method.new_label());
+        let (head, skip) = (method.new_label(), method.new_label());
+        method.nodes = vec![
+            Node::Label(start),
+            Node::Insn(Insn::Op(ICONST_0)),
+            Node::Insn(Insn::Var {
+                op: ISTORE,
+                slot: 1,
+            }),
+            Node::Label(head),
+            Node::Insn(Insn::Var { op: ILOAD, slot: 0 }),
+            Node::Insn(Insn::Jump {
+                op: IFEQ,
+                target: skip,
+            }),
+            Node::Insn(Insn::Op(ACONST_NULL)),
+            Node::Insn(Insn::Var {
+                op: ISTORE,
+                slot: 1,
+            }),
+            Node::Label(skip),
+            Node::Insn(Insn::Iinc { slot: 0, delta: -1 }),
+            Node::Insn(Insn::Var { op: ILOAD, slot: 0 }),
+            Node::Insn(Insn::Jump {
+                op: IFNE,
+                target: head,
+            }),
+            Node::Label(end),
+            Node::Insn(Insn::Var { op: ILOAD, slot: 0 }),
+            Node::Insn(Insn::Op(IRETURN)),
+            Node::Label(handler),
+            Node::Insn(Insn::Op(POP)),
+            Node::Insn(Insn::Op(ICONST_0)),
+            Node::Insn(Insn::Op(IRETURN)),
+            Node::Insn(Insn::Op(ICONST_1)),
+            Node::Insn(Insn::Op(IRETURN)),
+        ];
+        method.try_catch_blocks = vec![TryCatchBlock {
+            start,
+            end,
+            handler,
+            catch_type: None,
+        }];
+        method
+    }
+
+    #[test]
+    fn keeping_only_jumps_keeps_their_frames_and_every_reached_node() {
+        let method = looping_branch_in_a_handler();
+        let all = frames_of(&method);
+        let jumps = analyze_kept(
+            &method,
+            "T",
+            &mut BasicInterpreter,
+            &mut PlainFrames,
+            AnalyzerOptions::default(),
+            |_, node| matches!(node, Node::Insn(Insn::Jump { .. })),
+        )
+        .expect("the method analyzes");
+        assert_ne!(all, jumps, "the sparse analysis leaves frames out");
+        for (index, node) in method.nodes.iter().enumerate() {
+            assert_eq!(jumps.is_reached(index), all.get(index).is_some(), "{index}");
+            if matches!(node, Node::Insn(Insn::Jump { .. })) {
+                assert_eq!(jumps.get(index), all.get(index), "{index}");
+            }
+        }
+        assert!(!jumps.is_reached(method.nodes.len() - 1));
+    }
+
+    #[test]
+    fn keeping_every_frame_is_the_full_analysis() {
+        let method = looping_branch_in_a_handler();
+        let kept = analyze_kept(
+            &method,
+            "T",
+            &mut BasicInterpreter,
+            &mut PlainFrames,
+            AnalyzerOptions::default(),
+            |_, _| true,
+        )
+        .expect("the method analyzes");
+        let at_merge = kept.get(3).expect("the loop head is reached");
+        assert_eq!(
+            at_merge.locals,
+            vec![BasicValue::Int, BasicValue::Uninitialized]
+        );
+        assert_eq!(kept, frames_of(&method));
+    }
+
+    #[test]
+    #[should_panic(expected = "did not keep the frame")]
+    fn reading_a_frame_the_analysis_did_not_keep_is_a_bug() {
+        let method = looping_branch_in_a_handler();
+        let none = analyze_kept(
+            &method,
+            "T",
+            &mut BasicInterpreter,
+            &mut PlainFrames,
+            AnalyzerOptions::default(),
+            |_, _| false,
+        )
+        .expect("the method analyzes");
+        none.get(2);
     }
 
     #[test]

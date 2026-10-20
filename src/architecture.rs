@@ -803,6 +803,24 @@ mod tests {
     }
 
     #[test]
+    fn the_hosted_plugin_ir_reads_only_checked_fir_and_its_declarations() {
+        // It encodes Pass 2's checked bodies for kotlinc plugins in the plugin host: checked FIR,
+        // the declarations' syntax and resolved index, and the platform's description of a
+        // dependency. It never resolves, lowers or reaches a backend.
+        let allowed = [
+            "ast",
+            "compiler",
+            "diag",
+            "fir",
+            "frontend",
+            "libraries",
+            "types",
+        ];
+        assert_allowed_crate_modules("src/hosted_plugin_ir.rs", &allowed);
+        assert_allowed_crate_modules_in_tree("src/hosted_plugin_ir", &allowed);
+    }
+
+    #[test]
     fn frontend_tools_use_only_their_declared_frontend_handoff_dependencies() {
         assert_allowed_crate_modules("src/bin/check.rs", &["diag", "frontend"]);
         assert_allowed_crate_modules(
