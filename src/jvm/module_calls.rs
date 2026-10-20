@@ -95,22 +95,48 @@ pub(super) fn static_owner_is_jvm_interface(
             .any(|class| class.is_interface && class.fq_name_id() == owner)
 }
 
-pub(super) fn property_getter_name(property: &IrModuleProperty) -> String {
-    if property.owner_kind == Some(IrClassifierKind::Annotation) {
+/// The JVM name of a module property's accessor: the `@JvmName` that lands on it (written on the
+/// accessor or targeted with `@get:`/`@set:`), else Kotlin's accessor convention. An annotation
+/// member's getter is the member itself.
+pub(super) fn module_property_accessor_name(
+    property: &IrModuleProperty,
+    setter: bool,
+) -> Result<String, ()> {
+    if let Some(written) = module_property_written_accessor_name(property, setter)? {
+        return Ok(written.to_owned());
+    }
+    Ok(if setter {
+        crate::names::property_setter_name(&property.name)
+    } else if property.owner_kind == Some(IrClassifierKind::Annotation) {
         property.name.clone()
     } else {
         crate::names::property_getter_name(&property.name)
-    }
+    })
+}
+
+/// The `@JvmName` written for a module property's accessor, if any.
+pub(super) fn module_property_written_accessor_name(
+    property: &IrModuleProperty,
+    setter: bool,
+) -> Result<Option<&str>, ()> {
+    header_jvm_name(if setter {
+        &property.setter_annotations
+    } else {
+        &property.getter_annotations
+    })
 }
 
 fn owner_is_singleton(property: &IrModuleProperty) -> bool {
     property.owner_kind == Some(IrClassifierKind::Object)
 }
 
-fn header_jvm_name(annotations: &[crate::ir::IrHeaderAnnotation]) -> Result<Option<&str>, ()> {
+/// The JVM name a `@JvmName` among `annotations` writes: its constant string argument.
+pub(super) fn header_jvm_name(
+    annotations: &[crate::ir::IrHeaderAnnotation],
+) -> Result<Option<&str>, ()> {
     let Some(annotation) = annotations
         .iter()
-        .find(|annotation| annotation.identity.matches("kotlin/jvm/JvmName"))
+        .find(|annotation| annotation.identity == crate::types::wk::jvm_name())
     else {
         return Ok(None);
     };
@@ -129,7 +155,7 @@ pub(super) fn applied_jvm_name(
     let Some(annotation) = annotations.and_then(|annotations| {
         annotations
             .applications()
-            .find(|annotation| annotation.internal.matches("kotlin/jvm/JvmName"))
+            .find(|annotation| annotation.internal == crate::types::wk::jvm_name())
     }) else {
         return Ok(None);
     };
@@ -941,6 +967,39 @@ pub(super) fn realize(
                     Some(call)
                 }
             }
+            IrExpr::Call {
+                callee:
+                    Callee::Virtual {
+                        owner,
+                        name,
+                        descriptor,
+                        params,
+                        interface,
+                        module_target: Some(target),
+                        target: virtual_target,
+                    },
+                dispatch_receiver,
+                args,
+            } => {
+                let failure = ModuleRealizationTarget::Callable(target);
+                let callable = ir.referenced_module_callables.get(&target).ok_or(failure)?;
+                header_jvm_name(&callable.annotations)
+                    .map_err(|()| failure)?
+                    .filter(|physical| *physical != name)
+                    .map(|physical| IrExpr::Call {
+                        callee: Callee::Virtual {
+                            owner,
+                            name: physical.to_owned(),
+                            descriptor,
+                            params,
+                            interface,
+                            module_target: Some(target),
+                            target: virtual_target,
+                        },
+                        dispatch_receiver,
+                        args,
+                    })
+            }
             IrExpr::SingletonValue { classifier } => {
                 let failure = ModuleRealizationTarget::Classifier(classifier);
                 let (owner, field) =
@@ -1113,11 +1172,8 @@ fn realize_property(
         stored
     };
     let semantic = (value.is_none() && stored != ty).then_some(ty);
-    let accessor = if value.is_some() {
-        crate::names::property_setter_name(&property.name)
-    } else {
-        property_getter_name(property)
-    };
+    let accessor =
+        module_property_accessor_name(property, value.is_some()).map_err(|()| failure)?;
     if let Some(classifier) = property.owner {
         if property.owner_kind.is_none() {
             return Err(failure);

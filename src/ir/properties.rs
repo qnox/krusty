@@ -376,6 +376,12 @@ pub struct IrModuleProperty {
     /// Resolved Kotlin annotation identities. A target backend may interpret annotations in its
     /// namespace; common lowering never turns one into a physical access kind.
     pub annotations: Box<[TypeName]>,
+    /// The annotations that land on the getter, whether written on it or targeted at it with
+    /// `@get:`, with their constant string arguments. A target backend interprets the ones in its
+    /// namespace for the accessor it emits.
+    pub getter_annotations: Box<[super::IrHeaderAnnotation]>,
+    /// The annotations that land on the setter (written on it or targeted with `@set:`).
+    pub setter_annotations: Box<[super::IrHeaderAnnotation]>,
     pub flags: crate::fir::DeclarationFlags,
     /// Provider-normalized payload of a `const val`. Uses consume the value without reopening the
     /// declaration or selecting target storage by owner/spelling.
