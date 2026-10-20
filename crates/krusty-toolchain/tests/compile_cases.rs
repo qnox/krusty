@@ -218,7 +218,7 @@ fn ledger(problems: &[ExpectedDiagnostic]) -> String {
 fn every_compile_case_is_exact() {
     compiling::recorder();
     let cases = compile_cases();
-    assert_eq!(cases.len(), 15, "the cases are missing");
+    assert_eq!(cases.len(), 16, "the cases are missing");
     let mut failures = Vec::new();
     for case in &cases {
         let ran = krusty_toolchain(
@@ -496,6 +496,58 @@ fn a_rerun_leaves_no_output_of_removed_sources_or_resources() {
         assert!(!artifacts.join(gone).exists(), "{gone}");
     }
     assert!(artifacts.join("appjvm/kotlin-output").is_dir());
+}
+
+/// A plugin's resource directory is copied after the fragment's own, so its file replaces the
+/// fragment's file of the same path, as the toolchain's does.
+#[test]
+fn plugin_resources_are_copied_over_the_fragment_resources() {
+    compiling::recorder();
+    let case = case("checked-in-resources");
+    let quiet = |command: &mut Command| {
+        command.env("KRUSTY_RECORDER_FAIL", "none");
+    };
+    let first = krusty_toolchain("plugin-resources", &case, &[":app:compileJvm"], quiet);
+    assert_eq!(
+        first.output.code,
+        0,
+        "{}",
+        placed(&first.output.root, &first.output.stderr)
+    );
+    let project = first.directory.join(Resolving::PROJECT);
+    let resources_output =
+        project.join("build/artifacts/CompiledJvmArtifact/libjvm/resources-output");
+    let mut found = Vec::new();
+    files_below(&resources_output, "", &mut found);
+    assert_eq!(
+        found,
+        [(
+            "META-INF/build-info.properties".to_string(),
+            "version=1\n".to_string()
+        )]
+    );
+    std::fs::create_dir_all(project.join("lib/resources/META-INF")).unwrap();
+    std::fs::write(
+        project.join("lib/resources/META-INF/build-info.properties"),
+        "version=0\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("lib/resources/own.txt"), "own\n").unwrap();
+
+    let second = run_task(&first.directory, &project, &[":app:compileJvm"], quiet);
+    assert_eq!(second.code, 0, "{}", placed(&second.root, &second.stderr));
+    let mut found = Vec::new();
+    files_below(&resources_output, "", &mut found);
+    assert_eq!(
+        found,
+        [
+            (
+                "META-INF/build-info.properties".to_string(),
+                "version=1\n".to_string()
+            ),
+            ("own.txt".to_string(), "own\n".to_string()),
+        ]
+    );
 }
 
 #[test]

@@ -149,7 +149,10 @@ each once. The JDK is the one `JAVA_HOME` names; it must be a JDK (it has `bin/j
 version `settings.jvm.jdk.version` asks for. Artifact files and the serialization plugin come from
 the local repositories only. A module without Kotlin sources is not compiled. For each module the
 task clears its output directory, runs `KRUSTY_BIN` with the arguments, and copies the resources
-directory (`src/main/resources` in the Maven-like layout, else `resources`) to `resources-output`.
+directory (`src/main/resources` in the Maven-like layout, else `resources`), then each resource
+directory its toolchain plugins add, to `resources-output`; a file of a later directory replaces
+the same file of an earlier one, as the toolchain's does. A module whose only resources a plugin
+adds still puts `resources-output` on its dependents' classpath.
 A module is not compiled again when its inputs and its output are as its last successful
 compilation left them (`src/compile/avoidance.rs`), the check krusty's Build Tools API
 implementation makes for the toolchain: krusty fingerprints the inputs
@@ -190,17 +193,20 @@ searching `PATH`, and every task other than `compileJvm`.
 A module enables a plugin by name in `plugins:` (`<name>: enabled` or `<name>: {enabled: true}`);
 the name is that of a local plugin module the project lists in its own `plugins:`
 (`src/compile/plugins.rs`). krusty-toolchain implements the plugins whose `plugin.yaml` only adds
-Kotlin source directories of the module to its main fragment:
+Kotlin source directories and resource directories of the module to its main fragment:
 
 ```yaml
 tasks:
   declare:
     action: !org.example.declareSources
       sourceDir: ${module.rootDir}/generated-src/kotlin
+      resourceDir: ${module.rootDir}/generated-resources
 generated:
   sources:
     - language: kotlin
       directory: ${tasks.declare.action.sourceDir}
+  resources:
+    - directory: ${tasks.declare.action.resourceDir}
 ```
 
 A directory is the argument of a task's action that is `${module.rootDir}` or a plain path below
@@ -212,9 +218,9 @@ not compile the plugin module before the modules that enable it, as the toolchai
 task. It refuses, where each is written: a plugin the project does not list, plugin settings
 beyond `enabled`, `plugins` written in more than one of a module's files, `pluginInfo` in the
 plugin's module file, and everything else a `plugin.yaml` may declare (`checks`, `commands`,
-`module`, `project`, `pluginSettings`, a task's `markOutputsAs` or `taskOutputDir`, generated
-resources and cinterop definitions, generated sources in another language or for another
-fragment, and directories written any other way).
+`module`, `project`, `pluginSettings`, a task's `markOutputsAs` or `taskOutputDir`, cinterop
+definitions, generated sources in another language or for another fragment, anything but a
+`directory` on generated resources, and directories written any other way).
 
 The library's public surface is the command boundary: `model` (read a project), `configuration`,
 `compile`, `dependencies`, `diagnostic` and `show`. Discovery, the file-system inventory, YAML,

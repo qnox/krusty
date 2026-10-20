@@ -33,11 +33,12 @@ pub struct Step {
     pub arguments: Option<Vec<OsString>>,
     /// Where the last successful compilation's inputs and output are recorded (`avoidance.rs`).
     pub state: PathBuf,
-    /// Where the resources are copied. It holds exactly the resources directory's contents, and
-    /// nothing when the fragment has no resources directory.
+    /// Where the resources are copied. It holds exactly the resource directories' contents, and
+    /// nothing when the fragment has none.
     pub resources_output: PathBuf,
-    /// The fragment's resources directory, when it has one.
-    pub resources: Option<PathBuf>,
+    /// The fragment's resources directory, when it has one, then the directories of resources its
+    /// plugins add; a file of a later directory replaces the same file of an earlier one.
+    pub resources: Vec<PathBuf>,
     /// The earlier steps this one starts after: those of the modules the fragment compiles against
     /// directly, which start after the ones they compile against.
     pub waits: Vec<usize>,
@@ -135,15 +136,11 @@ pub fn plan(
         };
         let settings = main.get("settings").ok_or("a fragment without settings")?;
         let directory = header.file.parent().unwrap_or(Path::new(""));
-        let (generated, plugins_refused) = match plugins::generated_sources(
-            name,
-            directory,
-            configuration,
-            &model.project.plugins,
-        ) {
-            Ok(generated) => (generated, Vec::new()),
-            Err(refused) => (Vec::new(), refused),
-        };
+        let (generated, plugins_refused) =
+            match plugins::generated(name, directory, configuration, &model.project.plugins) {
+                Ok(generated) => (generated, Vec::new()),
+                Err(refused) => (plugins::Generated::default(), refused),
+            };
         let refused = refusals::refusals(name, configuration, main);
         let mut compiles = refused.is_empty() && plugins_refused.is_empty();
         for diagnostic in plugins_refused.into_iter().chain(refused) {
@@ -165,7 +162,7 @@ pub fn plan(
                 .and_then(|whole| whole.text_at(&["layout"]))
                 .unwrap_or_default(),
         );
-        layout.sources.extend(generated);
+        layout.sources.extend(generated.sources);
         let found = match sources::find(&layout.sources) {
             Ok(found) => found,
             Err(error) => {
@@ -193,12 +190,20 @@ pub fn plan(
         let artifacts = artifact_directory(root, name);
         let output = artifacts.join("kotlin-output");
         let resources_output = artifacts.join("resources-output");
-        let resources = layout.resources.is_dir().then(|| layout.resources.clone());
+        // The fragment's resources directory, then the plugins' resource directories, each copied
+        // over the ones before it as the toolchain does.
+        let resources: Vec<PathBuf> = layout
+            .resources
+            .is_dir()
+            .then(|| layout.resources.clone())
+            .into_iter()
+            .chain(generated.resources)
+            .collect();
         outputs.insert(
             name,
             [
                 (!found.kotlin.is_empty()).then(|| output.clone()),
-                resources.as_ref().map(|_| resources_output.clone()),
+                (!resources.is_empty()).then(|| resources_output.clone()),
             ]
             .into_iter()
             .flatten()
