@@ -80,19 +80,32 @@ fi
 
 /// The run's stand-in `java`, which the toolchain and krusty-toolchain alike run KSP with: it
 /// records its arguments as the recording krusty does, each `@file` argument replaced by the
-/// arguments the file holds, one per line.
+/// arguments the file holds, one per line. It then acts as a processor that the module's files
+/// drive (in `-project-base-dir`): it copies what the module's `ksp-generates` directory holds into
+/// KSP's output directory (`-output-base-dir`), as if it generated those files, and when the module
+/// holds a `ksp-fails` file, it prints that file on stderr and exits with status 5.
 const JAVA_RECORDER: &str = "#!/bin/sh
-until mkdir \"$KRUSTY_RECORD.lock\" 2>/dev/null; do sleep 0.01; done
-{
+arguments=$(
   for argument in \"$@\"; do
     case $argument in
       @*) sed -e '$a\\' \"${argument#@}\" ;;
       *) printf '%s\\n' \"$argument\" ;;
     esac
   done
-  printf '%s\\n' '----'
-} >> \"$KRUSTY_RECORD\"
+)
+until mkdir \"$KRUSTY_RECORD.lock\" 2>/dev/null; do sleep 0.01; done
+printf '%s\\n%s\\n' \"$arguments\" '----' >> \"$KRUSTY_RECORD\"
 rmdir \"$KRUSTY_RECORD.lock\"
+base=$(printf '%s\\n' \"$arguments\" | sed -n 's/^-project-base-dir=//p')
+output=$(printf '%s\\n' \"$arguments\" | sed -n 's/^-output-base-dir=//p')
+if [ -d \"$base/ksp-generates\" ]; then
+  mkdir -p \"$output\"
+  cp -R \"$base/ksp-generates/.\" \"$output\"
+fi
+if [ -f \"$base/ksp-fails\" ]; then
+  cat \"$base/ksp-fails\" >&2
+  exit 5
+fi
 ";
 
 const TOOLCHAIN_RECORDER: &str = "#!/bin/sh

@@ -1,7 +1,8 @@
 A module that runs KSP processors: KSP runs first, in a JVM on the module's JDK, with the
 processors' runtime classpath and the processor options in the order written, then the module
 compiles against the classes KSP generated. A module that compiles against it gets its resources
-output, which holds KSP's generated resources, though it has no resources directory.
+output, which holds KSP's generated resources, though it has no resources directory. The stand-in
+processor generates what `app/ksp-generates` holds: a class and a resource.
 --- task
 :consumer:compileJvm
 --- project.yaml
@@ -22,6 +23,10 @@ settings:
         alpha: first
 --- app/src/Model.kt
 class Model
+--- app/ksp-generates/classes/ksp/generated/Registry.class
+A stand-in for a generated class.
+--- app/ksp-generates/resources/ksp/META-INF/registry.txt
+generated.Registry
 --- consumer/module.yaml
 product: jvm/lib
 repositories:
@@ -155,3 +160,6 @@ com.google.devtools.ksp.cmdline.KSPJvmMain
 <directory>/project/build/artifacts/CompiledJvmArtifact/consumerjvm/kotlin-output
 <directory>/project/consumer/src/Use.kt
 ----
+--- outputs
+== appjvm/resources-output/META-INF/registry.txt
+generated.Registry
