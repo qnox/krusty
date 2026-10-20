@@ -1708,7 +1708,7 @@ mod selection_sizes {
     #[test]
     fn delegate_selections_carry_a_pointer_to_their_callable() {
         assert_eq!(size_of::<super::DelegateOperatorSelection>(), 72);
-        assert_eq!(size_of::<super::OrdinaryDelegateSelection>(), 40);
+        assert_eq!(size_of::<super::OrdinaryDelegateSelection>(), 32);
         assert_eq!(size_of::<super::DelegateConventionSelection>(), 32);
     }
 }

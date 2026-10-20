@@ -290,10 +290,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn handles_are_one_word_and_keep_ty_at_two() {
+    fn handles_stay_small_and_ty_is_one_id() {
         assert_eq!(std::mem::size_of::<TyList>(), 8);
         assert_eq!(std::mem::size_of::<TyParamName>(), 4);
-        assert_eq!(std::mem::size_of::<Ty>(), 16);
+        assert_eq!(std::mem::size_of::<Ty>(), 4);
+        assert_eq!(std::mem::size_of::<crate::types::TyKind>(), 16);
         let list = TyList::new(&[Ty::Unit, Ty::Null]);
         assert!(std::ptr::eq(list.0, TyList::new(&[Ty::Unit, Ty::Null]).0));
         assert_eq!(list, [Ty::Unit, Ty::Null][..]);

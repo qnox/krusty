@@ -674,7 +674,7 @@ impl Checker<'_> {
         let mut through_flexible = false;
         let edges = edges
             .into_iter()
-            .filter(|(_, ty)| !matches!(ty, Ty::Nothing | Ty::Error))
+            .filter(|(_, ty)| !matches!(*ty, Ty::Nothing | Ty::Error))
             .map(|(expression, ty)| {
                 let value =
                     super::conditional_branch::branch_value_expression(self.file, expression);
