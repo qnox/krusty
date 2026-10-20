@@ -6375,7 +6375,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   composed `Owner$Name` spelling, because a top-level Java class may itself be named `Base$Req`.
   Java source headers resolve supertypes through Java sources and the classpath; a Kotlin source
   classifier contributes the member types it declares (its own supertypes resolve after the headers
-  are built). Tests: `jvm::java_stub::tests::a_member_type_of_the_superclass_shadows_an_import`,
+  are built). A qualified suffix such as `Container.Secret` first selects a member of `Container`
+  using that class's own inheritance/package context, then checks access from the referencing
+  declaration. Private member types stay accessible inside their parsed source nest; protected
+  member types stay accessible from the same package or a lexically enclosing subclass of their
+  actual declaring class, including when qualified by that declaring class. Tests:
+  `jvm::java_stub::tests::qualified_inherited_containers_do_not_expose_inaccessible_member_types`,
+  `qualified_private_member_types_remain_accessible_within_the_source_nest`,
+  `qualified_protected_member_types_are_accessible_from_a_lexical_subclass`,
+  `a_qualified_container_must_inherit_the_member_before_access_is_checked`,
+  `a_member_type_of_the_superclass_shadows_an_import`,
   `a_top_level_dollar_name_is_not_a_member_type`, `a_private_member_type_is_not_inherited`,
   `a_package_private_member_type_is_inherited_only_within_its_package`,
   `a_package_private_member_type_is_not_inherited_across_an_intermediate_package`,

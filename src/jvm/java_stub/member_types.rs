@@ -215,18 +215,49 @@ impl<'a> MemberTypes<'a> {
         }
     }
 
-    /// The member type `name` of `class`, declared or inherited, as seen from code in `package`.
+    /// The member type `name` in a lexical class scope, declared or inherited. A directly
+    /// declared private type is visible from that class's own source scope.
     /// `source_supertypes` resolves a parsed source declaration's direct supertypes and answers
     /// `None` for any other classifier.
     pub(super) fn lookup(
         &self,
         class: &str,
         name: &str,
-        package: &str,
         source_supertypes: &dyn Fn(&str) -> Option<Vec<String>>,
     ) -> MemberTypeLookup {
-        if let Some(declared) = self.declared_member_type(class, name) {
-            return MemberTypeLookup::Found(declared.internal);
+        selected_member(self.candidates(class, name, source_supertypes))
+    }
+
+    /// A member selected through a type qualifier. Membership belongs to the qualifier's class;
+    /// access belongs to the referencing declaration, supplied by its lexical resolver. An
+    /// inaccessible alternative does not remove an ambiguity or reveal a hidden declaration.
+    pub(super) fn lookup_qualified(
+        &self,
+        class: &str,
+        name: &str,
+        source_supertypes: &dyn Fn(&str) -> Option<Vec<String>>,
+        accessible: &dyn Fn(&str, Visibility) -> bool,
+    ) -> MemberTypeLookup {
+        let found = self.candidates(class, name, source_supertypes);
+        if let [candidate] = found.as_slice() {
+            if !accessible(&candidate.declaring_owner, candidate.member.visibility) {
+                return MemberTypeLookup::Absent;
+            }
+        }
+        selected_member(found)
+    }
+
+    fn candidates(
+        &self,
+        class: &str,
+        name: &str,
+        source_supertypes: &dyn Fn(&str) -> Option<Vec<String>>,
+    ) -> Vec<InheritedMemberType> {
+        if let Some(member) = self.declared_member_type(class, name) {
+            return vec![InheritedMemberType {
+                declaring_owner: class.to_string(),
+                member,
+            }];
         }
         let mut visited = HashSet::default();
         visited.insert(class.to_string());
@@ -235,17 +266,34 @@ impl<'a> MemberTypes<'a> {
             self.collect_inherited(
                 &supertype,
                 name,
-                package,
+                package_of(class),
                 source_supertypes,
                 &mut visited,
                 &mut found,
             );
         }
-        match found.len() {
-            0 => MemberTypeLookup::Absent,
-            1 => MemberTypeLookup::Found(found.pop().unwrap().member.internal),
-            _ => MemberTypeLookup::Ambiguous,
+        found
+    }
+
+    /// Whether the parsed or external supertype graph proves this exact classifier is a
+    /// subclass of `base`. Lexically enclosing subclass scopes may access protected member types.
+    pub(super) fn is_subclass_of(
+        &self,
+        class: &str,
+        base: &str,
+        source_supertypes: &dyn Fn(&str) -> Option<Vec<String>>,
+    ) -> bool {
+        let mut pending = vec![class.to_string()];
+        let mut visited = HashSet::default();
+        while let Some(current) = pending.pop() {
+            if current == base {
+                return true;
+            }
+            if visited.insert(current.clone()) {
+                pending.extend(self.direct_supertypes(&current, source_supertypes));
+            }
         }
+        false
     }
 
     /// Member types `class` makes available to a subclass in `package`: its own accessible ones,
@@ -321,6 +369,14 @@ impl<'a> MemberTypes<'a> {
             .borrow_mut()
             .insert(class.to_string(), Some(resolved.clone()));
         resolved
+    }
+}
+
+fn selected_member(mut found: Vec<InheritedMemberType>) -> MemberTypeLookup {
+    match found.len() {
+        0 => MemberTypeLookup::Absent,
+        1 => MemberTypeLookup::Found(found.pop().unwrap().member.internal),
+        _ => MemberTypeLookup::Ambiguous,
     }
 }
 

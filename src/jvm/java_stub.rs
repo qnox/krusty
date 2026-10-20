@@ -332,13 +332,13 @@ impl Resolver<'_> {
     fn internal_of_with_depth(&self, name: &str) -> Option<ResolvedJavaName> {
         let mut segments = name.split('.');
         let head = segments.next()?;
-        let mut scope = self.owner;
-        while let Some(current) = scope {
+        for current in self.lexical_owners() {
             match self.member_type(current, head) {
                 MemberTypeLookup::Found(mut internal) => {
                     let mut nested_depth = 0;
                     for segment in segments {
-                        let MemberTypeLookup::Found(member) = self.member_type(&internal, segment)
+                        let MemberTypeLookup::Found(member) =
+                            self.qualified_member_type(&internal, segment)
                         else {
                             return None;
                         };
@@ -353,11 +353,6 @@ impl Resolver<'_> {
                 MemberTypeLookup::Ambiguous => return None,
                 MemberTypeLookup::Absent => {}
             }
-            scope = self
-                .declarations_by_internal
-                .get(current)
-                .copied()
-                .and_then(|declaration| declaration.outer_internal.as_deref());
         }
         resolve_internal_name_with_depth(&self.ctx.package, &self.ctx.imports, name, self.resolve)
     }
@@ -365,9 +360,62 @@ impl Resolver<'_> {
     /// The member type `name` of `class`, declared or inherited, as code in this file sees it.
     fn member_type(&self, class: &str, name: &str) -> MemberTypeLookup {
         self.member_types
-            .lookup(class, name, &self.ctx.package, &|source| {
-                self.source_supertypes(source)
-            })
+            .lookup(class, name, &|source| self.source_supertypes(source))
+    }
+
+    fn qualified_member_type(&self, class: &str, name: &str) -> MemberTypeLookup {
+        self.member_types.lookup_qualified(
+            class,
+            name,
+            &|source| self.source_supertypes(source),
+            &|declaring, visibility| self.member_type_accessible(declaring, visibility),
+        )
+    }
+
+    fn lexical_owners(&self) -> impl Iterator<Item = &str> {
+        std::iter::successors(self.owner, |owner| {
+            self.declarations_by_internal
+                .get(*owner)
+                .and_then(|declaration| declaration.outer_internal.as_deref())
+        })
+    }
+
+    fn member_type_accessible(
+        &self,
+        declaring: &str,
+        visibility: crate::types::Visibility,
+    ) -> bool {
+        use crate::types::Visibility;
+        let same_package = declaring
+            .rsplit_once('/')
+            .map_or("", |(package, _)| package)
+            == self.ctx.package;
+        match visibility {
+            Visibility::Public | Visibility::Internal => true,
+            Visibility::PackagePrivate => same_package,
+            Visibility::Private => {
+                // A source nest is the parser's enclosing graph. A legal `$` in a top-level
+                // identifier never invents an enclosing declaration or grants private access.
+                let mut declaring_nest = declaring;
+                while let Some(outer) = self
+                    .declarations_by_internal
+                    .get(declaring_nest)
+                    .and_then(|declaration| declaration.outer_internal.as_deref())
+                {
+                    declaring_nest = outer;
+                }
+                self.lexical_owners().last() == Some(declaring_nest)
+            }
+            Visibility::Protected => {
+                same_package
+                    || self.lexical_owners().any(|owner| {
+                        self.member_types
+                            .is_subclass_of(owner, declaring, &|source| {
+                                self.source_supertypes(source)
+                            })
+                    })
+            }
+        }
     }
 
     /// A parsed source declaration's direct supertypes, resolved in its own file and in the scope
@@ -2254,6 +2302,140 @@ mod tests {
             },
         ]);
         assert!(stubs_in(&world, &[("Leaf.java", leaf)]).is_none());
+    }
+
+    #[test]
+    fn qualified_inherited_containers_do_not_expose_inaccessible_member_types() {
+        let child = "package q; public class Child extends p.Base { \
+             public Container.Secret leak() { return null; } }";
+        for (modifier, members) in [
+            (
+                "private",
+                &[("Secret", "p/Base$Container$Secret", Visibility::Private)][..],
+            ),
+            (
+                "",
+                &[(
+                    "Secret",
+                    "p/Base$Container$Secret",
+                    Visibility::PackagePrivate,
+                )][..],
+            ),
+            (
+                "protected",
+                &[("Secret", "p/Base$Container$Secret", Visibility::Protected)][..],
+            ),
+        ] {
+            let visibility = members[0].2;
+            let base = format!(
+                "package p; public class Base {{ public static class Container {{ \
+                 {modifier} static class Secret {{}} }} }}"
+            );
+            assert!(
+                stubs_in(
+                    &DeclaredWorld(&[declared("java/lang/Object")]),
+                    &[("Base.java", &base), ("Child.java", child)]
+                )
+                .is_none(),
+                "source {visibility:?} Secret must be inaccessible"
+            );
+            let world = DeclaredWorld(&[
+                declared("java/lang/Object"),
+                Declared {
+                    name: "p/Base",
+                    supertypes: &[],
+                    members: &[("Container", "p/Base$Container", Visibility::Public)],
+                },
+                Declared {
+                    name: "p/Base$Container",
+                    supertypes: &[],
+                    members,
+                },
+                declared("p/Base$Container$Secret"),
+            ]);
+            assert!(
+                stubs_in(&world, &[("Child.java", child)]).is_none(),
+                "world {visibility:?} Secret must be inaccessible"
+            );
+        }
+    }
+
+    #[test]
+    fn qualified_private_member_types_remain_accessible_within_the_source_nest() {
+        let out = stubs(
+            "package p; public class Outer$Owner { \
+             public static class Container { private static class Secret {} } \
+             public Container.Secret own() { return null; } \
+             public static class Sibling { public Container.Secret sibling() { return null; } } }",
+            &["java/lang/Object"],
+        )
+        .expect("private member types are accessible throughout their source nest");
+        for (owner, method) in [
+            ("p/Outer$Owner", "own"),
+            ("p/Outer$Owner$Sibling", "sibling"),
+        ] {
+            assert_eq!(
+                method_descriptor(&out, owner, method),
+                "()Lp/Outer$Owner$Container$Secret;"
+            );
+        }
+    }
+
+    #[test]
+    fn qualified_package_private_member_types_remain_accessible_in_their_package() {
+        let out = stubs(
+            "package p; class Base { public static class Container { static class Secret {} } } \
+             class Child extends Base { public Container.Secret own() { return null; } }",
+            &["java/lang/Object"],
+        )
+        .expect("a package-private member type is accessible in its declaring package");
+        assert_eq!(
+            method_descriptor(&out, "p/Child", "own"),
+            "()Lp/Base$Container$Secret;"
+        );
+    }
+
+    #[test]
+    fn a_qualified_container_must_inherit_the_member_before_access_is_checked() {
+        assert!(stubs_in(
+            &DeclaredWorld(&[declared("java/lang/Object")]),
+            &[
+                ("Root.java", "package p; public class Root { static class Secret {} }"),
+                ("Base.java", "package q; public class Base { public static class Container extends p.Root {} }"),
+                ("Child.java", "package p; public class Child extends q.Base { public Container.Secret leak() { return null; } }"),
+            ],
+        ).is_none(), "the referencing package cannot restore a member the qualifier does not inherit");
+    }
+
+    #[test]
+    fn qualified_protected_member_types_are_accessible_from_a_lexical_subclass() {
+        let out = stubs_in(
+            &DeclaredWorld(&[declared("java/lang/Object")]),
+            &[
+                (
+                    "Base.java",
+                    "package p; public class Base { public static class Container { \
+                     protected static class Secret {} } }",
+                ),
+                (
+                    "Child.java",
+                    "package q; public class Child extends p.Base { \
+                     public static class Derived extends Container { \
+                     public Container.Secret own() { return null; } \
+                     public static class Nested { public Container.Secret nested() { return null; } } } }",
+                ),
+            ],
+        )
+        .expect("a lexical subclass may access a protected member type through its declaring type");
+        for (owner, method) in [
+            ("q/Child$Derived", "own"),
+            ("q/Child$Derived$Nested", "nested"),
+        ] {
+            assert_eq!(
+                method_descriptor(&out, owner, method),
+                "()Lp/Base$Container$Secret;"
+            );
+        }
     }
 
     #[test]
