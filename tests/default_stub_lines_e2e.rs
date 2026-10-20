@@ -58,5 +58,9 @@ fn a_default_impls_forward_returns_on_the_declaration_end_line() {
 /// A top-level stub marks its default's line and returns to the signature for the call.
 #[test]
 fn a_top_level_stub_marks_its_default_line() {
-    byte_identical("default_stub_lines_top_level", SOURCE, "Default_stub_lines_top_levelKt");
+    byte_identical(
+        "default_stub_lines_top_level",
+        SOURCE,
+        "Default_stub_lines_top_levelKt",
+    );
 }

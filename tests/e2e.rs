@@ -530,8 +530,6 @@ mod computed_frames_e2e;
 mod computed_prop_e2e;
 #[path = "computed_prop_generic_return_e2e.rs"]
 mod computed_prop_generic_return_e2e;
-#[path = "default_stub_lines_e2e.rs"]
-mod default_stub_lines_e2e;
 #[path = "e2e/conditional_resolution.rs"]
 mod conditional_resolution;
 #[path = "conformance_score_report_e2e.rs"]
@@ -669,6 +667,8 @@ mod default_constructor_header_pool_e2e;
 mod default_import_resolution_e2e;
 #[path = "default_lambda_inlining_e2e.rs"]
 mod default_lambda_inlining_e2e;
+#[path = "default_stub_lines_e2e.rs"]
+mod default_stub_lines_e2e;
 #[path = "default_stub_super_guard_e2e.rs"]
 mod default_stub_super_guard_e2e;
 #[path = "deferred_generic_local_e2e.rs"]
