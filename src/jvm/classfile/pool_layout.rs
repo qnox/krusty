@@ -168,7 +168,10 @@ impl<'a> Layout<'a> {
             reach(read, slot.index, &mut kept);
             let rewritten = match slot.holder {
                 Holder::Code(method, part) => by_method.get(&method).map(|&at| (at, part)),
-                Holder::Class | Holder::AttributeName | Holder::CodeAttribute(_) => None,
+                Holder::Class
+                | Holder::AttributeName
+                | Holder::CodeAttribute(_)
+                | Holder::Parameter(_) => None,
             };
             match rewritten {
                 Some((at, part)) => {
@@ -202,11 +205,13 @@ impl<'a> Layout<'a> {
                 }
             }
         }
-        // A transformation's leading entry moves ahead of its method's code unless kotlinc's writer
-        // interns it earlier, for a holder it visits before that code.
+        // A transformation's leading entry moves ahead of its method's replayed node (its
+        // `MethodParameters` names, then its code) unless kotlinc's writer interns it earlier, for
+        // a holder it visits before that node.
         let mut leading = vec![false; count];
+        let replay_starts = method_replay_starts(read, &code_starts);
         for method in relaid {
-            let code_start = code_starts
+            let code_start = replay_starts
                 .get(&method.index)
                 .copied()
                 .unwrap_or(usize::MAX);
@@ -372,13 +377,29 @@ fn method_code_starts(read: &ClassSlots) -> HashMap<usize, usize> {
             Holder::CodeAttribute(method) => {
                 attribute.entry(method).or_insert(position);
             }
-            Holder::Class | Holder::AttributeName => {}
+            Holder::Class | Holder::AttributeName | Holder::Parameter(_) => {}
         }
     }
     for (method, position) in attribute {
         body.entry(method).or_insert(position);
     }
     body
+}
+
+/// Where each method's node is replayed into kotlinc's writer: its first `MethodParameters` name,
+/// else its code.
+fn method_replay_starts(
+    read: &ClassSlots,
+    code_starts: &HashMap<usize, usize>,
+) -> HashMap<usize, usize> {
+    let mut starts = code_starts.clone();
+    for (position, slot) in read.visit_order().enumerate() {
+        if let Holder::Parameter(method) = slot.holder {
+            let start = starts.entry(method).or_insert(position);
+            *start = (*start).min(position);
+        }
+    }
+    starts
 }
 
 /// Where each `orphaned` entry goes: an entry a rewritten method interned that its rewritten
@@ -458,7 +479,7 @@ fn orphan_anchors(
                     settle(&mut pending, index, &mut anchored);
                 }
                 seen[index] = true;
-                if !orphaned[index] && slot.holder == Holder::Class {
+                if !orphaned[index] && matches!(slot.holder, Holder::Class | Holder::Parameter(_)) {
                     header_max = header_max.max(index);
                 }
             }

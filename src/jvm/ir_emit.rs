@@ -162,9 +162,9 @@ mod value_class_override_metadata;
 mod value_class_signatures;
 use crate::jvm::private_static_access::StaticOwner;
 use class_pool_seed::{
-    seed_accessor_locals, seed_ctor_before_members, seed_enum_constructor_locals,
-    seed_plain_constructor_locals, seed_plain_constructor_tail, seed_value_class_method_locals,
-    seed_value_ctor_after_members, PlainClassPoolSeed,
+    primary_constructor_method_parameters, seed_accessor_locals, seed_ctor_before_members,
+    seed_enum_constructor_locals, seed_plain_constructor_locals, seed_plain_constructor_tail,
+    seed_value_class_method_locals, seed_value_ctor_after_members, PlainClassPoolSeed,
 };
 pub(super) use enclosure::{class_enclosure, property_accessor_function};
 use primary_constructor_parameters::{
@@ -2316,6 +2316,7 @@ fn emit_class(
         class: c,
         fq_name: &fq_name,
         ctor_signature: ctor_signature.as_deref(),
+        java_parameters: env.java_parameters,
     };
     seed_ctor_before_members(byte_parity, pool_seed(), &mut cw);
     // Access: an extended or abstract class must not be `final`; a class with an emitted abstract
@@ -2545,15 +2546,7 @@ fn emit_class(
     // secondary constructor (below). Otherwise emit the primary `<init>` here.
     if c.has_primary_ctor {
         let ctor_desc = primary_ctor_descriptor(ir, c);
-        let ctor_parameters = if env.java_parameters {
-            if is_continuation {
-                super::method_parameters::continuation_constructor(c)
-            } else {
-                super::method_parameters::primary_constructor(ir, c, &param_tys)
-            }
-        } else {
-            Vec::new()
-        };
+        let ctor_parameters = primary_constructor_method_parameters(ir, c, env.java_parameters);
         // A `MethodParameters` name is interned with the method HEADER, before the body's constants
         // and before the `@NotNull`/`@Nullable` parameter descriptors — ASM's `visitParameter` order.
         cw.reserve_method_pool_with_annotations(

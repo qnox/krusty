@@ -12861,6 +12861,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `src/jvm/suspend/cps/member_parameters.rs`,
   `tests/value_class_receiver_capture_debug_names_e2e.rs`,
   `tests/value_class_mangled_lambda_names_e2e.rs`, `tests/java_parameters_attribute_e2e.rs`.
+- **Where `-java-parameters` names land in the constant pool.** ASM interns each
+  `MethodParameters` name in `visitParameter`, right after the method's name, descriptor and
+  `Signature` and before its annotations and code; it interns the attribute's own name when it
+  writes that method, after the method's other attribute names. A primary constructor's names
+  therefore precede its parameters' `@NotNull`/`@Nullable` descriptors, and a class whose
+  constructor is written first names `MethodParameters` before a later method's `StackMapTable`.
+  A suspend lambda's constructor, `create` and typed `invoke` name theirs with their headers. Its
+  `invokeSuspend` is rewritten by the coroutine transformer, whose method node kotlinc replays
+  after the transformer has added the spill fields and `@DebugMetadata`: `$result` follows that
+  annotation's entries and precedes the body's. Tests:
+  `java_parameters_interns_constructor_names_in_kotlinc_order`,
+  `java_parameters_interns_suspend_lambda_names_in_kotlinc_order`.
 - **`MethodParameters` of a value class's interface entries, abstract members and receiver-first
   statics (`-java-parameters`).** A value class keeps on its box an interface entry for each member
   lowered to a static `-impl` (the boxed override `abs(String)` calling `abs-impl`). kotlinc

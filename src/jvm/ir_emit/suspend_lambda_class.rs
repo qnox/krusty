@@ -573,9 +573,10 @@ fn emit_constructor(
         );
     }
     signature.push_str(&format!("L{CONTINUATION}<-{}>;)V", shape.self_desc()));
-    cw.seed_utf8("<init>");
-    cw.seed_utf8(&descriptor);
-    cw.seed_utf8(&signature);
+    let reflected = java_parameters
+        .then(|| shape.method_parameters(ir, lambda, SuspendLambdaMember::Constructor))
+        .unwrap_or_default();
+    seed_header(cw, "<init>", &descriptor, Some(&signature), &reflected);
     let completion = 1 + shape.capture_words();
     let mut code = CodeBuilder::new(completion + 1);
     let mut slot = 1u16;
@@ -618,9 +619,25 @@ fn emit_constructor(
         );
     }
     cw.set_method_debug("<init>", &descriptor, None, &locals);
-    if java_parameters {
-        let reflected = shape.method_parameters(ir, lambda, SuspendLambdaMember::Constructor);
-        cw.set_method_parameters("<init>", &descriptor, &reflected);
+    cw.set_method_parameters("<init>", &descriptor, &reflected);
+}
+
+/// Intern a member's header in ASM's visit order: name, descriptor, `Signature`, then the
+/// `MethodParameters` names `visitParameter` interns before the body.
+fn seed_header(
+    cw: &mut ClassWriter,
+    name: &str,
+    descriptor: &str,
+    signature: Option<&str>,
+    reflected: &[crate::jvm::method_parameters::MethodParameter],
+) {
+    cw.seed_utf8(name);
+    cw.seed_utf8(descriptor);
+    for text in signature
+        .into_iter()
+        .chain(reflected.iter().filter_map(|(name, _)| name.as_deref()))
+    {
+        cw.seed_utf8(text);
     }
 }
 
@@ -671,9 +688,10 @@ fn emit_create(
         "({}L{CONTINUATION}<*>;)L{CONTINUATION}<Lkotlin/Unit;>;",
         if parameter.is_some() { OBJECT_DESC } else { "" }
     );
-    cw.seed_utf8("create");
-    cw.seed_utf8(&descriptor);
-    cw.seed_utf8(&signature);
+    let reflected = java_parameters
+        .then(|| shape.method_parameters(ir, lambda, SuspendLambdaMember::Create))
+        .unwrap_or_default();
+    seed_header(cw, "create", &descriptor, Some(&signature), &reflected);
     let completion = 1 + u16::from(parameter.is_some());
     let copy = completion + 1;
     let mut code = CodeBuilder::new(copy);
@@ -708,10 +726,7 @@ fn emit_create(
         Some(&signature),
     );
     cw.set_method_debug("create", &descriptor, None, &locals);
-    if java_parameters {
-        let reflected = shape.method_parameters(ir, lambda, SuspendLambdaMember::Create);
-        cw.set_method_parameters("create", &descriptor, &reflected);
-    }
+    cw.set_method_parameters("create", &descriptor, &reflected);
 }
 
 /// The typed `invoke(parameters…, Continuation)`: start a fresh copy of the lambda with `Unit`.
@@ -738,11 +753,16 @@ fn emit_invoke(
     // A raw continuation (a `Nothing?` result) over raw parameters spells the descriptor back, and
     // such a `Signature` is omitted.
     let signature = (signature != descriptor).then_some(signature);
-    cw.seed_utf8(&shape.invoke_name);
-    cw.seed_utf8(&descriptor);
-    if let Some(signature) = &signature {
-        cw.seed_utf8(signature);
-    }
+    let reflected = java_parameters
+        .then(|| shape.method_parameters(ir, lambda, SuspendLambdaMember::Invoke))
+        .unwrap_or_default();
+    seed_header(
+        cw,
+        &shape.invoke_name,
+        &descriptor,
+        signature.as_deref(),
+        &reflected,
+    );
     let mut slots = Vec::with_capacity(shape.parameters.len());
     let mut completion = 1u16;
     for parameter in &shape.parameters {
@@ -792,10 +812,7 @@ fn emit_invoke(
         signature.as_deref(),
     );
     cw.set_method_debug(&shape.invoke_name, &descriptor, None, &locals);
-    if java_parameters {
-        let reflected = shape.method_parameters(ir, lambda, SuspendLambdaMember::Invoke);
-        cw.set_method_parameters(&shape.invoke_name, &descriptor, &reflected);
-    }
+    cw.set_method_parameters(&shape.invoke_name, &descriptor, &reflected);
 }
 
 /// The erased `FunctionN.invoke(Object…)` bridge to the typed `invoke`. Its parameters are the
