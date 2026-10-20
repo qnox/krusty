@@ -17,6 +17,8 @@ default-members = [".", "crates/krusty-cli"]
 resolver = "2"
 
 [dependencies]
+# The IR krusty hands kotlinc compiler plugins: plain data, built from checked FIR.
+krusty-plugin-ir = { path = "crates/krusty-plugin-ir" }
 # Fast keyed hashing for compiler maps whose keys can contain source-provided spellings. The
 # per-process random keys retain HashDoS resistance without paying SipHash's cost on every lookup.
 ahash = "0.8.12"

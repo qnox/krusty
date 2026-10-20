@@ -23,7 +23,7 @@ pub(super) fn validate(
         | report_jvm_field_companion_block_const_clashes(ir, diags)
         | report_delegated_property_array_clashes(ir, delegated_arrays, diags);
     for class in &ir.classes {
-        if let Err(message) = reject_duplicate_constructors(class) {
+        if let Err(message) = reject_duplicate_constructors(ir, class) {
             diags.error(Span::new(0, 0), message);
             return Err(());
         }
@@ -1244,16 +1244,16 @@ fn semantic_function_parameters(ir: &IrFile, function: FunId) -> &[crate::types:
         .unwrap_or(&ir.functions[function as usize].params)
 }
 
-fn reject_duplicate_constructors(class: &crate::ir::IrClass) -> Result<(), String> {
+fn reject_duplicate_constructors(ir: &IrFile, class: &crate::ir::IrClass) -> Result<(), String> {
     let mut descriptors = crate::fx_hash::HashSet::default();
     if class.has_primary_ctor {
         descriptors.insert(crate::jvm::names::method_descriptor(
-            &crate::jvm::ir_emit::class_ctor_jvm_tys(class),
+            &crate::jvm::ir_emit::class_ctor_jvm_tys(ir, class),
             crate::types::Ty::Unit,
         ));
     }
     for constructor in &class.secondary_ctors {
-        let parameters = crate::jvm::ir_emit::jvm_tys(&constructor.prefix_params)
+        let parameters = crate::jvm::ir_emit::secondary_prefix_jvm_tys(ir, class, constructor)
             .into_iter()
             .chain(crate::jvm::ir_emit::jvm_tys(&constructor.params))
             .collect::<Vec<_>>();

@@ -31,12 +31,15 @@ pub enum CompilerWarningName {
     DataClassInvisibleCopyUsage,
     ClassLiteralLhsNotAClass,
     Deprecation,
+    DeprecationErrorMigrationPeriodWarning,
     ExplicitTypeArgumentsInPropertyAccess,
     InapplicableOperatorModifier,
+    ParenthesizedPackageQualifier,
     TypeIntersectionAsReified,
     TypeIntersectionAsReifiedDeprecation,
     TypeParameterAsReifiedDeprecation,
     TypeArgumentsNotAllowed,
+    TypeArgumentsNotAllowedInPackageQualifier,
     WrongNumberOfTypeArgumentsInGetClass,
     ValueClassCannotBeRecursiveViaTypeParameters,
 }
@@ -50,10 +53,14 @@ impl CompilerWarningName {
             Self::DataClassInvisibleCopyUsage => "DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING",
             Self::ClassLiteralLhsNotAClass => "CLASS_LITERAL_LHS_NOT_A_CLASS_WARNING",
             Self::Deprecation => "DEPRECATION",
+            Self::DeprecationErrorMigrationPeriodWarning => {
+                "DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING"
+            }
             Self::ExplicitTypeArgumentsInPropertyAccess => {
                 "EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING"
             }
             Self::InapplicableOperatorModifier => "INAPPLICABLE_OPERATOR_MODIFIER_WARNING",
+            Self::ParenthesizedPackageQualifier => "PARENTHESIZED_PACKAGE_QUALIFIER_WARNING",
             Self::TypeIntersectionAsReified => "TYPE_INTERSECTION_AS_REIFIED_WARNING",
             Self::TypeIntersectionAsReifiedDeprecation => {
                 "TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING"
@@ -62,6 +69,9 @@ impl CompilerWarningName {
                 "TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING"
             }
             Self::TypeArgumentsNotAllowed => "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING",
+            Self::TypeArgumentsNotAllowedInPackageQualifier => {
+                "TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING"
+            }
             Self::WrongNumberOfTypeArgumentsInGetClass => {
                 "WRONG_NUMBER_OF_TYPE_ARGUMENTS_IN_GET_CLASS_WARNING"
             }
@@ -79,10 +89,14 @@ impl CompilerWarningName {
             "DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING" => Self::DataClassInvisibleCopyUsage,
             "CLASS_LITERAL_LHS_NOT_A_CLASS_WARNING" => Self::ClassLiteralLhsNotAClass,
             "DEPRECATION" => Self::Deprecation,
+            "DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING" => {
+                Self::DeprecationErrorMigrationPeriodWarning
+            }
             "EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING" => {
                 Self::ExplicitTypeArgumentsInPropertyAccess
             }
             "INAPPLICABLE_OPERATOR_MODIFIER_WARNING" => Self::InapplicableOperatorModifier,
+            "PARENTHESIZED_PACKAGE_QUALIFIER_WARNING" => Self::ParenthesizedPackageQualifier,
             "TYPE_INTERSECTION_AS_REIFIED_WARNING" => Self::TypeIntersectionAsReified,
             "TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING" => {
                 Self::TypeIntersectionAsReifiedDeprecation
@@ -91,6 +105,9 @@ impl CompilerWarningName {
                 Self::TypeParameterAsReifiedDeprecation
             }
             "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING" => Self::TypeArgumentsNotAllowed,
+            "TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING" => {
+                Self::TypeArgumentsNotAllowedInPackageQualifier
+            }
             "WRONG_NUMBER_OF_TYPE_ARGUMENTS_IN_GET_CLASS_WARNING" => {
                 Self::WrongNumberOfTypeArgumentsInGetClass
             }
@@ -113,12 +130,15 @@ mod warning_name_tests {
             CompilerWarningName::DataClassInvisibleCopyUsage,
             CompilerWarningName::ClassLiteralLhsNotAClass,
             CompilerWarningName::Deprecation,
+            CompilerWarningName::DeprecationErrorMigrationPeriodWarning,
             CompilerWarningName::ExplicitTypeArgumentsInPropertyAccess,
             CompilerWarningName::InapplicableOperatorModifier,
+            CompilerWarningName::ParenthesizedPackageQualifier,
             CompilerWarningName::TypeIntersectionAsReified,
             CompilerWarningName::TypeIntersectionAsReifiedDeprecation,
             CompilerWarningName::TypeParameterAsReifiedDeprecation,
             CompilerWarningName::TypeArgumentsNotAllowed,
+            CompilerWarningName::TypeArgumentsNotAllowedInPackageQualifier,
             CompilerWarningName::WrongNumberOfTypeArgumentsInGetClass,
             CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
         ];

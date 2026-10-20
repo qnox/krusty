@@ -117,22 +117,13 @@ fn default_check_selection(
         };
         // The provider selects the live syntax; the target selects the surviving semantic
         // declaration after expect/actual actualization. `bind_defaults` aliases both identities
-        // to that one parser declaration for this bounded check, so selection must admit both.
+        // to that one parser declaration for this bounded check.
         selected_bodies.insert(work.provider);
         selected_bodies.insert(work.target);
         let Some(selected_roots) = roots.get_mut(root.source.raw() as usize) else {
             return None;
         };
         selected_roots.insert(root_id);
-        if work.relation == crate::fir::DefaultArgumentRelation::ActualizedDeclaration {
-            // `bind_defaults` aliases the expect parser subtree to the surviving actual
-            // declaration chain. Reverse parser lookup can consequently name either stable
-            // identity for the same bounded syntax. Admit the target lexical root as well so an
-            // expect-owned constructor/member default is actually entered and checked; both IDs
-            // are transient Pass-1 selection facts and neither survives with the checked FIR.
-            let target_root = headers.lexical_root_for_default(index, work.target);
-            selected_roots.insert(target_root);
-        }
     }
     Some(DefaultCheckSelection { roots, bodies })
 }
@@ -281,12 +272,19 @@ fn check_default_source(input: DefaultSourceInput<'_>, state: DefaultSourceState
         selection.roots[raw_source],
         selection.bodies[raw_source],
     );
+    // Provider declarations own the retained syntax. A distinct actualized/inherited target owns
+    // only the semantic signature and resulting FIR; `bind_defaults` aliases that stable identity
+    // after binding the provider, without also opening the target's parser subtree.
+    let provider_bindings = items
+        .iter()
+        .map(|item| item.provider)
+        .collect::<crate::fx_hash::HashSet<_>>();
     let active = match crate::fir::ActiveSourceDeclarations::bind_defaults(
         file,
         source,
         index,
         &selection.roots[raw_source],
-        &selection.bodies[raw_source],
+        &provider_bindings,
         local_context.parser_classifier_identities(),
         &items,
     ) {

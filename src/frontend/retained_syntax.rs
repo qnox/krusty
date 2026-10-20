@@ -1011,6 +1011,7 @@ pub(super) fn compact(file: &mut File) {
 
     remap_declarations(file, &expressions);
     file.retained_expr_spans.clear();
+    file.forget_span_index();
     file.return_label_spans.remap(&statements, &expressions);
     file.value_operator_spans =
         remap_u32_map(std::mem::take(&mut file.value_operator_spans), &expressions);
@@ -1051,6 +1052,10 @@ pub(super) fn compact(file: &mut File) {
     );
     file.infix_calls = remap_u32_set(std::mem::take(&mut file.infix_calls), &expressions);
     file.call_type_args = remap_u32_map(std::mem::take(&mut file.call_type_args), &expressions);
+    file.parenthesized_expression_spans = remap_u32_map(
+        std::mem::take(&mut file.parenthesized_expression_spans),
+        &expressions,
+    );
     file.standalone_type_argument_qualifiers = remap_u32_set(
         std::mem::take(&mut file.standalone_type_argument_qualifiers),
         &expressions,
@@ -1180,6 +1185,10 @@ pub(super) fn compact(file: &mut File) {
         .into_iter()
         .filter_map(|(old, span)| statements.get(&StmtId(old)).map(|new| (new.0, span)))
         .collect();
+    file.compound_assignment_read_spans = remap_u32_map(
+        std::mem::take(&mut file.compound_assignment_read_spans),
+        &expressions,
+    );
     file.assignment_target_lines = std::mem::take(&mut file.assignment_target_lines)
         .into_iter()
         .filter_map(|(old, line)| statements.get(&StmtId(old)).map(|new| (new.0, line)))

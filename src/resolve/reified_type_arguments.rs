@@ -188,6 +188,7 @@ impl Checker<'_> {
             },
         );
         crate::spelling::Spelled {
+            classifier_segment: None,
             definitely_non_null: reference.definitely_non_null(),
             use_site_definitely_non_null: reference.definitely_non_null(),
             alias: None,

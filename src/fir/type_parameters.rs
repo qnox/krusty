@@ -85,7 +85,40 @@ pub struct ResolvedTypeParameterHeader {
     pub bounds: Box<[ResolvedTypeParameterBound]>,
 }
 
+struct PreparedTypeParameter {
+    ordinal: u32,
+    name: String,
+    semantic_name: String,
+    flags: ResolvedTypeParameterFlags,
+    bounds: Box<[ResolvedTypeParameterBound]>,
+}
+
 impl ResolvedModuleIndex {
+    pub(crate) fn publish_declaration_type_parameter_count(
+        &mut self,
+        declaration: DeclarationId,
+        count: u32,
+    ) {
+        assert!(
+            self.declaration_type_parameter_counts
+                .insert(declaration, count)
+                .is_none(),
+            "a declaration's source type-parameter count is published once"
+        );
+    }
+
+    pub(crate) fn declaration_type_parameters_complete(&self, declaration: DeclarationId) -> bool {
+        let Some(&count) = self.declaration_type_parameter_counts.get(&declaration) else {
+            // Syntaxless generated declarations carry their generic contract directly from their
+            // provider and have no compact source count to await.
+            return true;
+        };
+        // A classifier may append captured lexical parameters after its own source formals. The
+        // lifecycle count describes only the written prefix; those applied-layout slots do not
+        // make an otherwise complete declaration generic contract incomplete.
+        (0..count).all(|ordinal| self.type_parameter(declaration, ordinal).is_some())
+    }
+
     /// Bound ordinals with the primary concrete-class constituent first and source order preserved
     /// within the class/interface groups. Metadata and target erasure consume this finalized header
     /// fact without rediscovering classifier kinds downstream.
@@ -135,37 +168,86 @@ impl ResolvedModuleIndex {
         flags: ResolvedTypeParameterFlags,
         bounds: impl IntoIterator<Item = (Ty, bool)>,
     ) -> Result<TypeParameterId, UnpublishableType> {
-        let bounds = bounds
-            .into_iter()
-            .map(|(ty, is_interface)| {
-                Ok(ResolvedTypeParameterBound {
-                    ty: ResolvedTy::new(ty)?,
-                    is_interface,
-                })
-            })
-            .collect::<Result<Vec<_>, UnpublishableType>>()?
-            .into_boxed_slice();
-        assert!(
-            !self.type_parameters.contains_key(&(declaration, ordinal)),
-            "a declaration type parameter may be published only once"
-        );
-        let id = TypeParameterId::from_raw(super::header::next_id(
-            self.type_parameter_headers.len(),
-            "resolved type parameters",
-        ));
-        let name = self.intern_declaration_name(name);
-        let semantic_name = self.intern_declaration_name(semantic_name);
-        self.type_parameter_headers
-            .push(ResolvedTypeParameterHeader {
-                id,
-                name,
-                semantic_name,
+        self.publish_type_parameters_atomically(
+            declaration,
+            [(
+                ordinal,
+                name.to_owned(),
+                semantic_name.to_owned(),
                 flags,
                 bounds,
-            });
-        self.type_parameter_owners.push((declaration, ordinal));
-        self.type_parameters.insert((declaration, ordinal), id);
-        Ok(id)
+            )],
+        )
+        .map(|mut parameters| parameters.pop().expect("one type parameter was published"))
+    }
+
+    /// Validate a declaration's complete generic contract before publishing any of it.
+    pub(crate) fn publish_type_parameters_atomically<I, B>(
+        &mut self,
+        declaration: DeclarationId,
+        parameters: I,
+    ) -> Result<Vec<TypeParameterId>, UnpublishableType>
+    where
+        I: IntoIterator<Item = (u32, String, String, ResolvedTypeParameterFlags, B)>,
+        B: IntoIterator<Item = (Ty, bool)>,
+    {
+        let prepared = parameters
+            .into_iter()
+            .map(|(ordinal, name, semantic_name, flags, bounds)| {
+                let bounds = bounds
+                    .into_iter()
+                    .map(|(ty, is_interface)| {
+                        Ok(ResolvedTypeParameterBound {
+                            ty: ResolvedTy::new(ty)?,
+                            is_interface,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, UnpublishableType>>()?
+                    .into_boxed_slice();
+                assert!(
+                    !self.type_parameters.contains_key(&(declaration, ordinal)),
+                    "a declaration type parameter may be published only once"
+                );
+                Ok(PreparedTypeParameter {
+                    ordinal,
+                    name,
+                    semantic_name,
+                    flags,
+                    bounds,
+                })
+            })
+            .collect::<Result<Vec<_>, UnpublishableType>>()?;
+        for (position, parameter) in prepared.iter().enumerate() {
+            assert!(
+                prepared[position + 1..]
+                    .iter()
+                    .all(|later| later.ordinal != parameter.ordinal),
+                "a declaration type-parameter batch cannot repeat an ordinal"
+            );
+        }
+        let mut published = Vec::with_capacity(prepared.len());
+        for parameter in prepared {
+            let id = TypeParameterId::from_raw(super::header::next_id(
+                self.type_parameter_headers.len(),
+                "resolved type parameters",
+            ));
+            let name = self.intern_declaration_name(&parameter.name);
+            let semantic_name = self.intern_declaration_name(&parameter.semantic_name);
+            self.type_parameter_headers
+                .push(ResolvedTypeParameterHeader {
+                    id,
+                    name,
+                    semantic_name,
+                    flags: parameter.flags,
+                    bounds: parameter.bounds,
+                });
+            self.type_parameter_owners
+                .push((declaration, parameter.ordinal));
+            self.type_parameters
+                .insert((declaration, parameter.ordinal), id);
+            published.push(id);
+        }
+        Ok(published)
     }
 
     pub fn type_parameter(
@@ -229,6 +311,96 @@ impl ResolvedModuleIndex {
         self.declaration_names
             .get(header.semantic_name.raw() as usize)
             .map(AsRef::as_ref)
+    }
+
+    /// Source parameter names owned by a finalized type alias, in declaration order.
+    pub fn type_alias_formals(&self, declaration: DeclarationId) -> Vec<String> {
+        (0..)
+            .map_while(|ordinal| self.type_parameter(declaration, ordinal))
+            .filter_map(|parameter| self.type_parameter_name(parameter).map(str::to_owned))
+            .collect()
+    }
+
+    /// Type-parameter identities carried by an applied classifier type, in the same order as
+    /// [`Ty::type_args`]: parameters declared by the classifier, followed by lexically captured
+    /// parameters from nearest owner outward.
+    pub fn classifier_type_arguments(
+        &self,
+        classifier: DeclarationId,
+    ) -> Option<&[TypeParameterId]> {
+        self.classifier_type_arguments
+            .get(&classifier)
+            .map(Box::as_ref)
+    }
+
+    pub fn classifier_own_type_parameter_count(&self, classifier: DeclarationId) -> Option<u32> {
+        self.classifier_own_type_parameter_counts
+            .get(&classifier)
+            .copied()
+    }
+
+    /// The classifier applied to its own stable semantic type-parameter identities.
+    pub fn classifier_self_type(&self, classifier: DeclarationId) -> Option<Ty> {
+        let identity = self.classifier_header(classifier)?.classifier;
+        let arguments = self
+            .classifier_type_arguments(classifier)
+            .unwrap_or_default()
+            .iter()
+            .map(|parameter| {
+                let header = self.type_parameter_header(*parameter)?;
+                let semantic_name = self.type_parameter_semantic_name(*parameter)?;
+                let bound = header
+                    .bounds
+                    .first()
+                    .map(|bound| bound.ty.get())
+                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+                Some(Ty::ty_param(semantic_name, bound))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Ty::obj_args_name(identity, &arguments))
+    }
+
+    pub(crate) fn publish_classifier_type_arguments(
+        &mut self,
+        classifier: DeclarationId,
+        own_count: u32,
+        parameters: impl IntoIterator<Item = TypeParameterId>,
+    ) {
+        assert!(
+            self.classifier_header(classifier).is_some(),
+            "classifier type arguments require a published classifier header"
+        );
+        let parameters = parameters.into_iter().collect::<Box<[_]>>();
+        assert!(
+            own_count as usize <= parameters.len(),
+            "own classifier parameters must be a prefix of its applied layout"
+        );
+        assert!(
+            self.classifier_own_type_parameter_counts
+                .insert(classifier, own_count)
+                .is_none()
+                && self
+                    .classifier_type_arguments
+                    .insert(classifier, parameters)
+                    .is_none(),
+            "a classifier type-argument layout may be published only once"
+        );
+    }
+
+    /// Complete semantic substitution domain of a finalized type alias, in declaration order.
+    /// Its expansion has already been alpha-renamed to these identities, so source spellings are
+    /// not interchangeable here. Missing identity metadata invalidates the whole stable header.
+    pub(crate) fn type_alias_substitution_formals(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<Vec<String>> {
+        (0..)
+            .map_while(|ordinal| self.type_parameter(declaration, ordinal))
+            .map(|parameter| {
+                self.type_parameter_semantic_name(parameter)
+                    .map(str::to_owned)
+            })
+            .collect()
     }
 
     pub(crate) fn type_parameter_by_semantic_name(

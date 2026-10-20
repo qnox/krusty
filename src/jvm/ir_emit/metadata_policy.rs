@@ -92,6 +92,22 @@ pub(super) fn finish_local_synthetic_class(
     env.run.finish_class(cw)
 }
 
+/// Finish a synthetic class kotlinc generates for a whole file or class, such as the
+/// `$EntriesIntrinsicMappings` holder: the `k=3` synthetic-class record with PUBLIC visibility.
+pub(super) fn finish_public_synthetic_class(
+    mut cw: crate::jvm::classfile::ClassWriter,
+    env: &super::EmitEnv,
+) -> Vec<u8> {
+    cw.set_kotlin_metadata(
+        3,
+        env.metadata_stamp,
+        synthetic_class_xi(SYNTHETIC_PUBLIC),
+        &[],
+        &[],
+    );
+    env.run.finish_class(cw)
+}
+
 /// Whether a synthetic annotation implementation stamps nullability on its constructor, `equals`
 /// and `toString`. Kotlin 2.4.20 stopped; earlier releases did.
 pub(super) fn annotation_impl_carries_nullability() -> bool {

@@ -35,6 +35,12 @@ pub struct MemberExtPropSig {
     /// property like any other, so it publishes its annotations into `ResolvedModuleIndex` through
     /// the same stable declaration; it must not be the one property shape that drops them.
     pub(super) annotations: Vec<TypeName>,
+    /// Provider-normalized declaration availability. `HIDDEN` keeps the binary declaration but
+    /// removes it from source lookup; selectors must not reopen annotation syntax by origin.
+    pub(super) deprecated_hidden: bool,
+    /// Independent source availability of the getter and setter after accessor annotations have
+    /// been folded. Setter presence remains represented by `is_var`.
+    pub(super) accessor_availability: crate::libraries::PropertyAccessorAvailability,
     pub(super) stable_declaration: Option<crate::fir::DeclarationId>,
     pub(super) source_member: Option<crate::libraries::SourceMember>,
     pub(super) getter: Option<crate::libraries::LibraryCallable>,
@@ -42,6 +48,14 @@ pub struct MemberExtPropSig {
 }
 
 impl MemberExtPropSig {
+    fn readable(&self) -> bool {
+        !self.deprecated_hidden && self.accessor_availability.getter
+    }
+
+    fn write_selectable(&self) -> bool {
+        !self.deprecated_hidden && (!self.is_var || self.accessor_availability.setter)
+    }
+
     /// The declared extension receiver (`Int` in `val Int.x: T`).
     pub(crate) fn receiver_ty(&self) -> Ty {
         self.receiver
@@ -105,6 +119,14 @@ impl MemberExtPropSig {
     pub(crate) fn setter_visibility(&self) -> Option<Visibility> {
         self.setter_visibility
     }
+
+    pub(crate) fn deprecated_hidden(&self) -> bool {
+        self.deprecated_hidden
+    }
+
+    pub(crate) fn accessor_availability(&self) -> crate::libraries::PropertyAccessorAvailability {
+        self.accessor_availability
+    }
 }
 
 /// One member extension property selected for a concrete receiver and implicit dispatch scope.
@@ -131,6 +153,69 @@ pub(super) struct MemberExtensionProperty {
     pub(super) setter: Option<crate::libraries::LibraryCallable>,
 }
 
+impl super::Checker<'_> {
+    /// Select a member-extension property from one combined provider/active declaration family
+    /// using this lexical scope's receiver tower and context-argument policy.
+    pub(super) fn member_extension_property(
+        &self,
+        scope: &super::CheckerScope<'_>,
+        extension_receiver: Ty,
+        name: &str,
+    ) -> Result<Option<MemberExtensionProperty>, ()> {
+        self.member_extension_property_for_access(
+            scope,
+            extension_receiver,
+            name,
+            crate::symbol_resolver::PropertyAccess::Read,
+        )
+    }
+
+    pub(super) fn member_extension_property_for_write(
+        &self,
+        scope: &super::CheckerScope<'_>,
+        extension_receiver: Ty,
+        name: &str,
+    ) -> Result<Option<MemberExtensionProperty>, ()> {
+        self.member_extension_property_for_access(
+            scope,
+            extension_receiver,
+            name,
+            crate::symbol_resolver::PropertyAccess::Write,
+        )
+    }
+
+    fn member_extension_property_for_access(
+        &self,
+        scope: &super::CheckerScope<'_>,
+        extension_receiver: Ty,
+        name: &str,
+        access: crate::symbol_resolver::PropertyAccess,
+    ) -> Result<Option<MemberExtensionProperty>, ()> {
+        select(
+            &self.fed_source(),
+            self,
+            &member_extension_selection::ordinary_dispatch_first(
+                scope,
+                self.implicit_receivers(scope),
+            ),
+            &|parameters| {
+                self.select_context_arguments_with_types(scope, parameters)
+                    .ok()
+            },
+            &|owner, name| {
+                self.checked_local_member_extension_properties
+                    .get(&owner)
+                    .and_then(|properties| properties.get(name))
+                    .cloned()
+                    .unwrap_or_default()
+            },
+            extension_receiver,
+            name,
+            access,
+        )
+    }
+}
+
 /// Select a member-extension property against an explicit receiver tower. The tower and the
 /// context-argument resolver are the only things a scope supplies here, so both are parameters:
 /// the checker passes its scope's, while signature evaluation passes the declaration's.
@@ -139,6 +224,7 @@ pub(super) fn select(
     oracle: &dyn crate::assignable::TypeOracle,
     implicit_receivers: &[ImplicitReceiver],
     context_arguments: &dyn Fn(&[Ty]) -> Option<Vec<(ResolvedContextArgument, Ty)>>,
+    active_declarations: &dyn Fn(TypeName, &str) -> Vec<MemberExtPropSig>,
     extension_receiver: Ty,
     name: &str,
     access: crate::symbol_resolver::PropertyAccess,
@@ -152,7 +238,14 @@ pub(super) fn select(
         for (owner, owner_ty, dispatch_depth) in
             applied_symbol_hierarchy(source, dispatch_receiver.ty)
         {
-            let mut declarations = Vec::new();
+            // The immutable provider and the active body-local overlay expose the same normalized
+            // declaration shape. Candidate union happens before applicability and specificity, so
+            // active declarations never take a separate origin-specific selection path.
+            let mut declarations = active_declarations(owner, name);
+            declarations.retain(|property| match access {
+                crate::symbol_resolver::PropertyAccess::Read => property.readable(),
+                crate::symbol_resolver::PropertyAccess::Write => property.write_selectable(),
+            });
             if let Some(classifier) = source.classifier(owner) {
                 declarations.extend(
                     classifier
@@ -217,6 +310,8 @@ pub(super) fn select(
                                 // is transient and never publishes a declaration's annotations —
                                 // `ClassSig::member_ext_props` does — so nothing reads these.
                                 annotations: Vec::new(),
+                                deprecated_hidden: property.deprecated_hidden,
+                                accessor_availability: property.accessor_availability,
                                 stable_declaration: property.stable_declaration,
                                 source_member: property.source_member,
                                 getter: Some(property.getter.clone()),

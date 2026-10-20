@@ -188,6 +188,71 @@ fn receiver_capture_source(
 }
 
 impl Checker<'_> {
+    /// Whether this construction-site receiver candidate is the enclosing instance selected for
+    /// the anonymous classifier's inner-super constructor. The selected delegation may have been
+    /// cached before receiver-use accounting starts, so this exact semantic edge is independent of
+    /// the ordinary body-use counter.
+    fn selected_anonymous_super_outer_candidate(
+        &self,
+        declaration: DeclId,
+        candidate: &AnonymousCaptureCandidate,
+    ) -> bool {
+        let Some(selected) = self.resolved_primary_ctor_delegations.get(&declaration) else {
+            return false;
+        };
+        let Some(receiver) = selected.outer_receiver.as_ref() else {
+            return false;
+        };
+        let super_outer = match &selected.target {
+            super::ResolvedCtorDelegationTarget::Super {
+                implicit_outer: Some(classifier),
+                ..
+            } => *classifier,
+            _ => return false,
+        };
+        if let Some(stable) = receiver.classifier {
+            let Some(classifier) = self
+                .resolved_index
+                .and_then(|index| index.classifier_header(stable))
+                .map(|header| header.classifier)
+            else {
+                return false;
+            };
+            if classifier != super_outer {
+                return false;
+            }
+        }
+        let Some(AnonymousObjectReceiverSource::EnclosingInstance { .. }) =
+            candidate.semantic_receiver
+        else {
+            return false;
+        };
+        candidate.ty == receiver.ty
+            && candidate.receiver_role
+                == Some(super::ReceiverDeclarationRole::EnclosingClass(super_outer))
+    }
+
+    pub(super) fn keep_anonymous_receiver(
+        &self,
+        declaration: DeclId,
+        candidate: &AnonymousCaptureCandidate,
+        receiver_identity: (usize, usize),
+        uses_before: usize,
+        extension_use: Option<(Span, usize)>,
+        finalized: &[AnonymousObjectCapture],
+    ) -> bool {
+        let semantically_used = self.implicit_receiver_identity_use_count(receiver_identity)
+            > uses_before
+            || extension_use.is_some_and(|(declaration, before)| {
+                self.extension_receiver_use_count(declaration) > before
+            });
+        semantically_used
+            || self.selected_anonymous_super_outer_candidate(declaration, candidate)
+            || finalized
+                .iter()
+                .any(|capture| capture.name == candidate.name && capture.source == candidate.source)
+    }
+
     pub(super) fn refresh_anonymous_receiver_capture_fields(
         &mut self,
         declaration: DeclId,
@@ -582,9 +647,7 @@ impl Checker<'_> {
                 continue;
             }
             let Some(superclass) = self
-                .resolved_body_local_supertypes
-                .get(&nested_owner)
-                .and_then(|supertypes| supertypes.first())
+                .applied_declared_supertype(nested_owner)
                 .and_then(|supertype| supertype.kotlin_class_internal())
             else {
                 continue;

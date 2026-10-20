@@ -196,15 +196,28 @@ impl DefaultArgumentStore {
         index: &ResolvedModuleIndex,
         source: SourceFileId,
     ) -> Vec<(CallableId, FirBody)> {
+        self.take_for_source_matching(index, source, |_, _| true)
+    }
+
+    /// Remove the checked defaults in `source` whose callable is ready for the consuming phase.
+    /// Defaults whose body-local owner is still incomplete stay retained for the later Pass-2
+    /// publication boundary.
+    pub(crate) fn take_for_source_matching(
+        &mut self,
+        index: &ResolvedModuleIndex,
+        source: SourceFileId,
+        mut ready: impl FnMut(CallableId, &FirBody) -> bool,
+    ) -> Vec<(CallableId, FirBody)> {
         let selected = self
             .bodies
             .iter()
             .filter_map(|(callable, bodies)| {
                 let body = bodies.first()?;
-                index
+                (index
                     .declaration_anchor(DeclarationId::from_raw(body.owner().raw()))
                     .is_some_and(|anchor| anchor.source == source)
-                    .then_some(*callable)
+                    && ready(*callable, body))
+                .then_some(*callable)
             })
             .collect::<Vec<_>>();
         selected

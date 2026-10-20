@@ -84,7 +84,11 @@ pub(crate) fn load(
     drop_receiver(&mut node)?;
     add_marker_variable(&mut node, function, &class.name);
     if extracted.need_reification {
-        super::reified::specialize(&mut node, reified)?;
+        super::reified::specialize(
+            &mut node,
+            reified,
+            &mut crate::jvm::reified_arguments::NoEnumEntriesReads,
+        )?;
     }
     if node.instructions().any(is_class_reification_marker) {
         return Err(unsupported(

@@ -1041,6 +1041,10 @@ impl Checker<'_> {
         expected_property: Option<Ty>,
         site: DelegateConventionSite,
     ) -> (Ty, Option<Ty>) {
+        // Only the complete delegate expression is a migration position. Nested expressions keep
+        // their ordinary declaration-use semantics, while a selected class companion is identified
+        // later from the expression's retained singleton lowering.
+        self.deprecation_use_sites.mark_companion_delegate(delegate);
         let selection = DelegateGetValueSelection {
             provide_ref,
             this_ref,

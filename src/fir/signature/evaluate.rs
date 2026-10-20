@@ -6,6 +6,11 @@ use crate::integer_constant::IntegerConstant;
 mod declaration_publication;
 mod postponed_arguments;
 
+/// How many nested expression nodes the evaluation descends between checks of the remaining
+/// stack. Checking before the first node and then every 64 nested nodes keeps the largest
+/// unchecked run well below one grown segment, without paying `stacker`'s probe for every node.
+const EXPRESSION_STACK_CHECK_INTERVAL: usize = 64;
+
 /// The sole structural evaluator for [`SigExpr`]. It knows only how graph nodes compose; every
 /// semantic decision is delegated to [`SignatureSemantics`].
 pub struct ResolverBackedSignatureEvaluator<'a, S> {
@@ -1288,9 +1293,22 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             let node = graph
                 .expr(expression)
                 .expect("a signature expression id must belong to its graph");
+            // The nodes in progress are this walk's recursion depth. Pre-inference evaluates an
+            // inferred body before any per-file check runs, so it probes the remaining stack at
+            // the checker's cadence (see [`crate::wide_stack`]).
+            let depth = computing.len();
             // Every `?` inside the arms must still leave the guard: a failed node is dropped by a
             // sequence effect and may be read again by the block's result.
-            let ty = (|| -> Result<ResolvedTy, DiagnosticId> {
+            let mut frame = || -> Result<ResolvedTy, DiagnosticId> {
+                if graph.written_type_application(expression).is_some() {
+                    return semantics.resolve_written_type_application(
+                        expression,
+                        graph,
+                        &mut |argument| {
+                            evaluate_expression(semantics, argument, graph, demand, memo, computing)
+                        },
+                    );
+                }
                 match node {
                     SigExpr::Known(ty) => Ok(ty),
                     SigExpr::IntegerLiteral(_) => Ok(ResolvedTy::new(Ty::Int)
@@ -2034,7 +2052,12 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         semantics.substitute(base, &resolved_substitutions)
                     }
                 }
-            })();
+            };
+            let ty = if depth == 1 || depth.is_multiple_of(EXPRESSION_STACK_CHECK_INTERVAL) {
+                crate::wide_stack::on_wide_stack(frame)
+            } else {
+                frame()
+            };
             computing.remove(&expression);
             if ty.is_err() {
                 crate::trace_compiler!(

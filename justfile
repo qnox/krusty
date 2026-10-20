@@ -72,7 +72,10 @@ clippy-findings:
     cargo clean --target-dir "$clippy_target" >/dev/null
     output=$(mktemp)
     trap 'rm -f "$output"' EXIT
-    if ! CARGO_TARGET_DIR="$clippy_target" cargo clippy --workspace --all-targets --all-features --message-format=short >"$output" 2>&1; then
+    # CI forces colored Cargo output globally. The parser below consumes the redirected file, so
+    # override that setting here: an ANSI prefix before the path would make every diagnostic miss
+    # the anchored expression and falsely report an empty finding set.
+    if ! CARGO_TERM_COLOR=never CARGO_TARGET_DIR="$clippy_target" cargo clippy --workspace --all-targets --all-features --message-format=short >"$output" 2>&1; then
         cat "$output" >&2
         exit 1
     fi

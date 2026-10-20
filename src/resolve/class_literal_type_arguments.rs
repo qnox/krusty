@@ -167,7 +167,7 @@ impl Checker<'_> {
         if scope.tparam_contains(name) {
             return None;
         }
-        let (selection, _, alias) = self.select_type_classifier_binding(scope, name);
+        let (selection, _, alias, _) = self.select_type_classifier_binding(scope, name);
         let InheritedNestedClassifier::Found(classifier) = selection else {
             return None;
         };
@@ -180,8 +180,9 @@ impl Checker<'_> {
                 arg: None,
                 targs: self.file.call_type_args[&receiver.0].arguments.clone(),
                 span: self.file.expr_spans[receiver.0 as usize],
-                fun_params: Vec::new(),
+                fun_params: Box::new([]),
                 fun_context_count: 0,
+                qualifier_arguments: Default::default(),
             };
             let ty = self.obj_with_targs_name(scope, classifier, &reference);
             return Some(self.validate_class_literal_type_arguments(literal, receiver, ty));

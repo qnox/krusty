@@ -157,7 +157,8 @@ impl BodyLowering<'_> {
             FirStatementKind::LocalDeclaration {
                 declaration,
                 captures,
-            } => self.local_class_declaration(*declaration, captures)?,
+                capture_order,
+            } => self.local_class_declaration(*declaration, captures, capture_order)?,
             FirStatementKind::LocalFunction { .. } => self.ir.add_expr(IrExpr::Block {
                 stmts: Vec::new(),
                 value: None,
@@ -245,13 +246,49 @@ impl BodyLowering<'_> {
         &mut self,
         declaration: crate::fir::DeclarationId,
         captures: &[FirLocalClassCapture],
+        capture_order: &[u32],
     ) -> Result<ExprId, FirLoweringFailure> {
         let (classifier, values) = self.prepare_captured_class(declaration, captures)?;
+        self.record_capture_order(declaration, captures.len(), capture_order)?;
         self.local_class_captures.insert(classifier, values);
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: Vec::new(),
             value: None,
         }))
+    }
+
+    /// Record a local class's first-use capture order for the JVM backend. The class keeps its
+    /// fields, constructor prefix and construction arguments in field order; only an order that
+    /// differs from it is recorded. It must name every capture field exactly once.
+    fn record_capture_order(
+        &mut self,
+        declaration: crate::fir::DeclarationId,
+        captures: usize,
+        order: &[u32],
+    ) -> Result<(), FirLoweringFailure> {
+        let mut seen = vec![false; captures];
+        let permutation = order.len() == captures
+            && order.iter().all(|&field| {
+                seen.get_mut(field as usize)
+                    .is_some_and(|seen| !std::mem::replace(seen, true))
+            });
+        if !permutation {
+            return Err(FirLoweringFailure::InvalidCaptureOrder(declaration));
+        }
+        if order
+            .iter()
+            .enumerate()
+            .any(|(position, &field)| position != field as usize)
+        {
+            let class = self
+                .ir
+                .checked_classifier_classes
+                .get(&declaration)
+                .copied()
+                .ok_or(FirLoweringFailure::MissingLocalClass(declaration))?;
+            self.ir.class_capture_order.insert(class, order.into());
+        }
+        Ok(())
     }
 
     pub(super) fn prepare_captured_class(

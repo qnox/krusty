@@ -76,10 +76,10 @@ upstream release notes, which can name an assistant that contributed upstream. T
 - **Retire lint suppressions in code you touch.** Any `#[allow(...)]` on a function, type, or
   module your change touches must be deleted and re-linted; keep it only if the lint still fires,
   and prefer fixing the finding to suppressing it. Never add one to land a change.
-  `clippy-baseline.tsv` is enforced by the pre-commit hook only — CI never runs `just lint` — so it
-  drifts both ways; removing findings is always safe, an extraction must leave its new files clean
-  because the baseline is keyed by file, and a refreeze must say what it knowingly accepts rather
-  than absorb unrelated findings silently. See "Lint suppressions" below.
+  `clippy-baseline.tsv` is enforced by both the pre-commit hook and CI's lint job. Removing findings
+  is always safe, an extraction must leave its new files clean because the baseline is keyed by
+  file, and a refreeze must say what it knowingly accepts rather than absorb unrelated findings
+  silently. See "Lint suppressions" below.
 - The AST/IR stays **index-based** (`u32` ids into parallel `Vec`s — no `Box`/`Rc` graphs).
 - Correctness is defined by the **differential harness** vs the real `kotlinc`: don't claim a
   feature works without an ABI-signature diff and/or a round-trip test.
@@ -311,10 +311,10 @@ NEW file+message row or a HIGHER count. Removing findings is therefore always sa
 not: relocating code creates rows under the new path, so an extraction must leave the new files
 with no findings at all.
 
-It is enforced by the lefthook **pre-commit hook only** — CI installs the clippy component but
-never runs `just lint`, so a green CI run says nothing about the baseline. It therefore drifts in
-both directions as toolchains move and as findings are fixed without unfreezing: a stale-low entry
-blocks every commit, and a stale-high one silently licenses a real regression in that file.
+It is enforced by the lefthook **pre-commit hook** and CI's **lint job**. It can still drift in both
+directions as toolchains move, findings are fixed without unfreezing, or a stale green branch lands
+after its baseline snapshot: a stale-low entry blocks every commit, and a stale-high one silently
+licenses a real regression in that file.
 
 Refreezing with `just clippy-baseline` after intentionally fixing or knowingly accepting findings
 is the prescribed action, not a last resort. What it must not be is silent: a refreeze absorbs

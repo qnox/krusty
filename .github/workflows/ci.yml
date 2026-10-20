@@ -90,10 +90,15 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      # krusty-toolchain's oracle builds the Build Tools API implementation with its Gradle
+      # wrapper, which does not run on JDK 25; the coverage gate points it at JDK 21. The last
+      # version listed stays JAVA_HOME.
       - uses: actions/setup-java@v6.1.0
         with:
           distribution: zulu
-          java-version: '25'
+          java-version: |
+            21
+            25
       - name: cache kotlin toolchain and corpora
         uses: actions/cache@v6
         with:
@@ -173,6 +178,7 @@ jobs:
           # The e2e suite is one process. An instrumented run is about seventeen minutes; thirty
           # minutes leaves room for a slow runner and still fails a hung binary.
           KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 1800
+          KRUSTY_BUILD_TOOLS_JAVA_HOME: ${{ env.JAVA_HOME_21_X64 }}
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           # This job's archive only. The conformance job publishes a separate one.
           KRUSTY_RECORD_CLASS_DUMPS: ${{ steps.recorded-mode.outputs.record }}

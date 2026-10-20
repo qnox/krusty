@@ -98,11 +98,22 @@ pub(super) fn binary_class_name(classifier: TypeName) -> String {
 ///
 /// The mapping reads only whether the name is interned, and an interned name stays interned, so the
 /// physical name of a name interned before it is mapped is remembered per thread.
-pub fn classfile_internal_name(internal: &str) -> String {
-    if let Some(identity) = crate::types::existing_type_name(internal) {
-        return classfile_internal_name_of(identity).to_string();
+pub fn classfile_internal_name(internal: &str) -> std::borrow::Cow<'static, str> {
+    thread_local! {
+        static BY_SPELLING: std::cell::RefCell<crate::fx_hash::HashMap<Box<str>, &'static str>> =
+            std::cell::RefCell::default();
     }
-    physical_classfile_name(internal)
+    // Class constants map the same spellings over and over, and finding a spelling's identity
+    // probes the name tree once per package segment; a single probe here answers a repeat.
+    if let Some(physical) = BY_SPELLING.with(|known| known.borrow().get(internal).copied()) {
+        return physical.into();
+    }
+    if let Some(identity) = crate::types::existing_type_name(internal) {
+        let physical = classfile_internal_name_of(identity);
+        BY_SPELLING.with(|known| known.borrow_mut().insert(internal.into(), physical));
+        return physical.into();
+    }
+    physical_classfile_name(internal).into()
 }
 
 /// Physical JVM classfile name of an interned classifier. The spelling is retained once per
@@ -740,7 +751,7 @@ mod tests {
             let physical = classfile_internal_name_of(identity);
             assert_eq!(
                 physical,
-                classfile_internal_name(&identity.render()).as_str(),
+                classfile_internal_name(&identity.render()).as_ref(),
                 "{spelling}"
             );
             assert!(std::ptr::eq(physical, classfile_internal_name_of(identity)));

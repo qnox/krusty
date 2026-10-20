@@ -1,0 +1,39 @@
+An application depends on a module with resources and no sources, and on a module with neither:
+neither compiles, and each is on the application's classpath as the toolchain places it.
+--- task
+:app:compileJvm
+--- project.yaml
+modules:
+  - app
+  - assets
+  - empty
+--- app/module.yaml
+product: jvm/app
+repositories:
+  - mavenLocal
+dependencies:
+  - ../assets
+  - ../empty
+--- app/src/main.kt
+fun main() = println("hello")
+--- assets/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+--- assets/resources/greeting.txt
+hello
+--- empty/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+--- krusty-argv
+-Xjdk-release=25
+-jdk-home=<directory>/jdk
+-classpath=<directory>/project/build/artifacts/CompiledJvmArtifact/assetsjvm/resources-output:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-no-stdlib
+-module-name=app
+-Xkotlin-reference-version=2.4.20
+-d
+<directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output
+<directory>/project/app/src/main.kt
+----

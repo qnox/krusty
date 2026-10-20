@@ -371,9 +371,7 @@ pub fn to_jvm_internal(internal: &str) -> &str {
     if let Some(j) = kotlin_builtin_to_jvm(internal) {
         return j;
     }
-    if crate::types::existing_type_name(internal)
-        .is_some_and(super::function_classifiers::is_reflective_function_classifier)
-    {
+    if names_reflective_function(internal) {
         return crate::types::KFUNCTION_INTERNAL;
     }
     // `kotlin/Function{N}` is a METADATA-only name (what `@Metadata` calls a function type); the
@@ -391,6 +389,25 @@ pub fn to_jvm_internal(internal: &str) -> &str {
             .unwrap_or("kotlin/jvm/functions/FunctionN");
     }
     internal
+}
+
+/// Whether `internal` names a reflective function classifier (`kotlin/reflect/KFunction1`). Every
+/// class constant lookup asks, and finding a spelling's identity probes the name tree once per
+/// package segment, so the answer for an interned name, which stays interned, is remembered.
+fn names_reflective_function(internal: &str) -> bool {
+    thread_local! {
+        static BY_SPELLING: std::cell::RefCell<FxHashMap<Box<str>, bool>> =
+            std::cell::RefCell::default();
+    }
+    if let Some(reflective) = BY_SPELLING.with(|known| known.borrow().get(internal).copied()) {
+        return reflective;
+    }
+    let Some(identity) = crate::types::existing_type_name(internal) else {
+        return false;
+    };
+    let reflective = super::function_classifiers::is_reflective_function_classifier(identity);
+    BY_SPELLING.with(|known| known.borrow_mut().insert(internal.into(), reflective));
+    reflective
 }
 
 /// Which declaration supplies a mapped builtin's SOURCE member/supertype scope. This is part of the

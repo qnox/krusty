@@ -1,0 +1,34 @@
+Modules that depend on each other for compilation in a cycle cannot be compiled one after another.
+--- task
+:app:compileJvm
+--- project.yaml
+modules:
+  - app
+  - first
+  - second
+--- app/module.yaml
+product: jvm/app
+repositories:
+  - mavenLocal
+dependencies:
+  - ../first
+--- app/src/main.kt
+fun main() = Unit
+--- first/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - ../second
+--- first/src/First.kt
+class First
+--- second/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - ../first
+--- second/src/Second.kt
+class Second
+--- krusty-refusal
+error	ERROR: modules depend on each other for compilation in a cycle (first -> second -> first), and krusty-toolchain cannot order their compilation

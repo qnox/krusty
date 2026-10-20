@@ -115,8 +115,9 @@ impl Parser<'_> {
                 arg: None,
                 targs: Vec::new(),
                 span: start,
-                fun_params: Vec::new(),
+                fun_params: Box::new([]),
                 fun_context_count: 0,
+                qualifier_arguments: Default::default(),
             };
             match self.kind() {
                 TokenKind::KwFun => {

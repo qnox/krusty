@@ -12,8 +12,9 @@
 
 use super::*;
 
-pub(crate) const DECLARATION: &str = "non-public primary constructor is exposed via the generated 'copy()' method of the 'data' class.\n\nThe generated 'copy()' will change its visibility in future releases.\n\nTo suppress the warning do one of the following:\n- Annotate the data class with the '@ConsistentCopyVisibility' annotation.\n- Use the '-Xconsistent-data-class-copy-visibility' compiler flag.\n- Annotate the data class with the '@ExposedCopyVisibility' annotation \n  (Discouraged, but can be used to keep binary compatibility).\n\nTo learn more, see the documentation of the '@ConsistentCopyVisibility' and '@ExposedCopyVisibility' annotations.\n\n";
-pub(crate) const USAGE: &str = "this 'copy()' exposes the non-public primary constructor of a 'data class'. See the appropriate 'data class' documentation or contact the 'data class' author for migration guidance.";
+use crate::features::deprecation_cycle_messages::{
+    DATA_CLASS_COPY_VISIBILITY, DATA_CLASS_INVISIBLE_COPY_USAGE,
+};
 
 impl Checker<'_> {
     /// Check the declaration of the class `class`.
@@ -49,7 +50,7 @@ impl Checker<'_> {
                 .data_class_copy_visibility_change_warning
                 .as_deref(),
             crate::diag::CompilerWarningName::DataClassCopyVisibilityWillBeChanged,
-            DECLARATION,
+            DATA_CLASS_COPY_VISIBILITY,
         );
     }
 
@@ -103,7 +104,7 @@ impl Checker<'_> {
             self.file.error_about_data_class_copy_visibility_change,
             self.file.data_class_invisible_copy_usage_warning.as_deref(),
             crate::diag::CompilerWarningName::DataClassInvisibleCopyUsage,
-            USAGE,
+            DATA_CLASS_INVISIBLE_COPY_USAGE,
         );
     }
 }
