@@ -8,7 +8,7 @@
 use super::classpath::ExternalCallableKind;
 use crate::fir::ExternalCallableId;
 use crate::ir::{ExprId, FrDispatch, FuncRef, IrClass, IrExpr, IrFile};
-use crate::types::{type_name, Ty};
+use crate::types::{type_name, Ty, TyKind};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FunctionReferenceRealizationTarget {
@@ -40,9 +40,9 @@ fn adapted_flags(adaptation: &crate::fir::FirReferenceAdaptation, declaration_re
 /// projection records only a lower bound and remains intact for the descriptor boundary to erase
 /// to `Object`; it cannot be narrowed to its write-only lower bound.
 fn reflection_descriptor_ty(ty: Ty) -> Ty {
-    match ty {
-        Ty::OutProjection(upper_bound) | Ty::StarProjection(upper_bound) => *upper_bound,
-        ty => ty,
+    match ty.kind() {
+        TyKind::OutProjection(upper_bound) | TyKind::StarProjection(upper_bound) => upper_bound,
+        _ => ty,
     }
 }
 
@@ -218,7 +218,7 @@ fn realize_adapter_reference(
             reference.adapter,
         ))?
         .clone();
-    let Ty::Fun(function_type) = reference.function_type.non_null() else {
+    let TyKind::Fun(function_type) = reference.function_type.non_null().kind() else {
         return Err(FunctionReferenceRealizationTarget::Invalid);
     };
     let arity = u8::try_from(function_type.params.len())
@@ -806,13 +806,15 @@ pub(super) fn realize(
                 }
                 let inline_parameters = (0..args.len())
                     .map(|parameter| {
-                        matches!(params.get(parameter), Some(Ty::Fun(_)))
-                            && callable
-                                .inline_modifiers
-                                .get(parameter)
-                                .is_some_and(|modifier| {
-                                    *modifier != crate::types::InlineParameterModifier::Noinline
-                                })
+                        matches!(
+                            params.get(parameter).map(|ty| ty.kind()),
+                            Some(TyKind::Fun(_))
+                        ) && callable
+                            .inline_modifiers
+                            .get(parameter)
+                            .is_some_and(|modifier| {
+                                *modifier != crate::types::InlineParameterModifier::Noinline
+                            })
                     })
                     .collect::<Vec<_>>();
                 (inline_parameters, args)
@@ -929,7 +931,7 @@ mod tests {
     fn own_invoke_plan(function_type: Ty, declaration_suspend: bool, capture: Capture) -> bool {
         let mut ir = IrFile::default();
         let body = ir.add_expr(IrExpr::UnitInstance);
-        let Ty::Fun(signature) = function_type.non_null() else {
+        let TyKind::Fun(signature) = function_type.non_null().kind() else {
             unreachable!("test function type")
         };
         let mut params = signature.params.clone();

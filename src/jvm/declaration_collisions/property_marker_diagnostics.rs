@@ -1,6 +1,6 @@
 //! JVM diagnostic types for synthetic property-annotation marker parameters.
 
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::{MemberMethodDeclaration, PropertyAccessorDeclaration};
 
@@ -216,9 +216,9 @@ fn function_return(ir: &crate::ir::IrFile, function: crate::ir::FunId) -> Ty {
 }
 
 pub(super) fn replace_type_parameters_with_erased_bounds(ty: Ty) -> Ty {
-    match ty {
-        Ty::TyParam(_, bound) => erased_bound(*bound),
-        Ty::Fun(signature) => Ty::fun_with_shape(
+    match ty.kind() {
+        TyKind::TyParam(_, bound) => erased_bound(bound),
+        TyKind::Fun(signature) => Ty::fun_with_shape(
             signature
                 .params
                 .iter()
@@ -229,30 +229,30 @@ pub(super) fn replace_type_parameters_with_erased_bounds(ty: Ty) -> Ty {
             signature.has_receiver,
             signature.suspend,
         ),
-        Ty::Nullable(inner) => Ty::nullable(replace_type_parameters_with_erased_bounds(*inner)),
-        Ty::PlatformNullable(inner) => {
-            Ty::platform_nullable(replace_type_parameters_with_erased_bounds(*inner))
+        TyKind::Nullable(inner) => Ty::nullable(replace_type_parameters_with_erased_bounds(inner)),
+        TyKind::PlatformNullable(inner) => {
+            Ty::platform_nullable(replace_type_parameters_with_erased_bounds(inner))
         }
-        Ty::InProjection(inner) => {
-            Ty::in_projection(replace_type_parameters_with_erased_bounds(*inner))
+        TyKind::InProjection(inner) => {
+            Ty::in_projection(replace_type_parameters_with_erased_bounds(inner))
         }
-        Ty::OutProjection(inner) => {
-            Ty::out_projection(replace_type_parameters_with_erased_bounds(*inner))
+        TyKind::OutProjection(inner) => {
+            Ty::out_projection(replace_type_parameters_with_erased_bounds(inner))
         }
-        Ty::StarProjection(inner) => {
-            Ty::star_projection(replace_type_parameters_with_erased_bounds(*inner))
+        TyKind::StarProjection(inner) => {
+            Ty::star_projection(replace_type_parameters_with_erased_bounds(inner))
         }
-        Ty::DefinitelyNotNull(inner) => {
-            replace_type_parameters_with_erased_bounds(*inner).definitely_non_null()
+        TyKind::DefinitelyNotNull(inner) => {
+            replace_type_parameters_with_erased_bounds(inner).definitely_non_null()
         }
-        Ty::Obj(internal, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+        TyKind::Obj(internal, arguments) if !arguments.is_empty() => Ty::obj_args_name(
             internal,
             &arguments
                 .iter()
                 .map(|argument| replace_type_parameters_with_erased_bounds(*argument))
                 .collect::<Vec<_>>(),
         ),
-        Ty::Intersection(parts) => Ty::intersection(
+        TyKind::Intersection(parts) => Ty::intersection(
             &parts
                 .iter()
                 .map(|part| replace_type_parameters_with_erased_bounds(*part))
@@ -263,12 +263,12 @@ pub(super) fn replace_type_parameters_with_erased_bounds(ty: Ty) -> Ty {
 }
 
 fn erased_bound(bound: Ty) -> Ty {
-    match bound {
-        Ty::TyParam(_, next) => erased_bound(*next),
-        Ty::Nullable(inner) => Ty::nullable(erased_bound(*inner)),
-        Ty::PlatformNullable(inner) => Ty::platform_nullable(erased_bound(*inner)),
-        Ty::DefinitelyNotNull(inner) => erased_bound(*inner).definitely_non_null(),
-        Ty::Fun(signature) => {
+    match bound.kind() {
+        TyKind::TyParam(_, next) => erased_bound(next),
+        TyKind::Nullable(inner) => Ty::nullable(erased_bound(inner)),
+        TyKind::PlatformNullable(inner) => Ty::platform_nullable(erased_bound(inner)),
+        TyKind::DefinitelyNotNull(inner) => erased_bound(inner).definitely_non_null(),
+        TyKind::Fun(signature) => {
             let classifier = crate::libraries::function_classifiers::function_classifier_identity(
                 signature.params.len(),
                 signature.suspend,
@@ -276,7 +276,7 @@ fn erased_bound(bound: Ty) -> Ty {
             let star = Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")));
             Ty::obj_args_name(classifier, &vec![star; signature.params.len() + 1])
         }
-        Ty::Obj(internal, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+        TyKind::Obj(internal, arguments) if !arguments.is_empty() => Ty::obj_args_name(
             internal,
             &arguments
                 .iter()

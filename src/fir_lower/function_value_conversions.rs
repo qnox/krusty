@@ -2,7 +2,7 @@
 
 use crate::fir::ResolvedTy;
 use crate::ir::{ExprId, IrCallableReference, IrCallableReferenceTarget, IrExpr, IrFunction};
-use crate::types::{stored_value_ty, Ty};
+use crate::types::{stored_value_ty, Ty, TyKind};
 
 use super::BodyLowering;
 
@@ -19,7 +19,8 @@ impl BodyLowering<'_> {
         ordinal: u32,
         value: ExprId,
     ) -> Option<ExprId> {
-        let (Ty::Fun(source), Ty::Fun(target)) = (from.get().non_null(), to.get().non_null())
+        let (TyKind::Fun(source), TyKind::Fun(target)) =
+            (from.get().non_null().kind(), to.get().non_null().kind())
         else {
             return None;
         };

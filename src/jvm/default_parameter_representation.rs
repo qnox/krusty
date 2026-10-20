@@ -7,7 +7,7 @@
 
 use crate::ir::IrFile;
 use crate::jvm::physical_type::ir_ty_to_jvm;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// Record, with the parameters each `$default` stub takes boxed, every defaulted one that is a
 /// primitive-bounded type parameter, as its JDK wrapper.
@@ -61,7 +61,7 @@ pub(super) fn defaulted_primitive_bounds(
 /// value class whose carrier can hold `null`, so the stub's placeholder stays distinct from a
 /// supplied value. A sibling-file or dependency declaration follows the rule a same-file one records.
 pub(super) fn default_stub_takes_box(ir: &IrFile, parameter: Ty) -> bool {
-    let Ty::Obj(classifier, _) = parameter else {
+    let TyKind::Obj(classifier, _) = parameter.kind() else {
         return false;
     };
     crate::jvm::value_classes::boxed_value_class_carrier(ir, classifier)
@@ -71,13 +71,13 @@ pub(super) fn default_stub_takes_box(ir: &IrFile, parameter: Ty) -> bool {
 /// `(primitive, JDK wrapper)` when `declared` is a non-null type parameter bounded by a JVM
 /// primitive.
 pub(super) fn primitive_bounded_type_parameter(declared: Ty) -> Option<(Ty, Ty)> {
-    let Ty::TyParam(_, bound) = declared.non_null() else {
+    let TyKind::TyParam(_, bound) = declared.non_null().kind() else {
         return None;
     };
     if declared.is_nullable() {
         return None;
     }
-    let primitive = ir_ty_to_jvm(bound);
+    let primitive = ir_ty_to_jvm(&bound);
     primitive_wrapper(primitive).map(|wrapper| (primitive, wrapper))
 }
 

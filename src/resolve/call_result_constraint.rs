@@ -31,7 +31,7 @@ impl<'a> super::Checker<'a> {
             return site.inferred;
         };
         if site.inferred != Ty::Nothing
-            || !matches!(site.signature.ret.non_null(), Ty::TyParam(..))
+            || !site.signature.ret.non_null().is_ty_param()
             || expected == Ty::Error
         {
             return site.inferred;

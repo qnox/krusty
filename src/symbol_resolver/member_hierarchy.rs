@@ -12,7 +12,7 @@ use super::{
 };
 use crate::libraries::{Callables, FnKind, FunctionInfo, FunctionSet, PropKind, PropertySet};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// Whether a declaration participates in a subtype's member family. Accessibility is checked at
 /// the use site; private declarations are different because they are not inherited at all.
@@ -272,9 +272,9 @@ fn specialize_declared_callables(
         }
         if raw_owner_property {
             let erased = property.getter.physical_ret;
-            let erased = match declared_nullability {
-                Ty::Nullable(_) => Ty::nullable(erased.non_null()),
-                Ty::PlatformNullable(_) => Ty::platform_nullable(erased.non_null()),
+            let erased = match declared_nullability.kind() {
+                TyKind::Nullable(_) => Ty::nullable(erased.non_null()),
+                TyKind::PlatformNullable(_) => Ty::platform_nullable(erased.non_null()),
                 _ => erased,
             };
             property.ty = erased;
@@ -331,10 +331,10 @@ pub(crate) fn specialize_member_function(
         .callable
         .enhanced_result
         .specialize(receiver.kotlin_class_internal(), declared_result);
-    if let Ty::PlatformNullable(rigid) = declared_result {
+    if let TyKind::PlatformNullable(rigid) = declared_result.kind() {
         result_enhancement::publish_flexible_result(
             &mut function.call_sig.result_enhancement,
-            specialize_member_type(source, *rigid, &bindings, TypePosition::Out),
+            specialize_member_type(source, rigid, &bindings, TypePosition::Out),
         );
     }
     specialize_callable(source, &mut function.callable, &bindings);
@@ -349,8 +349,8 @@ pub(crate) fn specialize_member_function(
             .suspend
             .then(|| {
                 let continuation = *signature.params.last()?;
-                match continuation {
-                    Ty::Obj(name, args)
+                match continuation.kind() {
+                    TyKind::Obj(name, args)
                         if crate::types::same(name, crate::types::wk::continuation()) =>
                     {
                         args.first().copied()
@@ -561,10 +561,10 @@ fn members_in_hierarchy_for(
     // `invoke` remains a member of the `FnSig` itself and is handled by the caller from that signature.
     let intersection_parts =
         super::hierarchy_projection::intersection_components(receiver.non_null());
-    let receiver = match receiver.non_null() {
-        Ty::Fun(signature) => Ty::obj_args("kotlin/Function", &[signature.ret]),
-        Ty::Unit => Ty::obj("kotlin/Unit"),
-        Ty::Nothing => Ty::obj("kotlin/Nothing"),
+    let receiver = match receiver.non_null().kind() {
+        TyKind::Fun(signature) => Ty::obj_args("kotlin/Function", &[signature.ret]),
+        TyKind::Unit => Ty::obj("kotlin/Unit"),
+        TyKind::Nothing => Ty::obj("kotlin/Nothing"),
         _ => receiver,
     };
     let mut functions = FunctionSet::default();
@@ -1153,8 +1153,8 @@ fn expects_recorded_suspend_result(candidate: &FunctionInfo) -> bool {
         return false;
     }
     matches!(
-        candidate.callable.ret.non_null(),
-        Ty::Obj(..) | Ty::TyParam(..)
+        candidate.callable.ret.non_null().kind(),
+        TyKind::Obj(..) | TyKind::TyParam(..)
     )
 }
 

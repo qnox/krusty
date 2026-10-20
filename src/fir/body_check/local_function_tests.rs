@@ -3,6 +3,7 @@ use super::test_support::{
     root_expression,
 };
 use super::*;
+use crate::types::TyKind;
 
 fn collect_local_call_shapes(body: &FirBody, selected: &mut Vec<(usize, u32, bool)>) {
     for raw in 0..body.expression_count() {
@@ -855,8 +856,8 @@ fn suspend_local_function_reference_keeps_its_suspend_function_type() {
     };
     assert!(adaptation.is_none());
     assert!(matches!(
-        function_type.get(),
-        Ty::Fun(signature) if signature.suspend && signature.params.is_empty() && signature.ret == Ty::Unit
+        function_type.get().kind(),
+        TyKind::Fun(signature) if signature.suspend && signature.params.is_empty() && signature.ret == Ty::Unit
     ));
 }
 
@@ -956,8 +957,8 @@ fn generic_local_extension_signature_uses_the_preceding_local_classifier_scope()
         })
         .expect("generic local extension reference must become checked FIR");
     assert!(matches!(
-        reference.ty.get().non_null(),
-        Ty::Fun(signature)
+        reference.ty.get().non_null().kind(),
+        TyKind::Fun(signature)
             if signature.params.len() == 2
                 && signature.params[0] == Ty::obj_name(classifier)
                 && signature.params[1] == Ty::String

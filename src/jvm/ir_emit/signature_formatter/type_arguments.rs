@@ -8,7 +8,7 @@
 //! (`Sink<*>`). A class signature left with no generic structure is omitted.
 
 use super::{JvmSignatureFormatter, Wildcards};
-use crate::types::{Ty, TypeName, TypeVariance};
+use crate::types::{Ty, TyKind, TypeName, TypeVariance};
 
 impl JvmSignatureFormatter<'_> {
     pub(super) fn type_argument(
@@ -22,24 +22,24 @@ impl JvmSignatureFormatter<'_> {
         let restated = |projection: TypeVariance| {
             wildcards == Wildcards::Suppressed && declaration == projection
         };
-        match argument {
-            Ty::StarProjection(_) => Some("*".to_string()),
-            argument if is_star(declaration, argument) => Some("*".to_string()),
-            Ty::InProjection(inner) if restated(TypeVariance::In) => {
-                self.ty_at(inner, wildcards.for_argument(TypeVariance::In))
+        match argument.kind() {
+            TyKind::StarProjection(_) => Some("*".to_string()),
+            _ if is_star(declaration, argument) => Some("*".to_string()),
+            TyKind::InProjection(inner) if restated(TypeVariance::In) => {
+                self.ty_at(&inner, wildcards.for_argument(TypeVariance::In))
             }
-            Ty::OutProjection(inner) if restated(TypeVariance::Out) => {
-                self.ty_at(inner, wildcards.for_argument(TypeVariance::Out))
+            TyKind::OutProjection(inner) if restated(TypeVariance::Out) => {
+                self.ty_at(&inner, wildcards.for_argument(TypeVariance::Out))
             }
-            Ty::InProjection(inner) => Some(format!(
+            TyKind::InProjection(inner) => Some(format!(
                 "-{}",
-                self.ty_at(inner, wildcards.for_argument(TypeVariance::In))?
+                self.ty_at(&inner, wildcards.for_argument(TypeVariance::In))?
             )),
-            Ty::OutProjection(inner) => Some(format!(
+            TyKind::OutProjection(inner) => Some(format!(
                 "+{}",
-                self.ty_at(inner, wildcards.for_argument(TypeVariance::Out))?
+                self.ty_at(&inner, wildcards.for_argument(TypeVariance::Out))?
             )),
-            argument => {
+            _ => {
                 let mut signature = String::new();
                 if wildcards.writes_declaration_site()
                     && !(wildcards.drops_redundant()
@@ -81,23 +81,23 @@ impl JvmSignatureFormatter<'_> {
 /// Whether an argument for a parameter declared with `variance` leaves its type written raw:
 /// kotlinc's `hasNothingInNonContravariantPosition`.
 pub(super) fn makes_raw(variance: TypeVariance, argument: Ty) -> bool {
-    let argument = match argument {
-        Ty::StarProjection(_) => return false,
-        Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
-        argument => argument,
+    let argument = match argument.kind() {
+        TyKind::StarProjection(_) => return false,
+        TyKind::InProjection(inner) | TyKind::OutProjection(inner) => inner,
+        _ => argument,
     };
     let nullable_nothing = matches!(
-        argument,
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) if *inner == Ty::Nothing
+        argument.kind(),
+        TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) if inner == Ty::Nothing
     );
     nullable_nothing || (argument == Ty::Nothing && variance != TypeVariance::In)
 }
 
 /// Whether an argument for a parameter declared with `variance` is written as a star.
 pub(super) fn is_star(variance: TypeVariance, argument: Ty) -> bool {
-    let argument = match argument {
-        Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
-        argument => argument,
+    let argument = match argument.kind() {
+        TyKind::InProjection(inner) | TyKind::OutProjection(inner) => inner,
+        _ => argument,
     };
     argument == Ty::Nothing && variance == TypeVariance::In
 }

@@ -24,7 +24,7 @@ use crate::libraries::{FnKind, FunctionInfo, ResultEnhancement};
 use crate::resolve::override_plans;
 use crate::resolve::platform_value_narrowing::expected_type_rejects_null;
 use crate::symbol_source::SymbolSource;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::{
     applied_owner_type, applied_property_signature, effective_function, effective_property,
@@ -42,10 +42,10 @@ pub(in crate::resolve) fn delegate_member_calls(
     let interface = delegation.interface.get();
     // A type-parameter delegate offers its bound's members.
     let mut delegate = delegate.non_null();
-    while let Ty::TyParam(_, bound) = delegate {
+    while let TyKind::TyParam(_, bound) = delegate.kind() {
         delegate = bound.non_null();
     }
-    if !matches!(delegate, Ty::Obj(..)) {
+    if !matches!(delegate.kind(), TyKind::Obj(..)) {
         return Some(
             delegation
                 .members
@@ -167,10 +167,10 @@ fn delegate_function_call(
     let selected = effective_function(source, index, delegate, candidates)?;
     let call = function_call(source, index, delegate, selected)?;
     let unchecked = selected.call_sig.result_enhancement == ResultEnhancement::NotNull
-        || matches!(
-            selected.ret.apply(selected.callable.ret),
-            Ty::PlatformNullable(_)
-        );
+        || selected
+            .ret
+            .apply(selected.callable.ret)
+            .is_platform_nullable();
     let result_check = (unchecked && expected_type_rejects_null(forwarded.call.result.get()))
         .then(|| format!("{}(...)", forwarded.name).into_boxed_str());
     Some(ResolvedDelegateCall { call, result_check })
@@ -205,8 +205,8 @@ fn delegate_property_calls(
         property_type,
     };
     // A Java read is flexible, or enhanced from the builtin property it realizes.
-    let unchecked = matches!(property_type, Ty::PlatformNullable(_))
-        || getter.getter.enhanced_result.marks.head();
+    let unchecked =
+        property_type.is_platform_nullable() || getter.getter.enhanced_result.marks.head();
     let result_check = (unchecked && expected_type_rejects_null(forwarded.ty.get())).then(|| {
         getter
             .producer

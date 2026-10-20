@@ -5,6 +5,7 @@
 //! receiver callable collection, member-extension selection, applicability, and generic inference.
 
 use super::*;
+use crate::types::TyKind;
 
 enum DelegateGetValueAttempt {
     Complete(Option<Ty>),
@@ -1216,8 +1217,10 @@ impl Checker<'_> {
             let mut bindings = crate::symbol_resolver::GSigBinds::default();
             crate::symbol_resolver::unify_ty(ret, expected, &mut bindings);
             let refined = crate::symbol_resolver::ty_subst_keep_unbound(delegate_ty, &bindings);
-            let refined = match refined {
-                Ty::Obj(name, arguments) if arguments.iter().any(|argument| *argument == ret) => {
+            let refined = match refined.kind() {
+                TyKind::Obj(name, arguments)
+                    if arguments.iter().any(|argument| *argument == ret) =>
+                {
                     Ty::obj_args_name(
                         name,
                         &arguments
@@ -1232,7 +1235,7 @@ impl Checker<'_> {
                             .collect::<Vec<_>>(),
                     )
                 }
-                other => other,
+                _ => refined,
             };
             let refined = self.refine_delegate_receiver_to_bounds(refined);
             crate::trace_compiler!(
@@ -1264,7 +1267,7 @@ impl Checker<'_> {
     /// declaration's actual upper bound, then let the authoritative expected constructor check
     /// validate every source argument again.
     fn refine_delegate_receiver_to_bounds(&self, receiver: Ty) -> Ty {
-        let Ty::Obj(owner, arguments) = receiver else {
+        let TyKind::Obj(owner, arguments) = receiver.kind() else {
             return receiver;
         };
         let Some(class) = self.resolved_type_name(owner) else {

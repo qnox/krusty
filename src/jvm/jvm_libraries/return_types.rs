@@ -1,6 +1,7 @@
 //! Provider-boundary normalization of declared return types.
 
 use super::*;
+use crate::types::TyKind;
 
 /// The declaration-level return fact shared by both classpath member construction loops.
 pub(super) fn metadata_declared_nonnull_return(
@@ -14,7 +15,7 @@ pub(super) fn metadata_declared_nonnull_return(
             .generic_sig
             .as_ref()
             .map(|signature| signature.ret)
-            .filter(|ret| matches!(ret, Ty::TyParam(..)))
+            .filter(|ret| ret.is_ty_param())
     })
 }
 
@@ -26,8 +27,8 @@ pub(super) fn metadata_declared_nonnull_return(
 /// read-only face. A Kotlin-declared `MutableList` parameter is not a Java type and never passes
 /// through here, so a read-only Kotlin `List` still does not satisfy it.
 pub(super) fn java_collection_return_lower_bound(ty: Ty) -> Ty {
-    match ty {
-        Ty::Obj(owner, arguments) => {
+    match ty.kind() {
+        TyKind::Obj(owner, arguments) => {
             let arguments = arguments
                 .iter()
                 .map(|argument| java_collection_return_lower_bound(*argument))
@@ -38,19 +39,21 @@ pub(super) fn java_collection_return_lower_bound(ty: Ty) -> Ty {
                     .unwrap_or(owner);
             Ty::obj_args_name(owner, &arguments)
         }
-        Ty::Nullable(inner) => Ty::nullable(java_collection_return_lower_bound(*inner)),
-        Ty::PlatformNullable(inner) => {
-            Ty::platform_nullable(java_collection_return_lower_bound(*inner))
+        TyKind::Nullable(inner) => Ty::nullable(java_collection_return_lower_bound(inner)),
+        TyKind::PlatformNullable(inner) => {
+            Ty::platform_nullable(java_collection_return_lower_bound(inner))
         }
-        Ty::InProjection(inner) => Ty::in_projection(java_collection_return_lower_bound(*inner)),
-        Ty::OutProjection(inner) => Ty::out_projection(java_collection_return_lower_bound(*inner)),
-        Ty::StarProjection(inner) => {
-            Ty::star_projection(java_collection_return_lower_bound(*inner))
+        TyKind::InProjection(inner) => Ty::in_projection(java_collection_return_lower_bound(inner)),
+        TyKind::OutProjection(inner) => {
+            Ty::out_projection(java_collection_return_lower_bound(inner))
         }
-        Ty::TyParam(name, bound) => {
-            Ty::ty_param(name.as_str(), java_collection_return_lower_bound(*bound))
+        TyKind::StarProjection(inner) => {
+            Ty::star_projection(java_collection_return_lower_bound(inner))
         }
-        Ty::Fun(signature) => Ty::fun_with_shape(
+        TyKind::TyParam(name, bound) => {
+            Ty::ty_param(name.as_str(), java_collection_return_lower_bound(bound))
+        }
+        TyKind::Fun(signature) => Ty::fun_with_shape(
             signature.params.clone(),
             java_collection_return_lower_bound(signature.ret),
             signature.context_count,

@@ -52,7 +52,7 @@ pub(super) fn specialization_template(ir: &IrFile, function: FunId) -> Option<Fu
 }
 
 use crate::ir::{ClassId, ExprId, FunId, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// Exact implementation identities retained across closure-class realization. Reification may
 /// normalize these bodies, but not unrelated member methods capturing the same generic parameter.
@@ -631,7 +631,7 @@ pub(super) fn realize(
         else {
             continue;
         };
-        let Ty::Fun(signature) = function_type.non_null() else {
+        let TyKind::Fun(signature) = function_type.non_null().kind() else {
             continue;
         };
         let high_arity = crate::jvm::names::uses_function_n(signature.params.len());
@@ -969,9 +969,9 @@ fn raw_supertype(ir: &IrFile, fid: FunId, signature: &crate::types::FnSig) -> bo
 /// Whether a value class's declared underlying type admits `null`: a nullable type, or a type
 /// parameter whose bound does (`Result<T>(val a: T)` over `T : Any?`).
 fn admits_null(underlying: Ty) -> bool {
-    match underlying {
-        Ty::TyParam(_, bound) => admits_null(*bound),
-        other => other.admits_null(),
+    match underlying.kind() {
+        TyKind::TyParam(_, bound) => admits_null(bound),
+        _ => underlying.admits_null(),
     }
 }
 

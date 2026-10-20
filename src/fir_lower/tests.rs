@@ -1224,10 +1224,7 @@ fn extension_access_lowers_to_a_bound_function_wrapper_without_lookup() {
         .position(|function| function.name.starts_with("$fir_extension_bind_"))
         .expect("bound extension wrapper") as u32;
     assert_eq!(ir.functions[wrapper as usize].params.len(), 2);
-    assert!(matches!(
-        ir.functions[wrapper as usize].params[0],
-        Ty::Fun(_)
-    ));
+    assert!(ir.functions[wrapper as usize].params[0].is_fun());
     assert_eq!(
         ir.functions[wrapper as usize].params[1],
         Ty::obj("kotlin/Any")
@@ -2103,7 +2100,7 @@ fn generic_value_class_underlying_uses_its_declared_type_parameter_identity() {
             .first()
             .expect("value-class underlying field")
             .ty;
-        let crate::types::Ty::TyParam(semantic, _) = underlying else {
+        let crate::types::TyKind::TyParam(semantic, _) = underlying.kind() else {
             panic!("generic value-class underlying is not its type parameter: {underlying:?}");
         };
         assert!(signature

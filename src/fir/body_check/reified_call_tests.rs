@@ -2,6 +2,7 @@
 
 use super::test_support::checked_function_body;
 use super::*;
+use crate::types::TyKind;
 
 #[test]
 fn flow_intersection_type_argument_preserves_all_bounds_in_checked_fir() {
@@ -77,7 +78,7 @@ fn reified_intersection_argument_records_its_common_supertype() {
     };
     assert!(substitution.reified);
     assert!(
-        matches!(substitution.value.get(), Ty::Intersection(parts) if parts.len() == 2),
+        matches!(substitution.value.get().kind(), TyKind::Intersection(parts) if parts.len() == 2),
         "the semantic argument stays the intersection, got {:?}",
         substitution.value.get()
     );

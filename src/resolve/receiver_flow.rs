@@ -9,6 +9,7 @@
 
 use super::scope::{PathProperty, PathRoot};
 use super::*;
+use crate::types::TyKind;
 
 impl Checker<'_> {
     /// The access path a checked expression denotes: the value its name read selected, followed by
@@ -599,8 +600,8 @@ impl Checker<'_> {
     ) -> Ty {
         let params = self
             .expression_function_type(scope, site.callee, callee_ty)
-            .and_then(|semantic| match semantic {
-                Ty::Fun(signature) if signature.params.len() == site.args.len() => {
+            .and_then(|semantic| match semantic.kind() {
+                TyKind::Fun(signature) if signature.params.len() == site.args.len() => {
                     Some(signature.params.clone())
                 }
                 _ => None,

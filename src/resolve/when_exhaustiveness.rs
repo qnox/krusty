@@ -4,7 +4,7 @@
 use super::scope::FlowExclusion;
 use super::{Checker, CheckerScope, ExprLowering};
 use crate::ast::{Expr, ExprId, WhenArm};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 impl Checker<'_> {
     /// Every sealed descendant of `roots`, transitively (the roots themselves included). A sealed class
@@ -79,7 +79,7 @@ impl Checker<'_> {
                         .get(&(ty.span.lo, ty.span.hi))
                         .copied()
                         .unwrap_or_else(|| self.type_ref_ty_silent(scope, ty));
-                    if let Ty::Obj(internal, _) = resolved {
+                    if let TyKind::Obj(internal, _) = resolved.kind() {
                         covered.insert(internal);
                     }
                 }

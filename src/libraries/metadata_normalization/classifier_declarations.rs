@@ -122,7 +122,7 @@ pub(crate) fn classifier_shape(
             semantic_ty_with_identities(declared, bounds, type_parameters.identities().by_id());
         // A function supertype keeps its callable shape and is also an edge to the function
         // classifier it instantiates, which declares the `invoke` the class overrides.
-        if matches!(supertype, Ty::Fun(_)) {
+        if supertype.is_fun() {
             callable_signatures.push(supertype);
         }
         let template = supertype_classifier(supertype);

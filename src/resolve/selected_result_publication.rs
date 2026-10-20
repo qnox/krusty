@@ -6,7 +6,7 @@
 use super::ResolvedCall;
 use crate::fx_hash::HashMap;
 use crate::libraries::{GenericSig, LibraryCallable, LibraryMember, TypeEnhancement};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 #[derive(Clone, Copy)]
 pub(super) enum DispatchBinding {
@@ -269,8 +269,8 @@ impl CompactSelectedResultPublication {
 /// declaration publication may restore unenhanced flexible intervals around them, but must not
 /// turn an enhanced position back into a platform type.
 fn suppress_enhanced_flexibility(selected: Ty, published: Ty, enhancement: &TypeEnhancement) -> Ty {
-    match (selected, published) {
-        (Ty::Obj(selected_owner, selected), Ty::Obj(owner, published))
+    match (selected.kind(), published.kind()) {
+        (TyKind::Obj(selected_owner, selected), TyKind::Obj(owner, published))
             if selected_owner == owner && selected.len() == published.len() =>
         {
             Ty::obj_args_name(
@@ -290,7 +290,7 @@ fn suppress_enhanced_flexibility(selected: Ty, published: Ty, enhancement: &Type
                     .collect::<Vec<_>>(),
             )
         }
-        (Ty::Fun(selected), Ty::Fun(published))
+        (TyKind::Fun(selected), TyKind::Fun(published))
             if selected.context_count == published.context_count
                 && selected.has_receiver == published.has_receiver
                 && selected.suspend == published.suspend
@@ -321,12 +321,11 @@ fn suppress_enhanced_flexibility(selected: Ty, published: Ty, enhancement: &Type
                 published.suspend,
             )
         }
-        (Ty::Nullable(selected), Ty::Nullable(published)) => Ty::nullable(
-            suppress_enhanced_flexibility(*selected, *published, enhancement)
-                .platform_lower_bound(),
+        (TyKind::Nullable(selected), TyKind::Nullable(published)) => Ty::nullable(
+            suppress_enhanced_flexibility(selected, published, enhancement).platform_lower_bound(),
         ),
-        (selected, Ty::PlatformNullable(published)) if !selected.is_nullable() => {
-            let published = suppress_enhanced_flexibility(selected, *published, enhancement)
+        (_, TyKind::PlatformNullable(published)) if !selected.is_nullable() => {
+            let published = suppress_enhanced_flexibility(selected, published, enhancement)
                 .platform_lower_bound();
             if enhancement.head() {
                 published
@@ -334,8 +333,8 @@ fn suppress_enhanced_flexibility(selected: Ty, published: Ty, enhancement: &Type
                 Ty::platform_nullable(published)
             }
         }
-        (selected, _) if enhancement.head() => selected,
-        (_, published) => published,
+        (_, _) if enhancement.head() => selected,
+        (_, _) => published,
     }
 }
 
@@ -362,76 +361,78 @@ fn publication_arguments(
 }
 
 fn collect_type_parameters(ty: Ty, output: &mut Vec<String>) {
-    match ty {
-        Ty::TyParam(name, _) => {
+    match ty.kind() {
+        TyKind::TyParam(name, _) => {
             if !output.iter().any(|candidate| candidate == name) {
                 output.push(name.to_owned().to_string());
             }
         }
-        Ty::Obj(_, arguments) => {
+        TyKind::Obj(_, arguments) => {
             for argument in arguments {
                 collect_type_parameters(*argument, output);
             }
         }
-        Ty::Fun(signature) => {
+        TyKind::Fun(signature) => {
             for parameter in &signature.params {
                 collect_type_parameters(*parameter, output);
             }
             collect_type_parameters(signature.ret, output);
         }
-        Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::DefinitelyNotNull(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner)
-        | Ty::StarProjection(inner) => collect_type_parameters(*inner, output),
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::DefinitelyNotNull(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner) => collect_type_parameters(inner, output),
         _ => {}
     }
 }
 
 fn publish_selected(declared: Ty, selected: Ty, bindings: &HashMap<String, Ty>) -> Ty {
-    match (declared, selected) {
-        (Ty::TyParam(name, declared_bound), selected) => {
+    match (declared.kind(), selected.kind()) {
+        (TyKind::TyParam(name, declared_bound), _) => {
             let publication = bindings
                 .get(name.as_str())
                 .copied()
                 .map(|publication| align_publication(publication, selected))
                 .unwrap_or(selected);
-            if matches!(*declared_bound, Ty::PlatformNullable(_)) && !selected.is_nullable() {
+            if declared_bound.is_platform_nullable() && !selected.is_nullable() {
                 Ty::platform_nullable(publication.platform_lower_bound())
             } else {
                 publication
             }
         }
-        (Ty::PlatformNullable(declared), Ty::Nullable(selected)) => {
-            Ty::nullable(publish_selected(*declared, *selected, bindings).platform_lower_bound())
+        (TyKind::PlatformNullable(declared), TyKind::Nullable(selected)) => {
+            Ty::nullable(publish_selected(declared, selected, bindings).platform_lower_bound())
         }
-        (Ty::PlatformNullable(declared), Ty::PlatformNullable(selected)) => Ty::platform_nullable(
-            publish_selected(*declared, *selected, bindings).platform_lower_bound(),
-        ),
-        (Ty::PlatformNullable(declared), selected) if !selected.is_nullable() => {
+        (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(selected)) => {
             Ty::platform_nullable(
-                publish_selected(*declared, selected, bindings).platform_lower_bound(),
+                publish_selected(declared, selected, bindings).platform_lower_bound(),
             )
         }
-        (Ty::Nullable(declared), Ty::Nullable(selected)) => {
-            Ty::nullable(publish_selected(*declared, *selected, bindings).platform_lower_bound())
+        (TyKind::PlatformNullable(declared), _) if !selected.is_nullable() => {
+            Ty::platform_nullable(
+                publish_selected(declared, selected, bindings).platform_lower_bound(),
+            )
         }
-        (Ty::DefinitelyNotNull(declared), Ty::DefinitelyNotNull(selected)) => {
+        (TyKind::Nullable(declared), TyKind::Nullable(selected)) => {
+            Ty::nullable(publish_selected(declared, selected, bindings).platform_lower_bound())
+        }
+        (TyKind::DefinitelyNotNull(declared), TyKind::DefinitelyNotNull(selected)) => {
             Ty::DefinitelyNotNull(crate::types::intern_ty(publish_selected(
-                *declared, *selected, bindings,
+                declared, selected, bindings,
             )))
         }
-        (Ty::InProjection(declared), Ty::InProjection(selected)) => {
-            Ty::in_projection(publish_selected(*declared, *selected, bindings))
+        (TyKind::InProjection(declared), TyKind::InProjection(selected)) => {
+            Ty::in_projection(publish_selected(declared, selected, bindings))
         }
-        (Ty::OutProjection(declared), Ty::OutProjection(selected)) => {
-            Ty::out_projection(publish_selected(*declared, *selected, bindings))
+        (TyKind::OutProjection(declared), TyKind::OutProjection(selected)) => {
+            Ty::out_projection(publish_selected(declared, selected, bindings))
         }
-        (Ty::StarProjection(declared), Ty::StarProjection(selected)) => {
-            Ty::star_projection(publish_selected(*declared, *selected, bindings))
+        (TyKind::StarProjection(declared), TyKind::StarProjection(selected)) => {
+            Ty::star_projection(publish_selected(declared, selected, bindings))
         }
-        (Ty::Obj(owner, declared), Ty::Obj(selected_owner, selected))
+        (TyKind::Obj(owner, declared), TyKind::Obj(selected_owner, selected))
             if owner == selected_owner && declared.len() == selected.len() =>
         {
             Ty::obj_args_name(
@@ -444,7 +445,7 @@ fn publish_selected(declared: Ty, selected: Ty, bindings: &HashMap<String, Ty>) 
                     .collect::<Vec<_>>(),
             )
         }
-        (Ty::Fun(declared), Ty::Fun(selected))
+        (TyKind::Fun(declared), TyKind::Fun(selected))
             if declared.context_count == selected.context_count
                 && declared.has_receiver == selected.has_receiver
                 && declared.suspend == selected.suspend
@@ -469,17 +470,17 @@ fn publish_selected(declared: Ty, selected: Ty, bindings: &HashMap<String, Ty>) 
 }
 
 fn align_publication(publication: Ty, selected: Ty) -> Ty {
-    match (publication, selected) {
-        (Ty::PlatformNullable(publication), Ty::Nullable(selected)) => {
-            Ty::nullable(align_publication(*publication, *selected).platform_lower_bound())
+    match (publication.kind(), selected.kind()) {
+        (TyKind::PlatformNullable(publication), TyKind::Nullable(selected)) => {
+            Ty::nullable(align_publication(publication, selected).platform_lower_bound())
         }
-        (Ty::PlatformNullable(publication), Ty::PlatformNullable(selected)) => {
-            Ty::platform_nullable(align_publication(*publication, *selected).platform_lower_bound())
+        (TyKind::PlatformNullable(publication), TyKind::PlatformNullable(selected)) => {
+            Ty::platform_nullable(align_publication(publication, selected).platform_lower_bound())
         }
-        (Ty::PlatformNullable(publication), selected) if !selected.is_nullable() => {
-            Ty::platform_nullable(align_publication(*publication, selected).platform_lower_bound())
+        (TyKind::PlatformNullable(publication), _) if !selected.is_nullable() => {
+            Ty::platform_nullable(align_publication(publication, selected).platform_lower_bound())
         }
-        (Ty::Obj(owner, publication), Ty::Obj(selected_owner, selected))
+        (TyKind::Obj(owner, publication), TyKind::Obj(selected_owner, selected))
             if owner == selected_owner && publication.len() == selected.len() =>
         {
             Ty::obj_args_name(
@@ -492,7 +493,7 @@ fn align_publication(publication: Ty, selected: Ty) -> Ty {
                     .collect::<Vec<_>>(),
             )
         }
-        (Ty::Fun(publication), Ty::Fun(selected))
+        (TyKind::Fun(publication), TyKind::Fun(selected))
             if publication.context_count == selected.context_count
                 && publication.has_receiver == selected.has_receiver
                 && publication.suspend == selected.suspend
@@ -512,8 +513,8 @@ fn align_publication(publication: Ty, selected: Ty) -> Ty {
                 selected.suspend,
             )
         }
-        (Ty::Nullable(publication), Ty::Nullable(selected)) => {
-            Ty::nullable(align_publication(*publication, *selected).platform_lower_bound())
+        (TyKind::Nullable(publication), TyKind::Nullable(selected)) => {
+            Ty::nullable(align_publication(publication, selected).platform_lower_bound())
         }
         _ => selected,
     }
@@ -523,16 +524,16 @@ fn meet_publication(left: Ty, right: Ty) -> Ty {
     if left == right {
         return left;
     }
-    let (left_flexible, left) = match left {
-        Ty::PlatformNullable(inner) => (true, *inner),
-        other => (false, other),
+    let (left_flexible, left) = match left.kind() {
+        TyKind::PlatformNullable(inner) => (true, inner),
+        _ => (false, left),
     };
-    let (right_flexible, right) = match right {
-        Ty::PlatformNullable(inner) => (true, *inner),
-        other => (false, other),
+    let (right_flexible, right) = match right.kind() {
+        TyKind::PlatformNullable(inner) => (true, inner),
+        _ => (false, right),
     };
-    let lower = match (left, right) {
-        (Ty::Obj(owner, left), Ty::Obj(right_owner, right))
+    let lower = match (left.kind(), right.kind()) {
+        (TyKind::Obj(owner, left), TyKind::Obj(right_owner, right))
             if owner == right_owner && left.len() == right.len() =>
         {
             Ty::obj_args_name(
@@ -545,7 +546,7 @@ fn meet_publication(left: Ty, right: Ty) -> Ty {
                     .collect::<Vec<_>>(),
             )
         }
-        (Ty::Fun(left), Ty::Fun(right))
+        (TyKind::Fun(left), TyKind::Fun(right))
             if left.context_count == right.context_count
                 && left.has_receiver == right.has_receiver
                 && left.suspend == right.suspend
@@ -564,8 +565,8 @@ fn meet_publication(left: Ty, right: Ty) -> Ty {
                 left.suspend,
             )
         }
-        (left, right) if left == right => left,
-        (left, _) => left.platform_lower_bound(),
+        (_, _) if left == right => left,
+        (_, _) => left.platform_lower_bound(),
     };
     if left_flexible && right_flexible {
         Ty::platform_nullable(lower.platform_lower_bound())
@@ -706,31 +707,31 @@ pub(super) fn constrain_parameters<F: Clone>(
     star_projection: StarProjectionPolicy,
     view: &mut impl FnMut(Ty, &F, TypeName) -> Option<(Ty, Vec<F>)>,
 ) {
-    match declared {
-        Ty::TyParam(name, _) if formals.iter().any(|formal| formal == name) => {
+    match declared.kind() {
+        TyKind::TyParam(name, _) if formals.iter().any(|formal| formal == name) => {
             constraints
                 .entry(name.to_string())
                 .or_default()
                 .push(fact.clone());
         }
-        Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::DefinitelyNotNull(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner) => constrain_parameters(
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::DefinitelyNotNull(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner) => constrain_parameters(
             formals,
-            *inner,
+            inner,
             actual.non_null(),
             fact,
             constraints,
             star_projection,
             view,
         ),
-        Ty::StarProjection(inner) => {
+        TyKind::StarProjection(inner) => {
             if matches!(star_projection, StarProjectionPolicy::Descend) {
                 constrain_parameters(
                     formals,
-                    *inner,
+                    inner,
                     actual.non_null(),
                     fact,
                     constraints,
@@ -739,11 +740,11 @@ pub(super) fn constrain_parameters<F: Clone>(
                 );
             }
         }
-        Ty::Obj(owner, declared_arguments) if !declared_arguments.is_empty() => {
+        TyKind::Obj(owner, declared_arguments) if !declared_arguments.is_empty() => {
             let Some((actual, facts)) = view(actual, fact, owner) else {
                 return;
             };
-            let Ty::Obj(actual_owner, actual_arguments) = actual.non_null() else {
+            let TyKind::Obj(actual_owner, actual_arguments) = actual.non_null().kind() else {
                 return;
             };
             if owner != actual_owner
@@ -778,10 +779,10 @@ mod tests {
     use super::*;
 
     fn direct_view(actual: Ty, publication: Ty, owner: TypeName) -> Option<(Ty, Vec<Ty>)> {
-        let Ty::Obj(actual_owner, _) = actual.non_null() else {
+        let TyKind::Obj(actual_owner, _) = actual.non_null().kind() else {
             return None;
         };
-        let Ty::Obj(publication_owner, arguments) = publication.non_null() else {
+        let TyKind::Obj(publication_owner, arguments) = publication.non_null().kind() else {
             return None;
         };
         (actual_owner == owner && publication_owner == owner)

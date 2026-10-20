@@ -16,7 +16,7 @@
 //! `K`; a type variable fixed from marked constraints is marked. [`TypeEnhancement`] is that
 //! attribute's layout over one type's shape, kept beside the semantic [`Ty`] rather than inside it.
 
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// Which positions of one type carry `EnhancedNullability`: the type itself (`head`) and, in the
 /// type's own argument order, each of its type arguments. Positions with no marked descendant are
@@ -116,17 +116,17 @@ impl TypeEnhancement {
         declared: Ty,
         binding: &dyn Fn(&str) -> Option<TypeEnhancement>,
     ) -> TypeEnhancement {
-        match declared {
-            Ty::TyParam(name, _) => match binding(name.as_str()) {
+        match declared.kind() {
+            TyKind::TyParam(name, _) => match binding(name.as_str()) {
                 Some(argument) => argument.with_head(self.head),
                 None => self.clone(),
             },
-            Ty::Nullable(inner)
-            | Ty::PlatformNullable(inner)
-            | Ty::DefinitelyNotNull(inner)
-            | Ty::InProjection(inner)
-            | Ty::OutProjection(inner) => self.substitute(*inner, binding),
-            Ty::Obj(_, arguments) => TypeEnhancement::new(
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::DefinitelyNotNull(inner)
+            | TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner) => self.substitute(inner, binding),
+            TyKind::Obj(_, arguments) => TypeEnhancement::new(
                 self.head,
                 arguments
                     .iter()
@@ -178,34 +178,37 @@ impl EnhancedResult {
 /// shapes do not share are left alone.
 pub fn enhance_from_overridden(java: Ty, overridden: Ty) -> (Ty, TypeEnhancement) {
     let fixes_not_null = !matches!(
-        overridden,
-        Ty::Nullable(_) | Ty::PlatformNullable(_) | Ty::StarProjection(_) | Ty::Error
+        overridden.kind(),
+        TyKind::Nullable(_)
+            | TyKind::PlatformNullable(_)
+            | TyKind::StarProjection(_)
+            | TyKind::Error
     );
-    match java {
-        Ty::PlatformNullable(inner) if fixes_not_null => {
-            let (rigid, layout) = enhance_from_overridden(*inner, overridden);
+    match java.kind() {
+        TyKind::PlatformNullable(inner) if fixes_not_null => {
+            let (rigid, layout) = enhance_from_overridden(inner, overridden);
             (rigid, layout.with_head(true))
         }
-        Ty::PlatformNullable(inner) => {
-            let (inner, layout) = enhance_from_overridden(*inner, overridden.non_null());
+        TyKind::PlatformNullable(inner) => {
+            let (inner, layout) = enhance_from_overridden(inner, overridden.non_null());
             (Ty::platform_nullable(inner), layout)
         }
-        Ty::TyParam(_, bound) if fixes_not_null && matches!(bound, Ty::PlatformNullable(_)) => {
+        TyKind::TyParam(_, bound) if fixes_not_null && bound.is_platform_nullable() => {
             (java, TypeEnhancement::new(true, Vec::new()))
         }
-        Ty::InProjection(inner) | Ty::OutProjection(inner) => {
-            let overridden = match overridden {
-                Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
-                other => other,
+        TyKind::InProjection(inner) | TyKind::OutProjection(inner) => {
+            let overridden = match overridden.kind() {
+                TyKind::InProjection(inner) | TyKind::OutProjection(inner) => inner,
+                _ => overridden,
             };
-            let (enhanced, layout) = enhance_from_overridden(*inner, overridden);
-            let enhanced = match java {
-                Ty::InProjection(_) => Ty::in_projection(enhanced),
+            let (enhanced, layout) = enhance_from_overridden(inner, overridden);
+            let enhanced = match java.kind() {
+                TyKind::InProjection(_) => Ty::in_projection(enhanced),
                 _ => Ty::out_projection(enhanced),
             };
             (enhanced, layout)
         }
-        Ty::Obj(owner, arguments) => {
+        TyKind::Obj(owner, arguments) => {
             let fixed = overridden.non_null().type_args();
             if fixed.len() != arguments.len() {
                 return (java, TypeEnhancement::NONE);

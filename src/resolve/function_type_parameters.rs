@@ -107,7 +107,7 @@ fn function_typed(
 /// shape beside a direct `kotlin.reflect.KFunction` supertype.
 fn is_some_function_type(source: &dyn SymbolSource, ty: Ty) -> bool {
     let ty = ty.non_null();
-    matches!(ty, Ty::Fun(_))
+    ty.is_fun()
         || ty
             .kotlin_class_internal()
             .and_then(|internal| source.classifier(internal))

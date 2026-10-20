@@ -56,7 +56,7 @@ use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor
 use crate::jvm::operation_relocation::clone_below_representation_wrapper;
 use crate::jvm::physical_type::ir_ty_to_jvm;
 use crate::libraries::InlineKind;
-use crate::types::{existing_type_name, type_name, SemanticCallRole, Ty, TypeName};
+use crate::types::{existing_type_name, type_name, SemanticCallRole, Ty, TyKind, TypeName};
 use boxing_rewrites::{box_wrap, box_wrap_nullable, to_string_wrap};
 use call_results::CallTypes;
 pub(crate) use class_annotations::class_file_annotations;
@@ -1520,7 +1520,7 @@ pub(crate) fn lower_value_classes(
             // element boxed (don't erase to the underlying); elements are `box-impl`'d when stored. A
             // non-value-class element is erased; a primitive array (`kotlin/IntArray`) has no element arg.
             IrExpr::Vararg { array_type, .. } | IrExpr::NewArray { array_type, .. } => {
-                if let Ty::Obj(n, args) = array_type.non_null() {
+                if let TyKind::Obj(n, args) = array_type.non_null().kind() {
                     if n.matches("kotlin/Array") {
                         if let Some(elem) = args.first().copied() {
                             let keep_boxed = elem
@@ -3586,8 +3586,8 @@ pub(crate) fn lower_value_classes(
             // A synthesized wrapper member such as `box-impl` keeps the boxed value-class result.
             // User declarations are absent from this branch: they were converted to static carrier
             // functions above and take the ordinary return-boundary path below.
-            if let Ty::Obj(fq, _) = &orig_rets[fid] {
-                let x = *fq;
+            if let TyKind::Obj(fq, _) = orig_rets[fid].kind() {
+                let x = fq;
                 if under.contains_key(&x) {
                     if let Some(body) = ir.functions[fid].body {
                         box_tail(ir, body, x, &under);
@@ -3620,7 +3620,7 @@ pub(crate) fn lower_value_classes(
                     true,
                 );
             }
-        } else if let Ty::Obj(x, _) = orig_rets[fid].non_null() {
+        } else if let TyKind::Obj(x, _) = orig_rets[fid].non_null().kind() {
             // A function returning the value class ITSELF (`fun test(): Z = a?.foo()!!`), or an `X?`
             // its carrier holds (a boxed `X?` took the branch above), `unbox-impl`s a BOXED tail: the
             // erased return is the underlying. A nullable tail is unboxed null-safely (`null_slot`).
@@ -3888,8 +3888,8 @@ impl ReprCtx<'_> {
     fn operand_nonnull(&self, id: ExprId) -> bool {
         operand_nonnull(self.exprs, self.rets, self.fields, self.slots, id)
             || matches!(
-                self.types.declared_result(id, self.under),
-                Some(Ty::Obj(..))
+                self.types.declared_result(id, self.under).map(Ty::kind),
+                Some(TyKind::Obj(..))
             )
     }
 
@@ -3939,7 +3939,7 @@ impl ReprCtx<'_> {
             type_operand,
         } = &self.exprs[id as usize]
         {
-            if !matches!(type_operand.non_null(), Ty::TyParam(..)) {
+            if !type_operand.non_null().is_ty_param() {
                 break;
             }
             id = *arg;
@@ -3968,8 +3968,8 @@ fn nullable_is_boxed(x: TypeName, under: &Under) -> bool {
 /// on it would wrongly reject a legal value). True when the value class's field type erases to a
 /// nullable reference (`X(val v: Int?)` → `Integer`; `X(val v: String?)` → `String?`).
 fn vc_underlying_nullable(t: &Ty, under: &Under) -> bool {
-    if let Ty::Obj(fq_name, _) = t {
-        if let Some(u) = under.get(fq_name) {
+    if let TyKind::Obj(fq_name, _) = t.kind() {
+        if let Some(u) = under.get(&fq_name) {
             return crate::value_classes::underlying_chain_accepts_null(*u, under);
         }
     }

@@ -1,6 +1,7 @@
 //! Call-site type-variable constraint collection, propagation, and solving.
 
 use super::*;
+use crate::types::TyKind;
 
 pub(crate) fn infer_generic_call_constraints_from_symbols(
     source: &dyn SymbolSource,
@@ -105,7 +106,7 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
         // through its single abstract method, not through their nominal `KFunctionN`/`FunctionN`
         // carrier. This belongs at the constraint seam: callers that need the full upper/lower
         // relation and callers that need only solved bindings must observe the same inference.
-        if matches!(actual.non_null(), Ty::Fun(_)) {
+        if actual.non_null().is_fun() {
             if let Some(sam) = semantic_sam_signature(source, shape) {
                 shape = Ty::fun_with_shape(
                     sam.params,
@@ -140,7 +141,7 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
         }
     }
     for (argument, variable, actual) in deferred_flexible_roots {
-        let Ty::TyParam(formal, _) = variable else {
+        let TyKind::TyParam(formal, _) = variable.kind() else {
             unreachable!("deferred flexible root is a declaration variable")
         };
         if invariantly_fixed.contains(formal.as_str()) {
@@ -219,8 +220,8 @@ pub(crate) fn collect_assignability_constraints_from_symbols(
         constraints: &mut CallInferenceConstraints,
     ) {
         let actual = actual.projection_inner().unwrap_or(actual);
-        match actual {
-            Ty::TyParam(name, _) => {
+        match actual.kind() {
+            TyKind::TyParam(name, _) => {
                 let expected = expected.projection_inner().unwrap_or(expected);
                 constraints.insert(
                     source,
@@ -230,11 +231,11 @@ pub(crate) fn collect_assignability_constraints_from_symbols(
                     ConstraintOrigin::Receiver,
                 );
             }
-            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => {
-                actual_side(source, expected.non_null(), *inner, position, constraints)
+            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => {
+                actual_side(source, expected.non_null(), inner, position, constraints)
             }
-            Ty::Fun(actual) => {
-                let Ty::Fun(expected) = expected.non_null() else {
+            TyKind::Fun(actual) => {
+                let TyKind::Fun(expected) = expected.non_null().kind() else {
                     return;
                 };
                 for (&expected, &actual) in expected.params.iter().zip(&actual.params) {
@@ -254,7 +255,7 @@ pub(crate) fn collect_assignability_constraints_from_symbols(
                     constraints,
                 );
             }
-            Ty::Obj(actual_owner, _) => {
+            TyKind::Obj(actual_owner, _) => {
                 let Some(expected_owner) = expected.non_null().obj_internal() else {
                     return;
                 };
@@ -267,8 +268,8 @@ pub(crate) fn collect_assignability_constraints_from_symbols(
                         .find(|ty| ty.obj_internal() == Some(expected_owner))
                         .unwrap_or(actual)
                 };
-                let (Ty::Obj(owner, actual_arguments), Ty::Obj(_, expected_arguments)) =
-                    (applied.non_null(), expected.non_null())
+                let (TyKind::Obj(owner, actual_arguments), TyKind::Obj(_, expected_arguments)) =
+                    (applied.non_null().kind(), expected.non_null().kind())
                 else {
                     return;
                 };
@@ -282,10 +283,10 @@ pub(crate) fn collect_assignability_constraints_from_symbols(
                 for (index, (&expected, &actual)) in
                     expected_arguments.iter().zip(actual_arguments).enumerate()
                 {
-                    let (expected, position) = match expected {
-                        Ty::InProjection(inner) => (*inner, ConstraintPosition::Lower),
-                        Ty::OutProjection(inner) => (*inner, ConstraintPosition::Upper),
-                        Ty::StarProjection(_) => continue,
+                    let (expected, position) = match expected.kind() {
+                        TyKind::InProjection(inner) => (inner, ConstraintPosition::Lower),
+                        TyKind::OutProjection(inner) => (inner, ConstraintPosition::Upper),
+                        TyKind::StarProjection(_) => continue,
                         _ => {
                             let position = match variances
                                 .get(index)
@@ -462,7 +463,7 @@ impl CallInferenceConstraints {
             return false;
         }
         let actual = inference_actual(actual);
-        if matches!(actual, Ty::TyParam(actual_name, _) if actual_name == name) {
+        if matches!(actual.kind(), TyKind::TyParam(actual_name, _) if actual_name == name) {
             return false;
         }
         match position {
@@ -505,7 +506,7 @@ impl CallInferenceConstraints {
             let upper = self.upper.clone();
             for (formal, bounds) in signature.formals.iter().zip(&signature.formal_bounds) {
                 for bound in bounds {
-                    let Ty::TyParam(bound_formal, _) = bound.non_null() else {
+                    let TyKind::TyParam(bound_formal, _) = bound.non_null().kind() else {
                         continue;
                     };
                     if !signature
@@ -570,8 +571,7 @@ impl CallInferenceConstraints {
             // an unconstrained/default-nullable constructor variable must remain the caller's exact
             // parameter in its invariant result. This is a bound-proven reduction of the recorded
             // provenance, not a representation fallback; `R : Any` still requires the wrapper.
-            if let Ty::DefinitelyNotNull(original) = current {
-                let original = *original;
+            if let TyKind::DefinitelyNotNull(original) = current.kind() {
                 let original_fits = bounds.iter().all(|bound| {
                     resolution_subtype(source, original, ty_subst_keep_unbound(*bound, &self.lower))
                 });
@@ -708,26 +708,26 @@ fn collect_call_inference_constraints(
     origin: ConstraintOrigin,
     constraints: &mut CallInferenceConstraints,
 ) {
-    match shape {
-        Ty::TyParam(name, _) => {
+    match shape.kind() {
+        TyKind::TyParam(name, _) => {
             constraints.insert(source, name.as_str(), actual, position, origin);
         }
-        Ty::Nullable(inner) => {
+        TyKind::Nullable(inner) => {
             collect_call_inference_constraints(
                 source,
-                *inner,
+                inner,
                 nullable_generic_actual(actual),
                 position,
                 origin,
                 constraints,
             );
         }
-        Ty::PlatformNullable(inner) => {
+        TyKind::PlatformNullable(inner) => {
             let actual = nullable_generic_actual(actual);
             // A Java `List<T>!` is published as `MutableList<T>!`. `listOf("x")` reaches `List`,
             // not `MutableList`, so the element variable has to be read from the provider's
             // read-only face. A value that already reaches the mutable face keeps that face.
-            let inner = super::choose_platform_lower_face(source, *inner, actual);
+            let inner = super::choose_platform_lower_face(source, inner, actual);
             collect_call_inference_constraints(
                 source,
                 inner,
@@ -737,28 +737,28 @@ fn collect_call_inference_constraints(
                 constraints,
             );
         }
-        Ty::InProjection(inner) => collect_call_inference_constraints(
+        TyKind::InProjection(inner) => collect_call_inference_constraints(
             source,
-            *inner,
-            match actual {
-                Ty::OutProjection(_) | Ty::StarProjection(_) => Ty::Nothing,
+            inner,
+            match actual.kind() {
+                TyKind::OutProjection(_) | TyKind::StarProjection(_) => Ty::Nothing,
                 _ => actual.projection_inner().unwrap_or(actual),
             },
             position.through(crate::types::TypeVariance::In),
             origin,
             constraints,
         ),
-        Ty::OutProjection(inner) => collect_call_inference_constraints(
+        TyKind::OutProjection(inner) => collect_call_inference_constraints(
             source,
-            *inner,
+            inner,
             actual.projection_inner().unwrap_or(actual),
             position,
             origin,
             constraints,
         ),
-        Ty::StarProjection(_) => {}
-        Ty::Fun(function) => {
-            let Ty::Fun(actual) = actual.non_null() else {
+        TyKind::StarProjection(_) => {}
+        TyKind::Fun(function) => {
+            let TyKind::Fun(actual) = actual.non_null().kind() else {
                 return;
             };
             for (&parameter, &actual) in function.params.iter().zip(&actual.params) {
@@ -780,17 +780,17 @@ fn collect_call_inference_constraints(
                 constraints,
             );
         }
-        Ty::Obj(owner, arguments) => {
+        TyKind::Obj(owner, arguments) => {
             let mut actual = actual.projection_inner().unwrap_or(actual).non_null();
             // A caller-owned type parameter contributes the applied shape of its upper bound to a
             // classifier-shaped constraint. Treating the variable itself as the callee's element
             // argument makes `T : Iterable<*>` bind `Iterable<E>.withIndex` as `E = T`; project
             // through the bound so it correctly binds `E` to the star's readable upper type.
-            while let Ty::TyParam(_, bound) = actual {
-                actual = bound.projection_inner().unwrap_or(*bound).non_null();
+            while let TyKind::TyParam(_, bound) = actual.kind() {
+                actual = bound.projection_inner().unwrap_or(bound).non_null();
             }
             let projected = supertype_with_classifier(source, actual, owner);
-            let Some(Ty::Obj(_, actual_arguments)) = projected else {
+            let Some(TyKind::Obj(_, actual_arguments)) = projected.map(Ty::kind) else {
                 return;
             };
             let classifier = source.classifier(owner);
@@ -809,14 +809,14 @@ fn collect_call_inference_constraints(
                 // call-formal binding would later instantiate `A<E>` in input position as
                 // `A<Nothing>` and reject the very argument that supplied the capture. Invariant
                 // classifiers must keep the projection because their write side really is closed.
-                let actual = match (declared_variance, actual) {
-                    (crate::types::TypeVariance::Out, Ty::OutProjection(inner))
-                    | (crate::types::TypeVariance::Out, Ty::StarProjection(inner))
-                    | (crate::types::TypeVariance::In, Ty::InProjection(inner)) => *inner,
+                let actual = match (declared_variance, actual.kind()) {
+                    (crate::types::TypeVariance::Out, TyKind::OutProjection(inner))
+                    | (crate::types::TypeVariance::Out, TyKind::StarProjection(inner))
+                    | (crate::types::TypeVariance::In, TyKind::InProjection(inner)) => inner,
                     _ => actual,
                 };
-                let actual = if matches!(argument, Ty::OutProjection(_))
-                    && matches!(actual, Ty::InProjection(_))
+                let actual = if matches!(argument.kind(), TyKind::OutProjection(_))
+                    && matches!(actual.kind(), TyKind::InProjection(_))
                 {
                     let upper = classifier
                         .as_ref()

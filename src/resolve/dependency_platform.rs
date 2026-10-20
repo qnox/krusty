@@ -5,7 +5,7 @@ use crate::libraries::{
 };
 use crate::module_symbols::ModuleSymbols;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{Ty, TypeName, Visibility};
+use crate::types::{Ty, TyKind, TypeName, Visibility};
 use std::rc::Rc;
 
 use super::SymbolTable;
@@ -125,8 +125,8 @@ fn same_function(
             .iter()
             .zip(&right.callable.params)
             .all(
-                |(&left, &right)| match (left.non_null(), right.non_null()) {
-                    (Ty::Fun(left), Ty::Fun(right)) => {
+                |(&left, &right)| match (left.non_null().kind(), right.non_null().kind()) {
+                    (TyKind::Fun(left), TyKind::Fun(right)) => {
                         left.params.len() == right.params.len() && left.suspend == right.suspend
                     }
                     _ => {

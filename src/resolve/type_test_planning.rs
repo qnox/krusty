@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use crate::symbol_source::SymbolSource;
-use crate::types::{ClassifierRole, Ty};
+use crate::types::{ClassifierRole, Ty, TyKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ErasedBound {
@@ -24,10 +24,10 @@ fn erased_bound(source: &dyn SymbolSource, ty: Ty) -> Option<ErasedBound> {
     let mut current = ty.non_null();
     let mut seen = HashSet::new();
     loop {
-        match current {
-            Ty::TyParam(name, bound) if seen.insert(name) => current = bound.non_null(),
-            Ty::DefinitelyNotNull(inner) => current = inner.non_null(),
-            Ty::Obj(name, _) => {
+        match current.kind() {
+            TyKind::TyParam(name, bound) if seen.insert(name) => current = bound.non_null(),
+            TyKind::DefinitelyNotNull(inner) => current = inner.non_null(),
+            TyKind::Obj(name, _) => {
                 let role = source.classifier(name).and_then(|ty| ty.classifier_role());
                 return Some(match role {
                     Some(
@@ -39,7 +39,7 @@ fn erased_bound(source: &dyn SymbolSource, ty: Ty) -> Option<ErasedBound> {
                     }
                 });
             }
-            Ty::Fun(signature) => {
+            TyKind::Fun(signature) => {
                 let arity = u8::try_from(signature.params.len()).ok()?;
                 return Some(ErasedBound::Function(if signature.suspend {
                     ClassifierRole::SuspendFunctionOfArity(arity)
@@ -47,18 +47,18 @@ fn erased_bound(source: &dyn SymbolSource, ty: Ty) -> Option<ErasedBound> {
                     ClassifierRole::FunctionOfArity(arity)
                 }));
             }
-            Ty::TyParam(..)
-            | Ty::Nullable(_)
-            | Ty::PlatformNullable(_)
-            | Ty::Null
-            | Ty::Nothing
-            | Ty::Error
-            | Ty::Pending
-            | Ty::InProjection(_)
-            | Ty::OutProjection(_)
-            | Ty::StarProjection(_)
-            | Ty::Intersection(_) => return None,
-            builtin => return Some(ErasedBound::Classifier(builtin)),
+            TyKind::TyParam(..)
+            | TyKind::Nullable(_)
+            | TyKind::PlatformNullable(_)
+            | TyKind::Null
+            | TyKind::Nothing
+            | TyKind::Error
+            | TyKind::Pending
+            | TyKind::InProjection(_)
+            | TyKind::OutProjection(_)
+            | TyKind::StarProjection(_)
+            | TyKind::Intersection(_) => return None,
+            _ => return Some(ErasedBound::Classifier(current)),
         }
     }
 }

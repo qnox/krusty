@@ -5,6 +5,7 @@
 //! that engine's ordinary constructor-candidate shape.
 
 use super::*;
+use crate::types::TyKind;
 
 impl Checker<'_> {
     /// Normalize constructor headers already checked on an active body-local classifier's lexical
@@ -114,16 +115,16 @@ impl Checker<'_> {
             let vararg_index = source_vararg.map(|ordinal| context_count + ordinal);
             let lambda_parameter_types = parameters
                 .iter()
-                .map(|parameter| match parameter.non_null() {
-                    Ty::Fun(signature) => signature.params.clone(),
+                .map(|parameter| match parameter.non_null().kind() {
+                    TyKind::Fun(signature) => signature.params.clone(),
                     _ => Vec::new(),
                 })
                 .collect::<Vec<_>>();
             let lambda_receivers = Self::semantic_lambda_receiver_flags(parameters);
             let lambda_context_counts = parameters
                 .iter()
-                .map(|parameter| match parameter.non_null() {
-                    Ty::Fun(signature) => signature.context_count,
+                .map(|parameter| match parameter.non_null().kind() {
+                    TyKind::Fun(signature) => signature.context_count,
                     _ => 0,
                 })
                 .collect::<Vec<_>>();
@@ -618,7 +619,7 @@ impl Checker<'_> {
         params
             .iter()
             .map(|parameter| {
-                matches!(parameter.non_null(), Ty::Fun(signature) if signature.has_receiver)
+                matches!(parameter.non_null().kind(), TyKind::Fun(signature) if signature.has_receiver)
             })
             .collect()
     }
@@ -666,9 +667,9 @@ impl Checker<'_> {
     pub(super) fn constructor_shape_constraint(shape: Ty) -> ConstructorParameterConstraint {
         if !shape.mentions_ty_param() {
             ConstructorParameterConstraint::Concrete
-        } else if matches!(shape.non_null(), Ty::Fun(_)) {
+        } else if shape.non_null().is_fun() {
             ConstructorParameterConstraint::GenericFunction
-        } else if matches!(shape.non_null(), Ty::Obj(_, _)) {
+        } else if matches!(shape.non_null().kind(), TyKind::Obj(_, _)) {
             ConstructorParameterConstraint::GenericConstructed
         } else {
             ConstructorParameterConstraint::Inferred

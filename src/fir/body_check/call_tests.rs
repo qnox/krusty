@@ -5,6 +5,7 @@ use super::test_support::{
 };
 use super::*;
 use crate::fir::{FirExpressionDebugLines, FirInlineBodyPlan};
+use crate::types::TyKind;
 
 struct DependencyDefaultSource {
     name: &'static str,
@@ -1713,12 +1714,12 @@ fn recursive_generic_extension_call_publishes_identity_substitutions() {
                 .then_some((expression, call))
         })
         .expect("recursive foldl call must retain its checked identity instantiation");
-    assert!(matches!(recursive.0.ty.get(), Ty::TyParam(..)));
+    assert!(recursive.0.ty.get().is_ty_param());
     assert!(recursive
         .1
         .substitutions
         .iter()
-        .all(|substitution| matches!(substitution.value.get(), Ty::TyParam(..))));
+        .all(|substitution| substitution.value.get().is_ty_param()));
 }
 
 #[test]
@@ -1738,14 +1739,10 @@ fn recursive_vararg_lambda_result_accepts_a_lexical_identity_substitution() {
             let FirExprKind::Call(call) = &expression.kind else {
                 return None;
             };
-            (call.substitutions.len() == 1 && matches!(expression.ty.get(), Ty::TyParam(..)))
-                .then_some(call)
+            (call.substitutions.len() == 1 && expression.ty.get().is_ty_param()).then_some(call)
         })
         .expect("recursive call must retain its lexical type argument");
-    assert!(matches!(
-        recursive.substitutions[0].value.get(),
-        Ty::TyParam(..)
-    ));
+    assert!(recursive.substitutions[0].value.get().is_ty_param());
 }
 
 #[test]
@@ -4482,15 +4479,15 @@ fn regular_function_value_argument_to_suspend_parameter_is_an_explicit_checked_c
         panic!("regular-to-suspend adaptation must be explicit checked FIR")
     };
     assert!(matches!(
-        from.get(),
-        Ty::Fun(signature)
+        from.get().kind(),
+        TyKind::Fun(signature)
             if !signature.suspend
                 && signature.params == [Ty::Int]
                 && signature.ret == Ty::String
     ));
     assert!(matches!(
-        to.get(),
-        Ty::Fun(signature)
+        to.get().kind(),
+        TyKind::Fun(signature)
             if signature.suspend
                 && signature.params == [Ty::Int]
                 && signature.ret == Ty::String
@@ -4537,15 +4534,15 @@ fn functional_intersection_selects_the_matching_constituent_for_suspend_conversi
         panic!("the matching callable intersection constituent must be converted")
     };
     assert!(matches!(
-        from.get(),
-        Ty::Fun(signature)
+        from.get().kind(),
+        TyKind::Fun(signature)
             if !signature.suspend
                 && signature.params == [Ty::Int]
                 && signature.ret == Ty::String
     ));
     assert!(matches!(
-        to.get(),
-        Ty::Fun(signature)
+        to.get().kind(),
+        TyKind::Fun(signature)
             if signature.suspend
                 && signature.params == [Ty::Int]
                 && signature.ret == Ty::String
@@ -4885,7 +4882,7 @@ fn nominal_suspend_function_supertype_selects_function_extension() {
             else {
                 return None;
             };
-            matches!(receiver.get(), Ty::Fun(signature) if signature.suspend)
+            matches!(receiver.get().kind(), TyKind::Fun(signature) if signature.suspend)
                 .then_some((call, receiver, result))
         })
         .expect("startCoroutine must be selected as a checked function-type extension");
@@ -4922,7 +4919,7 @@ fn postponed_provider_lambda_uses_the_enclosing_stable_type_parameter() {
             matches!(expression.kind, FirExprKind::Lambda { .. }).then_some(expression)
         })
         .expect("Continuation callback must become a checked FIR lambda");
-    let Ty::Fun(signature) = callback.ty.get() else {
+    let TyKind::Fun(signature) = callback.ty.get().kind() else {
         panic!("Continuation callback must retain its checked function type")
     };
     let [Ty::Obj(result, arguments)] = signature.params.as_slice() else {

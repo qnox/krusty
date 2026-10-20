@@ -3,6 +3,7 @@ use super::test_support::{
     jvm_stdlib_semantics, root_expression, singleton_extension_source,
 };
 use super::*;
+use crate::types::TyKind;
 
 #[test]
 fn bound_external_extension_reference_on_a_singleton_publishes_the_exact_edge_classifier() {
@@ -384,7 +385,7 @@ fn companion_extension_function_reference_is_static_and_receiverless() {
     assert!(index
         .declaration_header(declaration.declaration)
         .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::COMPANION)));
-    let Ty::Fun(signature) = function_type.get() else {
+    let TyKind::Fun(signature) = function_type.get().kind() else {
         panic!("callable reference must retain its function type")
     };
     assert!(signature.params.is_empty());
@@ -457,7 +458,7 @@ fn companion_extension_property_reference_is_static_and_receiverless() {
     assert!(index
         .declaration_header(declaration)
         .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::COMPANION)));
-    let Ty::Fun(signature) = function_type.get() else {
+    let TyKind::Fun(signature) = function_type.get().kind() else {
         panic!("property reference must retain its invocation type")
     };
     assert!(signature.params.is_empty());
@@ -626,13 +627,13 @@ fn dependency_constructor_reference_keeps_its_external_declaration_identity() {
     assert_eq!(selected_parameters.as_ref(), parameters.as_ref());
     assert_eq!(parameters.len(), 2);
     assert!(matches!(
-        parameters[0].get(),
-        Ty::Nullable(_) | Ty::PlatformNullable(_)
+        parameters[0].get().kind(),
+        TyKind::Nullable(_) | TyKind::PlatformNullable(_)
     ));
     assert_eq!(parameters[0].get().non_null(), Ty::String);
     assert!(matches!(
-        parameters[1].get(),
-        Ty::Nullable(_) | Ty::PlatformNullable(_)
+        parameters[1].get().kind(),
+        TyKind::Nullable(_) | TyKind::PlatformNullable(_)
     ));
     assert_eq!(
         parameters[1].get().non_null().kotlin_class_internal(),
@@ -688,7 +689,7 @@ fn local_class_member_reference_uses_the_body_local_inferred_result() {
     assert!(index
         .callable(target.module().expect("stable local member target"))
         .is_some());
-    let Ty::Fun(signature) = function_type.get() else {
+    let TyKind::Fun(signature) = function_type.get().kind() else {
         panic!("local member reference must retain a final function type")
     };
     assert_eq!(signature.params.len(), 2);
@@ -838,7 +839,7 @@ fn unbound_context_extension_reference_preserves_parameter_roles() {
     assert!(index
         .callable(target.module().expect("module target"))
         .is_some());
-    let Ty::Fun(signature) = function_type.get() else {
+    let TyKind::Fun(signature) = function_type.get().kind() else {
         panic!("callable reference must retain its function shape")
     };
     assert_eq!(signature.context_count, 1);
@@ -993,11 +994,11 @@ fn unbound_generic_extension_property_reference_keeps_receiver_function_shape() 
         .is_some());
     assert_eq!(*binding, FirCallableReferenceBinding::Unbound);
     assert!(matches!(
-        expression.ty.get(),
-        Ty::Fun(signature)
+        expression.ty.get().kind(),
+        TyKind::Fun(signature)
             if signature.has_receiver
                 && signature.params.len() == 1
-                && matches!(signature.params[0], Ty::Obj(owner, _) if owner.matches("kotlin/collections/List"))
+                && matches!(signature.params[0].kind(), TyKind::Obj(owner, _) if owner.matches("kotlin/collections/List"))
     ));
 }
 
@@ -1497,7 +1498,7 @@ fn unbound_generic_member_reference_uses_applied_classifier_parameters() {
     else {
         panic!("unbound generic member must become checked callable-reference FIR")
     };
-    let Ty::Fun(signature) = function_type.get() else {
+    let TyKind::Fun(signature) = function_type.get().kind() else {
         panic!("callable reference must retain its exact function type")
     };
     assert_eq!(
@@ -1776,7 +1777,7 @@ fn unbound_member_reference_constrains_open_enclosing_call_slots() {
             else {
                 return false;
             };
-            let Ty::Fun(function) = function_type.get() else {
+            let TyKind::Fun(function) = function_type.get().kind() else {
                 return false;
             };
             function.params.as_ref() == [Ty::Int] && function.ret.non_null() == Ty::String
@@ -1785,7 +1786,7 @@ fn unbound_member_reference_constrains_open_enclosing_call_slots() {
     let FirExprKind::CallableReference { function_type, .. } = &reference.kind else {
         unreachable!("selected expression is a callable reference")
     };
-    let Ty::Fun(function) = function_type.get() else {
+    let TyKind::Fun(function) = function_type.get().kind() else {
         panic!("selected reference must retain a function type")
     };
     assert_eq!(function.params.as_ref(), [Ty::Int]);

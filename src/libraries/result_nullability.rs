@@ -24,7 +24,7 @@ impl ReturnInfo {
             // collapsed back to raw `Box?` while the equivalent source declaration stays precise.
             Some(meta) if !fallback.non_null().type_args().is_empty() => {
                 let specialized = Ty::obj_args(&meta.name(), fallback.non_null().type_args());
-                if matches!(meta, Ty::PlatformNullable(_)) {
+                if meta.is_platform_nullable() {
                     Ty::platform_nullable(specialized)
                 } else {
                     specialized

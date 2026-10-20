@@ -5,7 +5,7 @@ use crate::features::LangFeatures;
 use crate::frontend::analyze_source_set_with_features_and_prepare;
 use crate::libraries::EmptySymbolSource;
 use crate::source::SourceInput;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 fn initialized_jvm_libraries(
     classpath: std::rc::Rc<crate::jvm::classpath::Classpath>,
@@ -254,7 +254,7 @@ impl Backend for PackageDeclarationBackend {
             && function.inline
             && function
                 .receiver
-                .is_some_and(|receiver| matches!(receiver, Ty::TyParam(..)))
+                .is_some_and(|receiver| receiver.is_ty_param())
             && function.params == [("value".to_owned(), Ty::String)]
             && function.param_defaults == [true]
             && function.ret == Ty::String
@@ -407,7 +407,7 @@ fn pass_two_preserves_definitely_non_null_generic_parameter_shape() {
     let [parameter] = signature.params.as_slice() else {
         panic!("f must retain one parameter");
     };
-    let Ty::TyParam(parameter_formal, bound) = parameter else {
+    let TyKind::TyParam(parameter_formal, bound) = parameter.kind() else {
         panic!("T & Any must retain its type-parameter identity: {parameter:?}");
     };
     assert_eq!(parameter_formal, formal);
@@ -433,7 +433,7 @@ fn pass_two_preserves_definitely_non_null_generic_parameter_shape() {
     let [parameter] = constructor.params.as_slice() else {
         panic!("C must retain one constructor parameter");
     };
-    let Ty::TyParam(_, bound) = parameter else {
+    let TyKind::TyParam(_, bound) = parameter.kind() else {
         panic!("constructor T & Any must retain its parameter identity: {parameter:?}");
     };
     assert!(

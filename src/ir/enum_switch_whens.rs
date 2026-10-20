@@ -7,7 +7,7 @@
 //! class owns (the JVM's `$WhenMappings`), so code holding such a `when` reads state of that class.
 
 use super::{ExprId, IrBinOp, IrExpr, IrFile};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// A subject `when` that switches on an enum's keys.
 pub(crate) struct EnumSwitchWhen {
@@ -110,9 +110,9 @@ impl IrFile {
         if !matches!(self.expr(*when), IrExpr::When { .. }) {
             return None;
         }
-        let (classifier, nullable) = match *ty {
-            Ty::Obj(classifier, _) => (classifier, false),
-            Ty::Nullable(Ty::Obj(classifier, _)) => (*classifier, true),
+        let (classifier, nullable) = match ty.kind() {
+            TyKind::Obj(classifier, _) => (classifier, false),
+            TyKind::Nullable(Ty::Obj(classifier, _)) => (classifier, true),
             _ => return None,
         };
         let candidate = EnumSwitchWhen {

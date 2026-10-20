@@ -6,7 +6,7 @@ use crate::fx_hash::HashMap;
 use crate::jvm::names::type_descriptor;
 use crate::libraries::GenericSig;
 use crate::metadata::semantic::KotlinTypeParameterId;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// A builtin member's declared non-null result: its type parameter, or its classifier. A nullable
 /// result publishes none, as the metadata of a classpath member does.
@@ -23,19 +23,19 @@ pub(super) fn builtin_declared_return(nullable: bool, ret: Ty) -> Option<Ty> {
 /// The JVM erasure of a decoded builtin type: a type parameter erases to `Any` (`Object`), a class to
 /// itself with its type arguments dropped — exactly what a JVM descriptor records.
 pub(super) fn builtin_erased(ty: Ty) -> Ty {
-    match ty {
+    match ty.kind() {
         // JVM erasure follows the primary declared bound (`<T : CharSequence>` erases to
         // `CharSequence`), not unconditionally `Object`. Unbounded parameters already carry `Any?` as
         // their bound, so the same recursive rule covers both cases and stays aligned with
         // `names::type_descriptor` and bridge erasure.
-        Ty::TyParam(_, bound) => builtin_erased(*bound),
+        TyKind::TyParam(_, bound) => builtin_erased(bound),
         // Nullability is erased from reference classifiers, but not from scalar representation: a
         // nullable scalar occupies its wrapper reference in a JVM descriptor.
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => {
-            inner.boxed_ref().unwrap_or_else(|| builtin_erased(*inner))
+        TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => {
+            inner.boxed_ref().unwrap_or_else(|| builtin_erased(inner))
         }
-        Ty::Obj(name, args) if !args.is_empty() => Ty::obj_name(name),
-        other => other,
+        TyKind::Obj(name, args) if !args.is_empty() => Ty::obj_name(name),
+        _ => ty,
     }
 }
 

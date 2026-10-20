@@ -114,7 +114,7 @@ fn an_inlined_reified_check_specializes_only_the_call_site_lambda() {
     assert!(
         instanceof_targets(&ir, declaration[0])
             .iter()
-            .any(|ty| matches!(ty, Ty::TyParam(..))),
+            .any(|ty| ty.is_ty_param()),
         "the declaration implementation keeps the reified parameter"
     );
     assert!(
@@ -194,7 +194,7 @@ fn assert_copy_contract(ir: &crate::ir::IrFile, source: u32, copy: u32) {
             .params
             .iter()
             .chain(signature.ret.iter())
-            .any(|ty| matches!(ty, Ty::TyParam(..)));
+            .any(|ty| ty.is_ty_param());
         assert!(
             !mentions_param,
             "the copy's signature uses the call's type arguments: {signature:?}"
@@ -241,7 +241,7 @@ fn a_nested_escaping_lambda_is_specialized_too() {
         declaration.iter().any(|function| {
             instanceof_targets(&ir, *function)
                 .iter()
-                .any(|ty| matches!(ty, Ty::TyParam(..)))
+                .any(|ty| ty.is_ty_param())
         }),
         "the nested declaration implementation keeps the reified parameter"
     );
@@ -297,7 +297,7 @@ fn an_escaping_lambda_that_forwards_a_reified_argument_is_specialized() {
     assert!(
         declaration_checks
             .iter()
-            .any(|ty| matches!(ty, Ty::TyParam(..))),
+            .any(|ty| ty.is_ty_param()),
         "inlining accept leaves the declaration check on the reified parameter: {declaration_checks:?}"
     );
     assert!(
@@ -305,7 +305,7 @@ fn an_escaping_lambda_that_forwards_a_reified_argument_is_specialized() {
         "inlining accept leaves the call-site check on Token: {call_checks:?}"
     );
     assert!(
-        call_checks.iter().all(|ty| !matches!(ty, Ty::TyParam(..))),
+        call_checks.iter().all(|ty| !ty.is_ty_param()),
         "the call-site check does not keep the erased parameter: {call_checks:?}"
     );
 }
@@ -383,9 +383,7 @@ fn an_escaping_lambda_that_only_uses_type_of_is_specialized() {
         "common IR keeps typeOf as the call's type argument, not an intrinsic"
     );
     assert!(
-        declaration_arguments
-            .iter()
-            .any(|ty| matches!(ty, Ty::TyParam(..))),
+        declaration_arguments.iter().any(|ty| ty.is_ty_param()),
         "the declaration typeOf argument is the reified parameter: {declaration_arguments:?}"
     );
     assert!(
@@ -393,9 +391,7 @@ fn an_escaping_lambda_that_only_uses_type_of_is_specialized() {
         "the call-site typeOf argument is Token: {call_arguments:?}"
     );
     assert!(
-        call_arguments
-            .iter()
-            .all(|ty| !matches!(ty, Ty::TyParam(..))),
+        call_arguments.iter().all(|ty| !ty.is_ty_param()),
         "the call-site typeOf argument is not left as a type parameter: {call_arguments:?}"
     );
     assert!(
@@ -550,7 +546,7 @@ fn a_reified_sibling_does_not_reify_an_ordinary_parameter() {
     assert!(
         declaration_operands
             .iter()
-            .filter(|ty| matches!(ty, Ty::TyParam(..)))
+            .filter(|ty| ty.is_ty_param())
             .count()
             >= 2,
         "the declaration keeps both type parameters: {declaration_operands:?}"
@@ -560,7 +556,7 @@ fn a_reified_sibling_does_not_reify_an_ordinary_parameter() {
         "the reified check becomes Token: {call_operands:?}"
     );
     assert!(
-        call_operands.iter().any(|ty| matches!(ty, Ty::TyParam(..))),
+        call_operands.iter().any(|ty| ty.is_ty_param()),
         "the ordinary cast stays a type parameter: {call_operands:?}"
     );
     assert!(

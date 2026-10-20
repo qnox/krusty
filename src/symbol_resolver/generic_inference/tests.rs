@@ -1,4 +1,5 @@
 use super::*;
+use crate::types::TyKind;
 
 #[test]
 fn a_single_generic_lower_bound_keeps_platform_flexibility() {
@@ -46,7 +47,7 @@ fn a_type_parameter_is_not_rebound_to_its_own_definitely_non_null_face() {
     let same_face = formal.contributed_through_nullable_formal();
     let different_face = Ty::ty_param("scope-b:R", any).contributed_through_nullable_formal();
 
-    assert!(matches!(same_face, Ty::DefinitelyNotNull(_)));
+    assert!(matches!(same_face.kind(), TyKind::DefinitelyNotNull(_)));
     let mut same_identity = GSigBinds::default();
     unify_inferred_ty(formal, same_face, &mut same_identity);
     assert!(same_identity.is_empty());
@@ -807,7 +808,7 @@ fn nullable_any_bound_solves_to_definitely_non_null_and_substitutes_as_nullable(
         None,
     );
 
-    assert!(matches!(solved, Ty::DefinitelyNotNull(_)));
+    assert!(matches!(solved.kind(), TyKind::DefinitelyNotNull(_)));
     assert_eq!(inferred.bindings.get("R"), Some(&solved));
     assert!(inferred.bound_violation.is_none());
     let substituted = ty_subst(signature.ret, &inferred.bindings);
@@ -868,7 +869,7 @@ fn nullable_and_exact_dnn_paths_merge_without_losing_the_caller_bound() {
     let provenance = caller.contributed_through_nullable_formal();
 
     assert_ne!(provenance, compact);
-    assert!(matches!(provenance, Ty::DefinitelyNotNull(_)));
+    assert!(matches!(provenance.kind(), TyKind::DefinitelyNotNull(_)));
     for (left, right) in [(provenance, compact), (compact, provenance)] {
         assert_eq!(
             merge_inferred_ty_from_symbols(Some(&crate::libraries::EmptySymbolSource), left, right),

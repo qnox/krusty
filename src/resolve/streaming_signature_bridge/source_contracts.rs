@@ -15,7 +15,7 @@ use crate::contracts::{
     TermId, TermKind,
 };
 use crate::symbol_resolver::{CallArgKind, CandidateSelection};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 use super::ProductionSignatureSemantics;
 
@@ -247,8 +247,8 @@ impl ProductionSignatureSemantics<'_> {
         if !self.table.libraries.is_erased_contract_callable(&callable) {
             return None;
         }
-        match callable.params.first() {
-            Some(Ty::Fun(builder)) => builder.params.first().copied(),
+        match callable.params.first().map(|ty| ty.kind()) {
+            Some(TyKind::Fun(builder)) => builder.params.first().copied(),
             _ => None,
         }
     }

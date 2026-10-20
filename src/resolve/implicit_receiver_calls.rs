@@ -5,6 +5,7 @@
 //! selection has failed.
 
 use super::*;
+use crate::types::TyKind;
 
 pub(super) struct ReceiverCallRejections {
     receiver: Ty,
@@ -57,14 +58,16 @@ impl Checker<'_> {
         let rt = self.apply_postponed_call_bindings(receiver.ty);
         let type_args = self.resolved_explicit_type_args(scope, call);
         // A platform type `T!` is usable as `T` for member calls, as on an explicit receiver.
-        let member_receiver = match rt {
-            Ty::PlatformNullable(inner) => *inner,
+        let member_receiver = match rt.kind() {
+            TyKind::PlatformNullable(inner) => inner,
             _ => rt,
         };
         let (rung, rejected_candidates, mut member_mapping_failure) = if member_receiver
             == Ty::String
-            || matches!(member_receiver, Ty::Obj(..) | Ty::TyParam(..))
-        {
+            || matches!(
+                member_receiver.kind(),
+                TyKind::Obj(..) | TyKind::TyParam(..)
+            ) {
             match self
                 .record_member_call_with_slots(scope, call, rt, name, args, tower_rung, expected)
             {

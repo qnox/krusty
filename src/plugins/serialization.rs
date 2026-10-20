@@ -47,7 +47,7 @@ use crate::plugins::{
     FrontendCallable, FrontendClassContext, FrontendExpressionContext, IrPlugin, PluginContext,
     PluginExpressionPlan,
 };
-use crate::types::{type_name, Ty, TypeName};
+use crate::types::{type_name, Ty, TyKind, TypeName};
 
 use crate::fx_hash::HashMap;
 use constructed_standard_serializers::constructed_standard_serializer;
@@ -541,7 +541,7 @@ fn serialized_type_spelling(
     // wider gate would capture calls the generic path already compiles correctly and turn a working
     // file into a declined placeholder.
     constructed_standard_serializer(classifier)?;
-    let Ty::Obj(_, arguments) = ty.non_null() else {
+    let TyKind::Obj(_, arguments) = ty.non_null().kind() else {
         return None;
     };
     // Every currently mapped serializer is constructed over at least one checked type argument.
@@ -710,7 +710,7 @@ fn ty_descriptor(ctx: &PluginContext, ty: &Ty) -> Option<String> {
 /// reference/richer type (which needs `decodeSerializableElement`). Covers the full primitive set +
 /// String; backend lowering owns any wider physical carrier/local representation.
 fn decode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
-    if matches!(ty.non_null(), Ty::TyParam(..)) {
+    if ty.non_null().is_ty_param() {
         return None;
     }
     let fq = ty.kotlin_class_internal()?;
@@ -763,7 +763,7 @@ fn virtual_iface(owner: &str, name: &str, descriptor: &str) -> Callee {
 /// The `CompositeEncoder.encode<T>Element` method + descriptor for a property type, or `None` if the
 /// type isn't a directly-encodable primitive/String (a richer type needs `encodeSerializableElement`).
 fn encode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
-    if matches!(ty.non_null(), Ty::TyParam(..)) {
+    if ty.non_null().is_ty_param() {
         return None;
     }
     let fq = ty.kotlin_class_internal()?;

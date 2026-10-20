@@ -1,4 +1,4 @@
-use crate::types::{Ty, TypeVariance};
+use crate::types::{Ty, TyKind, TypeVariance};
 
 use super::{
     DeclarationId, DeclarationNameId, ResolvedModuleIndex, ResolvedTy, TypeParameterId,
@@ -23,9 +23,12 @@ impl ResolvedTypeParameterBound {
         bound: Ty,
         classifier_is_interface: impl FnOnce(crate::types::TypeName) -> bool,
     ) -> bool {
-        match bound.non_null() {
-            Ty::Fun(_) | Ty::TyParam(..) => true,
-            bound => bound.obj_internal().is_some_and(classifier_is_interface),
+        {
+            let bound = bound.non_null();
+            match bound.kind() {
+                TyKind::Fun(_) | TyKind::TyParam(..) => true,
+                _ => bound.obj_internal().is_some_and(classifier_is_interface),
+            }
         }
     }
 }

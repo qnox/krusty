@@ -35,7 +35,7 @@ pub(crate) fn authenticated_singleton_receiver(
     selected_classifier: Option<crate::types::TypeName>,
     expected: crate::types::Ty,
 ) -> bool {
-    let crate::types::Ty::Obj(expected_classifier, arguments) = expected else {
+    let crate::types::TyKind::Obj(expected_classifier, arguments) = expected.kind() else {
         return false;
     };
     receiver.is_some() && arguments.is_empty() && selected_classifier == Some(expected_classifier)

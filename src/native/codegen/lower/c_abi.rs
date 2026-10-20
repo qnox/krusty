@@ -5,6 +5,7 @@
 //! property defined here has its value even though the caller is not Kotlin.
 
 use super::*;
+use crate::types::TyKind;
 
 impl<'a> FileLowering<'a> {
     /// Export exact dependency declaration identities as target symbols. The ordinary
@@ -40,8 +41,8 @@ impl<'a> FileLowering<'a> {
         let declared = &self.ir.functions[function as usize];
         let mut params =
             Vec::with_capacity(declared.params.len() + usize::from(member_receiver.is_some()));
-        match (member_receiver, declared.dispatch_receiver) {
-            (Some(Ty::Obj(receiver, arguments)), Some(owner))
+        match (member_receiver.map(Ty::kind), declared.dispatch_receiver) {
+            (Some(TyKind::Obj(receiver, arguments)), Some(owner))
                 if receiver == owner && arguments.is_empty() =>
             {
                 params.push(member_receiver.expect("matched a member receiver"));

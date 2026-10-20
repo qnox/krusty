@@ -41,7 +41,7 @@ pub(crate) struct OverrideResults {
 /// Whether a declaration result of `ty` maps to an unboxed JVM scalar of its own. An unsigned type
 /// is a value class, whose override result follows the value-class representation instead.
 fn scalar_result(ty: Ty) -> bool {
-    !ty.is_unsigned() && !matches!(ty, Ty::TyParam(..)) && ir_ty_to_jvm(&ty).is_jvm_scalar()
+    !ty.is_unsigned() && !ty.is_ty_param() && ir_ty_to_jvm(&ty).is_jvm_scalar()
 }
 
 /// Whether an override whose result is `implementation` returns an unboxed JVM scalar where the

@@ -1,20 +1,21 @@
 //! Type-parameter substitution. Callers supply a lookup; the walk never builds a map of its own.
 
 use crate::fx_hash::HashMap;
+use crate::types::TyKind;
 
 use super::{intern, Ty};
 
 fn compose_in_projection(inner: Ty) -> Ty {
-    match inner {
-        Ty::StarProjection(_) | Ty::InProjection(_) => inner,
-        other => Ty::in_projection(other),
+    match inner.kind() {
+        TyKind::StarProjection(_) | TyKind::InProjection(_) => inner,
+        _ => Ty::in_projection(inner),
     }
 }
 
 fn compose_out_projection(inner: Ty) -> Ty {
-    match inner {
-        Ty::StarProjection(_) | Ty::OutProjection(_) => inner,
-        other => Ty::out_projection(other),
+    match inner.kind() {
+        TyKind::StarProjection(_) | TyKind::OutProjection(_) => inner,
+        _ => Ty::out_projection(inner),
     }
 }
 
@@ -30,8 +31,8 @@ where
     F: Fn(&str) -> Option<Ty> + Copy,
     P: Fn(&str) -> bool + Copy,
 {
-    match ty {
-        Ty::TyParam(name, bound) => lookup(name.as_str())
+    match ty.kind() {
+        TyKind::TyParam(name, bound) => lookup(name.as_str())
             .map(|binding| {
                 if !enforce_bound_nullability || bound.upper_bound_admits_null() {
                     binding
@@ -46,7 +47,7 @@ where
                     bound.non_null()
                 }
             }),
-        Ty::Fun(signature) => Ty::fun_with_shape(
+        TyKind::Fun(signature) => Ty::fun_with_shape(
             signature
                 .params
                 .iter()
@@ -72,51 +73,54 @@ where
         // An unbound-preserving walk is identity-only and keeps the provenance wrapper. A real
         // binding consumes the occurrence: concrete nullable types become non-null, while a
         // nullable-bounded symbolic binding becomes that caller parameter's own `T & Any`.
-        Ty::DefinitelyNotNull(inner) => match *inner {
-            Ty::TyParam(name, bound) => match lookup(name.as_str()) {
-                Some(binding) => binding.contributed_through_nullable_formal(),
-                None if preserve_unbound(name.as_str()) => Ty::DefinitelyNotNull(inner),
-                None => bound.contributed_through_nullable_formal(),
-            },
-            other => substitute_type_parameters(
-                other,
-                lookup,
-                preserve_unbound,
-                enforce_bound_nullability,
-            )
-            .contributed_through_nullable_formal(),
-        },
-        Ty::Nullable(inner) => Ty::nullable(substitute_type_parameters(
-            *inner,
+        TyKind::DefinitelyNotNull(inner) => {
+            let other = inner;
+            match other.kind() {
+                TyKind::TyParam(name, bound) => match lookup(name.as_str()) {
+                    Some(binding) => binding.contributed_through_nullable_formal(),
+                    None if preserve_unbound(name.as_str()) => ty,
+                    None => bound.contributed_through_nullable_formal(),
+                },
+                _ => substitute_type_parameters(
+                    other,
+                    lookup,
+                    preserve_unbound,
+                    enforce_bound_nullability,
+                )
+                .contributed_through_nullable_formal(),
+            }
+        }
+        TyKind::Nullable(inner) => Ty::nullable(substitute_type_parameters(
+            inner,
             lookup,
             preserve_unbound,
             enforce_bound_nullability,
         )),
-        Ty::PlatformNullable(inner) => Ty::platform_nullable(substitute_type_parameters(
-            *inner,
+        TyKind::PlatformNullable(inner) => Ty::platform_nullable(substitute_type_parameters(
+            inner,
             lookup,
             preserve_unbound,
             enforce_bound_nullability,
         )),
-        Ty::InProjection(inner) => compose_in_projection(substitute_type_parameters(
-            *inner,
+        TyKind::InProjection(inner) => compose_in_projection(substitute_type_parameters(
+            inner,
             lookup,
             preserve_unbound,
             enforce_bound_nullability,
         )),
-        Ty::OutProjection(inner) => compose_out_projection(substitute_type_parameters(
-            *inner,
+        TyKind::OutProjection(inner) => compose_out_projection(substitute_type_parameters(
+            inner,
             lookup,
             preserve_unbound,
             enforce_bound_nullability,
         )),
-        Ty::StarProjection(inner) => Ty::star_projection(substitute_type_parameters(
-            *inner,
+        TyKind::StarProjection(inner) => Ty::star_projection(substitute_type_parameters(
+            inner,
             lookup,
             preserve_unbound,
             enforce_bound_nullability,
         )),
-        Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+        TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
             name,
             &arguments
                 .iter()
@@ -130,7 +134,7 @@ where
                 })
                 .collect::<Vec<_>>(),
         ),
-        Ty::Intersection(parts) => Ty::intersection(
+        TyKind::Intersection(parts) => Ty::intersection(
             &parts
                 .iter()
                 .map(|part| {
@@ -163,8 +167,8 @@ pub(crate) fn ty_subst(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
 /// Projections below a classifier remain written generic arguments and must survive.
 pub(crate) fn ty_subst_alias_expansion(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
     fn normalize(ty: Ty) -> Ty {
-        match ty {
-            Ty::Fun(signature) => Ty::fun_with_shape(
+        match ty.kind() {
+            TyKind::Fun(signature) => Ty::fun_with_shape(
                 signature
                     .params
                     .iter()
@@ -175,42 +179,42 @@ pub(crate) fn ty_subst_alias_expansion(ty: Ty, bindings: &HashMap<String, Ty>) -
                 signature.has_receiver,
                 signature.suspend,
             ),
-            Ty::Nullable(inner) => Ty::nullable(normalize(*inner)),
-            Ty::PlatformNullable(inner) => Ty::platform_nullable(normalize(*inner)),
-            Ty::DefinitelyNotNull(inner) => {
-                Ty::DefinitelyNotNull(super::intern_ty(normalize(*inner)))
+            TyKind::Nullable(inner) => Ty::nullable(normalize(inner)),
+            TyKind::PlatformNullable(inner) => Ty::platform_nullable(normalize(inner)),
+            TyKind::DefinitelyNotNull(inner) => {
+                Ty::DefinitelyNotNull(super::intern_ty(normalize(inner)))
             }
-            Ty::InProjection(inner) => Ty::in_projection(normalize(*inner)),
-            Ty::OutProjection(inner) => Ty::out_projection(normalize(*inner)),
-            Ty::StarProjection(inner) => Ty::star_projection(normalize(*inner)),
-            Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+            TyKind::InProjection(inner) => Ty::in_projection(normalize(inner)),
+            TyKind::OutProjection(inner) => Ty::out_projection(normalize(inner)),
+            TyKind::StarProjection(inner) => Ty::star_projection(normalize(inner)),
+            TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
                 name,
                 &arguments
                     .iter()
                     .map(|argument| normalize(*argument))
                     .collect::<Vec<_>>(),
             ),
-            Ty::Intersection(parts) => Ty::intersection(
+            TyKind::Intersection(parts) => Ty::intersection(
                 &parts
                     .iter()
                     .map(|part| normalize(*part))
                     .collect::<Vec<_>>(),
             ),
-            other => other,
+            _ => ty,
         }
     }
 
     fn function_component(ty: Ty) -> Ty {
-        match ty {
-            Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
-                function_component(*inner)
+        match ty.kind() {
+            TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner)
+            | TyKind::StarProjection(inner) => function_component(inner),
+            TyKind::Nullable(inner) => Ty::nullable(function_component(inner)),
+            TyKind::PlatformNullable(inner) => Ty::platform_nullable(function_component(inner)),
+            TyKind::DefinitelyNotNull(inner) => {
+                Ty::DefinitelyNotNull(super::intern_ty(function_component(inner)))
             }
-            Ty::Nullable(inner) => Ty::nullable(function_component(*inner)),
-            Ty::PlatformNullable(inner) => Ty::platform_nullable(function_component(*inner)),
-            Ty::DefinitelyNotNull(inner) => {
-                Ty::DefinitelyNotNull(super::intern_ty(function_component(*inner)))
-            }
-            other => other,
+            _ => ty,
         }
     }
 
@@ -238,12 +242,12 @@ pub(crate) fn ty_subst_all(types: &[Ty], bindings: &HashMap<String, Ty>) -> Vec<
 /// decoders first discover formal declarations and type uses independently; this single type-model
 /// operation joins them without each decoder growing its own recursive walk.
 pub(crate) fn ty_with_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
-    match ty {
-        Ty::TyParam(name, current) => Ty::ty_param(
+    match ty.kind() {
+        TyKind::TyParam(name, current) => Ty::ty_param(
             name.as_str(),
-            bounds.get(name.as_str()).copied().unwrap_or(*current),
+            bounds.get(name.as_str()).copied().unwrap_or(current),
         ),
-        Ty::Fun(signature) => Ty::fun_with_shape(
+        TyKind::Fun(signature) => Ty::fun_with_shape(
             signature
                 .params
                 .iter()
@@ -254,22 +258,24 @@ pub(crate) fn ty_with_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
             signature.has_receiver,
             signature.suspend,
         ),
-        Ty::DefinitelyNotNull(inner) => {
-            Ty::DefinitelyNotNull(super::intern_ty(ty_with_param_bounds(*inner, bounds)))
+        TyKind::DefinitelyNotNull(inner) => {
+            Ty::DefinitelyNotNull(super::intern_ty(ty_with_param_bounds(inner, bounds)))
         }
-        Ty::Nullable(inner) => Ty::nullable(ty_with_param_bounds(*inner, bounds)),
-        Ty::PlatformNullable(inner) => Ty::platform_nullable(ty_with_param_bounds(*inner, bounds)),
-        Ty::InProjection(inner) => Ty::in_projection(ty_with_param_bounds(*inner, bounds)),
-        Ty::OutProjection(inner) => Ty::out_projection(ty_with_param_bounds(*inner, bounds)),
-        Ty::StarProjection(inner) => Ty::star_projection(ty_with_param_bounds(*inner, bounds)),
-        Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+        TyKind::Nullable(inner) => Ty::nullable(ty_with_param_bounds(inner, bounds)),
+        TyKind::PlatformNullable(inner) => {
+            Ty::platform_nullable(ty_with_param_bounds(inner, bounds))
+        }
+        TyKind::InProjection(inner) => Ty::in_projection(ty_with_param_bounds(inner, bounds)),
+        TyKind::OutProjection(inner) => Ty::out_projection(ty_with_param_bounds(inner, bounds)),
+        TyKind::StarProjection(inner) => Ty::star_projection(ty_with_param_bounds(inner, bounds)),
+        TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
             name,
             &arguments
                 .iter()
                 .map(|argument| ty_with_param_bounds(*argument, bounds))
                 .collect::<Vec<_>>(),
         ),
-        Ty::Intersection(parts) => Ty::intersection(
+        TyKind::Intersection(parts) => Ty::intersection(
             &parts
                 .iter()
                 .map(|part| ty_with_param_bounds(*part, bounds))
@@ -285,18 +291,18 @@ pub(crate) fn ty_with_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
 /// terminate without inventing a bound.
 pub(crate) fn ty_with_transitive_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
     fn hydrate(ty: Ty, bounds: &HashMap<String, Ty>, visiting: &mut Vec<&'static str>) -> Ty {
-        match ty {
-            Ty::TyParam(name, current) => {
+        match ty.kind() {
+            TyKind::TyParam(name, current) => {
                 if visiting.contains(&name.as_str()) {
                     return ty;
                 }
                 visiting.push(name.as_str());
-                let declared = bounds.get(name.as_str()).copied().unwrap_or(*current);
+                let declared = bounds.get(name.as_str()).copied().unwrap_or(current);
                 let hydrated = hydrate(declared, bounds, visiting);
                 visiting.pop();
                 Ty::ty_param(name.as_str(), hydrated)
             }
-            Ty::Fun(signature) => Ty::fun_with_shape(
+            TyKind::Fun(signature) => Ty::fun_with_shape(
                 signature
                     .params
                     .iter()
@@ -307,22 +313,24 @@ pub(crate) fn ty_with_transitive_param_bounds(ty: Ty, bounds: &HashMap<String, T
                 signature.has_receiver,
                 signature.suspend,
             ),
-            Ty::DefinitelyNotNull(inner) => {
-                Ty::DefinitelyNotNull(super::intern_ty(hydrate(*inner, bounds, visiting)))
+            TyKind::DefinitelyNotNull(inner) => {
+                Ty::DefinitelyNotNull(super::intern_ty(hydrate(inner, bounds, visiting)))
             }
-            Ty::Nullable(inner) => Ty::nullable(hydrate(*inner, bounds, visiting)),
-            Ty::PlatformNullable(inner) => Ty::platform_nullable(hydrate(*inner, bounds, visiting)),
-            Ty::InProjection(inner) => Ty::in_projection(hydrate(*inner, bounds, visiting)),
-            Ty::OutProjection(inner) => Ty::out_projection(hydrate(*inner, bounds, visiting)),
-            Ty::StarProjection(inner) => Ty::star_projection(hydrate(*inner, bounds, visiting)),
-            Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+            TyKind::Nullable(inner) => Ty::nullable(hydrate(inner, bounds, visiting)),
+            TyKind::PlatformNullable(inner) => {
+                Ty::platform_nullable(hydrate(inner, bounds, visiting))
+            }
+            TyKind::InProjection(inner) => Ty::in_projection(hydrate(inner, bounds, visiting)),
+            TyKind::OutProjection(inner) => Ty::out_projection(hydrate(inner, bounds, visiting)),
+            TyKind::StarProjection(inner) => Ty::star_projection(hydrate(inner, bounds, visiting)),
+            TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
                 name,
                 &arguments
                     .iter()
                     .map(|argument| hydrate(*argument, bounds, visiting))
                     .collect::<Vec<_>>(),
             ),
-            Ty::Intersection(parts) => Ty::intersection(
+            TyKind::Intersection(parts) => Ty::intersection(
                 &parts
                     .iter()
                     .map(|part| hydrate(*part, bounds, visiting))
@@ -339,15 +347,15 @@ pub(crate) fn ty_with_transitive_param_bounds(ty: Ty, bounds: &HashMap<String, T
 /// inline upper bounds carried by nested `TyParam` nodes. Renaming only the outer occurrence leaves
 /// chains such as `D : B, B : A` partly keyed by source spelling and breaks bound member lookup.
 pub(crate) fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>) -> Ty {
-    match ty {
-        Ty::TyParam(name, bound) => Ty::ty_param(
+    match ty.kind() {
+        TyKind::TyParam(name, bound) => Ty::ty_param(
             identities
                 .get(name.as_str())
                 .copied()
                 .unwrap_or(name.as_str()),
-            ty_rename_params(*bound, identities),
+            ty_rename_params(bound, identities),
         ),
-        Ty::Fun(signature) => Ty::fun_with_shape(
+        TyKind::Fun(signature) => Ty::fun_with_shape(
             signature
                 .params
                 .iter()
@@ -358,22 +366,24 @@ pub(crate) fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>)
             signature.has_receiver,
             signature.suspend,
         ),
-        Ty::DefinitelyNotNull(inner) => {
-            Ty::DefinitelyNotNull(super::intern_ty(ty_rename_params(*inner, identities)))
+        TyKind::DefinitelyNotNull(inner) => {
+            Ty::DefinitelyNotNull(super::intern_ty(ty_rename_params(inner, identities)))
         }
-        Ty::Nullable(inner) => Ty::nullable(ty_rename_params(*inner, identities)),
-        Ty::PlatformNullable(inner) => Ty::platform_nullable(ty_rename_params(*inner, identities)),
-        Ty::InProjection(inner) => Ty::in_projection(ty_rename_params(*inner, identities)),
-        Ty::OutProjection(inner) => Ty::out_projection(ty_rename_params(*inner, identities)),
-        Ty::StarProjection(inner) => Ty::star_projection(ty_rename_params(*inner, identities)),
-        Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+        TyKind::Nullable(inner) => Ty::nullable(ty_rename_params(inner, identities)),
+        TyKind::PlatformNullable(inner) => {
+            Ty::platform_nullable(ty_rename_params(inner, identities))
+        }
+        TyKind::InProjection(inner) => Ty::in_projection(ty_rename_params(inner, identities)),
+        TyKind::OutProjection(inner) => Ty::out_projection(ty_rename_params(inner, identities)),
+        TyKind::StarProjection(inner) => Ty::star_projection(ty_rename_params(inner, identities)),
+        TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
             name,
             &arguments
                 .iter()
                 .map(|argument| ty_rename_params(*argument, identities))
                 .collect::<Vec<_>>(),
         ),
-        Ty::Intersection(parts) => Ty::intersection(
+        TyKind::Intersection(parts) => Ty::intersection(
             &parts
                 .iter()
                 .map(|part| ty_rename_params(*part, identities))

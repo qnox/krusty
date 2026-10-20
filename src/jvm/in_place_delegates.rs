@@ -17,7 +17,7 @@ use crate::ir::{
     ClassId, ExprId, FnParamInfo, FunId, IrConst, IrExpr, IrFile, IrFunction,
     IrGeneratedParameterRole, IrLocalPropertyLayout, IrParameterIdentity, IrTypeOp,
 };
-use crate::types::{Ty, TypeName, Visibility};
+use crate::types::{Ty, TyKind, TypeName, Visibility};
 
 /// What evaluating a delegate in place keeps at its initialization site.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -318,9 +318,9 @@ fn extension_receiver_names_value_class(ir: &IrFile, receiver: Ty) -> bool {
     let mut current = receiver.non_null();
     let mut seen = HashSet::default();
     loop {
-        match current {
-            Ty::Obj(classifier, _) => return ir.is_value_class_name(classifier),
-            Ty::TyParam(name, bound) if seen.insert(name.to_owned()) => {
+        match current.kind() {
+            TyKind::Obj(classifier, _) => return ir.is_value_class_name(classifier),
+            TyKind::TyParam(name, bound) if seen.insert(name.to_owned()) => {
                 current = bound.non_null();
             }
             _ => return false,
@@ -397,8 +397,8 @@ fn approximate_type_parameters(
     parameters: &HashSet<String>,
     visiting: &mut HashSet<String>,
 ) -> Ty {
-    match ty {
-        Ty::TyParam(name, bound) if parameters.contains(name.as_str()) => {
+    match ty.kind() {
+        TyKind::TyParam(name, bound) if parameters.contains(name.as_str()) => {
             if !visiting.insert(name.to_owned().to_string()) {
                 // A repeated parameter is the recursive position of an F-bound. The generated
                 // method does not declare that parameter, so kotlinc exposes the position as `*`.
@@ -406,11 +406,11 @@ fn approximate_type_parameters(
             }
             // A bare type parameter carries nullability in its bound. Keep that wrapper so
             // `T : Int?` and `T : Value?` remain boxed delegate-method receivers.
-            let approximated = approximate_type_parameters(*bound, parameters, visiting);
+            let approximated = approximate_type_parameters(bound, parameters, visiting);
             visiting.remove(name.as_str());
             approximated
         }
-        Ty::Fun(signature) => Ty::fun_with_shape(
+        TyKind::Fun(signature) => Ty::fun_with_shape(
             signature
                 .params
                 .iter()
@@ -421,32 +421,32 @@ fn approximate_type_parameters(
             signature.has_receiver,
             signature.suspend,
         ),
-        Ty::Nullable(inner) => {
-            approximate_type_parameter_wrapper(*inner, parameters, visiting, Ty::nullable)
+        TyKind::Nullable(inner) => {
+            approximate_type_parameter_wrapper(inner, parameters, visiting, Ty::nullable)
         }
-        Ty::PlatformNullable(inner) => {
-            approximate_type_parameter_wrapper(*inner, parameters, visiting, Ty::platform_nullable)
+        TyKind::PlatformNullable(inner) => {
+            approximate_type_parameter_wrapper(inner, parameters, visiting, Ty::platform_nullable)
         }
-        Ty::InProjection(inner) => {
-            approximate_type_parameter_wrapper(*inner, parameters, visiting, Ty::in_projection)
+        TyKind::InProjection(inner) => {
+            approximate_type_parameter_wrapper(inner, parameters, visiting, Ty::in_projection)
         }
-        Ty::OutProjection(inner) => {
-            approximate_type_parameter_wrapper(*inner, parameters, visiting, Ty::out_projection)
+        TyKind::OutProjection(inner) => {
+            approximate_type_parameter_wrapper(inner, parameters, visiting, Ty::out_projection)
         }
-        Ty::StarProjection(inner) => {
-            approximate_type_parameter_wrapper(*inner, parameters, visiting, Ty::star_projection)
+        TyKind::StarProjection(inner) => {
+            approximate_type_parameter_wrapper(inner, parameters, visiting, Ty::star_projection)
         }
-        Ty::DefinitelyNotNull(inner) => {
-            approximate_type_parameter_wrapper(*inner, parameters, visiting, Ty::non_null)
+        TyKind::DefinitelyNotNull(inner) => {
+            approximate_type_parameter_wrapper(inner, parameters, visiting, Ty::non_null)
         }
-        Ty::Obj(classifier, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+        TyKind::Obj(classifier, arguments) if !arguments.is_empty() => Ty::obj_args_name(
             classifier,
             &arguments
                 .iter()
                 .map(|argument| approximate_type_parameters(*argument, parameters, visiting))
                 .collect::<Vec<_>>(),
         ),
-        Ty::Intersection(parts) => Ty::intersection(
+        TyKind::Intersection(parts) => Ty::intersection(
             &parts
                 .iter()
                 .map(|part| approximate_type_parameters(*part, parameters, visiting))
@@ -463,7 +463,7 @@ fn approximate_type_parameter_wrapper(
     wrap: fn(Ty) -> Ty,
 ) -> Ty {
     let approximated = approximate_type_parameters(inner, parameters, visiting);
-    if matches!(approximated, Ty::StarProjection(_)) {
+    if approximated.is_star_projection() {
         // A star is already the complete replacement for this recursive type argument. Retaining
         // a nullable, projection, or definitely-not-null wrapper would produce an invalid `*?`,
         // `out *`, or `* & Any` signature instead of kotlinc's `*`.
