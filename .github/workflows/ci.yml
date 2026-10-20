@@ -183,6 +183,9 @@ jobs:
           # compile_cases past the ordinary 120 seconds.
           KRUSTY_COVERAGE_TEST_TIMEOUT_SECONDS: 600
           KRUSTY_BUILD_TOOLS_JAVA_HOME: ${{ env.JAVA_HOME_21_X64 }}
+          # rust-cache prunes target before archiving it. A Gradle Kotlin-DSL workspace restored
+          # from there can therefore lack metadata.bin, which Gradle 8 cannot regenerate.
+          KRUSTY_BUILD_TOOLS_GRADLE_USER_HOME: ${{ runner.temp }}/krusty-build-tools-gradle-user-home
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           # This job's archive only. The conformance job publishes a separate one.
           KRUSTY_RECORD_CLASS_DUMPS: ${{ steps.recorded-mode.outputs.record }}
