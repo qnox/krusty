@@ -279,15 +279,20 @@ fn emit_frontend_dependency(
     // declaration headers that shaped this module. They are analysis artifacts only: the full JVM
     // pipeline still lets javac produce the real classes, and no stub is returned from that path.
     if retain_java_headers && !java_blocks.is_empty() {
-        let emitted = outputs
-            .iter()
-            .filter_map(|(path, _)| path.strip_suffix(".class"))
-            .collect::<krusty::fx_hash::HashSet<_>>();
-        let Some(headers) = krusty::jvm::java_stub::stub_classes(
-            java_blocks,
-            krusty::jvm::java_stub::StubMode::Strict,
-            &|candidate| emitted.contains(candidate) || cp.class_exists(candidate),
-        ) else {
+        let emitted = krusty::jvm::java_stub::EmittedClassesHeaderWorld::new(
+            outputs
+                .iter()
+                .filter(|(path, _)| path.ends_with(".class"))
+                .map(|(_, bytes)| bytes.as_slice()),
+            cp,
+        );
+        let Some(headers) = emitted.and_then(|world| {
+            krusty::jvm::java_stub::stub_classes(
+                java_blocks,
+                krusty::jvm::java_stub::StubMode::Strict,
+                &world,
+            )
+        }) else {
             return Err(
                 "check: cannot retain Java source declaration headers for a dependent frontend module"
                     .to_string(),

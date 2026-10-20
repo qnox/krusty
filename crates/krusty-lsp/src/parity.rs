@@ -497,15 +497,10 @@ fn set_java_stub_overlay(classpath: &Classpath, java_sources: &[String]) -> bool
         .iter()
         .map(|source| (String::new(), source.clone()))
         .collect();
-    let resolve = |candidate: &str| {
-        classpath
-            .find_name(krusty::types::type_name(candidate))
-            .is_some()
-    };
     match krusty::jvm::java_stub::stub_classes(
         &java,
         krusty::jvm::java_stub::StubMode::Lenient,
-        &resolve,
+        classpath,
     ) {
         Some(stubs) => {
             classpath.set_stub_overlay(stubs);

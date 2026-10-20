@@ -6366,6 +6366,35 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Plain line breaks only; an explicit `;` still terminates the expression. Test:
   `nested_string_template_e2e::template_interpolation_allows_newlines_around_expression`.
 
+- **A Java source class sees the member types it inherits.** A simple type name inside a Java class
+  body denotes a member type declared in the class, else one inherited from its supertypes (JLS
+  §8.5), before the enclosing class, imports, and package are consulted; two distinct inherited
+  member types of that name are ambiguous. A private member type is not inherited, and a
+  package-private one only into a class of its package; accessibility is decided at each
+  inheritance edge, so a member type an intermediate class in another package cannot inherit stays
+  hidden from that class's subclasses, even back in the declaring package. Likewise, inheriting it
+  inside its package cannot make it accessible to a later subclass outside that package. Membership
+  is structural: a member type is
+  the one its declaring classifier publishes under that simple name (a classfile's `InnerClasses`
+  entry, a Java source declaration's enclosing class, a Kotlin source classifier's nesting), never a
+  composed `Owner$Name` spelling, because a top-level Java class may itself be named `Base$Req`.
+  Java source headers resolve supertypes through Java sources and the classpath; a Kotlin source
+  classifier contributes the member types it declares (its own supertypes resolve after the headers
+  are built). A qualified suffix such as `Container.Secret` first selects a member of `Container`
+  using that class's own inheritance/package context, then checks access from the referencing
+  declaration. Private member types stay accessible inside their parsed source nest; protected
+  member types stay accessible from the same package or a lexically enclosing subclass of their
+  actual declaring class, including when qualified by that declaring class. Tests:
+  `jvm::java_stub::tests::qualified_inherited_containers_do_not_expose_inaccessible_member_types`,
+  `qualified_private_member_types_remain_accessible_within_the_source_nest`,
+  `qualified_protected_member_types_are_accessible_from_a_lexical_subclass`,
+  `a_qualified_container_must_inherit_the_member_before_access_is_checked`,
+  `a_member_type_of_the_superclass_shadows_an_import`,
+  `a_top_level_dollar_name_is_not_a_member_type`, `a_private_member_type_is_not_inherited`,
+  `a_package_private_member_type_is_inherited_only_within_its_package`,
+  `a_package_private_member_type_is_not_inherited_across_an_intermediate_package`,
+  `a_package_private_member_type_cannot_leave_its_package_through_a_subclass`, and siblings.
+
 - **Line breaks inside parentheses and brackets do not end an expression.** kotlinc's parser
   disables newlines inside `(…)` and `[…]` (call arguments, indices, collection literals,
   parenthesized expressions and conditions, a `when` subject) and re-enables them inside every `{…}`
