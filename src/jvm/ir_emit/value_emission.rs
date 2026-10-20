@@ -1616,6 +1616,18 @@ impl super::Emitter<'_> {
                         .set_emit_error(lambda_class::unrealized(self.ir, *impl_fn));
                     return code.aconst_null();
                 }
+                if lambda_mode == LambdaMode::Indy
+                    && crate::jvm::suspend::suspend_lambda::takes_value_class_carrier(
+                        self.ir, *impl_fn,
+                    )
+                {
+                    self.run.set_emit_error(format!(
+                        "internal error: suspend lambda {} takes a value-class carrier, which needs \
+                         its SuspendLambda class",
+                        self.ir.functions[*impl_fn as usize].name
+                    ));
+                    return code.aconst_null();
+                }
                 if lambda_mode == LambdaMode::Indy {
                     self.run.used_indy_lambdas.borrow_mut().insert(*impl_fn);
                 }

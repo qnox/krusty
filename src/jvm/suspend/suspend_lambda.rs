@@ -266,6 +266,33 @@ pub(super) fn route(
     Routed::Taken
 }
 
+/// Whether the suspend lambda `fid` takes one of its own parameters as a value class's carrier. The
+/// value-class pass lowers a suspend lambda's body for the class kotlinc writes, whose erased
+/// `FunctionN.invoke` unboxes the box it receives; an `invokedynamic` over the lifted function would
+/// hand it the box instead, so the emitter must not build one.
+pub(crate) fn takes_value_class_carrier(ir: &IrFile, fid: u32) -> bool {
+    if !ir.suspend_funs.contains(&fid) {
+        return false;
+    }
+    let Some(&own_from) = ir.lambda_own_params_from.get(&fid) else {
+        return false;
+    };
+    let Some((_, declared, _)) = ir.vc_declared_sigs.get(&fid) else {
+        return false;
+    };
+    let physical = &ir.functions[fid as usize].params;
+    declared
+        .iter()
+        .zip(physical)
+        .skip(own_from as usize)
+        .any(|(declared, physical)| {
+            declared.non_null().obj_internal().is_some_and(|class| {
+                crate::jvm::value_classes::is_boxed_value_class(ir, class)
+                    && physical.non_null().kotlin_class_internal() != Some(class)
+            })
+        })
+}
+
 /// `fids` with every lambda before the function whose body declares it, and otherwise in their
 /// order. An enclosing body is reshaped when its own machine is built, which can copy the lambda
 /// node that builds a nested lambda's value; realizing the nested lambda's class first leaves one
