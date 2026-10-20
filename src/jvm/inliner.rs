@@ -57,7 +57,7 @@ pub(crate) use callee_shape::{
     UnsupportedShape,
 };
 pub(crate) use class_roles::ClassRoles;
-pub(crate) use default_lambda::load as load_default_lambda;
+pub(in crate::jvm) use default_lambda::load as load_default_lambda;
 pub(crate) use default_masks::{
     expand as expand_default_masks, DefaultMasks, ExtractedDefaultLambda,
 };

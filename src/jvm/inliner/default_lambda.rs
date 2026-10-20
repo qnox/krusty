@@ -16,7 +16,7 @@
 
 use crate::jvm::bytecode_passes::descriptors;
 use crate::jvm::class_node::ClassNode;
-use crate::jvm::method_node::{Insn, LabelId, LocalVariable, MethodNode, Node};
+use crate::jvm::method_node::{Category, Insn, LabelId, LocalVariable, MethodNode, Node};
 use crate::jvm::reified_arguments::ReifiedArguments;
 
 use super::default_masks::DEFAULT_LAMBDA_FAKE_CALL;
@@ -54,7 +54,7 @@ const UNSUPPORTED_SUPER_CLASSES: [&str; 13] = [
 
 /// The lambda `extracted` names, read from its class: the body every `invoke` of the parameter
 /// is replaced with. `function` is the inline function's name, without `$default`.
-pub(crate) fn load(
+pub(in crate::jvm) fn load(
     class: &ClassNode,
     extracted: &ExtractedDefaultLambda,
     function: &str,
@@ -218,35 +218,58 @@ fn captured_fields(
         .code
         .as_ref()
         .ok_or_else(|| malformed("a default lambda's constructor has no code"))?;
+    parameter_assignments(&class.name, code)
+}
+
+/// The fields of `owner` that the constructor `code` assigns from its parameters. Each parameter
+/// must be loaded from its own slot, by the load its type takes, and stored into one field, in
+/// declaration order; any other shape is refused rather than bound to the wrong field.
+fn parameter_assignments(
+    owner: &str,
+    code: &MethodNode,
+) -> Result<Vec<CapturedField>, InlineError> {
     let instructions: Vec<&Insn> = code.instructions().collect();
-    let fields: Vec<CapturedField> = instructions
+    let assignments: Vec<(u8, u16, CapturedField)> = instructions
         .windows(3)
         .filter_map(|window| match window {
             [Insn::Var { op: ALOAD, slot: 0 }, Insn::Var {
-                op: ILOAD..=ALOAD, ..
+                op: load @ ILOAD..=ALOAD,
+                slot,
             }, Insn::Field {
                 op: PUTFIELD,
-                owner,
+                owner: field_owner,
                 name,
                 desc,
-            }] if *owner == class.name => Some(CapturedField {
-                name: name.clone(),
-                desc: desc.clone(),
-            }),
+            }] if field_owner == owner => Some((
+                *load,
+                *slot,
+                CapturedField {
+                    name: name.clone(),
+                    desc: desc.clone(),
+                },
+            )),
             _ => None,
         })
         .collect();
-    let parameters = descriptors::argument_types(constructor)
+    let parameters = descriptors::argument_types(&code.desc)
         .ok_or_else(|| malformed("a default lambda's constructor descriptor cannot be parsed"))?;
-    if parameters.len() != fields.len()
-        || parameters
-            .iter()
-            .zip(&fields)
-            .any(|(parameter, field)| *parameter != field.desc)
-    {
-        return Err(unsupported(
-            "a default lambda whose constructor does not assign its parameters in order",
-        ));
+    let refused = || {
+        unsupported("a default lambda whose constructor does not assign its parameters in order")
+    };
+    if parameters.len() != assignments.len() {
+        return Err(refused());
+    }
+    let mut expected_slot = 1;
+    let mut fields = Vec::with_capacity(assignments.len());
+    for (parameter, (load, slot, field)) in parameters.iter().zip(assignments) {
+        if field.desc != *parameter
+            || slot != expected_slot
+            || load != Category::of_descriptor(parameter).load_op()
+        {
+            return Err(refused());
+        }
+        expected_slot += descriptors::size(parameter) as u16;
+        fields.push(field);
     }
     Ok(fields)
 }
@@ -529,4 +552,88 @@ fn unsupported(reason: &'static str) -> InlineError {
 
 fn malformed(detail: &str) -> InlineError {
     InlineError::Analysis(detail.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LLOAD: u8 = 0x16;
+    const RETURN: u8 = 0xb1;
+    const OWNER: &str = "Client$f$1";
+
+    /// A constructor `(desc)V` whose body is `loads` assigned in turn to fields `a`, `b`, ….
+    fn constructor(desc: &str, loads: &[(u8, u16, &str)]) -> MethodNode {
+        let mut node = MethodNode::new(0, "<init>", desc);
+        for (index, (op, slot, field_desc)) in loads.iter().enumerate() {
+            node.nodes
+                .push(Node::Insn(Insn::Var { op: ALOAD, slot: 0 }));
+            node.nodes.push(Node::Insn(Insn::Var {
+                op: *op,
+                slot: *slot,
+            }));
+            node.nodes.push(Node::Insn(Insn::Field {
+                op: PUTFIELD,
+                owner: OWNER.into(),
+                name: ((b'a' + index as u8) as char).to_string(),
+                desc: (*field_desc).into(),
+            }));
+        }
+        node.nodes.push(Node::Insn(Insn::Op(RETURN)));
+        node
+    }
+
+    fn names(fields: &[CapturedField]) -> Vec<&str> {
+        fields.iter().map(|field| field.name.as_str()).collect()
+    }
+
+    #[test]
+    fn a_constructor_assigning_its_parameters_in_order_captures_them() {
+        let code = constructor(
+            "(JLjava/lang/String;I)V",
+            &[
+                (LLOAD, 1, "J"),
+                (ALOAD, 3, "Ljava/lang/String;"),
+                (ILOAD, 4, "I"),
+            ],
+        );
+        let fields = parameter_assignments(OWNER, &code).expect("in-order assignments");
+        assert_eq!(names(&fields), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_constructor_assigning_same_typed_parameters_out_of_order_is_refused() {
+        let code = constructor("(II)V", &[(ILOAD, 2, "I"), (ILOAD, 1, "I")]);
+        assert!(matches!(
+            parameter_assignments(OWNER, &code),
+            Err(InlineError::DefaultLambda(_))
+        ));
+    }
+
+    #[test]
+    fn a_constructor_assigning_one_parameter_twice_is_refused() {
+        let code = constructor(
+            "(Ljava/lang/String;Ljava/lang/String;)V",
+            &[
+                (ALOAD, 1, "Ljava/lang/String;"),
+                (ALOAD, 1, "Ljava/lang/String;"),
+            ],
+        );
+        assert!(matches!(
+            parameter_assignments(OWNER, &code),
+            Err(InlineError::DefaultLambda(_))
+        ));
+    }
+
+    #[test]
+    fn a_two_word_parameter_moves_the_next_parameter_two_slots() {
+        let code = constructor("(DI)V", &[(0x18, 1, "D"), (ILOAD, 2, "I")]);
+        assert!(matches!(
+            parameter_assignments(OWNER, &code),
+            Err(InlineError::DefaultLambda(_))
+        ));
+        let code = constructor("(DI)V", &[(0x18, 1, "D"), (ILOAD, 3, "I")]);
+        let fields = parameter_assignments(OWNER, &code).expect("double then int");
+        assert_eq!(names(&fields), ["a", "b"]);
+    }
 }
