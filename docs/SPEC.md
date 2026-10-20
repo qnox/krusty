@@ -4353,6 +4353,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   node, which the condition shares as its operand; checked FIR applies the view as a conversion
   of the subject's single value.
   `tests/nullable_when_subject_membership_e2e.rs`.
+- **A `when` subject equality compares the subject as read.** kotlinc builds `$subj$ == c` as
+  fir2ir converts any `==` operand: when the smart-cast subject and the candidate have one
+  primitive comparison type (`Int` and `Int` after a `null` or `in` arm, `Int` and `Int` after a
+  failed `!is Int`), the smart cast is erased and the subject is compared as it was stored. A
+  boxed `Int?`/`Long?`/`Char?` subject and a primitive candidate are then kotlinc's
+  `PrimitiveToObjectComparison`: the candidate, constant or not, is stored to a temporary before
+  the subject is null-tested and unboxed, and an earlier `null` arm makes that null test
+  redundant. An `Any` subject meets the boxed candidate in `Intrinsics.areEqual`. The resolver's
+  numeric plan unboxes and converts the subject only where fir2ir keeps the cast: a `Byte`/`Short`
+  comparison at `Int`, a nullable candidate, and a `Float`/`Double` narrowed from a non-nullable
+  type. A floating comparison with a nullable operand is fir2ir's `ieee754equals`, the typed
+  `Intrinsics.areEqual(Ljava/lang/Double;D)Z`, whether or not an arm narrowed the subject.
+  Checked FIR records the equality mode from the adapted semantic operand types. Inline
+  substitution preserves that mode: a generic `when (a) { b -> ... }` instantiated at `Double`
+  keeps structural equality (`NaN` equals itself and signed zeroes differ), while a direct
+  `Double` comparison uses IEEE equality. Generated primitive comparisons retain their separate
+  IR contract. `tests/when_narrowed_equality_order_e2e.rs`,
+  `tests/ieee754_inline_equality_e2e.rs`.
 - **`x ?: return` smart-casts `x` for the code that follows** (also `?: throw`/`break`/`continue`/a
   `Nothing`-typed call): completing an elvis whose right-hand side is `Nothing` proves a stable
   `val`/parameter non-null, exactly like an `if (x == null) return` guard. A nullable-primitive local

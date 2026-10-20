@@ -11,7 +11,7 @@ use crate::fir::{
     FirExprId, FirWhenBranch, FirWhenCondition, FirWhenSubjectNumericEquality, LocalValueId,
     ResolvedTy,
 };
-use crate::ir::{ExprId, IrBinOp, IrExpr, IrTypeOp};
+use crate::ir::{Callee, ExprId, IrBinOp, IrExpr, IrIntrinsic, IrTypeOp};
 use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure, LoweringState};
@@ -70,7 +70,12 @@ impl BodyLowering<'_> {
             let mut condition = None;
             for candidate in branch.conditions.iter().copied() {
                 let candidate = match candidate {
-                    FirWhenCondition::SubjectEquals { candidate, numeric } => {
+                    FirWhenCondition::SubjectEquals {
+                        candidate,
+                        mode,
+                        numeric,
+                        nullable_ieee754,
+                    } => {
                         // fir2ir builds the subject comparison, and the subject read in it, at
                         // the condition's own offsets.
                         let line = self.body.expression_debug_lines(candidate).source;
@@ -82,11 +87,24 @@ impl BodyLowering<'_> {
                             self.when_subject_read(subject, subject_expression, subject_variable);
                         let (subject, candidate) =
                             self.when_subject_equality_operands(read, candidate, numeric);
-                        let comparison = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: IrBinOp::Eq,
-                            lhs: subject,
-                            rhs: candidate,
-                        });
+                        let comparison = match nullable_ieee754 {
+                            Some(operand) => self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::Intrinsic {
+                                    operation: IrIntrinsic::Ieee754Equals {
+                                        operand: operand.get(),
+                                    },
+                                    ret: Ty::Boolean,
+                                },
+                                dispatch_receiver: None,
+                                args: vec![subject, candidate],
+                            }),
+                            None => self.ir.add_expr(IrExpr::Equality {
+                                op: IrBinOp::Eq,
+                                mode,
+                                lhs: subject,
+                                rhs: candidate,
+                            }),
+                        };
                         if line != 0 {
                             self.ir.expr_source_lines.insert(subject, line);
                             self.ir.expr_source_lines.insert(comparison, line);

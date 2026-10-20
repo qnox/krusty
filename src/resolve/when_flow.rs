@@ -20,6 +20,9 @@ pub(crate) struct WhenSubjectPlans {
     /// The narrowed view of the subject an `is`/`in` condition reads, where earlier conditions
     /// narrowed it below its own type.
     condition_views: HashMap<ExprId, Ty>,
+    /// Subject-form equality conditions that are fir2ir's `ieee754equals` of the recorded
+    /// floating type with a nullable operand.
+    nullable_ieee754_equalities: HashMap<ExprId, Ty>,
 }
 
 /// Exact numeric adaptations selected for one subject-form equality condition after earlier
@@ -115,6 +118,16 @@ impl Checker<'_> {
     }
 
     /// The full semantic equality plan of a subject-form equality condition.
+    ///
+    /// kotlinc compares `$subj$ == candidate` as fir2ir converts any `==` operand
+    /// (`OperatorExpressionGenerator.convertToIrExpression`): when the smart-cast subject and the
+    /// candidate have one primitive numeric comparison type, the smart cast is erased and the
+    /// subject is compared as read, so a boxed `Int?` subject meets an `Int` candidate in kotlinc's
+    /// `PrimitiveToObjectComparison` (the candidate stored first, then the subject unboxed). A
+    /// `Float`/`Double` keeps its cast, as a nullable one when the subject was nullable, which is
+    /// again the subject as read. Otherwise the subject is unboxed and each operand converted to
+    /// the comparison type. A floating comparison type makes the equality fir2ir's
+    /// `ieee754equals`, whose nullable operands keep their boxes.
     fn record_when_subject_numeric_equality(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -123,27 +136,57 @@ impl Checker<'_> {
         declared_subject: Ty,
         candidate: Ty,
     ) {
-        let Some(subject_unbox) = self.when_subject_numeric_type(scope, subject) else {
-            return;
-        };
-        if subject_unbox.canonical_semantic() == declared_subject.canonical_semantic() {
-            return;
-        }
+        let declared_subject = declared_subject.canonical_semantic();
         let candidate = candidate.canonical_semantic();
-        if !candidate.is_numeric() {
+        // A nullable candidate keeps its own type; only a non-null one is converted.
+        let nullable_candidate = candidate.nullable_primitive();
+        let candidate_value = nullable_candidate.unwrap_or(candidate);
+        if !candidate_value.is_numeric() {
             return;
         }
-        let Some(comparison) = Ty::promote(subject_unbox, candidate) else {
+        let narrowed = self
+            .when_subject_numeric_type(scope, subject)
+            .filter(|narrowed| narrowed.canonical_semantic() != declared_subject);
+        let Some(subject_value) = narrowed.or_else(|| {
+            Some(
+                declared_subject
+                    .nullable_primitive()
+                    .unwrap_or(declared_subject),
+            )
+            .filter(|ty| ty.is_numeric())
+        }) else {
             return;
         };
-        self.when_subject_plans.numeric_equalities.insert(
-            condition_expression,
-            WhenSubjectNumericEquality {
-                subject_unbox,
-                subject_widening: (comparison != subject_unbox).then_some(comparison),
-                candidate_widening: (comparison != candidate).then_some(comparison),
-            },
-        );
+        let Some(comparison) = Ty::promote(subject_value, candidate_value) else {
+            return;
+        };
+        if nullable_candidate.is_some() && comparison != candidate_value {
+            return;
+        }
+        let floating = matches!(comparison, Ty::Float | Ty::Double);
+        let compares_subject_as_read = narrowed.is_none_or(|narrowed| {
+            candidate == narrowed
+                && comparison == narrowed
+                && (!floating || declared_subject == Ty::nullable(narrowed))
+        });
+        if let Some(subject_unbox) = narrowed.filter(|_| !compares_subject_as_read) {
+            self.when_subject_plans.numeric_equalities.insert(
+                condition_expression,
+                WhenSubjectNumericEquality {
+                    subject_unbox,
+                    subject_widening: (comparison != subject_unbox).then_some(comparison),
+                    candidate_widening: (nullable_candidate.is_none() && comparison != candidate)
+                        .then_some(comparison),
+                },
+            );
+        }
+        let boxed_subject =
+            compares_subject_as_read && declared_subject.nullable_primitive().is_some();
+        if floating && (boxed_subject || nullable_candidate.is_some()) {
+            self.when_subject_plans
+                .nullable_ieee754_equalities
+                .insert(condition_expression, comparison);
+        }
     }
 
     /// Flow facts established by one `when` condition. Predicate conditions already contain the
@@ -189,6 +232,15 @@ impl super::TypeInfo {
     ) -> Option<WhenSubjectNumericEquality> {
         self.when_subject_plans
             .numeric_equalities
+            .get(&condition)
+            .copied()
+    }
+
+    /// The floating type of a subject-form equality condition that is IEEE-754 equality with a
+    /// nullable operand.
+    pub(crate) fn when_subject_nullable_ieee754_equality(&self, condition: ExprId) -> Option<Ty> {
+        self.when_subject_plans
+            .nullable_ieee754_equalities
             .get(&condition)
             .copied()
     }
