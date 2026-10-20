@@ -51,13 +51,11 @@ pub fn mark_must_inline_lambdas(ir: &mut IrFile) -> Result<(), MissingInlinePara
                 args,
                 ..
             } => args.clone(),
-            IrExpr::Call { args, .. }
-                if ir.module_inline_calls.contains(&call)
-                    || ir.compiled_inline_call(call).is_some() =>
-            {
-                args.clone()
-            }
-            _ => continue,
+            IrExpr::Call { args, .. } if ir.module_inline_calls.contains(&call) => args.clone(),
+            _ => match ir.compiled_inline_operands(call) {
+                Some(operands) => operands.arguments,
+                None => continue,
+            },
         };
         for (parameter, a) in args.into_iter().enumerate() {
             let IrExpr::Lambda { impl_fn, .. } = &ir.exprs[a as usize] else {

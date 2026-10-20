@@ -76,15 +76,17 @@ pub(super) fn companion_field_read(
 /// The accessor through which code of `context` reads `read`'s field, as kotlinc's
 /// `SyntheticAccessorLowering` places it, or `None` when `context` may read the field itself.
 ///
-/// A private field is read directly only by its holder; every other class calls the holder's
-/// `access$get<Companion>$p()`. A protected field is read directly from the holder's package and
-/// from its subclasses. Any other class reads it through `access$get<Companion>$p$s<hash>()` on the
-/// class that grants the access: the innermost lexically enclosing class that subclasses the
-/// holder, else the innermost enclosing class's companion that does. A protected read with no such
-/// class has no Kotlin access path and is an error.
+/// A private field is read directly only by its holder, and not from a body other classes inline
+/// (`exports_private_access`); every other class calls the holder's `access$get<Companion>$p()`.
+/// A protected field is read directly from the holder's package and from its subclasses. Any
+/// other class reads it through `access$get<Companion>$p$s<hash>()` on the class that grants the
+/// access: the innermost lexically enclosing class that subclasses the holder, else the innermost
+/// enclosing class's companion that does. A protected read with no such class has no Kotlin access
+/// path and is an error.
 pub(super) fn companion_field_accessor(
     ir: &IrFile,
     context: StaticOwner,
+    exports_private_access: bool,
     read: &CompanionFieldRead,
 ) -> Result<Option<(TypeName, StaticAccessor)>, String> {
     let accessor = |owner: TypeName| {
@@ -98,7 +100,7 @@ pub(super) fn companion_field_accessor(
     };
     match read.visibility {
         crate::types::Visibility::Private => {
-            if context == StaticOwner::Class(read.holder) {
+            if context == StaticOwner::Class(read.holder) && !exports_private_access {
                 Ok(None)
             } else {
                 accessor(read.holder)

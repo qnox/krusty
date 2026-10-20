@@ -580,7 +580,7 @@ pub(crate) fn lower_value_classes(
         reference_returns::value_class_reference_supertypes(classifiers, &under);
 
     // Members of a value class: their bodies operate on the BOXED object (only signatures erase).
-    let vc_methods = value_members::value_class_members(ir);
+    let vc_methods = value_members::value_class_members(ir, &under);
     // Exprs reachable from a value-class member body reference the BOXED class (`other is X`, `this.field`
     // in the synthesized `equals`) and must NOT be erased — those methods run on the boxed object.
     let mut vc_body_exprs: HashSet<ExprId> = HashSet::default();
@@ -2442,8 +2442,8 @@ pub(crate) fn lower_value_classes(
                         }
                     }
                 }
-                if let Some(function) = function.filter(|_| !uses_default_stub) {
-                    ir.jvm_member_targets.insert(id, function);
+                if !uses_default_stub {
+                    ir.record_realized_member_target(id, function, module_target);
                 }
                 // The `-impl` of an override whose primitive result is boxed returns the wrapper.
                 let boxed_result = match (function, module_target) {

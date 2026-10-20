@@ -61,10 +61,22 @@ fn moved_receiver(ir: &IrFile, fid: u32) -> Option<Ty> {
     if !ir.jvm_value_class_receiver_impls.contains(&fid) {
         return None;
     }
-    let class = ir
-        .classes
-        .iter()
-        .find(|class| class.methods.contains(&fid))
-        .expect("a value-class static replacement is a member of its class");
-    Some(ir.class_type(class))
+    let owner = ir.functions[fid as usize]
+        .dispatch_receiver
+        .expect("a value-class static replacement keeps its class as its dispatch owner");
+    if let Some(class) = ir.classes.iter().find(|class| class.fq_name == owner) {
+        return Some(ir.class_type(class));
+    }
+    // Another file's member template names its class's type parameters among its classifiers.
+    let arguments: Vec<Ty> = ir
+        .foreign_template_classifiers()
+        .find(|(classifier, _)| *classifier == owner)
+        .map(|(_, parameters)| {
+            parameters
+                .iter()
+                .map(crate::ir::IrTypeParameter::ty)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Ty::obj_args_name(owner, &arguments))
 }
