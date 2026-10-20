@@ -13,6 +13,10 @@ pub(super) struct Compilation<'a> {
     pub module_name: &'a str,
     /// `jvm.storeParameterNames`.
     pub java_parameters: bool,
+    /// The main fragment's source files in the order the toolchain walks its source directories,
+    /// when it compiles more than one: the toolchain then describes the fragment to the compiler
+    /// (`-Xmulti-platform`, `-Xfragments`, `-Xfragment-sources`).
+    pub fragment_sources: Option<&'a [PathBuf]>,
     /// Compiler plugin jars, in order.
     pub plugins: &'a [PathBuf],
     /// `kotlin.version`: the Kotlin release krusty compiles as.
@@ -21,6 +25,9 @@ pub(super) struct Compilation<'a> {
     /// The source files, sorted.
     pub sources: &'a [PathBuf],
 }
+
+/// The name of a module's main fragment.
+const MAIN_FRAGMENT: &str = "main";
 
 fn joined(prefix: &str, path: &Path) -> OsString {
     let mut argument = OsString::from(prefix);
@@ -51,6 +58,16 @@ pub(super) fn arguments(compilation: &Compilation<'_>) -> Result<Vec<OsString>, 
     )));
     if compilation.java_parameters {
         arguments.push(OsString::from("-java-parameters"));
+    }
+    if let Some(sources) = compilation.fragment_sources {
+        arguments.push(OsString::from("-Xmulti-platform"));
+        arguments.push(OsString::from(format!("-Xfragments={MAIN_FRAGMENT}")));
+        for source in sources {
+            arguments.push(joined(
+                &format!("-Xfragment-sources={MAIN_FRAGMENT}:"),
+                source,
+            ));
+        }
     }
     for plugin in compilation.plugins {
         arguments.push(joined("-Xplugin=", plugin));
@@ -85,6 +102,7 @@ mod tests {
             classpath: &classpath,
             module_name: "app",
             java_parameters: true,
+            fragment_sources: None,
             plugins: &plugins,
             kotlin_version: "2.4.20",
             output: Path::new("/out/app"),
@@ -116,6 +134,45 @@ mod tests {
         assert_eq!(
             arguments(&bare).unwrap()[..2],
             ["-jdk-home=/jdk", "-classpath=/out/lib:/m2/a.jar"].map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn a_fragment_of_several_source_directories_is_described_before_the_plugins() {
+        let plugins = [PathBuf::from("/m2/plugin.jar")];
+        let walked = [PathBuf::from("/p/src/b.kt"), PathBuf::from("/p/gen/a.kt")];
+        let compilation = Compilation {
+            release: None,
+            jdk_home: Path::new("/jdk"),
+            classpath: &[],
+            module_name: "app",
+            java_parameters: true,
+            fragment_sources: Some(&walked),
+            plugins: &plugins,
+            kotlin_version: "2.4.20",
+            output: Path::new("/out/app"),
+            sources: &[PathBuf::from("/p/gen/a.kt"), PathBuf::from("/p/src/b.kt")],
+        };
+        assert_eq!(
+            arguments(&compilation).unwrap(),
+            [
+                "-jdk-home=/jdk",
+                "-classpath=",
+                "-no-stdlib",
+                "-module-name=app",
+                "-java-parameters",
+                "-Xmulti-platform",
+                "-Xfragments=main",
+                "-Xfragment-sources=main:/p/src/b.kt",
+                "-Xfragment-sources=main:/p/gen/a.kt",
+                "-Xplugin=/m2/plugin.jar",
+                "-Xkotlin-reference-version=2.4.20",
+                "-d",
+                "/out/app",
+                "/p/gen/a.kt",
+                "/p/src/b.kt",
+            ]
+            .map(OsString::from)
         );
     }
 }

@@ -45,7 +45,7 @@ class Lib
 error	lib/module.yaml:11:9: ERROR: module `lib` runs KSP processors (`settings.kotlin.ksp.processors`), and krusty-toolchain does not run KSP
 error	lib/module.yaml:8:7: ERROR: module `lib` sets `settings.kotlin.optIns`, and krusty-toolchain does not implement compiling with it
 error	lib/module.yaml:6:26: ERROR: module `lib` sets `settings.kotlin.allWarningsAsErrors`, and krusty-toolchain does not implement compiling with it
-error	app/module.yaml:7:3: ERROR: module `app` enables toolchain plugins (`plugins`), and krusty-toolchain does not run toolchain plugins
+error	app/module.yaml:7:3: ERROR: module `app` enables toolchain plugin `my-plugin`, which the project does not list in its `plugins`
 error	app/module.yaml:10:22: ERROR: module `app` sets `settings.kotlin.languageVersion`, and krusty-toolchain does not implement compiling with it
 error	app/module.yaml:12:7: ERROR: module `app` sets `settings.kotlin.freeCompilerArgs`, and krusty-toolchain does not implement compiling with it
 error	app/module.yaml:13:18: ERROR: module `app` sets `settings.kotlin.explicitApi`, and krusty-toolchain does not implement compiling with it
