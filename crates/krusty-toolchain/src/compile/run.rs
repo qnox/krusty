@@ -148,27 +148,33 @@ fn run_step(step: &Step, krusty: &Path, printed: &mut Printed) -> Result<(), Run
     copy_resources(step)
 }
 
-/// Make the module's resources output exactly its resources directory's contents.
+/// Make the module's resources output exactly its resource directories' contents, a file of a
+/// later directory replacing the same file of an earlier one.
 fn copy_resources(step: &Step) -> Result<(), RunFailure> {
-    match &step.resources {
-        Some(resources) => clear(&step.resources_output)
-            .and_then(|()| copy_tree(resources, &step.resources_output))
-            .map_err(|error| {
-                RunFailure::Io(format!(
-                    "cannot copy the resources of module `{}` from {} to {}: {error}",
-                    step.module,
-                    resources.display(),
-                    step.resources_output.display()
-                ))
-            }),
-        None => remove(&step.resources_output).map_err(|error| {
-            RunFailure::Io(format!(
-                "cannot remove {} for module `{}`: {error}",
-                step.resources_output.display(),
-                step.module
-            ))
-        }),
+    let output = |action: &str, directory: &Path, error: io::Error| {
+        RunFailure::Io(format!(
+            "cannot {action} {} for module `{}`: {error}",
+            directory.display(),
+            step.module
+        ))
+    };
+    if step.resources.is_empty() {
+        return remove(&step.resources_output)
+            .map_err(|error| output("remove", &step.resources_output, error));
     }
+    clear(&step.resources_output)
+        .map_err(|error| output("clear", &step.resources_output, error))?;
+    for resources in &step.resources {
+        copy_tree(resources, &step.resources_output).map_err(|error| {
+            RunFailure::Io(format!(
+                "cannot copy the resources of module `{}` from {} to {}: {error}",
+                step.module,
+                resources.display(),
+                step.resources_output.display()
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 /// Make `directory` an empty directory.
@@ -190,7 +196,8 @@ fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
         let entry = entry?;
         let target = to.join(entry.file_name());
         if entry.file_type()?.is_dir() {
-            std::fs::create_dir(&target)?;
+            // An earlier resource directory may have the same directory.
+            std::fs::create_dir_all(&target)?;
             copy_tree(&entry.path(), &target)?;
         } else {
             std::fs::copy(entry.path(), &target)?;
