@@ -128,9 +128,20 @@ impl DefaultCallOperands {
         );
     }
 
-    /// The declaration a default bridge call stands for.
-    pub(super) fn declaration(&self, call: ExprId) -> Option<&DefaultedDeclaration> {
-        self.declarations.get(&call)
+    /// The declaration a call with a recorded default plan fills, `None` for any other call. A
+    /// plan recorded without its declaration is a broken realization: its bridge's spelling is
+    /// no stand-in for the declaration.
+    pub(super) fn defaulted_declaration(
+        &self,
+        call: ExprId,
+    ) -> Result<Option<&DefaultedDeclaration>, &'static str> {
+        match self.declarations.get(&call) {
+            Some(declaration) => Ok(Some(declaration)),
+            None if self.entries.contains_key(&call) => {
+                Err("a default call's declaration is not recorded")
+            }
+            None => Ok(None),
+        }
     }
 
     pub(super) fn contains(&self, call: ExprId) -> bool {
@@ -307,6 +318,33 @@ mod tests {
         );
         assert!(plans.is_continuation(8, 2));
         assert!(!plans.replace_operands(8, &[30]));
+    }
+
+    /// A default call names the declaration recorded beside its plan, which need not be its
+    /// bridge's name without `$default`; a plan without one is refused, never read from the bridge.
+    #[test]
+    fn a_default_call_reads_its_recorded_declaration() {
+        let declaration = DefaultedDeclaration {
+            owner: crate::types::type_name("lib/LibKt"),
+            name: "renamed".to_owned(),
+            descriptor: "(Ljava/lang/String;)Ljava/lang/String;".to_owned(),
+        };
+        let mut plans = DefaultCallOperands::default();
+        let plan = vec![
+            DefaultCallOperand::synthesized_default(10, 0),
+            DefaultCallOperand::synthesized_abi(11),
+            DefaultCallOperand::synthesized_abi(12),
+        ];
+        plans.record(1, plan.clone());
+        plans.record_declaration(1, declaration.clone());
+        plans.record(2, plan);
+
+        assert_eq!(plans.defaulted_declaration(1), Ok(Some(&declaration)));
+        assert_eq!(
+            plans.defaulted_declaration(2),
+            Err("a default call's declaration is not recorded")
+        );
+        assert_eq!(plans.defaulted_declaration(3), Ok(None));
     }
 
     #[test]
