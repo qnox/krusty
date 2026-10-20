@@ -2188,8 +2188,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   owner also sets the public-ABI bit (`xi` 944, or 816 when the `inline` function is private).
   A same-file call still inlines. When that caller keeps a copy of the default lambda
   (an `inline` `use` around the call that omits it), both copies build the one class.
-  Test: `tests/inline_default_stub_e2e.rs`. A call with holes
-  passes the computed mask + null marker. Byte-identical to kotlinc
+  Test: `tests/inline_default_stub_e2e.rs`. Every stub, member, top-level, abstract or suspend,
+  keeps those lines: it opens on the signature line, each mask test is on the signature line, each
+  default expression runs on its own lines, and the call after the defaults returns to the
+  signature line. A `$DefaultImpls` forward of an interface stub calls on the declaration's line and
+  returns on its end line, which for an abstract member is the last line of its declaration (the
+  `): String` of a multi-line parameter list). Test: `tests/default_stub_lines_e2e.rs`. A call with
+  holes passes the computed mask + null marker. Byte-identical to kotlinc
   for data-class `copy` and instance methods. **Mask bits are LOGICAL**: kotlinc numbers them over
   the DECLARED value parameters, so an EXTENSION's receiver — physically the leading parameter of
   the static realization — does not shift them (`fun Host.tag(name, port = 9)` → `port` is bit 2

@@ -669,6 +669,8 @@ mod default_constructor_header_pool_e2e;
 mod default_import_resolution_e2e;
 #[path = "default_lambda_inlining_e2e.rs"]
 mod default_lambda_inlining_e2e;
+#[path = "default_stub_lines_e2e.rs"]
+mod default_stub_lines_e2e;
 #[path = "default_stub_super_guard_e2e.rs"]
 mod default_stub_super_guard_e2e;
 #[path = "deferred_generic_local_e2e.rs"]
