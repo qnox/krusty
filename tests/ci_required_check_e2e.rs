@@ -425,6 +425,18 @@ fn gradle_matrix_caches_the_isolated_user_home_it_actually_consumes() {
 }
 
 #[test]
+fn coverage_build_tools_gradle_home_is_not_restored_with_target() {
+    let workflow = workflow();
+    let ci = job(&workflow, "ci");
+    assert!(
+        ci.contains(
+            "          KRUSTY_BUILD_TOOLS_GRADLE_USER_HOME: ${{ runner.temp }}/krusty-build-tools-gradle-user-home\n"
+        ),
+        "the Build Tools oracle's mutable Gradle state must stay outside rust-cache's target archive: {ci}"
+    );
+}
+
+#[test]
 fn harness_doc_names_the_aggregate_context_for_the_post_integration_ruleset_switch() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let doc = fs::read_to_string(root.join("docs/TEST_HARNESS.md")).expect("read TEST_HARNESS.md");

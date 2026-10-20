@@ -25,9 +25,11 @@
 //! installed there ([`RecordingKrusty`]), so the toolchain hands the recorder the arguments it would
 //! hand krusty. The implementation's sources are part of the oracle entry's identity; a live run
 //! builds it from them with its Gradle wrapper, in a scratch copy, run by the JDK
-//! `KRUSTY_BUILD_TOOLS_JAVA_HOME` names (else `JAVA_HOME`). The cached entry's stdout is the record,
-//! followed by a `==== outputs` line and the files the task left in the modules' artifact
-//! directories ([`artifact_outputs`]), its stderr what `kotlin` printed, its code `kotlin`'s exit status.
+//! `KRUSTY_BUILD_TOOLS_JAVA_HOME` names (else `JAVA_HOME`) and the Gradle user home
+//! `KRUSTY_BUILD_TOOLS_GRADLE_USER_HOME` names (else its workspace cache). The cached entry's stdout
+//! is the record, followed by a `==== outputs` line and the files the task left in the modules'
+//! artifact directories ([`artifact_outputs`]), its stderr what `kotlin` printed, its code
+//! `kotlin`'s exit status.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -230,8 +232,9 @@ fn implementation_sources() -> Vec<(String, Vec<u8>)> {
 
 /// The Build Tools API implementation jar, built once per process from its sources in a scratch
 /// copy. The Gradle wrapper runs with a user home of its own in the workspace's target cache
-/// (`krusty-build-tools-gradle`), never `~/.gradle`: the distribution it unpacks there ships
-/// kotlinx.serialization jars, which other tests of the workspace look for below `~/.gradle`.
+/// (`krusty-build-tools-gradle`), or `KRUSTY_BUILD_TOOLS_GRADLE_USER_HOME` when the caller must keep
+/// mutable Gradle state outside that cache. It never uses `~/.gradle`: the distribution it unpacks
+/// there ships kotlinx.serialization jars, which other tests of the workspace look for below it.
 fn implementation_jar() -> &'static Path {
     static JAR: OnceLock<PathBuf> = OnceLock::new();
     JAR.get_or_init(|| {
@@ -242,13 +245,15 @@ fn implementation_jar() -> &'static Path {
             std::fs::write(path, bytes).unwrap();
         }
         let mut command = Command::new("sh");
+        let gradle_user_home = std::env::var_os("KRUSTY_BUILD_TOOLS_GRADLE_USER_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                implementation_directory().join("../../target/cache/krusty-build-tools-gradle")
+            });
         command
             .args(["./gradlew", "-q", "jar"])
             .current_dir(&copy)
-            .env(
-                "GRADLE_USER_HOME",
-                implementation_directory().join("../../target/cache/krusty-build-tools-gradle"),
-            );
+            .env("GRADLE_USER_HOME", gradle_user_home);
         if let Some(java_home) = std::env::var_os("KRUSTY_BUILD_TOOLS_JAVA_HOME") {
             command.env("JAVA_HOME", java_home);
         }
