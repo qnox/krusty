@@ -9,7 +9,7 @@ use krusty_plugin_ir::{FileIr, FunctionIr, ModuleIr};
 
 use super::call_spans::CallSpans;
 use super::function::encode_function;
-use super::offsets::Utf16Offsets;
+use super::offsets::{kotlinc_text, Utf16Offsets};
 use super::types::package_name;
 use super::Refusal;
 
@@ -109,7 +109,7 @@ impl CheckedBodyObserver for ModuleIrEncoder<'_> {
                 ir: FileIr {
                     path: self.paths[source.id.raw() as usize].clone(),
                     package,
-                    text: source.text.to_string(),
+                    text: kotlinc_text(source.text),
                     functions: Vec::new(),
                 },
                 offsets: Utf16Offsets::new(source.text),
