@@ -111,10 +111,18 @@ impl PostponedCallConstraints {
         formals: &[String],
         function: &'static crate::types::FnSig,
     ) -> (&'static crate::types::FnSig, bool) {
-        match Self::enter_for_type(frames, compilation, file, call, formals, Ty::Fun(function)) {
-            (Ty::Fun(function), entered) => (function, entered),
-            _ => unreachable!("a function type remains a function type"),
-        }
+        let (entered_type, entered) = Self::enter_for_type(
+            frames,
+            compilation,
+            file,
+            call,
+            formals,
+            Ty::from(TyKind::Fun(function)),
+        );
+        let TyKind::Fun(function) = entered_type.kind() else {
+            unreachable!("a function type remains a function type")
+        };
+        (function, entered)
     }
 
     pub(super) fn enter_lambda(
@@ -957,7 +965,7 @@ mod tests {
         assert!(constraints.is_trivial_self_bound(&name, value, true));
         assert!(constraints.is_trivial_self_bound(
             &name,
-            Ty::DefinitelyNotNull(crate::types::intern_ty(value)),
+            Ty::from(TyKind::DefinitelyNotNull(value)),
             true
         ));
         assert!(constraints.is_trivial_self_bound(&name, value, false));

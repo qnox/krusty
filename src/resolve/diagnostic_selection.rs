@@ -18,10 +18,8 @@ pub(crate) fn unresolved_member_message(
         return crate::diagnostic_wording::unresolved_reference_on(name, None);
     }
     let rendered = match receiver.kind() {
-        TyKind::Error
-        | TyKind::Pending
-        | TyKind::TyParam(..)
-        | TyKind::Nullable(Ty::TyParam(..)) => None,
+        TyKind::Error | TyKind::Pending | TyKind::TyParam(..) => None,
+        TyKind::Nullable(inner) if inner.is_ty_param() => None,
         TyKind::Null => Some("Nothing?".to_string()),
         TyKind::PlatformNullable(inner) => Some(inner.source_name()),
         _ => Some(receiver.source_name()),

@@ -228,7 +228,7 @@ pub(super) fn functional_argument_expectation(
                     value_params: signature.params.get(skip..).unwrap_or_default().to_vec(),
                     receiver,
                     result: Some(signature.ret),
-                    callable_type: Some(Ty::Fun(signature)),
+                    callable_type: Some(Ty::from(TyKind::Fun(signature))),
                     sam_conversion: false,
                     inlined,
                     callee_formals,

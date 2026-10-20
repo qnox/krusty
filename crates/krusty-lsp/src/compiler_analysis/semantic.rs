@@ -13,7 +13,7 @@ use krusty::diag::{DiagSink, Span};
 use krusty::frontend::{
     lex_name_tokens, FrontendNameToken, FrontendNameTokenKind, FrontendSymbols, FrontendTypeInfo,
 };
-use krusty::types::{type_name, Ty, TypeName};
+use krusty::types::{type_name, Ty, TyKind, TypeName};
 
 use super::{
     checked_property_type, companion_class,
@@ -1656,11 +1656,11 @@ impl<'a> SemanticClassifier<'a> {
             {
                 modifiers = self.function_reference_modifiers(id, name)
                     & HighlightModifiers::DEFAULT_LIBRARY;
-            } else if let Some(Ty::Obj(owner, _)) = self
+            } else if let Some(TyKind::Obj(owner, _)) = self
                 .type_info
                 .and_then(|types| types.expr_types.get(lhs.0 as usize))
                 .copied()
-                .map(Ty::non_null)
+                .map(|ty| ty.non_null().kind())
             {
                 if self
                     .symbols
@@ -2330,7 +2330,7 @@ impl<'a> SemanticClassifier<'a> {
 
     fn type_definition_target_for_ty(&self, ty: Ty) -> Option<DefinitionTarget> {
         let ty = ty.non_null();
-        if matches!(ty, Ty::TyParam(_, _)) {
+        if ty.is_ty_param() {
             return None;
         }
         ty.kotlin_class_internal()
@@ -2718,7 +2718,7 @@ impl<'a> SemanticClassifier<'a> {
             .expr_types
             .get(receiver.0 as usize)?
             .non_null();
-        let Ty::Obj(owner, _) = ty else {
+        let TyKind::Obj(owner, _) = ty.kind() else {
             return None;
         };
         Some(owner.render())

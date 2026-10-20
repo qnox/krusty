@@ -89,7 +89,7 @@ pub(crate) fn semantic_call_role(
     }
     if declaration.owner == crate::types::wk::comparable()
         && declaration.name == "compareTo"
-        && matches!(declaration.params, [Ty::TyParam(..)])
+        && matches!(declaration.params, [parameter] if parameter.is_ty_param())
         && declaration.ret == Ty::Int
         && declaration.is_operator
         && !declaration.is_infix

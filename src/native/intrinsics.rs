@@ -456,12 +456,15 @@ pub(super) fn runtime_function(signature: FunctionSignature<'_>) -> Option<Strin
             signature.params,
             signature.ret.canonical_semantic(),
         ) {
-            ("readLine" | "readlnOrNull", [], Ty::Nullable(line))
-                if classifier_is(*line, "kotlin/String") =>
+            ("readLine" | "readlnOrNull", [], line)
+                if line.is_nullable() && classifier_is(line.non_null(), "kotlin/String") =>
             {
                 Some("kt_read_line".to_string())
             }
-            ("readln", [], line @ Ty::Obj(..)) if classifier_is(line, "kotlin/String") => {
+            ("readln", [], line)
+                if matches!(line.kind(), TyKind::Obj(..))
+                    && classifier_is(line, "kotlin/String") =>
+            {
                 Some("kt_read_line_or_throw".to_string())
             }
             _ => None,
@@ -601,8 +604,8 @@ pub(super) fn builder_scope(owner: DeclarationOwner, name: &str, params: &[Ty]) 
     // `buildSet` and `buildMap` have the same shape and are not answered, so they are not named
     // above rather than being separated here.
     match params {
-        [Ty::Fun(_)] => Some(builder),
-        [Ty::Int, Ty::Fun(_)] => Some(builder),
+        [block] if block.is_fun() => Some(builder),
+        [Ty::Int, block] if block.is_fun() => Some(builder),
         _ => None,
     }
 }
@@ -680,12 +683,15 @@ pub(super) fn precondition(
         // `require(Boolean)` and `require(Boolean) { … }`. The checked operand is declared
         // `Boolean`, so a call whose first parameter is anything else is another declaration.
         PreconditionShape::Holds => {
-            matches!(params, [Ty::Boolean] | [Ty::Boolean, Ty::Fun(_)])
+            matches!(params, [Ty::Boolean])
+                || matches!(params, [Ty::Boolean, block] if block.is_fun())
         }
         // `requireNotNull(T?)` — the operand is a type parameter, so nothing about it is worth
         // asserting here beyond its count; what matters is that the second parameter, when there
         // is one, is the block.
-        PreconditionShape::Present => matches!(params, [_] | [_, Ty::Fun(_)]),
+        PreconditionShape::Present => {
+            matches!(params, [_]) || matches!(params, [_, block] if block.is_fun())
+        }
         // `error(Any)`. Its message is NOT a block, which is what keeps it apart from the others.
         PreconditionShape::Always => {
             matches!(params, [param] if !param.is_fun())
@@ -796,7 +802,7 @@ pub(super) fn is_ranges_facade(owner: DeclarationOwner) -> bool {
 pub(super) fn is_comparable_compare_to(signature: FunctionSignature<'_>) -> bool {
     signature.owner.classifier_matches("kotlin/Comparable")
         && signature.name == "compareTo"
-        && matches!(signature.params, [Ty::TyParam(..)])
+        && matches!(signature.params, [parameter] if parameter.is_ty_param())
         && signature.ret == Ty::Int
 }
 

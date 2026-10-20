@@ -7,7 +7,7 @@
 use crate::types::TyKind;
 use std::cmp::Ordering;
 
-use super::{intern_tys, Ty, TypeName, TypeVariance};
+use super::{Ty, TypeName, TypeVariance};
 
 struct Piece {
     core: Ty,
@@ -57,7 +57,7 @@ pub(super) fn canonical(parts: &[Ty]) -> Ty {
         [one] if all_nullable => Ty::nullable(*one),
         [one] => *one,
         many => {
-            let intersection = Ty::Intersection(crate::types::TyList::new(intern_tys(many)));
+            let intersection = Ty::from(TyKind::Intersection(crate::types::TyList::new(many)));
             if all_nullable {
                 Ty::nullable(intersection)
             } else {
@@ -551,7 +551,9 @@ mod tests {
         match declaration_approximation(contravariant, &mut in_variance).map(Ty::kind) {
             Some(TyKind::Obj(name, arguments)) => {
                 assert!(name.matches("demo/Inn"));
-                assert!(matches!(arguments.as_slice(), [Ty::StarProjection(_)]));
+                assert!(
+                    matches!(arguments.as_slice(), [argument] if argument.is_star_projection())
+                );
             }
             other => panic!("expected a star argument, got {other:?}"),
         }
@@ -580,7 +582,7 @@ mod tests {
             Some(TyKind::Fun(signature)) => {
                 assert!(matches!(
                     signature.params.as_slice(),
-                    [Ty::StarProjection(_)]
+                    [parameter] if parameter.is_star_projection()
                 ));
                 assert_eq!(signature.ret, Ty::String);
             }

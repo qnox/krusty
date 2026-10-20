@@ -63,7 +63,7 @@ fn alias_target_star_bounds(
         TyKind::PlatformNullable(inner) => {
             Ty::platform_nullable(alias_target_star_bounds(inner, classifier))
         }
-        TyKind::DefinitelyNotNull(inner) => Ty::DefinitelyNotNull(crate::types::intern_ty(
+        TyKind::DefinitelyNotNull(inner) => Ty::from(TyKind::DefinitelyNotNull(
             alias_target_star_bounds(inner, classifier),
         )),
         TyKind::InProjection(inner) => {

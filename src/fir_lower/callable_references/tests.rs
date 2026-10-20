@@ -176,8 +176,8 @@ fn suspend_converted_function_value_becomes_bound_conversion_reference() {
         .expect("function-value conversion adapter") as u32;
     assert!(matches!(
         ir.functions[adapter as usize].params.as_slice(),
-        [Ty::Fun(source), Ty::Int]
-            if !source.suspend && source.params == [Ty::Int] && source.ret == Ty::String
+        [source, Ty::Int] if matches!(source.kind(), TyKind::Fun(source)
+            if !source.suspend && source.params == [Ty::Int] && source.ret == Ty::String)
     ));
     assert_eq!(ir.functions[adapter as usize].ret, Ty::String);
     assert!(ir.suspend_funs.contains(&adapter));
@@ -215,8 +215,8 @@ fn unit_converted_suspend_function_value_suspends_in_its_adapter() {
         .expect("function-value conversion adapter") as u32;
     assert!(matches!(
         ir.functions[adapter as usize].params.as_slice(),
-        [Ty::Fun(source), Ty::Int]
-            if source.suspend && source.params == [Ty::Int] && source.ret == Ty::String
+        [source, Ty::Int] if matches!(source.kind(), TyKind::Fun(source)
+            if source.suspend && source.params == [Ty::Int] && source.ret == Ty::String)
     ));
     assert_eq!(
         ir.functions[adapter as usize].ret,

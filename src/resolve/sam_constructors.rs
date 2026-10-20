@@ -28,10 +28,9 @@ pub(super) fn select_fixed_sam_constructor(
     result: Ty,
     actual: Ty,
 ) -> Option<SelectedSamConstructor> {
-    let callable = match actual.non_null() {
-        function @ Ty::Fun(_) => function,
-        nominal => crate::symbol_resolver::classifier_callable_signature(source, nominal)?,
-    };
+    // A function type is its own callable signature.
+    let callable =
+        crate::symbol_resolver::classifier_callable_signature(source, actual.non_null())?;
     let TyKind::Fun(actual_function) = callable.kind() else {
         return None;
     };
@@ -81,10 +80,9 @@ pub(super) fn select_sam_constructor(
     mut signature: SamSignature,
     actual: Ty,
 ) -> Option<SelectedSamConstructor> {
-    let callable = match actual.non_null() {
-        function @ Ty::Fun(_) => function,
-        nominal => crate::symbol_resolver::classifier_callable_signature(source, nominal)?,
-    };
+    // A function type is its own callable signature.
+    let callable =
+        crate::symbol_resolver::classifier_callable_signature(source, actual.non_null())?;
     let TyKind::Fun(actual_function) = callable.kind() else {
         return None;
     };

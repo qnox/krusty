@@ -1,19 +1,21 @@
 //! Lowering of checked references to dependency declarations.
 
 use super::*;
-use crate::types::type_name;
+use crate::types::{type_name, TyKind};
 
 #[test]
 fn external_unbound_reference_trusts_the_checked_receiver_widening() {
     let origin = OriginId::from_raw(0);
     let declaration = ExternalCallableId::from_raw(19);
-    let function_type = Ty::Fun(crate::types::intern_fnsig(crate::types::FnSig {
-        params: vec![Ty::String],
-        ret: Ty::Boolean,
-        context_count: 0,
-        has_receiver: false,
-        suspend: false,
-    }));
+    let function_type = Ty::from(TyKind::Fun(crate::types::intern_fnsig(
+        crate::types::FnSig {
+            params: vec![Ty::String],
+            ret: Ty::Boolean,
+            context_count: 0,
+            has_receiver: false,
+            suspend: false,
+        },
+    )));
     let mut body = FirBody::new(BodyOwnerId::from_raw(5));
     let reference = body.add_expr(FirExpr {
         origin,
@@ -83,13 +85,15 @@ fn external_singleton_references_keep_distinct_dispatches_for_one_declaration() 
     let declaration = ExternalCallableId::from_raw(23);
     let singleton = type_name("fixture/Numbers$Companion");
     let inherited_singleton = type_name("fixture/InheritedNumbers");
-    let function_type = Ty::Fun(crate::types::intern_fnsig(crate::types::FnSig {
-        params: vec![Ty::Int],
-        ret: Ty::Float,
-        context_count: 0,
-        has_receiver: false,
-        suspend: false,
-    }));
+    let function_type = Ty::from(TyKind::Fun(crate::types::intern_fnsig(
+        crate::types::FnSig {
+            params: vec![Ty::Int],
+            ret: Ty::Float,
+            context_count: 0,
+            has_receiver: false,
+            suspend: false,
+        },
+    )));
     let mut body = FirBody::new(BodyOwnerId::from_raw(7));
     let singleton_value = body.add_expr(FirExpr {
         origin,

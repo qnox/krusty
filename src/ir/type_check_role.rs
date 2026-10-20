@@ -141,7 +141,7 @@ mod tests {
     }
 
     fn test_of(ir: &mut IrFile, classifier: &str) -> Ty {
-        let target = Ty::Obj(type_name(classifier), crate::types::TyList::EMPTY);
+        let target = Ty::obj_name(type_name(classifier));
         let arg = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
         ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::InstanceOf,
@@ -200,10 +200,7 @@ mod tests {
     #[test]
     fn reified_type_arguments_carry_their_roles() {
         let mut ir = IrFile::default();
-        let editable = Ty::Obj(
-            type_name("test/roles/Editable"),
-            crate::types::TyList::EMPTY,
-        );
+        let editable = Ty::obj_name(type_name("test/roles/Editable"));
         ir.reified_call_subst
             .insert(0, vec![("T".to_string(), editable)]);
         ir.publish_classifier_roles(&PublishedRoles);
@@ -217,13 +214,13 @@ mod tests {
     fn a_function_type_takes_its_signature_arity() {
         let ir = IrFile::default();
         let function = |suspend| {
-            Ty::Fun(intern_fnsig(FnSig {
+            Ty::from(TyKind::Fun(intern_fnsig(FnSig {
                 params: vec![Ty::Int, Ty::String],
                 ret: Ty::Int,
                 context_count: 0,
                 has_receiver: true,
                 suspend,
-            }))
+            })))
         };
         assert_eq!(
             ir.type_check_role(function(false)),

@@ -129,14 +129,14 @@ pub(crate) fn complete_return_only_captured_receiver_bindings(
                 recursive_approximation.insert(receiver_formal.clone(), star);
             }
         }
-        let captured_upper = match bound.non_null() {
-            Ty::TyParam(receiver_formal, _) => receiver_bindings
+        let captured_upper = match bound.non_null().kind() {
+            TyKind::TyParam(receiver_formal, _) => receiver_bindings
                 .get(receiver_formal.as_str())
                 .copied()
                 .filter(|captured| captured.projection_inner().is_some())
                 .map(Ty::projection_read_ty),
-            projected @ (Ty::InProjection(_) | Ty::OutProjection(_) | Ty::StarProjection(_)) => {
-                Some(projected.projection_read_ty())
+            TyKind::InProjection(_) | TyKind::OutProjection(_) | TyKind::StarProjection(_) => {
+                Some(bound.non_null().projection_read_ty())
             }
             _ if !recursive_approximation.is_empty() => Some(*bound),
             _ => None,

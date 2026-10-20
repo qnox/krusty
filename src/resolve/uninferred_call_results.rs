@@ -363,10 +363,13 @@ mod tests {
         let [Some(arguments)] = records.as_slice() else {
             panic!("one selected local constructor record: {records:?}")
         };
-        let [Some(Ty::TyParam(name, bound))] = arguments.as_slice() else {
+        let [Some(argument)] = arguments.as_slice() else {
             panic!("the captured `T` must be recorded as the lexical parameter: {arguments:?}")
         };
-        assert_eq!(crate::types::type_parameter_source_name(name), "T");
-        assert_eq!(**bound, Ty::nullable(Ty::obj("kotlin/Any")));
+        let TyKind::TyParam(name, bound) = argument.kind() else {
+            panic!("the captured `T` must be recorded as the lexical parameter: {arguments:?}")
+        };
+        assert_eq!(crate::types::type_parameter_source_name(&name), "T");
+        assert_eq!(bound, Ty::nullable(Ty::obj("kotlin/Any")));
     }
 }
