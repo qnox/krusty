@@ -22,7 +22,74 @@ enum OperandUse<'s> {
     AsEmitted,
 }
 
+/// The operands of a sequence whose consumer does not materialize them at their exact slot, so
+/// they keep their smart casts (see [`Emitter::slot_operands`]).
+#[derive(Clone, Copy)]
+pub(super) enum KeptSmartCasts {
+    /// Every operand is materialized at its slot.
+    None,
+    /// A call's `leading` operands (a dispatch or extension receiver, whose slot is the class the
+    /// call names, not a type the receiver is materialized at) and its continuation (a
+    /// `Continuation` passed through as is).
+    CallReceivers { call: u32, leading: usize },
+}
+
 impl Emitter<'_> {
+    /// What a consumer that materializes `expression` at its own exact physical slot reads in its
+    /// place. A smart cast is kotlinc's `IMPLICIT_CAST`, which its JVM codegen emits as the
+    /// unnarrowed operand (`ExpressionCodegen.visitTypeOperator`); the consumer then materializes
+    /// that value at its slot (`PromisedValue.materializeAt`, `StackValue.coerce`), which writes
+    /// the only `checkcast`, none for an `Object` slot.
+    pub(super) fn slot_operand(&self, expression: u32) -> u32 {
+        self.consumed_implicit_cast_operand(expression)
+            .unwrap_or(expression)
+    }
+
+    /// [`Self::slot_operand`] for each operand of a sequence whose consumer materializes it at its
+    /// slot. This is the one step every such consumer applies to its operands before it sequences
+    /// them: call arguments (source, descriptor, virtual and `$default`), constructor arguments,
+    /// `FunctionN.invoke` and inlined function-value arguments, and comparison operands. `kept`
+    /// names the operands it does not materialize, which keep their casts.
+    pub(super) fn slot_operands(&self, ops: &[u32], kept: KeptSmartCasts) -> Vec<u32> {
+        ops.iter()
+            .enumerate()
+            .map(|(index, &operand)| {
+                let keeps = match kept {
+                    KeptSmartCasts::None => false,
+                    KeptSmartCasts::CallReceivers { call, leading } => {
+                        index.checked_sub(leading).is_none_or(|argument| {
+                            self.default_call_operands.is_continuation(call, argument)
+                        })
+                    }
+                };
+                if keeps {
+                    operand
+                } else {
+                    self.slot_operand(operand)
+                }
+            })
+            .collect()
+    }
+
+    /// Emit `expression` alone for a consumer that materializes it at the reference `slot`,
+    /// answering the type left on the stack. Only a deferred smart cast needs the consumer's own
+    /// cast here; any other value is emitted as it is.
+    pub(super) fn emit_operand_at_slot(
+        &mut self,
+        expression: u32,
+        slot: Ty,
+        code: &mut CodeBuilder,
+    ) -> Ty {
+        let operand = self.slot_operand(expression);
+        if operand == expression {
+            self.emit_value(expression, code);
+            return self.value_ty(expression);
+        }
+        let source = self.emit_consumed_operand(operand, code);
+        self.coerce_reference_on_stack(source, slot, code);
+        slot
+    }
+
     /// Push `ops` onto the stack in order. If a later op cannot carry the ones before it (see
     /// [`Self::spills_operand_prefix`]), evaluate all ops into temps first, then load them.
     pub(super) fn emit_operands(&mut self, ops: &[u32], code: &mut CodeBuilder) {
@@ -220,9 +287,11 @@ impl Emitter<'_> {
         ops: &[u32],
         code: &mut CodeBuilder,
     ) {
+        // Each side is compared as the `Object` it is.
+        let ops = self.slot_operands(ops, KeptSmartCasts::None);
         self.sequence_operands(
             None,
-            ops,
+            &ops,
             code,
             OperandUse::ReferenceComparison,
             Self::box_scalar_operand,

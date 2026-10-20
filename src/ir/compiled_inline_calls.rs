@@ -22,6 +22,15 @@ pub enum SameModuleInlining {
     CompiledBodies,
 }
 
+/// What a call inlined from a compiled body passes to that body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompiledInlineOperands {
+    /// The dispatch receiver of a member call, the body's `this`.
+    pub receiver: Option<ExprId>,
+    /// One value per declared parameter, in parameter order.
+    pub arguments: Vec<ExprId>,
+}
+
 #[derive(Default)]
 pub(super) struct CompiledInlineCalls {
     lowering: SameModuleInlining,
@@ -49,8 +58,12 @@ impl IrFile {
             self.compiled_inline_calls.lowering,
             SameModuleInlining::CompiledBodies
         );
-        let IrExpr::Call { args, .. } = self.expr(call) else {
-            panic!("expression {call} inlines function {function}'s compiled body but is no call");
+        let operands = match self.expr(call) {
+            IrExpr::Call { args, .. } => args.len(),
+            IrExpr::MethodCall { args, .. } => args.len(),
+            _ => panic!(
+                "expression {call} inlines function {function}'s compiled body but is no call"
+            ),
         };
         let modifiers = self
             .fn_params
@@ -61,7 +74,7 @@ impl IrFile {
         if !modifiers.is_empty() {
             assert_eq!(
                 modifiers.len(),
-                args.len(),
+                operands,
                 "a compiled inline call has one operand per parameter of function {function}"
             );
             let modifiers = modifiers.into();
@@ -73,6 +86,57 @@ impl IrFile {
     /// The function whose compiled body `call` inlines, when lowering kept it as a call for that.
     pub fn compiled_inline_call(&self, call: ExprId) -> Option<FunId> {
         self.compiled_inline_calls.calls.get(&call).copied()
+    }
+
+    /// Record the exact function `call`, a member call realized as a static of the member's class,
+    /// calls (`jvm_member_targets`): the declaration `function` this file holds, or else, for a
+    /// member of another file inlined from its compiled body, the template of the checked
+    /// `module_target` the call inlines.
+    pub(crate) fn record_realized_member_target(
+        &mut self,
+        call: ExprId,
+        function: Option<FunId>,
+        module_target: Option<crate::fir::CallableId>,
+    ) {
+        let realized = function.or_else(|| {
+            let template = self
+                .checked_callable_functions
+                .get(&module_target?)
+                .copied();
+            self.compiled_inline_call(call)
+                .filter(|&inlined| Some(inlined) == template)
+        });
+        if let Some(function) = realized {
+            self.jvm_member_targets.insert(call, function);
+        }
+    }
+
+    /// The operands a call inlined from a compiled body passes to that body: the dispatch receiver
+    /// a member call binds to the body's `this`, then one value per parameter. `None` when `call`
+    /// is not recorded as inlined from a compiled body.
+    pub fn compiled_inline_operands(&self, call: ExprId) -> Option<CompiledInlineOperands> {
+        self.compiled_inline_call(call)?;
+        match self.expr(call) {
+            IrExpr::Call {
+                dispatch_receiver,
+                args,
+                ..
+            } => Some(CompiledInlineOperands {
+                receiver: *dispatch_receiver,
+                arguments: args.clone(),
+            }),
+            IrExpr::MethodCall { receiver, args, .. } => Some(CompiledInlineOperands {
+                receiver: Some(*receiver),
+                arguments: args
+                    .iter()
+                    .map(|argument| {
+                        argument
+                            .expect("a call inlined from a compiled body supplies every argument")
+                    })
+                    .collect(),
+            }),
+            _ => None,
+        }
     }
 
     /// Every call of this file inlined from a compiled body, with the function it inlines.

@@ -1701,6 +1701,8 @@ mod value_class_object_carrier_generic_result_e2e;
 mod value_class_parameters_e2e;
 #[path = "value_class_private_member_access_e2e.rs"]
 mod value_class_private_member_access_e2e;
+#[path = "value_class_return_mangling_e2e.rs"]
+mod value_class_return_mangling_e2e;
 #[path = "value_class_secondary_constructor_default_e2e.rs"]
 mod value_class_secondary_constructor_default_e2e;
 #[path = "value_class_secondary_constructor_return_e2e.rs"]
@@ -2104,6 +2106,8 @@ mod renamed_builtin_property_null_check_e2e;
 mod sam_with_receiver_plugin_e2e;
 #[path = "shared_cell_initial_values_e2e.rs"]
 mod shared_cell_initial_values_e2e;
+#[path = "smart_cast_consumer_cast_e2e.rs"]
+mod smart_cast_consumer_cast_e2e;
 #[path = "source_when_nop_e2e.rs"]
 mod source_when_nop_e2e;
 #[path = "spill_order_e2e.rs"]
@@ -2435,6 +2439,8 @@ mod secondary_ctor_noprimary_e2e;
 mod secondary_ctor_this_sibling_e2e;
 #[path = "self_call_type_variables_e2e.rs"]
 mod self_call_type_variables_e2e;
+#[path = "serializable_noarg_constructor_order_e2e.rs"]
+mod serializable_noarg_constructor_order_e2e;
 #[path = "serializable_value_class_e2e.rs"]
 mod serializable_value_class_e2e;
 #[path = "serialization_class_serial_name_e2e.rs"]
@@ -2720,6 +2726,8 @@ mod unsigned_narrow_carrier_e2e;
 mod unsigned_property_getter_e2e;
 #[path = "unsigned_range_contains_e2e.rs"]
 mod unsigned_range_contains_e2e;
+#[path = "unsigned_range_inline_line_e2e.rs"]
+mod unsigned_range_inline_line_e2e;
 #[path = "unsigned_toplevel_e2e.rs"]
 mod unsigned_toplevel_e2e;
 #[path = "use_inline_finally_e2e.rs"]

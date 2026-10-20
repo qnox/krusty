@@ -2837,28 +2837,6 @@ fn emit_class(
         }
         .emit(secondary_ordinal as usize, sc);
     }
-    // The child-serializer cache's factories and its `…$cp` accessor follow that constructor, which
-    // is kotlinc's order for them. They are generated, so they carry no source order to sort by and
-    // the declared-member schedule leaves them out.
-    for &fid in c
-        .methods
-        .iter()
-        .filter(|fid| ir.serialization_cache_methods.contains(fid))
-    {
-        let f = &ir.functions[fid as usize];
-        if f.body.is_some() {
-            emit_method(
-                ir,
-                fid,
-                StaticOwner::Class(c.fq_name),
-                &fq_name,
-                facade,
-                &mut cw,
-                !f.is_static,
-                env,
-            );
-        }
-    }
     // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
     // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a full
     // mask — AFTER the declared methods (kotlinc's member order), at the primary's declared
@@ -2940,6 +2918,27 @@ fn emit_class(
                     }
                 }
             }
+        }
+    }
+    // The child-serializer cache's factories and `…$cp` accessor follow both constructors above
+    // (kotlinc's order). They are generated, so the declared-member schedule leaves them out.
+    for &fid in c
+        .methods
+        .iter()
+        .filter(|fid| ir.serialization_cache_methods.contains(fid))
+    {
+        let f = &ir.functions[fid as usize];
+        if f.body.is_some() {
+            emit_method(
+                ir,
+                fid,
+                StaticOwner::Class(c.fq_name),
+                &fq_name,
+                facade,
+                &mut cw,
+                !f.is_static,
+                env,
+            );
         }
     }
     jvm_static_members::emit_companion_bridges(ir, c, &mut cw, env);
@@ -4564,17 +4563,16 @@ fn emit_placed_method(
     // istore_<n>` into a synthetic `$i$f$<name>` int local covering the body — its inliner tracks
     // splice depth through these. Emitted after the parameter guards; the body's LineNumberTable
     // then naturally starts at the post-store pc.
-    let inline_marker: Option<(u16, u16)> = (ir.top_level_inline_functions.contains(&fid)
-        || (receiver_value && ir.inline_fns.contains(&fid)))
-    .then(|| {
-        let slot = e
-            .frame
-            .enter_temp(TempRole::InlineDepthMarker, Ty::Int)
-            .slot();
-        code.push_int(0, e.cw);
-        store(Ty::Int, slot, &mut code);
-        (slot, code.bytes.len() as u16)
-    });
+    let inline_marker: Option<(u16, u16)> =
+        function_debug::opens_with_inline_depth_marker(ir, fid, receiver_value).then(|| {
+            let slot = e
+                .frame
+                .enter_temp(TempRole::InlineDepthMarker, Ty::Int)
+                .slot();
+            code.push_int(0, e.cw);
+            store(Ty::Int, slot, &mut code);
+            (slot, code.bytes.len() as u16)
+        });
     // The marker and the parameter guards carry no line. The method's first entry is the first
     // statement, or the expression body — kotlinc does not also record the signature line there.
     // Building the machine: everything the discovery pass learned is in hand, so the entry,

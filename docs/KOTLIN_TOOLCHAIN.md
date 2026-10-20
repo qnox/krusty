@@ -149,7 +149,12 @@ each once. The JDK is the one `JAVA_HOME` names; it must be a JDK (it has `bin/j
 version `settings.jvm.jdk.version` asks for. Artifact files and the serialization plugin come from
 the local repositories only. A module without Kotlin sources is not compiled. For each module the
 task clears its output directory, runs `KRUSTY_BIN` with the arguments, and copies the resources
-directory (`src/main/resources` in the Maven-like layout, else `resources`) to `resources-output`.
+directory (`src/main/resources` in the Maven-like layout, else `resources`), then each resource
+directory its toolchain plugins add, to `resources-output`; a file of a later directory replaces
+the same file of an earlier one, as the toolchain's does. A module whose only resources a plugin
+adds still puts `resources-output` on its dependents' classpath. A resource directory that holds
+the module's `resources-output` (a plugin directory at the root of a root module, say) is refused,
+as copying it would copy the output into itself.
 A module is not compiled again when its inputs and its output are as its last successful
 compilation left them (`src/compile/avoidance.rs`), the check krusty's Build Tools API
 implementation makes for the toolchain: krusty fingerprints the inputs
@@ -173,7 +178,7 @@ Before compiling anything, krusty-toolchain refuses, at the setting and naming t
 module of the plan that:
 
 - enables a toolchain plugin it does not implement (see [Toolchain plugins](#toolchain-plugins)) or
-  runs KSP processors;
+  runs a KSP processor that is not a Maven artifact (see [KSP](#ksp));
 - sets a compiler setting it does not pass yet (`src/compile/refusals.rs`: the language and API
   versions, free compiler arguments, opt-ins, language features, warning options, explicit API
   mode, `debug`, compiler plugins and the settings the toolchain turns into compiler plugins);
@@ -185,22 +190,45 @@ module of the plan that:
 and refuses compile dependencies that form a cycle. It refuses an unset `KRUSTY_BIN` rather than
 searching `PATH`, and every task other than `compileJvm`.
 
+### KSP
+
+A module whose `settings.kotlin.ksp.processors` names Maven artifacts runs KSP before it compiles,
+as the toolchain's `kspJvm` task does (`src/compile/ksp.rs`): `<JDK>/bin/java @<argument file>`
+runs `com.google.devtools.ksp.cmdline.KSPJvmMain` with KSP's artifacts (`symbol-processing-api`,
+`symbol-processing-aa-embeddable` and `symbol-processing-common-deps` of `ksp.version`, resolved
+with their dependencies) on the class path, the module's existing source directories, its compile
+classpath as `-libraries`, `ksp.processorOptions` in the order written, and the processors'
+runtime classpath as the last argument, every argument as the toolchain passes it. KSP writes below
+`build/generated/<module>/main` and keeps its caches and temporary files below
+`build/tasks/_<module>_kspJvm`. The module then compiles with KSP's generated classes as the last
+classpath entry, and its resources output takes KSP's generated resources after its other resource
+directories, so a module running KSP always puts a resources output on its dependents' classpath.
+KSP does not run again while its inputs and its output are as its last successful run left them
+(`src/compile/avoidance.rs`): its arguments, the paths and contents of KSP's class path, the
+processors, the module's classpath and sources and the JDK's `release` file, and the files below
+`build/generated/<module>/main`, recorded in `build/krusty-toolchain/<module>jvm/ksp.state`. This is
+decided before the module's own check, whose fingerprint reads the classes KSP generated. A run that generates Kotlin or Java sources fails the module, since
+krusty-toolchain does not compile generated sources yet.
+
 ### Toolchain plugins
 
 A module enables a plugin by name in `plugins:` (`<name>: enabled` or `<name>: {enabled: true}`);
 the name is that of a local plugin module the project lists in its own `plugins:`
 (`src/compile/plugins.rs`). krusty-toolchain implements the plugins whose `plugin.yaml` only adds
-Kotlin source directories of the module to its main fragment:
+Kotlin source directories and resource directories of the module to its main fragment:
 
 ```yaml
 tasks:
   declare:
     action: !org.example.declareSources
       sourceDir: ${module.rootDir}/generated-src/kotlin
+      resourceDir: ${module.rootDir}/generated-resources
 generated:
   sources:
     - language: kotlin
       directory: ${tasks.declare.action.sourceDir}
+  resources:
+    - directory: ${tasks.declare.action.resourceDir}
 ```
 
 A directory is the argument of a task's action that is `${module.rootDir}` or a plain path below
@@ -212,9 +240,9 @@ not compile the plugin module before the modules that enable it, as the toolchai
 task. It refuses, where each is written: a plugin the project does not list, plugin settings
 beyond `enabled`, `plugins` written in more than one of a module's files, `pluginInfo` in the
 plugin's module file, and everything else a `plugin.yaml` may declare (`checks`, `commands`,
-`module`, `project`, `pluginSettings`, a task's `markOutputsAs` or `taskOutputDir`, generated
-resources and cinterop definitions, generated sources in another language or for another
-fragment, and directories written any other way).
+`module`, `project`, `pluginSettings`, a task's `markOutputsAs` or `taskOutputDir`, cinterop
+definitions, generated sources in another language or for another fragment, anything but a
+`directory` on generated resources, and directories written any other way).
 
 The library's public surface is the command boundary: `model` (read a project), `configuration`,
 `compile`, `dependencies`, `diagnostic` and `show`. Discovery, the file-system inventory, YAML,
@@ -287,10 +315,13 @@ section (each invocation's arguments, then `----`, each run's directory replaced
 with exit status 0 and no output, or to report exactly its `--- krusty-refusal` section and record
 nothing. The toolchain records the same arguments through krusty's Build Tools API implementation
 (`tools/krusty-build-tools`), built from its sources (by the JDK `KRUSTY_BUILD_TOOLS_JAVA_HOME`
-names, else `JAVA_HOME`) and installed into its shared cache, and must record each argv section
-(compared module by module, sources as a sorted list). The toolchain compiles a toolchain plugin's
-module and runs its tasks before the modules that enable it, so a case with a plugin names the
-plugin's module in a `--- toolchain-plugin-module` section: the recorder then also compiles that
+names, else `JAVA_HOME`, with the Gradle user home `KRUSTY_BUILD_TOOLS_GRADLE_USER_HOME` names,
+else a workspace cache) and installed into its shared cache, and must record each argv section
+(compared module by module, sources as a sorted list). CI places that mutable Gradle home outside
+Cargo's `target`, whose Rust cache prunes non-Cargo state before archiving it. The toolchain
+compiles a toolchain plugin's module and runs its tasks before the modules that enable it, so a
+case with a plugin names the plugin's module in a `--- toolchain-plugin-module` section: the
+recorder then also compiles that
 module, with the reference Kotlin compiler (the case's local repository lists the plugin API, whose
 stand-in jar is replaced by the one the distribution ships, and the standard library's by the
 reference compiler's), and the toolchain's invocation for it, which krusty-toolchain does not make,
