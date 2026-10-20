@@ -1497,14 +1497,9 @@ pub(super) fn check_and_dispatch_constructor_body(
             }
         }
         // The delegation's operands carry their source lines, as a secondary constructor's do.
-        let (expression_lines, statement_lines) = crate::fir::body::debug_lines::of_file(file);
-        checker.body.attach_debug_lines(
-            source,
-            file.source_line_count,
-            checker.origins,
-            &expression_lines,
-            &statement_lines,
-        );
+        checker
+            .body
+            .attach_debug_lines(source, file, checker.origins);
         ordinary_sink.accept(work.owner, checker.body);
         return Ok(());
     }
@@ -1601,14 +1596,9 @@ pub(super) fn check_and_dispatch_constructor_body(
         checker.body.push_root(statement);
     }
     // A secondary constructor's body statements carry their source lines, as a function body's do.
-    let (expression_lines, statement_lines) = crate::fir::body::debug_lines::of_file(file);
-    checker.body.attach_debug_lines(
-        source,
-        file.source_line_count,
-        checker.origins,
-        &expression_lines,
-        &statement_lines,
-    );
+    checker
+        .body
+        .attach_debug_lines(source, file, checker.origins);
     ordinary_sink.accept(work.owner, checker.body);
     Ok(())
 }
