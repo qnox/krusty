@@ -199,6 +199,18 @@ pub fn plan(
             .into_iter()
             .chain(generated.resources)
             .collect();
+        // Copying a directory that holds the resources output would copy the output into itself.
+        if let Some(holding) = resources
+            .iter()
+            .find(|directory| resources_output.starts_with(directory))
+        {
+            compiles = false;
+            diagnostics.push(Diagnostic::project_error(format!(
+                "the resource directory `{}` of module `{name}` holds its resources output `{}`, and krusty-toolchain does not copy a directory into itself",
+                holding.display(),
+                resources_output.display()
+            )));
+        }
         outputs.insert(
             name,
             [

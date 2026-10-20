@@ -152,7 +152,9 @@ task clears its output directory, runs `KRUSTY_BIN` with the arguments, and copi
 directory (`src/main/resources` in the Maven-like layout, else `resources`), then each resource
 directory its toolchain plugins add, to `resources-output`; a file of a later directory replaces
 the same file of an earlier one, as the toolchain's does. A module whose only resources a plugin
-adds still puts `resources-output` on its dependents' classpath.
+adds still puts `resources-output` on its dependents' classpath. A resource directory that holds
+the module's `resources-output` (a plugin directory at the root of a root module, say) is refused,
+as copying it would copy the output into itself.
 A module is not compiled again when its inputs and its output are as its last successful
 compilation left them (`src/compile/avoidance.rs`), the check krusty's Build Tools API
 implementation makes for the toolchain: krusty fingerprints the inputs

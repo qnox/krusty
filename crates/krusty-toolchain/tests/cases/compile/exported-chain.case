@@ -125,3 +125,6 @@ class Hidden
 <directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output
 <directory>/project/app/src/main/kotlin/app/Main.kt
 ----
+--- resources-outputs
+== basejvm/base.properties
+name=base

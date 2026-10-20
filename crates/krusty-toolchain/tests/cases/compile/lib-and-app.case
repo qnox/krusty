@@ -72,3 +72,6 @@ hello
 <directory>/project/app/src/extra/Helper.kt
 <directory>/project/app/src/main.kt
 ----
+--- resources-outputs
+== libjvm/greeting.txt
+hello

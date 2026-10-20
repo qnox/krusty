@@ -26,7 +26,8 @@
 //! hand krusty. The implementation's sources are part of the oracle entry's identity; a live run
 //! builds it from them with its Gradle wrapper, in a scratch copy, run by the JDK
 //! `KRUSTY_BUILD_TOOLS_JAVA_HOME` names (else `JAVA_HOME`). The cached entry's stdout is the record,
-//! its stderr what `kotlin` printed, its code `kotlin`'s exit status.
+//! followed by a `==== resources-outputs` line and the files of the modules' resources outputs
+//! ([`resources_outputs`]), its stderr what `kotlin` printed, its code `kotlin`'s exit status.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -39,6 +40,8 @@ pub const JDK: &str = "jdk";
 pub const RECORD: &str = "record";
 /// The line the recorder writes after each invocation's arguments.
 pub const END_OF_INVOCATION: &str = "----";
+/// The line an oracle entry's stdout holds between the record and the run's resources outputs.
+pub const RESOURCES_OUTPUTS: &str = "==== resources-outputs";
 
 const RECORDER: &str = "#!/bin/sh
 # The recorder writes no classes, so it takes no compilation fingerprint: the Build Tools API
@@ -271,7 +274,13 @@ pub struct RecordingKrusty;
 
 impl Compiler for RecordingKrusty {
     fn identity(&self) -> Vec<(String, Vec<u8>)> {
-        let mut identity = vec![("recorder".to_string(), RECORDER.as_bytes().to_vec())];
+        let mut identity = vec![
+            ("recorder".to_string(), RECORDER.as_bytes().to_vec()),
+            (
+                "resources-outputs".to_string(),
+                RESOURCES_OUTPUTS.as_bytes().to_vec(),
+            ),
+        ];
         identity.extend(implementation_sources());
         identity
     }
@@ -291,10 +300,13 @@ impl Compiler for RecordingKrusty {
     fn collect(&self, directory: &Path, ran: Output) -> Output {
         let mut printed = ran.stdout;
         printed.extend_from_slice(&ran.stderr);
+        let mut stdout = std::fs::read(directory.join(RECORD)).unwrap_or_default();
+        stdout.extend_from_slice(format!("{RESOURCES_OUTPUTS}\n").as_bytes());
+        stdout.extend_from_slice(resources_outputs(directory).as_bytes());
         Output {
             root: ran.root,
             code: ran.code,
-            stdout: std::fs::read(directory.join(RECORD)).unwrap_or_default(),
+            stdout,
             stderr: printed,
         }
     }
@@ -328,6 +340,10 @@ impl Compiler for RecordingKrustyCompilingPlugin<'_> {
                 plugin_compiling_recorder().into_bytes(),
             ),
             ("plugin".to_string(), self.plugin.as_bytes().to_vec()),
+            (
+                "resources-outputs".to_string(),
+                RESOURCES_OUTPUTS.as_bytes().to_vec(),
+            ),
         ];
         identity.extend(implementation_sources());
         identity
@@ -385,6 +401,45 @@ impl Compiler for RecordingKrustyCompilingPlugin<'_> {
     fn collect(&self, directory: &Path, ran: Output) -> Output {
         RecordingKrusty.collect(directory, ran)
     }
+}
+
+/// The files of every module's resources output in a run's `directory`, in path order: for each, a
+/// `== <artifact>/<path>` line, then its text.
+pub fn resources_outputs(directory: &Path) -> String {
+    fn walk(directory: &Path, prefix: &str, files: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let name = format!("{prefix}/{}", entry.file_name().to_string_lossy());
+            if entry.file_type().unwrap().is_dir() {
+                walk(&entry.path(), &name, files);
+            } else {
+                files.push((name, std::fs::read_to_string(entry.path()).unwrap()));
+            }
+        }
+    }
+    let artifacts = directory
+        .join(Resolving::PROJECT)
+        .join("build/artifacts/CompiledJvmArtifact");
+    let mut files = Vec::new();
+    for artifact in std::fs::read_dir(&artifacts).into_iter().flatten() {
+        let artifact = artifact.unwrap();
+        let output = artifact.path().join("resources-output");
+        if output.is_dir() {
+            walk(&output, &artifact.file_name().to_string_lossy(), &mut files);
+        }
+    }
+    files.sort();
+    files
+        .into_iter()
+        .map(|(name, text)| format!("== {name}\n{text}"))
+        .collect()
+}
+
+/// An oracle entry's stdout read back: the record, then the resources outputs.
+pub fn record_and_resources(stdout: &str) -> (&str, &str) {
+    stdout
+        .split_once(&format!("{RESOURCES_OUTPUTS}\n"))
+        .expect("the oracle entry lists the resources outputs after the record")
 }
 
 /// The invocations in a record, each its arguments with the sources (those after `-d <dir>`)
