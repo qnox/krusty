@@ -110,7 +110,7 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
     pub(super) overridden_declarations: &'a [crate::types::OverriddenDeclaration],
     pub(super) suspend: bool,
-    pub(super) inline: crate::libraries::InlineKind,
+    pub(super) inline: crate::fir::InlineKind,
     pub(super) inline_plan: Option<&'a crate::fir::FirInlineBodyPlan>,
     pub(super) substitutions: &'a [crate::fir::FirTypeSubstitution],
     pub(super) extension_receiver_parameter: Option<u32>,
@@ -436,7 +436,7 @@ impl BodyLowering<'_> {
                 }
                 // A declaration without a legal call has no fallback when its body cannot be
                 // expanded: the call is unsupported rather than an ordinary dependency call.
-                None if inline.must_inline() => {
+                None if inline.must_inline() && self.dependency_templates.provides_templates() => {
                     crate::trace_compiler!(
                         "lower",
                         "the must-inline dependency function {target:?} has no template"

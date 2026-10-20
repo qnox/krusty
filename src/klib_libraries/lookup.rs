@@ -169,13 +169,19 @@ pub(super) fn published_function(
     function.default_values = signed.defaults.clone();
     // A KLIB declaration's implementation is its serialized IR body unless provider normalization
     // authenticated an exact shared builtin or target-stdlib intrinsic declaration.
-    if let CallablePlacement::Package(package) = placement {
-        builtin_realizations::realize_package_function(
+    match placement {
+        CallablePlacement::Package(package) => builtin_realizations::realize_package_function(
             package,
             signed.compiler_builtin_owner,
             &signed.signature,
             &mut function,
-        );
+        ),
+        // Before the identity is assigned, so the realization every consumer of that identity
+        // reads — a source call's and an expanded template's alike — carries the operation.
+        CallablePlacement::Member { owner, .. } => {
+            builtin_realizations::realize_member(owner, &mut function)
+        }
+        CallablePlacement::Associated { .. } => {}
     }
     if let Some(intrinsic) = &signed.target_intrinsic {
         function.callable.compiler_intrinsic = Some(intrinsic.operation);
@@ -212,8 +218,14 @@ pub(super) fn published_property(
     );
     // As for functions, the implementation is the serialized IR body of each accessor, unless
     // the property is a builtin.
-    if let CallablePlacement::Package(package) = placement {
-        builtin_realizations::realize_package_property(package, &mut property);
+    match placement {
+        CallablePlacement::Package(package) => {
+            builtin_realizations::realize_package_property(package, &mut property)
+        }
+        CallablePlacement::Member { owner, .. } => {
+            builtin_realizations::realize_member_property(owner, &mut property)
+        }
+        CallablePlacement::Associated { .. } => {}
     }
     let kind = realization_kind(placement, property.receiver.is_some());
     identities.assign_property(signed, kind, &mut property);

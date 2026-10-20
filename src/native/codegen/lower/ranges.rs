@@ -322,6 +322,42 @@ impl BodyLowering<'_, '_, '_> {
         )
     }
 
+    /// `IntRange(start, endInclusive)` and its siblings constructed directly, as an expanded
+    /// `rangeTo` body does: the runtime's closed range over the two bounds. `None` for any class
+    /// that is not one of the runtime's integral ranges.
+    pub(super) fn range_class_construction(
+        &mut self,
+        internal: TypeName,
+        args: &[u32],
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let result = Ty::obj_name(internal);
+        let (kind, element) = range_type(result)?;
+        let &[start, end] = args else {
+            return Some(Err(declined!(
+                "construction of `{}` from {} arguments",
+                internal.render(),
+                args.len()
+            )));
+        };
+        Some((|| {
+            let Some(first) = self.coerce(start, element)? else {
+                return Ok(None);
+            };
+            let Some(last) = self.coerce(end, element)? else {
+                return Ok(None);
+            };
+            if self.terminated {
+                return Ok(None);
+            }
+            self.runtime_call(
+                &format!("kt_{kind}_range"),
+                &[element, element],
+                result,
+                &[first, last],
+            )
+        })())
+    }
+
     /// A member of a range object, or `a until b` on the facade that declares it.
     ///
     /// Returns `None` when this is neither, so the caller falls through to the ordinary
@@ -733,7 +769,7 @@ impl BodyLowering<'_, '_, '_> {
     ///
     /// Declines a receiver that is not a range: the facade also declares `contains` over
     /// collections and strings, which this does not answer.
-    fn facade_range_contains(
+    pub(super) fn facade_range_contains(
         &mut self,
         receiver: u32,
         argument: u32,
@@ -744,7 +780,11 @@ impl BodyLowering<'_, '_, '_> {
         let Some(internal) = receiver_ty.obj_internal() else {
             return Err(declined!("`contains` on a `{receiver_ty:?}`"));
         };
-        if range_element(internal).is_none() {
+        // An integral range held under `ClosedRange<T>` is the runtime's too, as long as this
+        // file puts no class of its own behind the interface; see [`closed_range_element`].
+        let held_under_interface = closed_range_element(receiver_ty).is_some()
+            && !self.file.implements_dependency(internal);
+        if range_element(internal).is_none() && !held_under_interface {
             return Err(declined!("`contains` on a `{receiver_ty:?}`"));
         }
         let Some(argument_ty) = self.checked_type(argument) else {

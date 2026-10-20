@@ -37,13 +37,13 @@ pub use annotation_application::{
     AnnotationPositionalPolicy,
 };
 pub use call_arg_mapping_failure::{CallArgMappingError, CallArgMappingFailure};
-pub(crate) use call_realization::KlibBodyCompanionReceiver;
 pub use call_realization::{
     DefaultCallRealization, DirectCFunction, ExternalCallableKind, ExternalCallableRealization,
     ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
     KlibDependencyCallable, NonvirtualCallRealization, OverriddenCallKind,
     OverriddenCallRealization,
 };
+pub(crate) use call_realization::{KlibBodyCallableShape, KlibBodyCompanionReceiver};
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::constructor_generic_signature;
 pub use classifier_callables::BoundInnerConstructor;

@@ -17565,6 +17565,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   branch of a non-`Unit` `try` converted to its type as a conditional's branches are. Tests:
   `klib_lowering::tests::control_forms::try_lowers_as_the_source_try_does`,
   `klib_lowering::tests::inline_templates::a_member_of_a_generic_class_is_called_at_its_receiver_type_arguments`.
+- **The Native backend realizes what an expanded library body reaches.** A KLIB member's builtin
+  operation (`Int.and`, `Long.times`, `Int.inv`, `Array.size`, `String.length`) is attached when
+  the provider publishes the member, before its identity is assigned, so a template's call of it
+  carries the same operation a source call does, and the Native backend emits the primitive
+  instruction. A construction of an unsigned type or of `kotlin.Result` is its argument at the
+  underlying type, since the target carries those classes as their value; `UInt.data` is the
+  receiver's bits. A runtime throwable constructed with every parameter defaulted takes the
+  default the runtime owns (`NotImplementedError()` reads "An operation is not implemented.").
+  `IntRange(a, b)` and its integral siblings are the runtime's range. A failed `Result` is the
+  runtime's `Result.Failure`, made by `createFailure`, and a `Result` held as `Any` is a runtime box
+  of its own type. kotlin-test's `checkResultIsFailure`, which an expanded `assertFailsWith` and
+  `assertFails` call, answers the held exception when it is an instance of the class literal's
+  type and otherwise fails the assertion with kotlin-test's wording. The stdlib's unsigned division
+  helpers are the unsigned `div` and `rem`; `x in range` through a facade extension is the runtime
+  range test, including a range typed `ClosedRange<Int>` in a file that implements no
+  `ClosedRange` itself. Tests: `tests/native_library_inline_bodies.rs`.
 
 - **A KLIB `when` keeps its source form.** A `when` with an `else` (a final branch whose condition
   is the constant `true`) of origin `WHEN` lowers to one flat `when` recorded as exhaustive at its

@@ -33,6 +33,46 @@ fn unsigned_range(element: Ty) -> Option<(&'static str, Ty)> {
 }
 
 impl BodyLowering<'_, '_, '_> {
+    /// Whether `target` is an array's `size`, by its getter's provider realization.
+    pub(super) fn is_array_size(&self, target: crate::fir::ExternalPropertyId) -> bool {
+        self.file
+            .callables
+            .property(target)
+            .and_then(|property| self.file.callables.callable(property.getter))
+            .is_some_and(|getter| {
+                getter
+                    .compiler_intrinsic
+                    .or(getter.member_realization.compiler_intrinsic())
+                    == Some(crate::backend::BackendCompilerIntrinsic::ArraySize)
+            })
+    }
+
+    /// Whether `target` reads the value an unsigned type wraps — the property its value-class
+    /// declaration names as underlying, owned by the unsigned type itself. An expanded stdlib
+    /// body reaches it as `this.data`.
+    pub(super) fn is_unsigned_storage_read(&self, target: crate::fir::ExternalPropertyId) -> bool {
+        let Some(property) = self.file.callables.property(target) else {
+            return false;
+        };
+        Ty::obj_name(property.owner).is_unsigned()
+            && self
+                .file
+                .classifiers
+                .classifier(property.owner)
+                .and_then(|fact| fact.value_declaration.clone())
+                .is_some_and(|declaration| declaration.property == property.name)
+    }
+
+    /// The value an unsigned receiver wraps: the same bits at the signed carrier, since this
+    /// target carries the unsigned type as its underlying value.
+    pub(super) fn unsigned_storage_read(
+        &mut self,
+        receiver: u32,
+        result: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        self.coerce(receiver, result)
+    }
+
     /// A member whose checked receiver is one of the unsigned types, or `None` otherwise.
     pub(super) fn unsigned_member(
         &mut self,

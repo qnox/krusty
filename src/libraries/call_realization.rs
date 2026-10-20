@@ -123,21 +123,34 @@ pub struct KlibBodyCallable<'a> {
     identity: &'a KlibDependencyCallable,
 }
 
+/// The declared shape of a selected callable that its KLIB body is lowered against.
+pub(crate) struct KlibBodyCallableShape<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) kind: ExternalCallableKind,
+    pub(crate) params: &'a [Ty],
+    pub(crate) ret: Ty,
+    pub(crate) parameter_identities: &'a [crate::fir::ResolvedParameterIdentity],
+    pub(crate) context_count: usize,
+    pub(crate) compiler_intrinsic: Option<CompilerIntrinsic>,
+}
+
 impl<'a> KlibBodyCallable<'a> {
     pub(crate) fn new(
-        name: &'a str,
-        kind: ExternalCallableKind,
-        params: &'a [Ty],
-        ret: Ty,
-        parameter_identities: &'a [crate::fir::ResolvedParameterIdentity],
-        context_count: usize,
-        compiler_intrinsic: Option<CompilerIntrinsic>,
-        singleton_dispatch: Option<Ty>,
-        singleton_classifier: Option<TypeName>,
+        shape: KlibBodyCallableShape<'a>,
+        singleton: Option<SingletonDispatch>,
         companion_receiver: Option<&'a KlibBodyCompanionReceiver>,
-        declaration_owner: Option<crate::types::SemanticCallableOwner>,
+        declaration_owner: Option<SemanticCallableOwner>,
         identity: Option<&'a KlibDependencyCallable>,
     ) -> Option<Self> {
+        let KlibBodyCallableShape {
+            name,
+            kind,
+            params,
+            ret,
+            parameter_identities,
+            context_count,
+            compiler_intrinsic,
+        } = shape;
         Some(Self {
             name,
             kind,
@@ -146,8 +159,8 @@ impl<'a> KlibBodyCallable<'a> {
             parameter_identities,
             context_count,
             compiler_intrinsic,
-            singleton_dispatch,
-            singleton_classifier,
+            singleton_dispatch: singleton.map(SingletonDispatch::ty),
+            singleton_classifier: singleton.map(|dispatch| dispatch.classifier),
             companion_receiver,
             declaration_owner,
             identity: identity?,
@@ -269,15 +282,16 @@ impl ExternalCallableRealization {
     pub fn klib_body_callable(&self) -> Option<KlibBodyCallable<'_>> {
         let singleton = self.callable.singleton_dispatch.as_deref().copied();
         KlibBodyCallable::new(
-            &self.callable.name,
-            self.kind,
-            &self.callable.params,
-            self.callable.ret,
-            &self.parameter_identities,
-            self.callable.context_count,
-            self.callable.compiler_intrinsic,
-            singleton.map(SingletonDispatch::ty),
-            singleton.map(|dispatch| dispatch.classifier),
+            KlibBodyCallableShape {
+                name: &self.callable.name,
+                kind: self.kind,
+                params: &self.callable.params,
+                ret: self.callable.ret,
+                parameter_identities: &self.parameter_identities,
+                context_count: self.callable.context_count,
+                compiler_intrinsic: self.callable.compiler_intrinsic,
+            },
+            singleton,
             self.klib_body_companion_receiver.as_ref(),
             self.declaration_owner,
             self.dependency_callable.as_ref(),

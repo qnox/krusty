@@ -476,12 +476,19 @@ mod tests {
     fn klib_body_lowering_is_target_neutral() {
         // Dependency bodies lower into common IR that Native and Wasm consume alike. The tests
         // beside the lowering may also reach the frontend to lower equivalent source.
+        // A template body links its callees through the calling compilation's normalized
+        // provider (`symbol_source`) and decides the subtyping the body leaves implicit over the
+        // common class hierarchy (`assignable`, read through `symbol_resolver`'s provider
+        // oracle). All three are target-neutral semantic contracts, never a backend's.
         let allowed = [
+            "assignable",
             "fir",
             "ir",
             "klib_libraries",
             "libraries",
             "metadata",
+            "symbol_resolver",
+            "symbol_source",
             "types",
         ];
         assert_allowed_crate_modules("src/klib_lowering.rs", &allowed);

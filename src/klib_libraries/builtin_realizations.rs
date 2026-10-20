@@ -43,10 +43,11 @@ pub(super) fn realize_member(owner: TypeName, function: &mut FunctionInfo) {
     function.callable.semantic_role = role;
 }
 
-/// Attach the role the member property `property` of `owner` has, if it is a builtin one.
+/// Attach the operation and role the member property `property` of `owner` has, if it is a
+/// builtin one.
 pub(super) fn realize_member_property(owner: TypeName, property: &mut PropertyInfo) {
     let params = property.getter.params.clone();
-    property.getter.semantic_role = semantic_call_role(BuiltinMemberDeclaration {
+    let facts = || BuiltinMemberDeclaration {
         owner,
         name: &property.name,
         params: &params,
@@ -55,7 +56,20 @@ pub(super) fn realize_member_property(owner: TypeName, property: &mut PropertyIn
         is_operator: false,
         is_infix: false,
         annotations: &[],
-    });
+    };
+    // An array's `size` is the array operation, as the JVM provider realizes the same declaration,
+    // and `String.length` the string's, as the core builtins publish it.
+    if let realization @ MemberRealization::Intrinsic(_) = member_rules::realization(facts()) {
+        property.getter.member_realization = realization;
+    } else if owner == crate::types::wk::string()
+        && property.name == "length"
+        && params.is_empty()
+        && property.ty == crate::types::Ty::Int
+    {
+        property.getter.member_realization =
+            MemberRealization::Intrinsic(crate::libraries::CompilerIntrinsic::StringLength);
+    }
+    property.getter.semantic_role = semantic_call_role(facts());
 }
 
 /// Attach the operation the package function `function` denotes, if it is a builtin one.
