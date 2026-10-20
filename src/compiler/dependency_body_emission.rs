@@ -16,7 +16,7 @@ use crate::ir::{Callee, IrExpr};
 use crate::klib_lowering::{DependencyBodyUnit, EmittedDependencyCallable, KlibCalleeFacts};
 use crate::libraries::KlibDependencyCallable;
 use crate::resolve::PassTwoSymbols;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 use std::collections::VecDeque;
 
 /// Exact dependency support declarations already emitted into one target program.
@@ -184,8 +184,8 @@ pub(super) fn emit_intrinsic_dependencies<B: Backend>(
             );
         }
         if let Some(&receiver) = unit.ir().singleton_extension_unread_receivers.get(function) {
-            let inert_platform_singleton = match receiver {
-                Ty::Obj(classifier, arguments) if arguments.is_empty() => {
+            let inert_platform_singleton = match receiver.kind() {
+                TyKind::Obj(classifier, arguments) if arguments.is_empty() => {
                     bodies.singleton_initialization_is_inert(&identity.module, classifier)
                 }
                 _ => false,

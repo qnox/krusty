@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use super::super::hierarchy_projection::{direct_supertypes, intersection_components};
 use super::super::SourceOracle;
 use crate::symbol_source::SymbolSource;
-use crate::types::{Ty, TypeName, TypeVariance};
+use crate::types::{Ty, TyKind, TypeName, TypeVariance};
 
 pub(super) fn common_super_type(source: &dyn SymbolSource, left: Ty, right: Ty) -> Ty {
     common_super_types(source, &[left, right])
@@ -125,18 +125,18 @@ impl<'a> CommonSupertypeSolver<'a> {
             .collect::<Vec<_>>();
         let mut classifiers = Vec::new();
         for candidate in &closures[0] {
-            let Ty::Obj(classifier, arguments) = candidate else {
+            let TyKind::Obj(classifier, arguments) = candidate.kind() else {
                 continue;
             };
-            if !classifiers.contains(&(*classifier, arguments.len()))
+            if !classifiers.contains(&(classifier, arguments.len()))
                 && closures.iter().skip(1).all(|types| {
                     types.iter().any(|ty| {
-                        matches!(ty, Ty::Obj(name, args)
+                        matches!(ty.kind(), TyKind::Obj(name, args)
                         if name == classifier && args.len() == arguments.len())
                     })
                 })
             {
-                classifiers.push((*classifier, arguments.len()));
+                classifiers.push((classifier, arguments.len()));
             }
         }
 
@@ -167,7 +167,7 @@ impl<'a> CommonSupertypeSolver<'a> {
                 types
                     .iter()
                     .copied()
-                    .filter(|ty| matches!(ty, Ty::Obj(name, args) if *name == classifier && args.len() == arity))
+                    .filter(|ty| matches!(ty.kind(), TyKind::Obj(name, args) if name == classifier && args.len() == arity))
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -246,9 +246,9 @@ impl<'a> CommonSupertypeSolver<'a> {
     fn combine_classifier_inner(&mut self, classifier: TypeName, types: &[Ty]) -> Option<Ty> {
         let arguments = types
             .iter()
-            .map(|ty| match ty {
-                Ty::Obj(_, arguments) => arguments,
-                _ => &[][..],
+            .map(|ty| match ty.kind() {
+                TyKind::Obj(_, arguments) => arguments,
+                _ => crate::types::TyList::EMPTY,
             })
             .collect::<Vec<_>>();
         let arity = arguments.first().map_or(0, |arguments| arguments.len());
@@ -298,9 +298,9 @@ impl<'a> CommonSupertypeSolver<'a> {
 }
 
 fn type_size(ty: Ty) -> usize {
-    match ty {
-        Ty::Obj(_, arguments) => 1 + arguments.iter().copied().map(type_size).sum::<usize>(),
-        Ty::Fun(signature) => {
+    match ty.kind() {
+        TyKind::Obj(_, arguments) => 1 + arguments.iter().copied().map(type_size).sum::<usize>(),
+        TyKind::Fun(signature) => {
             1 + signature
                 .params
                 .iter()
@@ -309,14 +309,14 @@ fn type_size(ty: Ty) -> usize {
                 .sum::<usize>()
                 + type_size(signature.ret)
         }
-        Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner)
-        | Ty::StarProjection(inner)
-        | Ty::DefinitelyNotNull(inner) => 1 + type_size(*inner),
-        Ty::TyParam(_, bound) => 1 + type_size(*bound),
-        Ty::Intersection(parts) => 1 + parts.iter().copied().map(type_size).sum::<usize>(),
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner)
+        | TyKind::DefinitelyNotNull(inner) => 1 + type_size(inner),
+        TyKind::TyParam(_, bound) => 1 + type_size(bound),
+        TyKind::Intersection(parts) => 1 + parts.iter().copied().map(type_size).sum::<usize>(),
         _ => 1,
     }
 }
@@ -335,7 +335,7 @@ pub(crate) fn reified_runtime_type(
 ) -> Ty {
     let nullable = ty.is_nullable();
     let inner = ty.non_null().projection_read_ty().non_null();
-    let Ty::Intersection(parts) = inner else {
+    let TyKind::Intersection(parts) = inner.kind() else {
         return ty;
     };
     let Some(approximated) = approximate_reified_intersection(parts.as_slice(), direct_supertypes)

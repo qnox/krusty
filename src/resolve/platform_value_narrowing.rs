@@ -8,7 +8,7 @@
 use super::{Checker, TypeInfo};
 use crate::ast::{Expr, ExprId};
 use crate::symbol_resolver::ResolvedMember;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// Where a PLATFORM value is committed to a declared non-null type, as far as the guard's SHAPE is
 /// concerned. Measured against kotlinc 2.4.10: a declared type propagates into a conditional, so each
@@ -45,9 +45,7 @@ impl Checker<'_> {
         e: ExprId,
         position: PlatformNarrowing,
     ) {
-        if !matches!(self.expr_types[e.0 as usize], Ty::PlatformNullable(_))
-            && !self.has_enhanced_result(e)
-        {
+        if !self.expr_types[e.0 as usize].is_platform_nullable() && !self.has_enhanced_result(e) {
             return;
         }
         if expected_type_rejects_null(expected) {
@@ -221,16 +219,16 @@ pub(super) fn expected_type_rejects_null(expected: Ty) -> bool {
     let mut current = expected;
     let mut seen = crate::fx_hash::HashSet::default();
     loop {
-        match current {
-            Ty::Unit
-            | Ty::Nothing
-            | Ty::Error
-            | Ty::Pending
-            | Ty::InProjection(_)
-            | Ty::OutProjection(_)
-            | Ty::StarProjection(_) => return false,
-            Ty::TyParam(name, bound) if seen.insert(name) => current = *bound,
-            Ty::TyParam(..) => return false,
+        match current.kind() {
+            TyKind::Unit
+            | TyKind::Nothing
+            | TyKind::Error
+            | TyKind::Pending
+            | TyKind::InProjection(_)
+            | TyKind::OutProjection(_)
+            | TyKind::StarProjection(_) => return false,
+            TyKind::TyParam(name, bound) if seen.insert(name) => current = bound,
+            TyKind::TyParam(..) => return false,
             _ => return !current.admits_null(),
         }
     }
@@ -244,7 +242,6 @@ impl TypeInfo {
     /// implicit cast lands only where a branch's own value is such a value: a sibling branch that
     /// produces a Kotlin `String` stays unchecked.
     pub(crate) fn produces_unchecked_java_value(&self, e: ExprId) -> bool {
-        matches!(self.expr_types[e.0 as usize], Ty::PlatformNullable(_))
-            || self.enhanced_values.contains(&e)
+        self.expr_types[e.0 as usize].is_platform_nullable() || self.enhanced_values.contains(&e)
     }
 }

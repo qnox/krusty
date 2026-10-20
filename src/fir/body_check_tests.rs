@@ -3,7 +3,7 @@ use crate::diag::DiagSink;
 use crate::features::LangFeatures;
 use crate::libraries::EmptySymbolSource;
 use crate::source::SourceInput;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::*;
 
@@ -1945,7 +1945,7 @@ fn statically_proven_suspend_function_tests_and_casts_build_checked_fir() {
                     operation: FirTypeOperation::Is(_),
                     target,
                     ..
-                }) if matches!(target.get(), crate::types::Ty::Fun(signature) if signature.suspend)
+                }) if matches!(target.get().kind(), crate::types::TyKind::Fun(signature) if signature.suspend)
             )),
             "cast" => {
                 let Some(FirExprKind::FunctionInvoke {
@@ -1961,7 +1961,7 @@ fn statically_proven_suspend_function_tests_and_casts_build_checked_fir() {
                         operation: FirTypeOperation::Cast,
                         target,
                         ..
-                    }) if matches!(target.get(), crate::types::Ty::Fun(signature) if signature.suspend)
+                    }) if matches!(target.get().kind(), crate::types::TyKind::Fun(signature) if signature.suspend)
                 ));
             }
             _ => unreachable!(),
@@ -2022,20 +2022,20 @@ suspend fun inspect(): Boolean {
 
     assert_eq!(runtime_targets.len(), 4);
     assert!(matches!(
-        runtime_targets[0],
-        Ty::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KSuspendFunction1")
+        runtime_targets[0].kind(),
+        TyKind::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KSuspendFunction1")
     ));
     assert!(matches!(
-        runtime_targets[1],
-        Ty::Fun(signature) if signature.suspend && signature.params.len() == 1
+        runtime_targets[1].kind(),
+        TyKind::Fun(signature) if signature.suspend && signature.params.len() == 1
     ));
     assert!(matches!(
-        runtime_targets[2],
-        Ty::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KSuspendFunction1")
+        runtime_targets[2].kind(),
+        TyKind::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KSuspendFunction1")
     ));
     assert!(matches!(
-        runtime_targets[3],
-        Ty::Fun(signature) if !signature.suspend && signature.params.len() == 2
+        runtime_targets[3].kind(),
+        TyKind::Fun(signature) if !signature.suspend && signature.params.len() == 2
     ));
 }
 
@@ -2123,27 +2123,27 @@ fun box(): String {
         .collect::<Vec<_>>();
     assert_eq!(runtime_targets.len(), 6);
     assert!(matches!(
-        runtime_targets[0],
-        Ty::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KSuspendFunction1")
+        runtime_targets[0].kind(),
+        TyKind::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KSuspendFunction1")
     ));
     assert!(matches!(
-        runtime_targets[1],
-        Ty::Fun(signature) if signature.suspend && signature.params.len() == 1
+        runtime_targets[1].kind(),
+        TyKind::Fun(signature) if signature.suspend && signature.params.len() == 1
     ));
     assert!(matches!(
-        runtime_targets[2],
-        Ty::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KSuspendFunction1")
+        runtime_targets[2].kind(),
+        TyKind::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KSuspendFunction1")
     ));
     assert!(matches!(
-        runtime_targets[3],
-        Ty::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KFunction2")
+        runtime_targets[3].kind(),
+        TyKind::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KFunction2")
     ));
     assert!(matches!(
-        runtime_targets[4],
-        Ty::Fun(signature) if signature.suspend && signature.params.len() == 1
+        runtime_targets[4].kind(),
+        TyKind::Fun(signature) if signature.suspend && signature.params.len() == 1
     ));
     assert!(matches!(
-        runtime_targets[5],
-        Ty::Fun(signature) if !signature.suspend && signature.params.len() == 2
+        runtime_targets[5].kind(),
+        TyKind::Fun(signature) if !signature.suspend && signature.params.len() == 2
     ));
 }

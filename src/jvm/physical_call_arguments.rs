@@ -8,7 +8,7 @@
 //! `call_declared_params` stay the Kotlin types; `physical_call_parameters` is the JVM plan.
 
 use crate::ir::{Callee, ExprId, IrExpr, IrFile, IrTypeOp};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// Declaration ordinals of the parameters that are not in `omitted`.
 ///
@@ -169,15 +169,15 @@ fn class_bound_is_unsigned(
     visiting: &mut Vec<&'static str>,
 ) -> Result<bool, String> {
     let ty = ty.non_null();
-    if matches!(ty, Ty::Fun(_)) {
+    if ty.is_fun() {
         return Ok(false);
     }
     if ty.is_unsigned() {
         return Ok(true);
     }
-    match ty {
-        Ty::DefinitelyNotNull(inner) => class_bound_is_unsigned(*inner, parameters, visiting),
-        Ty::TyParam(name, bound) => {
+    match ty.kind() {
+        TyKind::DefinitelyNotNull(inner) => class_bound_is_unsigned(inner, parameters, visiting),
+        TyKind::TyParam(name, bound) => {
             if visiting.contains(&name.as_str()) {
                 return Err(format!("type parameter {name} has a cyclic class bound"));
             }
@@ -187,7 +187,7 @@ fn class_bound_is_unsigned(
                 for &(bound, is_interface) in bounds {
                     let bound = bound.non_null();
                     if bound.is_unsigned()
-                        || ((matches!(bound, Ty::TyParam(..)) || !is_interface)
+                        || ((bound.is_ty_param() || !is_interface)
                             && class_bound_is_unsigned(bound, parameters, visiting)?)
                     {
                         visiting.pop();
@@ -195,7 +195,7 @@ fn class_bound_is_unsigned(
                     }
                 }
             }
-            let result = class_bound_is_unsigned(*bound, parameters, visiting);
+            let result = class_bound_is_unsigned(bound, parameters, visiting);
             visiting.pop();
             result
         }
@@ -256,9 +256,9 @@ fn unsigned_projection_carrier(physical: Ty) -> Option<Ty> {
         return None;
     }
     let root = physical.non_null();
-    let unsigned = match root {
-        Ty::TyParam(_, bound) => bound.non_null().is_unsigned(),
-        other => other.is_unsigned(),
+    let unsigned = match root.kind() {
+        TyKind::TyParam(_, bound) => bound.non_null().is_unsigned(),
+        _ => root.is_unsigned(),
     };
     if !unsigned {
         return None;

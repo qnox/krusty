@@ -18,6 +18,7 @@
 //!   gives and what the machine's plain conversion does not.
 
 use super::*;
+use crate::types::TyKind;
 
 impl BodyLowering<'_, '_, '_> {
     /// Source `==`/`!=`, realized from the semantic mode fixed by checking.
@@ -770,8 +771,8 @@ pub(super) fn scalar_bound(ty: Ty) -> Option<Ty> {
         if machine_carrier(at) != Carrier::Ref {
             return Some(at);
         }
-        match at {
-            Ty::TyParam(_, bound) => at = bound.non_null(),
+        match at.kind() {
+            TyKind::TyParam(_, bound) => at = bound.non_null(),
             _ => return None,
         }
     }

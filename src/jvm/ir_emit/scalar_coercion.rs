@@ -4,6 +4,7 @@
 //! wrappers, primitive accessors, numeric conversions, and unsigned value-class adapters.
 
 use super::{ir_ty_to_jvm, slot_words, type_descriptor, ClassWriter, CodeBuilder, Ty, TypeName};
+use crate::types::TyKind;
 
 /// Box a primitive on the stack to its wrapper. Signed primitives use `valueOf`; unsigned scalars
 /// use their inline-class `box-impl`.
@@ -37,20 +38,27 @@ fn scalar_box_accessor(ty: Ty) -> Option<(&'static str, &'static str, &'static s
 pub(super) fn semantic_scalar_adapter(semantic: Ty, carrier: Ty) -> Ty {
     fn concrete_scalar(mut ty: Ty) -> Option<Ty> {
         loop {
-            match ty.non_null().canonical_semantic() {
-                Ty::TyParam(_, bound) => ty = *bound,
-                scalar @ (Ty::Int
-                | Ty::Long
-                | Ty::Double
-                | Ty::Float
-                | Ty::Boolean
-                | Ty::Char
-                | Ty::Byte
-                | Ty::Short
-                | Ty::UByte
-                | Ty::UShort
-                | Ty::UInt
-                | Ty::ULong) => return Some(scalar),
+            let current = ty.non_null().canonical_semantic();
+            match current.kind() {
+                TyKind::TyParam(_, bound) => ty = bound,
+                _ if matches!(
+                    current,
+                    Ty::Int
+                        | Ty::Long
+                        | Ty::Double
+                        | Ty::Float
+                        | Ty::Boolean
+                        | Ty::Char
+                        | Ty::Byte
+                        | Ty::Short
+                        | Ty::UByte
+                        | Ty::UShort
+                        | Ty::UInt
+                        | Ty::ULong
+                ) =>
+                {
+                    return Some(current)
+                }
                 _ => return None,
             }
         }

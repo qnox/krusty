@@ -8,7 +8,7 @@
 use crate::fx_hash::HashSet;
 
 use crate::ir::IrFile;
-use crate::types::{Ty, Visibility};
+use crate::types::{Ty, TyKind, Visibility};
 
 use super::symbols::c_identifier;
 
@@ -246,13 +246,13 @@ fn type_tag(ty: Ty) -> &'static str {
 }
 
 fn describe(ty: Ty) -> String {
-    match ty {
-        Ty::Unit => "kotlin.Unit".to_string(),
-        Ty::Nullable(inner) => format!("{}?", describe(*inner)),
-        Ty::Fun(_) => "a function type".to_string(),
-        Ty::Nothing => "kotlin.Nothing".to_string(),
-        Ty::Obj(name, args) if args.is_empty() => name.render().replace('/', "."),
-        Ty::Obj(name, args) => {
+    match ty.kind() {
+        TyKind::Unit => "kotlin.Unit".to_string(),
+        TyKind::Nullable(inner) => format!("{}?", describe(inner)),
+        TyKind::Fun(_) => "a function type".to_string(),
+        TyKind::Nothing => "kotlin.Nothing".to_string(),
+        TyKind::Obj(name, args) if args.is_empty() => name.render().replace('/', "."),
+        TyKind::Obj(name, args) => {
             let arguments = args
                 .iter()
                 .map(|argument| describe(*argument))

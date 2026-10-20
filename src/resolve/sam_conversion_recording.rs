@@ -5,7 +5,7 @@
 //! value's `FunctionN`; the continuation stays on the interface method.
 
 use crate::ast::{Expr, ExprId};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 use super::*;
 
@@ -61,7 +61,7 @@ impl Checker<'_> {
         let postpone_lambda_body = expected.is_none()
             && self.postponed_argument_depth != 0
             && matches!(self.file.expr(*argument), Expr::Lambda { .. })
-            && matches!(expected_callable, Ty::Fun(shape) if self.contextual_lambda_accepts_function_shape(*argument, shape));
+            && matches!(expected_callable.kind(), TyKind::Fun(shape) if self.contextual_lambda_accepts_function_shape(*argument, shape));
         crate::trace_compiler!(
             "lambda_apply",
             "SAM constructor call={call:?} expected={expected:?} postponed_depth={} postpone_body={postpone_lambda_body}",
@@ -136,8 +136,8 @@ impl Checker<'_> {
             .and_then(|identity| self.visible_flow_value(scope, identity))
             .map(|(_, local)| local.declared_ty)
             .filter(|declared| {
-                matches!(nominal.non_null(), Ty::Fun(_) | Ty::Error)
-                    && !matches!(declared.non_null(), Ty::Fun(_))
+                matches!(nominal.non_null().kind(), TyKind::Fun(_) | TyKind::Error)
+                    && !declared.non_null().is_fun()
             })
             .unwrap_or(nominal)
     }
@@ -160,11 +160,12 @@ impl Checker<'_> {
         // shape. Recover its declaration only through the already-resolved value identity; never
         // perform a second spelling lookup after selection.
         let nominal = self.sam_source_nominal(scope, argument, nominal);
-        if let Some(Ty::Fun(signature)) = self
+        if let Some(TyKind::Fun(signature)) = self
             .callable_reference_types
             .get(&argument)
             .copied()
             .map(Ty::non_null)
+            .map(Ty::kind)
         {
             if signature.params.len() == sam.params.len() && (!signature.suspend || sam.suspend) {
                 return Some(signature.suspend);
@@ -174,7 +175,7 @@ impl Checker<'_> {
         // Read the exact function shape that check published for this expression; unlike a named
         // value, there is no earlier declaration shape for contextual checking to overwrite.
         if matches!(self.file.expr(argument), Expr::Lambda { .. }) {
-            if let Ty::Fun(signature) = self.expr_types[argument.0 as usize].non_null() {
+            if let TyKind::Fun(signature) = self.expr_types[argument.0 as usize].non_null().kind() {
                 if signature.params.len() == sam.params.len() && (!signature.suspend || sam.suspend)
                 {
                     return Some(signature.suspend);
@@ -188,7 +189,7 @@ impl Checker<'_> {
             sam.params.len(),
             sam.suspend,
         ) {
-            return Some(matches!(function, Ty::Fun(signature) if signature.suspend));
+            return Some(matches!(function.kind(), TyKind::Fun(signature) if signature.suspend));
         }
         self.semantic_sam_signature(nominal.non_null())
             .map(|source| source.suspend)
@@ -212,9 +213,11 @@ impl Checker<'_> {
         ) {
             return false;
         }
-        if matches!(actual, Ty::Error | Ty::Pending | Ty::Fun(_))
-            || actual.mentions_pending()
-            || !matches!(expected.non_null(), Ty::Obj(_, _))
+        if matches!(
+            actual.kind(),
+            TyKind::Error | TyKind::Pending | TyKind::Fun(_)
+        ) || actual.mentions_pending()
+            || !matches!(expected.non_null().kind(), TyKind::Obj(_, _))
         {
             return false;
         }
@@ -257,7 +260,11 @@ impl Checker<'_> {
             return false;
         }
         let actual = actual.non_null();
-        if matches!(actual, Ty::Error | Ty::Pending | Ty::Fun(_)) || actual.mentions_pending() {
+        if matches!(
+            actual.kind(),
+            TyKind::Error | TyKind::Pending | TyKind::Fun(_)
+        ) || actual.mentions_pending()
+        {
             return false;
         }
         let mut pending = vec![actual];
@@ -268,7 +275,7 @@ impl Checker<'_> {
                 continue;
             }
             seen.push(ty);
-            if let Ty::Obj(name, _) = ty {
+            if let TyKind::Obj(name, _) = ty.kind() {
                 if name == classifier {
                     return true;
                 }
@@ -312,7 +319,7 @@ impl Checker<'_> {
         };
         let convertible = matches!(self.file.expr(argument), Expr::Lambda { .. })
             || self.callable_reference_types.contains_key(&argument)
-            || matches!(self.expr_types[argument.0 as usize].non_null(), Ty::Fun(_));
+            || self.expr_types[argument.0 as usize].non_null().is_fun();
         if convertible {
             let nominal = self.expr_types[argument.0 as usize];
             if let Some(conversion) = self.sam_conversion_record(scope, argument, nominal, sam) {

@@ -7,6 +7,7 @@ use super::lambda_route::SpliceReason;
 use super::*;
 use crate::jvm::classreader::{ExcEntry, MethodLocal};
 use crate::jvm::method_node::{CodeAttribute, LabelId};
+use crate::types::TyKind;
 
 const GETSTATIC: u8 = 0xb2;
 const ARETURN: u8 = 0xb0;
@@ -146,8 +147,16 @@ impl Emitter<'_> {
         let split = captures.len().min(physical.len());
         let (capture_types, physical_parameters) = physical.split_at(split);
         let arity = usize::from(arity);
-        let semantic = match self.ir.logical_types.get(&argument).map(|ty| ty.non_null()) {
-            Some(Ty::Fun(signature)) if signature.params.len() == arity => signature.params.clone(),
+        let semantic = match self
+            .ir
+            .logical_types
+            .get(&argument)
+            .map(|ty| ty.non_null())
+            .map(Ty::kind)
+        {
+            Some(TyKind::Fun(signature)) if signature.params.len() == arity => {
+                signature.params.clone()
+            }
             _ => {
                 return Err(
                     "a placed lambda has no checked function type with each argument's type",
@@ -187,7 +196,7 @@ impl Emitter<'_> {
         inline_body: u32,
         function_type: Ty,
     ) -> Result<(LiteralLambda, usize), &'static str> {
-        let Ty::Fun(signature) = function_type.non_null() else {
+        let TyKind::Fun(signature) = function_type.non_null().kind() else {
             return Err("a callable reference has no function type");
         };
         let physical = jvm_function_params(self.ir, impl_fn);

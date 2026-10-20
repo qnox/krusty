@@ -1,4 +1,4 @@
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// Convert an actual type into the constraint contributed through a nullable formal position.
 ///
@@ -7,11 +7,13 @@ use crate::types::Ty;
 /// `T = Any`. A contravariant projection must remain captured; opening `in String` to `String`
 /// would invent a readable `String` result where Kotlin exposes only `Any?`.
 pub(super) fn nullable_generic_actual(actual: Ty) -> Ty {
-    let actual = match actual {
-        Ty::OutProjection(inner) | Ty::StarProjection(inner) => *inner,
-        actual => actual,
+    let actual = match actual.kind() {
+        TyKind::OutProjection(inner) | TyKind::StarProjection(inner) => inner,
+        _ => actual,
     };
-    if actual == Ty::Null || matches!(actual, Ty::Nullable(inner) if *inner == Ty::Nothing) {
+    if actual == Ty::Null
+        || matches!(actual.kind(), TyKind::Nullable(inner) if inner == Ty::Nothing)
+    {
         Ty::Nothing
     } else {
         // A nullable formal contributes the definitely-non-null form. `T : Any?` becomes `T & Any`,
@@ -28,12 +30,12 @@ pub(super) fn nullable_generic_actual(actual: Ty) -> Ty {
 /// shape. Nested flexible variables remain part of their enclosing structural constraint and do
 /// not enter this root-only rule.
 pub(super) fn flexible_variable_argument(shape: Ty, actual: Ty) -> Option<(Ty, Ty)> {
-    let Ty::PlatformNullable(&variable @ Ty::TyParam(..)) = shape else {
+    let TyKind::PlatformNullable(variable @ Ty::TyParam(..)) = shape.kind() else {
         return None;
     };
-    match actual {
-        Ty::Null => Some((variable, Ty::nullable(Ty::Nothing))),
-        Ty::Nullable(_) => Some((variable, actual)),
+    match actual.kind() {
+        TyKind::Null => Some((variable, Ty::nullable(Ty::Nothing))),
+        TyKind::Nullable(_) => Some((variable, actual)),
         _ => None,
     }
 }
@@ -72,8 +74,8 @@ mod tests {
             nullable_caller.contributed_through_nullable_formal()
         );
         assert!(matches!(
-            nullable_generic_actual(nullable_caller),
-            Ty::DefinitelyNotNull(_)
+            nullable_generic_actual(nullable_caller).kind(),
+            TyKind::DefinitelyNotNull(_)
         ));
         assert_eq!(nullable_generic_actual(non_null_caller), non_null_caller);
         assert_eq!(

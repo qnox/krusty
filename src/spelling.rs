@@ -18,7 +18,7 @@
 //! Field numbers here were read off kotlinc 2.4.10 output, not recalled — see
 //! `docs/METADATA_NOTES.md`.
 
-use crate::types::{ResolvedAnnotation, Ty, TypeName};
+use crate::types::{ResolvedAnnotation, Ty, TyKind, TypeName};
 
 /// The source spelling of one declared type, mirroring the expanded `Ty` tree node for node.
 ///
@@ -123,20 +123,20 @@ impl Spelled {
 
     /// Record provider-owned upper faces for every flexible occurrence in inferred `ty`.
     pub(crate) fn record_flexible_upper_bounds(&mut self, ty: Ty, upper_bound: &dyn Fn(Ty) -> Ty) {
-        let ty = match ty {
-            Ty::PlatformNullable(lower) => {
-                self.flexible_upper_bound = Some(upper_bound(*lower));
-                *lower
+        let ty = match ty.kind() {
+            TyKind::PlatformNullable(lower) => {
+                self.flexible_upper_bound = Some(upper_bound(lower));
+                lower
             }
-            Ty::Nullable(inner)
-            | Ty::DefinitelyNotNull(inner)
-            | Ty::InProjection(inner)
-            | Ty::OutProjection(inner)
-            | Ty::StarProjection(inner) => *inner,
-            other => other,
+            TyKind::Nullable(inner)
+            | TyKind::DefinitelyNotNull(inner)
+            | TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner)
+            | TyKind::StarProjection(inner) => inner,
+            _ => ty,
         };
-        match ty {
-            Ty::Obj(_, arguments) => {
+        match ty.kind() {
+            TyKind::Obj(_, arguments) => {
                 if self.args.len() < arguments.len() {
                     self.args.resize_with(arguments.len(), Spelled::default);
                 }
@@ -144,7 +144,7 @@ impl Spelled {
                     spelling.record_flexible_upper_bounds(*argument, upper_bound);
                 }
             }
-            Ty::Fun(signature) if !signature.suspend => {
+            TyKind::Fun(signature) if !signature.suspend => {
                 let count = signature.params.len() + 1;
                 if self.args.len() < count {
                     self.args.resize_with(count, Spelled::default);
@@ -160,7 +160,7 @@ impl Spelled {
             // A suspend function's metadata result occupies the continuation argument rather than
             // the ordinary last function-type slot. The publication sidecar does not carry that
             // physical layout, so decline nested flexibility instead of attaching it incorrectly.
-            Ty::Fun(_) => {}
+            TyKind::Fun(_) => {}
             _ => {}
         }
     }

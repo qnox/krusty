@@ -16,7 +16,7 @@
 use crate::fx_hash::HashMap;
 
 use crate::ir::{FunId, IrFile, IrTypeParameter};
-use crate::types::{Ty, TypeName, TypeVariance};
+use crate::types::{Ty, TyKind, TypeName, TypeVariance};
 
 const REFLECTION: &str = "kotlin/jvm/internal/Reflection";
 const K_TYPE: &str = "kotlin/reflect/KType";
@@ -233,25 +233,25 @@ fn is_mutable_collection(ir: &IrFile, name: TypeName) -> bool {
 /// classifier type: a primitive's `TYPE` for a non-null signed scalar, otherwise the mapped class,
 /// with arrays spelled by their descriptor and value classes kept as themselves.
 fn class_instance(ty: Ty) -> Result<TypeOfInsn, TypeOfError> {
-    let (inner, nullable) = match ty {
-        Ty::Nullable(inner) => (*inner, true),
-        other => (other, false),
+    let (inner, nullable) = match ty.kind() {
+        TyKind::Nullable(inner) => (inner, true),
+        _ => (ty, false),
     };
     if !nullable && inner.is_jvm_scalar() && !inner.is_unsigned() {
         let wrapper = crate::jvm::jvm_class_map::wrapper_internal(inner)
             .ok_or(TypeOfError::Undescribable(ty))?;
         return Ok(TypeOfInsn::PrimitiveClass(wrapper));
     }
-    let class = match inner {
-        Ty::Unit => "kotlin/Unit".to_owned(),
-        Ty::Nothing => "java/lang/Void".to_owned(),
-        Ty::Fun(signature) => {
+    let class = match inner.kind() {
+        TyKind::Unit => "kotlin/Unit".to_owned(),
+        TyKind::Nothing => "java/lang/Void".to_owned(),
+        TyKind::Fun(signature) => {
             if signature.suspend {
                 return Err(TypeOfError::SuspendFunctionType);
             }
             crate::jvm::names::function_interface_internal_name(signature.params.len())
         }
-        Ty::Obj(name, _)
+        TyKind::Obj(name, _)
             if name.matches("kotlin/Array") || crate::types::prim_array_element(name).is_some() =>
         {
             if crate::types::prim_array_element(name).is_some_and(Ty::is_unsigned) {
@@ -260,7 +260,7 @@ fn class_instance(ty: Ty) -> Result<TypeOfInsn, TypeOfError> {
                 crate::jvm::names::type_descriptor(inner)
             }
         }
-        Ty::Obj(name, _) => crate::jvm::names::classfile_internal_name_of(name).to_string(),
+        TyKind::Obj(name, _) => crate::jvm::names::classfile_internal_name_of(name).to_string(),
         _ => return Err(TypeOfError::Undescribable(ty)),
     };
     Ok(TypeOfInsn::LdcClass(class))
@@ -307,10 +307,10 @@ impl Generator<'_, '_> {
     }
 
     fn type_of(&mut self, ty: Ty, type_parameter_bound: bool) -> Result<(), TypeOfError> {
-        if let Ty::PlatformNullable(lower) = ty {
+        if let TyKind::PlatformNullable(lower) = ty.kind() {
             // A flexible type: its lower bound, its upper bound, then the combination.
-            self.type_of(*lower, type_parameter_bound)?;
-            self.type_of(Ty::nullable(*lower), type_parameter_bound)?;
+            self.type_of(lower, type_parameter_bound)?;
+            self.type_of(Ty::nullable(lower), type_parameter_bound)?;
             self.reflection(
                 "platformType",
                 k_type_descriptor(&[&format!("L{K_TYPE};"), &format!("L{K_TYPE};")]),
@@ -319,7 +319,7 @@ impl Generator<'_, '_> {
         }
         let nullable = ty.is_nullable();
         let inner = ty.non_null();
-        let arguments = if let Ty::TyParam(identity, _) = inner {
+        let arguments = if let TyKind::TyParam(identity, _) = inner.kind() {
             let (parameter, container) = self.parameters.declaration(identity.as_str())?;
             if !type_parameter_bound && parameter.reified {
                 let suffix = if nullable { "?" } else { "" };
@@ -370,12 +370,13 @@ impl Generator<'_, '_> {
             if nullable { "nullableTypeOf" } else { "typeOf" },
             k_type_descriptor(&arguments),
         );
-        match inner {
-            Ty::Obj(name, _) if is_mutable_collection(self.parameters.ir, name) => self.reflection(
-                "mutableCollectionType",
-                k_type_descriptor(&[&format!("L{K_TYPE};")]),
-            ),
-            Ty::Nothing => {
+        match inner.kind() {
+            TyKind::Obj(name, _) if is_mutable_collection(self.parameters.ir, name) => self
+                .reflection(
+                    "mutableCollectionType",
+                    k_type_descriptor(&[&format!("L{K_TYPE};")]),
+                ),
+            TyKind::Nothing => {
                 self.reflection("nothingType", k_type_descriptor(&[&format!("L{K_TYPE};")]))
             }
             _ => {}
@@ -386,8 +387,8 @@ impl Generator<'_, '_> {
     /// kotlinc's `generateTypeOfArguments`: `KTypeProjection.star`, or the argument's type passed
     /// to the static factory for its variance.
     fn projection(&mut self, argument: Ty, type_parameter_bound: bool) -> Result<(), TypeOfError> {
-        let (ty, factory) = match argument {
-            Ty::StarProjection(_) => {
+        let (ty, factory) = match argument.kind() {
+            TyKind::StarProjection(_) => {
                 self.push(TypeOfInsn::GetStatic {
                     owner: K_TYPE_PROJECTION,
                     name: "star",
@@ -395,9 +396,9 @@ impl Generator<'_, '_> {
                 });
                 return Ok(());
             }
-            Ty::InProjection(ty) => (*ty, "contravariant"),
-            Ty::OutProjection(ty) => (*ty, "covariant"),
-            ty => (ty, "invariant"),
+            TyKind::InProjection(ty) => (ty, "contravariant"),
+            TyKind::OutProjection(ty) => (ty, "covariant"),
+            _ => (argument, "invariant"),
         };
         self.type_of(ty, type_parameter_bound)?;
         self.push(TypeOfInsn::InvokeStatic {
@@ -584,9 +585,9 @@ impl Generator<'_, '_> {
 /// The type arguments of a classifier type in runtime order. A function type carries its
 /// parameters followed by its result.
 fn classifier_arguments(ty: Ty) -> Vec<Ty> {
-    match ty {
-        Ty::Obj(_, arguments) => arguments.to_vec(),
-        Ty::Fun(signature) => signature
+    match ty.kind() {
+        TyKind::Obj(_, arguments) => arguments.to_vec(),
+        TyKind::Fun(signature) => signature
             .params
             .iter()
             .copied()
@@ -727,17 +728,22 @@ fn type_reaches_parameter(
     ty: Ty,
     seen: &mut Vec<String>,
 ) -> bool {
-    match ty.non_null() {
-        Ty::TyParam(identity, _) => {
-            reaches_itself(parameters, start, identity.as_str(), seen, false)
+    {
+        let other = ty.non_null();
+        match other.kind() {
+            TyKind::TyParam(identity, _) => {
+                reaches_itself(parameters, start, identity.as_str(), seen, false)
+            }
+            TyKind::PlatformNullable(inner)
+            | TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner) => {
+                type_reaches_parameter(parameters, start, inner, seen)
+            }
+            TyKind::StarProjection(_) => false,
+            _ => classifier_arguments(other)
+                .into_iter()
+                .any(|argument| type_reaches_parameter(parameters, start, argument, seen)),
         }
-        Ty::PlatformNullable(inner) | Ty::InProjection(inner) | Ty::OutProjection(inner) => {
-            type_reaches_parameter(parameters, start, *inner, seen)
-        }
-        Ty::StarProjection(_) => false,
-        other => classifier_arguments(other)
-            .into_iter()
-            .any(|argument| type_reaches_parameter(parameters, start, argument, seen)),
     }
 }
 
@@ -768,19 +774,26 @@ fn type_references_recursive_bound(
     ty: Ty,
     used: &mut Vec<String>,
 ) -> Result<bool, TypeOfError> {
-    match ty.non_null() {
-        Ty::TyParam(identity, _) => references_recursive_bound(parameters, identity.as_str(), used),
-        Ty::PlatformNullable(inner) | Ty::InProjection(inner) | Ty::OutProjection(inner) => {
-            type_references_recursive_bound(parameters, *inner, used)
-        }
-        Ty::StarProjection(_) => Ok(false),
-        other => {
-            for argument in classifier_arguments(other) {
-                if type_references_recursive_bound(parameters, argument, used)? {
-                    return Ok(true);
-                }
+    {
+        let other = ty.non_null();
+        match other.kind() {
+            TyKind::TyParam(identity, _) => {
+                references_recursive_bound(parameters, identity.as_str(), used)
             }
-            Ok(false)
+            TyKind::PlatformNullable(inner)
+            | TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner) => {
+                type_references_recursive_bound(parameters, inner, used)
+            }
+            TyKind::StarProjection(_) => Ok(false),
+            _ => {
+                for argument in classifier_arguments(other) {
+                    if type_references_recursive_bound(parameters, argument, used)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
         }
     }
 }

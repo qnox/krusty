@@ -1,6 +1,7 @@
 //! Completion of a postponed producer whose result has no proper call-site constraint.
 
 use super::{GSigBinds, GenericSig, Ty};
+use crate::types::TyKind;
 use crate::types::TypeName;
 
 /// Complete the declaration-owned variables of an unconstrained producer.
@@ -200,16 +201,16 @@ fn bind_concrete_parameter(
 ) -> bool {
     let shape = shape.non_null();
     let actual = actual.non_null();
-    match shape {
-        Ty::StarProjection(_) => true,
-        Ty::InProjection(inner) | Ty::OutProjection(inner) => bind_concrete_parameter(
+    match shape.kind() {
+        TyKind::StarProjection(_) => true,
+        TyKind::InProjection(inner) | TyKind::OutProjection(inner) => bind_concrete_parameter(
             nested,
-            *inner,
+            inner,
             actual.projection_inner().unwrap_or(actual),
             outer_formals,
             binds,
         ),
-        Ty::TyParam(name, _) if nested.formals.iter().any(|formal| formal == name) => {
+        TyKind::TyParam(name, _) if nested.formals.iter().any(|formal| formal == name) => {
             let constraint = actual.projection_inner().unwrap_or(actual).non_null();
             if !is_concrete_constraint(constraint, &nested.formals, outer_formals) {
                 return true;
@@ -223,9 +224,9 @@ fn bind_concrete_parameter(
                 }
             }
         }
-        Ty::Obj(owner, arguments) => {
+        TyKind::Obj(owner, arguments) => {
             let actual = actual.projection_inner().unwrap_or(actual).non_null();
-            let Ty::Obj(actual_owner, actual_arguments) = actual else {
+            let TyKind::Obj(actual_owner, actual_arguments) = actual.kind() else {
                 return true;
             };
             if owner != actual_owner || arguments.len() != actual_arguments.len() {
@@ -243,7 +244,7 @@ fn bind_concrete_parameter(
 }
 
 fn is_concrete_constraint(ty: Ty, nested_formals: &[String], outer_formals: &[String]) -> bool {
-    !matches!(ty, Ty::StarProjection(_) | Ty::Error)
+    !matches!(ty.kind(), TyKind::StarProjection(_) | TyKind::Error)
         && !crate::types::ty_mentions_param(ty, nested_formals)
         && !crate::types::ty_mentions_param(ty, outer_formals)
 }

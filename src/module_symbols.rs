@@ -19,7 +19,7 @@ use crate::libraries::{
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 #[cfg(test)]
 use crate::types::Visibility;
-use crate::types::{stored_value_ty, type_name, Ty, TypeName};
+use crate::types::{stored_value_ty, type_name, Ty, TyKind, TypeName};
 
 use classifier_member_signatures::{
     classifier_member_generic_signature, normalize_classifier_property_generic_signature,
@@ -289,21 +289,21 @@ impl<'a> ModuleSymbols<'a> {
                 param_defaults,
                 c.ctor_params
                     .iter()
-                    .map(|parameter| match parameter {
-                        Ty::Fun(function) => function.params.clone(),
+                    .map(|parameter| match parameter.kind() {
+                        TyKind::Fun(function) => function.params.clone(),
                         _ => Vec::new(),
                     })
                     .collect(),
                 c.ctor_params
                     .iter()
                     .map(
-                        |parameter| matches!(parameter, Ty::Fun(function) if function.has_receiver),
+                        |parameter| matches!(parameter.kind(), TyKind::Fun(function) if function.has_receiver),
                     )
                     .collect::<crate::libraries::ParamFlags>(),
                 c.ctor_params
                     .iter()
-                    .map(|parameter| match parameter {
-                        Ty::Fun(function) => function.context_count,
+                    .map(|parameter| match parameter.kind() {
+                        TyKind::Fun(function) => function.context_count,
                         _ => 0,
                     })
                     .collect(),
@@ -432,7 +432,7 @@ impl<'a> ModuleSymbols<'a> {
             recv_fun: c
                 .ctor_params
                 .iter()
-                .map(|parameter| matches!(parameter.non_null(), Ty::Fun(sig) if sig.has_receiver))
+                .map(|parameter| matches!(parameter.non_null().kind(), TyKind::Fun(sig) if sig.has_receiver))
                 .collect(),
             vararg: c.ctor_vararg,
             annotation: None,

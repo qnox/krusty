@@ -31,7 +31,7 @@ pub(super) fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
 /// stays unboxed.
 fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Option<Ty> {
     let declared = ir.inline_declared_type(declaration)?;
-    if !matches!(declared.non_null(), Ty::TyParam(..)) {
+    if !declared.non_null().is_ty_param() {
         return None;
     }
     let erased = ir_ty_to_jvm(&stored_value_ty(declared));

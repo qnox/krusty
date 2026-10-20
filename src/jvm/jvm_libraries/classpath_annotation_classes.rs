@@ -6,7 +6,7 @@ use crate::jvm::classreader::ClassInfo;
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, ParamList, Visibility,
 };
-use crate::types::{AnnotationTargets, Ty};
+use crate::types::{AnnotationTargets, Ty, TyKind};
 
 /// Normalize a constructor-less annotation declaration into the common application shape while
 /// JVM descriptors and `AnnotationDefault` are still provider-owned facts. Core never reparses a
@@ -17,8 +17,8 @@ pub(super) fn java_annotation_parameter_list(class: &ClassInfo) -> Option<ParamL
     // `Signature` attribute: dropping it would accept `String::class` for
     // `Class<? extends Runnable>`. The physical descriptor remains provider-owned and unchanged.
     let kotlin_class_element = |semantic: Ty| {
-        let arguments = match semantic.non_null() {
-            Ty::Obj(_, arguments) => arguments,
+        let arguments = match semantic.non_null().kind() {
+            TyKind::Obj(_, arguments) => arguments,
             _ => crate::types::TyList::EMPTY,
         };
         Ty::obj_args_name(

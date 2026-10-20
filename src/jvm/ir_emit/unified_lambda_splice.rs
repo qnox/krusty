@@ -21,6 +21,7 @@
 use super::inline_call_outcome::InlineCallOutcome;
 use super::*;
 use crate::jvm::inline::SplicedFrame;
+use crate::types::TyKind;
 
 /// The checked facts the placement of one selected literal reads.
 #[derive(Debug, PartialEq)]
@@ -84,8 +85,13 @@ fn literal_facts(ir: &IrFile, lambda: ExprId) -> Result<LiteralFacts, &'static s
     let Some(arguments) = physical.get(captures.len()..captures.len() + arity) else {
         return Err("a placed lambda's method lacks a parameter for each argument");
     };
-    let semantic = match ir.logical_types.get(&lambda).map(|ty| ty.non_null()) {
-        Some(Ty::Fun(signature)) if signature.params.len() == arity => signature.params.clone(),
+    let semantic = match ir
+        .logical_types
+        .get(&lambda)
+        .map(|ty| ty.non_null())
+        .map(Ty::kind)
+    {
+        Some(TyKind::Fun(signature)) if signature.params.len() == arity => signature.params.clone(),
         _ => return Err("a placed lambda has no checked function type with each argument's type"),
     };
     // The body is built in a scratch frame whose argument slots are not installed yet, so its
@@ -113,7 +119,7 @@ fn callable_reference_facts(ir: &IrFile, lambda: ExprId) -> Result<LiteralFacts,
         return Err("a placed callable reference has no recorded inline template");
     };
     let function_type = reference.function_type;
-    let Ty::Fun(signature) = function_type.non_null() else {
+    let TyKind::Fun(signature) = function_type.non_null().kind() else {
         return Err("a placed callable reference has no function type");
     };
     if signature.params.len() != arity {

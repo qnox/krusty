@@ -7,7 +7,7 @@
 //! type-parameter owner reads `<root>.Name` there; the native runtime message omits that prefix.
 
 use super::IrFile;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 impl IrFile {
     /// Render `ty` for a null-cast message. `top_level_owner` names the owner of a function that
@@ -31,50 +31,50 @@ impl IrFile {
                 format!("<{}>", rendered.join(", "))
             }
         };
-        match ty {
-            Ty::Unit => "kotlin.Unit".to_string(),
-            Ty::Nothing => "kotlin.Nothing".to_string(),
-            Ty::Null => "kotlin.Nothing?".to_string(),
-            Ty::Error => "<error>".to_string(),
-            Ty::Pending => "<pending>".to_string(),
-            Ty::Obj(name, types) => format!(
+        match ty.kind() {
+            TyKind::Unit => "kotlin.Unit".to_string(),
+            TyKind::Nothing => "kotlin.Nothing".to_string(),
+            TyKind::Null => "kotlin.Nothing?".to_string(),
+            TyKind::Error => "<error>".to_string(),
+            TyKind::Pending => "<pending>".to_string(),
+            TyKind::Obj(name, types) => format!(
                 "{}{}",
                 rendered_owner(name, qualify_root_classifier),
                 arguments(&mut types.iter().copied())
             ),
-            Ty::Nullable(inner) => format!(
+            TyKind::Nullable(inner) => format!(
                 "{}?",
-                self.rendered_cast_target(*inner, top_level_owner, qualify_root_classifier)
+                self.rendered_cast_target(inner, top_level_owner, qualify_root_classifier)
             ),
-            Ty::PlatformNullable(inner) => {
-                self.rendered_cast_target(*inner, top_level_owner, qualify_root_classifier)
+            TyKind::PlatformNullable(inner) => {
+                self.rendered_cast_target(inner, top_level_owner, qualify_root_classifier)
             }
-            Ty::InProjection(inner) => format!(
+            TyKind::InProjection(inner) => format!(
                 "in {}",
-                self.rendered_cast_target(*inner, top_level_owner, qualify_root_classifier)
+                self.rendered_cast_target(inner, top_level_owner, qualify_root_classifier)
             ),
-            Ty::OutProjection(inner) => format!(
+            TyKind::OutProjection(inner) => format!(
                 "out {}",
-                self.rendered_cast_target(*inner, top_level_owner, qualify_root_classifier)
+                self.rendered_cast_target(inner, top_level_owner, qualify_root_classifier)
             ),
-            Ty::StarProjection(_) => "*".to_string(),
-            Ty::DefinitelyNotNull(inner) => format!(
+            TyKind::StarProjection(_) => "*".to_string(),
+            TyKind::DefinitelyNotNull(inner) => format!(
                 "{} & Any",
-                self.rendered_cast_target(*inner, top_level_owner, qualify_root_classifier)
+                self.rendered_cast_target(inner, top_level_owner, qualify_root_classifier)
             ),
-            Ty::Intersection(parts) => parts
+            TyKind::Intersection(parts) => parts
                 .iter()
                 .map(|part| {
                     self.rendered_cast_target(*part, top_level_owner, qualify_root_classifier)
                 })
                 .collect::<Vec<_>>()
                 .join(" & "),
-            Ty::TyParam(name, _) => self.rendered_type_parameter(
+            TyKind::TyParam(name, _) => self.rendered_type_parameter(
                 name.as_str(),
                 top_level_owner,
                 qualify_root_classifier,
             ),
-            Ty::Fun(signature) => format!(
+            TyKind::Fun(signature) => format!(
                 "{}{}{}",
                 if signature.suspend {
                     "kotlin.coroutines.SuspendFunction"

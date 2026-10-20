@@ -4,6 +4,7 @@
 //! semantic values to the physical reference slots those shapes consume.
 
 use super::*;
+use crate::types::TyKind;
 
 impl Emitter<'_> {
     pub(super) fn emit_string_concat(
@@ -288,7 +289,7 @@ impl Emitter<'_> {
         // or the data-class `Arrays.toString(field)` wrapper). Both must pick the `append(String)`
         // overload kotlinc uses, not the less-specific `append(Object)`.
         let is_string = matches!(ty, Ty::String)
-            || matches!(ty, Ty::Obj(name, _) if name == "java/lang/String" || name == "kotlin/String");
+            || matches!(ty.kind(), TyKind::Obj(name, _) if name == "java/lang/String" || name == "kotlin/String");
         let descriptor = match ty {
             _ if is_string => "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
             Ty::Int | Ty::Short | Ty::Byte => "(I)Ljava/lang/StringBuilder;",

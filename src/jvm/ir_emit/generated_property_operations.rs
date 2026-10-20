@@ -153,7 +153,7 @@ fn generated_property_hash_owner(ir: &IrFile, bodies: &dyn MethodBodies, ty: Ty)
     let source_interface = semantic_owner.is_some_and(|name| {
         ir.source_classifier_kind(name) == Some(crate::ir::IrClassifierKind::Interface)
     });
-    let is_interface = matches!(runtime_ty, Ty::Fun(_))
+    let is_interface = runtime_ty.is_fun()
         || source_interface
         || semantic_owner.is_some_and(|owner| bodies.owner_is_interface_name(owner));
     if is_interface {

@@ -44,12 +44,14 @@ use crate::name_tree::{NameId, NameTree};
 use interning::ShardedInterner;
 mod primitive_arrays;
 mod thin_handles;
+mod ty_kind;
 pub use primitive_arrays::{prim_array_element, prim_array_name, primitive_array_creator_element};
 pub(crate) use spelling::type_name_from_multifile_facade;
 pub use spelling::{existing_type_name, existing_type_name_child, type_name, type_name_from};
 use std::fmt;
 use std::sync::OnceLock;
 pub use thin_handles::{TyList, TyParamName};
+pub use ty_kind::TyKind;
 pub(crate) use type_parameter_identity::{
     call_site_type_variable, constructor_type_parameter, declaration_type_parameter,
     generated_function_type_parameter, hidden_captured_type_parameter, metadata_type_parameter,

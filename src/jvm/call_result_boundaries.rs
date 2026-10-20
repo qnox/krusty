@@ -6,7 +6,7 @@
 //! refines marked slots after its carrier inventory exists.
 
 use crate::ir::{Callee, ExprId, IrExpr, IrFile, IrTypeOp};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 pub(super) fn terminal_call(exprs: &[IrExpr], mut expression: ExprId) -> Option<ExprId> {
     loop {
@@ -63,7 +63,7 @@ fn realized_call_result(ir: &IrFile, call: ExprId) -> Option<Ty> {
 pub(super) fn erased_result_slot(ir: &IrFile, call: ExprId, declared: Ty) -> Option<Ty> {
     let erased = realized_call_result(ir, call)?;
     let nullable = declared.is_nullable()
-        || matches!(declared.non_null(), Ty::TyParam(_, bound) if bound.is_nullable());
+        || matches!(declared.non_null().kind(), TyKind::TyParam(_, bound) if bound.is_nullable());
     Some(if nullable {
         Ty::nullable(erased.non_null())
     } else {

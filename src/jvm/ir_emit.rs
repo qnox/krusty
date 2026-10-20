@@ -22,7 +22,7 @@ use crate::jvm::names::{
 use crate::jvm::property_references::local_delegated_properties::LocalDelegatedProperties;
 use crate::jvm::value_classes::instance_representation;
 use crate::kt_string::KtStringBuf;
-use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
+use crate::types::{stored_value_ty, Ty, TyKind, TypeName, TypeVariance};
 use companion_field::{add_companion_field, companion_field_access, emit_companion_init};
 use field_visibility::{declared_field_access, default_accessor_access, is_jvm_field};
 use inherited_default_forwarders::emit_default_impls_forwarders;
@@ -4876,18 +4876,18 @@ fn parameterized_sig_at(
     ty: &Ty,
     wildcards: Wildcards,
 ) -> Option<String> {
-    let inner = match ty {
-        Ty::Nullable(t) | Ty::PlatformNullable(t) => t,
-        t => t,
+    let inner = match ty.kind() {
+        TyKind::Nullable(t) | TyKind::PlatformNullable(t) => t,
+        _ => *ty,
     };
-    match inner {
-        Ty::Obj(_, args) if !args.is_empty() => {
-            let sig = formatter.ty_at(inner, wildcards)?;
-            (sig != ir_type_desc(inner)).then_some(sig)
+    match inner.kind() {
+        TyKind::Obj(_, args) if !args.is_empty() => {
+            let sig = formatter.ty_at(&inner, wildcards)?;
+            (sig != ir_type_desc(&inner)).then_some(sig)
         }
-        Ty::Fun(_) => {
-            let sig = formatter.ty_at(inner, wildcards)?;
-            (sig != ir_type_desc(inner)).then_some(sig)
+        TyKind::Fun(_) => {
+            let sig = formatter.ty_at(&inner, wildcards)?;
+            (sig != ir_type_desc(&inner)).then_some(sig)
         }
         _ => None,
     }
@@ -5039,12 +5039,12 @@ fn method_parameterized_sig(
 ) -> Option<String> {
     // Runs for every emitted method — bail before building any string when no position can carry one.
     let is_parameterized = |t: &Ty| {
-        let inner = match t {
-            Ty::Nullable(t) | Ty::PlatformNullable(t) => t,
-            t => t,
+        let inner = match t.kind() {
+            TyKind::Nullable(t) | TyKind::PlatformNullable(t) => t,
+            _ => *t,
         };
-        matches!(inner, Ty::Fun(_) | Ty::Intersection(_))
-            || matches!(inner, Ty::Obj(_, arguments) if !arguments.is_empty())
+        matches!(inner.kind(), TyKind::Fun(_) | TyKind::Intersection(_))
+            || matches!(inner.kind(), TyKind::Obj(_, arguments) if !arguments.is_empty())
     };
     if !params
         .iter()
@@ -6833,9 +6833,9 @@ fn call_ret_ty(ret: &Ty) -> Ty {
 }
 
 fn norm_nothing(t: Ty) -> Ty {
-    match &t {
-        Ty::Obj(n, _)
-            if crate::jvm::jvm_class_map::type_name_maps_to_jvm_internal(*n, "java/lang/Void") =>
+    match t.kind() {
+        TyKind::Obj(n, _)
+            if crate::jvm::jvm_class_map::type_name_maps_to_jvm_internal(n, "java/lang/Void") =>
         {
             Ty::Nothing
         }

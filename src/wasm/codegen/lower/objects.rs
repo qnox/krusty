@@ -13,7 +13,7 @@ use crate::ir::{
     Callee, ClassId, CtorDelegateTarget, FunId, IrLocalPropertyLayout, IrSuperCallKind, IrTypeOp,
     IrVirtualTarget,
 };
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::super::super::objects::REFERENCE;
@@ -34,8 +34,8 @@ impl Body<'_> {
     /// The class of this file a type names, if it names one.
     pub(super) fn class_of_type(&self, ty: Ty) -> Option<ClassId> {
         self.classes?;
-        match ty.non_null() {
-            Ty::Obj(name, _) => self.ir.class_id_by_name(name),
+        match ty.non_null().kind() {
+            TyKind::Obj(name, _) => self.ir.class_id_by_name(name),
             _ => None,
         }
     }
@@ -697,7 +697,7 @@ impl Body<'_> {
                 super::describe(self.type_of(arg)?.unwrap_or(Ty::Unit))
             ));
         }
-        let nullable = matches!(target, Ty::Nullable(_)) && op != IrTypeOp::SafeCast;
+        let nullable = matches!(target.kind(), TyKind::Nullable(_)) && op != IrTypeOp::SafeCast;
         let tested = target.non_null();
         let value = self.local(REFERENCE);
         self.value(arg, any())?;

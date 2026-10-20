@@ -6,7 +6,7 @@
 
 use super::ProductionSignatureSemantics;
 use crate::resolve::selected_result_publication::CompactSelectedResultPublication;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 fn whole_array_arguments(arguments: &[crate::fir::ResolvedSigCallArgument<'_>]) -> Box<[bool]> {
     arguments
@@ -274,7 +274,7 @@ impl crate::fir::SelectedResultPublicationSemantics for ProductionSignatureSeman
                 .into_iter()
                 .find(|(candidate, _, _)| *candidate == owner)
                 .map(|(_, applied, _)| applied)?;
-            let Ty::Obj(published_owner, arguments) = published.non_null() else {
+            let TyKind::Obj(published_owner, arguments) = published.non_null().kind() else {
                 return None;
             };
             (published_owner == owner).then_some((ordinary, arguments.to_vec()))

@@ -2,7 +2,7 @@
 
 use super::{IrExpr, IrFile, IrGenericSig, IrModuleSource, IrTypeParameter};
 use crate::fx_hash::HashMap;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// Whether a lambda class is a source Kotlin function or a compiler-synthesized adapter.
 ///
@@ -285,35 +285,35 @@ impl IrFile {
 /// and receiver types, its value parameters, then its result). A parameter's bound is its
 /// declaration's, not a part of `ty`.
 pub(crate) fn type_parameters_named_by(ty: Ty, names: &mut Vec<&'static str>) {
-    match ty {
-        Ty::TyParam(name, _) => {
+    match ty.kind() {
+        TyKind::TyParam(name, _) => {
             if !names.contains(&name.as_str()) {
                 names.push(name.as_str());
             }
         }
-        Ty::Obj(_, arguments) => {
+        TyKind::Obj(_, arguments) => {
             for &argument in arguments {
                 type_parameters_named_by(argument, names);
             }
         }
-        Ty::Fun(signature) => {
+        TyKind::Fun(signature) => {
             for &parameter in &signature.params {
                 type_parameters_named_by(parameter, names);
             }
             type_parameters_named_by(signature.ret, names);
         }
-        Ty::DefinitelyNotNull(inner)
-        | Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner) => type_parameters_named_by(*inner, names),
-        Ty::Intersection(parts) => {
+        TyKind::DefinitelyNotNull(inner)
+        | TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner) => type_parameters_named_by(inner, names),
+        TyKind::Intersection(parts) => {
             for &part in parts {
                 type_parameters_named_by(part, names);
             }
         }
         // A star names no type; the bound it keeps is the parameter's.
-        Ty::StarProjection(_) => {}
-        Ty::Unit | Ty::Null | Ty::Nothing | Ty::Error | Ty::Pending => {}
+        TyKind::StarProjection(_) => {}
+        TyKind::Unit | TyKind::Null | TyKind::Nothing | TyKind::Error | TyKind::Pending => {}
     }
 }

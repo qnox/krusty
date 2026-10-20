@@ -9,6 +9,7 @@
 //! call has no runtime receiver at any later phase.
 
 use super::*;
+use crate::types::TyKind;
 
 /// The outcome of one associated rung for a call.
 pub(super) enum AssociatedCall {
@@ -647,7 +648,7 @@ impl Checker<'_> {
         expected: Option<Ty>,
     ) -> Option<Ty> {
         if !functions.is_empty() {
-            if let Some(Ty::Fun(expected)) = expected {
+            if let Some(TyKind::Fun(expected)) = expected.map(Ty::kind) {
                 return self
                     .selected_receiverless_function_ref(expression, name, expected, functions);
             }

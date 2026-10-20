@@ -10,7 +10,7 @@
 //! Every emitter that annotates a declared position asks here; whether the position is a JVM
 //! reference at all is its physical descriptor's question, not this one.
 
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 const NOT_NULL: &str = "Lorg/jetbrains/annotations/NotNull;";
 const NULLABLE: &str = "Lorg/jetbrains/annotations/Nullable;";
@@ -18,10 +18,10 @@ const NULLABLE: &str = "Lorg/jetbrains/annotations/Nullable;";
 /// The classification of a declared reference type: `0` = unannotated, `1` = `@NotNull`,
 /// `2` = `@Nullable`.
 pub(super) fn declared_reference_nullability(declared: Ty) -> u8 {
-    match declared {
-        Ty::PlatformNullable(_) => 0,
-        Ty::Nullable(_) => 2,
-        Ty::TyParam(..) if declared.upper_bound_admits_null() => 0,
+    match declared.kind() {
+        TyKind::PlatformNullable(_) => 0,
+        TyKind::Nullable(_) => 2,
+        TyKind::TyParam(..) if declared.upper_bound_admits_null() => 0,
         _ => 1,
     }
 }
@@ -47,5 +47,5 @@ pub(super) fn declared_annotation(declared: Ty, physical: Ty) -> Option<&'static
 
 /// Whether `declared` is a bare type parameter left unannotated because it admits null.
 pub(super) fn is_unannotated_type_parameter(declared: Ty) -> bool {
-    matches!(declared, Ty::TyParam(..)) && declared_reference_nullability(declared) == 0
+    declared.is_ty_param() && declared_reference_nullability(declared) == 0
 }

@@ -5,7 +5,7 @@
 //! { … }` passes the lambda as the receiver `T`).
 
 use crate::ir::{ExprId, IrFile};
-use crate::types::{InlineParameterModifier, Ty};
+use crate::types::InlineParameterModifier;
 
 /// Whether operand `parameter` of the realized inline call `call` is an inline parameter, from the
 /// declaration's published modifiers and declared parameter types. `None` when the call published
@@ -13,5 +13,5 @@ use crate::types::{InlineParameterModifier, Ty};
 pub(crate) fn is_inline_parameter(ir: &IrFile, call: ExprId, parameter: usize) -> Option<bool> {
     let modifier = *ir.call_inline_modifiers.get(&call)?.get(parameter)?;
     let declared = *ir.call_declared_params.get(&call)?.get(parameter)?;
-    Some(modifier != InlineParameterModifier::Noinline && matches!(declared, Ty::Fun(_)))
+    Some(modifier != InlineParameterModifier::Noinline && declared.is_fun())
 }

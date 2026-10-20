@@ -2,7 +2,7 @@ use crate::diag::DiagSink;
 use crate::features::LangFeatures;
 use crate::libraries::EmptySymbolSource;
 use crate::source::SourceInput;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 mod local_classifier_identity;
 mod qualified_signatures;
@@ -1645,10 +1645,7 @@ class Callable<T> : suspend (T) -> String {
     let header = index
         .classifier_header(declaration)
         .expect("stable Callable header");
-    assert!(header
-        .interfaces
-        .iter()
-        .any(|parent| matches!(parent.get(), Ty::Fun(_))));
+    assert!(header.interfaces.iter().any(|parent| parent.get().is_fun()));
     assert!(hierarchy.iter().all(|parent| {
         !parent.applied.get().mentions_error() && !parent.applied.get().mentions_pending()
     }));
@@ -4176,14 +4173,14 @@ fn explicit_type_arguments_specialize_a_projected_sam_lambda_in_pass_one() {
     let [comparator, first, second] = compare_with_parameters.as_slice() else {
         panic!("compareWith retains its generic parameter structure: {compare_with:?}")
     };
-    let Ty::Obj(comparator, arguments) = *comparator else {
+    let TyKind::Obj(comparator, arguments) = comparator.kind() else {
         panic!("compareWith retains Comparator as its first parameter: {comparator:?}")
     };
     assert!(comparator.matches("Comparator"));
     let [Ty::InProjection(projected)] = arguments.as_slice() else {
         panic!("Comparator retains its written `in T` argument: {arguments:?}")
     };
-    let Ty::TyParam(projected, _) = **projected else {
+    let TyKind::TyParam(projected, _) = (**projected).kind() else {
         panic!("Comparator projection retains T: {projected:?}")
     };
     assert_eq!(first.ty_param_name(), Some(projected.as_str()));

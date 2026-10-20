@@ -15,7 +15,7 @@
 //! arguments and nullability) and without a type-variable context.
 
 use crate::fx_hash::HashMap;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// The class-hierarchy oracle the assignability relation walks. Direct supertypes retain their applied
 /// type arguments: `Child<String> : Producer<String>` must not collapse to the bare name `Producer`
@@ -104,8 +104,8 @@ fn declared_upper_bound(
 /// Array projection flexibility is Kotlin type semantics; the JVM provider only decides that an
 /// external declaration has a platform type and supplies its lower bound.
 pub(crate) fn platform_shape_upper_bound(lower: Ty) -> Ty {
-    match lower {
-        Ty::Obj(owner, arguments)
+    match lower.kind() {
+        TyKind::Obj(owner, arguments)
             if lower.is_reference_array()
                 && matches!(arguments.as_slice(), [argument] if argument.projection_inner().is_none()) =>
         {
@@ -144,7 +144,7 @@ impl TyCtx {
 }
 
 fn is_any(t: Ty) -> bool {
-    matches!(t, Ty::Obj(n, _)
+    matches!(t.kind(), TyKind::Obj(n, _)
         if crate::types::same(n, crate::types::wk::any())
             || crate::types::same(n, crate::types::wk::java_object()))
 }
@@ -198,20 +198,21 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     }
     // A type parameter's semantic identity is its key. The carried bound is constraint metadata and
     // may be normalized differently while a generic call is instantiated (`Any` versus `Any?`).
-    if matches!((sub, sup), (Ty::TyParam(a, _), Ty::TyParam(b, _)) if a == b) {
+    if matches!((sub.kind(), sup.kind()), (TyKind::TyParam(a, _), TyKind::TyParam(b, _)) if a == b)
+    {
         return true;
     }
     // `T & Any` is a subtype of the original parameter and of the non-null intersection of that
     // parameter's upper bounds (`T : Any?` satisfies `Any`; `T : Throwable?` satisfies
     // `Throwable`; `where T : A?, T : B?` satisfies both `A` and `B`). It does not satisfy an
     // unrelated non-null bound.
-    if let Ty::DefinitelyNotNull(original) = sub {
-        if assignable_inner(cx, oracle, *original, sup) {
+    if let TyKind::DefinitelyNotNull(original) = sub.kind() {
+        if assignable_inner(cx, oracle, original, sup) {
             return true;
         }
-        if let Ty::TyParam(name, bound) = *original {
-            let tightened = declared_upper_bound(oracle, name.as_str(), *bound, Ty::non_null);
-            if tightened != *original && assignable_inner(cx, oracle, tightened, sup) {
+        if let TyKind::TyParam(name, bound) = original.kind() {
+            let tightened = declared_upper_bound(oracle, name.as_str(), bound, Ty::non_null);
+            if tightened != original && assignable_inner(cx, oracle, tightened, sup) {
                 return true;
             }
         }
@@ -226,14 +227,14 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     // A target intersection requires the source to meet every component. Checked before the
     // source arm so `Int & String & Number` is still a subtype of `Int & String`. `Nothing` is
     // already a subtype of every intersection via the arm above.
-    if let Ty::Intersection(parts) = sup {
+    if let TyKind::Intersection(parts) = sup.kind() {
         return parts
             .iter()
             .copied()
             .all(|part| assignable_inner(cx, oracle, sub, part));
     }
     // `A & B` is a subtype of each component, so it meets a target that any component meets.
-    if let Ty::Intersection(parts) = sub {
+    if let TyKind::Intersection(parts) = sub.kind() {
         return parts
             .iter()
             .copied()
@@ -241,51 +242,57 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     }
     // Projection wrappers are meaningful only as generic arguments. When they reach a recursive
     // comparison, consume their readable bound; `obj_assignable` handles their direction.
-    if let Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) = sup {
-        return assignable_inner(cx, oracle, sub, *inner);
+    if let TyKind::InProjection(inner)
+    | TyKind::OutProjection(inner)
+    | TyKind::StarProjection(inner) = sup.kind()
+    {
+        return assignable_inner(cx, oracle, sub, inner);
     }
-    if let Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) = sub {
-        return assignable_inner(cx, oracle, *inner, sup);
+    if let TyKind::InProjection(inner)
+    | TyKind::OutProjection(inner)
+    | TyKind::StarProjection(inner) = sub.kind()
+    {
+        return assignable_inner(cx, oracle, inner, sup);
     }
 
     // A Java platform type `T!` is the flexible interval `T..T?`: as a source it may be consumed at
     // either bound, and as a target it accepts values admitted by the nullable upper bound.
-    if let Ty::PlatformNullable(inner) = sup {
-        let upper = platform_shape_upper_bound(oracle.platform_flexible_upper_bound(*inner));
+    if let TyKind::PlatformNullable(inner) = sup.kind() {
+        let upper = platform_shape_upper_bound(oracle.platform_flexible_upper_bound(inner));
         return assignable_inner(cx, oracle, sub, Ty::nullable(upper));
     }
-    if let Ty::PlatformNullable(inner) = sub {
-        return assignable_inner(cx, oracle, *inner, sup)
-            || assignable_inner(cx, oracle, Ty::nullable(*inner), sup);
+    if let TyKind::PlatformNullable(inner) = sub.kind() {
+        return assignable_inner(cx, oracle, inner, sup)
+            || assignable_inner(cx, oracle, Ty::nullable(inner), sup);
     }
 
     // Nullability. `null` fits any nullable target; `T` fits `T?`; `T?` does not fit non-null `T`.
     if sub == Ty::Null {
-        return matches!(sup, Ty::Nullable(_)) || sup == Ty::Null;
+        return matches!(sup.kind(), TyKind::Nullable(_)) || sup == Ty::Null;
     }
-    if let Ty::Nullable(inner) = sup {
+    if let TyKind::Nullable(inner) = sup.kind() {
         // `X? <: Y?` compares the non-null face of `X` against the nullable target. Stripping the
         // target's mark as well would reject a symbolic `X : Any?` from `Any?`, even though the
         // complete nullable occurrence is valid. This is the relation used when a nullable value
         // fixes a flexible Java variable (`Foo? <: T!`) and that solution is checked against T's
         // nullable upper bound.
-        if let Ty::Nullable(sub_inner) = sub {
-            return assignable_inner(cx, oracle, *sub_inner, sup);
+        if let TyKind::Nullable(sub_inner) = sub.kind() {
+            return assignable_inner(cx, oracle, sub_inner, sup);
         }
         // A symbolic source has the nullability of its upper bound. Follow that bound before
         // stripping the target's `?`: `<T : Any?>` is a subtype of `Any?` (and therefore fits a
         // star projection), but is not a subtype of non-null `Any`. Preserve the direct `T <: T?`
         // relation without expanding T to an unrelated upper bound first.
-        if matches!(sub, Ty::TyParam(source, _) if matches!(*inner, Ty::TyParam(target, _) if source == target))
+        if matches!(sub.kind(), TyKind::TyParam(source, _) if matches!(inner.kind(), TyKind::TyParam(target, _) if source == target))
         {
             return true;
         }
-        if let Ty::TyParam(name, bound) = sub {
-            return variable_bound_assignable(cx, oracle, sub, name.as_str(), *bound, sup);
+        if let TyKind::TyParam(name, bound) = sub.kind() {
+            return variable_bound_assignable(cx, oracle, sub, name.as_str(), bound, sup);
         }
-        return is_assignable(cx, oracle, sub.non_null(), *inner);
+        return is_assignable(cx, oracle, sub.non_null(), inner);
     }
-    if matches!(sub, Ty::Nullable(_)) {
+    if matches!(sub.kind(), TyKind::Nullable(_)) {
         // sup is non-null here (the `Nullable` sup arm returned above).
         return false;
     }
@@ -293,14 +300,16 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     // A source type variable is a subtype of its declared upper bound, including another variable
     // (`<R, T : R>` means `T <: R`). Check this before rejecting an unbound target variable; otherwise
     // the target arm hides the only declared proof of that relation.
-    if let (Ty::TyParam(source_name, source_bound), Ty::TyParam(target_name, _)) = (sub, sup) {
+    if let (TyKind::TyParam(source_name, source_bound), TyKind::TyParam(target_name, _)) =
+        (sub.kind(), sup.kind())
+    {
         if source_name != target_name {
             return variable_bound_assignable(
                 cx,
                 oracle,
                 sub,
                 source_name.as_str(),
-                *source_bound,
+                source_bound,
                 sup,
             );
         }
@@ -310,13 +319,13 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     // `String <: T`. Generic inference must bind T before ordinary assignability is asked. This comes
     // AFTER nullability so the same symbolic type still obeys Kotlin's ordinary `T <: T?` relation;
     // expanding the source `T` to its bound first loses that identity.
-    if let Ty::TyParam(name, _) = sup {
+    if let TyKind::TyParam(name, _) = sup.kind() {
         return cx
             .lookup(name.as_str())
             .is_some_and(|target| target != sup && assignable_inner(cx, oracle, sub, target));
     }
-    if let Ty::TyParam(name, bound) = sub {
-        return variable_bound_assignable(cx, oracle, sub, name.as_str(), *bound, sup);
+    if let TyKind::TyParam(name, bound) = sub.kind() {
+        return variable_bound_assignable(cx, oracle, sub, name.as_str(), bound, sup);
     }
 
     // Everything (a boxed primitive included) is assignable to `Any`/`Object`.
@@ -331,8 +340,8 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
         return sub == sup;
     }
 
-    match (sub, sup) {
-        (Ty::Fun(a), Ty::Fun(b)) => {
+    match (sub.kind(), sup.kind()) {
+        (TyKind::Fun(a), TyKind::Fun(b)) => {
             a.params.len() == b.params.len()
                 // A `suspend` function is never a regular one: nothing converts that way.
                 && (!a.suspend || b.suspend)
@@ -347,7 +356,9 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
         }
         // A function type projects onto `kotlin/Function<R>` with its own result as the
         // type argument, so the argument check applies: `() -> String` is not a `Function<Int>`.
-        (Ty::Obj(_, _) | Ty::Fun(_), Ty::Obj(_, _)) => obj_assignable(cx, oracle, sub, sup),
+        (TyKind::Obj(_, _) | TyKind::Fun(_), TyKind::Obj(_, _)) => {
+            obj_assignable(cx, oracle, sub, sup)
+        }
         _ => {
             // Remaining mixed reference shapes (`Ty::String` vs `Ty::Obj("kotlin/CharSequence")`) compare
             // through their Kotlin class identity.
@@ -368,40 +379,43 @@ fn obj_assignable(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool
         .zip(applied_sub.type_args().iter())
         .enumerate()
         .all(|(index, (&p, &a))| {
-            match p {
+            match p.kind() {
                 // `A<B> <: A<*>` for every argument `B`: a star projection contains every argument
                 // of its parameter. Its carried readable bound is derived from the declaration
                 // (kotlinc's `isSubtypeForSameConstructor` skips a star super-argument outright),
                 // so it never decides containment: a classpath `Frame<*>` whose bound the metadata
                 // reader leaves at `Any?` is the same type as a source `Frame<*>` reading `Bound`.
-                Ty::StarProjection(_) => return true,
-                Ty::OutProjection(expected) => {
-                    if matches!(a, Ty::InProjection(_)) {
+                TyKind::StarProjection(_) => return true,
+                TyKind::OutProjection(expected) => {
+                    if matches!(a.kind(), TyKind::InProjection(_)) {
                         let readable = target
                             .map(|owner| oracle.type_param_upper_bounds(owner, index))
                             .filter(|bounds| !bounds.is_empty())
                             .unwrap_or_else(|| vec![Ty::nullable(Ty::obj("kotlin/Any"))]);
                         return readable
                             .into_iter()
-                            .any(|bound| assignable_inner(cx, oracle, bound, *expected));
+                            .any(|bound| assignable_inner(cx, oracle, bound, expected));
                     }
                     let mut captured = cx.clone();
-                    capture_projection_parameters(&mut captured, oracle, *expected, a);
+                    capture_projection_parameters(&mut captured, oracle, expected, a);
                     return assignable_inner(
                         &captured,
                         oracle,
                         a.projection_inner().unwrap_or(a),
-                        *expected,
+                        expected,
                     );
                 }
-                Ty::InProjection(expected) => {
-                    if matches!(a, Ty::OutProjection(_) | Ty::StarProjection(_)) {
-                        return *expected == Ty::Nothing;
+                TyKind::InProjection(expected) => {
+                    if matches!(
+                        a.kind(),
+                        TyKind::OutProjection(_) | TyKind::StarProjection(_)
+                    ) {
+                        return expected == Ty::Nothing;
                     }
                     return assignable_inner(
                         cx,
                         oracle,
-                        *expected,
+                        expected,
                         a.projection_inner().unwrap_or(a),
                     );
                 }
@@ -431,13 +445,13 @@ fn capture_projection_parameters(
     template: Ty,
     actual: Ty,
 ) {
-    match template {
-        Ty::TyParam(name, _) => {
+    match template.kind() {
+        TyKind::TyParam(name, _) => {
             if cx.lookup(name.as_str()).is_none() && actual != template {
                 cx.bind(name.as_str(), actual.projection_inner().unwrap_or(actual));
             }
         }
-        Ty::Obj(_, template_args) => {
+        TyKind::Obj(_, template_args) => {
             let Some(applied) = applied_supertype(oracle, actual, template) else {
                 return;
             };
@@ -445,8 +459,8 @@ fn capture_projection_parameters(
                 capture_projection_parameters(cx, oracle, template, actual);
             }
         }
-        Ty::Fun(template) => {
-            let Ty::Fun(actual) = actual.projection_inner().unwrap_or(actual) else {
+        TyKind::Fun(template) => {
+            let TyKind::Fun(actual) = actual.projection_inner().unwrap_or(actual).kind() else {
                 return;
             };
             for (&template, &actual) in template.params.iter().zip(&actual.params) {
@@ -454,30 +468,30 @@ fn capture_projection_parameters(
             }
             capture_projection_parameters(cx, oracle, template.ret, actual.ret);
         }
-        Ty::DefinitelyNotNull(template)
-        | Ty::Nullable(template)
-        | Ty::PlatformNullable(template)
-        | Ty::InProjection(template)
-        | Ty::OutProjection(template)
-        | Ty::StarProjection(template) => capture_projection_parameters(
+        TyKind::DefinitelyNotNull(template)
+        | TyKind::Nullable(template)
+        | TyKind::PlatformNullable(template)
+        | TyKind::InProjection(template)
+        | TyKind::OutProjection(template)
+        | TyKind::StarProjection(template) => capture_projection_parameters(
             cx,
             oracle,
-            *template,
+            template,
             actual.projection_inner().unwrap_or(actual).non_null(),
         ),
-        Ty::Intersection(parts) => {
+        TyKind::Intersection(parts) => {
             for &part in parts {
                 capture_projection_parameters(cx, oracle, part, actual);
             }
         }
-        Ty::Unit | Ty::Pending | Ty::Nothing | Ty::Null | Ty::Error => {}
+        TyKind::Unit | TyKind::Pending | TyKind::Nothing | TyKind::Null | TyKind::Error => {}
     }
 }
 
 fn same_type_argument_with(oracle: &dyn TypeOracle, left: Ty, right: Ty) -> bool {
-    match (left, right) {
-        (Ty::TyParam(a, _), Ty::TyParam(b, _)) => a == b,
-        (Ty::Obj(a, aa), Ty::Obj(b, ba)) => {
+    match (left.kind(), right.kind()) {
+        (TyKind::TyParam(a, _), TyKind::TyParam(b, _)) => a == b,
+        (TyKind::Obj(a, aa), TyKind::Obj(b, ba)) => {
             a == b
                 && aa.len() == ba.len()
                 && aa
@@ -485,21 +499,23 @@ fn same_type_argument_with(oracle: &dyn TypeOracle, left: Ty, right: Ty) -> bool
                     .zip(ba)
                     .all(|(&left, &right)| same_flexible_type_with(oracle, left, right))
         }
-        (Ty::Nullable(a), Ty::Nullable(b))
-        | (Ty::PlatformNullable(a), Ty::PlatformNullable(b))
-        | (Ty::InProjection(a), Ty::InProjection(b))
-        | (Ty::OutProjection(a), Ty::OutProjection(b)) => same_flexible_type_with(oracle, *a, *b),
+        (TyKind::Nullable(a), TyKind::Nullable(b))
+        | (TyKind::PlatformNullable(a), TyKind::PlatformNullable(b))
+        | (TyKind::InProjection(a), TyKind::InProjection(b))
+        | (TyKind::OutProjection(a), TyKind::OutProjection(b)) => {
+            same_flexible_type_with(oracle, a, b)
+        }
         // Two stars in one argument slot are one projection, whatever readable bound each carries:
         // the bound is derived from the declaration, not part of the projection's identity.
-        (Ty::StarProjection(_), Ty::StarProjection(_)) => true,
+        (TyKind::StarProjection(_), TyKind::StarProjection(_)) => true,
         // A star projection is the `out` projection of its readable bound: `Resp<*>` is
         // `Resp<out Any?>`, and a Java wildcard `Resp<?>` arrives as `Resp<out Any!>`. Inside an
         // invariant argument the two spellings are one type.
-        (Ty::StarProjection(bound), Ty::OutProjection(other))
-        | (Ty::OutProjection(other), Ty::StarProjection(bound)) => {
-            same_flexible_type_with(oracle, *bound, *other)
+        (TyKind::StarProjection(bound), TyKind::OutProjection(other))
+        | (TyKind::OutProjection(other), TyKind::StarProjection(bound)) => {
+            same_flexible_type_with(oracle, bound, other)
         }
-        (Ty::Fun(a), Ty::Fun(b)) => {
+        (TyKind::Fun(a), TyKind::Fun(b)) => {
             a.context_count == b.context_count
                 && a.has_receiver == b.has_receiver
                 && a.suspend == b.suspend
@@ -532,14 +548,13 @@ impl TypeOracle for NullOracle {
 }
 
 fn same_flexible_type_with(oracle: &dyn TypeOracle, left: Ty, right: Ty) -> bool {
-    match (left, right) {
-        (Ty::PlatformNullable(left), Ty::PlatformNullable(right)) => {
-            flexible_bound_matches(oracle, *left, *right)
-                || flexible_bound_matches(oracle, *right, *left)
+    match (left.kind(), right.kind()) {
+        (TyKind::PlatformNullable(left), TyKind::PlatformNullable(right)) => {
+            flexible_bound_matches(oracle, left, right)
+                || flexible_bound_matches(oracle, right, left)
         }
-        (Ty::PlatformNullable(inner), other) | (other, Ty::PlatformNullable(inner)) => {
-            flexible_bound_matches(oracle, *inner, other)
-        }
+        (TyKind::PlatformNullable(inner), _) => flexible_bound_matches(oracle, inner, right),
+        (_, TyKind::PlatformNullable(inner)) => flexible_bound_matches(oracle, inner, left),
         _ => same_type_argument_with(oracle, left, right),
     }
 }
@@ -560,7 +575,7 @@ fn flexible_bound_matches(oracle: &dyn TypeOracle, inner: Ty, other: Ty) -> bool
 /// `Box<T : Any>` is therefore not assignable to `Box<String>` until inference binds `T` to `String`.
 fn normalized_type_argument(cx: &TyCtx, ty: Ty) -> Ty {
     fn resolve(cx: &TyCtx, current: Ty, origin: Ty) -> Ty {
-        let Ty::TyParam(name, _) = current else {
+        let TyKind::TyParam(name, _) = current.kind() else {
             return current;
         };
         let Some(next) = cx.lookup(name.as_str()) else {
@@ -624,7 +639,7 @@ mod tests {
         fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
             // What `hierarchy_projection` states for the real oracle: `(P) -> R` is a
             // `kotlin.Function<R>`.
-            if let Ty::Fun(signature) = ty.non_null() {
+            if let TyKind::Fun(signature) = ty.non_null().kind() {
                 return vec![Ty::obj_args("kotlin/Function", &[signature.ret])];
             }
             let Some(internal) = ty.kotlin_class_internal() else {
@@ -682,8 +697,10 @@ mod tests {
             }
         }
         fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
-            match lower {
-                Ty::Obj(owner, arguments) if owner.matches("kotlin/collections/MutableList") => {
+            match lower.kind() {
+                TyKind::Obj(owner, arguments)
+                    if owner.matches("kotlin/collections/MutableList") =>
+                {
                     Ty::obj_args("kotlin/collections/List", &arguments)
                 }
                 _ => lower,
@@ -786,8 +803,8 @@ mod tests {
 
         impl TypeOracle for FunctionOracle {
             fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
-                match ty.non_null() {
-                    Ty::Fun(signature) => {
+                match ty.non_null().kind() {
+                    TyKind::Fun(signature) => {
                         vec![Ty::obj_args("kotlin/Function", &[signature.ret])]
                     }
                     _ => Vec::new(),

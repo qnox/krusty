@@ -74,7 +74,7 @@ pub(crate) use stdlib_klib_intrinsics::{stdlib_klib_intrinsic, StdlibKlibIntrins
 use crate::fx_hash::{HashMap, HashSet};
 use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
-use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TypeName, TypeNameList};
+use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
 pub use compiler_intrinsic::CompilerIntrinsic;
 pub(crate) use core_builtins::add_core_builtin_declarations;
@@ -1704,13 +1704,13 @@ impl FunctionInfo {
         }
 
         fn merge_method_arguments(declared: Ty, selected: Ty, formals: &[String]) -> Ty {
-            match (declared, selected) {
-                (Ty::TyParam(formal, _), selected)
+            match (declared.kind(), selected.kind()) {
+                (TyKind::TyParam(formal, _), _)
                     if formals.iter().any(|candidate| candidate == formal) =>
                 {
                     selected
                 }
-                (Ty::Obj(name, arguments), Ty::Obj(selected_name, selected_arguments))
+                (TyKind::Obj(name, arguments), TyKind::Obj(selected_name, selected_arguments))
                     if name == selected_name && arguments.len() == selected_arguments.len() =>
                 {
                     let merged = arguments
@@ -1725,7 +1725,7 @@ impl FunctionInfo {
                         .then(|| Ty::obj_args_name(name, &merged))
                         .unwrap_or(declared)
                 }
-                (Ty::Fun(function), Ty::Fun(selected_function))
+                (TyKind::Fun(function), TyKind::Fun(selected_function))
                     if function.params.len() == selected_function.params.len()
                         && function.context_count == selected_function.context_count
                         && function.has_receiver == selected_function.has_receiver
@@ -1753,20 +1753,20 @@ impl FunctionInfo {
                         })
                         .unwrap_or(declared)
                 }
-                (Ty::Nullable(inner), Ty::Nullable(selected_inner)) => {
-                    Ty::nullable(merge_method_arguments(*inner, *selected_inner, formals))
+                (TyKind::Nullable(inner), TyKind::Nullable(selected_inner)) => {
+                    Ty::nullable(merge_method_arguments(inner, selected_inner, formals))
                 }
-                (Ty::PlatformNullable(inner), Ty::PlatformNullable(selected_inner)) => {
-                    Ty::platform_nullable(merge_method_arguments(*inner, *selected_inner, formals))
+                (TyKind::PlatformNullable(inner), TyKind::PlatformNullable(selected_inner)) => {
+                    Ty::platform_nullable(merge_method_arguments(inner, selected_inner, formals))
                 }
-                (Ty::InProjection(inner), Ty::InProjection(selected_inner)) => {
-                    Ty::in_projection(merge_method_arguments(*inner, *selected_inner, formals))
+                (TyKind::InProjection(inner), TyKind::InProjection(selected_inner)) => {
+                    Ty::in_projection(merge_method_arguments(inner, selected_inner, formals))
                 }
-                (Ty::OutProjection(inner), Ty::OutProjection(selected_inner)) => {
-                    Ty::out_projection(merge_method_arguments(*inner, *selected_inner, formals))
+                (TyKind::OutProjection(inner), TyKind::OutProjection(selected_inner)) => {
+                    Ty::out_projection(merge_method_arguments(inner, selected_inner, formals))
                 }
-                (Ty::StarProjection(inner), Ty::StarProjection(selected_inner)) => {
-                    Ty::star_projection(merge_method_arguments(*inner, *selected_inner, formals))
+                (TyKind::StarProjection(inner), TyKind::StarProjection(selected_inner)) => {
+                    Ty::star_projection(merge_method_arguments(inner, selected_inner, formals))
                 }
                 _ => declared,
             }

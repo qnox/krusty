@@ -5,7 +5,7 @@ use crate::fir::{
     FirReferenceAdaptation, FirTypeSubstitution,
 };
 use crate::ir::{ExprId, IrCheckedOperation, IrExpr, IrFunction, IrTypeOp};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::{BodyLowering, FirLoweringFailure};
 
@@ -20,7 +20,7 @@ impl BodyLowering<'_> {
         adaptation: Option<&FirReferenceAdaptation>,
         reference_ty: Ty,
     ) -> Result<Option<ExprId>, FirLoweringFailure> {
-        let Ty::Fun(reference) = reference_ty.non_null() else {
+        let TyKind::Fun(reference) = reference_ty.non_null().kind() else {
             return Ok(None);
         };
         if adaptation.is_some_and(|adaptation| !adaptation.arguments.is_empty()) {

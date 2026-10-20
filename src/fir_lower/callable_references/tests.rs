@@ -1,4 +1,5 @@
 use super::*;
+use crate::types::TyKind;
 
 fn semantic_references(ir: &IrFile) -> Vec<&crate::ir::IrCallableReference> {
     ir.exprs
@@ -69,8 +70,8 @@ fn unadapted_local_function_reference_keeps_structural_identity_and_capture() {
         crate::ir::IrCallableReferenceTarget::Local { name, .. } if name.as_ref() == "add"
     ));
     assert!(matches!(
-        reference.function_type,
-        Ty::Fun(signature) if signature.params.len() == 1
+        reference.function_type.kind(),
+        TyKind::Fun(signature) if signature.params.len() == 1
     ));
     assert!(ir
         .exprs
@@ -118,7 +119,7 @@ fn adapted_local_function_reference_becomes_default_call_wrapper() {
             reference.target,
             crate::ir::IrCallableReferenceTarget::Local { .. }
         ) && reference.adaptation.is_some()
-            && matches!(reference.function_type, Ty::Fun(signature) if signature.params.len() == 1)
+            && matches!(reference.function_type.kind(), TyKind::Fun(signature) if signature.params.len() == 1)
     }));
     assert!(ir
         .exprs
@@ -149,7 +150,7 @@ fn suspend_converted_local_reference_becomes_suspend_wrapper() {
     assert!(semantic_references(&ir).iter().any(|reference| {
         reference.adapter == wrapper
             && reference.captures.is_empty()
-            && matches!(reference.function_type, Ty::Fun(signature)
+            && matches!(reference.function_type.kind(), TyKind::Fun(signature)
                 if signature.suspend && signature.params.len() == 1)
     }));
     assert!(ir
@@ -191,8 +192,10 @@ fn suspend_converted_function_value_becomes_bound_conversion_reference() {
     assert_eq!(reference.adapter, adapter);
     assert!(reference.captures.is_empty() && reference.bound_receiver.is_some());
     assert!(reference.declaration_suspend && reference.adaptation.is_none());
-    assert!(matches!(reference.function_type, Ty::Fun(signature)
-        if signature.suspend && signature.params == [Ty::Int] && signature.ret == Ty::String));
+    assert!(
+        matches!(reference.function_type.kind(), TyKind::Fun(signature)
+        if signature.suspend && signature.params == [Ty::Int] && signature.ret == Ty::String)
+    );
 }
 
 #[test]
@@ -242,8 +245,10 @@ fn unit_converted_suspend_function_value_suspends_in_its_adapter() {
     ));
     assert_eq!(reference.adapter, adapter);
     assert!(reference.bound_receiver.is_some() && reference.declaration_suspend);
-    assert!(matches!(reference.function_type, Ty::Fun(signature)
-        if signature.suspend && signature.params == [Ty::Int] && signature.ret == Ty::Unit));
+    assert!(
+        matches!(reference.function_type.kind(), TyKind::Fun(signature)
+        if signature.suspend && signature.params == [Ty::Int] && signature.ret == Ty::Unit)
+    );
 }
 
 #[test]
@@ -310,8 +315,8 @@ fn function_invoke_reference_becomes_a_capturing_suspend_forwarder() {
         .expect("function invoke forwarding wrapper") as u32;
     assert_eq!(ir.functions[wrapper as usize].params.len(), 1);
     assert!(matches!(
-        ir.functions[wrapper as usize].params[0],
-        Ty::Fun(signature) if signature.suspend && signature.params.is_empty()
+        ir.functions[wrapper as usize].params[0].kind(),
+        TyKind::Fun(signature) if signature.suspend && signature.params.is_empty()
     ));
     assert_eq!(ir.functions[wrapper as usize].ret, Ty::obj("kotlin/Unit"));
     assert!(ir.suspend_funs.contains(&wrapper));
@@ -405,7 +410,7 @@ fn vararg_adapted_local_reference_packs_wrapper_parameters() {
             reference.target,
             crate::ir::IrCallableReferenceTarget::Local { .. }
         ) && reference.adaptation.is_some()
-            && matches!(reference.function_type, Ty::Fun(signature) if signature.params.len() == 2)
+            && matches!(reference.function_type.kind(), TyKind::Fun(signature) if signature.params.len() == 2)
     }));
     assert!(ir
         .exprs
@@ -460,7 +465,7 @@ fn unbound_local_extension_reference_keeps_receiver_as_structural_parameter() {
                 reference.target,
                 crate::ir::IrCallableReferenceTarget::Local { .. }
             )
-            && matches!(reference.function_type, Ty::Fun(signature) if signature.params.len() == 2)
+            && matches!(reference.function_type.kind(), TyKind::Fun(signature) if signature.params.len() == 2)
     }));
     assert!(ir
         .exprs
@@ -487,7 +492,7 @@ fn bound_local_extension_reference_captures_selected_receiver() {
                 reference.target,
                 crate::ir::IrCallableReferenceTarget::Local { .. }
             )
-            && matches!(reference.function_type, Ty::Fun(signature) if signature.params.len() == 1)
+            && matches!(reference.function_type.kind(), TyKind::Fun(signature) if signature.params.len() == 1)
     }));
     assert!(ir
         .exprs
@@ -516,13 +521,13 @@ fn adapted_local_extension_references_materialize_bound_and_unbound_receivers() 
         reference.captures.is_empty()
             && reference.bound_receiver.is_none()
             && reference.adaptation.is_some()
-            && matches!(reference.function_type, Ty::Fun(signature) if signature.params.len() == 1)
+            && matches!(reference.function_type.kind(), TyKind::Fun(signature) if signature.params.len() == 1)
     }));
     assert!(references.iter().any(|reference| {
         reference.captures.is_empty()
             && reference.bound_receiver.is_some()
             && reference.adaptation.is_some()
-            && matches!(reference.function_type, Ty::Fun(signature) if signature.params.is_empty())
+            && matches!(reference.function_type.kind(), TyKind::Fun(signature) if signature.params.is_empty())
     }));
     assert!(ir
         .exprs
@@ -647,7 +652,7 @@ fn a_local_reference_coerces_substituted_arguments_to_declared_slots() {
     };
     let declared = [declared_slot(0), declared_slot(2)];
     assert!(
-        declared.iter().all(|slot| matches!(slot, Ty::TyParam(..))),
+        declared.iter().all(|slot| slot.is_ty_param()),
         "the generic local functions keep their type parameter: {declared:?}"
     );
     let coercions = ir
@@ -1545,8 +1550,10 @@ fn reflective_unbound_inner_constructor_reference_keeps_structural_identity() {
         crate::ir::IrCallableReferenceTarget::Constructor { classifier }
             if classifier == crate::types::type_name("Outer$Inner")
     ));
-    assert!(matches!(reference.function_type, Ty::Fun(signature)
-        if signature.params == [Ty::obj("Outer")]));
+    assert!(
+        matches!(reference.function_type.kind(), TyKind::Fun(signature)
+        if signature.params == [Ty::obj("Outer")])
+    );
     assert_eq!(
         reference.declaration_parameters.as_ref(),
         [Ty::obj("Outer")]
@@ -1727,8 +1734,8 @@ fn reflective_enum_value_of_reference_names_the_classifier_member() {
         } if classifier == crate::types::type_name("E")
     ));
     assert!(matches!(
-        reference.function_type,
-        Ty::Fun(signature) if signature.params == [Ty::String]
+        reference.function_type.kind(),
+        TyKind::Fun(signature) if signature.params == [Ty::String]
     ));
     assert_eq!(reference.declaration_parameters.as_ref(), [Ty::String]);
     assert_eq!(reference.declaration_result, Ty::obj("E"));

@@ -4,7 +4,7 @@
 
 use crate::fx_hash::HashMap;
 use crate::ir::{Callee, ExprId, IrExpr};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// Whether the value the expr at `id` produces is statically NON-NULL — so boxing it (`box-impl`) can't
 /// hit the value class's non-null ctor check. A construction/`!!`/non-nullable slot or return qualifies.
@@ -15,7 +15,7 @@ pub(super) fn operand_nonnull(
     slots: &HashMap<u32, Ty>,
     id: ExprId,
 ) -> bool {
-    let non_null_ty = |t: &Ty| matches!(t, Ty::Obj(..));
+    let non_null_ty = |t: &Ty| matches!(t.kind(), TyKind::Obj(..));
     match &exprs[id as usize] {
         // An array allocation is a fresh non-null reference. Treating `newarray` as nullable
         // dropped the `box-impl` a null-safe coercion to a supertype has to emit.

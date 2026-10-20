@@ -111,8 +111,8 @@ pub(crate) fn semantic_call_role(
             && declaration
                 .params
                 .iter()
-                .all(|parameter| matches!(parameter, Ty::TyParam(..)))
-            && matches!(declaration.ret, Ty::TyParam(..))
+                .all(|parameter| parameter.is_ty_param())
+            && declaration.ret.is_ty_param()
             && !declaration.is_infix;
         if signature_matches
             && ((declaration.name == "get" && !declaration.is_operator)
@@ -136,7 +136,7 @@ pub(crate) fn semantic_call_role(
             && declaration
                 .params
                 .iter()
-                .all(|parameter| matches!(parameter, Ty::TyParam(..)))
+                .all(|parameter| parameter.is_ty_param())
             && declaration.ret == Ty::Unit
             && !declaration.is_operator
             && !declaration.is_infix;

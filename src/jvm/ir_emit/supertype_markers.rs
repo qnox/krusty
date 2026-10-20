@@ -11,7 +11,7 @@
 use crate::ir::{IrClass, IrFile};
 use crate::jvm::classfile::ClassWriter;
 use crate::jvm::type_intrinsics::{collection_marker, SUSPEND_FUNCTION_MARKER};
-use crate::types::Ty;
+use crate::types::TyKind;
 
 /// The markers in kotlinc's order: first appearance among the direct supertypes, each once.
 pub(super) fn marker_interfaces(ir: &IrFile, class: &IrClass) -> Vec<&'static str> {
@@ -56,21 +56,24 @@ fn declared_interfaces(class: &IrClass) -> Vec<String> {
     if !class
         .supertypes
         .iter()
-        .any(|supertype| matches!(supertype.non_null(), Ty::Fun(_)))
+        .any(|supertype| supertype.non_null().is_fun())
     {
         return class.interfaces.iter_rendered().collect();
     }
     class
         .supertypes
         .iter()
-        .filter_map(|supertype| match supertype.non_null() {
-            Ty::Fun(function) => Some(crate::jvm::names::function_interface_internal_name(
-                function.params.len() + usize::from(function.suspend),
-            )),
-            nominal => nominal
-                .obj_internal()
-                .filter(|classifier| class.interfaces.contains_name(*classifier))
-                .map(|classifier| classifier.render()),
+        .filter_map(|supertype| {
+            let nominal = supertype.non_null();
+            match nominal.kind() {
+                TyKind::Fun(function) => Some(crate::jvm::names::function_interface_internal_name(
+                    function.params.len() + usize::from(function.suspend),
+                )),
+                _ => nominal
+                    .obj_internal()
+                    .filter(|classifier| class.interfaces.contains_name(*classifier))
+                    .map(|classifier| classifier.render()),
+            }
         })
         .collect()
 }

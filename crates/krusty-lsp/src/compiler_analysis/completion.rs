@@ -6,7 +6,7 @@ use krusty::ast::{
     ClassDecl, ClassKind, Decl, Expr, File, FunBody, FunDecl, Param, PropDecl, Stmt, TypeRef,
 };
 use krusty::diag::Span;
-use krusty::types::{Ty, Visibility};
+use krusty::types::{Ty, TyKind, Visibility};
 
 use super::{
     companion_class,
@@ -1002,9 +1002,12 @@ fn qualified_name(package: &str, name: &str) -> String {
 }
 
 fn ty_key(ty: &Ty) -> Option<String> {
-    match ty.non_null() {
-        Ty::Obj(name, _) => Some(name.render().replace(['/', '$'], ".")),
-        Ty::Error | Ty::Null | Ty::Nothing => None,
-        primitive => Some(format!("{primitive:?}")),
+    {
+        let primitive = ty.non_null();
+        match primitive.kind() {
+            TyKind::Obj(name, _) => Some(name.render().replace(['/', '$'], ".")),
+            TyKind::Error | TyKind::Null | TyKind::Nothing => None,
+            _ => Some(format!("{primitive:?}")),
+        }
     }
 }

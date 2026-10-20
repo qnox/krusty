@@ -5,7 +5,7 @@ use crate::fir::{
     FirStatementKind, LocalCallableId,
 };
 use crate::ir::{Callee, ExprId, IrExpr, IrFunction};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::tailrec::{finish_tailrec_body, Frame as TailrecFrame};
 
@@ -576,7 +576,7 @@ impl BodyLowering<'_> {
         adaptation: Option<&crate::fir::FirReferenceAdaptation>,
         reference_ty: Ty,
     ) -> Result<Option<ExprId>, FirLoweringFailure> {
-        let Ty::Fun(reference) = reference_ty.non_null() else {
+        let TyKind::Fun(reference) = reference_ty.non_null().kind() else {
             return Ok(None);
         };
         let reference_suspend = realization.suspend

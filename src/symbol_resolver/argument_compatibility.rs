@@ -6,7 +6,7 @@
 
 use crate::libraries::SemanticPlatform;
 use crate::symbol_source::SymbolSource;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::{
     instantiate_slot, semantic_arg_assignable, semantic_sam_signature, GSigBinds, SourceOracle,
@@ -20,8 +20,8 @@ pub(crate) fn function_input_types(
     sig: Ty,
     binds: &GSigBinds,
 ) -> Vec<Ty> {
-    match sig.non_null() {
-        Ty::Fun(signature) => signature
+    match sig.non_null().kind() {
+        TyKind::Fun(signature) => signature
             .params
             .iter()
             .map(|parameter| {
@@ -42,12 +42,12 @@ pub(crate) fn function_input_types(
 /// Whether an argument fits a parameter in erased Kotlin terms.
 pub(crate) fn arg_fits(parameter: &Ty, argument: &Ty) -> bool {
     parameter == argument
-        || matches!(parameter, Ty::Obj(name, _)
-            if (crate::types::same(*name, crate::types::wk::any())
-                || crate::types::same(*name, crate::types::wk::java_object()))
-                && !matches!(argument, Ty::Null | Ty::Nullable(_)))
+        || matches!(parameter.kind(), TyKind::Obj(name, _)
+            if (crate::types::same(name, crate::types::wk::any())
+                || crate::types::same(name, crate::types::wk::java_object()))
+                && !matches!(argument.kind(), TyKind::Null | TyKind::Nullable(_)))
         || matches!((parameter.fun_arity(), argument.fun_arity()), (Some(expected), Some(actual)) if expected == actual)
-        || matches!((parameter, argument), (Ty::Obj(expected, _), Ty::Obj(actual, _)) if expected == actual)
+        || matches!((parameter.kind(), argument.kind()), (TyKind::Obj(expected, _), TyKind::Obj(actual, _)) if expected == actual)
 }
 
 /// Whether a function-shaped argument can adapt to a functional-interface parameter.
@@ -84,9 +84,9 @@ pub(crate) fn sam_return_matches(
     if expected == Ty::Unit || matches!(actual, Ty::Error | Ty::Nothing) {
         return true;
     }
-    let expected = match expected {
-        Ty::TyParam(_, bound) => *bound,
-        expected => expected,
+    let expected = match expected.kind() {
+        TyKind::TyParam(_, bound) => bound,
+        _ => expected,
     };
     semantic_arg_assignable(source, &expected, &actual)
 }
@@ -113,7 +113,7 @@ pub(super) fn arg_fits_source(
         || semantic_arg_assignable(source, parameter, argument)
         // `null` may constrain a callable-owned formal to `Nothing?`; a fixed enclosing bare type
         // parameter is rejected later by the ordinary checker with its precise diagnostic.
-        || (*argument == Ty::Null && matches!(parameter.non_null(), Ty::TyParam(..)))
+        || (*argument == Ty::Null && parameter.non_null().is_ty_param())
 }
 
 /// Whether a parameter can host an implicitly typed lambda before its body is checked.
@@ -124,7 +124,7 @@ pub(super) fn untyped_lambda_pertinent(
 ) -> bool {
     let shape = parameter.non_null();
     shape.fun_arity().is_some()
-        || matches!(shape, Ty::TyParam(..))
+        || shape.is_ty_param()
         || shape.is_erased_top()
         || (0..=1)
             .filter_map(|arity| platform.function_type(arity))
@@ -147,8 +147,8 @@ impl super::SymbolResolver<'_> {
     /// type, a SAM interface, a type variable whose bound admits one, or a supertype of every
     /// function type such as `Any`.
     pub(crate) fn admits_function_value(&self, parameter: Ty) -> bool {
-        if let Ty::TyParam(_, bound) = parameter.non_null() {
-            return self.admits_function_value(*bound);
+        if let TyKind::TyParam(_, bound) = parameter.non_null().kind() {
+            return self.admits_function_value(bound);
         }
         self.functional_expectation(parameter).is_some()
             || resolution_subtype(

@@ -8,7 +8,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 const OBJECT_REF: &str = "kotlin/jvm/internal/Ref$ObjectRef";
 
@@ -448,7 +448,7 @@ fn lambda_class_constructor(ir: &IrFile, internal: TypeName) -> Option<Vec<Ty>> 
 
 /// The element a constructor parameter of the erased `Ref$ObjectRef<T>` holder carries.
 fn erased_cell_element(parameter: Ty) -> Option<Ty> {
-    let Ty::Obj(holder, arguments) = parameter.non_null() else {
+    let TyKind::Obj(holder, arguments) = parameter.non_null().kind() else {
         return None;
     };
     if !holder.matches(OBJECT_REF) {
@@ -748,7 +748,7 @@ mod tests {
         else {
             panic!("cell");
         };
-        assert!(matches!(elem, Ty::TyParam(name, _) if *name == "R"));
+        assert!(matches!(elem.kind(), TyKind::TyParam(name, _) if &*name == "R"));
         assert!(matches!(
             ir.expr(*init),
             IrExpr::TypeOp {
@@ -768,12 +768,12 @@ mod tests {
         assert_eq!(*type_operand, Ty::Int);
         assert!(matches!(
             ir.expr(*moved),
-            IrExpr::RefGet { elem, .. } if matches!(elem, Ty::TyParam(name, _) if *name == "R")
+            IrExpr::RefGet { elem, .. } if matches!(elem.kind(), TyKind::TyParam(name, _) if &*name == "R")
         ));
         let IrExpr::RefSet { elem, value, .. } = ir.expr(write) else {
             panic!("write");
         };
-        assert!(matches!(elem, Ty::TyParam(name, _) if *name == "R"));
+        assert!(matches!(elem.kind(), TyKind::TyParam(name, _) if &*name == "R"));
         assert!(matches!(
             ir.expr(*value),
             IrExpr::TypeOp {
@@ -989,8 +989,8 @@ mod tests {
             [Ty::TyParam(name, _)] if *name == "R"
         ));
         assert!(matches!(
-            ir.shared_capture_parameters.get(&(specialized, 0)),
-            Some(Ty::TyParam(name, _)) if *name == "R"
+            ir.shared_capture_parameters.get(&(specialized, 0)).map(|ty| ty.kind()),
+            Some(TyKind::TyParam(name, _)) if &*name == "R"
         ));
         let IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,

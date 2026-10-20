@@ -6,7 +6,7 @@ use super::{
     ty_subst_keep_unbound, unify_ty_from_symbols, GSigBinds, SourceOracle,
 };
 use crate::symbol_source::SymbolSource;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// Whether the declared receiver's type arguments are consistent with the actual receiver's, position by
 /// position, under Kotlin's COVARIANT reading of a receiver position: each actual argument must be
@@ -55,7 +55,7 @@ fn receiver_type_args_match(
     }
     let erased_top = |t: Ty| {
         let t = t.projection_inner().unwrap_or(t);
-        matches!(t.non_null(), Ty::Obj(n, _)
+        matches!(t.non_null().kind(), TyKind::Obj(n, _)
             if crate::types::same(n, crate::types::wk::any())
                 || crate::types::same(n, crate::types::wk::java_object()))
     };
@@ -73,12 +73,12 @@ fn receiver_type_args_match(
             if declared_wildcard(d) || erased_top(r) {
                 return true;
             }
-            match d {
-                Ty::InProjection(expected) => {
-                    crate::assignable::is_assignable(&cx, &oracle, *expected, r)
+            match d.kind() {
+                TyKind::InProjection(expected) => {
+                    crate::assignable::is_assignable(&cx, &oracle, expected, r)
                 }
-                Ty::OutProjection(expected) => {
-                    crate::assignable::is_assignable(&cx, &oracle, r, *expected)
+                TyKind::OutProjection(expected) => {
+                    crate::assignable::is_assignable(&cx, &oracle, r, expected)
                 }
                 _ => crate::assignable::is_assignable(&cx, &oracle, r, d),
             }
@@ -129,7 +129,9 @@ fn bind_receiver_type_variables(
 /// receiver-function notation shares the same value representation and parameter list, so the
 /// `has_receiver` marker does not participate here.
 pub(crate) fn function_shape_matches(src: &dyn SymbolSource, actual: Ty, declared: Ty) -> bool {
-    let (Ty::Fun(actual), Ty::Fun(declared)) = (actual.non_null(), declared.non_null()) else {
+    let (TyKind::Fun(actual), TyKind::Fun(declared)) =
+        (actual.non_null().kind(), declared.non_null().kind())
+    else {
         return false;
     };
     let mut bindings = GSigBinds::default();
@@ -215,7 +217,7 @@ impl ReceiverMro {
         // A generic receiver may bind its parameter to a nullable type even though a bare T is not
         // itself a nullable value occurrence. An explicit non-null upper bound closes that route.
         let accepts_nullable = decl_recv.admits_null()
-            || matches!(decl_recv, Ty::TyParam(_, bound) if bound.upper_bound_admits_null());
+            || matches!(decl_recv.kind(), TyKind::TyParam(_, bound) if bound.upper_bound_admits_null());
         // The null literal has no classifier hierarchy of its own, but it is a valid receiver for
         // every nullable extension receiver. Candidate specificity is decided after this applicability
         // rung; inventing a class key for `Null` would incorrectly make it a member of `Any`'s MRO.
@@ -245,7 +247,7 @@ impl ReceiverMro {
         // Its member scope remains nominal, but extension applicability uses the exact callable
         // supertype shape published by the provider. Bind generic receiver slots from that shape;
         // returning the nominal receiver here loses `T` in `suspend () -> T` before selection.
-        if matches!(decl_recv.non_null(), Ty::Fun(_)) {
+        if decl_recv.non_null().is_fun() {
             let callable = classifier_callable_signature(src, self.recv)?;
             if function_shape_matches(src, callable, decl_recv) {
                 let callable_rung = self

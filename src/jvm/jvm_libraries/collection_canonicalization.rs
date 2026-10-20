@@ -6,7 +6,7 @@
 
 use crate::jvm::classpath::kotlin_name_to_ty;
 use crate::jvm::jvm_class_map;
-use crate::types::{Ty, TyList};
+use crate::types::{Ty, TyKind, TyList};
 
 /// Overlay the `@Metadata`-declared collection classifiers onto a JVM-signature-derived type, level
 /// by level. The signature erases read-only vs mutable (`List`/`MutableList` both spell
@@ -22,7 +22,9 @@ pub(super) fn overlay_metadata_collection_names(base: Ty, meta: Ty) -> Ty {
     // Nullability lives on the base (the resolution pipeline applies it separately); look through a
     // metadata `T?` to its classifier.
     let meta = meta.non_null();
-    let (Ty::Obj(base_name, base_args), Ty::Obj(meta_name, meta_args)) = (base, meta) else {
+    let (TyKind::Obj(base_name, base_args), TyKind::Obj(meta_name, meta_args)) =
+        (base.kind(), meta.kind())
+    else {
         return base;
     };
     let sibling = jvm_class_map::is_kotlin_collection_type_name(meta_name)
@@ -48,20 +50,22 @@ pub(super) fn overlay_metadata_collection_names(base: Ty, meta: Ty) -> Ty {
 /// Recursively rewrite each JVM collection interface in `ty` (`java/util/List<T>` → its Kotlin
 /// `kotlin/collections/List<T>`), leaving every other type and the type arguments' own structure intact.
 pub(super) fn canonicalize_jvm_collections(ty: Ty) -> Ty {
-    match ty {
+    match ty.kind() {
         // A boxed primitive wrapper (`java/lang/Integer`) — always a type ARGUMENT here (a top-level
         // return is a collection with args, or handled by the suspend bare-class path). Its Kotlin type is
         // the PRIMITIVE (`kotlin/Int` → `Ty::Int`), not a boxed `Obj("kotlin/Int")`: a signature spells a
         // generic argument's primitive in its boxed JVM form (`List<Integer>`), but `List<Int>`'s element
         // is `Int`, so `for (x in xs) { s += x }` / `xs.sum()` resolve and the element unboxes rather than
         // comparing `Int` against a boxed reference.
-        Ty::Obj(name, TyList::EMPTY) => match jvm_class_map::wrapper_to_kotlin_prim_name(name) {
-            Some(prim) => kotlin_name_to_ty(prim),
-            None => Ty::obj_name(
-                jvm_class_map::jvm_collection_to_kotlin_type_name(name).unwrap_or(name),
-            ),
-        },
-        Ty::Obj(name, args) => {
+        TyKind::Obj(name, TyList::EMPTY) => {
+            match jvm_class_map::wrapper_to_kotlin_prim_name(name) {
+                Some(prim) => kotlin_name_to_ty(prim),
+                None => Ty::obj_name(
+                    jvm_class_map::jvm_collection_to_kotlin_type_name(name).unwrap_or(name),
+                ),
+            }
+        }
+        TyKind::Obj(name, args) => {
             // Canonicalize a JVM collection to its Kotlin form (`java/util/List` →
             // `kotlin/collections/List`), so a member/`for`/extension keyed on the Kotlin collection
             // resolves on the recovered type.
@@ -72,7 +76,7 @@ pub(super) fn canonicalize_jvm_collections(ty: Ty) -> Ty {
                 .collect();
             Ty::obj_args_name(kname, &cargs)
         }
-        Ty::Fun(sig) => {
+        TyKind::Fun(sig) => {
             let params = sig
                 .params
                 .iter()
@@ -87,7 +91,7 @@ pub(super) fn canonicalize_jvm_collections(ty: Ty) -> Ty {
                 sig.suspend,
             )
         }
-        Ty::Nullable(inner) => Ty::nullable(canonicalize_jvm_collections(*inner)),
-        other => other,
+        TyKind::Nullable(inner) => Ty::nullable(canonicalize_jvm_collections(inner)),
+        _ => ty,
     }
 }

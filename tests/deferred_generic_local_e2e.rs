@@ -182,7 +182,7 @@ fn common_ir_keeps_specialized_semantics_and_deferred_declaration_provenance() {
         .deferred_local_types
         .iter()
         .any(|(&declaration, declared)| {
-            matches!(declared.non_null(), krusty::types::Ty::TyParam(..))
+            declared.non_null().is_ty_param()
                 && matches!(
                     ir.expr(declaration),
                     krusty::ir::IrExpr::Variable {

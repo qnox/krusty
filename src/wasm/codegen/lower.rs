@@ -31,7 +31,7 @@ use crate::ir::{
     module_override_callable, Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic,
     IrTypeOp,
 };
-use crate::types::{EqualityMode, Ty};
+use crate::types::{EqualityMode, Ty, TyKind};
 
 use super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::super::objects::REFERENCE;
@@ -333,11 +333,14 @@ pub(super) const STRING: ValType = ValType::Ref {
 };
 
 fn describe(ty: Ty) -> String {
-    match ty {
+    match ty.kind() {
         // Boundary conversion for a diagnostic.
-        Ty::Obj(name, _) => name.render().replace('/', "."),
-        Ty::Nullable(inner) => format!("{}?", describe(*inner)),
-        other => format!("{other:?}"),
+        TyKind::Obj(name, _) => name.render().replace('/', "."),
+        TyKind::Nullable(inner) => format!("{}?", describe(inner)),
+        _ => {
+            let other = ty;
+            format!("{other:?}")
+        }
     }
 }
 

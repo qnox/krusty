@@ -3,6 +3,7 @@ use super::test_support::{
     jvm_semantics, jvm_stdlib_semantics, root_expression,
 };
 use super::*;
+use crate::types::TyKind;
 
 #[test]
 fn dependency_super_property_keeps_property_identity_and_non_virtual_dispatch() {
@@ -88,7 +89,7 @@ fn prioritized_inferred_enum_entries_is_the_classifier_property() {
         .ty
         .get();
     assert!(
-        matches!(ty, Ty::Obj(name, _) if name.segment_ref() == "EnumEntries"),
+        matches!(ty.kind(), TyKind::Obj(name, _) if name.segment_ref() == "EnumEntries"),
         "{ty:?}"
     );
 }
@@ -444,7 +445,7 @@ fn generic_context_property_is_specialized_from_the_selected_context_value() {
             )
         })
         .expect("generic context property read");
-    let Ty::Obj(result, arguments) = read.ty.get() else {
+    let TyKind::Obj(result, arguments) = read.ty.get().kind() else {
         panic!("generic context property must retain its applied result type")
     };
     assert!(result.matches("Result"));
@@ -983,7 +984,7 @@ fn caller_type_parameter_retains_applied_library_upper_bound() {
         .expect("bounded parameter read")
         .ty
         .get();
-    let Ty::TyParam(_, bound) = ty else {
+    let TyKind::TyParam(_, bound) = ty.kind() else {
         panic!("bounded parameter must retain its symbolic identity: {ty:?}")
     };
     assert_eq!(

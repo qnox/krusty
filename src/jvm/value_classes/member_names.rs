@@ -7,7 +7,7 @@
 
 use super::Under;
 use crate::fx_hash::HashSet;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// kotlinc's `erasedUpperBound`: the classifier a type stands for once erased. A type parameter
 /// stands for whatever its bound erases to, whatever the nullability along the way.
@@ -15,9 +15,9 @@ fn erased_upper_bound(t: &Ty) -> Option<TypeName> {
     let mut current = t.non_null();
     let mut seen = HashSet::default();
     loop {
-        match current {
-            Ty::Obj(fq_name, _) => return Some(fq_name),
-            Ty::TyParam(name, bound) if seen.insert(name) => current = bound.non_null(),
+        match current.kind() {
+            TyKind::Obj(fq_name, _) => return Some(fq_name),
+            TyKind::TyParam(name, bound) if seen.insert(name) => current = bound.non_null(),
             _ => return None,
         }
     }
@@ -28,19 +28,19 @@ fn erased_upper_bound(t: &Ty) -> Option<TypeName> {
 /// through a nullable bound along its chain). `T : IC?` is represented exactly as `IC?` is. Any
 /// other type is returned unchanged.
 pub(super) fn value_class_bound_occurrence(t: Ty, under: &Under) -> Ty {
-    if !matches!(t.non_null(), Ty::TyParam(..)) {
+    if !t.non_null().is_ty_param() {
         return t;
     }
     let mut bound = t.non_null();
     let mut seen = HashSet::default();
-    while let Ty::TyParam(name, next) = bound {
+    while let TyKind::TyParam(name, next) = bound.kind() {
         if !seen.insert(name) {
             return t;
         }
         bound = next.non_null();
     }
-    match bound {
-        Ty::Obj(fq_name, _) if under.contains_key(&fq_name) => {
+    match bound.kind() {
+        TyKind::Obj(fq_name, _) if under.contains_key(&fq_name) => {
             if t.is_nullable() || t.non_null().upper_bound_admits_null() {
                 Ty::nullable(bound)
             } else {
@@ -78,8 +78,7 @@ fn mangling_info(
     t: &Ty,
     value_classes: &(impl ValueClassNames + ?Sized),
 ) -> crate::jvm::inline_class::InfoForMangling {
-    let is_nullable =
-        t.is_nullable() || matches!(t, Ty::TyParam(..)) && t.upper_bound_admits_null();
+    let is_nullable = t.is_nullable() || t.is_ty_param() && t.upper_bound_admits_null();
     let (fq_name, is_value, is_nullable) = match erased_upper_bound(t) {
         Some(fq_name) => (
             fq_name.render(),
@@ -203,7 +202,9 @@ pub(super) fn module_call_jvm_name(
         .enumerate()
         .filter_map(|(index, (semantic, erased))| {
             let classifier = erased.non_null().kotlin_class_internal()?;
-            matches!(semantic.non_null(), Ty::TyParam(..))
+            semantic
+                .non_null()
+                .is_ty_param()
                 .then_some(())
                 .filter(|_| under.contains_key(&classifier))
                 .map(|_| (index, erased))

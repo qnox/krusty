@@ -11,7 +11,7 @@
 use super::body_has_reified_markers;
 use crate::ir::IrFile;
 use crate::jvm::declared_type_nullability::{declared_annotation, is_unannotated_type_parameter};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// The nullability annotation type descriptors of one function, in physical parameter order.
 pub(super) struct DeclaredNullability {
@@ -59,8 +59,9 @@ pub(super) fn declared_nullability(ir: &IrFile, fid: u32) -> DeclaredNullability
         || matches!(
             gsig.and_then(|signature| signature.ret)
                 .or(member_sem.map(|(_, result)| *result))
-                .unwrap_or(f.ret),
-            Ty::PlatformNullable(_)
+                .unwrap_or(f.ret)
+                .kind(),
+            TyKind::PlatformNullable(_)
         );
     let ret_ann = (!lambda_impl
         && !reified_body

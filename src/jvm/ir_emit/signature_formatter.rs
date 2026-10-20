@@ -2,6 +2,7 @@
 //! realized as use-site wildcards, primitives boxed, and each classifier's outer chain written out.
 
 use super::*;
+use crate::types::TyKind;
 
 mod constructor_positions;
 mod type_arguments;
@@ -320,14 +321,14 @@ impl<'a> JvmSignatureFormatter<'a> {
     }
 
     fn can_have_subtypes_ignoring_nullability(&self, ty: Ty) -> Option<bool> {
-        let ty = match ty {
-            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => *inner,
-            ty => ty,
+        let ty = match ty.kind() {
+            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => inner,
+            _ => ty,
         };
         if ty == Ty::Nothing {
             return Some(false);
         }
-        if matches!(ty, Ty::TyParam(..)) {
+        if ty.is_ty_param() {
             return Some(true);
         }
         // Core's COMPACT variants for final Kotlin classifiers (`Unit`, `String`, the scalars and
@@ -353,13 +354,13 @@ impl<'a> JvmSignatureFormatter<'a> {
         }
         for (index, argument) in arguments.iter().copied().enumerate() {
             let declaration = self.declaration_variance(owner, index)?;
-            let (use_site, argument) = match argument {
-                Ty::InProjection(inner) => (TypeVariance::In, *inner),
-                Ty::OutProjection(inner) => (TypeVariance::Out, *inner),
+            let (use_site, argument) = match argument.kind() {
+                TyKind::InProjection(inner) => (TypeVariance::In, inner),
+                TyKind::OutProjection(inner) => (TypeVariance::Out, inner),
                 // A star is already the complete JVM wildcard. Its frontend read bound is not a
                 // classfile type argument and must not participate in wildcard optimization.
-                Ty::StarProjection(_) => return Some(true),
-                argument => (TypeVariance::Invariant, argument),
+                TyKind::StarProjection(_) => return Some(true),
+                _ => (TypeVariance::Invariant, argument),
             };
             let effective = if use_site == TypeVariance::Invariant {
                 declaration
@@ -487,20 +488,23 @@ impl<'a> JvmSignatureFormatter<'a> {
     /// variance stays (`vararg x: In<E>` is `[LIn<-TE;>;`). A non-vararg `Array<In<E>>` parameter
     /// suppresses that wildcard and must keep going through [`Self::method_ty`].
     pub(super) fn vararg_element_ty(&self, ty: &Ty, wildcards: Wildcards) -> Option<String> {
-        let semantic = match ty {
-            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner,
-            ty => ty,
+        let semantic = match ty.kind() {
+            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => inner,
+            _ => *ty,
         };
-        let Ty::Obj(owner, arguments) = semantic else {
+        let TyKind::Obj(owner, arguments) = semantic.kind() else {
             return self.method_ty(ty, wildcards);
         };
         if !owner.matches("kotlin/Array") || arguments.len() != 1 {
             return self.method_ty(ty, wildcards);
         }
-        let element = match arguments[0] {
-            Ty::InProjection(_) => Ty::obj("kotlin/Any"),
-            Ty::OutProjection(inner) | Ty::StarProjection(inner) => *inner,
-            argument => argument,
+        let element = {
+            let argument = arguments[0];
+            match argument.kind() {
+                TyKind::InProjection(_) => Ty::obj("kotlin/Any"),
+                TyKind::OutProjection(inner) | TyKind::StarProjection(inner) => inner,
+                _ => argument,
+            }
         };
         Some(format!("[{}", self.ty_at(&element, wildcards)?))
     }
@@ -513,22 +517,22 @@ impl<'a> JvmSignatureFormatter<'a> {
         if let Some((expanded, wildcards)) = self.value_class_position(*ty, wildcards) {
             return self.method_ty(&expanded, wildcards);
         }
-        let semantic = match ty {
-            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner,
-            ty => ty,
+        let semantic = match ty.kind() {
+            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => inner,
+            _ => *ty,
         };
-        match semantic {
-            Ty::TyParam(..) | Ty::Fun(_) => self.ty_at(ty, wildcards),
-            Ty::Intersection(_) => {
-                let approximated = self.declaration_approximation(*semantic)?;
+        match semantic.kind() {
+            TyKind::TyParam(..) | TyKind::Fun(_) => self.ty_at(ty, wildcards),
+            TyKind::Intersection(_) => {
+                let approximated = self.declaration_approximation(semantic)?;
                 self.method_ty(&approximated, wildcards)
             }
-            Ty::Obj(_, arguments) if !arguments.is_empty() => self.ty_at(ty, wildcards),
-            Ty::InProjection(_)
-            | Ty::OutProjection(_)
-            | Ty::StarProjection(_)
-            | Ty::Null
-            | Ty::Error => {
+            TyKind::Obj(_, arguments) if !arguments.is_empty() => self.ty_at(ty, wildcards),
+            TyKind::InProjection(_)
+            | TyKind::OutProjection(_)
+            | TyKind::StarProjection(_)
+            | TyKind::Null
+            | TyKind::Error => {
                 self.run.set_emit_error(format!(
                     "internal: invalid semantic method-signature type {ty:?}"
                 ));
@@ -551,20 +555,20 @@ impl<'a> JvmSignatureFormatter<'a> {
     /// interface (`FunctionN<R>` past 22 parameters, a continuation-taking `Function{N+1}` for a
     /// suspend one), exactly as the same function type is in any other position.
     pub(super) fn supertype(&self, ty: &Ty) -> Option<String> {
-        if let Ty::Fun(function) = ty {
+        if let TyKind::Fun(function) = ty.kind() {
             return self.function_ty(function, Wildcards::Supertype);
         }
         self.ty_at(ty, Wildcards::Supertype)
     }
 
     pub(super) fn ty_at(&self, ty: &Ty, wildcards: Wildcards) -> Option<String> {
-        if let Ty::Nullable(inner) | Ty::PlatformNullable(inner) = ty {
-            return self.ty_at(inner, wildcards);
+        if let TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) = ty.kind() {
+            return self.ty_at(&inner, wildcards);
         }
-        if let Ty::TyParam(name, _) = ty {
+        if let TyKind::TyParam(name, _) = ty.kind() {
             return Some(format!(
                 "T{};",
-                crate::types::type_parameter_source_name(name)
+                crate::types::type_parameter_source_name(&name)
             ));
         }
         if ty.non_null().is_jvm_scalar() {
@@ -598,14 +602,17 @@ impl<'a> JvmSignatureFormatter<'a> {
                 // put it on. `Array<out String>` erases to `[Ljava/lang/String;`, as kotlinc emits.
                 // Its projection still decides the element's mode: `Array<List<Any>>` is an
                 // invariant argument, `Array<out List<Any>>` a covariant one.
-                let (variance, element) = match arguments[0] {
-                    // A consumer's elements are read as `Any?`: `Array<in List<Any>>` is
-                    // `[Ljava/lang/Object;`, whose signature adds nothing.
-                    Ty::InProjection(_) => (TypeVariance::In, Ty::obj("kotlin/Any")),
-                    Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
-                        (TypeVariance::Out, *inner)
+                let (variance, element) = {
+                    let argument = arguments[0];
+                    match argument.kind() {
+                        // A consumer's elements are read as `Any?`: `Array<in List<Any>>` is
+                        // `[Ljava/lang/Object;`, whose signature adds nothing.
+                        TyKind::InProjection(_) => (TypeVariance::In, Ty::obj("kotlin/Any")),
+                        TyKind::OutProjection(inner) | TyKind::StarProjection(inner) => {
+                            (TypeVariance::Out, inner)
+                        }
+                        _ => (TypeVariance::Invariant, argument),
                     }
-                    argument => (TypeVariance::Invariant, argument),
                 };
                 Some(format!(
                     "[{}",
