@@ -574,21 +574,21 @@ impl<'a> JvmSignatureFormatter<'a> {
         if ty.non_null().is_jvm_scalar() {
             return Some(boxed_descriptor(ty.non_null()));
         }
-        match *ty {
-            Ty::String => Some("Ljava/lang/String;".to_string()),
-            Ty::Unit => Some("Lkotlin/Unit;".to_string()),
-            Ty::Nothing => Some("Lkotlin/Nothing;".to_string()),
-            Ty::InProjection(inner) => Some(format!("-{}", self.ty_at(inner, wildcards)?)),
-            Ty::OutProjection(inner) => Some(format!("+{}", self.ty_at(inner, wildcards)?)),
-            Ty::Fun(signature) => self.function_ty(signature, wildcards),
-            Ty::Intersection(_) => {
+        match ty.kind() {
+            TyKind::STRING => Some("Ljava/lang/String;".to_string()),
+            TyKind::Unit => Some("Lkotlin/Unit;".to_string()),
+            TyKind::Nothing => Some("Lkotlin/Nothing;".to_string()),
+            TyKind::InProjection(inner) => Some(format!("-{}", self.ty_at(&inner, wildcards)?)),
+            TyKind::OutProjection(inner) => Some(format!("+{}", self.ty_at(&inner, wildcards)?)),
+            TyKind::Fun(signature) => self.function_ty(signature, wildcards),
+            TyKind::Intersection(_) => {
                 let approximated = self.declaration_approximation(*ty)?;
                 self.ty_at(&approximated, wildcards)
             }
             // A primitive specialized array is class-shaped in the semantic model but is a JVM
             // array in descriptors and generic signatures alike. It has no type arguments to
             // drive the general classifier path below.
-            Ty::Obj(owner, _) if crate::types::prim_array_element(owner).is_some() => {
+            TyKind::Obj(owner, _) if crate::types::prim_array_element(owner).is_some() => {
                 Some(ir_type_desc(ty))
             }
             // `kotlin.Array<E>` has no JVM class: its realization is the ARRAY type `[E`, and that is
@@ -597,7 +597,9 @@ impl<'a> JvmSignatureFormatter<'a> {
             // fails on it. kotlinc writes `[` + the element's signature — and, since a signature that
             // adds nothing over the descriptor is omitted entirely, `Array<String>` ends up with no
             // attribute at all while `Array<T>` keeps `[TT;`.
-            Ty::Obj(owner, arguments) if owner.matches("kotlin/Array") && arguments.len() == 1 => {
+            TyKind::Obj(owner, arguments)
+                if owner.matches("kotlin/Array") && arguments.len() == 1 =>
+            {
                 // The element's own variance is not written: a JVM array type has no argument list to
                 // put it on. `Array<out String>` erases to `[Ljava/lang/String;`, as kotlinc emits.
                 // Its projection still decides the element's mode: `Array<List<Any>>` is an
@@ -622,7 +624,7 @@ impl<'a> JvmSignatureFormatter<'a> {
             // `KFunctionN` and `KSuspendFunctionN` have no JVM class of their own: they are carried
             // as `kotlin.reflect.KFunction<out R>`, whose one parameter is the result. kotlinc
             // writes that application, so the parameter types are not part of the signature.
-            Ty::Obj(owner, arguments)
+            TyKind::Obj(owner, arguments)
                 if crate::libraries::function_classifiers::is_reflective_function_classifier(
                     owner,
                 ) =>
@@ -634,10 +636,15 @@ impl<'a> JvmSignatureFormatter<'a> {
                     self.type_argument(TypeVariance::Out, *result, wildcards)?
                 ))
             }
-            Ty::Obj(owner, arguments) if self.is_written_raw(owner, arguments.as_slice())? => Some(
-                format!("L{};", crate::jvm::names::classfile_internal_name_of(owner)),
-            ),
-            Ty::Obj(owner, arguments) => {
+            TyKind::Obj(owner, arguments)
+                if self.is_written_raw(owner, arguments.as_slice())? =>
+            {
+                Some(format!(
+                    "L{};",
+                    crate::jvm::names::classfile_internal_name_of(owner)
+                ))
+            }
+            TyKind::Obj(owner, arguments) => {
                 let chain = self.classifier_signature_chain(owner)?;
                 let declared_arguments: usize =
                     chain.iter().map(|(_, variances)| variances.len()).sum();

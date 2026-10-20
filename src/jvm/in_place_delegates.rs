@@ -367,7 +367,7 @@ fn owner_type_parameter_chain(
 fn approximate_owner_receiver(ir: &IrFile, owner: crate::types::TypeName) -> Ty {
     let declarations = owner_type_parameter_chain(ir, owner);
     if declarations.is_empty() {
-        return Ty::Obj(owner, crate::types::TyList::EMPTY);
+        return Ty::obj_name(owner);
     }
     let mut parameters = declarations
         .iter()

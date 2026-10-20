@@ -1862,10 +1862,10 @@ fn apply_enum_entry_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, fi
 /// The internal class name to `checkcast` a value to when narrowing an erased `Object` to `ty` — or
 /// `None` when no narrowing is needed (`Object`/`Any`, a primitive, `Unit`/`Nothing`).
 fn checkcast_internal(ty: Ty) -> Option<String> {
-    match ty {
-        Ty::String => Some("java/lang/String".to_string()),
+    match ty.kind() {
+        TyKind::STRING => Some("java/lang/String".to_string()),
         _ if ty.is_array() => Some(type_descriptor(ty)),
-        Ty::Obj(n, _) if !crate::jvm::jvm_class_map::is_jvm_erased_top(n) => {
+        TyKind::Obj(n, _) if !crate::jvm::jvm_class_map::is_jvm_erased_top(n) => {
             Some(crate::jvm::names::classfile_internal_name_of(n).to_string())
         }
         _ => None,
@@ -3047,17 +3047,17 @@ fn function_reference_target(ir: &IrFile, reference: &crate::ir::FuncRef) -> Opt
 }
 
 fn verif_for_jvm_free(cw: &mut ClassWriter, t: Ty) -> VerifType {
-    match t {
-        t if is_jvm_int_category(t) => VerifType::Integer,
-        Ty::Long => VerifType::Long,
-        Ty::Double => VerifType::Double,
-        Ty::Float => VerifType::Float,
-        Ty::String => VerifType::Object(cw.class_ref("java/lang/String")),
-        t if t.is_array() => VerifType::Object(cw.class_ref(&type_descriptor(t))),
-        Ty::Obj(n, _) => {
+    match t.kind() {
+        _ if is_jvm_int_category(t) => VerifType::Integer,
+        TyKind::LONG => VerifType::Long,
+        TyKind::DOUBLE => VerifType::Double,
+        TyKind::FLOAT => VerifType::Float,
+        TyKind::STRING => VerifType::Object(cw.class_ref("java/lang/String")),
+        _ if t.is_array() => VerifType::Object(cw.class_ref(&type_descriptor(t))),
+        TyKind::Obj(n, _) => {
             VerifType::Object(cw.class_ref(crate::jvm::names::classfile_internal_name_of(n)))
         }
-        Ty::Null => VerifType::Null,
+        TyKind::Null => VerifType::Null,
         _ => VerifType::Top,
     }
 }
@@ -6444,21 +6444,21 @@ impl<'a> Emitter<'a> {
     fn verif_single(&mut self, ty: Ty) -> VerifType {
         // Keep object types by name here. The final StackMapTable encoder interns only classes that
         // survive frame compression, avoiding constant-pool entries for omitted locals.
-        match ty {
-            t if is_jvm_int_category(t) => VerifType::Integer,
-            Ty::Long => VerifType::Long,
-            Ty::Double => VerifType::Double,
-            Ty::Float => VerifType::Float,
-            Ty::String => VerifType::ObjectName("java/lang/String".to_string()),
+        match ty.kind() {
+            _ if is_jvm_int_category(ty) => VerifType::Integer,
+            TyKind::LONG => VerifType::Long,
+            TyKind::DOUBLE => VerifType::Double,
+            TyKind::FLOAT => VerifType::Float,
+            TyKind::STRING => VerifType::ObjectName("java/lang/String".to_string()),
             // An array's verification type is an `Object` whose class name is its descriptor (`[I`).
-            t if t.is_array() => VerifType::ObjectName(type_descriptor(ty)),
-            Ty::Obj(n, _) => {
+            _ if ty.is_array() => VerifType::ObjectName(type_descriptor(ty)),
+            TyKind::Obj(n, _) => {
                 VerifType::ObjectName(crate::jvm::names::classfile_internal_name_of(n).to_string())
             }
-            Ty::Nullable(_) | Ty::PlatformNullable(_) => {
+            TyKind::Nullable(_) | TyKind::PlatformNullable(_) => {
                 VerifType::ObjectName(crate::jvm::names::instanceof_internal_name(ty))
             }
-            Ty::Null => VerifType::Null,
+            TyKind::Null => VerifType::Null,
             _ => VerifType::Top,
         }
     }

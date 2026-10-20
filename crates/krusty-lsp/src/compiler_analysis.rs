@@ -1923,8 +1923,7 @@ mod tests {
             "T",
             krusty::types::Ty::nullable(krusty::types::Ty::obj("kotlin/Any")),
         );
-        let intersection =
-            krusty::types::Ty::DefinitelyNotNull(krusty::types::intern_ty(parameter));
+        let intersection = Ty::from(TyKind::DefinitelyNotNull(parameter));
         let mut names = std::collections::HashSet::new();
         type_parameters_mentioned(intersection, &mut names);
         assert!(names.contains("T"));

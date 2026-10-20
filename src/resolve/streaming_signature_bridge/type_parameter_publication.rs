@@ -671,12 +671,16 @@ mod tests {
             panic!("BaseTerminal.I must be bounded by Interpreter: {bound:?}");
         };
         assert!(interpreter.matches("Interpreter"));
-        let [Ty::StarProjection(readable), _, Ty::TyParam(self_name, _)] = arguments.as_slice()
+        let [readable, _, self_parameter] = arguments.as_slice() else {
+            panic!("Interpreter bound must retain its three exact arguments: {arguments:?}");
+        };
+        let (TyKind::StarProjection(readable), TyKind::TyParam(self_name, _)) =
+            (readable.kind(), self_parameter.kind())
         else {
             panic!("Interpreter bound must retain its three exact arguments: {arguments:?}");
         };
         assert_eq!(self_name.as_str(), semantic);
-        let TyKind::Obj(intermediary, parameters) = (**readable).kind() else {
+        let TyKind::Obj(intermediary, parameters) = readable.kind() else {
             panic!("Interpreter's first star must read as Intermediary<I>: {readable:?}");
         };
         assert!(intermediary.matches("Interpreter$Intermediary"));

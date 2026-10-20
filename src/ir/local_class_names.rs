@@ -109,9 +109,7 @@ fn ty(value: Ty, names: &HashMap<TypeName, TypeName>) -> Ty {
         TyKind::OutProjection(inner) => Ty::out_projection(ty(inner, names)),
         TyKind::StarProjection(inner) => Ty::star_projection(ty(inner, names)),
         TyKind::TyParam(parameter, bound) => Ty::ty_param(parameter.as_str(), ty(bound, names)),
-        TyKind::DefinitelyNotNull(inner) => {
-            Ty::DefinitelyNotNull(crate::types::intern_ty(ty(inner, names)))
-        }
+        TyKind::DefinitelyNotNull(inner) => Ty::from(TyKind::DefinitelyNotNull(ty(inner, names))),
         TyKind::Intersection(parts) => Ty::intersection(
             &parts
                 .iter()

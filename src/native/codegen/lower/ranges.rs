@@ -591,7 +591,7 @@ impl BodyLowering<'_, '_, '_> {
             function.name == "compareTo"
                 && function.dispatch_receiver.is_some()
                 && function.ret == Ty::Int
-                && matches!(function.params.as_slice(), [Ty::Obj(other, _)] if *other == name)
+                && matches!(function.params.as_slice(), [other] if other.obj_parts().is_some_and(|(other, _)| other == name))
         });
         let (true, Some(function)) = (is_final, own) else {
             return Err(declined!(

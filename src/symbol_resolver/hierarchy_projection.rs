@@ -79,22 +79,22 @@ fn stored_projection_ptr(ty: Ty) -> Option<*const Ty> {
 /// expression. This projection is only for dispatch-member lookup and applicability; extension
 /// receivers continue to use the expression's actual type.
 pub(crate) fn member_scope_receiver(receiver: Ty) -> Ty {
-    match receiver {
-        Ty::Nothing => Ty::obj_name(crate::types::wk::any()),
-        Ty::TyParam(_, bound) => member_scope_receiver(*bound),
-        Ty::Byte => Ty::obj("kotlin/Byte"),
-        Ty::Short => Ty::obj("kotlin/Short"),
-        Ty::Int => Ty::obj("kotlin/Int"),
-        Ty::Long => Ty::obj("kotlin/Long"),
-        Ty::Float => Ty::obj("kotlin/Float"),
-        Ty::Double => Ty::obj("kotlin/Double"),
-        Ty::Boolean => Ty::obj("kotlin/Boolean"),
-        Ty::Char => Ty::obj("kotlin/Char"),
-        Ty::UByte => Ty::obj("kotlin/UByte"),
-        Ty::UShort => Ty::obj("kotlin/UShort"),
-        Ty::UInt => Ty::obj("kotlin/UInt"),
-        Ty::ULong => Ty::obj("kotlin/ULong"),
-        Ty::String => Ty::obj("kotlin/String"),
+    match receiver.kind() {
+        TyKind::Nothing => Ty::obj_name(crate::types::wk::any()),
+        TyKind::TyParam(_, bound) => member_scope_receiver(bound),
+        TyKind::BYTE => Ty::obj("kotlin/Byte"),
+        TyKind::SHORT => Ty::obj("kotlin/Short"),
+        TyKind::INT => Ty::obj("kotlin/Int"),
+        TyKind::LONG => Ty::obj("kotlin/Long"),
+        TyKind::FLOAT => Ty::obj("kotlin/Float"),
+        TyKind::DOUBLE => Ty::obj("kotlin/Double"),
+        TyKind::BOOLEAN => Ty::obj("kotlin/Boolean"),
+        TyKind::CHAR => Ty::obj("kotlin/Char"),
+        TyKind::UBYTE => Ty::obj("kotlin/UByte"),
+        TyKind::USHORT => Ty::obj("kotlin/UShort"),
+        TyKind::UINT => Ty::obj("kotlin/UInt"),
+        TyKind::ULONG => Ty::obj("kotlin/ULong"),
+        TyKind::STRING => Ty::obj("kotlin/String"),
         _ => receiver,
     }
 }
@@ -104,8 +104,12 @@ pub(crate) fn member_scope_receiver(receiver: Ty) -> Ty {
 /// failed receiver through another origin.
 pub(crate) fn supports_member_lookup(receiver: Ty) -> bool {
     matches!(
-        receiver.non_null(),
-        Ty::String | Ty::Obj(..) | Ty::TyParam(..) | Ty::Fun(..) | Ty::Intersection(_)
+        receiver.non_null().kind(),
+        TyKind::STRING
+            | TyKind::Obj(..)
+            | TyKind::TyParam(..)
+            | TyKind::Fun(..)
+            | TyKind::Intersection(_)
     )
 }
 

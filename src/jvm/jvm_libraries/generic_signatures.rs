@@ -625,7 +625,7 @@ mod constructor_inference_signature_tests {
         assert_eq!(signature.ret.obj_internal(), Some(owner));
         assert!(matches!(
             signature.ret.type_args(),
-            [Ty::TyParam(name, _)] if *name == "V"
+            [argument] if argument.ty_param_name() == Some("V")
         ));
     }
 
@@ -648,12 +648,12 @@ mod constructor_inference_signature_tests {
         assert_eq!(signature.formals, vec!["E".to_string(), "U".to_string()]);
         assert!(matches!(
             signature.ret.type_args(),
-            [Ty::TyParam(name, _)] if *name == "E"
+            [argument] if argument.ty_param_name() == Some("E")
         ));
         assert!(matches!(
             signature.params.as_slice(),
-            [Ty::TyParam(value, _), Ty::TyParam(extra, _)]
-                if *value == "E" && *extra == "U"
+            [value, extra]
+                if value.ty_param_name() == Some("E") && extra.ty_param_name() == Some("U")
         ));
     }
 
@@ -672,11 +672,11 @@ mod constructor_inference_signature_tests {
         assert_ne!(signature.formals[1], "T");
         assert!(matches!(
             signature.ret.type_args(),
-            [Ty::TyParam(name, _)] if *name == "T"
+            [argument] if argument.ty_param_name() == Some("T")
         ));
         assert!(matches!(
             signature.params.as_slice(),
-            [Ty::TyParam(name, _)] if *name == signature.formals[1]
+            [parameter] if parameter.ty_param_name() == Some(signature.formals[1].as_str())
         ));
         assert_eq!(
             crate::types::type_parameter_source_name(&signature.formals[1]),

@@ -321,24 +321,24 @@ fn reified_type_test(
 }
 
 fn supported_type(ty: Ty, parameters: &[IrTypeParameter]) -> bool {
-    match ty {
-        Ty::Unit | Ty::Nothing | Ty::Boolean => true,
-        Ty::Obj(_, arguments) => arguments.iter().all(|argument| match argument.kind() {
+    match ty.kind() {
+        TyKind::Unit | TyKind::Nothing | TyKind::BOOLEAN => true,
+        TyKind::Obj(_, arguments) => arguments.iter().all(|argument| match argument.kind() {
             TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
             | TyKind::StarProjection(inner) => supported_type(inner, parameters),
             _ => supported_type(*argument, parameters),
         }),
-        Ty::Nullable(inner) => supported_type(*inner, parameters),
-        Ty::InProjection(_) | Ty::OutProjection(_) | Ty::StarProjection(_) => false,
-        Ty::TyParam(..) => parameters.iter().any(|parameter| parameter.ty() == ty),
-        Ty::Null
-        | Ty::Error
-        | Ty::Pending
-        | Ty::Fun(_)
-        | Ty::DefinitelyNotNull(_)
-        | Ty::PlatformNullable(_)
-        | Ty::Intersection(_) => false,
+        TyKind::Nullable(inner) => supported_type(inner, parameters),
+        TyKind::InProjection(_) | TyKind::OutProjection(_) | TyKind::StarProjection(_) => false,
+        TyKind::TyParam(..) => parameters.iter().any(|parameter| parameter.ty() == ty),
+        TyKind::Null
+        | TyKind::Error
+        | TyKind::Pending
+        | TyKind::Fun(_)
+        | TyKind::DefinitelyNotNull(_)
+        | TyKind::PlatformNullable(_)
+        | TyKind::Intersection(_) => false,
     }
 }
 
@@ -735,12 +735,14 @@ impl FileWriter {
             TyKind::Nullable(inner) => (inner, 0),
             _ => (ty, 1),
         };
-        let (classifier, arguments) = match inner {
-            Ty::Unit => (self.class_symbol(TypeName::from("kotlin/Unit")), &[][..]),
-            Ty::Nothing => (self.class_symbol(TypeName::from("kotlin/Nothing")), &[][..]),
-            Ty::Boolean => (self.class_symbol(TypeName::from("kotlin/Boolean")), &[][..]),
-            Ty::Obj(classifier, arguments) => (self.class_symbol(classifier), arguments.as_slice()),
-            Ty::TyParam(..) => {
+        let (classifier, arguments) = match inner.kind() {
+            TyKind::Unit => (self.class_symbol(TypeName::from("kotlin/Unit")), &[][..]),
+            TyKind::Nothing => (self.class_symbol(TypeName::from("kotlin/Nothing")), &[][..]),
+            TyKind::BOOLEAN => (self.class_symbol(TypeName::from("kotlin/Boolean")), &[][..]),
+            TyKind::Obj(classifier, arguments) => {
+                (self.class_symbol(classifier), arguments.as_slice())
+            }
+            TyKind::TyParam(..) => {
                 let (_, _, symbol) = parameters
                     .iter()
                     .find(|(_, parameter, _)| parameter.ty == inner)
