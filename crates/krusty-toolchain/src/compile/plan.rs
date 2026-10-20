@@ -31,6 +31,8 @@ pub struct Step {
     /// krusty's arguments; `None` when the fragment has no Kotlin sources, which the toolchain
     /// does not compile.
     pub arguments: Option<Vec<OsString>>,
+    /// Where the last successful compilation's inputs and output are recorded (`avoidance.rs`).
+    pub state: PathBuf,
     /// Where the resources are copied. It holds exactly the resources directory's contents, and
     /// nothing when the fragment has no resources directory.
     pub resources_output: PathBuf,
@@ -58,6 +60,15 @@ fn artifact_directory(root: &Path, module: &str) -> PathBuf {
         .join("artifacts")
         .join("CompiledJvmArtifact")
         .join(format!("{module}jvm"))
+}
+
+/// Where krusty-toolchain records a module's last successful compilation, outside the toolchain's
+/// own artifacts.
+fn state_file(root: &Path, module: &str) -> PathBuf {
+    root.join("build")
+        .join("krusty-toolchain")
+        .join(format!("{module}jvm"))
+        .join("compilation.state")
 }
 
 /// The plan for compiling the modules `modules` of `model`, or `None` when something it needs is
@@ -250,6 +261,7 @@ pub fn plan(
             module: name.to_string(),
             output,
             arguments,
+            state: state_file(root, name),
             resources_output,
             resources,
             waits,
