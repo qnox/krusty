@@ -1704,6 +1704,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `create`/`invoke` and an erased `invoke` bridge, created by `new C(captures…, null)`. Moving to that
   shape is step 6 of `docs/JVM_INLINE_BEFORE_CPS.md` §1a. Behaviour is covered by
   `tests/suspend_e2e.rs` (`suspend_lambda_*`) and `tests/suspend_receiver_lambda_e2e.rs`.
+- **A suspend lambda takes a value-class parameter as its carrier, through a mangled typed `invoke`.**
+  kotlinc always writes a suspend lambda as a `SuspendLambda` class, never an `invokedynamic`, so the
+  value-class pass lowers its body over each value class's carrier, as for any function, instead of
+  over the box a generic `FunctionN` slot hands an `invokedynamic` lambda. The typed `invoke` takes the
+  carrier (`IC` → `String`, `BI` → `int`, `IC?` → `String`, while `BI?` and `UInt?` stay boxed) and is
+  mangled like a function taking a value class over the lambda's declared parameters, receiver first,
+  with the continuation hashed as `_` and its `Any?` result never: `suspend (IC) -> Unit` and
+  `suspend (IC) -> IC` both take `invoke-hHQ9REg`, and `suspend (Result<Int>) -> Unit` stays `invoke`.
+  The erased `FunctionN.invoke` bridge and `create(Object, Continuation)` unbox the box they receive
+  (`checkcast IC; unbox-impl`, null-safely for a nullable reference carrier), `create` casts a box that
+  is itself the physical type (`checkcast BI` for `BI?`) where it stores any other reference unchecked,
+  the typed `invoke` boxes the carrier again to hand it to `create`, and the spill field (`L$0`, `I$0`)
+  holds the carrier, which `invokeSuspend` reads back cast to it. Only a suspend lambda with a class
+  site takes the carrier: one that is SAM converted, or an inline call's argument that krusty still
+  materializes as an `invokedynamic` over the lifted function (a `crossinline` lambda captured into an
+  object, where kotlinc inlines the body instead), keeps the boxed slot that realization hands it. A
+  carrier-taking suspend lambda the class lowering then declines is an emission error rather than an
+  `invokedynamic` that would hand its lifted function a box. Proven byte for byte
+  against kotlinc and box-run (`tests/suspend_lambda_value_class_invoke_e2e.rs`).
 - **A suspend lambda's parameter slots bind the RECEIVER as `this` — for a classpath callee too.** A
   `suspend R.() -> T` parameter folds its receiver into the erased `Function{n+1}`'s FIRST slot, and the
   checker resolves a bare member in the body against that receiver. Lowering binds the leading

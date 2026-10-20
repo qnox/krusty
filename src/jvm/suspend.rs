@@ -60,7 +60,7 @@ use spill_layout::{
 };
 mod specialized_lambda_classes;
 pub(crate) use specialized_lambda_classes::SpecializedLambdaClasses;
-mod suspend_lambda;
+pub(crate) mod suspend_lambda;
 mod tail_forward;
 mod value_class_results;
 pub(crate) use value_class_results::{box_may_be_null, completion_box};

@@ -98,6 +98,22 @@ fn mangling_info(
     }
 }
 
+/// The JVM name of a suspend lambda class's typed `invoke`, over the lambda's declared parameters
+/// (context parameters and receiver first) in order. kotlinc mangles it like any function taking a
+/// value class, its continuation contributing the trailing `_`. Its result, returned through that
+/// continuation, is `Any?`, so the name never carries a result hash: `suspend (IC) -> IC` and
+/// `suspend (IC) -> Unit` both take `invoke-hHQ9REg`.
+pub(crate) fn suspend_lambda_invoke_name(ir: &crate::ir::IrFile, parameters: &[Ty]) -> String {
+    vc_mangle(
+        "invoke",
+        parameters,
+        &Ty::nullable(Ty::obj("kotlin/Any")),
+        ir,
+        false,
+        true,
+    )
+}
+
 /// [`vc_mangle`] that leaves an ALREADY-mangled name alone: if `base` is exactly what this signature
 /// would produce from its own stem, it is returned unchanged. The mangle appends a fixed-width
 /// suffix, `-` plus seven base64url characters, so the stem is everything before the last eight
