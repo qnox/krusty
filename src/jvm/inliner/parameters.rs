@@ -154,6 +154,8 @@ impl Parameters {
         let mut owned = vec![false; self.captured.len()];
         for (index, parameter) in self.parameters.iter().enumerate() {
             assign(index, parameter, &mut slots);
+            // A default lambda's captured values are stored by the inlined body, never at an
+            // argument: like kotlinc's captured parameters they follow every parameter.
             let Binding::Lambda(lambda) = parameter.binding else {
                 continue;
             };
@@ -356,5 +358,24 @@ mod tests {
             capture_owners: vec![0],
         };
         assert_eq!(parameters.temporaries(), vec![None, Some(0), None]);
+    }
+
+    #[test]
+    fn a_default_lambdas_captured_temporary_follows_every_parameter() {
+        // kotlinc's `cap(a, f = { a + "?" }, b = "z")`: a, f's unwritten temporary, b, then the
+        // value the default lambda captured, which the body stores where its arm constructed it.
+        let parameters = Parameters {
+            parameters: vec![
+                parameter(Category::Reference, Binding::Temporary),
+                parameter(Category::Reference, Binding::DefaultLambda(0)),
+                parameter(Category::Reference, Binding::Temporary),
+            ],
+            captured: vec![parameter(Category::Reference, Binding::Temporary)],
+            capture_owners: vec![0],
+        };
+        assert_eq!(
+            parameters.temporaries(),
+            vec![Some(0), Some(1), Some(2), Some(3)]
+        );
     }
 }
