@@ -64,3 +64,32 @@ fn a_block_inside_parentheses_keeps_its_line_breaks_as_terminators() {
     common::expect_box_ok_with_stdlib(source, "BlockInParentheses");
     assert_module_matches_kotlinc(&[("BlockInParentheses.kt", source)]);
 }
+
+#[test]
+fn a_when_subject_and_an_object_header_inside_parentheses_may_start_on_the_next_line() {
+    let source = "open class Base(val n: Int)\n\
+         \n\
+         fun id(base: Base) = base.n\n\
+         \n\
+         fun sum(a: Int, b: Int) = a + b\n\
+         \n\
+         fun choose(key: Int) = sum(when\n\
+         \x20   (key) {\n\
+         \x20       1 -> 5\n\
+         \x20       else -> 2\n\
+         \x20   }, 0)\n\
+         \n\
+         fun build() = id(object : Base\n\
+         \x20   (7) {\n\
+         \x20       val extra = n\n\
+         \x20       fun twice() = extra * 2\n\
+         \x20   })\n\
+         \n\
+         fun box(): String {\n\
+         \x20   val chosen = choose(1)\n\
+         \x20   val built = build()\n\
+         \x20   return if (chosen == 5 && built == 7) \"OK\" else \"$chosen $built\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "BodyBoundaryInParentheses");
+    assert_module_matches_kotlinc(&[("BodyBoundaryInParentheses.kt", source)]);
+}

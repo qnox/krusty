@@ -788,6 +788,14 @@ impl ParserNesting {
 /// acceptance.
 const EXPR_DEPTH_LIMIT: u32 = crate::wide_stack::MAX_SEMANTIC_EXPR_DEPTH * 2;
 
+/// The functions, properties, initializer order, and type aliases of an object body.
+type ObjectMembers = (
+    Vec<FunDecl>,
+    Vec<PropDecl>,
+    Vec<ClassInit>,
+    Vec<crate::ast::TypeAliasDecl>,
+);
+
 impl<'a> Parser<'a> {
     fn new(
         src: &'a str,
@@ -3590,66 +3598,62 @@ impl<'a> Parser<'a> {
 
     /// `object Name { fun … }` — a singleton with member functions (no primary constructor).
     /// Parse an object/anonymous-object body `{ fun…/val…/init… }`, returning its members.
-    fn parse_object_body(
-        &mut self,
-        owner: &str,
-    ) -> (
-        Vec<FunDecl>,
-        Vec<PropDecl>,
-        Vec<ClassInit>,
-        Vec<crate::ast::TypeAliasDecl>,
-    ) {
+    fn parse_object_body(&mut self, owner: &str) -> ObjectMembers {
+        if !self.eat_optional_declaration_body_open() {
+            return Default::default();
+        }
+        // Only the `{…}` body restores statement-terminating line breaks; the `object` header stays
+        // in the enclosing mode.
+        self.with_newlines_significant(|parser| parser.parse_object_members(owner))
+    }
+
+    /// The members of an object body after its `{`, through the closing `}`.
+    fn parse_object_members(&mut self, owner: &str) -> ObjectMembers {
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut init_order: Vec<ClassInit> = Vec::new();
         let mut type_aliases = Vec::new();
-        if self.eat_optional_declaration_body_open() {
-            loop {
-                self.skip_newlines();
-                let mods = self.parse_member_decl_prefix();
-                if self.parse_and_register_nested_classifier(owner, &mods, true) {
-                    continue;
+        loop {
+            self.skip_newlines();
+            let mods = self.parse_member_decl_prefix();
+            if self.parse_and_register_nested_classifier(owner, &mods, true) {
+                continue;
+            }
+            match self.kind() {
+                TokenKind::RBrace | TokenKind::Eof => break,
+                TokenKind::KwFun => {
+                    let f = self.parse_fun(&mods);
+                    methods.push(f);
                 }
-                match self.kind() {
-                    TokenKind::RBrace | TokenKind::Eof => break,
-                    TokenKind::KwFun => {
-                        let f = self.parse_fun(&mods);
-                        methods.push(f);
-                    }
-                    TokenKind::KwVal | TokenKind::KwVar => {
-                        let property = self.parse_member_property(&mods, true, false);
-                        init_order.push(ClassInit::PropInit(body_props.len()));
-                        body_props.push(property);
-                    }
-                    TokenKind::Ident
-                        if self.keyword_text("init")
-                            && self
-                                .t
-                                .get(self.i + 1)
-                                .map_or(false, |t| t.kind == TokenKind::LBrace) =>
-                    {
-                        init_order.push(ClassInit::Block(self.parse_init_block()));
-                    }
-                    TokenKind::Ident if self.keyword_text("typealias") => {
-                        type_aliases.push(self.parse_type_alias_syntax());
-                    }
-                    _ => {
-                        self.diags
-                            .error(self.tok().span, "expected an object member declaration");
-                        self.bump();
-                    }
+                TokenKind::KwVal | TokenKind::KwVar => {
+                    let property = self.parse_member_property(&mods, true, false);
+                    init_order.push(ClassInit::PropInit(body_props.len()));
+                    body_props.push(property);
+                }
+                TokenKind::Ident
+                    if self.keyword_text("init")
+                        && self
+                            .t
+                            .get(self.i + 1)
+                            .is_some_and(|t| t.kind == TokenKind::LBrace) =>
+                {
+                    init_order.push(ClassInit::Block(self.parse_init_block()));
+                }
+                TokenKind::Ident if self.keyword_text("typealias") => {
+                    type_aliases.push(self.parse_type_alias_syntax());
+                }
+                _ => {
+                    self.diags
+                        .error(self.tok().span, "expected an object member declaration");
+                    self.bump();
                 }
             }
-            self.expect(TokenKind::RBrace, "'}'");
         }
+        self.expect(TokenKind::RBrace, "'}'");
         (methods, body_props, init_order, type_aliases)
     }
 
     fn parse_anon_object(&mut self, span: Span) -> ExprId {
-        self.with_newlines_significant(|parser| parser.parse_anon_object_body(span))
-    }
-
-    fn parse_anon_object_body(&mut self, span: Span) -> ExprId {
         self.bump(); // 'object'
         let name = format!("Anon$anon${}", span.lo);
         let (

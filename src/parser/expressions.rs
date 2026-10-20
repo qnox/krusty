@@ -1566,12 +1566,7 @@ impl Parser<'_> {
         )
     }
 
-    /// A `when` body restores statement-terminating line breaks, as every `{…}` body does.
     fn parse_when(&mut self) -> ExprId {
-        self.with_newlines_significant(Self::parse_when_expression)
-    }
-
-    fn parse_when_expression(&mut self) -> ExprId {
         let start = self.tok().span;
         self.bump(); // 'when'
                      // `when (val v = e) { … }` — a subject variable. Desugar to `{ val v = e; when (v) { … } }`:
@@ -1624,6 +1619,28 @@ impl Parser<'_> {
         };
         self.skip_newlines();
         self.expect(TokenKind::LBrace, "'{'");
+        // Only the `{…}` body restores statement-terminating line breaks; the `when` keyword and its
+        // subject stay in the enclosing mode, so `f(when\n(x) { … })` reads its subject.
+        let (arms, end) = self.with_newlines_significant(|parser| parser.parse_when_arms(subject));
+        let span = Span::new(start.lo, end.hi);
+        let when_expr = self.file.add_expr(Expr::When { subject, arms }, span);
+        match subject_var {
+            Some((stmt, _)) => {
+                self.file.when_subject_variables.insert(when_expr.0);
+                self.file.add_expr(
+                    Expr::Block {
+                        stmts: vec![stmt],
+                        trailing: Some(when_expr),
+                    },
+                    span,
+                )
+            }
+            None => when_expr,
+        }
+    }
+
+    /// The arms of a `when` body after its `{`, through the closing `}`, and that brace's span.
+    fn parse_when_arms(&mut self, subject: Option<ExprId>) -> (Vec<WhenArm>, Span) {
         let mut arms = Vec::new();
         loop {
             self.skip_newlines();
@@ -1670,21 +1687,7 @@ impl Parser<'_> {
         }
         let end = self.tok().span;
         self.expect(TokenKind::RBrace, "'}'");
-        let span = Span::new(start.lo, end.hi);
-        let when_expr = self.file.add_expr(Expr::When { subject, arms }, span);
-        match subject_var {
-            Some((stmt, _)) => {
-                self.file.when_subject_variables.insert(when_expr.0);
-                self.file.add_expr(
-                    Expr::Block {
-                        stmts: vec![stmt],
-                        trailing: Some(when_expr),
-                    },
-                    span,
-                )
-            }
-            None => when_expr,
-        }
+        (arms, end)
     }
 
     /// A single `when`-arm condition. In the subject form, `is T` / `!is T` becomes a type test

@@ -6313,7 +6313,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parenthesized expressions and conditions, a `when` subject) and re-enables them inside every `{…}`
   body it opens there (block, lambda, `when` body, object literal). A line-leading `+`, `or`, or other
   binary operator inside parentheses therefore continues the expression, while a statement in a
-  lambda argument still ends at its line break. Tests: `parenthesized_line_breaks_e2e`.
+  lambda argument still ends at its line break. Only the `{…}` body re-enables them: the `when`
+  keyword and subject, and an object literal's `object : Base(…)` header, keep the enclosing mode,
+  so `f(when\n(x) { … })` and `f(object : Base\n(1) { … })` parse as one expression. Tests:
+  `parenthesized_line_breaks_e2e`.
 
 - **A Java instance field is a Kotlin `var` property (unless `final`), with Java visibility.** Public
   fields read/write anywhere; protected fields bind from a subclass of the declaring class (any
