@@ -30,12 +30,22 @@ pub(super) fn emit_default_stub_forward(ir: &IrFile, fid: u32, owner: &str, cw: 
     }
     let target = cw.interface_methodref(owner, &name, &desc);
     code.invokestatic(target, argument_words as i32, slot_words(ret) as i32);
+    let return_pc = code.bytes.len() as u16;
     emit_return(ret, &mut code);
     code.ensure_locals(argument_words);
     code.link();
     cw.add_method(default_stub_access(ir, fid), &name, &desc, &code);
+    // kotlinc calls on the declaration's line and returns on its end line.
     if let Some(&line) = ir.fn_decl_lines.get(&fid) {
-        cw.set_method_lines(&name, &desc, &[(0, line)]);
+        let mut lines = vec![(0, line)];
+        if let Some(&end) = ir
+            .fn_end_lines
+            .get(&fid)
+            .filter(|&&end| end != 0 && end != line)
+        {
+            lines.push((return_pc, end));
+        }
+        cw.set_method_lines(&name, &desc, &lines);
     }
 }
 

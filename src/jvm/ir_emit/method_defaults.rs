@@ -133,6 +133,12 @@ pub(super) fn emit_default_stub(
     let _ = emitter.lease_temporary(marker_slot, Ty::obj("java/lang/Object"));
 
     let mut code = CodeBuilder::new(emitter.frame.size());
+    // kotlinc's stub stands on the signature line, except while a default expression runs on its
+    // own lines; the call that follows the defaults returns to the signature.
+    let signature_line = signature_line(ir, fid);
+    if let Some(line) = signature_line {
+        code.mark_line(line);
+    }
     if is_interface || owner_is_inheritable(ir, owner) {
         emit_default_super_guard(emitter.cw, &mut code, marker_slot, &method_name);
     }
@@ -143,8 +149,11 @@ pub(super) fn emit_default_stub(
         receiver_offset,
         &param_slots,
         &mask_slots,
-        None,
+        signature_line,
     );
+    if let Some(line) = signature_line {
+        code.mark_line(line);
+    }
     if singleton.is_none() {
         code.aload(0);
     }
@@ -201,15 +210,6 @@ pub(super) fn emit_default_stub(
         default_stub_access(ir, fid)
     };
     emitter.cw.add_method(access, &stub_name, &stub_desc, &code);
-    if let Some(&line) = ir
-        .fn_sig_lines
-        .get(&fid)
-        .or_else(|| ir.fn_decl_lines.get(&fid))
-    {
-        emitter
-            .cw
-            .set_method_lines(&stub_name, &stub_desc, &[(0, line)]);
-    }
     drop(emitter);
     emit_published_default_accessor(
         ir,
@@ -410,6 +410,14 @@ pub(super) fn default_stub_access(ir: &IrFile, fid: u32) -> u16 {
     visibility | 0x1008
 }
 
+/// The declaration's signature line, where a default stub's own instructions stand.
+fn signature_line(ir: &IrFile, fid: u32) -> Option<u32> {
+    ir.fn_sig_lines
+        .get(&fid)
+        .or_else(|| ir.fn_decl_lines.get(&fid))
+        .copied()
+}
+
 pub(super) fn emit_default_param_overwrites(
     emitter: &mut Emitter<'_>,
     code: &mut CodeBuilder,
@@ -426,8 +434,8 @@ pub(super) fn emit_default_param_overwrites(
     for (index, default) in defaults.iter().enumerate().take(logical_param_count) {
         if let Some(expression) = default {
             let (slot, ty) = param_slots[index + receiver_offset];
-            // An inline stub's mask tests stand on the signature line, which a preceding
-            // default's own line no longer is.
+            // Each mask test stands on the signature line, which a preceding default's own line
+            // no longer is.
             if let Some(line) = signature_line {
                 code.mark_line(line);
             }
@@ -573,23 +581,10 @@ pub(super) fn emit_facade_default_stub(
     let mut code = CodeBuilder::new(emitter.frame.size());
     // The stub's first line is the signature. The function method itself does not record that
     // line: its table opens on the body, after the inline-depth marker.
-    if inline_default {
-        if let Some(&line) = ir
-            .fn_sig_lines
-            .get(&fid)
-            .or_else(|| ir.fn_decl_lines.get(&fid))
-        {
-            code.mark_line(line);
-        }
+    let signature_line = signature_line(ir, fid);
+    if let Some(line) = signature_line {
+        code.mark_line(line);
     }
-    let signature_line = inline_default
-        .then(|| {
-            ir.fn_sig_lines
-                .get(&fid)
-                .or_else(|| ir.fn_decl_lines.get(&fid))
-        })
-        .flatten()
-        .copied();
     emit_default_param_overwrites(
         &mut emitter,
         &mut code,
@@ -613,11 +608,7 @@ pub(super) fn emit_facade_default_stub(
             // A default expression may have moved the current line into its own body. The ordinary
             // method-entry checks resume at the declaration signature; `mark_line` naturally
             // deduplicates this when the default and signature share one line.
-            if let Some(&line) = ir
-                .fn_sig_lines
-                .get(&fid)
-                .or_else(|| ir.fn_decl_lines.get(&fid))
-            {
+            if let Some(line) = signature_line {
                 code.mark_line(line);
             }
             super::method_entry::emit(fid, &real_params, false, None, env, &mut emitter, &mut code);
@@ -648,6 +639,9 @@ pub(super) fn emit_facade_default_stub(
             record_stub_parameter_locals(ir, fid, &real_params, &mut code);
         }
     } else {
+        if let Some(line) = signature_line {
+            code.mark_line(line);
+        }
         for (index, &(slot, ty)) in param_slots.iter().enumerate() {
             load(ty, slot, &mut code);
             emit_adapted_unbox(
@@ -681,21 +675,6 @@ pub(super) fn emit_facade_default_stub(
         &descriptor,
         &code,
     );
-    // An inline stub keeps the lines its body marked. Replacing them with the signature line
-    // would drop the expression entry kotlinc records after the inline-depth marker.
-    if !inline_default {
-        if let Some(&line) = ir
-            .fn_sig_lines
-            .get(&fid)
-            .or_else(|| ir.fn_decl_lines.get(&fid))
-        {
-            emitter.cw.set_method_lines(
-                &format!("{method_name}$default"),
-                &descriptor,
-                &[(0, line)],
-            );
-        }
-    }
     drop(emitter);
     emit_published_default_accessor(
         ir,
