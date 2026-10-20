@@ -44,7 +44,7 @@ pub use selections::*;
 pub use signature_state::SignatureState;
 mod classifier_headers;
 mod declaration_metadata;
-pub use declaration_metadata::NoArgSuperConstructor;
+pub use declaration_metadata::{NoArgSuperConstructor, PropertyAccessor};
 mod file_annotations;
 pub(crate) use file_annotations::FileAnnotationFacts;
 mod result_expectation;
@@ -1408,11 +1408,8 @@ pub struct ResolvedModuleIndex {
     /// Resolved declaration annotation identities retained as stable semantic header metadata.
     /// Source spellings, spans, and target-specific interpretations do not cross this boundary.
     declaration_annotations: HashMap<DeclarationId, Box<[TypeName]>>,
-    /// Fully checked declaration annotation applications. Values are folded against the selected
-    /// annotation constructor and keyed by stable declaration identity; consumers never join them
-    /// back to the identity-only header list by ordinal.
-    declaration_applied_annotations:
-        HashMap<DeclarationId, Box<[crate::types::ResolvedAnnotation]>>,
+    /// Fully checked annotation applications by stable declaration or property-accessor site.
+    checked_annotation_applications: declaration_metadata::CheckedAnnotationApplications,
     /// Constant string arguments parallel to selected declaration annotations. This is compact,
     /// resolved header metadata (for example the value of `@JvmName`), not retained annotation
     /// syntax. Keeping it beside the stable declaration lets target realization consume annotation
@@ -2486,7 +2483,7 @@ impl ResolvedModuleIndex {
         self.declarations.is_empty()
             && self.declaration_headers.is_empty()
             && self.declaration_annotations.is_empty()
-            && self.declaration_applied_annotations.is_empty()
+            && self.checked_annotation_applications.is_empty()
             && self.declaration_annotation_string_arguments.is_empty()
             && self.declaration_annotation_class_arguments.is_empty()
             && self.continuation_ordinals.is_empty()
@@ -2953,16 +2950,7 @@ impl ResolvedModuleIndex {
                 .values()
                 .map(|annotations| annotations.len() * std::mem::size_of::<TypeName>())
                 .sum::<usize>()
-            + self.declaration_applied_annotations.len()
-                * (std::mem::size_of::<DeclarationId>()
-                    + std::mem::size_of::<Box<[crate::types::ResolvedAnnotation]>>())
-            + self
-                .declaration_applied_annotations
-                .values()
-                .map(|annotations| {
-                    annotations.len() * std::mem::size_of::<crate::types::ResolvedAnnotation>()
-                })
-                .sum::<usize>()
+            + self.checked_annotation_applications.storage_payload_bytes()
             + self.declaration_annotation_string_arguments.len()
                 * (std::mem::size_of::<(DeclarationId, u32)>()
                     + std::mem::size_of::<Box<[Box<str>]>>())
