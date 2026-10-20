@@ -3,9 +3,9 @@
 //! passes the Kotlin compiler.
 //!
 //! The whole plan is built before anything is compiled: every module's compiler arguments, and
-//! every refusal of what krusty-toolchain does not implement (toolchain plugins, KSP, Java
-//! sources, compiler settings it does not pass, a JDK it would have to provision, an artifact it
-//! would have to download). Then the modules are compiled, several at once, each after the
+//! every refusal of what krusty-toolchain does not implement (toolchain plugins other than ones
+//! that add source directories, KSP, Java sources, compiler settings it does not pass, a JDK it
+//! would have to provision, an artifact it would have to download). Then the modules are compiled, several at once, each after the
 //! modules it compiles against, starting no more once one fails.
 
 mod arguments;
@@ -14,6 +14,7 @@ mod classpath;
 mod jdk;
 mod order;
 mod plan;
+mod plugins;
 mod refusals;
 mod run;
 mod schedule;

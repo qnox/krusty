@@ -1,0 +1,40 @@
+A toolchain plugin whose generated Kotlin sources are written out as a directory of the module
+that is not the output of one of its tasks: the toolchain rejects the project, for each module that
+enables the plugin, and krusty-toolchain rejects it with the same problems.
+--- task
+:app:compileJvm
+--- project.yaml
+modules:
+  - app
+  - tools/direct
+plugins:
+  - ./tools/direct
+--- tools/direct/module.yaml
+product: jvm/amper-plugin
+--- tools/direct/plugin.yaml
+tasks:
+  declare:
+    action: !org.example.build.declareSources
+      sourceDir: ${module.rootDir}/declared/kotlin
+generated:
+  sources:
+    - language: kotlin
+      directory: ${module.rootDir}/generated-src/kotlin
+--- tools/direct/src/declareSources.kt
+package org.example.build
+
+import org.jetbrains.amper.plugins.Output
+import org.jetbrains.amper.plugins.TaskAction
+import java.nio.file.Path
+
+@TaskAction
+fun declareSources(@Output sourceDir: Path) {
+}
+--- app/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+plugins:
+  direct: enabled
+--- app/generated-src/kotlin/A.kt
+class A

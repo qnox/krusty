@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use super::arguments::{arguments, Compilation};
 use super::classpath::classpath;
 use super::order::{compile_dependencies, compile_order};
-use super::{jdk, refusals, sources};
+use super::{jdk, plugins, refusals, sources};
 use crate::diagnostic::{Diagnostic, Diagnostics};
 use crate::maven::{missing, Coordinates, Metadata, OpenError, Problem, Store};
 use crate::model::Model;
@@ -134,9 +134,19 @@ pub fn plan(
             return Err(format!("module `{name}` is not configured"));
         };
         let settings = main.get("settings").ok_or("a fragment without settings")?;
+        let directory = header.file.parent().unwrap_or(Path::new(""));
+        let (generated, plugins_refused) = match plugins::generated_sources(
+            name,
+            directory,
+            configuration,
+            &model.project.plugins,
+        ) {
+            Ok(generated) => (generated, Vec::new()),
+            Err(refused) => (Vec::new(), refused),
+        };
         let refused = refusals::refusals(name, configuration, main);
-        let compiles = refused.is_empty();
-        for diagnostic in refused {
+        let mut compiles = refused.is_empty() && plugins_refused.is_empty();
+        for diagnostic in plugins_refused.into_iter().chain(refused) {
             diagnostics.push(diagnostic);
         }
         let jdk_home = jdk::select(
@@ -147,8 +157,7 @@ pub fn plan(
         )
         .map_err(|diagnostic| diagnostics.push(diagnostic))
         .ok();
-        let directory = header.file.parent().unwrap_or(Path::new(""));
-        let layout = sources::layout(
+        let mut layout = sources::layout(
             directory,
             &configuration
                 .module
@@ -156,6 +165,7 @@ pub fn plan(
                 .and_then(|whole| whole.text_at(&["layout"]))
                 .unwrap_or_default(),
         );
+        layout.sources.extend(generated);
         let found = match sources::find(&layout.sources) {
             Ok(found) => found,
             Err(error) => {
@@ -169,6 +179,17 @@ pub fn plan(
                 continue;
             }
         };
+        for file in &found.not_directories {
+            compiles = false;
+            diagnostics.push(Diagnostic::error(
+                file,
+                None,
+                format!(
+                    "Source directory at '{}' exists, but it's not a directory, this is currently unsupported",
+                    file.display()
+                ),
+            ));
+        }
         let artifacts = artifact_directory(root, name);
         let output = artifacts.join("kotlin-output");
         let resources_output = artifacts.join("resources-output");
@@ -236,6 +257,7 @@ pub fn plan(
                 classpath: &entries,
                 module_name: name,
                 java_parameters: settings.is_enabled(&["jvm", "storeParameterNames"]),
+                fragment_sources: (found.filled > 1).then_some(found.walked.as_slice()),
                 plugins: &plugins,
                 kotlin_version: &kotlin_version,
                 output: &output,
