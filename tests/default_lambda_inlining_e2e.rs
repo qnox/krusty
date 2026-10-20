@@ -222,3 +222,69 @@ fn suspend_inline_default_bridges_run_like_the_reference_compiler() {
     .expect("reference kotlinc is provisioned");
     assert_eq!(output, "OK");
 }
+
+const CAPTURING_LIB: &str = r#"
+package lib
+
+inline fun cap(a: String, f: () -> String = { a + "?" }, b: String = "z"): String {
+    val t = f() + b
+    return t
+}
+
+inline fun span(start: Long, count: Int, f: () -> Long = { start + count }, label: String = "n"): String =
+    label + f()
+"#;
+
+const CAPTURING_MAIN: &str = r#"
+import lib.*
+
+fun capped(url: String): String {
+    val r = cap(url)
+    return r.let { it + "!" }
+}
+
+fun cappedWith(url: String): String = cap(url, b = "y")
+
+fun spanned(start: Long): String {
+    val text = span(start, 3)
+    return text.let { it + "." }
+}
+
+fun box(): String {
+    if (capped("u") != "u?z!") return "FAIL capped: " + capped("u")
+    if (cappedWith("v") != "v?y") return "FAIL cappedWith: " + cappedWith("v")
+    if (spanned(4L) != "n7.") return "FAIL spanned: " + spanned(4L)
+    return "OK"
+}
+"#;
+
+/// An omitted inline lambda parameter whose default lambda captures earlier arguments is inlined
+/// from its class, as kotlinc does: the arm's loads of the captured values stay, and they are
+/// stored into temporaries that follow every parameter, each read where the lambda's body read
+/// its field. A later local reuses the freed slots.
+#[test]
+fn capturing_default_lambdas_are_inlined_where_kotlinc_inlines_them() {
+    let classes = common::classes_against_kotlinc_lib(
+        "CapturingDefaults",
+        &[("Lib.kt", CAPTURING_LIB)],
+        CAPTURING_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        ["CapturingDefaultsKt"]
+    );
+    let differences = classes.code_differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+#[test]
+fn capturing_default_lambdas_run_like_the_reference_compiler() {
+    let output = common::expect_box_run_against_ref(
+        "capturing_default_lambdas",
+        CAPTURING_LIB,
+        CAPTURING_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+}
