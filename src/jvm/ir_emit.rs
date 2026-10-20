@@ -2920,10 +2920,8 @@ fn emit_class(
             }
         }
     }
-    // The child-serializer cache's factories and its `…$cp` accessor follow the deserialization
-    // constructor and the no-arg convenience constructor, which is kotlinc's order for them. They
-    // are generated, so they carry no source order to sort by and the declared-member schedule
-    // leaves them out.
+    // The child-serializer cache's factories and `…$cp` accessor follow both constructors above
+    // (kotlinc's order). They are generated, so the declared-member schedule leaves them out.
     for &fid in c
         .methods
         .iter()
