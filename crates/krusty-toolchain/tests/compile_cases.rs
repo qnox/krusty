@@ -8,7 +8,9 @@
 //! `tests/cases/dependencies/repository`. Its `krusty-argv` section is krusty-toolchain's ledger of
 //! the recorded invocations, in the order it runs them, each run's directory written
 //! `<directory>`; a `krusty-refusal` section instead holds the errors it refuses with, which must be
-//! all it prints. Both ledgers are checked without the oracle. Where the oracle runs, the
+//! all it prints. Both ledgers are checked without the oracle; the invocations of the `krusty-argv`
+//! ledger are compared module by module, as krusty-toolchain compiles independent modules together
+//! (the order it starts them in is checked by its own tests). Where the oracle runs, the
 //! toolchain's recorded invocations must be the `krusty-argv` ledger's, compared module by module
 //! (the toolchain may compile independent modules in either order), the sources of each as a set.
 //!
@@ -107,7 +109,7 @@ fn compile_cases() -> Vec<CompileCase> {
         .collect()
 }
 
-/// What krusty-toolchain did for `task` in `case`'s project, and what the recorder recorded.
+/// What krusty-toolchain did for `tasks` in `case`'s project, and what the recorder recorded.
 struct Ran {
     output: Output,
     record: String,
@@ -119,7 +121,7 @@ struct Ran {
 fn krusty_toolchain(
     run: &str,
     case: &CompileCase,
-    task: &str,
+    tasks: &[&str],
     configure: impl Fn(&mut Command),
 ) -> Ran {
     let temp = support::TempDir::new(&format!("compile-{run}"));
@@ -127,7 +129,7 @@ fn krusty_toolchain(
     let root = support::materialize(&temp, &case.project);
     Resolving::write_repository(&directory, &case.repository);
     compiling::lay_out(&directory);
-    let output = run_task(&directory, &root, task, configure);
+    let output = run_task(&directory, &root, tasks, configure);
     let record = std::fs::read_to_string(directory.join(compiling::RECORD)).unwrap_or_default();
     Ran {
         output,
@@ -137,14 +139,20 @@ fn krusty_toolchain(
     }
 }
 
-/// Runs krusty-toolchain's `task` in the project at `root`, laid out in `directory`.
-fn run_task(directory: &Path, root: &Path, task: &str, configure: impl Fn(&mut Command)) -> Output {
+/// Runs krusty-toolchain's `tasks` in the project at `root`, laid out in `directory`.
+fn run_task(
+    directory: &Path,
+    root: &Path,
+    tasks: &[&str],
+    configure: impl Fn(&mut Command),
+) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_krusty-toolchain"));
     command
-        .args(["task", task])
+        .arg("task")
+        .args(tasks)
         .current_dir(root)
         .env("HOME", directory.join(Resolving::HOME));
-    compiling::environment(&mut command, directory);
+    compiling::environment(&mut command, directory, &compiling::toolchain_recorder());
     configure(&mut command);
     let ran = command.output().expect("run krusty-toolchain");
     Output {
@@ -200,7 +208,12 @@ fn every_compile_case_is_exact() {
     assert_eq!(cases.len(), 11, "the cases are missing");
     let mut failures = Vec::new();
     for case in &cases {
-        let ran = krusty_toolchain(&format!("case-{}", case.name), case, &case.task, |_| {});
+        let ran = krusty_toolchain(
+            &format!("case-{}", case.name),
+            case,
+            &[case.task.as_str()],
+            |_| {},
+        );
         let actual = &ran.output;
         let printed = format!(
             "status {}, stdout\n{}stderr\n{}record\n{}",
@@ -213,7 +226,7 @@ fn every_compile_case_is_exact() {
             (Some(argv), _) => {
                 let clean =
                     actual.code == 0 && actual.stdout.is_empty() && actual.stderr.is_empty();
-                if !clean || ran.record != *argv {
+                if !clean || by_module_text(&ran.record) != by_module_text(argv) {
                     failures.push(format!(
                         "{}: krusty-toolchain did {printed}\nthe `krusty-argv` section expects status 0, no output and the record\n{argv}",
                         case.name
@@ -244,6 +257,26 @@ fn every_compile_case_is_exact() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// A record's invocations as written, ordered by the module each compiles.
+fn by_module_text(record: &str) -> Vec<(String, String)> {
+    let mut invocations = Vec::new();
+    let mut current = String::new();
+    for line in record.split_inclusive('\n') {
+        current.push_str(line);
+        if line.trim_end_matches('\n') == compiling::END_OF_INVOCATION {
+            let module = current
+                .lines()
+                .find_map(|argument| argument.strip_prefix("-module-name="))
+                .unwrap_or_default()
+                .to_string();
+            invocations.push((module, std::mem::take(&mut current)));
+        }
+    }
+    invocations.push((String::new(), current));
+    invocations.sort();
+    invocations
 }
 
 /// Invocations by the module each compiles.
@@ -320,7 +353,7 @@ fn modules(record: &str) -> Vec<String> {
 fn outputs_are_cleared_and_resources_copied() {
     compiling::recorder();
     let case = case("lib-and-app");
-    let ran = krusty_toolchain("resources", &case, ":app:compileJvm", |command| {
+    let ran = krusty_toolchain("resources", &case, &[":app:compileJvm"], |command| {
         command.env("KRUSTY_RECORDER_FAIL", "none");
     });
     assert_eq!(
@@ -359,7 +392,7 @@ fn a_rerun_leaves_no_output_of_removed_sources_or_resources() {
     let quiet = |command: &mut Command| {
         command.env("KRUSTY_RECORDER_FAIL", "none");
     };
-    let first = krusty_toolchain("stale", &case, ":app:compileJvm", quiet);
+    let first = krusty_toolchain("stale", &case, &[":app:compileJvm"], quiet);
     assert_eq!(
         first.output.code,
         0,
@@ -382,7 +415,7 @@ fn a_rerun_leaves_no_output_of_removed_sources_or_resources() {
     std::fs::remove_file(project.join("lib/src/Greeting.kt")).unwrap();
     std::fs::remove_dir_all(project.join("lib/resources")).unwrap();
 
-    let second = run_task(&first.directory, &project, ":app:compileJvm", quiet);
+    let second = run_task(&first.directory, &project, &[":app:compileJvm"], quiet);
     assert_eq!(second.code, 0, "{}", placed(&second.root, &second.stderr));
     let mut found = Vec::new();
     files_below(&artifacts, "", &mut found);
@@ -397,7 +430,7 @@ fn a_rerun_leaves_no_output_of_removed_sources_or_resources() {
 fn the_first_failing_compilation_stops_the_task_with_its_status() {
     compiling::recorder();
     let case = case("exported-chain");
-    let ran = krusty_toolchain("failure", &case, ":app:compileJvm", |command| {
+    let ran = krusty_toolchain("failure", &case, &[":app:compileJvm"], |command| {
         command.env("KRUSTY_RECORDER_FAIL", "base");
     });
     assert_eq!(
@@ -421,34 +454,41 @@ fn the_first_failing_compilation_stops_the_task_with_its_status() {
 fn a_task_needs_krusty_and_a_task_krusty_toolchain_runs() {
     compiling::recorder();
     let case = case("lib-and-app");
-    let cases: [(&str, &str, bool, &str); 4] = [
+    let cases: [(&str, &[&str], bool, &str); 5] = [
         (
             "no-krusty",
-            ":lib:compileJvm",
+            &[":lib:compileJvm"],
             true,
             "\nERROR: KRUSTY_BIN is not set: krusty-toolchain compiles with the krusty binary it names, and does not search PATH for one\n",
         ),
         (
             "unknown-module",
-            ":nope:compileJvm",
+            &[":nope:compileJvm"],
             false,
             "\nERROR: Task ':nope:compileJvm' was not found in the project\n",
         ),
         (
             "not-a-task",
-            "compileJvm",
+            &["compileJvm"],
             false,
             "\nERROR: Task 'compileJvm' was not found in the project\n",
         ),
         (
+            // The toolchain names the last task it does not find.
+            "unknown-modules",
+            &[":nope:compileJvm", ":lib:compileJvm", ":zz:compileJvm"],
+            false,
+            "\nERROR: Task ':zz:compileJvm' was not found in the project\n",
+        ),
+        (
             "other-task",
-            ":app:runJvm",
+            &[":app:runJvm"],
             false,
             "\nERROR: krusty-toolchain does not implement the task ':app:runJvm': it runs only `:<module>:compileJvm`\n",
         ),
     ];
-    for (run, task, without_krusty, stderr) in cases {
-        let ran = krusty_toolchain(run, &case, task, |command| {
+    for (run, tasks, without_krusty, stderr) in cases {
+        let ran = krusty_toolchain(run, &case, tasks, |command| {
             if without_krusty {
                 command.env_remove("KRUSTY_BIN");
             }
@@ -580,7 +620,7 @@ fn the_real_krusty_compiles_a_library_and_the_application_that_uses_it() {
     std::fs::copy(real.kotlin_lib.join("annotations-13.0.jar"), &annotations).unwrap();
     compiling::lay_out(&directory);
 
-    let ran = run_task(&directory, &root, ":app:compileJvm", |command| {
+    let ran = run_task(&directory, &root, &[":app:compileJvm"], |command| {
         command
             .env("JAVA_HOME", &real.java_home)
             .env("KRUSTY_BIN", &real.krusty);
@@ -630,5 +670,292 @@ fn the_real_krusty_compiles_a_library_and_the_application_that_uses_it() {
         ),
         (Some(0), "hello, world!\n".to_string(), String::new()),
         "the application runs with the library's behavior"
+    );
+}
+
+/// A diamond: `app` compiles against `left` and `right`, which both compile against `base`. The
+/// project lists them so that its order is not the order they compile in.
+fn diamond() -> CompileCase {
+    let module = |dependencies: &[&str]| {
+        let mut text = "product: jvm/lib\nrepositories:\n  - mavenLocal\n".to_string();
+        if !dependencies.is_empty() {
+            text.push_str("dependencies:\n");
+            for dependency in dependencies {
+                text.push_str(&format!("  - ../{dependency}\n"));
+            }
+        }
+        text
+    };
+    let mut project = vec![(
+        "project.yaml".to_string(),
+        "modules:\n  - app\n  - base\n  - left\n  - right\n".to_string(),
+    )];
+    for (name, dependencies) in [
+        ("app", &["left", "right"][..]),
+        ("base", &[][..]),
+        ("left", &["base"][..]),
+        ("right", &["base"][..]),
+    ] {
+        project.push((format!("{name}/module.yaml"), module(dependencies)));
+        project.push((
+            format!("{name}/src/{name}.kt"),
+            format!("fun {name}() = 1\n"),
+        ));
+    }
+    let mut repository = Vec::new();
+    files_below(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases/dependencies/repository"),
+        "",
+        &mut repository,
+    );
+    CompileCase {
+        name: "diamond".to_string(),
+        project,
+        repository,
+        task: ":app:compileJvm".to_string(),
+        argv: None,
+        refusal: None,
+    }
+}
+
+/// Whether krusty-toolchain runs more than one module at a time on this host.
+fn parallel() -> bool {
+    std::thread::available_parallelism().is_ok_and(|count| count.get() > 1)
+}
+
+/// What a run did: its status, stdout, stderr, and its recorder's events.
+fn timed_run(
+    run: &str,
+    tasks: &[&str],
+    configure: impl Fn(&mut Command),
+) -> (i32, String, String, Vec<String>) {
+    let case = diamond();
+    let temp = support::TempDir::new(&format!("compile-{run}"));
+    let events = temp.0.join("events");
+    let ran = krusty_toolchain(run, &case, tasks, |command| {
+        command
+            .env("KRUSTY_EVENTS", &events)
+            .env("KRUSTY_RECORDER_SLEEP", "0.4");
+        configure(command);
+    });
+    let events = std::fs::read_to_string(&events).unwrap_or_default();
+    (
+        ran.output.code,
+        placed(&ran.output.root, &ran.output.stdout),
+        placed(&ran.output.root, &ran.output.stderr),
+        events.lines().map(str::to_string).collect(),
+    )
+}
+
+/// `events` with the events from each `(start, end)` index range of `together` sorted: modules
+/// that run at the same time start and end in either order.
+fn settled(mut events: Vec<String>, together: &[(usize, usize)]) -> Vec<String> {
+    for &(start, end) in together {
+        events[start..end].sort();
+    }
+    events
+}
+
+fn lines(lines: &[&str]) -> Vec<String> {
+    lines.iter().map(|line| line.to_string()).collect()
+}
+
+/// What a module the recorder sleeps in prints on stderr.
+fn sleeper(module: &str) -> String {
+    format!("recorder: {module} begins\nrecorder: {module} ends\n")
+}
+
+#[test]
+fn independent_modules_compile_together_after_what_they_compile_against() {
+    compiling::recorder();
+    let (code, stdout, stderr, events) = timed_run("diamond", &[":app:compileJvm"], |_| {});
+    // Each module's output stays together, in plan order whichever finishes first.
+    let order = ["base", "left", "right", "app"];
+    assert_eq!(
+        (code, stdout, stderr),
+        (
+            0,
+            order
+                .iter()
+                .map(|module| format!("recorder: compiled {module}\n"))
+                .collect(),
+            order.iter().map(|module| sleeper(module)).collect(),
+        )
+    );
+    if parallel() {
+        assert_eq!(
+            settled(events, &[(2, 4), (4, 6)]),
+            lines(&[
+                "start base",
+                "end base",
+                "start left",
+                "start right",
+                "end left",
+                "end right",
+                "start app",
+                "end app",
+            ])
+        );
+    } else {
+        assert_eq!(
+            events,
+            lines(&[
+                "start base",
+                "end base",
+                "start left",
+                "end left",
+                "start right",
+                "end right",
+                "start app",
+                "end app",
+            ])
+        );
+    }
+}
+
+#[test]
+fn a_failure_starts_no_module_and_waits_for_the_running_ones() {
+    compiling::recorder();
+    let (code, stdout, stderr, events) =
+        timed_run("diamond-failure", &[":app:compileJvm"], |command| {
+            command.env("KRUSTY_RECORDER_FAIL", "left");
+        });
+    let failed = "recorder: failing left\n";
+    let error = "\nERROR: Task ':left:compileJvm' failed: krusty exited with status 3\n";
+    if parallel() {
+        // `right` runs while `left` fails at once: it finishes, and `app` never starts.
+        assert_eq!(
+            (code, stdout, stderr, settled(events, &[(2, 4)])),
+            (
+                3,
+                "recorder: compiled base\nrecorder: compiled right\n".to_string(),
+                format!("{}{failed}{}{error}", sleeper("base"), sleeper("right")),
+                lines(&[
+                    "start base",
+                    "end base",
+                    "start left",
+                    "start right",
+                    "end left",
+                    "end right"
+                ]),
+            )
+        );
+    } else {
+        assert_eq!(
+            (code, stdout, stderr, events),
+            (
+                3,
+                "recorder: compiled base\n".to_string(),
+                format!("{}{failed}{error}", sleeper("base")),
+                lines(&["start base", "end base", "start left", "end left"]),
+            )
+        );
+    }
+}
+
+/// Two sibling modules fail: `left`, planned first, slowly with status 4, and `right` at once with
+/// status 3. What is printed, and the status, follow the plan, not which fails first.
+#[test]
+fn concurrent_failures_are_reported_in_plan_order() {
+    compiling::recorder();
+    for attempt in 0..4 {
+        let ran = timed_run(
+            &format!("siblings-{attempt}"),
+            &[":app:compileJvm"],
+            |command| {
+                command
+                    .env("KRUSTY_RECORDER_FAIL", "right")
+                    .env("KRUSTY_RECORDER_FAIL_LATE", "left");
+            },
+        );
+        let base = "recorder: compiled base\n".to_string();
+        let expected = if parallel() {
+            (
+                4,
+                base,
+                format!(
+                    "{}{}recorder: failing left late\nrecorder: failing right\n\n\
+                     ERROR: Task ':left:compileJvm' failed: krusty exited with status 4\n\n\
+                     ERROR: Task ':right:compileJvm' failed: krusty exited with status 3\n",
+                    sleeper("base"),
+                    sleeper("left")
+                ),
+                lines(&[
+                    "start base",
+                    "end base",
+                    "start left",
+                    "start right",
+                    "end right",
+                    "end left",
+                ]),
+            )
+        } else {
+            (
+                4,
+                base,
+                format!(
+                    "{}{}recorder: failing left late\n\n\
+                     ERROR: Task ':left:compileJvm' failed: krusty exited with status 4\n",
+                    sleeper("base"),
+                    sleeper("left")
+                ),
+                lines(&["start base", "end base", "start left", "end left"]),
+            )
+        };
+        let (code, stdout, stderr, events) = ran;
+        // `left` and `right` start together; `right` ends first.
+        let events = if parallel() {
+            settled(events, &[(2, 4)])
+        } else {
+            events
+        };
+        assert_eq!(
+            (code, stdout, stderr, events),
+            expected,
+            "attempt {attempt}"
+        );
+    }
+}
+
+#[test]
+fn several_tasks_compile_the_union_of_what_they_need_once() {
+    compiling::recorder();
+    let case = diamond();
+    // A target named twice, and a dependency both targets share.
+    let tasks = [":right:compileJvm", ":left:compileJvm", ":right:compileJvm"];
+    let ran = krusty_toolchain("union", &case, &tasks, |_| {});
+    let mut compiled = modules(&ran.record);
+    // `left` and `right` compile together, in either order, after `base`.
+    compiled[1..].sort();
+    assert_eq!(
+        (
+            ran.output.code,
+            placed(&ran.output.root, &ran.output.stdout),
+            placed(&ran.output.root, &ran.output.stderr),
+            compiled
+        ),
+        (
+            0,
+            String::new(),
+            String::new(),
+            lines(&["base", "left", "right"])
+        )
+    );
+    // The toolchain, given the same tasks, compiles the same modules with the same arguments.
+    let mut arguments = vec!["task"];
+    arguments.extend(tasks);
+    let toolchain = kotlin::kotlin(&Invocation {
+        case: "diamond-union",
+        files: &case.project,
+        args: &arguments,
+        repository: Some(&case.repository),
+        compiler: Some(&compiling::RecordingKrusty),
+    });
+    let recorded = placed(&toolchain.root, &toolchain.stdout);
+    assert_eq!(
+        (toolchain.code, by_module(&recorded)),
+        (0, by_module(&ran.record)),
+        "the toolchain printed\n{}",
+        placed(&toolchain.root, &toolchain.stderr)
     );
 }
