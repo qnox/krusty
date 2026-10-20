@@ -6444,6 +6444,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   statement whose `Unit` value follows the lambda's brace now does too, unless a copied body's
   terminal `Unit` keeps its own mapped line and so writes that `nop` itself.
   Tests: `tests/inline_scope_function_bytes_e2e.rs`.
+- **A statement lambda's discarded result is popped on the call's line.** For a statement such as
+  `run { one() }`, `with(x) { length }` or `s.let { it.length }`, kotlinc leaves the inlined
+  lambda's value on the operand stack through the end of the lambda's locals and the call line
+  `markLineNumberAfterInlineIfNeeded` writes after the inline call; the statement's `pop` follows
+  there. The `pop` is that line's instruction, so `RedundantNopsCleanup` drops the frame's closing
+  `nop`: `invokestatic one; pop` with the call line at the `pop` and the `$i$a$` local ending
+  before it. A `when` tail still discards in its branches, which is where kotlinc's pop
+  propagation leaves those `pop`s, and a pure load or constant still vanishes with its `pop`.
+  Tests: `tests/discarded_inline_lambda_result_e2e.rs`.
 - **A same-file inline call's result is adapted after its copied frame ends.** kotlinc ends the
   `$i$f$` marker and the inlined parameter locals at the copied body's end label before its caller
   adapts the result. An erased type-parameter result is narrowed after those locals end, a
