@@ -310,9 +310,13 @@ fn emit_companion_bridge(
 }
 
 impl Emitter<'_> {
-    /// The singleton whose instance value `value` reads, in a named object's static member.
+    /// The singleton whose instance value `value` reads, in a named object's static member. Only
+    /// the unbound receiver is the instance: a nested scope that binds value 0 to a local of its
+    /// own (an inlined body's receiver) keeps that binding.
     pub(super) fn singleton_receiver_value(&self, value: u32) -> Option<TypeName> {
-        self.singleton_receiver.filter(|_| value == 0)
+        self.singleton_receiver.filter(|_| {
+            value == 0 && !self.slots.contains_key(&value) && !self.var_types.contains_key(&value)
+        })
     }
 
     /// Whether `expression` reads a static member's receiver value: the singleton's instance

@@ -67,3 +67,55 @@ object Registry {
         "Registry",
     );
 }
+
+/// An inlined extension lambda in an initializer binds its own receiver to value 0. That binding
+/// keeps its local; only the object's unbound `this` loads `INSTANCE`.
+#[test]
+fn an_inlined_receiver_in_an_initializer_keeps_its_local() {
+    common::expect_box_ok_with_stdlib(
+        r#"
+inline fun <T> T.with(f: T.() -> Unit): T {
+    this.f()
+    return this
+}
+object Buffered {
+    val string = "OK"
+    val buffer = StringBuilder().with {
+        append(string)
+    }
+}
+fun box(): String = Buffered.buffer.toString()
+"#,
+        "object_initializer_inlined_receiver",
+    );
+}
+
+/// An inlined lambda's parameter in an initializer is a local of the inlined body, not the
+/// object's receiver, even when the value it holds is a nested anonymous object.
+#[test]
+fn an_inlined_lambda_parameter_in_an_initializer_keeps_its_local() {
+    common::expect_box_ok_with_stdlib(
+        r#"
+inline fun <T> T.also(f: (T) -> Unit): T {
+    f(this)
+    return this
+}
+object Holder {
+    var result = ""
+    private val made = object {
+        fun inner() = object {
+            fun mark() {
+                result += "K"
+            }
+        }.also { result += "O" }
+    }
+    val kept = made.inner().also { it.mark() }
+}
+fun box(): String {
+    Holder.kept
+    return Holder.result
+}
+"#,
+        "object_initializer_inlined_parameter",
+    );
+}
