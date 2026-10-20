@@ -16,9 +16,9 @@ The reference is Kotlin Toolchain 0.13.0.
   [--include-tests]` prints exactly what `kotlin show dependencies` prints: each module's resolved
   dependency graph for the compile and runtime classpaths of its main (and test) fragment. See
   [Dependency resolution](#dependency-resolution).
-- `krusty-toolchain [--project-dir=<path>] task :<module>:compileJvm` compiles the module's main
-  fragment and those of the modules it compiles against, with the krusty binary `KRUSTY_BIN` names,
-  passing it the compiler arguments the toolchain's compilation passes. See
+- `krusty-toolchain [--project-dir=<path>] task :<module>:compileJvm...` compiles the modules' main
+  fragments and those of the modules they compile against, each once, with the krusty binary
+  `KRUSTY_BIN` names, passing it the compiler arguments the toolchain's compilation passes. See
   [Compiling](#compiling).
 - Project discovery: the nearest directory at or above the current one with a `project.yaml`. A
   module file passed on the way that the project does not list makes its directory a single-module
@@ -117,9 +117,10 @@ Versions compare as Maven compares them (`maven_version.rs`), as the toolchain d
 
 ## Compiling
 
-`task :<module>:compileJvm` builds its whole plan before compiling anything (`src/compile/plan.rs`):
-the module and the modules it depends on for compilation, transitively, in dependency order with
-the project's module order breaking ties, each with its krusty arguments in the order the
+`task :<module>:compileJvm...` builds its whole plan before compiling anything
+(`src/compile/plan.rs`): the modules named, as `kotlin task` takes several task names, and the
+modules they depend on for compilation, transitively, each once, in dependency order with the
+project's module order breaking ties, each with its krusty arguments in the order the
 toolchain's compilation passes them:
 
 ```text
@@ -134,11 +135,20 @@ The classpath is the module's resolved compile graph, walked breadth first
 sources) followed by its resources output (when it has resources), then each artifact's files,
 each once. The JDK is the one `JAVA_HOME` names; it must be a JDK (it has `bin/javac`) of the major
 version `settings.jvm.jdk.version` asks for. Artifact files and the serialization plugin come from
-the local repositories only. A module without Kotlin sources is not compiled. For each module in
-turn the task clears its output directory, runs `KRUSTY_BIN` with the arguments, its output
-streaming through, and copies the resources directory (`src/main/resources` in the Maven-like
-layout, else `resources`) to `resources-output`. The first compilation that fails stops the task
-with krusty's exit status.
+the local repositories only. A module without Kotlin sources is not compiled. For each module the
+task clears its output directory, runs `KRUSTY_BIN` with the arguments, and copies the resources
+directory (`src/main/resources` in the Maven-like layout, else `resources`) to `resources-output`.
+Modules run as the toolchain runs its task graph (`src/compile/schedule.rs`): a module starts as
+soon as the modules it compiles against have finished, at most as many at once as the host has
+available processors (the toolchain bounds its task executor the same way and has no option for
+it, so neither does krusty-toolchain). krusty's output is captured per module and printed whole in plan
+order, as soon as the module and every module planned before it that ran have finished, so each
+module's output stays together and nothing printed depends on which compilation finishes first.
+Once a module fails no module begins: a module begins, before it touches its outputs, only under
+the same lock a failure is recorded under, so it either began before the failure or does nothing.
+The running ones are waited for, each failure is reported in plan order, and the task exits with the status of
+the first failing krusty in plan order. When several tasks name modules that do not exist, the last is reported, as the
+toolchain reports it.
 
 Before compiling anything, krusty-toolchain refuses, at the setting and naming the module, every
 module of the plan that:
