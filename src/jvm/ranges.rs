@@ -125,7 +125,8 @@ pub(super) fn realize(
             | IrExpr::Checked(
                 IrCheckedOperation::RangeConstruction { .. }
                 | IrCheckedOperation::RangeLoop { .. }
-                | IrCheckedOperation::RangeContains { .. },
+                | IrCheckedOperation::RangeContains { .. }
+                | IrCheckedOperation::ComparableRangeContains { .. },
             )
             | IrExpr::CallableReference(_)
             | IrExpr::Const(_)

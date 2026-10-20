@@ -134,6 +134,31 @@ fn required_closed_range_contains_roles(
     .collect()
 }
 
+/// The role of the stdlib's one generic `rangeTo`, `<T : Comparable<T>> T.rangeTo(that: T)`.
+fn comparable_range_to_role(
+    libraries: &JvmLibraries,
+) -> Option<crate::libraries::CompilerIntrinsic> {
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/ranges")),
+        "rangeTo",
+    );
+    let generic = symbols
+        .callables
+        .functions()
+        .iter()
+        .filter(|function| {
+            function
+                .generic_sig
+                .as_ref()
+                .is_some_and(|signature| signature.formals.len() == 1)
+        })
+        .collect::<Vec<_>>();
+    let [range_to] = generic[..] else {
+        panic!("expected one generic rangeTo, found {}", generic.len());
+    };
+    range_to.callable.compiler_intrinsic
+}
+
 #[test]
 fn selected_stdlib_builtins_publish_range_contains_but_an_earlier_copy_does_not() {
     let Some(stdlib) = crate::toolchain::stdlib_jar() else {
@@ -146,6 +171,11 @@ fn selected_stdlib_builtins_publish_range_contains_but_an_earlier_copy_does_not(
         required_closed_range_contains_roles(&trusted),
         vec![Some(crate::libraries::CompilerIntrinsic::ClosedRangeContains); 4],
         "the exact mixed numeric stdlib overloads carry the intrinsic role"
+    );
+    assert_eq!(
+        comparable_range_to_role(&trusted),
+        Some(crate::libraries::CompilerIntrinsic::ComparableRangeTo),
+        "the selected stdlib's Comparable rangeTo carries the intrinsic role"
     );
 
     let directory = std::env::temp_dir().join(format!(
@@ -183,6 +213,11 @@ fn selected_stdlib_builtins_publish_range_contains_but_an_earlier_copy_does_not(
         required_closed_range_contains_roles(&shadowed),
         vec![None; 4],
         "an earlier full stdlib copy has identical declarations but no selected-stdlib authority"
+    );
+    assert_eq!(
+        comparable_range_to_role(&shadowed),
+        None,
+        "an earlier stdlib copy's identical Comparable rangeTo has no selected-stdlib authority"
     );
 
     drop(shadowed);

@@ -392,6 +392,35 @@ impl BodyLowering<'_> {
                     call
                 }
             }
+            FirExprKind::ComparableRangeContainment {
+                lower,
+                upper_bound,
+                negated,
+            } => {
+                let lower = self.checked_call(
+                    lower,
+                    self.body.expression_debug_lines(expression_id).source,
+                )?;
+                if !matches!(
+                    self.ir.expr(lower),
+                    IrExpr::Call {
+                        dispatch_receiver: Some(_),
+                        args,
+                        ..
+                    } if args.len() == 1
+                ) {
+                    return Err(FirLoweringFailure::InvalidComparableRangeOrdering { origin });
+                }
+                self.ir.logical_types.insert(lower, Ty::Int);
+                let end = self.expression(*upper_bound)?;
+                self.ir.add_expr(IrExpr::Checked(
+                    crate::ir::IrCheckedOperation::ComparableRangeContains {
+                        lower,
+                        end,
+                        negated: *negated,
+                    },
+                ))
+            }
             FirExprKind::ClassLiteral { classifier, value } => {
                 self.checked_class_literal(*classifier, *value)?
             }

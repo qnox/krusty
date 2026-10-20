@@ -98,6 +98,10 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
                 f(*start);
                 f(*end);
             }
+            IrCheckedOperation::ComparableRangeContains { lower, end, .. } => {
+                f(*lower);
+                f(*end);
+            }
             IrCheckedOperation::RangeLoop {
                 source,
                 body,

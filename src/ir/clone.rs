@@ -33,6 +33,20 @@ pub fn clone_expression_dag(ir: &mut IrFile, root: ExprId) -> (ExprId, HashMap<E
     (root, cloned)
 }
 
+/// A copy of `source` alone whose direct operands are `map`ped, with its sparse semantic/source
+/// facts: a second use of one checked operation over other operands.
+pub(crate) fn clone_with_operands(
+    ir: &mut IrFile,
+    source: ExprId,
+    map: impl FnMut(ExprId) -> ExprId,
+) -> ExprId {
+    let mut expression = ir.exprs[source as usize].clone();
+    remap_direct_children(&mut expression, map);
+    let target = ir.add_expr(expression);
+    copy_expression_facts(ir, source, target);
+    target
+}
+
 /// Give every child edge below `root` its own expression nodes while retaining `root` itself.
 ///
 /// Common IR is a DAG: one operand may deliberately be referenced by several parents. A transform
@@ -177,6 +191,10 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
             } => {
                 *value = map(*value);
                 *start = map(*start);
+                *end = map(*end);
+            }
+            IrCheckedOperation::ComparableRangeContains { lower, end, .. } => {
+                *lower = map(*lower);
                 *end = map(*end);
             }
             IrCheckedOperation::RangeLoop {

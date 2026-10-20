@@ -514,6 +514,8 @@ mod companion_private_members_e2e;
 mod companion_supertype_e2e;
 #[path = "companion_toplevel_property_e2e.rs"]
 mod companion_toplevel_property_e2e;
+#[path = "comparable_range_contains_e2e.rs"]
+mod comparable_range_contains_e2e;
 #[path = "compare_to_zero_branch_e2e.rs"]
 mod compare_to_zero_branch_e2e;
 #[path = "comparison_jump_line_e2e.rs"]
