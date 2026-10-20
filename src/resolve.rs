@@ -7218,9 +7218,9 @@ pub struct TypeInfo {
     reflective_callable_references: crate::fx_hash::HashSet<ExprId>,
     /// `when`s the checker proved exhaustive, by an `else` or by covering their subject.
     exhaustive_whens: crate::fx_hash::HashSet<ExprId>,
-    /// Complete numeric equality plans for subject-form `when` conditions after earlier failed type
-    /// tests. Keyed by the condition expression.
-    when_subject_numeric_equalities: HashMap<ExprId, when_flow::WhenSubjectNumericEquality>,
+    /// What each condition of a subject `when` was checked against (numeric equality plans and
+    /// narrowed subject views). Keyed by the condition expression.
+    when_subject_plans: when_flow::WhenSubjectPlans,
     resolved_type_tys: HashMap<(u32, u32), Ty>,
     /// Full checked generic-bound shapes keyed by the bound's source span. Unlike an ordinary type
     /// use, a declaration bound retains the referenced type variables and declaration-site variance.
@@ -32594,7 +32594,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         callable_reference_types: HashMap::default(),
         reflective_callable_references: crate::fx_hash::HashSet::default(),
         exhaustive_whens: crate::fx_hash::HashSet::default(),
-        when_subject_numeric_equalities: HashMap::default(),
+        when_subject_plans: when_flow::WhenSubjectPlans::default(),
         resolved_type_tys: HashMap::default(),
         unresolved_type_segments: HashMap::default(),
         active_lexical_policies: Vec::new(),
@@ -34132,7 +34132,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         callable_reference_types,
         reflective_callable_references,
         exhaustive_whens,
-        when_subject_numeric_equalities,
+        when_subject_plans,
         resolved_type_tys,
         resolved_type_bounds,
         resolved_declaration_types,
@@ -34453,7 +34453,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         callable_reference_types,
         reflective_callable_references,
         exhaustive_whens,
-        when_subject_numeric_equalities,
+        when_subject_plans,
         resolved_type_tys,
         resolved_type_bounds,
         resolved_declaration_types,
@@ -35182,8 +35182,8 @@ struct Checker<'a> {
     callable_reference_types: HashMap<ExprId, Ty>,
     reflective_callable_references: crate::fx_hash::HashSet<ExprId>,
     exhaustive_whens: crate::fx_hash::HashSet<ExprId>,
-    /// See [`TypeInfo::when_subject_numeric_equalities`].
-    when_subject_numeric_equalities: HashMap<ExprId, when_flow::WhenSubjectNumericEquality>,
+    /// See [`TypeInfo::when_subject_plans`].
+    when_subject_plans: when_flow::WhenSubjectPlans,
     resolved_type_tys: HashMap<(u32, u32), Ty>,
     unresolved_type_segments: HashMap<(u32, u32), crate::symbol_resolver::ClassifierMiss>,
     /// Lexical policies (`@Suppress`, opt-in acceptance) inherited from annotated enclosing
@@ -59102,7 +59102,7 @@ impl<'a> Checker<'a> {
                         (Some(subject), false) => self.expr_expected(cond_scope, cnd, subject),
                         _ => self.expr(cond_scope, cnd),
                     };
-                    self.record_when_subject_numeric_equality(
+                    self.record_when_condition_subject_plan(
                         cond_scope, cnd, subject, subj_ty, condition, ct,
                     );
                     match subj_ty {
