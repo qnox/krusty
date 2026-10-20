@@ -6361,6 +6361,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Plain line breaks only; an explicit `;` still terminates the expression. Test:
   `nested_string_template_e2e::template_interpolation_allows_newlines_around_expression`.
 
+- **`$` before a backtick interpolates only a complete escaped identifier.** A backtick, one or more
+  characters that are neither a backtick nor a line break, then a closing backtick; any other `$`
+  is literal template text (`"$`"`). Test:
+  `nested_string_template_e2e::a_dollar_before_an_unterminated_backtick_is_literal_text`.
+
 - **A property's `where` clause precedes its initializer or delegate.** The grammar places
   `typeConstraints` before `= expression` / `by expression`. Test:
   `where_bound_arguments_e2e::an_extension_property_where_clause_precedes_its_delegate`.
