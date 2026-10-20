@@ -782,7 +782,7 @@ fn parameter_role(role: SerializedRole, identity: &ResolvedParameterIdentity) ->
 
 /// The function class application `ty` is, without the annotations that mark its context
 /// parameters and receiver; any other type unchanged.
-fn plain_function_type(ty: Ty) -> Ty {
+pub(super) fn plain_function_type(ty: Ty) -> Ty {
     match ty {
         Ty::Fun(signature) => Ty::fun_with_shape(
             signature.params.to_vec(),
