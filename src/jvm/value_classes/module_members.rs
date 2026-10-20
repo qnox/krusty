@@ -8,8 +8,10 @@
 
 use super::member_names::vc_mangle;
 use super::{erase, Under};
+use crate::fir::ResolvedInheritedDefault;
 use crate::ir::IrFile;
-use crate::types::Ty;
+use crate::jvm::bridge_adaptations::ValueClassAdapter;
+use crate::types::{Ty, TypeName};
 
 /// kotlinc's JVM name for the member: `base`, with the value-class hash when its declared
 /// signature mentions a value class, spelled as the declaring file spells it.
@@ -67,6 +69,12 @@ pub(crate) struct ForwardedMemberTypes {
     pub(crate) physical_ret: Ty,
     pub(crate) semantic_params: Vec<Ty>,
     pub(crate) semantic_ret: Ty,
+    /// Per parameter, the value class a supertype substitution carries unboxed there: the
+    /// realization boxes it into the inherited declaration's erased slot.
+    pub(crate) value_class_params: Vec<Option<ValueClassAdapter>>,
+    /// The value class a substitution carries unboxed in the result: the realization unboxes the
+    /// inherited declaration's erased result.
+    pub(crate) value_class_ret: Option<ValueClassAdapter>,
 }
 
 /// The physical parameters that correspond to source-semantic parameters of a dependency member.
@@ -130,6 +138,8 @@ pub(crate) fn forwarded_member_types(
                     .map(|ty| module_member_carrier(ir, *ty))
                     .collect(),
                 semantic_ret: ret,
+                value_class_params: vec![None; default.parameters.len()],
+                value_class_ret: None,
             };
         }
         crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(declaration)
@@ -150,7 +160,36 @@ pub(crate) fn forwarded_member_types(
         physical_ret: shape.physical_ret,
         semantic_params: default.parameters.to_vec(),
         semantic_ret: default.result,
+        value_class_params: vec![None; default.parameters.len()],
+        value_class_ret: None,
     }
+}
+
+/// The value class the classifier's applied supertype substitutes where the declaration has
+/// another type (`T` of `I<T>` taken as `Z` for `I<Z>`).
+fn substituted_value_class(ir: &IrFile, declared: &Ty, applied: &Ty) -> Option<TypeName> {
+    if declared == applied {
+        return None;
+    }
+    applied
+        .non_null()
+        .obj_internal()
+        .filter(|&classifier| ir.is_value_class_name(classifier))
+}
+
+/// Whether the classifier's applied supertype substitutes a value class into the inherited
+/// member's signature. kotlinc's fake override then has a value-class signature of its own: it is
+/// named by that signature (`foo-<hash>`) and takes the carriers, and the declaration's own JVM
+/// name and erased descriptor become a bridge to it. A suspend member keeps its declared CPS
+/// shape.
+pub(crate) fn substitutes_value_class(ir: &IrFile, default: &ResolvedInheritedDefault) -> bool {
+    !default.suspend
+        && default
+            .parameters
+            .iter()
+            .zip(default.applied_parameters.iter())
+            .chain(std::iter::once((&default.result, &default.applied_result)))
+            .any(|(declared, applied)| substituted_value_class(ir, declared, applied).is_some())
 }
 
 /// The parameter and result types the classifier's own realization of an inherited member
@@ -158,31 +197,14 @@ pub(crate) fn forwarded_member_types(
 /// and the substituted type where it does not (`f(value: String): String` for `I<String>`). A
 /// substituted result whose declaration erases to a reference keeps a reference: kotlinc boxes it
 /// (`Integer f(int)` for `I<Int>`) so it still overrides the declaration's erased result. A
-/// value-class substitute keeps the declared shape (a recorded gap: kotlinc writes a mangled typed
-/// forwarder).
+/// substituted value class is its carrier (`foo-<hash>(I)` for `I<Z>`), result included: the
+/// realization boxes and unboxes it across the declaration's erased slots.
 pub(crate) fn specialized_member_types(
     ir: &IrFile,
     callables: &crate::backend::CheckedBackendCallables,
-    default: &crate::fir::ResolvedInheritedDefault,
+    default: &ResolvedInheritedDefault,
 ) -> ForwardedMemberTypes {
     let declared = forwarded_member_types(ir, callables, default);
-    // A value-class substitute (`I<Z>`) keeps the declaration's erased shape: kotlinc's typed
-    // forwarder would take the mangled carrier signature, which this realization does not model.
-    let substitutes_value_class = default
-        .parameters
-        .iter()
-        .zip(default.applied_parameters.iter())
-        .chain(std::iter::once((&default.result, &default.applied_result)))
-        .filter(|(declared, applied)| declared != applied)
-        .any(|(_, applied)| {
-            applied
-                .non_null()
-                .obj_internal()
-                .is_some_and(|classifier| ir.is_value_class_name(classifier))
-        });
-    if substitutes_value_class {
-        return declared;
-    }
     let module = matches!(default.body, crate::fir::InheritedDefaultBody::Module);
     let semantic = |ty: Ty| {
         if module {
@@ -195,11 +217,23 @@ pub(crate) fn specialized_member_types(
         Some(bound) => bound.non_null(),
         None => ty,
     };
+    // A substituted value class takes its carrier whichever module declares the member; the
+    // carrier of a boxed representation (`Z?` over a primitive) is the box itself, which crosses
+    // the erased slot as it is.
+    let carried = |declared: &Ty, applied: Ty| {
+        let value_class = substituted_value_class(ir, declared, &applied)?;
+        let carrier = module_member_carrier(ir, applied);
+        let adapter = (carrier.non_null().obj_internal() != Some(value_class))
+            .then(|| ValueClassAdapter::new(value_class, applied.is_nullable()));
+        Some((carrier, adapter))
+    };
     let mut types = ForwardedMemberTypes {
         physical_params: Vec::with_capacity(declared.physical_params.len()),
         physical_ret: declared.physical_ret,
         semantic_params: Vec::with_capacity(declared.semantic_params.len()),
         semantic_ret: declared.semantic_ret,
+        value_class_params: Vec::with_capacity(declared.semantic_params.len()),
+        value_class_ret: None,
     };
     for (index, (declared_ty, applied)) in default
         .parameters
@@ -210,13 +244,23 @@ pub(crate) fn specialized_member_types(
         if declared_ty == applied {
             types.physical_params.push(declared.physical_params[index]);
             types.semantic_params.push(declared.semantic_params[index]);
+            types.value_class_params.push(None);
+        } else if let Some((carrier, adapter)) = carried(declared_ty, *applied) {
+            types.physical_params.push(carrier);
+            types.semantic_params.push(carrier);
+            types.value_class_params.push(adapter);
         } else {
             let applied = semantic(*applied);
             types.physical_params.push(physical(applied));
             types.semantic_params.push(applied);
+            types.value_class_params.push(None);
         }
     }
-    if default.result != default.applied_result {
+    if let Some((carrier, adapter)) = carried(&default.result, default.applied_result) {
+        types.physical_ret = carrier;
+        types.semantic_ret = carrier;
+        types.value_class_ret = adapter;
+    } else if default.result != default.applied_result {
         let applied = semantic(default.applied_result);
         let erased = crate::jvm::method_descriptors::jvm_declared_ty(&declared.physical_ret);
         let realized = physical(applied);

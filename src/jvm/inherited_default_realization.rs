@@ -54,6 +54,28 @@ pub(crate) fn inherited_member_jvm_name(
     )
 }
 
+/// The JVM name of the classifier's own realization of the member: the member's JVM name, or,
+/// when the applied supertype substitutes a value class into its signature, the declared name
+/// mangled over that substituted signature, as kotlinc names the fake override
+/// (`foo-IQRRRT4(I)` for `foo(x: T)` through `I<Z>`). The member's own name then stays the erased
+/// bridge's.
+pub(crate) fn inherited_realization_jvm_name(
+    ir: &IrFile,
+    callables: &crate::backend::CheckedBackendCallables,
+    default: &crate::fir::ResolvedInheritedDefault,
+) -> String {
+    if !crate::jvm::value_classes::substitutes_value_class(ir, default) {
+        return inherited_member_jvm_name(ir, callables, default);
+    }
+    crate::jvm::value_classes::module_member_jvm_name(
+        ir,
+        &inherited_member_declared_name(default),
+        &default.applied_parameters,
+        &default.applied_result,
+        default.suspend,
+    )
+}
+
 /// Where a class's compatibility forwarder sends its call.
 pub(crate) enum ForwarderRealization<'a> {
     /// The dependency's receiver-first holder static, its only body.
@@ -134,6 +156,24 @@ pub(crate) fn inherited_default_bridges(
         if erased == concrete && erased_ret == concrete_ret {
             continue;
         }
+        // A value class the substitution carries unboxed stays the value class here: the
+        // value-class pass erases it to its carrier and plans the bridge's box and unbox.
+        let concrete_params = specialized
+            .physical_params
+            .iter()
+            .zip(&specialized.value_class_params)
+            .zip(default.applied_parameters.iter())
+            .map(|((physical, carried), applied)| match carried {
+                Some(_) => *applied,
+                None => *physical,
+            })
+            .collect();
+        let concrete_ret = match specialized.value_class_ret {
+            Some(_) => default.applied_result,
+            None => specialized.physical_ret,
+        };
+        let name = inherited_member_jvm_name(ir, callables, default);
+        let realization = inherited_realization_jvm_name(ir, callables, default);
         let kind = match default.name {
             crate::fir::InheritedMemberName::Function(_) => BridgeKind::Function,
             crate::fir::InheritedMemberName::PropertyGetter(_) => BridgeKind::PropertyGetter,
@@ -153,33 +193,45 @@ pub(crate) fn inherited_default_bridges(
                     semantic: *semantic,
                 })
                 .collect(),
-            name: inherited_member_jvm_name(ir, callables, default),
+            target_name: (realization != name).then_some(realization),
+            name,
             erased_params: declared.physical_params,
             erased_ret: declared.physical_ret,
-            concrete_params: specialized.physical_params,
-            concrete_ret: specialized.physical_ret,
+            concrete_params,
+            concrete_ret,
             target_ret: None,
             barrier_plan: None,
             special: false,
             module_name_bridge: false,
-            target_name: None,
             property_implementation: None,
         });
     }
     bridges
 }
 
-/// The descriptor a `super` call names when it selects `declaration` through class `owner` and a
-/// class at or above `owner` inherits that declaration as a specialized default: the typed
-/// forwarder's (`echo(String)String` for `Echo<String>`), since the erased entry is a bridge that
-/// dispatches virtually back to the typed one. `None` when no such forwarder exists.
-pub(crate) fn specialized_super_descriptor(
+/// The typed forwarder a `super` call names in place of the declaration it selected.
+pub(crate) struct SpecializedSuperEntry {
+    pub(crate) name: String,
+    pub(crate) descriptor: String,
+    /// The member as the applied supertype substitutes it, when that substitutes a value class:
+    /// the forwarder is then no realization of the selected declaration's own signature (it takes
+    /// and returns carriers under its own mangled name), so the call's arguments and result are
+    /// represented for this signature instead: its parameters, then its result.
+    pub(crate) value_class_signature: Option<(Box<[crate::types::Ty]>, crate::types::Ty)>,
+}
+
+/// The entry a `super` call names when it selects `declaration` through class `owner` and a class
+/// at or above `owner` inherits that declaration as a specialized default: the typed forwarder
+/// (`echo(String)String` for `Echo<String>`, `foo-IQRRRT4(I)` for `I<Z>`), since the erased entry
+/// is a bridge that dispatches virtually back to the typed one. `None` when no such forwarder
+/// exists.
+pub(crate) fn specialized_super_entry(
     ir: &IrFile,
     callables: &crate::backend::CheckedBackendCallables,
     owner: crate::types::TypeName,
     declaration: crate::fir::ResolvedFunctionOverrideTarget,
     jvm_default: JvmDefaultMode,
-) -> Option<String> {
+) -> Option<SpecializedSuperEntry> {
     let mut seen = crate::fx_hash::HashSet::default();
     let mut current = owner;
     while seen.insert(current) {
@@ -206,7 +258,14 @@ pub(crate) fn specialized_super_descriptor(
             let unchanged = params
                 == crate::jvm::method_descriptors::jvm_tys(&declared.physical_params)
                 && ret == crate::jvm::method_descriptors::jvm_declared_ty(&declared.physical_ret);
-            return (!unchanged).then(|| crate::jvm::names::method_descriptor(&params, ret));
+            return (!unchanged).then(|| SpecializedSuperEntry {
+                name: inherited_realization_jvm_name(ir, callables, default),
+                descriptor: crate::jvm::names::method_descriptor(&params, ret),
+                value_class_signature: crate::jvm::value_classes::substitutes_value_class(
+                    ir, default,
+                )
+                .then(|| (default.applied_parameters.clone(), default.applied_result)),
+            });
         }
         current = class.superclass;
     }
@@ -219,6 +278,9 @@ pub(crate) struct ValueClassInheritedStatic {
     pub(crate) name: String,
     /// The physical parameters after the carrier, as the classifier's applied supertype gives them.
     pub(crate) parameters: Vec<crate::types::Ty>,
+    /// The checked parameters after the carrier: the member as the applied supertype substitutes
+    /// it, which a call's arguments are represented for.
+    pub(crate) declared_parameters: Box<[crate::types::Ty]>,
     pub(crate) result: crate::types::Ty,
 }
 
@@ -239,9 +301,10 @@ pub(crate) fn value_class_inherited_static(
     Some(ValueClassInheritedStatic {
         name: crate::jvm::value_classes::inherited_member_impl_name(
             &inherited_member_declared_name(default),
-            &inherited_member_jvm_name(ir, callables, default),
+            &inherited_realization_jvm_name(ir, callables, default),
         ),
         parameters: crate::jvm::method_descriptors::jvm_tys(&types.physical_params),
+        declared_parameters: default.applied_parameters.clone(),
         result: crate::jvm::method_descriptors::jvm_declared_ty(&types.physical_ret),
     })
 }

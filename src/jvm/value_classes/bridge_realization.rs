@@ -108,7 +108,10 @@ pub(super) fn realize(
                 .non_null()
                 .obj_internal()
                 .filter(|fq_name| callable_under.contains_key(fq_name));
-            if !owner_is_value && !bridge_mentions_vc {
+            // A value class's own member plans its arguments from its lowered static below; any
+            // other target on the box (an inherited default's typed forwarder) takes them unboxed
+            // as an ordinary class's target does.
+            if (!owner_is_value || lowered_member_target.is_none()) && !bridge_mentions_vc {
                 if let Some(parameters) = bridge_parameters::unbox_arguments(b, callable_under) {
                     adapter.parameters = parameters;
                 }
