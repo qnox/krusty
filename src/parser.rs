@@ -649,6 +649,9 @@ struct Parser<'a> {
     /// used where a following `{` belongs to an enclosing construct (a `: I by Impl()` delegate, whose
     /// `{` opens the class body, not a lambda on the delegate call).
     no_trailing_lambda: bool,
+    /// Whether physical line breaks are whitespace, as inside `(…)` and `[…]`; see
+    /// `parser/line_breaks.rs`.
+    newlines_insignificant: bool,
     /// Whether the statement list currently being parsed belongs to a block whose trailing
     /// expression is semantically consumed (lambda and `if`/`when`/`try` value blocks). Function,
     /// accessor, constructor, init, loop, and `finally` blocks discard a trailing expression; they
@@ -785,6 +788,14 @@ impl ParserNesting {
 /// acceptance.
 const EXPR_DEPTH_LIMIT: u32 = crate::wide_stack::MAX_SEMANTIC_EXPR_DEPTH * 2;
 
+/// The functions, properties, initializer order, and type aliases of an object body.
+type ObjectMembers = (
+    Vec<FunDecl>,
+    Vec<PropDecl>,
+    Vec<ClassInit>,
+    Vec<crate::ast::TypeAliasDecl>,
+);
+
 impl<'a> Parser<'a> {
     fn new(
         src: &'a str,
@@ -809,6 +820,7 @@ impl<'a> Parser<'a> {
             context_receivers: features.has("ContextReceivers"),
             when_guards: features.has("WhenGuards"),
             no_trailing_lambda: false,
+            newlines_insignificant: false,
             block_trailing_is_value: false,
             bare_branch_value: false,
             value_modifier_span: None,
@@ -929,6 +941,7 @@ impl<'a> Parser<'a> {
         if self.i + 1 < self.t.len() {
             self.i += 1;
         }
+        self.skip_insignificant_newlines();
         t
     }
     fn eat(&mut self, k: TokenKind) -> bool {
@@ -3585,58 +3598,58 @@ impl<'a> Parser<'a> {
 
     /// `object Name { fun … }` — a singleton with member functions (no primary constructor).
     /// Parse an object/anonymous-object body `{ fun…/val…/init… }`, returning its members.
-    fn parse_object_body(
-        &mut self,
-        owner: &str,
-    ) -> (
-        Vec<FunDecl>,
-        Vec<PropDecl>,
-        Vec<ClassInit>,
-        Vec<crate::ast::TypeAliasDecl>,
-    ) {
+    fn parse_object_body(&mut self, owner: &str) -> ObjectMembers {
+        if !self.eat_optional_declaration_body_open() {
+            return Default::default();
+        }
+        // Only the `{…}` body restores statement-terminating line breaks; the `object` header stays
+        // in the enclosing mode.
+        self.with_newlines_significant(|parser| parser.parse_object_members(owner))
+    }
+
+    /// The members of an object body after its `{`, through the closing `}`.
+    fn parse_object_members(&mut self, owner: &str) -> ObjectMembers {
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut init_order: Vec<ClassInit> = Vec::new();
         let mut type_aliases = Vec::new();
-        if self.eat_optional_declaration_body_open() {
-            loop {
-                self.skip_newlines();
-                let mods = self.parse_member_decl_prefix();
-                if self.parse_and_register_nested_classifier(owner, &mods, true) {
-                    continue;
+        loop {
+            self.skip_newlines();
+            let mods = self.parse_member_decl_prefix();
+            if self.parse_and_register_nested_classifier(owner, &mods, true) {
+                continue;
+            }
+            match self.kind() {
+                TokenKind::RBrace | TokenKind::Eof => break,
+                TokenKind::KwFun => {
+                    let f = self.parse_fun(&mods);
+                    methods.push(f);
                 }
-                match self.kind() {
-                    TokenKind::RBrace | TokenKind::Eof => break,
-                    TokenKind::KwFun => {
-                        let f = self.parse_fun(&mods);
-                        methods.push(f);
-                    }
-                    TokenKind::KwVal | TokenKind::KwVar => {
-                        let property = self.parse_member_property(&mods, true, false);
-                        init_order.push(ClassInit::PropInit(body_props.len()));
-                        body_props.push(property);
-                    }
-                    TokenKind::Ident
-                        if self.keyword_text("init")
-                            && self
-                                .t
-                                .get(self.i + 1)
-                                .map_or(false, |t| t.kind == TokenKind::LBrace) =>
-                    {
-                        init_order.push(ClassInit::Block(self.parse_init_block()));
-                    }
-                    TokenKind::Ident if self.keyword_text("typealias") => {
-                        type_aliases.push(self.parse_type_alias_syntax());
-                    }
-                    _ => {
-                        self.diags
-                            .error(self.tok().span, "expected an object member declaration");
-                        self.bump();
-                    }
+                TokenKind::KwVal | TokenKind::KwVar => {
+                    let property = self.parse_member_property(&mods, true, false);
+                    init_order.push(ClassInit::PropInit(body_props.len()));
+                    body_props.push(property);
+                }
+                TokenKind::Ident
+                    if self.keyword_text("init")
+                        && self
+                            .t
+                            .get(self.i + 1)
+                            .is_some_and(|t| t.kind == TokenKind::LBrace) =>
+                {
+                    init_order.push(ClassInit::Block(self.parse_init_block()));
+                }
+                TokenKind::Ident if self.keyword_text("typealias") => {
+                    type_aliases.push(self.parse_type_alias_syntax());
+                }
+                _ => {
+                    self.diags
+                        .error(self.tok().span, "expected an object member declaration");
+                    self.bump();
                 }
             }
-            self.expect(TokenKind::RBrace, "'}'");
         }
+        self.expect(TokenKind::RBrace, "'}'");
         (methods, body_props, init_order, type_aliases)
     }
 
@@ -4164,44 +4177,6 @@ impl<'a> Parser<'a> {
     }
 
     // ---- statements ----
-    fn parse_block_expr(&mut self, trailing_is_value: bool) -> ExprId {
-        let start = self.tok().span;
-        self.expect(TokenKind::LBrace, "'{'");
-        let saved_block_value = self.block_trailing_is_value;
-        let classifier_shadow_count = self.lexical_type_parameters.shadow_count();
-        self.block_trailing_is_value = trailing_is_value;
-        let mut stmts = Vec::new();
-        loop {
-            self.skip_newlines();
-            if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
-                break;
-            }
-            stmts.push(self.parse_stmt());
-        }
-        self.block_trailing_is_value = saved_block_value;
-        self.lexical_type_parameters
-            .truncate_shadows(classifier_shadow_count);
-        let end = self.tok().span;
-        self.expect(TokenKind::RBrace, "'}'");
-        // A trailing bare expression is the block's value.
-        let mut trailing = None;
-        if let Some(&last) = stmts.last() {
-            if let Stmt::Expr(e) = self.file.stmt(last) {
-                let e = *e;
-                trailing = Some(e);
-                stmts.pop();
-                // The statement's annotations (`@Suppress("NAME") call()`) annotate the value.
-                if let Some(mut annotations) = self.file.statement_annotations.remove(&last) {
-                    if let Some(own) = self.file.expression_annotations.remove(&e) {
-                        annotations.extend(own);
-                    }
-                    self.file.expression_annotations.insert(e, annotations);
-                }
-            }
-        }
-        self.file
-            .add_expr(Expr::Block { stmts, trailing }, Span::new(start.lo, end.hi))
-    }
 
     /// The default-value expression for a type (`var x: T` deferred init): `0`/`false`/`'\0'`/`null`.
     fn default_init_expr(&mut self, ty: &TypeRef, span: Span) -> ExprId {

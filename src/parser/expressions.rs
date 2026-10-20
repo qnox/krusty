@@ -945,8 +945,9 @@ impl Parser<'_> {
                 TokenKind::LParen => {
                     let open_paren = self.bump().span;
                     let label = self.lambda_label_of_callee(lhs);
-                    let (args, names, name_spans) =
-                        self.with_lambda_label(Some(label), Self::parse_call_argument_list);
+                    let (args, names, name_spans) = self.with_newlines_insignificant(|parser| {
+                        parser.with_lambda_label(Some(label), Self::parse_call_argument_list)
+                    });
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let end = self.tok().span;
                     self.expect(TokenKind::RParen, "')'");
@@ -1109,17 +1110,16 @@ impl Parser<'_> {
                 // `array[index]` element access, or `receiver[i, j, …]` — a multi-index `get` operator.
                 TokenKind::LBracket => {
                     self.bump();
-                    self.skip_newlines();
-                    let mut indices = vec![self.parse_expr()];
-                    self.skip_newlines();
-                    while self.eat(TokenKind::Comma) {
-                        self.skip_newlines();
-                        if self.at(TokenKind::RBracket) {
-                            break; // tolerate a trailing comma
+                    let indices = self.with_newlines_insignificant(|parser| {
+                        let mut indices = vec![parser.parse_expr()];
+                        while parser.eat(TokenKind::Comma) {
+                            if parser.at(TokenKind::RBracket) {
+                                break; // tolerate a trailing comma
+                            }
+                            indices.push(parser.parse_expr());
                         }
-                        indices.push(self.parse_expr());
-                        self.skip_newlines();
-                    }
+                        indices
+                    });
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let end = self.tok().span;
                     self.expect(TokenKind::RBracket, "']'");
@@ -1175,18 +1175,16 @@ impl Parser<'_> {
             // to ignore this provisional callee and select the language-defined target factory.
             TokenKind::LBracket => {
                 self.bump(); // '['
-                self.skip_newlines();
-                let mut args = Vec::new();
-                while !self.at(TokenKind::RBracket) && !self.at(TokenKind::Eof) {
-                    args.push(self.parse_expr());
-                    self.skip_newlines();
-                    if self.at(TokenKind::Comma) {
-                        self.bump();
-                        self.skip_newlines();
-                    } else {
-                        break;
+                let args = self.with_newlines_insignificant(|parser| {
+                    let mut args = Vec::new();
+                    while !parser.at(TokenKind::RBracket) && !parser.at(TokenKind::Eof) {
+                        args.push(parser.parse_expr());
+                        if !parser.eat(TokenKind::Comma) {
+                            break;
+                        }
                     }
-                }
+                    args
+                });
                 let end = self.tok().span;
                 self.expect(TokenKind::RBracket, "']'");
                 let fname = if args.is_empty() {
@@ -1327,9 +1325,7 @@ impl Parser<'_> {
             }
             TokenKind::LParen => {
                 self.bump();
-                self.skip_newlines();
-                let e = self.parse_expr();
-                self.skip_newlines();
+                let e = self.with_newlines_insignificant(Self::parse_expr);
                 self.expect(TokenKind::RParen, "')'");
                 let close = self.t[self.i.saturating_sub(1)].span;
                 // Parentheses end a safe selector. The index becomes an ordinary subscript of the
@@ -1395,9 +1391,7 @@ impl Parser<'_> {
     /// `while (\n    true\n)`.
     pub(super) fn parse_parenthesized_condition(&mut self) -> ExprId {
         self.expect(TokenKind::LParen, "'('");
-        self.skip_newlines();
-        let cond = self.parse_expr();
-        self.skip_newlines();
+        let cond = self.with_newlines_insignificant(Self::parse_expr);
         self.expect(TokenKind::RParen, "')'");
         cond
     }
@@ -1599,11 +1593,8 @@ impl Parser<'_> {
                 // subject binding always has an initializer.
                 let operator = self.tok().span;
                 self.expect(TokenKind::Eq, "'='");
-                // A `when` subject initializer may start on the next line.
-                self.skip_newlines();
-                let init = self.parse_expr();
+                let init = self.with_newlines_insignificant(Self::parse_expr);
                 self.file.value_operator_spans.insert(init.0, operator);
-                self.skip_newlines();
                 self.expect(TokenKind::RParen, "')'");
                 let sp = Span::new(vstart.lo, self.file.expr_spans[init.0 as usize].hi);
                 let stmt = self.file.add_stmt(
@@ -1619,8 +1610,7 @@ impl Parser<'_> {
                 subject_var = Some((stmt, nm));
                 Some(nm)
             } else {
-                let e = self.parse_expr();
-                self.skip_newlines();
+                let e = self.with_newlines_insignificant(Self::parse_expr);
                 self.expect(TokenKind::RParen, "')'");
                 Some(e)
             }
@@ -1629,6 +1619,28 @@ impl Parser<'_> {
         };
         self.skip_newlines();
         self.expect(TokenKind::LBrace, "'{'");
+        // Only the `{…}` body restores statement-terminating line breaks; the `when` keyword and its
+        // subject stay in the enclosing mode, so `f(when\n(x) { … })` reads its subject.
+        let (arms, end) = self.with_newlines_significant(|parser| parser.parse_when_arms(subject));
+        let span = Span::new(start.lo, end.hi);
+        let when_expr = self.file.add_expr(Expr::When { subject, arms }, span);
+        match subject_var {
+            Some((stmt, _)) => {
+                self.file.when_subject_variables.insert(when_expr.0);
+                self.file.add_expr(
+                    Expr::Block {
+                        stmts: vec![stmt],
+                        trailing: Some(when_expr),
+                    },
+                    span,
+                )
+            }
+            None => when_expr,
+        }
+    }
+
+    /// The arms of a `when` body after its `{`, through the closing `}`, and that brace's span.
+    fn parse_when_arms(&mut self, subject: Option<ExprId>) -> (Vec<WhenArm>, Span) {
         let mut arms = Vec::new();
         loop {
             self.skip_newlines();
@@ -1675,21 +1687,7 @@ impl Parser<'_> {
         }
         let end = self.tok().span;
         self.expect(TokenKind::RBrace, "'}'");
-        let span = Span::new(start.lo, end.hi);
-        let when_expr = self.file.add_expr(Expr::When { subject, arms }, span);
-        match subject_var {
-            Some((stmt, _)) => {
-                self.file.when_subject_variables.insert(when_expr.0);
-                self.file.add_expr(
-                    Expr::Block {
-                        stmts: vec![stmt],
-                        trailing: Some(when_expr),
-                    },
-                    span,
-                )
-            }
-            None => when_expr,
-        }
+        (arms, end)
     }
 
     /// A single `when`-arm condition. In the subject form, `is T` / `!is T` becomes a type test

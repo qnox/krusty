@@ -6361,6 +6361,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Plain line breaks only; an explicit `;` still terminates the expression. Test:
   `nested_string_template_e2e::template_interpolation_allows_newlines_around_expression`.
 
+- **Line breaks inside parentheses and brackets do not end an expression.** kotlinc's parser
+  disables newlines inside `(…)` and `[…]` (call arguments, indices, collection literals,
+  parenthesized expressions and conditions, a `when` subject) and re-enables them inside every `{…}`
+  body it opens there (block, lambda, `when` body, object literal). A line-leading `+`, `or`, or other
+  binary operator inside parentheses therefore continues the expression, while a statement in a
+  lambda argument still ends at its line break. Only the `{…}` body re-enables them: the `when`
+  keyword and subject, and an object literal's `object : Base(…)` header, keep the enclosing mode,
+  so `f(when\n(x) { … })` and `f(object : Base\n(1) { … })` parse as one expression. Tests:
+  `parenthesized_line_breaks_e2e`.
+
 - **`$` before a backtick interpolates only a complete escaped identifier.** A backtick, one or more
   characters that are neither a backtick nor a line break, then a closing backtick; any other `$`
   is literal template text (`"$`"`). Test:
