@@ -399,25 +399,9 @@ impl<'a> ModuleSymbols<'a> {
         } else {
             crate::libraries::TypeKind::Class
         };
-        let enum_entries_accessor = enum_entries.as_ref().map(|_| {
-            // Describe the accessor the backend emits even though it has no source declaration. This
-            // is the same LibraryMember capability dependency providers expose, so consumers retain
-            // one origin-independent target and lowering need not reconstruct its JVM call. Keep the
-            // logical name uncallable: `Enum.getEntries()` is not a Kotlin source function; only the
-            // synthetic `Enum.entries` property may select its physical name.
-            let mut entries = LibraryMember::new(
-                "<enum-entries-accessor>".to_string(),
-                Vec::new(),
-                Ty::obj_args(
-                    "kotlin/enums/EnumEntries",
-                    &[Ty::obj_name(c.internal_name())],
-                ),
-                "()Lkotlin/enums/EnumEntries;".to_string(),
-            );
-            entries.owner = Some(c.internal_name());
-            entries.physical_name = Some("getEntries".to_string());
-            entries
-        });
+        let enum_entries_accessor = enum_entries
+            .as_ref()
+            .map(|_| LibraryMember::source_enum_entries_accessor(c.internal_name()));
         let enum_entries = enum_entries.unwrap_or_default();
         let sealed_subclasses = if c.is_sealed() {
             self.syms.subclass_names_of(c.internal_name()).into()

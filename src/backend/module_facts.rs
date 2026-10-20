@@ -67,6 +67,33 @@ pub struct BackendClassifierFact {
     /// The declared companion object: the name of the static field holding it and its classifier.
     /// Kotlin metadata publishes it for a dependency and the source declaration for this module.
     pub companion: Option<(Box<str>, TypeName)>,
+    /// The static accessor realizing an enum's synthetic `entries` property, as its provider
+    /// published it: present for an enum of this module and for a dependency enum that declares
+    /// one, absent for an enum without (a Java enum, or a Kotlin enum compiled before `entries`).
+    pub enum_entries_accessor: Option<EnumEntriesAccessor>,
+}
+
+/// The exact static call target of an enum's `entries` accessor: its owner, physical name and
+/// descriptor, carried from the provider's [`LibraryMember`](crate::libraries::LibraryMember).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnumEntriesAccessor {
+    pub owner: TypeName,
+    pub name: Box<str>,
+    pub descriptor: Box<str>,
+}
+
+impl EnumEntriesAccessor {
+    fn from_member(owner: TypeName, member: &crate::libraries::LibraryMember) -> Self {
+        Self {
+            owner: member.owner.unwrap_or(owner),
+            name: member
+                .physical_name
+                .as_deref()
+                .unwrap_or(&member.name)
+                .into(),
+            descriptor: member.descriptor.as_str().into(),
+        }
+    }
 }
 
 /// Declaration facts of a current-module classifier that a dependency's classifier record carries
@@ -83,7 +110,7 @@ struct SourceDeclaration {
 }
 
 impl BackendClassifierFact {
-    fn from_library(shape: &LibraryType) -> Self {
+    fn from_library(classifier: TypeName, shape: &LibraryType) -> Self {
         Self {
             access: shape.access,
             is_kotlin: shape.is_kotlin,
@@ -107,6 +134,10 @@ impl BackendClassifierFact {
                 .companion_object
                 .as_ref()
                 .map(|(field, companion)| (Box::from(field.as_str()), *companion)),
+            enum_entries_accessor: shape
+                .enum_entries_accessor
+                .as_ref()
+                .map(|accessor| EnumEntriesAccessor::from_member(classifier, accessor)),
         }
     }
 
@@ -297,6 +328,14 @@ impl BackendModuleFacts {
                 // A source declaration is neither a mapped collection builtin nor a `FunctionN`.
                 role: None,
                 companion: companion.clone(),
+                enum_entries_accessor: (kind == crate::libraries::TypeKind::Enum).then(|| {
+                    EnumEntriesAccessor::from_member(
+                        classifier.classifier,
+                        &crate::libraries::LibraryMember::source_enum_entries_accessor(
+                            classifier.classifier,
+                        ),
+                    )
+                }),
             };
             source_declarations.insert(
                 classifier.classifier,
@@ -366,7 +405,7 @@ impl BackendModuleFacts {
             }
             classifiers.insert(
                 classifier,
-                Arc::new(BackendClassifierFact::from_library(&shape)),
+                Arc::new(BackendClassifierFact::from_library(classifier, &shape)),
             );
         }
         Ok(Self {
@@ -500,7 +539,9 @@ impl BackendClassifierSource for CheckedBackendClassifiers<'_> {
                 "dependency classifier crossed the backend boundary with invalid types: {error:?}"
             )
         });
-        Some(Arc::new(BackendClassifierFact::from_library(&shape)))
+        Some(Arc::new(BackendClassifierFact::from_library(
+            classifier, &shape,
+        )))
     }
 }
 
@@ -931,7 +972,7 @@ mod tests {
             .expect("stable classifier");
         let provider = crate::module_symbols::ModuleSymbols::new(&analysis.symbols);
         let legacy = provider.classifier(classifier).expect("module classifier");
-        let legacy = BackendClassifierFact::from_library(&legacy);
+        let legacy = BackendClassifierFact::from_library(classifier, &legacy);
         assert_eq!(*stable, legacy);
     }
 
