@@ -671,6 +671,64 @@ fn the_real_krusty_compiles_a_library_and_the_application_that_uses_it() {
         (Some(0), "hello, world!\n".to_string(), String::new()),
         "the application runs with the library's behavior"
     );
+
+    // Run again: krusty fingerprints each module's inputs and output, and compiles neither.
+    let compile = || {
+        let ran = run_task(&directory, &root, &[":app:compileJvm"], |command| {
+            command
+                .env("JAVA_HOME", &real.java_home)
+                .env("KRUSTY_BIN", &real.krusty);
+        });
+        (
+            ran.code,
+            placed(&ran.root, &ran.stdout),
+            placed(&ran.root, &ran.stderr),
+        )
+    };
+    let emitted = |module: &str| {
+        format!(
+            "ok: emitted 1 class file(s) to {PLACEHOLDER}/project/build/artifacts/CompiledJvmArtifact/{module}jvm/kotlin-output\n"
+        )
+    };
+    assert_eq!(
+        compile(),
+        (0, String::new(), String::new()),
+        "nothing changed"
+    );
+    // A body-only edit of the library leaves what the application compiles against unchanged.
+    let greeter = root.join("lib/src/Greeter.kt");
+    let source = std::fs::read_to_string(&greeter).unwrap();
+    std::fs::write(&greeter, source.replace("hello, ", "hi, ")).unwrap();
+    assert_eq!(
+        compile(),
+        (0, emitted("lib"), String::new()),
+        "only the edited library compiles"
+    );
+    // A new declaration in the library changes what the application compiles against.
+    std::fs::write(
+        &greeter,
+        source.replace("hello, ", "hi, ").replace(
+            "    fun greet()",
+            "    fun wave() = \"o/\"\n    fun greet()",
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        compile(),
+        (
+            0,
+            format!("{}{}", emitted("lib"), emitted("app")),
+            String::new()
+        ),
+        "the application compiles against the library's new declaration"
+    );
+    // A class removed from an output directory is compiled again.
+    std::fs::remove_file(app.join("MainKt.class")).unwrap();
+    assert_eq!(
+        compile(),
+        (0, emitted("app"), String::new()),
+        "the application's missing class is compiled again"
+    );
 }
 
 /// A diamond: `app` compiles against `left` and `right`, which both compile against `base`. The
@@ -958,4 +1016,96 @@ fn several_tasks_compile_the_union_of_what_they_need_once() {
         "the toolchain printed\n{}",
         placed(&toolchain.root, &toolchain.stderr)
     );
+}
+
+#[test]
+fn a_module_whose_inputs_and_output_are_unchanged_is_not_compiled_again() {
+    compiling::recorder();
+    let case = diamond();
+    let fingerprints = support::TempDir::new("compile-fingerprints");
+    let fingerprint = |module: &str, digit: char| {
+        std::fs::write(
+            fingerprints.0.join(module),
+            std::iter::repeat_n(digit, 64).collect::<String>(),
+        )
+        .unwrap();
+    };
+    for module in ["app", "base", "left", "right"] {
+        fingerprint(module, '0');
+    }
+    let fingerprinted = |command: &mut Command| {
+        command.env("KRUSTY_RECORDER_FINGERPRINTS", &fingerprints.0);
+    };
+    let first = krusty_toolchain("avoidance", &case, &[":app:compileJvm"], fingerprinted);
+    let project = first.directory.join(Resolving::PROJECT);
+    let record = first.directory.join(compiling::RECORD);
+    // The modules each run compiles, in plan order (`left` and `right` compile together, so sorted).
+    let compiled = |ran: &Output| {
+        // A run that compiles nothing writes no record.
+        let modules = modules(&std::fs::read_to_string(&record).unwrap_or_default());
+        let _ = std::fs::remove_file(&record);
+        let mut together = modules.clone();
+        if let Some(middle) = together.get_mut(1..3).filter(|_| modules.len() == 4) {
+            middle.sort();
+        }
+        (
+            ran.code,
+            placed(&ran.root, &ran.stdout),
+            placed(&ran.root, &ran.stderr),
+            together,
+        )
+    };
+    assert_eq!(
+        compiled(&first.output),
+        (
+            0,
+            String::new(),
+            String::new(),
+            lines(&["base", "left", "right", "app"])
+        ),
+        "the first run compiles every module"
+    );
+    let rerun = || {
+        run_task(
+            &first.directory,
+            &project,
+            &[":app:compileJvm"],
+            fingerprinted,
+        )
+    };
+    let ran = rerun();
+    assert_eq!(
+        compiled(&ran),
+        (0, String::new(), String::new(), Vec::new()),
+        "nothing changed"
+    );
+    fingerprint("left", '1');
+    let ran = rerun();
+    assert_eq!(
+        compiled(&ran),
+        (0, String::new(), String::new(), lines(&["left"])),
+        "only the module whose inputs changed"
+    );
+    let stray =
+        project.join("build/artifacts/CompiledJvmArtifact/rightjvm/kotlin-output/Stray.class");
+    std::fs::write(&stray, b"class").unwrap();
+    let ran = rerun();
+    assert_eq!(
+        compiled(&ran),
+        (0, String::new(), String::new(), lines(&["right"])),
+        "only the module whose output changed"
+    );
+    assert!(
+        !stray.exists(),
+        "the recompiled module's output holds only its classes"
+    );
+    std::fs::remove_file(fingerprints.0.join("app")).unwrap();
+    for attempt in 0..2 {
+        let ran = rerun();
+        assert_eq!(
+            compiled(&ran),
+            (0, String::new(), String::new(), lines(&["app"])),
+            "a module krusty takes no fingerprint of compiles every time ({attempt})"
+        );
+    }
 }

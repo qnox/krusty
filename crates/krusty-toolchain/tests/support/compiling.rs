@@ -16,7 +16,9 @@
 //! `recorder: <module> begins` on stderr, sleeps that many seconds, prints
 //! `recorder: <module> ends` on stderr and `recorder: compiled <module>` on stdout. The module
 //! `KRUSTY_RECORDER_FAIL_LATE` names instead prints `recorder: failing <module> late` on stderr
-//! after its sleep and exits with status 4.
+//! after its sleep and exits with status 4. It records no `compilation-fingerprint` request: it
+//! answers one with the contents of the file named for the module in the directory
+//! `KRUSTY_RECORDER_FINGERPRINTS` names, and fails one when there is none.
 //!
 //! The toolchain compiles through the Build Tools API, whose implementation it loads from its
 //! shared cache by Maven coordinates. krusty's implementation (`tools/krusty-build-tools`) is
@@ -61,6 +63,11 @@ const TOOLCHAIN_RECORDER: &str = "#!/bin/sh
 for argument in \"$@\"; do
   case $argument in -module-name=*) module=${argument#-module-name=} ;; esac
 done
+if [ \"${1:-}\" = compilation-fingerprint ]; then
+  fingerprint=\"${KRUSTY_RECORDER_FINGERPRINTS:-}/$module\"
+  if [ -n \"${KRUSTY_RECORDER_FINGERPRINTS:-}\" ] && [ -f \"$fingerprint\" ]; then exec cat \"$fingerprint\"; fi
+  exit 1
+fi
 event() {
   if [ -n \"${KRUSTY_EVENTS:-}\" ]; then printf '%s %s\\n' \"$1\" \"$module\" >> \"$KRUSTY_EVENTS\"; fi
 }
