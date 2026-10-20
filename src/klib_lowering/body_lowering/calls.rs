@@ -299,8 +299,12 @@ impl BodyLowering<'_> {
                 "a function invocation's value has another shape than its function class",
             ));
         }
-        // An erased body uses the erasure of the function value's result.
-        if signature.ret != ty && self.header.erased(signature.ret) != ty {
+        // An erased body uses the erasure of the function value's result, or the bound an
+        // already expanded inline function's type parameter erased to.
+        if signature.ret != ty
+            && self.header.erased(signature.ret) != ty
+            && !self.linker.is_subtype(signature.ret, ty)
+        {
             return Err(mismatch(
                 "a function invocation is typed apart from its result",
             ));
@@ -347,7 +351,7 @@ impl BodyLowering<'_> {
         ty: Ty,
     ) -> Lowered<ExprId> {
         let linked = self.substituted(linked, access)?;
-        let (dispatch_receiver, args) = self.call_operands(
+        let operands = self.call_operands(
             access,
             ty,
             CalleeShape {
@@ -355,11 +359,17 @@ impl BodyLowering<'_> {
                 params: &linked.params,
                 ret: linked.ret,
                 context_count: linked.context_count,
+                class_type_parameters: &linked.class_type_parameters,
             },
         )?;
+        let mut callee = linked.callee;
+        if let Callee::External { params, ret, .. } = &mut callee {
+            (*params, *ret) = (operands.params, operands.ret);
+        }
+        let (dispatch_receiver, args) = (operands.receiver, operands.args);
         let singleton_dispatch = linked.singleton_dispatch;
         let call = self.ir.add_expr(IrExpr::Call {
-            callee: linked.callee,
+            callee,
             dispatch_receiver,
             args,
         });
@@ -385,7 +395,13 @@ impl BodyLowering<'_> {
             return unsupported("an access of a generic property");
         }
         let linked = self.linker.link_accessor(accessor)?;
-        let (receiver, arguments) = self.call_operands(
+        let CallOperands {
+            receiver,
+            args: arguments,
+            receiver_type: source_receiver,
+            params: parameters,
+            ret: result,
+        } = self.call_operands(
             access,
             ty,
             CalleeShape {
@@ -393,15 +409,13 @@ impl BodyLowering<'_> {
                 params: &linked.params,
                 ret: linked.ret,
                 context_count: linked.context_count,
+                class_type_parameters: &linked.class_type_parameters,
             },
         )?;
         let LinkedAccessor {
             property: target,
             write,
-            receiver: source_receiver,
-            params: parameters,
-            ret: result,
-            context_count: _,
+            ..
         } = linked;
         let dispatch = IrPropertyDispatch::Ordinary;
         Ok(self.ir.add_expr(IrExpr::Checked(if write {
@@ -428,18 +442,17 @@ impl BodyLowering<'_> {
     }
 
     /// A call's dispatch receiver and arguments, each read at the callee's declared type, after
-    /// checking that the call has the callee's result type and passes every parameter.
+    /// checking that the call has the callee's result type and passes every parameter. A member
+    /// of a generic class is read at its class's type arguments, which the dispatch receiver's type
+    /// applies to the class through its hierarchy, as a source call of the member is checked.
     fn call_operands(
         &mut self,
         access: &KlibIrMemberAccess,
         ty: Ty,
         callee: CalleeShape<'_>,
-    ) -> Lowered<(Option<ExprId>, Vec<ExprId>)> {
+    ) -> Lowered<CallOperands> {
         if callee.context_count != 0 && matches!(access.arguments, KlibIrArguments::Split { .. }) {
             return unsupported("a context argument in the pre-2.4 argument layout");
-        }
-        if ty != callee.ret {
-            return Err(mismatch("a call is typed apart from its callee's result"));
         }
         let arguments = arguments(access);
         if arguments.len() != callee.params.len() + usize::from(callee.receiver.is_some()) {
@@ -448,25 +461,76 @@ impl BodyLowering<'_> {
             ));
         }
         let mut arguments = arguments.into_iter();
-        let dispatch_receiver = callee
-            .receiver
-            .map(|expected| {
+        let mut bindings = crate::fx_hash::HashMap::default();
+        let (receiver, receiver_type) = match callee.receiver {
+            None => (None, None),
+            Some(declared) => {
                 let argument = arguments.next().flatten().ok_or(
                     KlibBodyDeclineReason::UnsupportedOperation(
                         "a call that omits its dispatch receiver",
                     ),
                 )?;
-                self.operand(argument, expected)
-            })
-            .transpose()?;
-        let mut args = Vec::with_capacity(callee.params.len());
-        for (argument, &parameter) in arguments.zip(callee.params) {
+                if callee.class_type_parameters.is_empty() {
+                    (Some(self.operand(argument, declared)?), Some(declared))
+                } else {
+                    let lowered = self.expression(argument)?;
+                    let applied = self.class_arguments(lowered, declared)?;
+                    bindings.extend(
+                        callee
+                            .class_type_parameters
+                            .iter()
+                            .cloned()
+                            .zip(applied.type_args().iter().copied()),
+                    );
+                    (Some(lowered), Some(applied))
+                }
+            }
+        };
+        let ret = callee.ret.substitute_erased(&bindings);
+        if ty != ret {
+            return Err(mismatch("a call is typed apart from its callee's result"));
+        }
+        let params = callee
+            .params
+            .iter()
+            .map(|param| param.substitute_erased(&bindings))
+            .collect::<Vec<_>>();
+        let mut args = Vec::with_capacity(params.len());
+        for (argument, &parameter) in arguments.zip(&params) {
             let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
                 "a call that leaves a parameter to its default",
             ))?;
             args.push(self.operand(argument, parameter)?);
         }
-        Ok((dispatch_receiver, args))
+        Ok(CallOperands {
+            receiver,
+            args,
+            receiver_type,
+            params,
+            ret,
+        })
+    }
+
+    /// The generic class `declared` names, applied to the type arguments the dispatch receiver
+    /// `lowered` applies to it through its hierarchy.
+    fn class_arguments(&self, lowered: ExprId, declared: Ty) -> Lowered<Ty> {
+        let actual = self.lowered_type(lowered);
+        let owner = declared
+            .kotlin_class_internal()
+            .ok_or_else(|| mismatch("a generic member's receiver is not a class"))?;
+        if actual.is_nullable() {
+            return Err(KlibBodyDeclineReason::ImplicitConversion);
+        }
+        let applied = self
+            .linker
+            .applied_supertype(actual, owner)
+            .ok_or(KlibBodyDeclineReason::ImplicitConversion)?;
+        if applied.type_args().len() != declared.type_args().len() {
+            return Err(mismatch(
+                "a generic member's receiver applies another number of type arguments",
+            ));
+        }
+        Ok(applied)
     }
 
     /// `linked` at the call's type arguments: each of the callee's type parameters bound to the
@@ -543,6 +607,17 @@ struct CalleeShape<'a> {
     params: &'a [Ty],
     ret: Ty,
     context_count: usize,
+    class_type_parameters: &'a [String],
+}
+
+/// A call's lowered dispatch receiver and arguments, with the receiver type, parameters and
+/// result they were read at.
+struct CallOperands {
+    receiver: Option<ExprId>,
+    args: Vec<ExprId>,
+    receiver_type: Option<Ty>,
+    params: Vec<Ty>,
+    ret: Ty,
 }
 
 /// A call's arguments in the order of its callee's parameters: dispatch receiver, context

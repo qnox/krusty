@@ -468,6 +468,29 @@ fn throw_lowers_as_the_source_throw_does() {
 }
 
 #[test]
+fn try_lowers_as_the_source_try_does() {
+    let shapes: [Shape; 1] = [("f", &[T::Int, T::Throwable], T::Int)];
+    let demo = demo(&shapes, |_, body| {
+        let a = body.param(0);
+        let attempt = body.block(vec![KlibIrStatement::Expression(a)], T::Int);
+        let caught = body.try_catch(
+            attempt,
+            |body, parameter| {
+                let thrown = body.get(parameter, T::Throwable);
+                let thrown = body.throw(thrown);
+                body.block(vec![KlibIrStatement::Expression(thrown)], T::Nothing)
+            },
+            T::Int,
+        );
+        Some(vec![body.ret(caught)])
+    });
+    let source = format!(
+        "{THROWABLE}fun f(a: Int, e: Throwable): Int {{\n return try {{ a }} catch (local2001: Throwable) {{ throw local2001 }}\n}}\n"
+    );
+    assert_eq!(lowered(&demo, "f", &[]), source_body(&source, "f", 2));
+}
+
+#[test]
 fn a_constructor_call_declines_by_its_form() {
     let demo = demo(&[("f", &[T::Throwable], T::Nothing)], |_, body| {
         let KlibIrSignature::Public(signature) = body.function.signature.clone() else {

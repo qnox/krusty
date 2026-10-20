@@ -132,15 +132,19 @@ impl BodyLowering<'_> {
     /// Whether `id` is an expression of the source, rather than a statement (an assignment, a
     /// loop or a jump), and so a block's value when it ends one.
     pub(super) fn is_source_expression(&self, id: KlibIrExprId) -> bool {
-        !matches!(
-            self.arena.expr(id).kind,
+        match &self.arena.expr(id).kind {
             KlibIrExprKind::Return { .. }
-                | KlibIrExprKind::Break { .. }
-                | KlibIrExprKind::Continue { .. }
-                | KlibIrExprKind::SetValue { .. }
-                | KlibIrExprKind::While(_)
-                | KlibIrExprKind::DoWhile(_)
-        )
+            | KlibIrExprKind::Break { .. }
+            | KlibIrExprKind::Continue { .. }
+            | KlibIrExprKind::SetValue { .. }
+            | KlibIrExprKind::While(_)
+            | KlibIrExprKind::DoWhile(_) => false,
+            KlibIrExprKind::Block {
+                origin: Some(origin),
+                ..
+            } => origin != "FOR_LOOP",
+            _ => true,
+        }
     }
 
     fn is_jump_statement(&self, statement: &KlibIrStatement) -> bool {

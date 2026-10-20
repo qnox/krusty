@@ -215,14 +215,18 @@ impl BodyLowering<'_> {
         }
     }
 
-    /// `lowered` as a branch value of type `ty`: a value of `ty` or a diverging one as it is, and
-    /// a value of the non-null type `ty` widens as the checker widens it.
-    fn branch_value(&mut self, lowered: ExprId, ty: Ty) -> Lowered<ExprId> {
+    /// `lowered` as a branch value of type `ty`: a value of `ty` or a diverging one as it is, a
+    /// value of the non-null type `ty` widens as the checker widens it, and a value of another
+    /// subtype of `ty` is a value of `ty`.
+    pub(super) fn branch_value(&mut self, lowered: ExprId, ty: Ty) -> Lowered<ExprId> {
         let actual = self.lowered_type(lowered);
         if super::is_value_of(actual, ty) || actual == Ty::Nothing {
             return Ok(lowered);
         }
-        self.nullable_widening(lowered, actual, ty)
+        if let Some(widened) = self.nullable_widening(lowered, actual, ty) {
+            return Ok(widened);
+        }
+        self.upcast(lowered, actual, ty)
             .ok_or(KlibBodyDeclineReason::ImplicitConversion)
     }
 }

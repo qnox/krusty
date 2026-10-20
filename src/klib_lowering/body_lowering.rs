@@ -15,11 +15,13 @@ use crate::fx_hash::{HashMap, HashSet};
 
 mod blocks;
 mod calls;
+mod class_literals;
 mod compiler_blocks;
 mod conditionals;
 mod constructions;
 mod loops;
 mod string_templates;
+mod try_catch;
 mod type_operators;
 
 use super::decline::KlibBodyDeclineReason;
@@ -54,6 +56,10 @@ pub(super) struct LinkedCallee {
     /// The semantic identities of the callee's own type parameters, which the receiver,
     /// parameters and result name and a call's type arguments bind, in declaration order.
     pub(super) type_parameters: Vec<String>,
+    /// The semantic identities of the type parameters of a member's generic class, which the
+    /// receiver (the class applied to them), parameters and result name and a call binds from its
+    /// dispatch receiver's type, in declaration order.
+    pub(super) class_type_parameters: Vec<String>,
 }
 
 /// Joins the calls a body makes of public dependency declarations to the functions they invoke.
@@ -71,6 +77,13 @@ pub(super) trait CallLinker {
 
     /// The dependency property a call of its accessor `callee` reads or writes.
     fn link_accessor(&mut self, callee: &KlibAccessorIdSignature) -> Lowered<LinkedAccessor>;
+
+    /// Proves that `classifier` is a dependency object, whose value a body may read.
+    fn singleton(&self, classifier: TypeName) -> Lowered<()>;
+
+    /// `sub` as the class `owner` it is a subtype of, with the type arguments its hierarchy applies
+    /// to `owner`.
+    fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty>;
 
     /// Whether `sub` is a subtype of `sup` in the calling compilation's semantic model, which a
     /// producer-checked body uses a value of the one where the other is expected for.
@@ -96,6 +109,8 @@ pub(super) struct LinkedAccessor {
     pub(super) params: Vec<Ty>,
     pub(super) ret: Ty,
     pub(super) context_count: usize,
+    /// As [`LinkedCallee::class_type_parameters`].
+    pub(super) class_type_parameters: Vec<String>,
 }
 
 /// The function a body is lowered into: its serialized symbol, the only target its `return`s may
@@ -265,6 +280,13 @@ impl<'a> BodyLowering<'a> {
                 let ty = self.ty(expression, "inline argument container")?;
                 return self.argument_container(statements, ty);
             }
+            KlibIrExprKind::Block {
+                statements,
+                origin: Some(origin),
+            } if origin == "FOR_LOOP" => {
+                let ty = self.ty(expression, "`for` loop")?;
+                return self.for_loop(statements, ty);
+            }
             KlibIrExprKind::Block { .. } => {
                 return unsupported("a block of a compiler-introduced form")
             }
@@ -293,9 +315,18 @@ impl<'a> BodyLowering<'a> {
             }
             KlibIrExprKind::GetField { .. } => return unsupported("a field read"),
             KlibIrExprKind::SetField { .. } => return unsupported("a field write"),
-            KlibIrExprKind::GetObject(_) => return unsupported("an object value"),
-            KlibIrExprKind::GetClass(_) => return unsupported("a class literal of a value"),
-            KlibIrExprKind::ClassReference { .. } => return unsupported("a class literal"),
+            KlibIrExprKind::GetObject(symbol) => {
+                let ty = self.ty(expression, "object value")?;
+                return self.object_value(symbol, ty);
+            }
+            KlibIrExprKind::GetClass(value) => {
+                let ty = self.ty(expression, "class literal")?;
+                return self.value_class_literal(*value, ty);
+            }
+            KlibIrExprKind::ClassReference { class, class_type } => {
+                let ty = self.ty(expression, "class literal")?;
+                return self.class_reference(class, *class_type, ty);
+            }
             KlibIrExprKind::GetEnumValue(_) => return unsupported("an enum entry"),
             KlibIrExprKind::Break { loop_id, label: _ } => {
                 let ty = self.ty(expression, "`break`")?;
@@ -325,7 +356,14 @@ impl<'a> BodyLowering<'a> {
                 let ty = self.ty(expression, "`throw`")?;
                 (self.throw(*value, ty)?, ty)
             }
-            KlibIrExprKind::Try { .. } => return unsupported("`try`"),
+            KlibIrExprKind::Try {
+                result,
+                catches,
+                finally,
+            } => {
+                let ty = self.ty(expression, "`try`")?;
+                (self.try_expression(*result, catches, *finally, ty)?, ty)
+            }
             KlibIrExprKind::Vararg { .. } => return unsupported("a vararg argument"),
             KlibIrExprKind::FunctionExpression { .. } => return unsupported("a lambda"),
             KlibIrExprKind::DynamicMember { .. } => return unsupported("a dynamic member access"),
@@ -370,13 +408,21 @@ impl<'a> BodyLowering<'a> {
         if let Some(widened) = self.nullable_widening(lowered, actual, expected) {
             return Ok(widened);
         }
+        self.upcast(lowered, actual, expected)
+            .ok_or(KlibBodyDeclineReason::ImplicitConversion)
+    }
+
+    /// `value`, of the type `actual`, as a value of its supertype `expected`: the value itself, or
+    /// the coercion checked FIR lowering places when only `expected` is nullable. `None` when
+    /// `expected` is not a supertype of `actual`.
+    fn upcast(&mut self, value: ExprId, actual: Ty, expected: Ty) -> Option<ExprId> {
         if !self.linker.is_subtype(actual, expected) {
-            return Err(KlibBodyDeclineReason::ImplicitConversion);
+            return None;
         }
-        Ok(if actual.is_nullable() == expected.is_nullable() {
-            lowered
+        Some(if actual.is_nullable() == expected.is_nullable() {
+            value
         } else {
-            self.coercion(lowered, expected)
+            self.coercion(value, expected)
         })
     }
 
@@ -517,7 +563,9 @@ impl<'a> BodyLowering<'a> {
         if is_value_of(actual, declared) {
             return Ok(lowered);
         }
-        if actual != self.header.erased(declared) {
+        // A prepared copy also erases the type parameters of the inline functions it already
+        // expanded, so the value may be typed with the erasure's bound: a supertype of `declared`.
+        if actual != self.header.erased(declared) && !self.linker.is_subtype(declared, actual) {
             return Err(KlibBodyDeclineReason::ImplicitConversion);
         }
         Ok(self.declared_value(lowered, declared))

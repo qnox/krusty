@@ -443,6 +443,29 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
         IrExpr::Break { label } => format!("break{}", label_suffix(label.as_deref())),
         IrExpr::Continue { label } => format!("continue{}", label_suffix(label.as_deref())),
         IrExpr::Throw { operand } => format!("throw {}", render(ir, *operand)),
+        IrExpr::Try {
+            body,
+            catches,
+            finally,
+            result,
+        } => format!(
+            "try {}{}{}: {}",
+            render(ir, *body),
+            catches
+                .iter()
+                .map(|catch| format!(
+                    " catch(v{} {:?}: {}) {}",
+                    catch.var,
+                    catch.binding.as_ref().map(|binding| binding.name.as_str()),
+                    type_name_of(catch.ty),
+                    render(ir, catch.body)
+                ))
+                .collect::<String>(),
+            finally
+                .map(|finally| format!(" finally {}", render(ir, finally)))
+                .unwrap_or_default(),
+            type_name_of(*result)
+        ),
         IrExpr::StringConcat(parts) => format!(
             "concat[{}]",
             parts

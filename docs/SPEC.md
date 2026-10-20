@@ -17173,8 +17173,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`SemanticCallRole::KotlinFunctionInvoke`), never by the `invoke` spelling; prepared copies erase
   function-type context and receiver markers, so the invocation's context and receiver arguments
   lead its value arguments, and a plain `FunctionN` read matches a declared context or receiver
-  function type of the same arity. A KLIB `inline` declaration is `MustInline`: it has no legal
-  direct call, and checked FIR keeps the callee's whole `InlineKind`. A must-inline call whose
+  function type of the same arity. A KLIB `inline` declaration is `MustInline` when it is
+  `@InlineOnly` (by the annotation's qualified identity in its metadata) or declares a reified type
+  parameter: it has no legal direct call. Any other KLIB `inline` function is `CanInline`, as its
+  public declaration is callable, and checked FIR keeps the callee's whole `InlineKind`. A must-inline call whose
   template is missing or declined is rejected, never compiled as a call of the dependency
   function; a `CanInline` callee without a template stays an ordinary call. A call that selected a
   template but cannot expand from it is rejected too. No per-shape plan is decoded for a KLIB
@@ -17216,6 +17218,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   are dropped with it. Tests: `klib_lowering::tests::inline_templates::*` (among them
   `a_dependency_constructor_call_constructs_by_the_provider_identity` and
   `a_dependency_property_read_reads_the_provider_property`), `klib_lowering::tests::body_forms::*`.
+- **A KLIB template lowers objects, class literals, conversions, loops and `try` as their source.**
+  A singleton read is the source object value when the provider says the classifier is an object.
+  `C::class`, `T::class` and `value::class` are the source class literals. A member of a generic
+  class is called at the type arguments its receiver applies to the class (by the calling
+  compilation's subtyping), so its parameters and result are substituted as a source member call
+  is. A value used as one of its supertypes, by an implicit cast, a branch or an argument, is the
+  value itself, with the coercion checked FIR places for a nullable target. An implicit cast to a
+  subtype, or to another parameterization of the same classifier, is the smart cast kotlinc proved
+  and lowers as a cast; any other implicit cast declines. A prepared copy erases the type
+  parameters of the inline functions it already expanded to their bounds, so a value typed with a
+  supertype of the declared type, passed to a function value or produced by one, is that erased
+  value. A `FOR_LOOP` block is the source `for` over an iterator: an unnamed iterator local and a
+  `while (hasNext())` loop whose body declares the named loop variable from `next()`. A `try` is the
+  source `try`, each `catch` parameter bound to the next value slot under its source name, each
+  branch of a non-`Unit` `try` converted to its type as a conditional's branches are. Tests:
+  `klib_lowering::tests::control_forms::try_lowers_as_the_source_try_does`,
+  `klib_lowering::tests::inline_templates::a_member_of_a_generic_class_is_called_at_its_receiver_type_arguments`.
 
 - **A KLIB `when` keeps its source form.** A `when` with an `else` (a final branch whose condition
   is the constant `true`) of origin `WHEN` lowers to one flat `when` recorded as exhaustive at its

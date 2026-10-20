@@ -51,17 +51,10 @@ pub struct TemplateCallees<'a> {
     /// The ordinary serialized declarations of the loaded KLIBs, which resolve each call's
     /// producer and describe its callee.
     pub declarations: &'a KlibDeclarationBodies,
-    /// The calling compilation's provider identity of an exact serialized declaration.
-    pub provider: &'a dyn Fn(
-        &KlibDependencyCallable,
-    ) -> Option<(ExternalCallableId, ExternalCallableRealization)>,
-    /// The calling compilation's provider realization of a dependency property.
-    pub properties: &'a dyn Fn(
-        crate::fir::ExternalPropertyId,
-    ) -> Option<crate::libraries::ExternalPropertyRealization>,
-    /// The calling compilation's class hierarchy, which decides the subtyping a body leaves
-    /// implicit.
-    pub types: &'a dyn crate::assignable::TypeOracle,
+    /// The calling compilation's symbols: the provider identity of an exact serialized
+    /// declaration, its property and classifier records, and the class hierarchy that decides the
+    /// subtyping a body leaves implicit.
+    pub source: &'a dyn crate::symbol_source::SymbolSource,
 }
 
 /// Lower the prepared-inline body of the dependency function `selected`, from `prepared`, into
@@ -292,10 +285,27 @@ impl TemplateCalls<'_> {
 }
 
 impl CallLinker for TemplateCalls<'_> {
+    fn singleton(&self, classifier: crate::types::TypeName) -> Result<(), KlibBodyDeclineReason> {
+        match self.callees.source.classifier(classifier) {
+            Some(record) if record.is_object() => Ok(()),
+            _ => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+                "the serialized object {classifier:?} is selected as no object"
+            ))),
+        }
+    }
+
+    fn applied_supertype(&self, sub: Ty, owner: crate::types::TypeName) -> Option<Ty> {
+        crate::assignable::applied_supertype(
+            &crate::symbol_resolver::SourceOracle(self.callees.source),
+            sub,
+            Ty::obj_name(owner),
+        )
+    }
+
     fn is_subtype(&self, sub: Ty, sup: Ty) -> bool {
         crate::assignable::is_subtype(
             &crate::assignable::TyCtx::new(),
-            self.callees.types,
+            &crate::symbol_resolver::SourceOracle(self.callees.source),
             sub,
             sup,
         )
@@ -312,7 +322,11 @@ impl CallLinker for TemplateCalls<'_> {
                 reason,
             )))
         };
-        let Some((target, realization)) = (self.callees.provider)(&identity) else {
+        let Some((target, realization)) = self
+            .callees
+            .source
+            .external_callable_by_dependency(&identity)
+        else {
             return Err(declined(KlibBodyDeclineReason::SignatureMismatch(
                 "the provider realizes no declaration of the exact serialized callee".to_owned(),
             )));
@@ -364,7 +378,11 @@ impl CallLinker for TemplateCalls<'_> {
             .declarations
             .function(&identity)
             .ok_or_else(|| declined(KlibBodyDeclineReason::Unjoined))?;
-        let Some((target, realization)) = (self.callees.provider)(&identity) else {
+        let Some((target, realization)) = self
+            .callees
+            .source
+            .external_callable_by_dependency(&identity)
+        else {
             return Err(declined(KlibBodyDeclineReason::SignatureMismatch(
                 "the provider realizes no declaration of the exact serialized callee".to_owned(),
             )));
@@ -372,7 +390,9 @@ impl CallLinker for TemplateCalls<'_> {
         let property = realization
             .callable
             .external_property_identity
-            .and_then(|property| Some((property, (self.callees.properties)(property)?)));
+            .and_then(|property| {
+                Some((property, self.callees.source.external_property(property)?))
+            });
         let Some((property, accessors)) = property else {
             return Err(declined(KlibBodyDeclineReason::SignatureMismatch(
                 "the serialized accessor is selected as no property's accessor".to_owned(),
@@ -383,16 +403,26 @@ impl CallLinker for TemplateCalls<'_> {
                 "an access of an inline dependency property from an inline template",
             ));
         }
-        accessor_access(callee, arena, declaration, &realization)
-            .map(|receiver| LinkedAccessor {
+        accessor_access(
+            self.callees.source,
+            callee,
+            arena,
+            declaration,
+            &realization,
+        )
+        .map(|receiver| {
+            let (receiver, class_type_parameters) = receiver.unzip();
+            LinkedAccessor {
                 property,
                 write: accessors.setter == Some(target),
                 receiver,
                 params: realization.callable.params.clone(),
                 ret: realization.callable.ret,
                 context_count: realization.callable.context_count,
-            })
-            .map_err(declined)
+                class_type_parameters: class_type_parameters.unwrap_or_default(),
+            }
+        })
+        .map_err(declined)
     }
 
     fn is_selected(&self, _callee: &KlibPublicIdSignature) -> Result<bool, KlibBodyDeclineReason> {
@@ -418,7 +448,11 @@ impl CallLinker for TemplateCalls<'_> {
             .declarations
             .function(&identity)
             .ok_or_else(|| callee_declined(KlibBodyDeclineReason::Unjoined))?;
-        let Some((target, realization)) = (self.callees.provider)(&identity) else {
+        let Some((target, realization)) = self
+            .callees
+            .source
+            .external_callable_by_dependency(&identity)
+        else {
             return Err(callee_declined(KlibBodyDeclineReason::SignatureMismatch(
                 "the provider realizes no declaration of the exact serialized callee".to_owned(),
             )));
@@ -429,7 +463,13 @@ impl CallLinker for TemplateCalls<'_> {
             ));
         }
         if let Some(receiver) = &declaration.dispatch_receiver {
-            return member_call(callee, arena, declaration, receiver, target, &realization)
+            let member = MemberDeclaration {
+                callee,
+                arena,
+                declaration,
+                receiver,
+            };
+            return member_call(self.callees.source, member, target, &realization)
                 .map_err(callee_declined);
         }
         let formals = realization
@@ -460,6 +500,7 @@ impl CallLinker for TemplateCalls<'_> {
             context_count,
             singleton_dispatch: None,
             type_parameters: Vec::new(),
+            class_type_parameters: Vec::new(),
         })
     }
 }
@@ -516,21 +557,35 @@ fn generic_call(
         context_count,
         singleton_dispatch: None,
         type_parameters: formals,
+        class_type_parameters: Vec::new(),
     })
 }
 
+/// A serialized member declaration a template calls, with the dispatch receiver it declares.
+struct MemberDeclaration<'a> {
+    callee: &'a KlibPublicIdSignature,
+    arena: &'a crate::metadata::klib_ir::tree::KlibIrArena,
+    declaration: &'a crate::metadata::klib_ir::tree::KlibIrFunction,
+    receiver: &'a crate::metadata::klib_ir::tree::KlibIrParameter,
+}
+
 /// A template's call of the member `callee`, by the provider's identity `target`. Its signature is
-/// the provider's: the member is non-generic and declares no extension receiver, and the serialized
-/// declaration must belong to the class metadata names as its owner. The dispatch receiver is read
-/// at the serialized receiver's type, the argument the call passes.
+/// the provider's: the member declares no type parameters or extension receiver, and the
+/// serialized declaration must belong to the class metadata names as its owner. The dispatch
+/// receiver is read at its class's type, applied to the class's own type parameters when the class
+/// is generic.
 fn member_call(
-    callee: &KlibPublicIdSignature,
-    arena: &crate::metadata::klib_ir::tree::KlibIrArena,
-    declaration: &crate::metadata::klib_ir::tree::KlibIrFunction,
-    receiver: &crate::metadata::klib_ir::tree::KlibIrParameter,
+    source: &dyn crate::symbol_source::SymbolSource,
+    member: MemberDeclaration<'_>,
     target: ExternalCallableId,
     realization: &ExternalCallableRealization,
 ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
+    let MemberDeclaration {
+        callee,
+        arena,
+        declaration,
+        receiver,
+    } = member;
     let generic = realization
         .callable
         .generic_sig
@@ -553,7 +608,7 @@ fn member_call(
             realization.declaration_owner
         )));
     }
-    let receiver = semantic_type(arena, &KlibTypeParameters::default(), receiver.ty)?;
+    let (receiver, class_type_parameters) = class_receiver(source, owner, arena, receiver)?;
     let params = realization.callable.params.clone();
     let ret = realization.callable.ret;
     Ok(LinkedCallee {
@@ -572,6 +627,7 @@ fn member_call(
         context_count: realization.callable.context_count,
         singleton_dispatch: None,
         type_parameters: Vec::new(),
+        class_type_parameters,
     })
 }
 
@@ -579,11 +635,12 @@ fn member_call(
 /// provider's realization of it: a member's must belong to the class metadata names as its owner
 /// and is read at the serialized receiver's type, the argument the call passes.
 fn accessor_access(
+    source: &dyn crate::symbol_source::SymbolSource,
     callee: &KlibAccessorIdSignature,
     arena: &crate::metadata::klib_ir::tree::KlibIrArena,
     declaration: &crate::metadata::klib_ir::tree::KlibIrFunction,
     realization: &ExternalCallableRealization,
-) -> Result<Option<Ty>, KlibBodyDeclineReason> {
+) -> Result<Option<(Ty, Vec<String>)>, KlibBodyDeclineReason> {
     let generic = realization
         .callable
         .generic_sig
@@ -621,7 +678,43 @@ fn accessor_access(
             realization.declaration_owner
         )));
     }
-    semantic_type(arena, &KlibTypeParameters::default(), receiver.ty).map(Some)
+    class_receiver(source, owner, arena, receiver).map(Some)
+}
+
+/// The type a member of `owner` reads its dispatch receiver at, with the class's type parameters
+/// a call binds from its receiver: the serialized receiver's type for a non-generic class, and the
+/// class applied to its own type parameters, as the provider names them, for a generic one.
+fn class_receiver(
+    source: &dyn crate::symbol_source::SymbolSource,
+    owner: crate::types::TypeName,
+    arena: &crate::metadata::klib_ir::tree::KlibIrArena,
+    receiver: &crate::metadata::klib_ir::tree::KlibIrParameter,
+) -> Result<(Ty, Vec<String>), KlibBodyDeclineReason> {
+    let Some(record) = source.classifier(owner) else {
+        return Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+            "no class {owner:?} declares the serialized member"
+        )));
+    };
+    let formals = record.type_params().clone();
+    if formals.is_empty() {
+        return Ok((
+            semantic_type(arena, &KlibTypeParameters::default(), receiver.ty)?,
+            formals,
+        ));
+    }
+    let arguments = formals
+        .iter()
+        .enumerate()
+        .map(|(index, formal)| {
+            let bound = record
+                .type_param_bounds()
+                .get(index)
+                .and_then(|bounds| bounds.first().copied())
+                .unwrap_or(Ty::nullable(Ty::obj("kotlin/Any")));
+            Ty::ty_param(formal, bound)
+        })
+        .collect::<Vec<_>>();
+    Ok((Ty::obj_args_name(owner, &arguments), formals))
 }
 
 #[cfg(test)]
