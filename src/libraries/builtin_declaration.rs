@@ -28,6 +28,7 @@ pub(crate) struct BuiltinMemberDeclaration<'a> {
 ///
 /// The package is the source namespace, never a JVM file facade. Receivers and parameters are
 /// semantic Kotlin types, and the receiver is not repeated in `params`.
+#[derive(Clone, Copy)]
 pub(crate) struct BuiltinFunctionDeclaration<'a> {
     pub package: TypeName,
     pub name: &'a str,

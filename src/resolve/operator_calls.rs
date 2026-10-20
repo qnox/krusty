@@ -871,8 +871,17 @@ impl<'a> Checker<'a> {
                     ))
                     && matches!(contains, Some((Ty::Boolean, ResolvedCall::Member(_))));
                 let ty = self.finish_range_contains(&operands, range_ty, range_call, contains);
-                if comparable_range && ty == Ty::Boolean {
-                    self.select_comparable_range_ordering(e, range_ty);
+                if comparable_range
+                    && ty == Ty::Boolean
+                    && !self.select_comparable_range_ordering(e, range_ty)
+                {
+                    self.diags.error(
+                        self.span(e),
+                        "internal error: the Comparable range has no single `compareTo` to order \
+                         its bounds"
+                            .to_string(),
+                    );
+                    return self.set(e, Ty::Error);
                 }
                 ty
             }
@@ -885,10 +894,11 @@ impl<'a> Checker<'a> {
     /// member on `Comparable<T>` for the range's element `T`, through the ordinary member
     /// candidate selection, and record it beside the range and `contains` calls it stands in for.
     /// The bounds keep the boundaries `rangeTo` gave them, so the selection sees only the element
-    /// type.
-    fn select_comparable_range_ordering(&mut self, expression: ExprId, range_ty: Ty) {
-        let Some(&element) = range_ty.type_args().first() else {
-            return;
+    /// type. Returns whether exactly one `compareTo` was selected: the provider role promises it,
+    /// so the caller fails closed without one.
+    fn select_comparable_range_ordering(&mut self, expression: ExprId, range_ty: Ty) -> bool {
+        let [element] = *range_ty.type_args() else {
+            return false;
         };
         let comparable = Ty::obj_args_name(crate::types::wk::comparable(), &[element]);
         let (mut functions, _) = self
@@ -911,12 +921,13 @@ impl<'a> Checker<'a> {
                     None,
                 )
         else {
-            return;
+            return false;
         };
         self.resolved_operator_calls.insert(
             (expression, SyntheticOperatorCall::CompareTo),
             selected_member_call(comparable, &selected, params, Ty::Int),
         );
+        true
     }
 
     /// The `contains` operator call testing membership of `value` in a range of `range_ty`.

@@ -17743,22 +17743,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc), box `ranges/contains/comparisonWithRangeBoundEliminated.kt`.
 
 - **Membership in a `Comparable` range literal is kotlinc's `ComparableRangeToHandler`.** When the
-  range is built by the stdlib's operator `rangeTo` extension whose single parameter is the
-  `Comparable` type parameter and which returns `ClosedRange` (the provider role
-  `CompilerIntrinsic::ComparableRangeTo`, read from the declaration, not its name), and `contains`
-  resolves to `ClosedRange`'s member, `x in a..b` allocates no range: it is
-  `0 <= x.compareTo(a) && x.compareTo(b) <= 0`, a `when` yielding `false` when the first comparison
-  fails, with `!in` negating it. Both calls are the resolver's selection of `compareTo` on
-  `Comparable<E>` for the range's element type, so they dispatch through
-  `Comparable.compareTo(Object)` even for `String` or a user class; the value is cast to `Comparable`
-  at each use (no cast when its erasure already is, as for `T : Comparable<T>`) and stored uncast
-  when stored. Temporaries follow the numeric membership's side-effect ordering above. A
-  platform-typed end bound (the `rangeTo` argument) keeps its null check; the start bound (the
-  `rangeTo` receiver) gets none, as in kotlinc. Tests: `comparable_range_contains_e2e` (class bytes
-  for `String`, `when`, `if`, generic, user-class, effectful-operand, inline and `BigDecimal`
-  membership, and a run against kotlinc). A negated `when` branch condition (`!in a..b ->`) compiles
-  to kotlinc's code but marks its line at the first comparison rather than the condition's start;
-  the primitive `!in` branch shares that line-table divergence.
+  range is built by the stdlib's `operator fun <T : Comparable<T>> T.rangeTo(that: T): ClosedRange<T>`
+  (the provider role `CompilerIntrinsic::ComparableRangeTo`, attached from the complete normalized
+  declaration and only for the authenticated compiler builtins owner; a dependency's identical
+  declaration keeps its body), and `contains` resolves to `ClosedRange`'s member, `x in a..b`
+  allocates no range: it is `0 <= x.compareTo(a) && x.compareTo(b) <= 0`, a `when` yielding `false`
+  when the first comparison fails, with `!in` negating it. Both calls are the resolver's selection
+  of `compareTo` on `Comparable<E>` for the range's element type, so they dispatch through
+  `Comparable.compareTo(Object)` even for `String` or a user class; a role without one selected
+  `compareTo` is an internal error, never a fallback to building the range. The value is cast to
+  `Comparable` at each use (no cast when its erasure already is, as for `T : Comparable<T>`) and
+  stored uncast when stored. Temporaries follow the numeric membership's side-effect ordering
+  above. A platform-typed end bound (the `rangeTo` argument) keeps its null check; the start bound
+  (the `rangeTo` receiver) gets none, as in kotlinc. Tests: `comparable_range_contains_e2e` (class
+  bytes for `String`, `when`, `if`, generic, user-class, effectful-operand, inline and `BigDecimal`
+  membership, and a run against kotlinc),
+  `comparable_range_to_requires_the_complete_generic_declaration_and_its_owner`,
+  `selected_stdlib_builtins_publish_range_contains_but_an_earlier_copy_does_not`. A negated `when`
+  branch condition (`!in a..b ->`) compiles to kotlinc's code but marks its line at the first
+  comparison rather than the condition's start; the primitive `!in` branch shares that line-table
+  divergence.
 
 - **Source generic signatures participate in call-site substitution.** Module callables retain
   their declared type parameters, receiver, parameters, bounds, and return type. Receiver-call
