@@ -4878,7 +4878,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     fn install_source_module_headers(
         &self,
         sources: &[crate::libraries::PlatformSourceHeaderInput<'_>],
-        source_classifiers: &[TypeName],
+        source_classifiers: &[(TypeName, crate::types::Visibility)],
     ) -> Result<(), crate::libraries::SourceHeaderError> {
         let java = sources
             .iter()
@@ -4905,13 +4905,9 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         let source_classifiers = source_classifiers
             .iter()
             .copied()
-            .collect::<crate::fx_hash::HashSet<_>>();
-        let is_source_classifier = |candidate: &str| {
-            crate::types::existing_type_name(candidate)
-                .is_some_and(|name| source_classifiers.contains(&name))
-        };
+            .collect::<crate::fx_hash::HashMap<_, _>>();
         let world = super::java_stub::SourceModuleHeaderWorld {
-            source_classifiers: &is_source_classifier,
+            source_classifiers: &source_classifiers,
             classpath: &self.cp,
         };
         let java_blocks = java

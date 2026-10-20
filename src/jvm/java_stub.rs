@@ -28,10 +28,16 @@ use crate::java_source::{
     lex_java, parse_raw_file, primitive_desc, resolve_internal_name_with_depth, DeclKind, FileCtx,
     JavaConstant, Member, RawDecl, ResolvedJavaName, SrcType, SrcWildcard, STUB_DEFAULT,
 };
-use std::cell::RefCell;
 
 #[cfg(test)]
 use crate::java_source::parse_source_file;
+
+mod member_types;
+
+pub use member_types::{
+    EmittedClassesHeaderWorld, JavaHeaderWorld, JavaMemberType, SourceModuleHeaderWorld,
+};
+use member_types::{MemberTypeLookup, MemberTypes};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StubMode {
@@ -42,65 +48,6 @@ pub enum StubMode {
 impl StubMode {
     fn is_lenient(self) -> bool {
         self == Self::Lenient
-    }
-}
-
-/// The classifiers outside the Java sources being stubbed, named by JVM internal name.
-pub trait JavaHeaderWorld {
-    /// Whether this world declares the classifier.
-    fn contains(&self, internal: &str) -> bool;
-    /// Direct supertypes of a classifier [`Self::contains`] accepted. A class inherits the member
-    /// types of its supertypes (JLS §8.5), so a simple name in a Java source can denote a nested
-    /// classifier of one of them.
-    fn direct_supertypes(&self, internal: &str) -> Vec<String>;
-}
-
-/// A world known only by name: its classifiers declare no supertypes, so they pass no member types
-/// on to a Java source class extending them.
-impl<F: Fn(&str) -> bool> JavaHeaderWorld for F {
-    fn contains(&self, internal: &str) -> bool {
-        self(internal)
-    }
-
-    fn direct_supertypes(&self, _internal: &str) -> Vec<String> {
-        Vec::new()
-    }
-}
-
-impl JavaHeaderWorld for super::classpath::Classpath {
-    fn contains(&self, internal: &str) -> bool {
-        self.find(internal).is_some()
-    }
-
-    fn direct_supertypes(&self, internal: &str) -> Vec<String> {
-        self.find(internal).map_or_else(Vec::new, |class| {
-            class
-                .super_class()
-                .into_iter()
-                .chain(class.interfaces())
-                .collect()
-        })
-    }
-}
-
-/// A classpath together with the classifiers of the module's other sources. Those are known by
-/// name only while Java headers are built (their supertypes resolve later), so the member types
-/// they declare are visible and the ones they inherit are not.
-pub struct SourceModuleHeaderWorld<'a> {
-    pub source_classifiers: &'a dyn Fn(&str) -> bool,
-    pub classpath: &'a super::classpath::Classpath,
-}
-
-impl JavaHeaderWorld for SourceModuleHeaderWorld<'_> {
-    fn contains(&self, internal: &str) -> bool {
-        (self.source_classifiers)(internal) || self.classpath.contains(internal)
-    }
-
-    fn direct_supertypes(&self, internal: &str) -> Vec<String> {
-        if (self.source_classifiers)(internal) {
-            return Vec::new();
-        }
-        self.classpath.direct_supertypes(internal)
     }
 }
 
@@ -150,7 +97,10 @@ pub fn stub_classes(
     // the overlay's emission set excludes them (they are invisible to Kotlin source).
     let resolve_all = |cand: &str| source_declarations.contains(cand) || world.contains(cand);
 
-    let supertypes = RefCell::default();
+    let member_types = MemberTypes::new(
+        world,
+        parsed.iter().flat_map(|(_, declarations)| declarations),
+    );
     let mut out = Vec::new();
     let mut emitted: HashSet<&str> = HashSet::default();
     for (ctx, decls) in &parsed {
@@ -163,12 +113,11 @@ pub fn stub_classes(
             let r = Resolver {
                 ctx,
                 resolve: &resolve_all,
-                world,
                 mode,
                 owner: Some(raw.internal.as_str()),
                 declarations_by_internal: &declarations_by_internal,
                 contexts_by_internal: &contexts_by_internal,
-                supertypes: &supertypes,
+                member_types: &member_types,
             };
             let type_variables = TypeVariables::for_declaration(raw, &declarations_by_internal);
             match r.emit(raw, &type_variables) {
@@ -185,8 +134,6 @@ pub fn stub_classes(
 struct Resolver<'a> {
     ctx: &'a FileCtx,
     resolve: &'a dyn Fn(&str) -> bool,
-    /// The classifiers outside these sources, consulted for the supertypes they declare.
-    world: &'a dyn JavaHeaderWorld,
     mode: StubMode,
     /// Internal name of the declaration being emitted — member types of the enclosing chain,
     /// declared or inherited, shadow the package (`Proc` inside `Builder` is `Builder$Proc`, JLS
@@ -197,16 +144,7 @@ struct Resolver<'a> {
     declarations_by_internal: &'a HashMap<&'a str, &'a RawDecl>,
     /// Parsed internal name → the file context its supertype spellings resolve in.
     contexts_by_internal: &'a HashMap<&'a str, &'a FileCtx>,
-    /// Direct supertypes already resolved for a classifier; `None` while they are being resolved,
-    /// so a cyclic `extends` reads as declaring none instead of recursing.
-    supertypes: &'a RefCell<HashMap<String, Option<Vec<String>>>>,
-}
-
-/// The outcome of looking a simple name up among one class's member types.
-enum MemberType {
-    Found(String),
-    Absent,
-    Ambiguous,
+    member_types: &'a MemberTypes<'a>,
 }
 
 /// Type variables in scope at one source position: the class's, then a member's own. Each level is
@@ -397,10 +335,11 @@ impl Resolver<'_> {
         let mut scope = self.owner;
         while let Some(current) = scope {
             match self.member_type(current, head) {
-                MemberType::Found(mut internal) => {
+                MemberTypeLookup::Found(mut internal) => {
                     let mut nested_depth = 0;
                     for segment in segments {
-                        let MemberType::Found(member) = self.member_type(&internal, segment) else {
+                        let MemberTypeLookup::Found(member) = self.member_type(&internal, segment)
+                        else {
                             return None;
                         };
                         internal = member;
@@ -411,8 +350,8 @@ impl Resolver<'_> {
                         nested_depth,
                     });
                 }
-                MemberType::Ambiguous => return None,
-                MemberType::Absent => {}
+                MemberTypeLookup::Ambiguous => return None,
+                MemberTypeLookup::Absent => {}
             }
             scope = self
                 .declarations_by_internal
@@ -423,74 +362,32 @@ impl Resolver<'_> {
         resolve_internal_name_with_depth(&self.ctx.package, &self.ctx.imports, name, self.resolve)
     }
 
-    /// The member type `name` of `class`: one it declares, else the one it inherits from its
-    /// supertypes (JLS §8.5). Two distinct inherited member types of that name make every simple
-    /// reference to it ambiguous.
-    fn member_type(&self, class: &str, name: &str) -> MemberType {
-        let mut visited = HashSet::default();
-        let mut found = Vec::new();
-        self.collect_member_types(class, name, &mut visited, &mut found);
-        match found.len() {
-            0 => MemberType::Absent,
-            1 => MemberType::Found(found.pop().unwrap()),
-            _ => MemberType::Ambiguous,
-        }
+    /// The member type `name` of `class`, declared or inherited, as code in this file sees it.
+    fn member_type(&self, class: &str, name: &str) -> MemberTypeLookup {
+        self.member_types
+            .lookup(class, name, &self.ctx.package, &|source| {
+                self.source_supertypes(source)
+            })
     }
 
-    fn collect_member_types(
-        &self,
-        class: &str,
-        name: &str,
-        visited: &mut HashSet<String>,
-        found: &mut Vec<String>,
-    ) {
-        if !visited.insert(class.to_string()) {
-            return;
-        }
-        let declared = format!("{class}${name}");
-        if (self.resolve)(&declared) {
-            if !found.contains(&declared) {
-                found.push(declared);
-            }
-            return;
-        }
-        for supertype in self.direct_supertypes(class) {
-            self.collect_member_types(&supertype, name, visited, found);
-        }
-    }
-
-    fn direct_supertypes(&self, class: &str) -> Vec<String> {
-        if let Some(known) = self.supertypes.borrow().get(class) {
-            return known.clone().unwrap_or_default();
-        }
-        self.supertypes.borrow_mut().insert(class.to_string(), None);
-        let resolved = self.resolve_direct_supertypes(class);
-        self.supertypes
-            .borrow_mut()
-            .insert(class.to_string(), Some(resolved.clone()));
-        resolved
-    }
-
-    /// A source declaration's supertypes resolve in its own file, in the scope that encloses it;
-    /// any other classifier's come from the world that declares it.
-    fn resolve_direct_supertypes(&self, class: &str) -> Vec<String> {
-        let (Some(declaration), Some(ctx)) = (
-            self.declarations_by_internal.get(class).copied(),
-            self.contexts_by_internal.get(class).copied(),
-        ) else {
-            return self.world.direct_supertypes(class);
-        };
+    /// A parsed source declaration's direct supertypes, resolved in its own file and in the scope
+    /// that encloses it. `None` for a classifier these sources do not declare.
+    fn source_supertypes(&self, class: &str) -> Option<Vec<String>> {
+        let declaration = self.declarations_by_internal.get(class).copied()?;
+        let ctx = self.contexts_by_internal.get(class).copied()?;
         let enclosing = Resolver {
             ctx,
             owner: declaration.outer_internal.as_deref(),
             ..*self
         };
-        declaration
-            .superclass
-            .iter()
-            .chain(&declaration.interfaces)
-            .filter_map(|supertype| enclosing.internal_of(&supertype.name))
-            .collect()
+        Some(
+            declaration
+                .superclass
+                .iter()
+                .chain(&declaration.interfaces)
+                .filter_map(|supertype| enclosing.internal_of(&supertype.name))
+                .collect(),
+        )
     }
 
     /// Erased JVM descriptor of a source type (JLS §4.6). `None` if a reference type doesn't
@@ -2147,32 +2044,154 @@ mod tests {
             .expect("stubbed method")
     }
 
-    /// A world of named classifiers with the direct supertypes each declares.
-    struct DeclaredWorld(&'static [(&'static str, &'static [&'static str])]);
+    /// One classifier of a test world with its direct supertypes and declared member types.
+    struct Declared {
+        name: &'static str,
+        supertypes: &'static [&'static str],
+        members: &'static [(&'static str, &'static str, Visibility)],
+    }
 
-    impl JavaHeaderWorld for DeclaredWorld {
-        fn contains(&self, internal: &str) -> bool {
-            self.0.iter().any(|(name, _)| *name == internal)
-        }
-
-        fn direct_supertypes(&self, internal: &str) -> Vec<String> {
-            self.0
-                .iter()
-                .find(|(name, _)| *name == internal)
-                .map_or_else(Vec::new, |(_, supertypes)| {
-                    supertypes.iter().map(|name| name.to_string()).collect()
-                })
+    const fn declared(name: &'static str) -> Declared {
+        Declared {
+            name,
+            supertypes: &[],
+            members: &[],
         }
     }
 
+    struct DeclaredWorld<'a>(&'a [Declared]);
+
+    impl DeclaredWorld<'_> {
+        fn get(&self, internal: &str) -> Option<&Declared> {
+            self.0.iter().find(|declared| declared.name == internal)
+        }
+    }
+
+    impl JavaHeaderWorld for DeclaredWorld<'_> {
+        fn contains(&self, internal: &str) -> bool {
+            self.get(internal).is_some()
+        }
+
+        fn member_type(&self, owner: &str, simple_name: &str) -> Option<JavaMemberType> {
+            self.get(owner)?
+                .members
+                .iter()
+                .find(|(simple, _, _)| *simple == simple_name)
+                .map(|(_, internal, visibility)| JavaMemberType {
+                    internal: internal.to_string(),
+                    visibility: *visibility,
+                })
+        }
+
+        fn direct_supertypes(&self, internal: &str) -> Vec<String> {
+            self.get(internal).map_or_else(Vec::new, |declared| {
+                declared
+                    .supertypes
+                    .iter()
+                    .map(|name| name.to_string())
+                    .collect()
+            })
+        }
+    }
+
+    use crate::types::Visibility;
+
+    fn stubs_in(
+        world: &DeclaredWorld<'_>,
+        sources: &[(&str, &str)],
+    ) -> Option<Vec<(String, Vec<u8>)>> {
+        let sources = sources
+            .iter()
+            .map(|(name, text)| (name.to_string(), text.to_string()))
+            .collect::<Vec<_>>();
+        stub_classes(&sources, StubMode::Strict, world)
+    }
+
+    const CHILD_TAKES_REQ: &str = "package p;\nimport q.Req;\n\
+         public class Child extends Base { public void take(Req request) {} }";
+
     #[test]
-    fn a_simple_name_denotes_a_member_type_of_the_superclass() {
-        let out = stubs(
-            "package p;\nimport q.Req;\n\
-             public class Child extends Base { public void take(Req<Object> request) {} }",
-            &["java/lang/Object", "p/Base", "p/Base$Req", "q/Req"],
+    fn a_member_type_of_the_superclass_shadows_an_import() {
+        let world = DeclaredWorld(&[
+            declared("java/lang/Object"),
+            Declared {
+                name: "p/Base",
+                supertypes: &[],
+                members: &[("Req", "p/Base$Req", Visibility::Public)],
+            },
+            declared("p/Base$Req"),
+            declared("q/Req"),
+        ]);
+        let out = stubs_in(&world, &[("Child.java", CHILD_TAKES_REQ)]).expect("stubs");
+        assert_eq!(
+            method_descriptor(&out, "p/Child", "take"),
+            "(Lp/Base$Req;)V"
+        );
+    }
+
+    #[test]
+    fn a_top_level_dollar_name_is_not_a_member_type() {
+        let world = DeclaredWorld(&[
+            declared("java/lang/Object"),
+            declared("p/Base"),
+            declared("p/Base$Req"),
+            declared("q/Req"),
+        ]);
+        let out = stubs_in(&world, &[("Child.java", CHILD_TAKES_REQ)]).expect("stubs");
+        assert_eq!(method_descriptor(&out, "p/Child", "take"), "(Lq/Req;)V");
+        let unimported = "package p;\n\
+             public class Child extends Base { public void take(Req request) {} }";
+        assert!(stubs_in(&world, &[("Child.java", unimported)]).is_none());
+    }
+
+    #[test]
+    fn a_private_member_type_is_not_inherited() {
+        let world = DeclaredWorld(&[
+            declared("java/lang/Object"),
+            Declared {
+                name: "p/Base",
+                supertypes: &[],
+                members: &[("Req", "p/Base$Req", Visibility::Private)],
+            },
+            declared("p/Base$Req"),
+            declared("q/Req"),
+        ]);
+        let out = stubs_in(&world, &[("Child.java", CHILD_TAKES_REQ)]).expect("stubs");
+        assert_eq!(method_descriptor(&out, "p/Child", "take"), "(Lq/Req;)V");
+
+        let source_base = "package p; public class Base { private static class Req {} }";
+        let out = stubs_in(
+            &DeclaredWorld(&[declared("java/lang/Object"), declared("q/Req")]),
+            &[("Base.java", source_base), ("Child.java", CHILD_TAKES_REQ)],
         )
         .expect("stubs");
+        assert_eq!(method_descriptor(&out, "p/Child", "take"), "(Lq/Req;)V");
+    }
+
+    #[test]
+    fn a_package_private_member_type_is_inherited_only_within_its_package() {
+        let world = DeclaredWorld(&[
+            declared("java/lang/Object"),
+            Declared {
+                name: "lib/Base",
+                supertypes: &[],
+                members: &[("Req", "lib/Base$Req", Visibility::PackagePrivate)],
+            },
+            declared("lib/Base$Req"),
+            Declared {
+                name: "p/Base",
+                supertypes: &[],
+                members: &[("Req", "p/Base$Req", Visibility::PackagePrivate)],
+            },
+            declared("p/Base$Req"),
+            declared("q/Req"),
+        ]);
+        let other_package = "package p;\nimport q.Req;\n\
+             public class Child extends lib.Base { public void take(Req request) {} }";
+        let out = stubs_in(&world, &[("Child.java", other_package)]).expect("stubs");
+        assert_eq!(method_descriptor(&out, "p/Child", "take"), "(Lq/Req;)V");
+
+        let out = stubs_in(&world, &[("Child.java", CHILD_TAKES_REQ)]).expect("stubs");
         assert_eq!(
             method_descriptor(&out, "p/Child", "take"),
             "(Lp/Base$Req;)V"
@@ -2181,30 +2200,39 @@ mod tests {
 
     #[test]
     fn a_member_type_is_inherited_through_source_and_world_supertypes() {
-        let sources = vec![
-            (
-                "Middle.java".to_string(),
-                "package p; public abstract class Middle extends lib.Root implements Marked {}"
-                    .to_string(),
-            ),
-            (
-                "Marked.java".to_string(),
-                "package p; public interface Marked { interface Tag {} }".to_string(),
-            ),
-            (
-                "Leaf.java".to_string(),
-                "package p; public class Leaf extends Middle { \
-                 public Entry entry() { return null; } public Tag tag() { return null; } }"
-                    .to_string(),
-            ),
-        ];
         let world = DeclaredWorld(&[
-            ("java/lang/Object", &[]),
-            ("lib/Root", &["lib/Base"]),
-            ("lib/Base", &["java/lang/Object"]),
-            ("lib/Base$Entry", &["java/lang/Object"]),
+            declared("java/lang/Object"),
+            Declared {
+                name: "lib/Root",
+                supertypes: &["lib/Base"],
+                members: &[],
+            },
+            Declared {
+                name: "lib/Base",
+                supertypes: &["java/lang/Object"],
+                members: &[("Entry", "lib/Base$Entry", Visibility::Public)],
+            },
+            declared("lib/Base$Entry"),
         ]);
-        let out = stub_classes(&sources, StubMode::Strict, &world).expect("stubs");
+        let out = stubs_in(
+            &world,
+            &[
+                (
+                    "Middle.java",
+                    "package p; public abstract class Middle extends lib.Root implements Marked {}",
+                ),
+                (
+                    "Marked.java",
+                    "package p; public interface Marked { interface Tag {} }",
+                ),
+                (
+                    "Leaf.java",
+                    "package p; public class Leaf extends Middle { \
+                     public Entry entry() { return null; } public Tag tag() { return null; } }",
+                ),
+            ],
+        )
+        .expect("stubs");
         assert_eq!(
             method_descriptor(&out, "p/Leaf", "entry"),
             "()Llib/Base$Entry;"
@@ -2215,18 +2243,22 @@ mod tests {
     #[test]
     fn two_distinct_inherited_member_types_make_the_simple_name_ambiguous() {
         let world = DeclaredWorld(&[
-            ("java/lang/Object", &[]),
-            ("lib/A", &[]),
-            ("lib/A$Item", &[]),
-            ("lib/B", &[]),
-            ("lib/B$Item", &[]),
+            declared("java/lang/Object"),
+            Declared {
+                name: "lib/A",
+                supertypes: &[],
+                members: &[("Item", "lib/A$Item", Visibility::Public)],
+            },
+            declared("lib/A$Item"),
+            Declared {
+                name: "lib/B",
+                supertypes: &[],
+                members: &[("Item", "lib/B$Item", Visibility::Public)],
+            },
+            declared("lib/B$Item"),
         ]);
-        let sources = vec![(
-            "Both.java".to_string(),
-            "package p; public abstract class Both implements lib.A, lib.B { \
-             public abstract Item item(); }"
-                .to_string(),
-        )];
-        assert!(stub_classes(&sources, StubMode::Strict, &world).is_none());
+        let both = "package p; public abstract class Both implements lib.A, lib.B { \
+             public abstract Item item(); }";
+        assert!(stubs_in(&world, &[("Both.java", both)]).is_none());
     }
 }
