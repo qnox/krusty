@@ -14,12 +14,23 @@ use crate::ir::IrFile;
 /// Every function a value class declares as a member: its source members (later realized as
 /// static carrier functions) and its synthesized members. The body-local static helpers the
 /// frontend placed in the class ([`IrFile::class_static_local_functions`]) are excluded by that
-/// exact identity.
-pub(super) fn value_class_members(ir: &IrFile) -> HashSet<u32> {
+/// exact identity. A member template of another file's value class, retained so a call can
+/// inline its compiled body, is realized as that class realizes it: a static carrier function.
+pub(super) fn value_class_members(ir: &IrFile, under: &super::Under) -> HashSet<u32> {
+    let templates = ir
+        .foreign_inline_templates
+        .iter()
+        .copied()
+        .filter(|&template| {
+            ir.functions[template as usize]
+                .dispatch_receiver
+                .is_some_and(|owner| under.contains_key(&owner))
+        });
     ir.classes
         .iter()
         .filter(|class| class.is_value)
         .flat_map(|class| class.methods.iter().copied())
         .filter(|function| !ir.class_static_local_functions.contains_key(function))
+        .chain(templates)
         .collect()
 }
