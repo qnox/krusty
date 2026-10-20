@@ -362,7 +362,6 @@ private fun compilerArguments(task: KotlinJvmCompile, kotlinVersion: String): Li
     }
     val languageVersion = options.languageVersion.orNull?.version
     val apiVersion = options.apiVersion.orNull?.version
-    reject(options.progressiveMode.getOrElse(false), "progressiveMode")
     reject(options.extraWarnings.getOrElse(false), "extraWarnings")
     reject(options.suppressWarnings.getOrElse(false), "suppressWarnings")
     // Named `-Xwarning-level` policy is forwarded to the compiler, whose diagnostic registry is
@@ -397,6 +396,7 @@ private fun compilerArguments(task: KotlinJvmCompile, kotlinVersion: String): Li
     }
     options.jvmTarget.orNull?.let { arguments.addPair("-jvm-target", it.target) }
     options.jvmDefault.orNull?.let { arguments.addPair("-jvm-default", it.compilerArgument) }
+    if (options.progressiveMode.getOrElse(false)) arguments.add("-progressive")
     if (options.javaParameters.getOrElse(false)) arguments.add("-java-parameters")
     if (options.noJdk.getOrElse(false)) arguments.add("-no-jdk")
     if (options.allWarningsAsErrors.getOrElse(false) && "-Werror" !in freeArguments) {
