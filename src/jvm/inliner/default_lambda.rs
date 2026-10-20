@@ -9,18 +9,26 @@
 //! start at slot 0, like those of a literal lambda's node. The body then gets the marker local
 //! `$i$a$-<function>-<class>` (`createNodeWithFakeVariables`), and its reified operations are
 //! specialized when the arm asked for it.
+//!
+//! A lambda the arm constructs takes its captured values as parameters after its own, the fields
+//! its constructor assigns in assignment order (`findCapturedFieldAssignmentInstructions`): the
+//! body's `aload 0; getfield` of one becomes a load of that parameter.
 
 use crate::jvm::bytecode_passes::descriptors;
 use crate::jvm::class_node::ClassNode;
 use crate::jvm::method_node::{Insn, LabelId, LocalVariable, MethodNode, Node};
 use crate::jvm::reified_arguments::ReifiedArguments;
 
-use super::{ExtractedDefaultLambda, InlineError, Lambda};
+use super::default_masks::DEFAULT_LAMBDA_FAKE_CALL;
+use super::{ExtractedDefaultLambda, InlineError, Lambda, Parameters};
 
 const ICONST_0: u8 = 0x03;
 const ISTORE: u8 = 0x36;
 const ALOAD: u8 = 0x19;
 const GOTO: u8 = 0xa7;
+const GETFIELD: u8 = 0xb4;
+const PUTFIELD: u8 = 0xb5;
+const ILOAD: u8 = 0x15;
 const INVOKESTATIC: u8 = 0xb8;
 const ACC_STATIC: u16 = 0x0008;
 const ACC_BRIDGE: u16 = 0x0040;
@@ -81,6 +89,11 @@ pub(crate) fn load(
     if erased.access & ACC_BRIDGE != 0 {
         inline_bridge(&mut node, class)?;
     }
+    let captured = match &extracted.constructor {
+        Some(constructor) => captured_fields(class, constructor)?,
+        None => Vec::new(),
+    };
+    read_captured_parameters(&mut node, class, &captured)?;
     drop_receiver(&mut node)?;
     add_marker_variable(&mut node, function, &class.name);
     if extracted.need_reification {
@@ -104,16 +117,201 @@ pub(crate) fn load(
         .ok_or_else(|| malformed("a default lambda's descriptor cannot be parsed"))?
         .to_string();
     node.access |= ACC_STATIC;
+    let close = node
+        .desc
+        .rfind(')')
+        .ok_or_else(|| malformed("a default lambda's descriptor cannot be parsed"))?;
+    let captured_descriptors: String = captured.iter().map(|field| field.desc.as_str()).collect();
+    node.desc.insert_str(close, &captured_descriptors);
     Ok(Lambda {
         value_class_parameters: vec![None; parameter_types.len()],
         parameter_types,
         return_type,
         value_class_return: None,
         captured: 0..0,
-        capture_names: Vec::new(),
+        capture_names: captured.into_iter().map(|field| Some(field.name)).collect(),
         default_class: Some(class.name.clone()),
         node,
     })
+}
+
+/// Each fake call a default arm left where it constructed its lambda becomes the stores of the
+/// values it takes into the lambda's captured parameters, the last value first, as kotlinc's
+/// `MethodInliner` writes them in place of `DEFAULT_LAMBDA_FAKE_CALL`. The body is the prepared
+/// one, whose captured parameters follow its own.
+pub(super) fn store_captured_values(
+    node: &mut MethodNode,
+    parameters: &Parameters,
+    lambdas: &[Lambda],
+) -> Result<(), InlineError> {
+    let mut at = 0;
+    while at < node.nodes.len() {
+        let Node::Insn(Insn::Method {
+            op: INVOKESTATIC,
+            owner,
+            name,
+            desc,
+            ..
+        }) = &node.nodes[at]
+        else {
+            at += 1;
+            continue;
+        };
+        if owner != DEFAULT_LAMBDA_FAKE_CALL {
+            at += 1;
+            continue;
+        }
+        let slot: usize = name
+            .strip_prefix(DEFAULT_LAMBDA_FAKE_CALL)
+            .and_then(|slot| slot.parse().ok())
+            .ok_or_else(|| malformed("a default lambda's fake call names no parameter"))?;
+        let lambda = parameters
+            .lambda_at(slot)
+            .and_then(|lambda| lambdas.get(lambda))
+            .ok_or_else(|| malformed("a default lambda's fake call names no inlined lambda"))?;
+        let types = descriptors::argument_types(desc)
+            .ok_or_else(|| malformed("a default lambda's fake call cannot be parsed"))?;
+        if types.len() != lambda.captured.len() {
+            return Err(malformed(
+                "a default lambda's fake call does not take its captured values",
+            ));
+        }
+        let mut slot = parameters.real_size()
+            + parameters.captured[..lambda.captured.start]
+                .iter()
+                .map(|parameter| parameter.category.words() as u16)
+                .sum::<u16>();
+        let mut stores = Vec::with_capacity(types.len());
+        for ty in &types {
+            stores.push(Node::Insn(Insn::Var {
+                op: descriptors::typed_opcode(ty, ISTORE),
+                slot,
+            }));
+            slot += descriptors::size(ty) as u16;
+        }
+        stores.reverse();
+        let count = stores.len();
+        node.nodes.splice(at..=at, stores);
+        at += count;
+    }
+    Ok(())
+}
+
+/// A field a lambda's constructor assigns from one of its parameters.
+struct CapturedField {
+    name: String,
+    desc: String,
+}
+
+/// The fields `class`'s constructor `constructor` assigns its parameters to, in assignment order:
+/// `aload 0; <load>; putfield` (`findCapturedFieldAssignmentInstructions`). They must take the
+/// constructor's parameters in order, which the arm left on the stack.
+fn captured_fields(
+    class: &ClassNode,
+    constructor: &str,
+) -> Result<Vec<CapturedField>, InlineError> {
+    let code = class
+        .methods
+        .iter()
+        .find(|method| method.name == "<init>" && method.desc == constructor)
+        .ok_or_else(|| malformed("a default lambda's arm calls a constructor its class lacks"))?
+        .code
+        .as_ref()
+        .ok_or_else(|| malformed("a default lambda's constructor has no code"))?;
+    let instructions: Vec<&Insn> = code.instructions().collect();
+    let fields: Vec<CapturedField> = instructions
+        .windows(3)
+        .filter_map(|window| match window {
+            [Insn::Var { op: ALOAD, slot: 0 }, Insn::Var {
+                op: ILOAD..=ALOAD, ..
+            }, Insn::Field {
+                op: PUTFIELD,
+                owner,
+                name,
+                desc,
+            }] if *owner == class.name => Some(CapturedField {
+                name: name.clone(),
+                desc: desc.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+    let parameters = descriptors::argument_types(constructor)
+        .ok_or_else(|| malformed("a default lambda's constructor descriptor cannot be parsed"))?;
+    if parameters.len() != fields.len()
+        || parameters
+            .iter()
+            .zip(&fields)
+            .any(|(parameter, field)| *parameter != field.desc)
+    {
+        return Err(unsupported(
+            "a default lambda whose constructor does not assign its parameters in order",
+        ));
+    }
+    Ok(fields)
+}
+
+/// The captured values become parameters after the body's own, its locals moving up by their
+/// words, and each `aload 0; getfield` of one becomes a load of its parameter.
+fn read_captured_parameters(
+    node: &mut MethodNode,
+    class: &ClassNode,
+    captured: &[CapturedField],
+) -> Result<(), InlineError> {
+    if captured.is_empty() {
+        return Ok(());
+    }
+    let first = 1 + descriptors::argument_types(&node.desc)
+        .ok_or_else(|| malformed("a default lambda's descriptor cannot be parsed"))?
+        .iter()
+        .map(|argument| descriptors::size(argument) as u16)
+        .sum::<u16>();
+    let mut slots = Vec::with_capacity(captured.len());
+    let mut next = first;
+    for field in captured {
+        slots.push(next);
+        next += descriptors::size(&field.desc) as u16;
+    }
+    let shift = next - first;
+    for entry in &mut node.nodes {
+        if let Node::Insn(Insn::Var { slot, .. } | Insn::Iinc { slot, .. }) = entry {
+            if *slot >= first {
+                *slot += shift;
+            }
+        }
+    }
+    for local in &mut node.local_variables {
+        if local.slot >= first {
+            local.slot += shift;
+        }
+    }
+    node.max_locals += shift;
+    let mut at = 0;
+    while at + 1 < node.nodes.len() {
+        let read = match (&node.nodes[at], &node.nodes[at + 1]) {
+            (
+                Node::Insn(Insn::Var { op: ALOAD, slot: 0 }),
+                Node::Insn(Insn::Field {
+                    op: GETFIELD,
+                    owner,
+                    name,
+                    desc,
+                }),
+            ) if *owner == class.name => captured
+                .iter()
+                .position(|field| field.name == *name && field.desc == *desc),
+            _ => None,
+        };
+        if let Some(field) = read {
+            node.nodes[at] = Node::Insn(Insn::Var {
+                op: descriptors::typed_opcode(&captured[field].desc, ILOAD),
+                slot: slots[field],
+            });
+            node.nodes.remove(at + 1);
+        }
+        at += 1;
+    }
+    Ok(())
 }
 
 /// `inlineBridge`: the erased `invoke` only adapts its arguments for the typed one it calls on

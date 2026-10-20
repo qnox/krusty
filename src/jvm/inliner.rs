@@ -140,6 +140,7 @@ pub(in crate::jvm) fn inline(
     let mut node = callee.clone();
     reified::specialize(&mut node, reified_arguments, call.enum_entries)?;
     let mut node = preparation::prepare(&node, inline_only, parameters);
+    default_lambda::store_captured_values(&mut node, parameters, lambdas)?;
     try_blocks::move_try_starts_to_their_first_instruction(&mut node)?;
     let mut node = preprocess_node_before_inline(node)?;
     preparation::remove_fake_variable_initializations(&mut node);

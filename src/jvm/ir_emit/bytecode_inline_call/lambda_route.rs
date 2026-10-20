@@ -130,15 +130,18 @@ impl Emitter<'_> {
             }
             let loaded = self
                 .load_default_lambdas(call, &default_lambdas, &physical)
-                .map_err(|error| {
-                    crate::trace_compiler!("splice", "a default lambda is not inlined: {error:?}");
-                    "a default lambda of the call cannot be inlined"
-                })?;
-            for (operand, mut lambda) in loaded {
-                lambda.captured = captured.len()..captured.len();
-                lambda_bindings.insert(operand, lambdas.len());
-                lambdas.push(lambda);
-            }
+                .and_then(|loaded| {
+                    for (operand, mut lambda) in loaded {
+                        default_bridge::append_default_lambda_captures(&mut lambda, &mut captured)?;
+                        lambda_bindings.insert(operand, lambdas.len());
+                        lambdas.push(lambda);
+                    }
+                    Ok(())
+                });
+            loaded.map_err(|error| {
+                crate::trace_compiler!("splice", "a default lambda is not inlined: {error:?}");
+                "a default lambda of the call cannot be inlined"
+            })?;
             let parameters = self.call_parameters(
                 &supplies,
                 &physical,

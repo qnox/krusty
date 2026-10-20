@@ -12,7 +12,11 @@
 //!
 //! An omitted inline lambda parameter's default is not stored either (`extractDefaultLambdasInfo`):
 //! the arm's `getstatic Lambda.INSTANCE` and its store are deleted, and the call inlines the
-//! lambda class's `invoke` wherever the body invokes the parameter ([`super::default_lambda`]).
+//! lambda class's `invoke` wherever the body invokes the parameter ([`super::default_lambda`]). A
+//! lambda constructed with captured values keeps the code that loads them: its `new`, `dup` and
+//! constructor call are deleted, and its store becomes kotlinc's fake call
+//! (`defaultLambdaFakeCallStub`), which the inliner replaces with the stores of the values into
+//! the lambda's captured parameters.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -32,6 +36,8 @@ const IAND: u8 = 0x7e;
 const IFEQ: u8 = 0x99;
 const IFNULL: u8 = 0xc6;
 const NEW: u8 = 0xbb;
+const DUP: u8 = 0x59;
+const INVOKESPECIAL: u8 = 0xb7;
 const CHECKCAST: u8 = 0xc0;
 const GETSTATIC: u8 = 0xb2;
 const INVOKESTATIC: u8 = 0xb8;
@@ -52,8 +58,13 @@ pub(crate) struct DefaultMasks {
     pub inline_lambdas: Vec<u16>,
 }
 
-/// An omitted inline lambda parameter whose default is a lambda class's singleton
-/// (`ExtractedDefaultLambda`).
+/// The owner of the call that stands where a default arm stored its lambda constructed with
+/// captured values (`DEFAULT_LAMBDA_FAKE_CALL`); its name is the owner followed by the parameter's
+/// declaration slot, and its arguments are the captured values.
+pub(crate) const DEFAULT_LAMBDA_FAKE_CALL: &str = "$$$DEFAULT_LAMBDA_FAKE_CALL$$$";
+
+/// An omitted inline lambda parameter whose default is a lambda class's singleton, or a lambda
+/// class constructed with captured values (`ExtractedDefaultLambda`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ExtractedDefaultLambda {
     /// The parameter's declaration slot.
@@ -62,6 +73,16 @@ pub(crate) struct ExtractedDefaultLambda {
     pub class: String,
     /// The default arm marked the class for reification (`needClassReification`).
     pub need_reification: bool,
+    /// The descriptor of the constructor the arm calls, `None` for a singleton.
+    pub constructor: Option<String>,
+}
+
+/// A default arm whose lambda is extracted: the instructions it loses, and the fake call that
+/// replaces its store when it constructs the lambda.
+struct ExtractedArm {
+    lambda: ExtractedDefaultLambda,
+    deleted: Vec<usize>,
+    fake_call: Option<(usize, Insn)>,
 }
 
 impl DefaultMasks {
@@ -124,11 +145,14 @@ pub(crate) fn expand(
             .and_then(Option::as_ref)
             .and_then(|position| position.checked_sub(1))
             .ok_or_else(|| malformed("a mask test jumps to a label the body never places"))?;
-        if let Some((lambda, first)) = singleton_default(node, slot, condition.jump, store) {
-            for entry in deleted.iter_mut().take(store + 1).skip(first) {
-                *entry = true;
+        if let Some(arm) = extracted_arm(node, slot, condition.jump, store) {
+            for at in arm.deleted {
+                deleted[at] = true;
             }
-            extracted.push(lambda);
+            if let Some((at, call)) = arm.fake_call {
+                node.nodes[at] = Node::Insn(call);
+            }
+            extracted.push(arm.lambda);
         }
     }
     for condition in &conditions {
@@ -188,15 +212,35 @@ pub(crate) fn expand(
     Ok(extracted)
 }
 
+/// The default arm ending at `store` whose lambda is extracted, by what produces the stored value:
+/// a lambda class's singleton or its constructor. Any other default is stored as it is.
+fn extracted_arm(node: &MethodNode, slot: u16, jump: usize, store: usize) -> Option<ExtractedArm> {
+    let mut value = store.checked_sub(1)?;
+    if matches!(
+        node.nodes.get(value),
+        Some(Node::Insn(Insn::Type { op: CHECKCAST, .. }))
+    ) {
+        value = value.checked_sub(1)?;
+    }
+    match node.nodes.get(value) {
+        Some(Node::Insn(Insn::Field { op: GETSTATIC, .. })) => {
+            singleton_default(node, slot, jump, store)
+        }
+        Some(Node::Insn(Insn::Method {
+            op: INVOKESPECIAL, ..
+        })) => constructed_default(node, slot, jump, store),
+        _ => None,
+    }
+}
+
 /// The default arm `[needClassReification] getstatic Lambda.INSTANCE [checkcast] astore slot`
-/// ending at `store`, and where its deleted instructions begin. A lambda class constructed with
-/// captured values is not extracted yet: its default stays the stored object.
+/// ending at `store`, all of which is deleted.
 fn singleton_default(
     node: &MethodNode,
     slot: u16,
     jump: usize,
     store: usize,
-) -> Option<(ExtractedDefaultLambda, usize)> {
+) -> Option<ExtractedArm> {
     let mut instance = store.checked_sub(1)?;
     if matches!(
         node.nodes.get(instance),
@@ -219,7 +263,95 @@ fn singleton_default(
     if name != "INSTANCE" {
         return None;
     }
-    let marker = instance.checked_sub(1).filter(|&at| {
+    let marker = reification_marker(node, jump, instance);
+    Some(ExtractedArm {
+        lambda: ExtractedDefaultLambda {
+            slot,
+            class: owner.clone(),
+            need_reification: marker.is_some(),
+            constructor: None,
+        },
+        deleted: (marker.unwrap_or(instance)..=store).collect(),
+        fake_call: None,
+    })
+}
+
+/// The default arm `[needClassReification] new Lambda; dup; <captured values>; invokespecial
+/// Lambda.<init>; [checkcast] astore slot` ending at `store`. The code that loads the captured
+/// values stays; the store becomes the fake call that takes them.
+fn constructed_default(
+    node: &MethodNode,
+    slot: u16,
+    jump: usize,
+    store: usize,
+) -> Option<ExtractedArm> {
+    let mut constructor = store.checked_sub(1)?;
+    let checkcast = matches!(
+        node.nodes.get(constructor),
+        Some(Node::Insn(Insn::Type { op: CHECKCAST, .. }))
+    );
+    if checkcast {
+        constructor = constructor.checked_sub(1)?;
+    }
+    let Some(Node::Insn(Insn::Method {
+        op: INVOKESPECIAL,
+        owner,
+        name,
+        desc,
+        ..
+    })) = node.nodes.get(constructor)
+    else {
+        return None;
+    };
+    if name != "<init>" || !desc.ends_with(")V") {
+        return None;
+    }
+    let mut creations = (jump + 1..constructor).filter(|&at| {
+        matches!(
+            node.nodes.get(at),
+            Some(Node::Insn(Insn::Type { op: NEW, class })) if class == owner
+        )
+    });
+    let creation = creations.next()?;
+    if creations.next().is_some()
+        || !matches!(
+            node.nodes.get(creation + 1),
+            Some(Node::Insn(Insn::Op(DUP)))
+        )
+    {
+        return None;
+    }
+    let marker = reification_marker(node, jump, creation);
+    let mut deleted = marker.into_iter().collect::<Vec<_>>();
+    deleted.extend([creation, creation + 1, constructor]);
+    if checkcast {
+        deleted.push(constructor + 1);
+    }
+    let close = desc.rfind(')')?;
+    Some(ExtractedArm {
+        lambda: ExtractedDefaultLambda {
+            slot,
+            class: owner.clone(),
+            need_reification: marker.is_some(),
+            constructor: Some(desc.clone()),
+        },
+        deleted,
+        fake_call: Some((
+            store,
+            Insn::Method {
+                op: INVOKESTATIC,
+                owner: DEFAULT_LAMBDA_FAKE_CALL.to_string(),
+                name: format!("{DEFAULT_LAMBDA_FAKE_CALL}{slot}"),
+                desc: format!("{}V", &desc[..=close]),
+                interface: false,
+            },
+        )),
+    })
+}
+
+/// The `needClassReification` call right before `at`, inside the arm that starts after `jump`.
+fn reification_marker(node: &MethodNode, jump: usize, at: usize) -> Option<usize> {
+    at.checked_sub(1).filter(|&at| {
         at > jump
             && matches!(
                 node.nodes.get(at),
@@ -233,15 +365,7 @@ fn singleton_default(
                     && name == "needClassReification"
                     && desc == "()V"
             )
-    });
-    Some((
-        ExtractedDefaultLambda {
-            slot,
-            class: owner.clone(),
-            need_reification: marker.is_some(),
-        },
-        marker.unwrap_or(instance),
-    ))
+    })
 }
 
 /// Validate the call-site contract against the bridge descriptor before inspecting its body. The

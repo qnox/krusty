@@ -373,10 +373,18 @@ struct Expansion<'a> {
 
 impl Expansion<'_> {
     /// Where a line of the lambda's body stands in the caller: a default lambda's through its
-    /// class's source map, a literal's through the caller's.
+    /// class's source map, read from its `invoke` (whose descriptor its node extends with the
+    /// captured values), a literal's through the caller's.
     fn lambda_line(&self, lines: &mut dyn SourceLines, line: u16) -> Option<u16> {
         match &self.lambda.default_class {
-            Some(class) => lines.default_lambda(class, &self.lambda.node.desc, line),
+            Some(class) => {
+                let invoke = format!(
+                    "({}){}",
+                    self.lambda.parameter_types.concat(),
+                    self.lambda.return_type
+                );
+                lines.default_lambda(class, &invoke, line)
+            }
             None => lines.lambda(line),
         }
     }
