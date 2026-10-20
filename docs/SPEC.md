@@ -938,7 +938,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the move, so a comparison, a source `&&`/`||` and an `if` over qualifying operands stay in
   place too (`sb.appendLine(a < b)` is `getstatic sb; iload; iload; if_icmpge; …; append`). A
   member call that omits an argument (its `$default` operands) and a compiler-built eager
-  `And`/`Or`, which holds its left operand in a temporary, keep the stored path.
+  `And`/`Or`, which holds its left operand in a temporary, keep the stored path. A source `==`
+  (`areEqual`, `equals-impl`, a null check or a primitive jump) and a string template
+  (`String.valueOf`, a `StringBuilder` chain or `invokedynamic`) stay in place over qualifying
+  operands, except the equalities whose realization stores an operand: `Int? == Int` keeps the
+  `Int` in a temporary (`PrimitiveToObjectComparison`), as does `UInt? == UInt` with a right
+  operand that is not a local or constant. An inline call that takes a lambda stores its own
+  parameters, so kotlinc stores the whole argument (`sb.appendLine(l.count { … })`).
   Tests:
   `tests/inline_arguments_in_place_e2e.rs`, `tests/inline_repeat_local_e2e.rs`,
   `tests/inline_format_arguments_e2e.rs`, `tests/in_place_property_receiver_e2e.rs`,
