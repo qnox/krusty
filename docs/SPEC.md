@@ -6459,6 +6459,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   before it. A `when` tail still discards in its branches, which is where kotlinc's pop
   propagation leaves those `pop`s, and a pure load or constant still vanishes with its `pop`.
   Tests: `tests/discarded_inline_lambda_result_e2e.rs`.
+- **An inlined lambda returns on its trailing expression's last line.** kotlinc marks a lambda's
+  implicit `return` once the value is on the stack, at the end of the trailing expression (not
+  the lambda's `}`), and the inliner leaves a `nop` in the `return`'s place. Usually that line is
+  already in effect and the `nop` goes. After an inline call it is not: kotlinc forgets the line
+  after inlining (`markLineNumberAfterInlineIfNeeded`), so `run { run { one() } }` writes the line
+  again on a `nop` that the cleanup keeps, inside the outer lambda's locals, in value and
+  statement position alike. A trailing expression that ends on a later line than the one in
+  effect gets the same mark. An inline call is that trailing expression itself; the lambda body
+  blocks around it are looked through.
+  Tests: `tests/nested_inline_lambda_line_e2e.rs`.
 - **A same-file inline call's result is adapted after its copied frame ends.** kotlinc ends the
   `$i$f$` marker and the inlined parameter locals at the copied body's end label before its caller
   adapts the result. An erased type-parameter result is narrowed after those locals end, a
