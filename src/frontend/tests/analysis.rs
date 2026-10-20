@@ -341,7 +341,7 @@ impl crate::symbol_source::SymbolSource for ExistingLibrary {
         function.call_sig = CallSig {
             lambda_param_types,
             lambda_receivers,
-            lambda_receiver_params,
+            lambda_receiver_params: lambda_receiver_params.into(),
             required: value_params.len(),
             ..CallSig::default()
         };

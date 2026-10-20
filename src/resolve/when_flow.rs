@@ -3,11 +3,24 @@
 use super::scope::NarrowPath;
 use super::{Checker, CheckerScope};
 use crate::ast::{Expr, ExprId, WhenCondition};
+use crate::fx_hash::HashMap;
 use crate::types::Ty;
 
 /// A condition's narrowings: the casts to apply, and the ones a closure mutation declines, keyed
 /// by the declined path's spelling.
 type WhenNarrowings = (Vec<(NarrowPath, Ty)>, Vec<(String, Ty)>);
+
+/// The subject facts each condition of a subject `when` was checked against, keyed by the
+/// condition expression.
+#[derive(Default)]
+pub(crate) struct WhenSubjectPlans {
+    /// Complete numeric equality plans for subject-form conditions after earlier failed type
+    /// tests.
+    numeric_equalities: HashMap<ExprId, WhenSubjectNumericEquality>,
+    /// The narrowed view of the subject an `is`/`in` condition reads, where earlier conditions
+    /// narrowed it below its own type.
+    condition_views: HashMap<ExprId, Ty>,
+}
 
 /// Exact numeric adaptations selected for one subject-form equality condition after earlier
 /// conditions have narrowed the subject. Later phases materialize this plan without re-selecting
@@ -46,22 +59,70 @@ impl Checker<'_> {
         narrowed.is_numeric().then_some(narrowed)
     }
 
-    /// Record the full semantic equality plan while the condition's checked candidate type and the
-    /// subject's accumulated false-branch smart casts are both in scope.
-    pub(super) fn record_when_subject_numeric_equality(
+    /// Record what one condition of a subject `when` was checked against, while the condition's
+    /// checked type and the subject's accumulated false-branch smart casts are both in scope.
+    pub(super) fn record_when_condition_subject_plan(
         &mut self,
         scope: &CheckerScope<'_>,
         condition_expression: ExprId,
         subject: Option<ExprId>,
         declared_subject: Option<Ty>,
         condition: WhenCondition,
-        candidate: Ty,
+        checked: Ty,
     ) {
-        let (Some(subject), Some(declared_subject), WhenCondition::SubjectEquals(_)) =
-            (subject, declared_subject, condition)
-        else {
+        let (Some(subject), Some(declared_subject)) = (subject, declared_subject) else {
             return;
         };
+        if condition.is_predicate() {
+            self.record_when_subject_condition_view(
+                condition_expression,
+                subject,
+                declared_subject,
+            );
+        } else {
+            self.record_when_subject_numeric_equality(
+                scope,
+                condition_expression,
+                subject,
+                declared_subject,
+                checked,
+            );
+        }
+    }
+
+    /// An `is`/`in` condition holds the subject's own syntax node as its operand, and checking
+    /// the condition in its arm's flow typed that node as the arm sees the subject. The node is
+    /// still the `when`'s subject, evaluated once at entry with its own type, as kotlinc's
+    /// `tmp_subject` is. Record the arm's view against the condition, which reads the subject
+    /// through it as kotlinc's smart-cast `$subj$` does, and keep the subject's own type on the
+    /// node. Otherwise the subject would be converted to a later arm's view before any arm ran:
+    /// a nullable primitive narrowed past a `null` arm was unboxed up front, and the `null` arm
+    /// compared a primitive with `null`.
+    fn record_when_subject_condition_view(
+        &mut self,
+        condition_expression: ExprId,
+        subject: ExprId,
+        declared_subject: Ty,
+    ) {
+        let view = self.expr_types[subject.0 as usize];
+        if view == declared_subject || view == Ty::Error {
+            return;
+        }
+        self.when_subject_plans
+            .condition_views
+            .insert(condition_expression, view);
+        self.set(subject, declared_subject);
+    }
+
+    /// The full semantic equality plan of a subject-form equality condition.
+    fn record_when_subject_numeric_equality(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        condition_expression: ExprId,
+        subject: ExprId,
+        declared_subject: Ty,
+        candidate: Ty,
+    ) {
         let Some(subject_unbox) = self.when_subject_numeric_type(scope, subject) else {
             return;
         };
@@ -75,7 +136,7 @@ impl Checker<'_> {
         let Some(comparison) = Ty::promote(subject_unbox, candidate) else {
             return;
         };
-        self.when_subject_numeric_equalities.insert(
+        self.when_subject_plans.numeric_equalities.insert(
             condition_expression,
             WhenSubjectNumericEquality {
                 subject_unbox,
@@ -126,7 +187,17 @@ impl super::TypeInfo {
         &self,
         condition: ExprId,
     ) -> Option<WhenSubjectNumericEquality> {
-        self.when_subject_numeric_equalities
+        self.when_subject_plans
+            .numeric_equalities
+            .get(&condition)
+            .copied()
+    }
+
+    /// The narrowed view of the subject an `is`/`in` condition reads, when earlier conditions
+    /// narrowed the subject below its own type.
+    pub(crate) fn when_subject_condition_view(&self, condition: ExprId) -> Option<Ty> {
+        self.when_subject_plans
+            .condition_views
             .get(&condition)
             .copied()
     }

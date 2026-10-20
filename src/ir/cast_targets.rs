@@ -69,9 +69,11 @@ impl IrFile {
                 })
                 .collect::<Vec<_>>()
                 .join(" & "),
-            Ty::TyParam(name, _) => {
-                self.rendered_type_parameter(name, top_level_owner, qualify_root_classifier)
-            }
+            Ty::TyParam(name, _) => self.rendered_type_parameter(
+                name.as_str(),
+                top_level_owner,
+                qualify_root_classifier,
+            ),
             Ty::Fun(signature) => format!(
                 "{}{}{}",
                 if signature.suspend {

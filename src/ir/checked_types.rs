@@ -93,18 +93,22 @@ impl IrFile {
             IrExpr::UnitInstance => Ty::Unit,
             // A construction, a singleton and an enum constant name their class; an array
             // construction and a callable reference name their whole type.
-            IrExpr::New { internal, .. } => Ty::Obj(*internal, &[]),
+            IrExpr::New { internal, .. } => Ty::Obj(*internal, crate::types::TyList::EMPTY),
             IrExpr::SingletonValue { classifier }
             | IrExpr::EnumEntry { classifier, .. }
-            | IrExpr::EnumValueOf { classifier, .. } => Ty::Obj(*classifier, &[]),
+            | IrExpr::EnumValueOf { classifier, .. } => {
+                Ty::Obj(*classifier, crate::types::TyList::EMPTY)
+            }
             // An enclosing-instance edge names the outer classifier it reaches.
-            IrExpr::EnclosingInstance { outer, .. } => Ty::Obj(*outer, &[]),
-            IrExpr::EnumValues { classifier } => {
-                Ty::obj_args("kotlin/Array", &[Ty::Obj(*classifier, &[])])
-            }
-            IrExpr::EnumEntries { classifier } => {
-                Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::Obj(*classifier, &[])])
-            }
+            IrExpr::EnclosingInstance { outer, .. } => Ty::Obj(*outer, crate::types::TyList::EMPTY),
+            IrExpr::EnumValues { classifier } => Ty::obj_args(
+                "kotlin/Array",
+                &[Ty::Obj(*classifier, crate::types::TyList::EMPTY)],
+            ),
+            IrExpr::EnumEntries { classifier } => Ty::obj_args(
+                "kotlin/enums/EnumEntries",
+                &[Ty::Obj(*classifier, crate::types::TyList::EMPTY)],
+            ),
             IrExpr::EnumSwitchOrdinal { .. } | IrExpr::EnumSwitchKey { .. } => Ty::Int,
             IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => *array_type,
             IrExpr::CallableReference(reference) => reference.function_type,

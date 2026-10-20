@@ -236,12 +236,12 @@ impl EmptySymbolSource {
             classifier.named_parameter_lists.push(ParamList {
                 visibility: Visibility::Public,
                 names: vec!["bound".to_string()],
-                defaults: vec![false],
+                defaults: vec![false].into(),
                 types: vec![Ty::obj_args(
                     "kotlin/reflect/KClass",
                     &[Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
                 )],
-                recv_fun: vec![false],
+                recv_fun: vec![false].into(),
                 vararg: None,
                 annotation: None,
             });
@@ -255,9 +255,9 @@ impl EmptySymbolSource {
             classifier.named_parameter_lists.push(ParamList {
                 visibility: Visibility::Public,
                 names: vec!["names".to_string()],
-                defaults: vec![false],
+                defaults: vec![false].into(),
                 types: vec![Ty::obj_args("kotlin/Array", &[Ty::String])],
-                recv_fun: vec![false],
+                recv_fun: vec![false].into(),
                 vararg: Some(0),
                 annotation: None,
             });

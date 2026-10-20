@@ -1876,7 +1876,8 @@ fn merge_class_initialization(
                 .unwrap_or(0);
             let constructor_value_count = u32::try_from(constructor_value_count)
                 .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
-            rebase_initializer_values(ir, initialization, constructor_value_count)?;
+            let prefix = ir.classes[class_id as usize].constructor_prefix_count;
+            rebase_initializer_values(ir, initialization, prefix, constructor_value_count)?;
             let direct_super_bodies = ir.classes[class_id as usize]
                 .secondary_ctors
                 .iter()
@@ -1907,10 +1908,13 @@ fn merge_class_initialization(
 
 /// Body-local value identities restart in each streamed FIR unit. Once a class initializer is
 /// composed into a secondary constructor, reserve the constructor's parameter prefix (`this` stays
-/// value 0) and move every initializer-local identity above it.
+/// value 0) and move every initializer-local identity above it. A read of the constructor prefix
+/// (`1..=prefix`, a capture constructor code reads from its parameter) already names the
+/// constructor's own parameter and stays.
 fn rebase_initializer_values(
     ir: &mut IrFile,
     root: ExprId,
+    prefix: u32,
     offset: u32,
 ) -> Result<(), FirFileLoweringFailure> {
     if offset == 0 {
@@ -1927,7 +1931,7 @@ fn rebase_initializer_values(
         expressions.push(expression);
     }
     let rebase = |value: &mut u32| -> Result<(), FirFileLoweringFailure> {
-        if *value != 0 {
+        if *value > prefix {
             *value = value
                 .checked_add(offset)
                 .ok_or(FirFileLoweringFailure::ValueIdentityOverflow)?;

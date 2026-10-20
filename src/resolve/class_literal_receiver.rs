@@ -13,7 +13,7 @@ use super::projected_classifier_argument_bindings;
 /// parameters `classifier` declares when it was written without type arguments. Each star keeps
 /// the parameter's declared upper bound, as a written `H<*>` does.
 pub(super) fn star_projected_class_literal_receiver(receiver: Ty, classifier: &LibraryType) -> Ty {
-    let Ty::Obj(internal, []) = receiver else {
+    let Some((internal, [])) = receiver.obj_parts() else {
         return receiver;
     };
     // A bare `Array::class` is its own language feature (`BareArrayClassLiteral`).

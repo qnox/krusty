@@ -365,7 +365,7 @@ fn add_unused_extension_property_inspection(
 fn type_parameters_mentioned(ty: Ty, names: &mut std::collections::HashSet<&'static str>) {
     match ty {
         Ty::TyParam(name, _) => {
-            names.insert(name);
+            names.insert(krusty::types::TyParamName::as_str(name));
         }
         Ty::Nullable(inner) | Ty::PlatformNullable(inner) | Ty::DefinitelyNotNull(inner) => {
             type_parameters_mentioned(*inner, names)

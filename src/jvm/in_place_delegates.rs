@@ -367,7 +367,7 @@ fn owner_type_parameter_chain(
 fn approximate_owner_receiver(ir: &IrFile, owner: crate::types::TypeName) -> Ty {
     let declarations = owner_type_parameter_chain(ir, owner);
     if declarations.is_empty() {
-        return Ty::Obj(owner, &[]);
+        return Ty::Obj(owner, crate::types::TyList::EMPTY);
     }
     let mut parameters = declarations
         .iter()
@@ -398,8 +398,8 @@ fn approximate_type_parameters(
     visiting: &mut HashSet<String>,
 ) -> Ty {
     match ty {
-        Ty::TyParam(name, bound) if parameters.contains(name) => {
-            if !visiting.insert(name.to_owned()) {
+        Ty::TyParam(name, bound) if parameters.contains(name.as_str()) => {
+            if !visiting.insert(name.to_owned().to_string()) {
                 // A repeated parameter is the recursive position of an F-bound. The generated
                 // method does not declare that parameter, so kotlinc exposes the position as `*`.
                 return Ty::star_projection(Ty::nullable(Ty::obj_name(crate::types::wk::any())));
@@ -407,7 +407,7 @@ fn approximate_type_parameters(
             // A bare type parameter carries nullability in its bound. Keep that wrapper so
             // `T : Int?` and `T : Value?` remain boxed delegate-method receivers.
             let approximated = approximate_type_parameters(*bound, parameters, visiting);
-            visiting.remove(name);
+            visiting.remove(name.as_str());
             approximated
         }
         Ty::Fun(signature) => Ty::fun_with_shape(

@@ -584,7 +584,7 @@ fn record_class_function_exports(
                             declaration.name
                         )
                     })?;
-                Some(crate::types::Ty::Obj(receiver, &[]))
+                Some(crate::types::Ty::Obj(receiver, crate::types::TyList::EMPTY))
             };
             // The current prepared writer can serialize a non-generic dispatch classifier exactly.
             // A generic owner also needs its class parameters remapped into the synthetic prepared

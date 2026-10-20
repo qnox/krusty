@@ -512,8 +512,10 @@ pub fn dsl_member(callable: &SelectedDslCallable<'_>) -> Option<DslMember> {
             ("returnsNotNull", []) => (DslMember::ReturnsNotNull, contracts("ReturnsNotNull")),
             // `fun <R> callsInPlace(lambda: Function<R>, kind: InvocationKind)`: the lambda's
             // `R` is the member's own type parameter, which selection may have specialized.
-            ("callsInPlace", [Ty::Obj(lambda, [_]), kind])
-                if lambda.matches("kotlin/Function") && *kind == contracts("InvocationKind") =>
+            ("callsInPlace", [Ty::Obj(lambda, lambda_args), kind])
+                if lambda_args.len() == 1
+                    && lambda.matches("kotlin/Function")
+                    && *kind == contracts("InvocationKind") =>
             {
                 (DslMember::CallsInPlace, contracts("CallsInPlace"))
             }

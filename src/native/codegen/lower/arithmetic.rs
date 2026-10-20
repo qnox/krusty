@@ -365,7 +365,7 @@ impl BodyLowering<'_, '_, '_> {
             if let (Some(left), Some(right)) = (unboxed(lhs_checked), unboxed(rhs_checked)) {
                 // A class that declares its own `equals` answers by it, through its box below.
                 if left == right && !self.declares_its_own_equals(left) {
-                    let class = Ty::Obj(left, &[]);
+                    let class = Ty::Obj(left, crate::types::TyList::EMPTY);
                     let Some(lhs) = self.coerce(lhs, class)? else {
                         return Ok(None);
                     };

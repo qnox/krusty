@@ -911,9 +911,9 @@ fn encode_type_with_parameter(
             );
         }
         Ty::TyParam(name, _) => {
-            let reference = type_parameters
-                .get(name)
-                .ok_or_else(|| TypeEncodeError::MissingTypeParameter(name.to_owned()))?;
+            let reference = type_parameters.get(name.as_str()).ok_or_else(|| {
+                TypeEncodeError::MissingTypeParameter(name.to_owned().to_string())
+            })?;
             if nullable {
                 message.field_varint(3, 1);
             }
@@ -923,7 +923,7 @@ fn encode_type_with_parameter(
             match reference {
                 TypeParameterRef::Id(id) => message.field_varint(7, *id),
                 TypeParameterRef::CapturedOnUse => {
-                    message.field_varint(7, type_parameters.captured.intern(name));
+                    message.field_varint(7, type_parameters.captured.intern(name.as_str()));
                 }
                 TypeParameterRef::Named(source_name) => {
                     message.field_varint(9, strings.local(source_name) as u64);

@@ -66,8 +66,8 @@ pub(super) fn qualified_type_parameter(
         unreachable!("caller only delegates type parameters")
     };
     let marker = if nullable { "?" } else { "!" };
-    let rendered = render(parameter);
-    let source = type_parameter_source_name(parameter);
+    let rendered = render(parameter.as_str());
+    let source = type_parameter_source_name(parameter.as_str());
     match rendered.strip_prefix(source) {
         Some(owner) => format!("{source}{marker}{owner}"),
         None => format!("{rendered}{marker}"),

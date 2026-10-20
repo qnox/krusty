@@ -309,6 +309,11 @@ impl Emitter<'_> {
                 }
             }
         }
+        if !dead && !optimized_postfix && !anchored_lambda_result {
+            if let Some(value) = value.filter(|_| self.opens_spliced_lambda_frame(stmts)) {
+                self.mark_lambda_result_return(value, code);
+            }
+        }
         // A callable's own scope is its body. A value-returning lambda keeps those locals
         // open through the return, the same way a statement-position callable scope does.
         let mut anchored = false;
@@ -592,6 +597,50 @@ impl Emitter<'_> {
         self.erased_invocations.remove(&result);
         let words = code.stack_height() - before;
         (!code.is_dead() && matches!(words, 1 | 2)).then_some(words as u16)
+    }
+
+    /// The implicit `return` of an inlined lambda's trailing value. kotlinc marks a return's line
+    /// once its value is on the stack, at the expression's end, and the inliner turns the return
+    /// into a `nop`. The mark repeats the line in effect, so it writes nothing, unless the value
+    /// ended on another line or an inline call inside it reset the line
+    /// (`markLineNumberAfterInlineIfNeeded`): then the `nop` is that line's only instruction and
+    /// the cleanup keeps it.
+    fn mark_lambda_result_return(&mut self, value: u32, code: &mut CodeBuilder) {
+        if code.is_dead() {
+            return;
+        }
+        // The lambda body's block, and a coercion of it to the lambda's return type, carry the
+        // lambda's `}`; the return is its trailing expression's. An inlined call is that
+        // expression itself, not a body to look into.
+        let mut returned = value;
+        loop {
+            returned = match *self.ir.expr(returned) {
+                IrExpr::Block {
+                    value: Some(inner), ..
+                } if !self.realizes_inlined_call(returned) => inner,
+                IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg,
+                    ..
+                } => arg,
+                _ => break,
+            };
+        }
+        let Some(line) = self
+            .ir
+            .expr_end_lines
+            .get(&returned)
+            .or_else(|| self.ir.expr_source_lines.get(&returned))
+            .copied()
+            .filter(|line| *line != 0)
+        else {
+            return;
+        };
+        let before = code.line_marks().last().copied();
+        self.mark_expression_line(returned, line, code);
+        if code.line_marks().last().copied() != before {
+            code.nop();
+        }
     }
 
     /// Whether an inlined lambda's trailing value is a value the JVM stack carries out of the
@@ -1233,6 +1282,7 @@ impl Emitter<'_> {
                     // call has returned to its own line; the statement discards it there.
                     let before = code.stack_height();
                     self.emit_value(value, code);
+                    self.mark_lambda_result_return(value, code);
                     let words = code.stack_height() - before;
                     discard_after_frame =
                         (!code.is_dead() && matches!(words, 1 | 2)).then_some(words as u16);

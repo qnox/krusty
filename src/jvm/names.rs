@@ -491,9 +491,9 @@ fn descriptor_shape(ty: Ty) -> DescriptorShape {
             other => descriptor_shape(other.boxed_ref().unwrap_or(other)),
         },
         Ty::DefinitelyNotNull(inner) => descriptor_shape(*inner),
-        Ty::Intersection(parts) => {
-            descriptor_shape(super::physical_type::intersection_jvm_carrier(parts))
-        }
+        Ty::Intersection(parts) => descriptor_shape(
+            super::physical_type::intersection_jvm_carrier(parts.as_slice()),
+        ),
         Ty::TyParam(_, bound)
         | Ty::PlatformNullable(bound)
         | Ty::OutProjection(bound)

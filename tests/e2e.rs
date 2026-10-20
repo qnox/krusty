@@ -1254,6 +1254,8 @@ mod java_member_modules;
 mod java_self_bounded_constructor_e2e;
 #[path = "local_class_capture_order_e2e.rs"]
 mod local_class_capture_order_e2e;
+#[path = "local_class_construction_capture_e2e.rs"]
+mod local_class_construction_capture_e2e;
 #[path = "local_function_reference_inference_e2e.rs"]
 mod local_function_reference_inference_e2e;
 java_member_modules::declare!();
@@ -1555,6 +1557,8 @@ mod mpp_requires_the_feature_e2e;
 mod nested_class_annotation_scope_e2e;
 #[path = "nested_inline_lambda_e2e.rs"]
 mod nested_inline_lambda_e2e;
+#[path = "nested_inline_lambda_line_e2e.rs"]
+mod nested_inline_lambda_line_e2e;
 #[path = "nested_receiver_lambda_captures_e2e.rs"]
 mod nested_receiver_lambda_captures_e2e;
 #[path = "nested_type_parameter_bound_e2e.rs"]
@@ -2606,6 +2610,8 @@ mod erased_parameter_boxing_e2e;
 mod function_type_parameter_name_e2e;
 #[path = "hidden_deprecation_overload_e2e.rs"]
 mod hidden_deprecation_overload_e2e;
+#[path = "nullable_when_subject_membership_e2e.rs"]
+mod nullable_when_subject_membership_e2e;
 #[path = "super_argument_outer_receiver_e2e.rs"]
 mod super_argument_outer_receiver_e2e;
 #[path = "tparam_bound_member_e2e.rs"]
@@ -2738,6 +2744,8 @@ mod value_class_e2e;
 mod value_class_init_validate_e2e;
 #[path = "value_class_mangled_lambda_names_e2e.rs"]
 mod value_class_mangled_lambda_names_e2e;
+#[path = "value_class_mangled_names_e2e.rs"]
+mod value_class_mangled_names_e2e;
 #[path = "value_class_map_key_e2e.rs"]
 mod value_class_map_key_e2e;
 #[path = "value_class_member_lambda_return_e2e.rs"]

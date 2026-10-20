@@ -27,8 +27,9 @@ The reference is Kotlin Toolchain 0.13.0.
 - `module.yaml` and the templates it applies (`apply`, transitively): `product`, `description`,
   `dependencies` and `settings`, with `test-` and `@jvm` variants, read against the toolchain's
   schema (`src/schema`). Of `repositories`, only `mavenLocal` is used; `layout` chooses where a
-  compiled module's sources and resources are; `tasks` is read but not yet used;
-  `plugins`, `mavenPlugins`, `aliases` and `pluginInfo` are accepted without being read.
+  compiled module's sources and resources are; `tasks` is read but not yet used; `plugins` is read
+  when a module is compiled (see [Toolchain plugins](#toolchain-plugins)); `mavenPlugins`,
+  `aliases` and `pluginInfo` are accepted without being read.
 
 ## Settings
 
@@ -125,10 +126,21 @@ toolchain's compilation passes them:
 
 ```text
 -Xjdk-release=<settings.jvm.release> -jdk-home=<JDK> -classpath=<classpath> -no-stdlib
--module-name=<module> [-java-parameters] [-Xplugin=<kotlin-serialization-compiler-plugin jar>]
+-module-name=<module> [-java-parameters]
+[-Xmulti-platform -Xfragments=main -Xfragment-sources=main:<source>...]
+[-Xplugin=<kotlin-serialization-compiler-plugin jar>]
 -Xkotlin-reference-version=<settings.kotlin.version>
 -d <root>/build/artifacts/CompiledJvmArtifact/<module>jvm/kotlin-output <sources, sorted>
 ```
+
+The main fragment's source directories are the layout's (`src`, or `src/main/java` then
+`src/main/kotlin` in the Maven-like layout) followed by those its toolchain plugins add. The
+toolchain counts the ones that are directories holding anything at all (a file of any kind); when
+more than one does, it describes the fragment to the compiler: `-Xmulti-platform`,
+`-Xfragments=main`, and a `-Xfragment-sources=main:<file>` for each `.kt` and `.java` file in the
+order it walks the directories (each in turn, depth first, entries in the order the file system
+lists them), which krusty-toolchain walks the same way. A source directory that exists without
+being a directory is refused with the toolchain's message.
 
 The classpath is the module's resolved compile graph, walked breadth first
 (`src/compile/classpath.rs`): first each module dependency's compiled output (when it has Kotlin
@@ -138,6 +150,13 @@ version `settings.jvm.jdk.version` asks for. Artifact files and the serializatio
 the local repositories only. A module without Kotlin sources is not compiled. For each module the
 task clears its output directory, runs `KRUSTY_BIN` with the arguments, and copies the resources
 directory (`src/main/resources` in the Maven-like layout, else `resources`) to `resources-output`.
+A module is not compiled again when its inputs and its output are as its last successful
+compilation left them (`src/compile/avoidance.rs`), the check krusty's Build Tools API
+implementation makes for the toolchain: krusty fingerprints the inputs
+(`krusty compilation-fingerprint` before the arguments), and the output directory is compared by its
+files' paths and contents with the state recorded in
+`<root>/build/krusty-toolchain/<module>jvm/compilation.state`. A body-only edit of a module
+therefore recompiles only that module. When krusty takes no fingerprint, the module compiles.
 Modules run as the toolchain runs its task graph (`src/compile/schedule.rs`): a module starts as
 soon as the modules it compiles against have finished, at most as many at once as the host has
 available processors (the toolchain bounds its task executor the same way and has no option for
@@ -153,7 +172,8 @@ toolchain reports it.
 Before compiling anything, krusty-toolchain refuses, at the setting and naming the module, every
 module of the plan that:
 
-- enables toolchain plugins or runs KSP processors;
+- enables a toolchain plugin it does not implement (see [Toolchain plugins](#toolchain-plugins)) or
+  runs KSP processors;
 - sets a compiler setting it does not pass yet (`src/compile/refusals.rs`: the language and API
   versions, free compiler arguments, opt-ins, language features, warning options, explicit API
   mode, `debug`, compiler plugins and the settings the toolchain turns into compiler plugins);
@@ -164,6 +184,37 @@ module of the plan that:
 
 and refuses compile dependencies that form a cycle. It refuses an unset `KRUSTY_BIN` rather than
 searching `PATH`, and every task other than `compileJvm`.
+
+### Toolchain plugins
+
+A module enables a plugin by name in `plugins:` (`<name>: enabled` or `<name>: {enabled: true}`);
+the name is that of a local plugin module the project lists in its own `plugins:`
+(`src/compile/plugins.rs`). krusty-toolchain implements the plugins whose `plugin.yaml` only adds
+Kotlin source directories of the module to its main fragment:
+
+```yaml
+tasks:
+  declare:
+    action: !org.example.declareSources
+      sourceDir: ${module.rootDir}/generated-src/kotlin
+generated:
+  sources:
+    - language: kotlin
+      directory: ${tasks.declare.action.sourceDir}
+```
+
+A directory is the argument of a task's action that is `${module.rootDir}` or a plain path below
+it, or that directory written out, which the toolchain takes as that task's output. A directory
+written out that no task's action argument is the toolchain rejects, for each module that enables
+the plugin, and krusty-toolchain reports the same problem. krusty-toolchain runs no plugin task: the action is the plugin's own code, so a directory a
+task provides is compiled as it is on disk, and refused when it is not a directory there. It does
+not compile the plugin module before the modules that enable it, as the toolchain does to run the
+task. It refuses, where each is written: a plugin the project does not list, plugin settings
+beyond `enabled`, `plugins` written in more than one of a module's files, `pluginInfo` in the
+plugin's module file, and everything else a `plugin.yaml` may declare (`checks`, `commands`,
+`module`, `project`, `pluginSettings`, a task's `markOutputsAs` or `taskOutputDir`, generated
+resources and cinterop definitions, generated sources in another language or for another
+fragment, and directories written any other way).
 
 The library's public surface is the command boundary: `model` (read a project), `configuration`,
 `compile`, `dependencies`, `diagnostic` and `show`. Discovery, the file-system inventory, YAML,
@@ -237,7 +288,15 @@ with exit status 0 and no output, or to report exactly its `--- krusty-refusal` 
 nothing. The toolchain records the same arguments through krusty's Build Tools API implementation
 (`tools/krusty-build-tools`), built from its sources (by the JDK `KRUSTY_BUILD_TOOLS_JAVA_HOME`
 names, else `JAVA_HOME`) and installed into its shared cache, and must record each argv section
-(compared module by module, sources as a sorted list).
+(compared module by module, sources as a sorted list). The toolchain compiles a toolchain plugin's
+module and runs its tasks before the modules that enable it, so a case with a plugin names the
+plugin's module in a `--- toolchain-plugin-module` section: the recorder then also compiles that
+module, with the reference Kotlin compiler (the case's local repository lists the plugin API, whose
+stand-in jar is replaced by the one the distribution ships, and the standard library's by the
+reference compiler's), and the toolchain's invocation for it, which krusty-toolchain does not make,
+must be recorded once and is left out of the comparison. A case with neither section is a project
+both reject: krusty-toolchain must refuse it, and where the oracle runs, with exactly the problems
+the toolchain reports.
 
 `tests/support/oracle.rs` caches each reference's exit code and raw stdout and stderr (only a JVM's
 `Picked up JAVA_TOOL_OPTIONS` line is dropped from stderr) under

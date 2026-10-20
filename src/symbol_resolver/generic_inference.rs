@@ -497,7 +497,7 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
         }
         Ty::Obj(name, args) => {
             if let (Some(source), Ty::Fun(actual_function)) = (source, actual.non_null()) {
-                let target = Ty::obj_args_name(name, args);
+                let target = Ty::obj_args_name(name, args.as_slice());
                 if let Some(sam) = semantic_sam_signature(source, target) {
                     for (&parameter, &actual) in sam.params.iter().zip(&actual_function.params) {
                         unify_ty_impl(Some(source), parameter, actual, binds);
@@ -1245,7 +1245,7 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     // so substituting the inferred result through `R?` can reopen the original caller `T?`.
     let same_parameter_dnn = |provenance: Ty, compact: Ty| match provenance {
         Ty::DefinitelyNotNull(&Ty::TyParam(name, bound)) => {
-            compact == Ty::ty_param(name, bound.definitely_non_null())
+            compact == Ty::ty_param(name.as_str(), bound.definitely_non_null())
         }
         _ => false,
     };
@@ -1841,7 +1841,7 @@ pub(crate) fn complete_bottom_constraint_bindings(
                     continue;
                 }
                 let is_bottom = |ty: Ty| ty == Ty::Null || ty.non_null() == Ty::Nothing;
-                match bindings.get(bound_formal).copied() {
+                match bindings.get(bound_formal.as_str()).copied() {
                     Some(bottom) if is_bottom(bottom) && !is_bottom(actual) => {
                         // `Null` (the raw literal type) and `Nothing?` both admitted null.
                         let joined = if bottom == Ty::Null || bottom.is_nullable() {
@@ -2406,10 +2406,10 @@ pub(super) fn merge_specialized_return(provider: Ty, inferred: Ty) -> Ty {
             if provider_name == inferred_name =>
         {
             if provider_args.is_empty() {
-                return Ty::obj_args_name(provider_name, inferred_args);
+                return Ty::obj_args_name(provider_name, inferred_args.as_slice());
             }
             if inferred_args.is_empty() || provider_args.len() != inferred_args.len() {
-                return Ty::obj_args_name(provider_name, provider_args);
+                return Ty::obj_args_name(provider_name, provider_args.as_slice());
             }
             let args = provider_args
                 .iter()

@@ -13,6 +13,12 @@
 //! (the order it starts them in is checked by its own tests). Where the oracle runs, the
 //! toolchain's recorded invocations must be the `krusty-argv` ledger's, compared module by module
 //! (the toolchain may compile independent modules in either order), the sources of each as a set.
+//! A case whose modules enable a toolchain plugin names the plugin's module in a
+//! `toolchain-plugin-module` section: the toolchain compiles that module for real to run the
+//! plugin's tasks (`compiling::RecordingKrustyCompilingPlugin`), and its invocation, which
+//! krusty-toolchain does not make, must be recorded once and is left out of the comparison. A case
+//! with neither ledger is a project both reject: krusty-toolchain must refuse it, and where the
+//! oracle runs, with exactly the problems the toolchain reports.
 //!
 //! One test compiles with the real krusty instead of the recorder: a library and an application
 //! that uses it, whose outputs are listed and whose program is run on the JDK it compiled against.
@@ -33,6 +39,7 @@ use support::{ExpectedDiagnostic, ExpectedSeverity, KrustyExpected};
 const REPOSITORY_SECTION: &str = "m2/";
 const TASK_SECTION: &str = "task";
 const ARGV_SECTION: &str = "krusty-argv";
+const PLUGIN_SECTION: &str = "toolchain-plugin-module";
 const PLACEHOLDER: &str = "<directory>";
 
 type Files = Vec<(String, String)>;
@@ -45,6 +52,9 @@ struct CompileCase {
     task: String,
     argv: Option<String>,
     refusal: Option<Vec<ExpectedDiagnostic>>,
+    /// The toolchain plugin module the toolchain compiles, and krusty-toolchain does not, to run
+    /// its tasks, when there is one.
+    plugin_module: Option<String>,
 }
 
 fn files_below(directory: &Path, prefix: &str, files: &mut Files) {
@@ -75,6 +85,7 @@ fn compile_cases() -> Vec<CompileCase> {
                 repository: shared.clone(),
                 task: String::new(),
                 argv: None,
+                plugin_module: None,
                 refusal: match case.krusty {
                     Some(KrustyExpected::Refusal(refused)) => Some(refused),
                     Some(KrustyExpected::Difference(_)) => {
@@ -90,6 +101,8 @@ fn compile_cases() -> Vec<CompileCase> {
                     compiled.task = text.trim().to_string();
                 } else if file == ARGV_SECTION {
                     compiled.argv = Some(text);
+                } else if file == PLUGIN_SECTION {
+                    compiled.plugin_module = Some(text.trim().to_string());
                 } else {
                     compiled.project.push((file, text));
                 }
@@ -100,8 +113,8 @@ fn compile_cases() -> Vec<CompileCase> {
                 compiled.name
             );
             assert!(
-                compiled.argv.is_some() != compiled.refusal.is_some(),
-                "{}: a case holds either a `krusty-argv` or a `krusty-refusal` section",
+                compiled.argv.is_none() || compiled.refusal.is_none(),
+                "{}: a case holds a `krusty-argv` or a `krusty-refusal` section, not both",
                 compiled.name
             );
             compiled
@@ -205,7 +218,7 @@ fn ledger(problems: &[ExpectedDiagnostic]) -> String {
 fn every_compile_case_is_exact() {
     compiling::recorder();
     let cases = compile_cases();
-    assert_eq!(cases.len(), 11, "the cases are missing");
+    assert_eq!(cases.len(), 15, "the cases are missing");
     let mut failures = Vec::new();
     for case in &cases {
         let ran = krusty_toolchain(
@@ -253,7 +266,15 @@ fn every_compile_case_is_exact() {
                     ));
                 }
             }
-            (None, None) => unreachable!("checked when the cases are read"),
+            (None, None) => {
+                // Checked against the toolchain's problems where the oracle runs.
+                if refusal(actual).is_none() || !ran.record.is_empty() {
+                    failures.push(format!(
+                        "{}: krusty-toolchain did {printed}\na case with neither ledger expects status 1, no stdout, nothing recorded and nothing but problems",
+                        case.name
+                    ));
+                }
+            }
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
@@ -297,27 +318,78 @@ fn every_compile_case_passes_the_arguments_the_toolchain_passes() {
         .into_iter()
         .filter(|case| case.refusal.is_none())
         .collect();
+    compiling::recorder();
     let arguments: Vec<[&str; 2]> = cases
         .iter()
         .map(|case| ["task", case.task.as_str()])
         .collect();
+    let compilers: Vec<Box<dyn kotlin::Compiler>> = cases
+        .iter()
+        .map(|case| -> Box<dyn kotlin::Compiler> {
+            match &case.plugin_module {
+                Some(plugin) => Box::new(compiling::RecordingKrustyCompilingPlugin { plugin }),
+                None => Box::new(compiling::RecordingKrusty),
+            }
+        })
+        .collect();
     let invocations: Vec<Invocation<'_>> = cases
         .iter()
         .zip(&arguments)
-        .map(|(case, args)| Invocation {
+        .zip(&compilers)
+        .map(|((case, args), compiler)| Invocation {
             case: &case.name,
             files: &case.project,
             args,
             repository: Some(&case.repository),
-            compiler: Some(&compiling::RecordingKrusty),
+            compiler: Some(compiler.as_ref()),
         })
         .collect();
     let outputs = kotlin::kotlin_all(&invocations);
     let mut failures = Vec::new();
     for (case, toolchain) in cases.iter().zip(outputs) {
         let record = placed(&toolchain.root, &toolchain.stdout);
-        let argv = case.argv.as_deref().unwrap_or_default();
-        if toolchain.code != 0 || by_module(&record) != by_module(argv) {
+        let Some(argv) = case.argv.as_deref() else {
+            // Both reject the project, with the same problems.
+            let ran = krusty_toolchain(
+                &format!("rejected-{}", case.name),
+                case,
+                &[case.task.as_str()],
+                |_| {},
+            );
+            let project_root = format!("{}/{}", toolchain.root, Resolving::PROJECT);
+            let (rejected, unread) = problems(&project_root, &toolchain.stderr);
+            let rejected: Vec<ExpectedDiagnostic> = rejected
+                .into_iter()
+                .map(|problem| ExpectedDiagnostic {
+                    rendered: placed(&toolchain.root, problem.rendered.as_bytes()),
+                    ..problem
+                })
+                .collect();
+            let refused = refusal(&ran.output);
+            if toolchain.code == 0
+                || !unread.is_empty()
+                || !record.is_empty()
+                || refused.as_ref() != Some(&rejected)
+            {
+                failures.push(format!(
+                    "{}: the toolchain exited {} having recorded\n{record}\nand rejected the project with\n{}krusty-toolchain refused it with\n{}",
+                    case.name,
+                    toolchain.code,
+                    ledger(&rejected),
+                    refused.as_deref().map(ledger).unwrap_or_default()
+                ));
+            }
+            continue;
+        };
+        let mut recorded = by_module(&record);
+        // The plugin module's invocation is the toolchain's alone: krusty-toolchain runs no task.
+        let plugin_compiled = case.plugin_module.as_ref().is_none_or(|plugin| {
+            let name = format!("-module-name={plugin}");
+            let before = recorded.len();
+            recorded.retain(|invocation| !invocation.contains(&name));
+            recorded.len() + 1 == before
+        });
+        if toolchain.code != 0 || !plugin_compiled || recorded != by_module(argv) {
             failures.push(format!(
                 "{}: the toolchain exited {} having printed\n{}and recorded\n{record}\nthe `krusty-argv` section is\n{argv}",
                 case.name,
@@ -671,6 +743,64 @@ fn the_real_krusty_compiles_a_library_and_the_application_that_uses_it() {
         (Some(0), "hello, world!\n".to_string(), String::new()),
         "the application runs with the library's behavior"
     );
+
+    // Run again: krusty fingerprints each module's inputs and output, and compiles neither.
+    let compile = || {
+        let ran = run_task(&directory, &root, &[":app:compileJvm"], |command| {
+            command
+                .env("JAVA_HOME", &real.java_home)
+                .env("KRUSTY_BIN", &real.krusty);
+        });
+        (
+            ran.code,
+            placed(&ran.root, &ran.stdout),
+            placed(&ran.root, &ran.stderr),
+        )
+    };
+    let emitted = |module: &str| {
+        format!(
+            "ok: emitted 1 class file(s) to {PLACEHOLDER}/project/build/artifacts/CompiledJvmArtifact/{module}jvm/kotlin-output\n"
+        )
+    };
+    assert_eq!(
+        compile(),
+        (0, String::new(), String::new()),
+        "nothing changed"
+    );
+    // A body-only edit of the library leaves what the application compiles against unchanged.
+    let greeter = root.join("lib/src/Greeter.kt");
+    let source = std::fs::read_to_string(&greeter).unwrap();
+    std::fs::write(&greeter, source.replace("hello, ", "hi, ")).unwrap();
+    assert_eq!(
+        compile(),
+        (0, emitted("lib"), String::new()),
+        "only the edited library compiles"
+    );
+    // A new declaration in the library changes what the application compiles against.
+    std::fs::write(
+        &greeter,
+        source.replace("hello, ", "hi, ").replace(
+            "    fun greet()",
+            "    fun wave() = \"o/\"\n    fun greet()",
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        compile(),
+        (
+            0,
+            format!("{}{}", emitted("lib"), emitted("app")),
+            String::new()
+        ),
+        "the application compiles against the library's new declaration"
+    );
+    // A class removed from an output directory is compiled again.
+    std::fs::remove_file(app.join("MainKt.class")).unwrap();
+    assert_eq!(
+        compile(),
+        (0, emitted("app"), String::new()),
+        "the application's missing class is compiled again"
+    );
 }
 
 /// A diamond: `app` compiles against `left` and `right`, which both compile against `base`. The
@@ -715,6 +845,7 @@ fn diamond() -> CompileCase {
         task: ":app:compileJvm".to_string(),
         argv: None,
         refusal: None,
+        plugin_module: None,
     }
 }
 
@@ -958,4 +1089,96 @@ fn several_tasks_compile_the_union_of_what_they_need_once() {
         "the toolchain printed\n{}",
         placed(&toolchain.root, &toolchain.stderr)
     );
+}
+
+#[test]
+fn a_module_whose_inputs_and_output_are_unchanged_is_not_compiled_again() {
+    compiling::recorder();
+    let case = diamond();
+    let fingerprints = support::TempDir::new("compile-fingerprints");
+    let fingerprint = |module: &str, digit: char| {
+        std::fs::write(
+            fingerprints.0.join(module),
+            std::iter::repeat_n(digit, 64).collect::<String>(),
+        )
+        .unwrap();
+    };
+    for module in ["app", "base", "left", "right"] {
+        fingerprint(module, '0');
+    }
+    let fingerprinted = |command: &mut Command| {
+        command.env("KRUSTY_RECORDER_FINGERPRINTS", &fingerprints.0);
+    };
+    let first = krusty_toolchain("avoidance", &case, &[":app:compileJvm"], fingerprinted);
+    let project = first.directory.join(Resolving::PROJECT);
+    let record = first.directory.join(compiling::RECORD);
+    // The modules each run compiles, in plan order (`left` and `right` compile together, so sorted).
+    let compiled = |ran: &Output| {
+        // A run that compiles nothing writes no record.
+        let modules = modules(&std::fs::read_to_string(&record).unwrap_or_default());
+        let _ = std::fs::remove_file(&record);
+        let mut together = modules.clone();
+        if let Some(middle) = together.get_mut(1..3).filter(|_| modules.len() == 4) {
+            middle.sort();
+        }
+        (
+            ran.code,
+            placed(&ran.root, &ran.stdout),
+            placed(&ran.root, &ran.stderr),
+            together,
+        )
+    };
+    assert_eq!(
+        compiled(&first.output),
+        (
+            0,
+            String::new(),
+            String::new(),
+            lines(&["base", "left", "right", "app"])
+        ),
+        "the first run compiles every module"
+    );
+    let rerun = || {
+        run_task(
+            &first.directory,
+            &project,
+            &[":app:compileJvm"],
+            fingerprinted,
+        )
+    };
+    let ran = rerun();
+    assert_eq!(
+        compiled(&ran),
+        (0, String::new(), String::new(), Vec::new()),
+        "nothing changed"
+    );
+    fingerprint("left", '1');
+    let ran = rerun();
+    assert_eq!(
+        compiled(&ran),
+        (0, String::new(), String::new(), lines(&["left"])),
+        "only the module whose inputs changed"
+    );
+    let stray =
+        project.join("build/artifacts/CompiledJvmArtifact/rightjvm/kotlin-output/Stray.class");
+    std::fs::write(&stray, b"class").unwrap();
+    let ran = rerun();
+    assert_eq!(
+        compiled(&ran),
+        (0, String::new(), String::new(), lines(&["right"])),
+        "only the module whose output changed"
+    );
+    assert!(
+        !stray.exists(),
+        "the recompiled module's output holds only its classes"
+    );
+    std::fs::remove_file(fingerprints.0.join("app")).unwrap();
+    for attempt in 0..2 {
+        let ran = rerun();
+        assert_eq!(
+            compiled(&ran),
+            (0, String::new(), String::new(), lines(&["app"])),
+            "a module krusty takes no fingerprint of compiles every time ({attempt})"
+        );
+    }
 }

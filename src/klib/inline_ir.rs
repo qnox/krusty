@@ -739,7 +739,7 @@ impl FileWriter {
             Ty::Unit => (self.class_symbol(TypeName::from("kotlin/Unit")), &[][..]),
             Ty::Nothing => (self.class_symbol(TypeName::from("kotlin/Nothing")), &[][..]),
             Ty::Boolean => (self.class_symbol(TypeName::from("kotlin/Boolean")), &[][..]),
-            Ty::Obj(classifier, arguments) => (self.class_symbol(classifier), arguments),
+            Ty::Obj(classifier, arguments) => (self.class_symbol(classifier), arguments.as_slice()),
             Ty::TyParam(..) => {
                 let (_, _, symbol) = parameters
                     .iter()

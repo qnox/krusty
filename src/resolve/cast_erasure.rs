@@ -196,7 +196,7 @@ fn same_type_parameter(left: Ty, right: Ty) -> bool {
 fn direct_type_parameter(mut ty: Ty) -> Option<&'static str> {
     loop {
         ty = match ty {
-            Ty::TyParam(parameter, _) => return Some(parameter),
+            Ty::TyParam(parameter, _) => return Some(parameter.as_str()),
             Ty::Nullable(inner)
             | Ty::PlatformNullable(inner)
             | Ty::DefinitelyNotNull(inner)

@@ -627,16 +627,18 @@ impl<'a> JvmSignatureFormatter<'a> {
                     self.type_argument(TypeVariance::Out, *result, wildcards)?
                 ))
             }
-            Ty::Obj(owner, arguments) if self.is_written_raw(owner, arguments)? => Some(format!(
-                "L{};",
-                crate::jvm::names::classfile_internal_name_of(owner)
-            )),
+            Ty::Obj(owner, arguments) if self.is_written_raw(owner, arguments.as_slice())? => Some(
+                format!("L{};", crate::jvm::names::classfile_internal_name_of(owner)),
+            ),
             Ty::Obj(owner, arguments) => {
                 let chain = self.classifier_signature_chain(owner)?;
                 let declared_arguments: usize =
                     chain.iter().map(|(_, variances)| variances.len()).sum();
-                let arguments =
-                    self.classifier_usage_arguments(owner, arguments, declared_arguments)?;
+                let arguments = self.classifier_usage_arguments(
+                    owner,
+                    arguments.as_slice(),
+                    declared_arguments,
+                )?;
                 let (outer, _) = chain.first()?;
                 let jvm = crate::jvm::names::classfile_internal_name_of(*outer);
                 let mut signature = format!("L{jvm}");

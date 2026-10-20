@@ -369,7 +369,7 @@ impl BodyLowering<'_, '_, '_> {
             let address = self.data_address(slot);
             values.push(self.builder.ins().load(types::I64, trusted(), address, 0));
         }
-        let element = Ty::Obj(classifier, &[]);
+        let element = Ty::Obj(classifier, crate::types::TyList::EMPTY);
         let shape = self.array_shape(Ty::obj_args("kotlin/Array", &[element]))?;
         let descriptor = self.data_address(shape.descriptor);
         let length = self.builder.ins().iconst(types::I32, count as i64);

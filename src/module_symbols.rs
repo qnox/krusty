@@ -299,7 +299,7 @@ impl<'a> ModuleSymbols<'a> {
                     .map(
                         |parameter| matches!(parameter, Ty::Fun(function) if function.has_receiver),
                     )
-                    .collect(),
+                    .collect::<crate::libraries::ParamFlags>(),
                 c.ctor_params
                     .iter()
                     .map(|parameter| match parameter {
@@ -1444,7 +1444,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                         function.receiver = None;
                     }
                     function.source_key = None;
-                    function.callable.singleton_dispatch = Some(Box::new(singleton.clone()));
+                    function.callable.singleton_dispatch = Some(Box::new(singleton));
                     overloads.push(function);
                 }
                 for mut property in imported_properties.overloads {
@@ -1456,9 +1456,9 @@ impl SymbolSource for ModuleSymbols<'_> {
                         PropKind::MemberExtension => property.kind = PropKind::Extension,
                         PropKind::Extension | PropKind::TopLevel => {}
                     }
-                    property.getter.singleton_dispatch = Some(Box::new(singleton.clone()));
+                    property.getter.singleton_dispatch = Some(Box::new(singleton));
                     if let Some(setter) = &mut property.setter {
-                        setter.singleton_dispatch = Some(Box::new(singleton.clone()));
+                        setter.singleton_dispatch = Some(Box::new(singleton));
                     }
                     properties.push(property);
                 }
@@ -1712,15 +1712,15 @@ mod tests {
             equality_bound: None,
             vararg_index: None,
             required: 0,
-            param_defaults: vec![],
-            exact_params: vec![],
-            no_infer_params: vec![],
-            implicit_integer_coercion: vec![],
+            param_defaults: vec![].into(),
+            exact_params: vec![].into(),
+            no_infer_params: vec![].into(),
+            implicit_integer_coercion: vec![].into(),
             param_default_values: vec![],
             param_names: vec![],
             parameter_identities: vec![],
             lambda_param_types: vec![],
-            lambda_recv: vec![],
+            lambda_recv: vec![].into(),
             inline_modifiers: vec![],
             visibility: crate::types::Visibility::Public,
             context_count: 0,
@@ -2200,7 +2200,7 @@ mod tests {
         let mut st = FrontendSymbols::default();
         let mut s = sig(vec![Ty::Int, Ty::Int], Ty::Int);
         s.required = 1;
-        s.param_defaults = vec![false, true];
+        s.param_defaults = vec![false, true].into();
         s.param_names = vec!["a".into(), "b".into()];
         s.set_vararg(false);
         st.funs.insert("f".into(), vec![s]);
