@@ -124,6 +124,11 @@ pub(super) enum DelegatedProperty {
 /// emitter fails closed if it cannot perform that splice. A current-module operator kept as a call
 /// can fall back the same way, and keeps its slot.
 pub(super) fn elide_unread(ir: &mut IrFile, bodies: &dyn MethodBodies) {
+    for argument in compiled_body_unread_operands(ir) {
+        if ir.is_delegated_property_operand(argument) {
+            ir.mark_unread_inline_operand(argument);
+        }
+    }
     for raw in 0..ir.exprs.len() as ExprId {
         if ir.is_unread_inline_operand(raw) && ir.is_delegated_property_operand(raw) {
             elide(ir, raw);
@@ -164,6 +169,36 @@ pub(super) fn elide_unread(ir: &mut IrFile, bodies: &dyn MethodBodies) {
             }
         }
     }
+}
+
+/// The operands of calls inlined from a current-module compiled body that the body never reads.
+/// The route is final, so the body is always inlined and such an operand is never passed. The
+/// operands number like the body's values: a member's dispatch receiver first.
+fn compiled_body_unread_operands(ir: &IrFile) -> Vec<ExprId> {
+    let mut unread = Vec::new();
+    for (call, function) in ir.compiled_inline_calls() {
+        let Some(body) = ir
+            .functions
+            .get(function as usize)
+            .and_then(|function| function.body)
+        else {
+            continue;
+        };
+        let Some(operands) = ir.compiled_inline_operands(call) else {
+            continue;
+        };
+        let read = crate::ir::read_values(ir, body);
+        unread.extend(
+            operands
+                .receiver
+                .into_iter()
+                .chain(operands.arguments)
+                .enumerate()
+                .filter(|&(value, _)| !read.contains(&(value as u32)))
+                .map(|(_, operand)| operand),
+        );
+    }
+    unread
 }
 
 /// Pass `null` in place of a delegated-property operand, adaptations included, so no reflected

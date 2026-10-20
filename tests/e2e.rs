@@ -1701,6 +1701,8 @@ mod value_class_object_carrier_generic_result_e2e;
 mod value_class_parameters_e2e;
 #[path = "value_class_private_member_access_e2e.rs"]
 mod value_class_private_member_access_e2e;
+#[path = "value_class_return_mangling_e2e.rs"]
+mod value_class_return_mangling_e2e;
 #[path = "value_class_secondary_constructor_default_e2e.rs"]
 mod value_class_secondary_constructor_default_e2e;
 #[path = "value_class_secondary_constructor_return_e2e.rs"]
@@ -2102,6 +2104,8 @@ mod renamed_builtin_property_null_check_e2e;
 mod sam_with_receiver_plugin_e2e;
 #[path = "shared_cell_initial_values_e2e.rs"]
 mod shared_cell_initial_values_e2e;
+#[path = "smart_cast_consumer_cast_e2e.rs"]
+mod smart_cast_consumer_cast_e2e;
 #[path = "source_when_nop_e2e.rs"]
 mod source_when_nop_e2e;
 #[path = "spill_order_e2e.rs"]

@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use crate::maven::{missing, ArtifactResolver, Problem, Store};
-use crate::resolution::{Kind, ModuleGraph};
+use crate::resolution::{Kind, ModuleGraph, NodeId};
 
 /// What a module's compile classpath holds.
 pub(super) struct Classpath {
@@ -28,6 +28,30 @@ pub(super) fn classpath(
     store: &Store,
     problems: &mut Vec<Problem>,
 ) -> Classpath {
+    let compile = graph.modules[0];
+    walk(graph, compile, resolver, store, problems)
+}
+
+/// The artifact files of the runtime classpath of a tool `graph` is resolved for
+/// (`Resolvers::resolve_artifacts`), in the order a breadth-first walk meets them, each once.
+/// Problems are reported as for [`classpath`].
+pub(super) fn runtime_classpath(
+    graph: &mut ModuleGraph,
+    resolver: &ArtifactResolver<'_>,
+    store: &Store,
+    problems: &mut Vec<Problem>,
+) -> Vec<PathBuf> {
+    let runtime = graph.modules[1];
+    walk(graph, runtime, resolver, store, problems).files
+}
+
+fn walk(
+    graph: &mut ModuleGraph,
+    start: NodeId,
+    resolver: &ArtifactResolver<'_>,
+    store: &Store,
+    problems: &mut Vec<Problem>,
+) -> Classpath {
     let mut classpath = Classpath {
         modules: Vec::new(),
         files: Vec::new(),
@@ -37,8 +61,7 @@ pub(super) fn classpath(
             problems.push(problem);
         }
     };
-    let compile = graph.modules[0];
-    for id in graph.graph.breadth_first(compile, resolver, |_, _| true) {
+    for id in graph.graph.breadth_first(start, resolver, |_, _| true) {
         let node = graph.graph.node(id);
         let maven = match &node.kind {
             Kind::Module(module) if !module.top_level => {
@@ -58,7 +81,7 @@ pub(super) fn classpath(
         }
         let Some(declared) = resolver.read_declared(maven.current_artifact(), node.scope) else {
             report(Problem::general(format!(
-                "{} is in the compile graph, but its metadata was not read",
+                "{} is in the resolved graph, but its metadata was not read",
                 coordinates.pretty(None)
             )));
             continue;

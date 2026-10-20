@@ -5309,9 +5309,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   body is lowered whether it inlines from compiled bodies (`Backend::same_module_inlining`); the
   JVM does, every other target expands the IR template. Common lowering then decides each call's
   route once (`fir_lower/source_calls/inline_route.rs`): a call stays a call recorded for the
-  backend (`IrFile::compiled_inline_call`) only when the callee is a top-level, non-suspend
-  function in this module (public, or declared in the caller's own file; not a companion-block
-  member, which its class compiles) with no suspend function-typed parameter or receiver, no
+  backend (`IrFile::compiled_inline_call`) only when the callee is a non-suspend function in this
+  module (public, or declared in the caller's own file), top-level or a member of a class, object
+  or companion, with no suspend function-typed parameter or receiver, no
   `crossinline` parameter, and a template without lambdas, callable references, local classes,
   or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
   called with every argument from any body outside a suspend state machine: a named function, an
@@ -5328,6 +5328,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter, which binds none, does not shift the parameters after it. Every other call is
   expanded in IR for a named reason. The JVM compiles each such callee once per emission pass, alone, into a writer of
   its declaring class and source file, and the inliner reads that body as it reads a dependency's.
+  A member is compiled as its class emits it: an instance method whose `this` is the call's
+  dispatch receiver (a companion's or object's member takes the singleton instance), or a value
+  class's static `-impl`, whose call names the exact function it realizes. A member declared in
+  another file of the module is compiled on the class its template records as its dispatch
+  owner, under that file's name; a member of another file's value class is realized there as its
+  class realizes it, a static `-impl` over the carrier. A `companion { … }` block member is a
+  static of its class, compiled there. A call inlined this way never invokes the member, so it needs
+  no `access$` bridge to it even when the member is private to another class. A private inline
+  function whose body another class of the file inlines (a nested class calling its outer
+  class's private inline member) reads private members through its class's synthetic accessors,
+  as kotlinc compiles it, since that body runs in the calling class; called only from its own
+  class it keeps direct access. A delegated property's reference operand that the compiled body
+  of its operator never reads is passed as `null`, so no `$$delegatedProperties` entry is made
+  for it (`PropertyReferenceLowering`). Every emitted member inline method opens with the
+  `$i$f$` marker, a value class's static `-impl` included, and the marker carries no line, as a
+  top-level one's does not. An inline function's own body reads a hoisted companion property
+  through the companion's accessor rather than the outer class's static field, as kotlinc keeps
+  an accessor call inside an inline function, and a body other classes inline reads a private
+  companion instance through the outer class's `access$get<Companion>$p`.
   A callee whose body inlines another same-module callee is compiled after it, as kotlinc compiles
   a callee's node when a call first needs it; the node carries its method's own source map (the
   lines it inlined are numbered past its file's own line count, not the caller's), so the caller
@@ -6005,6 +6024,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A `KFunctionN<P…, R>` in a generic `Signature` is written `KFunction<R>`, the one type argument of
   its JVM class. Tests: `tests/reference_consumer_casts_e2e.rs`, `tests/named_argument_operands_e2e.rs`.
 
+- **A smart-cast value is cast only to what its consumer reads.** A smart cast is kotlinc's
+  `IMPLICIT_CAST`, which its JVM codegen emits as the unnarrowed operand
+  (`ExpressionCodegen.visitTypeOperator`); the consumer then materializes that value at its own type
+  (`PromisedValue.materializeAt`, `StackValue.coerce`). So after `x is Marker` with `x: Any`, an
+  `Any?` parameter, an erased `T`, and a string template's `StringBuilder.append(Object)` take `x`
+  with no `checkcast`; a `Marker` parameter gets `checkcast Marker`; and after `x is Leaf` a `Base`
+  parameter gets only `checkcast Base`, never `Leaf` first. A template part is consumed the same
+  way: `String.valueOf(Object)` and an `invokedynamic` argument take it unnarrowed, and
+  `append(String)` (selected by a `String` smart cast) casts it to `String`. krusty defers the cast
+  only where the consumer itself materializes the value at its exact physical slot, and every such
+  consumer reads its operands through one step (`Emitter::slot_operands`, or
+  `emit_operand_at_slot` for a single operand): the arguments of source, descriptor and external
+  virtual or interface calls (`list.add(value)` is `aload; invokeinterface add(Object)`), of a
+  `$default` stub, whose receiver is an ordinary parameter of the declaring class (`checkcast Base`
+  for a receiver smart cast to `Sub`), of a constructor (an erased generic parameter takes the bare
+  load), of `FunctionN.invoke` and of an inlined function-value literal (whose own parameter casts
+  it as the body reads it), and both sides of `==` (`aload value; aload other;
+  Intrinsics.areEqual`) and `===`; a reference implicit coercion (cast to its target); and a
+  template part. Every other consumer keeps the narrowed value: a dispatch receiver, whose slot is
+  the class the call names, a suspend call's `$completion`, which is a `Continuation`, a local
+  initializer, and the rest. A written `as` keeps its own cast, and a narrowing to or from a value
+  class or unsigned type stays with the value-class adapter that owns its carried representation.
+  Tests: `tests/smart_cast_consumer_cast_e2e.rs`.
+
 - **A captured `var` initialized to its holder's default leaves the holder unset.** A `Ref$XxxRef`
   holder starts at its field's JVM default, so a constant initializer equal to it (zero, positive
   zero for `Float`/`Double`, `false`, `'\u0000'`, or `null` in an `ObjectRef`) is not stored, as
@@ -6317,6 +6360,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   NL* "}"` per the Kotlin grammar — a multiline lambda inside `${…}` (common in raw strings) parses.
   Plain line breaks only; an explicit `;` still terminates the expression. Test:
   `nested_string_template_e2e::template_interpolation_allows_newlines_around_expression`.
+
+- **A property's `where` clause precedes its initializer or delegate.** The grammar places
+  `typeConstraints` before `= expression` / `by expression`. Test:
+  `where_bound_arguments_e2e::an_extension_property_where_clause_precedes_its_delegate`.
+
+
 
 - **A Java instance field is a Kotlin `var` property (unless `final`), with Java visibility.** Public
   fields read/write anywhere; protected fields bind from a subclass of the declaring class (any
@@ -12546,6 +12595,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   argument and calls the entry. krusty named the static function from the bridge
   (`compareTo-impl(I)I`), which does not exist. Tests: `tests/explicit_backing_field_e2e.rs`.
   Corpus: `properties/backingField/genericSupertypeWithValueClassExplicitBackingField`.
+- **A member is named by its own value-class result, once, whatever it overrides.** kotlinc
+  (`InlineClassAbi.hashSuffix`) hashes a non-facade member's value parameters and its own return
+  type into ONE suffix whenever that return is a value class. An override is no exception: an
+  override getter `val key: Z` of `Map.Entry<K, V>.key` is `getKey-a_XrcN0()I` with a boxing
+  bridge `getKey()Object`, `override val p: Z` of `val p: Z?` is `getP-a_XrcN0()I` with a bridge
+  `getP-m98lmvQ()LZ;` under the supertype's own name, and a custom getter takes the same name as
+  a stored property's. A value class's interface entry is the member itself on the box, so it
+  takes the static member's name unchanged (`get-ayyZXx8(I)LZ;` for `get(key: Z): Z?`), never a
+  second hash over its physical result (`get-ayyZXx8--zXLvJo`). A function and a property
+  getter decide bridge necessity by the same rule: a value-class result that differs from the
+  overridden one needs a bridge even where the unerased descriptors agree.
+  Tests: `tests/value_class_return_mangling_e2e.rs`. Corpus:
+  `inlineClasses/inlineClassCollection/inlineMapOfInlineClass`.
 - **A value class's suspend interface entry is the CPS method on the box.** The overriding member
   is the static `build-impl(carrier, Continuation)Object`. The box implements the interface with
   `build(Continuation)Object`: it reads the carrier and calls that static method, passing the

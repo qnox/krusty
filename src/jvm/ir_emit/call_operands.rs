@@ -11,6 +11,7 @@
 //! then obliged to abandon the whole call — never to emit the `invoke*` that would follow — and to
 //! leave its own arm stack-correct via [`Emitter::bail_descriptor_arity`].
 
+use super::operand_stack::KeptSmartCasts;
 use super::*;
 
 /// Map a physical descriptor operand back to the selected call's checked argument vector. A
@@ -226,8 +227,15 @@ impl Emitter<'_> {
     ) -> Result<(), DescriptorArityMismatch> {
         DescriptorArityMismatch::check(None, ops.len(), physical.len())?;
         self.mark_generated_operand_start(call, ops.first().copied(), code);
+        let ops = self.slot_operands(
+            ops,
+            KeptSmartCasts::CallReceivers {
+                call,
+                leading: leading_non_argument_operands,
+            },
+        );
         let mut index = 0usize;
-        self.emit_operands_adapted(None, ops, code, |this, source, code| {
+        self.emit_operands_adapted(None, &ops, code, |this, source, code| {
             let parameter_index = index;
             let target = physical[index];
             index += 1;
@@ -257,8 +265,10 @@ impl Emitter<'_> {
     ) -> Result<(), DescriptorArityMismatch> {
         DescriptorArityMismatch::check(None, ops.len(), physical.len())?;
         let origins = self.default_operand_origins(call, ops, true);
+        // A `$default` stub's receiver is an ordinary parameter, materialized at its type.
+        let ops = self.slot_operands(ops, KeptSmartCasts::CallReceivers { call, leading: 0 });
         let mut index = 0usize;
-        self.emit_operands_adapted(Some((call, &origins)), ops, code, |this, source, code| {
+        self.emit_operands_adapted(Some((call, &origins)), &ops, code, |this, source, code| {
             let parameter_index = index;
             let target = physical[index];
             index += 1;
@@ -336,6 +346,13 @@ impl Emitter<'_> {
         // The call owns any operand a default-argument realization synthesized for it, so its own
         // line goes back into effect at the start of each such run.
         let origins = self.default_operand_origins(call_expression, ops, false);
+        let ops = &self.slot_operands(
+            ops,
+            KeptSmartCasts::CallReceivers {
+                call: call_expression,
+                leading: leading_non_argument_operands,
+            },
+        );
         self.emit_operands_at_slots(
             Some((call_expression, &origins)),
             ops,
@@ -390,6 +407,13 @@ impl Emitter<'_> {
         });
         physical.extend_from_slice(physical_params);
         self.mark_generated_operand_start(call_expression, ops.first().copied(), code);
+        let ops = self.slot_operands(
+            &ops,
+            KeptSmartCasts::CallReceivers {
+                call: call_expression,
+                leading: 1,
+            },
+        );
         let mut index = 0usize;
         self.emit_operands_at_slots(None, &ops, &physical, code, |this, source, code| {
             let operand = ops[index];

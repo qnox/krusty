@@ -2,9 +2,9 @@
 //! compiler arguments it gives krusty.
 //!
 //! A run is laid out as `kotlin::Resolving` lays it out (`<directory>` in compared output), with a
-//! JDK beside the project (`jdk`: a `release` file naming `JAVA_VERSION="25.0.2"` and empty
-//! `bin/javac` and `bin/java`, which is all either reads of it) and the file the recording krusty
-//! writes (`record`). `KRUSTY_BIN` names that recorder: it appends its arguments to the record, one
+//! JDK beside the project (`jdk`: a `release` file naming `JAVA_VERSION="25.0.2"`, an empty
+//! `bin/javac`, and a `bin/java` that records the KSP runs both make, which is all either reads of
+//! it) and the file the recording krusty writes (`record`). `KRUSTY_BIN` names that recorder: it appends its arguments to the record, one
 //! per line, then a `----` line, each invocation whole under a lock (a `record.lock` directory),
 //! since the toolchain compiles independent modules at the same time; it exits 0, or with status 3
 //! for the module `KRUSTY_RECORDER_FAIL` names. Nothing is compiled, so a `compilation-fingerprint`
@@ -25,9 +25,11 @@
 //! installed there ([`RecordingKrusty`]), so the toolchain hands the recorder the arguments it would
 //! hand krusty. The implementation's sources are part of the oracle entry's identity; a live run
 //! builds it from them with its Gradle wrapper, in a scratch copy, run by the JDK
-//! `KRUSTY_BUILD_TOOLS_JAVA_HOME` names (else `JAVA_HOME`). The cached entry's stdout is the record,
-//! followed by a `==== outputs` line and the files the task left in the modules' artifact
-//! directories ([`artifact_outputs`]), its stderr what `kotlin` printed, its code `kotlin`'s exit status.
+//! `KRUSTY_BUILD_TOOLS_JAVA_HOME` names (else `JAVA_HOME`) and the Gradle user home
+//! `KRUSTY_BUILD_TOOLS_GRADLE_USER_HOME` names (else its workspace cache). The cached entry's stdout
+//! is the record, followed by a `==== outputs` line and the files the task left in the modules'
+//! artifact directories ([`artifact_outputs`]), its stderr what `kotlin` printed, its code
+//! `kotlin`'s exit status.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -75,6 +77,36 @@ const PLUGIN_COMPILATION: &str = "if [ \"$module\" = \"$KRUSTY_RECORDER_PLUGIN\"
     esac
   done
   JAVA_HOME=$KRUSTY_RECORDER_JDK exec \"$KRUSTY_RECORDER_KOTLINC\" -jdk-home \"$KRUSTY_RECORDER_JDK\" \"$@\"
+fi
+";
+
+/// The run's stand-in `java`, which the toolchain and krusty-toolchain alike run KSP with: it
+/// records its arguments as the recording krusty does, each `@file` argument replaced by the
+/// arguments the file holds, one per line. It then acts as a processor that the module's files
+/// drive (in `-project-base-dir`): it copies what the module's `ksp-generates` directory holds into
+/// KSP's output directory (`-output-base-dir`), as if it generated those files, and when the module
+/// holds a `ksp-fails` file, it prints that file on stderr and exits with status 5.
+const JAVA_RECORDER: &str = "#!/bin/sh
+arguments=$(
+  for argument in \"$@\"; do
+    case $argument in
+      @*) sed -e '$a\\' \"${argument#@}\" ;;
+      *) printf '%s\\n' \"$argument\" ;;
+    esac
+  done
+)
+until mkdir \"$KRUSTY_RECORD.lock\" 2>/dev/null; do sleep 0.01; done
+printf '%s\\n%s\\n' \"$arguments\" '----' >> \"$KRUSTY_RECORD\"
+rmdir \"$KRUSTY_RECORD.lock\"
+base=$(printf '%s\\n' \"$arguments\" | sed -n 's/^-project-base-dir=//p')
+output=$(printf '%s\\n' \"$arguments\" | sed -n 's/^-output-base-dir=//p')
+if [ -d \"$base/ksp-generates\" ]; then
+  mkdir -p \"$output\"
+  cp -R \"$base/ksp-generates/.\" \"$output\"
+fi
+if [ -f \"$base/ksp-fails\" ]; then
+  cat \"$base/ksp-fails\" >&2
+  exit 5
 fi
 ";
 
@@ -129,6 +161,7 @@ fn recorders() -> &'static Path {
             ("krusty", RECORDER.to_string()),
             ("krusty-compiling-plugin", plugin_compiling_recorder()),
             ("krusty-toolchain-krusty", TOOLCHAIN_RECORDER.to_string()),
+            ("java", JAVA_RECORDER.to_string()),
         ] {
             let path = directory.join(name);
             std::fs::write(&path, script).unwrap();
@@ -168,10 +201,10 @@ pub fn lay_out(directory: &Path) {
     let jdk = directory.join(JDK);
     std::fs::create_dir_all(jdk.join("bin")).unwrap();
     std::fs::write(jdk.join("release"), "JAVA_VERSION=\"25.0.2\"\n").unwrap();
-    for tool in ["javac", "java"] {
-        std::fs::write(jdk.join("bin").join(tool), "").unwrap();
-        make_executable(&jdk.join("bin").join(tool));
-    }
+    std::fs::write(jdk.join("bin").join("javac"), "").unwrap();
+    make_executable(&jdk.join("bin").join("javac"));
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(recorders().join("java"), jdk.join("bin").join("java")).unwrap();
     std::fs::create_dir_all(directory.join(Resolving::CACHE)).unwrap();
 }
 
@@ -230,8 +263,9 @@ fn implementation_sources() -> Vec<(String, Vec<u8>)> {
 
 /// The Build Tools API implementation jar, built once per process from its sources in a scratch
 /// copy. The Gradle wrapper runs with a user home of its own in the workspace's target cache
-/// (`krusty-build-tools-gradle`), never `~/.gradle`: the distribution it unpacks there ships
-/// kotlinx.serialization jars, which other tests of the workspace look for below `~/.gradle`.
+/// (`krusty-build-tools-gradle`), or `KRUSTY_BUILD_TOOLS_GRADLE_USER_HOME` when the caller must keep
+/// mutable Gradle state outside that cache. It never uses `~/.gradle`: the distribution it unpacks
+/// there ships kotlinx.serialization jars, which other tests of the workspace look for below it.
 fn implementation_jar() -> &'static Path {
     static JAR: OnceLock<PathBuf> = OnceLock::new();
     JAR.get_or_init(|| {
@@ -242,13 +276,15 @@ fn implementation_jar() -> &'static Path {
             std::fs::write(path, bytes).unwrap();
         }
         let mut command = Command::new("sh");
+        let gradle_user_home = std::env::var_os("KRUSTY_BUILD_TOOLS_GRADLE_USER_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                implementation_directory().join("../../target/cache/krusty-build-tools-gradle")
+            });
         command
             .args(["./gradlew", "-q", "jar"])
             .current_dir(&copy)
-            .env(
-                "GRADLE_USER_HOME",
-                implementation_directory().join("../../target/cache/krusty-build-tools-gradle"),
-            );
+            .env("GRADLE_USER_HOME", gradle_user_home);
         if let Some(java_home) = std::env::var_os("KRUSTY_BUILD_TOOLS_JAVA_HOME") {
             command.env("JAVA_HOME", java_home);
         }
@@ -277,6 +313,10 @@ impl Compiler for RecordingKrusty {
         let mut identity = vec![
             ("recorder".to_string(), RECORDER.as_bytes().to_vec()),
             ("outputs".to_string(), OUTPUTS.as_bytes().to_vec()),
+            (
+                "java recorder".to_string(),
+                JAVA_RECORDER.as_bytes().to_vec(),
+            ),
         ];
         identity.extend(implementation_sources());
         identity

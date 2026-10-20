@@ -7,8 +7,10 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use super::arguments::{arguments, Compilation};
-use super::classpath::classpath;
+use super::classpath::{classpath, runtime_classpath};
+use super::ksp::{self, Ksp, KspOutputs, KspRun};
 use super::order::{compile_dependencies, compile_order};
+use super::refusals::at_setting;
 use super::{jdk, plugins, refusals, sources};
 use crate::diagnostic::{Diagnostic, Diagnostics};
 use crate::maven::{missing, Coordinates, Metadata, OpenError, Problem, Store};
@@ -39,6 +41,8 @@ pub struct Step {
     /// The fragment's resources directory, when it has one, then the directories of resources its
     /// plugins add; a file of a later directory replaces the same file of an earlier one.
     pub resources: Vec<PathBuf>,
+    /// The KSP run that comes first, when the fragment runs KSP processors.
+    pub ksp: Option<Ksp>,
     /// The earlier steps this one starts after: those of the modules the fragment compiles against
     /// directly, which start after the ones they compile against.
     pub waits: Vec<usize>,
@@ -142,10 +146,17 @@ pub fn plan(
                 Err(refused) => (plugins::Generated::default(), refused),
             };
         let refused = refusals::refusals(name, configuration, main);
-        let mut compiles = refused.is_empty() && plugins_refused.is_empty();
-        for diagnostic in plugins_refused.into_iter().chain(refused) {
+        let (processors, processors_refused) = ksp_processors(name, configuration, settings);
+        let mut compiles =
+            refused.is_empty() && plugins_refused.is_empty() && processors_refused.is_empty();
+        for diagnostic in plugins_refused
+            .into_iter()
+            .chain(refused)
+            .chain(processors_refused)
+        {
             diagnostics.push(diagnostic);
         }
+        let ksp_outputs = (!processors.is_empty()).then(|| KspOutputs::of(root, name));
         let jdk_home = jdk::select(
             name,
             configuration,
@@ -198,6 +209,11 @@ pub fn plan(
             .then(|| layout.resources.clone())
             .into_iter()
             .chain(generated.resources)
+            .chain(
+                ksp_outputs
+                    .as_ref()
+                    .map(|outputs| outputs.resources.clone()),
+            )
             .collect();
         // Copying a directory that holds the resources output would copy the output into itself.
         if let Some(holding) = resources
@@ -245,6 +261,18 @@ pub fn plan(
                 Err(problem) => problems.push(problem),
             }
         }
+        let ksp_classpaths = (!processors.is_empty()).then(|| {
+            let version = settings
+                .text_at(&["kotlin", "ksp", "version"])
+                .unwrap_or_default();
+            let (mut graph, resolver) =
+                resolvers.resolve_artifacts(&declarations[index], &ksp::ksp_artifacts(&version));
+            let tool = runtime_classpath(&mut graph, resolver, &store, &mut problems);
+            let (mut graph, resolver) =
+                resolvers.resolve_artifacts(&declarations[index], &processors);
+            let processors = runtime_classpath(&mut graph, resolver, &store, &mut problems);
+            (tool, processors)
+        });
         let new_problems = problems.len() > known;
         for problem in &problems[known..] {
             diagnostics.push(problem.diagnostic());
@@ -264,6 +292,38 @@ pub fn plan(
         let release = match settings.at(&["jvm", "release"]).map(|node| &node.value) {
             Some(Value::Int(release)) => Some(*release),
             _ => None,
+        };
+        let ksp = match ksp_classpaths {
+            Some((tool, processors)) => {
+                let existing: Vec<PathBuf> = layout
+                    .sources
+                    .iter()
+                    .filter(|directory| directory.is_dir())
+                    .cloned()
+                    .collect();
+                let jdk_version = settings
+                    .text_at(&["jvm", "jdk", "version"])
+                    .and_then(|version| version.parse().ok())
+                    .unwrap_or_default();
+                let ksp = ksp::ksp(&KspRun {
+                    root,
+                    module: name,
+                    module_directory: directory,
+                    jdk_home: &jdk_home,
+                    jdk_version,
+                    jvm_target: release.map_or(jdk_version, i64::from),
+                    kotlin_version: &kotlin_version,
+                    ksp_classpath: &tool,
+                    processors: &processors,
+                    options: &processor_options(settings),
+                    sources: &existing,
+                    libraries: &entries,
+                })?;
+                // The module compiles against what KSP generates, last.
+                entries.push(ksp.outputs.classes.clone());
+                Some(ksp)
+            }
+            None => None,
         };
         let arguments = if found.kotlin.is_empty() {
             None
@@ -303,8 +363,56 @@ pub fn plan(
             state: state_file(root, name),
             resources_output,
             resources,
+            ksp,
             waits,
         });
     }
     Ok((!diagnostics.has_errors()).then_some(Plan { steps }))
+}
+
+/// The Maven artifacts `settings.kotlin.ksp.processors` of `module` names, with a refusal of each
+/// processor that is a module or a catalog entry.
+fn ksp_processors(
+    module: &str,
+    configuration: &crate::configuration::Configuration,
+    settings: &crate::tree::Node,
+) -> (Vec<Coordinates>, Vec<Diagnostic>) {
+    let Some(Value::List(items)) = settings
+        .at(&["kotlin", "ksp", "processors"])
+        .map(|node| &node.value)
+    else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut processors = Vec::new();
+    let mut refused = Vec::new();
+    for item in items {
+        match resolution::maven_artifact(item) {
+            Some(coordinates) => processors.push(coordinates),
+            None => refused.push(at_setting(
+                configuration,
+                item,
+                format!(
+                    "module `{module}` runs a KSP processor that is not a Maven artifact, and krusty-toolchain runs only processors published to a Maven repository"
+                ),
+            )),
+        }
+    }
+    (processors, refused)
+}
+
+/// `settings.kotlin.ksp.processorOptions`, in the order written.
+fn processor_options(settings: &crate::tree::Node) -> Vec<(String, String)> {
+    match settings
+        .at(&["kotlin", "ksp", "processorOptions"])
+        .map(|node| &node.value)
+    {
+        Some(Value::Mapping { entries, .. }) => entries
+            .iter()
+            .filter_map(|entry| match &entry.value.value {
+                Value::String(value) => Some((entry.key.clone(), value.clone())),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }

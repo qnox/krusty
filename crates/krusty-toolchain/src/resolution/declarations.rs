@@ -238,6 +238,18 @@ fn unsupported_catalog(module: &ModuleHeader) -> String {
     )
 }
 
+/// The Maven coordinates an unscoped dependency item names (`ksp.processors`), when it names an
+/// artifact rather than a module or a catalog entry.
+pub fn maven_artifact(item: &Node) -> Option<Coordinates> {
+    match &item.value {
+        Value::Mapping {
+            object: Some(object),
+            ..
+        } if std::ptr::eq(*object, &UNSCOPED_EXTERNAL_MAVEN) => Some(maven_coordinates(item)),
+        _ => None,
+    }
+}
+
 fn maven_coordinates(node: &Node) -> Coordinates {
     let part = |name: &str| node.text_at(&[name]);
     Coordinates::with_selector(

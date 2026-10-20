@@ -537,19 +537,23 @@ fn default_expression_lambda(ir: &IrFile, expression: ExprId) -> Option<FunId> {
 /// lambda's body in place of its value.
 fn inline_call_argument(ir: &IrFile, node: ExprId) -> bool {
     ir.exprs.iter().enumerate().any(|(call, expression)| {
+        let call = ExprId::try_from(call).expect("IR expression index exceeds ExprId");
+        if let Some(operands) = ir.compiled_inline_operands(call) {
+            // A `noinline` literal of a call inlined from a compiled body is a value the body
+            // receives, so it keeps its class.
+            return operands
+                .arguments
+                .iter()
+                .enumerate()
+                .any(|(parameter, &argument)| {
+                    argument == node
+                        && crate::jvm::inline_parameters::is_inline_parameter(ir, call, parameter)
+                            == Some(true)
+                });
+        }
         let IrExpr::Call { args, .. } = expression else {
             return false;
         };
-        let call = ExprId::try_from(call).expect("IR expression index exceeds ExprId");
-        if ir.compiled_inline_call(call).is_some() {
-            // A `noinline` literal of a call inlined from a compiled body is a value the body
-            // receives, so it keeps its class.
-            return args.iter().enumerate().any(|(parameter, &argument)| {
-                argument == node
-                    && crate::jvm::inline_parameters::is_inline_parameter(ir, call, parameter)
-                        == Some(true)
-            });
-        }
         (ir.inline_call_sites.contains(&call) || ir.module_inline_calls.contains(&call))
             && args.contains(&node)
     })

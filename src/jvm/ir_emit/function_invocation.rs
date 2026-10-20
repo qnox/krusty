@@ -34,6 +34,9 @@ impl Emitter<'_> {
         params: &[Ty],
         code: &mut CodeBuilder,
     ) {
+        // Every argument crosses `invoke` as the `Object` it is; an inlined literal's body
+        // materializes it at its own parameter.
+        let args = &self.slot_operands(args, super::operand_stack::KeptSmartCasts::None);
         if let IrExpr::GetValue(value) = self.ir.expr(func) {
             if let Some(alias) = self.inline_lambda_alias(*value) {
                 self.emit_aliased_invocation(&alias, args, params, code);
