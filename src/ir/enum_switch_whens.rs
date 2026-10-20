@@ -41,8 +41,9 @@ impl EnumSwitchWhen {
                     || matches!(ir.expr(*result), IrExpr::When { .. })
                         && self.compares_an_entry(ir, *result)
             }),
-            &IrExpr::PrimitiveBinOp {
+            &IrExpr::Equality {
                 op: IrBinOp::Eq,
+                mode: super::EqualityMode::Structural,
                 lhs,
                 rhs,
             } => self.compared_operand(ir, lhs, rhs).is_some_and(|other| {
@@ -66,8 +67,9 @@ impl EnumSwitchWhen {
                 return true;
             };
             match ir.expr(*condition) {
-                &IrExpr::PrimitiveBinOp {
+                &IrExpr::Equality {
                     op: IrBinOp::Eq,
+                    mode: super::EqualityMode::Structural,
                     lhs,
                     rhs,
                 } => self.compared_operand(ir, lhs, rhs).is_none_or(|other| {

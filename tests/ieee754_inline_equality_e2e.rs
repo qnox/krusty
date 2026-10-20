@@ -14,6 +14,8 @@ inline fun <reified T : Comparable<Double>> lessReified(a: T, b: Double): Boolea
 inline fun <reified T : Comparable<Double>> equalsReified(a: T, b: T): Boolean = a == b\n\
 inline fun less754(a: Double, b: Double): Boolean = a < b\n\
 inline fun equals754(a: Double, b: Double): Boolean = a == b\n\
+inline fun <T : Comparable<Double>> whenGeneric(a: T, b: T): Boolean = when (a) { b -> true; else -> false }\n\
+inline fun when754(a: Double, b: Double): Boolean = when (a) { b -> true; else -> false }\n\
 ";
 
 const MAIN: &str = "\
@@ -26,6 +28,10 @@ fun box(): String {\n\
     if (equalsReified(-0.0, 0.0)) return \"fail 6\"\n\
     if (less754(-0.0, 0.0)) return \"fail 7\"\n\
     if (!equals754(-0.0, 0.0)) return \"fail 8\"\n\
+    if (whenGeneric(-0.0, 0.0)) return \"generic when signed zero\"\n\
+    if (!whenGeneric(Double.NaN, Double.NaN)) return \"generic when NaN\"\n\
+    if (!when754(-0.0, 0.0)) return \"IEEE when signed zero\"\n\
+    if (when754(Double.NaN, Double.NaN)) return \"IEEE when NaN\"\n\
     return \"OK\"\n\
 }\n\
 ";
@@ -44,7 +50,9 @@ fn inlined_equality_keeps_the_checked_mode() {
     let source = format!(
         "{LIB}\n\
          fun structuralUse(a: Double): Boolean = equalsGeneric(a, 0.0)\n\
-         fun ieeeUse(a: Double): Boolean = equals754(a, 0.0)\n"
+         fun ieeeUse(a: Double): Boolean = equals754(a, 0.0)\n\
+         fun whenStructuralUse(a: Double): Boolean = whenGeneric(a, 0.0)\n\
+         fun whenIeeeUse(a: Double): Boolean = when754(a, 0.0)\n"
     );
     let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
         common::stdlib_jar(),
@@ -82,10 +90,14 @@ fn inlined_equality_keeps_the_checked_mode() {
         [
             ("structuralUse", equality_mode("structuralUse")),
             ("ieeeUse", equality_mode("ieeeUse")),
+            ("whenStructuralUse", equality_mode("whenStructuralUse")),
+            ("whenIeeeUse", equality_mode("whenIeeeUse")),
         ],
         [
             ("structuralUse", krusty::ir::EqualityMode::Structural),
             ("ieeeUse", krusty::ir::EqualityMode::Ieee754),
+            ("whenStructuralUse", krusty::ir::EqualityMode::Structural),
+            ("whenIeeeUse", krusty::ir::EqualityMode::Ieee754),
         ],
         "each inline call must keep its own checked equality mode"
     );

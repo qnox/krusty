@@ -8,7 +8,7 @@ use crate::fir::{
     FirExpr, FirExprId, FirWhenBranch, FirWhenCondition, FirWhenSubjectNumericEquality, ResolvedTy,
     SyntheticOriginKind,
 };
-use crate::types::Ty;
+use crate::types::{EqualityMode, Ty};
 
 use super::{BodyCheckFailure, BodyFirChecker, FirExprKind};
 
@@ -127,36 +127,64 @@ impl BodyFirChecker<'_> {
                             self.boolean_condition(condition.expression())?
                         };
                         Ok(if has_subject && !condition.is_predicate() {
-                            let numeric = self
+                            let plan = self
                                 .info
-                                .when_subject_numeric_equality(condition.expression())
+                                .when_subject_numeric_equality(condition.expression());
+                            let nullable_ieee754 = self
+                                .info
+                                .when_subject_nullable_ieee754_equality(condition.expression());
+                            let resolved = |ty: Ty| {
+                                let span = self.file.expr_span(condition.expression()).ok_or_else(
+                                    || {
+                                        self.failure(
+                                            None,
+                                            super::BodyCheckFailureKind::MissingSourceSpan,
+                                        )
+                                    },
+                                )?;
+                                self.resolved_type(span, ty)
+                            };
+                            let numeric = plan
                                 .map(|plan| {
-                                    let span = self
-                                        .file
-                                        .expr_span(condition.expression())
-                                        .ok_or_else(|| {
-                                            self.failure(
-                                                None,
-                                                super::BodyCheckFailureKind::MissingSourceSpan,
-                                            )
-                                        })?;
                                     Ok::<_, BodyCheckFailure>(FirWhenSubjectNumericEquality {
-                                        subject_unbox: self
-                                            .resolved_type(span, plan.subject_unbox())?,
+                                        subject_unbox: resolved(plan.subject_unbox())?,
                                         subject_widening: plan
                                             .subject_widening()
-                                            .map(|ty| self.resolved_type(span, ty))
+                                            .map(resolved)
                                             .transpose()?,
                                         candidate_widening: plan
                                             .candidate_widening()
-                                            .map(|ty| self.resolved_type(span, ty))
+                                            .map(resolved)
                                             .transpose()?,
                                     })
                                 })
                                 .transpose()?;
+                            let nullable_ieee754 = nullable_ieee754.map(resolved).transpose()?;
+                            let subject_ty = numeric
+                                .map(|plan| {
+                                    plan.subject_widening.unwrap_or(plan.subject_unbox).get()
+                                })
+                                .unwrap_or_else(|| {
+                                    self.body
+                                        .expr(subject.expect("subject equality has a subject"))
+                                        .expect("the subject was just checked")
+                                        .ty
+                                        .get()
+                                });
+                            let candidate_ty = numeric
+                                .and_then(|plan| plan.candidate_widening)
+                                .unwrap_or_else(|| {
+                                    self.body
+                                        .expr(checked)
+                                        .expect("the candidate was just checked")
+                                        .ty
+                                })
+                                .get();
                             FirWhenCondition::SubjectEquals {
                                 candidate: checked,
+                                mode: EqualityMode::of_source_operands(subject_ty, candidate_ty),
                                 numeric,
+                                nullable_ieee754,
                             }
                         } else {
                             FirWhenCondition::Predicate(checked)

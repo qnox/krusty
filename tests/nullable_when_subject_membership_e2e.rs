@@ -34,9 +34,8 @@ fn a_nullable_subject_is_tested_for_null_before_any_condition_narrows_it() {
     .unwrap_or_else(|error| panic!("{error}"));
 }
 
-/// An equality arm after the narrowing range arm. Its bytes still differ from kotlinc's, which
-/// stores the constant before unboxing the subject for the comparison, so only its behavior is
-/// pinned here.
+/// An equality arm after the narrowing range arm; `when_narrowed_equality_order_e2e.rs` pins
+/// its bytes.
 const EQUALITY_AFTER: &str =
     "fun thenConstant(c: Int?) = when (c) { null -> \"null\"; in 1..3 -> \"in\"; 7 -> \"seven\"; else -> \"out\" }\n";
 

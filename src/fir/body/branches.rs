@@ -3,6 +3,7 @@
 
 use crate::fir::header::{FirExprId, LocalValueId, OriginId};
 use crate::fir::signature::ResolvedTy;
+use crate::types::EqualityMode;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirCatch {
@@ -36,11 +37,15 @@ pub struct FirWhenSubjectNumericEquality {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FirWhenCondition {
     /// `candidate` compared with the subject. `numeric` is the complete adaptation plan selected
-    /// after earlier conditions' false-branch smart casts; `None` keeps ordinary structural
-    /// equality at the subject's declared type.
+    /// after earlier conditions' false-branch smart casts; `None` keeps the subject's declared
+    /// type. `mode` records equality semantics after those adaptations, before inline substitution.
     SubjectEquals {
         candidate: FirExprId,
+        mode: EqualityMode,
         numeric: Option<FirWhenSubjectNumericEquality>,
+        /// The floating type of an IEEE-754 equality with a nullable operand (fir2ir's
+        /// `ieee754equals`), which keeps each nullable operand boxed.
+        nullable_ieee754: Option<ResolvedTy>,
     },
     Predicate(FirExprId),
 }
