@@ -203,7 +203,11 @@ runtime classpath as the last argument, every argument as the toolchain passes i
 `build/tasks/_<module>_kspJvm`. The module then compiles with KSP's generated classes as the last
 classpath entry, and its resources output takes KSP's generated resources after its other resource
 directories, so a module running KSP always puts a resources output on its dependents' classpath.
-KSP runs on every task run. A run that generates Kotlin or Java sources fails the module, since
+KSP does not run again while its inputs and its output are as its last successful run left them
+(`src/compile/avoidance.rs`): its arguments, the paths and contents of KSP's class path, the
+processors, the module's classpath and sources and the JDK's `release` file, and the files below
+`build/generated/<module>/main`, recorded in `build/krusty-toolchain/<module>jvm/ksp.state`. This is
+decided before the module's own check, whose fingerprint reads the classes KSP generated. A run that generates Kotlin or Java sources fails the module, since
 krusty-toolchain does not compile generated sources yet.
 
 ### Toolchain plugins

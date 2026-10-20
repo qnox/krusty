@@ -154,7 +154,8 @@ fn run_step(step: &Step, krusty: &Path, printed: &mut Printed) -> Result<(), Run
     copy_resources(step)
 }
 
-/// Run `step`'s KSP run `ksp`; what KSP printed goes to `printed`.
+/// Run `step`'s KSP run `ksp`, unless its inputs and output are as its last successful run left
+/// them; what KSP printed goes to `printed`.
 fn run_ksp(step: &Step, ksp: &ksp::Ksp, printed: &mut Printed) -> Result<(), RunFailure> {
     let output = |action: &str, directory: &Path, error: io::Error| {
         RunFailure::Io(format!(
@@ -163,6 +164,13 @@ fn run_ksp(step: &Step, ksp: &ksp::Ksp, printed: &mut Printed) -> Result<(), Run
             step.module
         ))
     };
+    // KSP's inputs are fingerprinted before the module's: the module compiles against KSP's output.
+    let inputs = avoidance::tool_inputs(&ksp.arguments, &ksp.reads)
+        .map_err(|error| output("fingerprint the inputs of KSP", &ksp.outputs.base, error))?;
+    if avoidance::up_to_date(&ksp.state, &ksp.outputs.base, &inputs) {
+        return Ok(());
+    }
+    avoidance::forget(&ksp.state).map_err(|error| output("remove", &ksp.state, error))?;
     let ran = ksp::run(ksp).map_err(|error| {
         RunFailure::Io(format!(
             "cannot run KSP ({}) for module `{}`: {error}",
@@ -189,7 +197,9 @@ fn run_ksp(step: &Step, ksp: &ksp::Ksp, printed: &mut Printed) -> Result<(), Run
     }
     // KSP writes the directory only when it generates a resource.
     std::fs::create_dir_all(&ksp.outputs.resources)
-        .map_err(|error| output("create", &ksp.outputs.resources, error))
+        .map_err(|error| output("create", &ksp.outputs.resources, error))?;
+    avoidance::record(&ksp.state, &ksp.outputs.base, &inputs)
+        .map_err(|error| output("record", &ksp.state, error))
 }
 
 /// Make the module's resources output exactly its resource directories' contents, a file of a

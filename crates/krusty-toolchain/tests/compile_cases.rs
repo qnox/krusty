@@ -619,6 +619,12 @@ fn a_ksp_rerun_keeps_nothing_an_earlier_run_generated() {
     let generates = project.join("app/ksp-generates/resources/ksp");
     std::fs::remove_dir_all(generates.join("META-INF")).unwrap();
     std::fs::write(generates.join("other.txt"), "other\n").unwrap();
+    // A changed source, which KSP reads, so KSP runs again.
+    std::fs::write(
+        project.join("app/src/Model.kt"),
+        "class Model(val name: String)\n",
+    )
+    .unwrap();
 
     let second = run_task(
         &first.directory,
@@ -649,6 +655,59 @@ fn a_ksp_rerun_keeps_nothing_an_earlier_run_generated() {
             ],
             "== appjvm/resources-output/other.txt\nother\n".to_string()
         )
+    );
+}
+
+/// KSP does not run again while what it reads and what it generated are as its last successful run
+/// left them: its arguments (the processor options among them), the processors, and its output.
+#[test]
+fn an_unchanged_ksp_run_is_skipped() {
+    compiling::recorder();
+    let case = case("ksp");
+    let first = krusty_toolchain("ksp-skip", &case, &[":consumer:compileJvm"], |_| {});
+    assert_eq!(
+        first.output.code,
+        0,
+        "{}",
+        placed(&first.output.root, &first.output.stderr)
+    );
+    let project = first.directory.join(Resolving::PROJECT);
+    let record = first.directory.join(compiling::RECORD);
+    let ksp_runs = || {
+        runs_ksp(&std::fs::read_to_string(&record).unwrap())
+            .into_iter()
+            .filter(|&ksp| ksp)
+            .count()
+    };
+    let rerun = || {
+        let ran = run_task(
+            &first.directory,
+            &project,
+            &[":consumer:compileJvm"],
+            |_| {},
+        );
+        assert_eq!(ran.code, 0, "{}", placed(&ran.root, &ran.stderr));
+        ksp_runs()
+    };
+    let module = project.join("app/module.yaml");
+    let processor = first
+        .directory
+        .join(Resolving::HOME)
+        .join(".m2/repository/org/example/processor/1.0/processor-1.0.jar");
+    let generated = project.join("build/generated/app/main/resources/ksp/META-INF/registry.txt");
+    let mut runs = vec![ksp_runs(), rerun()];
+    let written = std::fs::read_to_string(&module).unwrap();
+    std::fs::write(&module, written.replace("alpha: first", "alpha: second")).unwrap();
+    runs.push(rerun());
+    std::fs::write(&processor, "Another processor.\n").unwrap();
+    runs.push(rerun());
+    std::fs::remove_file(&generated).unwrap();
+    runs.push(rerun());
+    runs.push(rerun());
+    assert_eq!(runs, [1, 1, 2, 3, 4, 4]);
+    assert_eq!(
+        std::fs::read_to_string(&generated).unwrap(),
+        "generated.Registry\n"
     );
 }
 

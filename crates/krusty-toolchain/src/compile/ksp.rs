@@ -80,6 +80,12 @@ pub struct Ksp {
     pub temporary: PathBuf,
     pub caches: PathBuf,
     pub outputs: KspOutputs,
+    /// What the run reads besides its arguments: KSP's class path, the processors, the module's
+    /// classpath and sources, and the JDK's `release` file, fingerprinted to skip a run whose
+    /// inputs and output are unchanged (`avoidance.rs`).
+    pub reads: Vec<PathBuf>,
+    /// Where the last successful run's inputs and output are recorded.
+    pub state: PathBuf,
 }
 
 /// What one module's KSP run is made of.
@@ -195,6 +201,21 @@ pub(super) fn ksp(run: &KspRun<'_>) -> Result<Ksp, String> {
         temporary,
         caches,
         outputs,
+        reads: run
+            .ksp_classpath
+            .iter()
+            .chain(run.processors)
+            .chain(run.libraries)
+            .chain(run.sources)
+            .cloned()
+            .chain([run.jdk_home.join("release")])
+            .collect(),
+        state: run
+            .root
+            .join("build")
+            .join("krusty-toolchain")
+            .join(format!("{}jvm", run.module))
+            .join("ksp.state"),
     })
 }
 
