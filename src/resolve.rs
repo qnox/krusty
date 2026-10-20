@@ -183,7 +183,9 @@ mod named_class_constructors;
 mod operator_calls;
 mod operator_declarations;
 mod opt_in_usage;
-use operator_calls::{range_operator, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess};
+use operator_calls::{
+    range_operator, OperatorOperand, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess,
+};
 mod declaration_publication;
 mod enhanced_values;
 use declaration_publication::inferred_declaration_ty;
@@ -55483,17 +55485,18 @@ impl<'a> Checker<'a> {
                 // Reconstructing the result from operand classes duplicates that metadata and was the
                 // reason UByte/UShort ranges degraded to `ClosedRange<T>` or were rejected outright.
                 let convention = range_operator(kind);
-                if let Some((range_ty, range_call)) = self.operator_expression_call_ret(
+                let operand = OperatorOperand {
+                    ty: rt,
+                    expression: hi,
+                };
+                if let Some(range_ty) = self.select_binary_operator_expression(
                     scope,
                     e,
                     lt,
                     convention.name,
-                    &[rt],
-                    &[hi],
+                    operand,
                     None,
                 ) {
-                    self.resolved_operator_calls
-                        .insert((e, convention.key), range_call);
                     return self.set(e, range_ty);
                 }
                 self.diags.error(
@@ -58468,23 +58471,13 @@ impl<'a> Checker<'a> {
             // exact callable and may still realize it with primitive operations where appropriate.
             if lt.is_unsigned() {
                 if let Some(name) = op.arith_operator_name() {
-                    if let Some((ret, target)) = self.operator_expression_call_ret(
-                        scope,
-                        e,
-                        lt,
-                        name,
-                        &[rt],
-                        &[rhs],
-                        expected,
-                    ) {
-                        self.resolved_operator_calls.insert(
-                            (
-                                e,
-                                SyntheticOperatorCall::from_name(name)
-                                    .expect("arithmetic operator has a synthetic-call key"),
-                            ),
-                            target,
-                        );
+                    let operand = OperatorOperand {
+                        ty: rt,
+                        expression: rhs,
+                    };
+                    if let Some(ret) = self
+                        .select_binary_operator_expression(scope, e, lt, name, operand, expected)
+                    {
                         return self.set(e, ret);
                     }
                 }
@@ -58540,23 +58533,13 @@ impl<'a> Checker<'a> {
                         Err(()) => return self.set(e, Ty::Error),
                         Ok(None) => {}
                     }
-                    if let Some((ret, target)) = self.operator_expression_call_ret(
-                        scope,
-                        e,
-                        lt,
-                        fname,
-                        &[rt],
-                        &[rhs],
-                        expected,
-                    ) {
-                        self.resolved_operator_calls.insert(
-                            (
-                                e,
-                                SyntheticOperatorCall::from_name(fname)
-                                    .expect("arithmetic operator has a synthetic-call key"),
-                            ),
-                            target,
-                        );
+                    let operand = OperatorOperand {
+                        ty: rt,
+                        expression: rhs,
+                    };
+                    if let Some(ret) = self
+                        .select_binary_operator_expression(scope, e, lt, fname, operand, expected)
+                    {
                         return self.set(
                             e,
                             if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
@@ -58577,23 +58560,13 @@ impl<'a> Checker<'a> {
             if lt.is_reference() && lt.scalar_value_repr().is_none() {
                 let op_name = op.arith_operator_name();
                 if let Some(fname) = op_name {
-                    if let Some((ret, target)) = self.operator_expression_call_ret(
-                        scope,
-                        e,
-                        lt,
-                        fname,
-                        &[rt],
-                        &[rhs],
-                        expected,
-                    ) {
-                        self.resolved_operator_calls.insert(
-                            (
-                                e,
-                                SyntheticOperatorCall::from_name(fname)
-                                    .expect("arithmetic operator has a synthetic-call key"),
-                            ),
-                            target,
-                        );
+                    let operand = OperatorOperand {
+                        ty: rt,
+                        expression: rhs,
+                    };
+                    if let Some(ret) = self
+                        .select_binary_operator_expression(scope, e, lt, fname, operand, expected)
+                    {
                         return self.set(e, ret);
                     }
                     if self.report_required_operator_modifier(
@@ -58670,20 +58643,12 @@ impl<'a> Checker<'a> {
                 && lt != Ty::Error
                 && rt != Ty::Error
             {
-                if let Some((ret, target)) = self.operator_expression_call_ret(
-                    scope,
-                    e,
-                    lt,
-                    "compareTo",
-                    &[rt],
-                    &[rhs],
-                    None,
-                ) {
-                    if ret == Ty::Int {
-                        self.resolved_operator_calls
-                            .insert((e, SyntheticOperatorCall::CompareTo), target);
-                        return self.set(e, Ty::Boolean);
-                    }
+                let operand = OperatorOperand {
+                    ty: rt,
+                    expression: rhs,
+                };
+                if self.select_comparison_expression(scope, e, lt, operand) {
+                    return self.set(e, Ty::Boolean);
                 }
             }
             let builtin_lt = self.builtin_operator_operand(scope, lt);

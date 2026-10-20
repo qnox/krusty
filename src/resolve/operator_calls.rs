@@ -90,20 +90,31 @@ struct SelectedOperator {
     type_arguments: OperatorTypeArguments,
 }
 
+/// The declaration's generic signature, the selected call shape, and one solved argument per
+/// declared formal (`None` when the selection left that formal unbound).
+struct SolvedOperatorTypeArguments {
+    signature: crate::libraries::GenericSig,
+    call_sig: CallSig,
+    arguments: Vec<Option<Ty>>,
+}
+
 /// The type arguments an operator selection solved, published only by the caller whose expression
 /// IS that one call (`a + b`, `a..b`, `a < b`). A convention selected for another expression's
 /// key (a loop range, a compound assignment receiver, an `in` range that also selects `contains`)
 /// does not own that key's single generic-call record.
 enum OperatorTypeArguments {
-    Solved {
-        signature: crate::libraries::GenericSig,
-        call_sig: CallSig,
-        arguments: Vec<Option<Ty>>,
-    },
+    Solved(Box<SolvedOperatorTypeArguments>),
     NotGeneric,
     /// The selection path committed its own generic facts (member extensions) or has none to
     /// commit here (local extensions and indexed `set`, which their own paths record).
     CommittedBySelection,
+}
+
+/// The single right-hand operand of a binary operator expression (`b` in `a + b`, `a..b`,
+/// `a < b`): its checked type and its source expression.
+pub(super) struct OperatorOperand {
+    pub(super) ty: Ty,
+    pub(super) expression: ExprId,
 }
 
 impl<'a> Checker<'a> {
@@ -132,18 +143,70 @@ impl<'a> Checker<'a> {
         .map(|selected| (selected.ret, selected.call))
     }
 
-    /// Select the operator convention that `expression` itself denotes and publish the type
-    /// arguments it solved under that expression, as every other generic call publishes them:
-    /// `a + b` through `inline operator fun <reified T> T.plus(other: T)` passes the same reified
-    /// `T` as the explicit `a.plus(b)`.
-    pub(super) fn operator_expression_call_ret(
+    /// Select the convention `name` that the binary expression `expression` denotes (`a + b`,
+    /// `a..b`) and record its target under the expression's synthetic operator call. Returns the
+    /// convention's result.
+    pub(super) fn select_binary_operator_expression(
         &mut self,
         scope: &CheckerScope<'_>,
         expression: ExprId,
         receiver: Ty,
         name: &str,
-        arg_tys: &[Ty],
-        arg_exprs: &[ExprId],
+        operand: OperatorOperand,
+        expected_result: Option<Ty>,
+    ) -> Option<Ty> {
+        let key = SyntheticOperatorCall::from_name(name)
+            .expect("a binary operator expression names a synthetic operator");
+        let (ret, call) = self.operator_expression_call_ret(
+            scope,
+            expression,
+            receiver,
+            name,
+            operand,
+            expected_result,
+        )?;
+        self.resolved_operator_calls.insert((expression, key), call);
+        Some(ret)
+    }
+
+    /// Select the `compareTo` convention a comparison expression (`a < b`) denotes. Only a
+    /// convention returning `Int` is a comparison; its target is then recorded under the
+    /// expression's synthetic `compareTo` call.
+    pub(super) fn select_comparison_expression(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        receiver: Ty,
+        operand: OperatorOperand,
+    ) -> bool {
+        match self.operator_expression_call_ret(
+            scope,
+            expression,
+            receiver,
+            "compareTo",
+            operand,
+            None,
+        ) {
+            Some((Ty::Int, call)) => {
+                self.resolved_operator_calls
+                    .insert((expression, SyntheticOperatorCall::CompareTo), call);
+                true
+            }
+            Some(_) | None => false,
+        }
+    }
+
+    /// Select the operator convention that `expression` itself denotes and publish the type
+    /// arguments it solved under that expression, as every other generic call publishes them:
+    /// `a + b` through `inline operator fun <reified T> T.plus(other: T)` passes the same reified
+    /// `T` as the explicit `a.plus(b)`.
+    fn operator_expression_call_ret(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        receiver: Ty,
+        name: &str,
+        operand: OperatorOperand,
         expected_result: Option<Ty>,
     ) -> Option<(Ty, ResolvedCall)> {
         let selected = self.select_operator(
@@ -151,18 +214,21 @@ impl<'a> Checker<'a> {
             expression,
             receiver,
             name,
-            arg_tys,
-            arg_exprs,
+            &[operand.ty],
+            &[operand.expression],
             self.span(expression),
             expected_result,
             None,
         )?;
         match selected.type_arguments {
-            OperatorTypeArguments::Solved {
-                signature,
-                call_sig,
-                arguments,
-            } => self.replace_selected_generic_call(expression, &signature, &call_sig, arguments),
+            OperatorTypeArguments::Solved(solved) => {
+                let SolvedOperatorTypeArguments {
+                    signature,
+                    call_sig,
+                    arguments,
+                } = *solved;
+                self.replace_selected_generic_call(expression, &signature, &call_sig, arguments)
+            }
             OperatorTypeArguments::NotGeneric => self.clear_selected_generic_call(expression),
             OperatorTypeArguments::CommittedBySelection => {}
         }
@@ -543,15 +609,17 @@ impl<'a> Checker<'a> {
             })
         };
         let type_arguments = match selected.generic_sig.as_ref() {
-            Some(signature) => OperatorTypeArguments::Solved {
-                arguments: signature
-                    .formals
-                    .iter()
-                    .map(|formal| bindings.get(formal).copied())
-                    .collect(),
-                signature: signature.clone(),
-                call_sig: selected.call_sig.clone(),
-            },
+            Some(signature) => {
+                OperatorTypeArguments::Solved(Box::new(SolvedOperatorTypeArguments {
+                    arguments: signature
+                        .formals
+                        .iter()
+                        .map(|formal| bindings.get(formal).copied())
+                        .collect(),
+                    signature: signature.clone(),
+                    call_sig: selected.call_sig.clone(),
+                }))
+            }
             None => OperatorTypeArguments::NotGeneric,
         };
         Some(SelectedOperator {
