@@ -74,3 +74,24 @@ fn template_interpolation_allows_newlines_around_expression() {
         }\n";
     assert_eq!(run(SRC).expect("newline interpolation"), "OK");
 }
+
+/// A `$` begins an escaped-name template only when a whole `` `name` `` follows on the same line;
+/// before an unterminated backtick it is literal text, as in kotlinc's lexer.
+#[test]
+fn a_dollar_before_an_unterminated_backtick_is_literal_text() {
+    let source = "fun special(c: Char) = c in \"\\\\\\\"$`\"\n\
+         \n\
+         fun box(): String {\n\
+         \x20   val `odd name` = 1\n\
+         \x20   val text = \"$`odd name`\"\n\
+         \x20   return if (special('`') && special('$') && !special('a') && text == \"1\") \"OK\" else \"fail\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "DollarBacktick");
+    let classes = common::classes_against_kotlinc_module(&[("DollarBacktick.kt", source)]);
+    let differences = classes.differences();
+    assert!(
+        differences.is_empty(),
+        "classes differ from kotlinc's:\n\n{}",
+        differences.join("\n\n")
+    );
+}

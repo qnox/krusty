@@ -6308,6 +6308,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Plain line breaks only; an explicit `;` still terminates the expression. Test:
   `nested_string_template_e2e::template_interpolation_allows_newlines_around_expression`.
 
+- **`$` before a backtick interpolates only a complete escaped identifier.** A backtick, one or more
+  characters that are neither a backtick nor a line break, then a closing backtick; any other `$`
+  is literal template text (`"$`"`). Test:
+  `nested_string_template_e2e::a_dollar_before_an_unterminated_backtick_is_literal_text`.
+
 - **A Java instance field is a Kotlin `var` property (unless `final`), with Java visibility.** Public
   fields read/write anywhere; protected fields bind from a subclass of the declaring class (any
   depth). An accessible field beats a bean-getter synthetic property even across hierarchy rungs
