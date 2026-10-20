@@ -143,30 +143,11 @@ impl BodyFirChecker<'_> {
         if let Some(source) = self.lambda_return_source {
             outer_lambda_return_depths.insert(source, 1);
         }
-        let mut outer_values = self
-            .outer_values
-            .iter()
-            .map(|(name, (depth, value))| {
-                (
-                    name.clone(),
-                    (
-                        depth.checked_add(1).expect("too many nested lambdas"),
-                        *value,
-                    ),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        for scope in &self.scopes {
-            outer_values.extend(
-                scope
-                    .iter()
-                    .map(|(name, value)| (name.clone(), (0, *value))),
-            );
-        }
+        let mut outer_values = self.outer_values.nested(&self.scopes);
         crate::trace_compiler!(
             "fir",
             "checked lambda captures expression={expression:?} outer_values={:?}",
-            outer_values.keys().collect::<Vec<_>>(),
+            outer_values.names().collect::<Vec<_>>(),
         );
         let mut outer_delegates = self
             .outer_delegates
@@ -188,16 +169,11 @@ impl BodyFirChecker<'_> {
                     .map(|(name, binding)| (name.clone(), (0, binding.clone()))),
             );
         }
-        outer_values.extend(
-            outer_delegates
-                .iter()
-                .filter_map(|(name, (depth, binding))| {
-                    binding
-                        .storage
-                        .local()
-                        .map(|storage| (name.clone(), (*depth, storage)))
-                }),
-        );
+        for (name, (depth, binding)) in &outer_delegates {
+            if let Some(storage) = binding.storage.local() {
+                outer_values.replace_nearest(name.clone(), (*depth, storage));
+            }
+        }
         let receiver_frame = self.receiver_frame();
         let class_values = self.nested_class_values()?;
         let class_capture_values = self.nested_class_capture_values()?;

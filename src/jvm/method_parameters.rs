@@ -211,12 +211,14 @@ fn constructor_prefix(ir: &IrFile, class: &IrClass, count: usize) -> Vec<MethodP
         "constructor prefix exceeds its arguments"
     );
     let identities = crate::jvm::parameter_names::constructor_identities(&class.ctor_args);
+    let captures = crate::jvm::capture_names::class_captures(ir, class);
     let prefix = class
         .ctor_args
         .iter()
         .zip(&identities)
+        .zip(captures)
         .take(count)
-        .map(|(argument, identity)| {
+        .map(|((argument, identity), capture)| {
             // The enclosing instance is the generated identity constructor_identities recorded.
             // An unnamed capture maps to a positional identity and is named by its storage below.
             if let IrParameterRole::Generated(role @ IrGeneratedParameterRole::OuterInstance) =
@@ -226,10 +228,8 @@ fn constructor_prefix(ir: &IrFile, class: &IrClass, count: usize) -> Vec<MethodP
                     .expect("a generated constructor prefix has a JVM parameter name");
                 return parameter(name, generated_constructor_flags(role));
             }
-            let name = argument
-                .capture
-                .as_ref()
-                .map(|capture| crate::jvm::capture_names::class_capture(ir, class, capture).field)
+            let name = capture
+                .map(|capture| capture.field)
                 .or_else(|| {
                     let field = argument.field_index?;
                     Some(class.fields.get(field as usize)?.name.clone())

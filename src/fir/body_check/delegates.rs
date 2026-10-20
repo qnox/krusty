@@ -645,7 +645,11 @@ impl BodyFirChecker<'_> {
                 current: false,
                 receiver_depth: 0,
                 classifier: None,
-                context_binding: Some((name.to_string(), *shadow_depth as usize)),
+                context_binding: Some(crate::resolve::ContextBinding {
+                    name: name.to_string(),
+                    shadow_depth: *shadow_depth as usize,
+                    flow_identity: None,
+                }),
                 singleton: None,
             },
             FirDelegateDispatchReceiver::Singleton { ty, classifier } => {
@@ -1174,11 +1178,11 @@ fn delegate_dispatch_receiver(
     resolved: &impl Fn(Ty) -> Result<ResolvedTy, BodyCheckFailure>,
 ) -> Result<FirDelegateDispatchReceiver, BodyCheckFailure> {
     let ty = resolved(selected.ty)?;
-    if let Some((name, shadow_depth)) = &selected.context_binding {
+    if let Some(binding) = &selected.context_binding {
         return Ok(FirDelegateDispatchReceiver::ContextBinding {
             ty,
-            name: name.clone().into_boxed_str(),
-            shadow_depth: u32::try_from(*shadow_depth).map_err(|_| BodyCheckFailure {
+            name: binding.name.clone().into_boxed_str(),
+            shadow_depth: u32::try_from(binding.shadow_depth).map_err(|_| BodyCheckFailure {
                 span: None,
                 kind: BodyCheckFailureKind::UnsupportedCallShape,
             })?,

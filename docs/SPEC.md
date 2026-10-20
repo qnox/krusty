@@ -938,7 +938,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the move, so a comparison, a source `&&`/`||` and an `if` over qualifying operands stay in
   place too (`sb.appendLine(a < b)` is `getstatic sb; iload; iload; if_icmpge; …; append`). A
   member call that omits an argument (its `$default` operands) and a compiler-built eager
-  `And`/`Or`, which holds its left operand in a temporary, keep the stored path.
+  `And`/`Or`, which holds its left operand in a temporary, keep the stored path. A source `==`
+  (`areEqual`, `equals-impl`, a null check or a primitive jump) and a string template
+  (`String.valueOf`, a `StringBuilder` chain or `invokedynamic`) stay in place over qualifying
+  operands, except the equalities whose realization stores an operand: `Int? == Int` keeps the
+  `Int` in a temporary (`PrimitiveToObjectComparison`), as does `UInt? == UInt` with a right
+  operand that is not a local or constant. An inline call that takes a lambda stores its own
+  parameters, so kotlinc stores the whole argument (`sb.appendLine(l.count { … })`).
   Tests:
   `tests/inline_arguments_in_place_e2e.rs`, `tests/inline_repeat_local_e2e.rs`,
   `tests/inline_format_arguments_e2e.rs`, `tests/in_place_property_receiver_e2e.rs`,
@@ -10488,9 +10494,33 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   function captures in the function's own first-use order, found the same way: with
   `fun helper() = b + a`, a class whose only use is `helper()` takes `($b, $a)`, not name order.
   The resolver publishes that order of lexical identities only for the class that includes the
-  function; the function's own capture vector, and so its lifted parameters, are unchanged. A
-  class that includes a function whose captured value no recorded use orders (an implicit context
-  argument) is rejected as unsupported rather than ordered by name. Field and parameter order is JVM representation, so the checker
+  function; the function's own capture vector, and so its lifted parameters, are unchanged. An
+  implicit context argument or receiver is a use of the value it passes, at its call, as in
+  kotlinc: in `context(registry: Registry) fun render(other: String)`, a class that calls
+  `fun local() = other + contextualValue()` captures `($other, $registry)`; with the operands
+  swapped it captures `($registry, $other)`
+  (`an_implicit_context_argument_is_a_first_use_at_its_call`). The checker records the flow
+  identity of the binding it selects for each context argument or named context receiver, and the
+  order maps that identity to the capture, never the value's spelling. A shadowing local and the
+  context value it hides are two captures of one spelling: with `val registry = "shadow"` inside
+  that `render`, a class that calls `fun local() = registry + contextualValue() + other` takes
+  `($registry: String, $registry$1: Registry, $other)`. The class's call passes each of the
+  function's captures from the field that stores the same lexical binding, never the field of that
+  name. kotlinc names the fields in physical order: the first capture of a spelling is `$name` and
+  each later one `$name$1`, `$name$2`, …, so with `contextualValue()` first the class takes
+  `($registry: Registry, $registry$1: String, $other)`
+  (`a_shadowing_read_and_a_context_value_of_one_name_are_two_captures`,
+  `a_context_value_used_first_takes_the_plain_capture_name`). The JVM backend numbers the names
+  once over the physical order, and the field table, `MethodParameters` and the constructor's
+  `LocalVariableTable` all take them from there. Whether a local function's capture is a shared
+  cell is decided by its binding, as for a class capture, never by its spelling: a captured source
+  `var` is one cell, as kotlinc's `SharedVariablesLowering` makes it, and a write counts only
+  when the checker resolved it to that same binding. With `var registry = "shadow"` written by
+  `local` (`registry += "!"`), the class takes `Ref$ObjectRef` for the `var` and the plain
+  `Registry` for the context value, in either first-use order
+  (`a_written_shadowing_var_is_the_only_shared_capture`,
+  `a_context_value_before_a_written_shadowing_var_stays_unshared`). A capture no recorded use orders is
+  an internal error, never ordered by name. Field and parameter order is JVM representation, so the checker
   publishes the order as a recorded fact (`TypeInfo::local_class_capture_orders`, carried by the
   checked local-class declaration to `IrFile::class_capture_order`). Every phase before the JVM
   backend keeps capture fields, constructor parameters and construction arguments in field order,
@@ -10506,11 +10536,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `this@Outer` both go through. It is rejected when the enclosing receiver is a `@JvmInline value
   class`: there is no instance to capture, since `this` is the bare underlying value there
   (`codegen/box/inlineClasses/initBlock.kt` fails verification otherwise).
-  Two capture shapes are NOT modelled yet and are rejected (the file skips): a local class that
-  calls a local function capturing a value only an implicit context argument uses (no recorded use
-  orders that capture), and a reassigned `var` (shared mutable state, not capturable by value).
-  A capture read during construction is supported and ordered as described above. The capture
-  scan is syntactic and conservative: over-reporting skips a file, under-reporting emits a class without what it needs,
+  One capture shape is NOT modelled yet and is rejected (the file skips): a reassigned `var`
+  (shared mutable state, not capturable by value). A capture read during construction is
+  supported and ordered as described above. The capture scan is syntactic and conservative:
+  over-reporting skips a file, under-reporting emits a class without what it needs,
   which the box corpus caught as `NoSuchMethodError` on construction
   (`codegen/box/localClasses/capturingInDefaultConstructorParameter.kt`).
   Tests: `tests/local_class_scope_e2e.rs`.
@@ -15500,8 +15529,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 - **Unsigned `in`-range membership + a fast test profile.** `x in a..b` / `x !in a..b` for `UInt`/`ULong`
   operands lowers to the same bounds-check intrinsic as the signed case, but each comparison goes through
-  `Integer.compareUnsigned`/`Long.compareUnsigned` (`compareUnsigned(p, q) <op> 0`) rather than a signed
-  opcode — so values past the sign bit (`4000000000u`) order correctly, matching kotlinc's `uintCompare`.
+  an unsigned ordering rather than a signed opcode — so values past the sign bit (`4000000000u`) order
+  correctly. (Superseded: the ordering is now kotlinc's inlined `compareTo`; see the
+  `RangeContainsLowering` entry.)
   Iterating an unsigned range *value* (`for (i in 0u..n)`, which needs the mangled `UIntRange` getters) is
   still pending; direct `for (i in 0u until n)` already worked. (Infra: the in-loop test round now builds
   with an unoptimized `gate` cargo profile — overflow-checks off so krusty's wrapping arithmetic doesn't
@@ -17609,7 +17639,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   inclusive upper bound becomes the exclusive one a step above it (`x < 11`), unless it is its type's
   maximum. `downTo` builds a progression, which is not a closed range, and a floating-point `..<` an
   `OpenEndRange`: membership in either calls `contains`. Unsigned membership still compares only
-  operands of one type. The common backend realizes the checked membership for every target, as
+  operands of one type, and orders them with the unsigned `compareTo`, the value its receiver:
+  `0 <= x.compareTo(a) && x.compareTo(b) <= 0` (`< 0` for an exclusive end), and no constant end
+  moves. That `compareTo` is inline, and its body is the ordering function the provider publishes
+  in the `UnsignedCompare` role (`UnsignedKt.uintCompare`/`ulongCompare`), the one the membership
+  carries from resolution. On the JVM each ordering is a call of that function marked as an
+  inlined call, so inside a condition the line is written again at the jump after it; another
+  target orders the values with its unsigned-compare intrinsic. Every node the membership
+  generates carries the `in` expression's source line, as kotlinc builds them at its offsets: the
+  value comparison after an inlined ordering marks that line at its jump, and a membership whose
+  operands carry another line (a `when` subject) returns to the `in` line, not the statement's. A plain `<` or an explicit
+  `compareTo` call is kotlinc's intrinsic, `Integer.compareUnsigned`.
+  `tests/unsigned_range_contains_e2e.rs` (full-byte against kotlinc). The common backend realizes the checked membership for every target, as
   it realizes counted loops. Tests: `range_literal_membership_e2e` (class bytes and run against
   kotlinc), box `ranges/contains/comparisonWithRangeBoundEliminated.kt`.
 

@@ -51,20 +51,11 @@ impl Checker<'_> {
     }
 
     pub(super) fn local_capture_binding_identities(
-        &self,
-        scope: &CheckerScope<'_>,
         captures: &[AnonymousObjectCapture],
     ) -> Vec<Option<u32>> {
         captures
             .iter()
-            .map(|capture| {
-                (capture.source == AnonymousObjectCaptureSource::LexicalValue)
-                    .then(|| {
-                        self.lookup(scope, &capture.name)
-                            .and_then(|binding| binding.lexical_capture_identity)
-                    })
-                    .flatten()
-            })
+            .map(|capture| capture.lexical_binding)
             .collect()
     }
 
@@ -74,7 +65,7 @@ impl Checker<'_> {
         declaration: DeclId,
         captures: &mut Vec<AnonymousObjectCapture>,
     ) {
-        let mut bindings = self.local_capture_binding_identities(scope, captures);
+        let mut bindings = Self::local_capture_binding_identities(captures);
         self.extend_superclass_captures(scope, declaration, captures, &mut bindings);
     }
 
@@ -216,12 +207,8 @@ impl Checker<'_> {
             else {
                 continue;
             };
-            let required_bindings = self.local_function_capture_bindings.get(&statement);
-            for (ordinal, required) in function.captures.iter().enumerate() {
-                let required_identity = required_bindings
-                    .and_then(|bindings| bindings.get(ordinal))
-                    .copied()
-                    .flatten();
+            for required in &function.captures {
+                let required_identity = required.lexical_binding;
                 let selected = required_identity.and_then(|identity| {
                     self.lexical_binding_by_identity(scope, &required.name, identity)
                 });
@@ -241,6 +228,7 @@ impl Checker<'_> {
                         receiver: None,
                         semantic_receiver: None,
                         lexical_shadow_depth,
+                        lexical_binding: required_identity,
                         capture_dependency: None,
                         receiver_capture: None,
                         receiver_role: None,

@@ -17,7 +17,7 @@ use crate::ir::{Callee, ExprId, IrBinOp, IrConst, IrExpr, IrIntrinsic, IrTypeOp}
 use crate::types::Ty;
 
 use super::header::{moved_bound, Direction};
-use super::{constant_bound, integral_value, CounterLoopStyle, Realizer};
+use super::{constant_bound, integral_value, CounterLoopStyle, HeaderInlining, Realizer};
 
 /// A checked membership test in a range literal, compared in `comparison`.
 pub(super) struct Membership {
@@ -73,14 +73,14 @@ impl Realizer<'_> {
         let lower = self.cast(lower, comparison);
         let upper = self.cast(upper, comparison);
         let value_for_lower = self.reread(value);
-        let lower_clause = self.compare(IrBinOp::Le, comparison, lower, value_for_lower);
+        let lower_clause = self.lower_clause(comparison, lower, value_for_lower);
         let value_for_upper = self.reread(value);
         let upper_operation = if bounds.upper_inclusive {
             IrBinOp::Le
         } else {
             IrBinOp::Lt
         };
-        let upper_clause = self.compare(upper_operation, comparison, value_for_upper, upper);
+        let upper_clause = self.upper_clause(upper_operation, comparison, value_for_upper, upper);
         let (first, second) = if lower_first {
             (lower_clause, upper_clause)
         } else {
@@ -192,36 +192,81 @@ impl Realizer<'_> {
         )
     }
 
-    fn compare(&mut self, operation: IrBinOp, ty: Ty, lhs: ExprId, rhs: ExprId) -> ExprId {
+    /// `lower <= value`. An unsigned one is `0 <= value.compareTo(lower)`, as kotlinc's
+    /// `RangeContainsLowering` writes it: the value is the receiver of each ordering call.
+    fn lower_clause(&mut self, ty: Ty, lower: ExprId, value: ExprId) -> ExprId {
+        if !ty.is_unsigned() {
+            return self.primitive_comparison(IrBinOp::Le, ty, lower, value);
+        }
+        let zero = self.add_checked(IrExpr::Const(IrConst::Int(0)), Ty::Int);
+        let ordering = self.unsigned_ordering(ty, value, lower);
+        self.add_checked(
+            IrExpr::PrimitiveBinOp {
+                op: IrBinOp::Le,
+                lhs: zero,
+                rhs: ordering,
+            },
+            Ty::Boolean,
+        )
+    }
+
+    /// `value <= upper` (`<` when exclusive). An unsigned one is `value.compareTo(upper) <= 0`.
+    fn upper_clause(&mut self, operation: IrBinOp, ty: Ty, value: ExprId, upper: ExprId) -> ExprId {
+        if !ty.is_unsigned() {
+            return self.primitive_comparison(operation, ty, value, upper);
+        }
+        let ordering = self.unsigned_ordering(ty, value, upper);
+        let zero = self.add_checked(IrExpr::Const(IrConst::Int(0)), Ty::Int);
+        self.add_checked(
+            IrExpr::PrimitiveBinOp {
+                op: operation,
+                lhs: ordering,
+                rhs: zero,
+            },
+            Ty::Boolean,
+        )
+    }
+
+    /// `value.compareTo(bound)` of two unsigned values: the inline `UInt.compareTo`/
+    /// `ULong.compareTo`, whose body is the ordering function resolution selected for the
+    /// checked membership. A target that realizes kotlinc's inlined calls calls that function and
+    /// marks the call as inlined; another orders the values with its unsigned comparison.
+    fn unsigned_ordering(&mut self, ty: Ty, value: ExprId, bound: ExprId) -> ExprId {
+        // The operands are compared in the selected type; targets choose only its representation.
+        self.ir.logical_types.insert(value, ty);
+        self.ir.logical_types.insert(bound, ty);
+        let compare = self
+            .unsigned_compare
+            .clone()
+            .expect("checked unsigned membership carries its selected ordering");
+        if self.inlining == HeaderInlining::Kotlinc {
+            let call = self.runtime_call(&compare, vec![value, bound]);
+            self.inlined_call(call);
+            return call;
+        }
+        self.add_checked(
+            IrExpr::Call {
+                callee: Callee::Intrinsic {
+                    operation: IrIntrinsic::UnsignedCompare { operand: ty },
+                    ret: Ty::Int,
+                },
+                dispatch_receiver: None,
+                args: vec![value, bound],
+            },
+            Ty::Int,
+        )
+    }
+
+    fn primitive_comparison(
+        &mut self,
+        operation: IrBinOp,
+        ty: Ty,
+        lhs: ExprId,
+        rhs: ExprId,
+    ) -> ExprId {
         // The operands are compared in the selected type; targets choose only its representation.
         self.ir.logical_types.insert(lhs, ty);
         self.ir.logical_types.insert(rhs, ty);
-        if ty.is_unsigned() {
-            assert!(
-                self.unsigned_compare.is_some(),
-                "checked unsigned membership carries its selected ordering"
-            );
-            let compared = self.add_checked(
-                IrExpr::Call {
-                    callee: Callee::Intrinsic {
-                        operation: IrIntrinsic::UnsignedCompare { operand: ty },
-                        ret: Ty::Int,
-                    },
-                    dispatch_receiver: None,
-                    args: vec![lhs, rhs],
-                },
-                Ty::Int,
-            );
-            let zero = self.add_checked(IrExpr::Const(IrConst::Int(0)), Ty::Int);
-            return self.add_checked(
-                IrExpr::PrimitiveBinOp {
-                    op: operation,
-                    lhs: compared,
-                    rhs: zero,
-                },
-                Ty::Boolean,
-            );
-        }
         self.add_checked(
             IrExpr::PrimitiveBinOp {
                 op: operation,

@@ -172,3 +172,172 @@ fn differently_typed_captures_record_their_physical_constructor_signature() {
         assert_same_class("MixedCaptures", MIXED_TYPES, class);
     }
 }
+
+/// An implicit context argument is a use of the value it passes, at the call: `local` reads
+/// `other` before it passes `registry` to `contextualValue()`, so a class that calls it captures
+/// `($other, $registry)`; in `renderFirst`, which passes `registry` first, the class captures
+/// `($registry, $other)`. A same-named nearer local does not stand in for the context value the
+/// call passes.
+#[test]
+fn an_implicit_context_argument_is_a_first_use_at_its_call() {
+    let source = "\
+class Registry(val value: String)
+
+context(registry: Registry)
+fun contextualValue(): String = registry.value
+
+context(registry: Registry)
+fun render(other: String): String {
+    fun local(): String = other + contextualValue()
+    class C { fun f() = local() }
+    return C().f()
+}
+
+context(registry: Registry)
+fun renderFirst(other: String): String {
+    fun local(): String = contextualValue() + other
+    class C { fun f() = local() }
+    return C().f()
+}
+
+// A nearer `val registry` shadows the context parameter's name but is not a `Registry`: the call
+// still passes the context receiver, so `local` captures `(other, registry)` of type `Registry`.
+context(registry: Registry)
+fun renderShadowed(other: String): String {
+    val registry = \"shadow\"
+    fun local(): String = other + contextualValue()
+    class C { fun f() = local() }
+    return C().f() + registry
+}
+";
+    assert_same_class("ContextCaptureOrder", source, "ContextCaptureOrderKt");
+    assert_same_class(
+        "ContextCaptureOrder",
+        source,
+        "ContextCaptureOrderKt$render$C",
+    );
+    assert_same_class(
+        "ContextCaptureOrder",
+        source,
+        "ContextCaptureOrderKt$renderFirst$C",
+    );
+    assert_same_class(
+        "ContextCaptureOrder",
+        source,
+        "ContextCaptureOrderKt$renderShadowed$C",
+    );
+}
+
+/// Captures are told apart by binding, not by name: `local` reads the nearer `val registry` by name
+/// and also passes the shadowed context parameter `registry` to `contextualValue()`. Those are two
+/// bindings, so the class that calls `local` keeps two captures, `($registry, $registry$1, $other)`
+/// in first-use order, as kotlinc does.
+#[test]
+fn a_shadowing_read_and_a_context_value_of_one_name_are_two_captures() {
+    let source = "\
+class Registry(val value: String)
+
+context(registry: Registry)
+fun contextualValue(): String = registry.value
+
+context(registry: Registry)
+fun renderBoth(other: String): String {
+    val registry = \"shadow\"
+    fun local(): String = registry + contextualValue() + other
+    class C { fun f() = local() }
+    return C().f()
+}
+";
+    assert_same_class(
+        "ContextShadowCapture",
+        source,
+        "ContextShadowCaptureKt$renderBoth$C",
+    );
+}
+
+/// With the context value used first, kotlinc gives it the plain spelling and numbers the
+/// shadowing local after it: `($registry: Registry, $registry$1: String, $other)`.
+#[test]
+fn a_context_value_used_first_takes_the_plain_capture_name() {
+    let source = "\
+class Registry(val value: String)
+
+context(registry: Registry)
+fun contextualValue(): String = registry.value
+
+context(registry: Registry)
+fun renderBoth(other: String): String {
+    val registry = \"shadow\"
+    fun local(): String = contextualValue() + registry + other
+    class C { fun f() = local() }
+    return C().f()
+}
+";
+    assert_same_class(
+        "ContextFirstShadowCapture",
+        source,
+        "ContextFirstShadowCaptureKt$renderBoth$C",
+    );
+}
+
+/// `local` writes the shadowing `var registry` and passes the hidden context value `registry`.
+/// Only the written binding is a shared cell: the class takes `Ref$ObjectRef` for the `var` and the
+/// plain `Registry` for the context value, never a cell for both.
+fn mutable_shadow_source(body: &str) -> String {
+    format!(
+        "\
+class Registry(val value: String)
+
+context(registry: Registry)
+fun contextualValue(): String = registry.value
+
+context(registry: Registry)
+fun render(other: String): String {{
+    var registry = \"shadow\"
+    fun local(): String {{
+{body}
+    }}
+    class C {{ fun f() = local() }}
+    return C().f() + registry
+}}
+
+fun box(): String = with(Registry(\"ctx\")) {{ render(\"+\") }}
+"
+    )
+}
+
+/// The write comes first: `($registry: Ref$ObjectRef, $registry$1: Registry, $other)`. kotlinc
+/// prints `shadow!ctx+shadow!`.
+#[test]
+fn a_written_shadowing_var_is_the_only_shared_capture() {
+    let source = mutable_shadow_source(
+        "        registry += \"!\"\n        return registry + contextualValue() + other",
+    );
+    assert_same_class(
+        "MutableShadowCapture",
+        &source,
+        "MutableShadowCaptureKt$render$C",
+    );
+    assert_eq!(
+        common::expect_box_run_with_stdlib(&source, "MutableShadowCapture"),
+        "shadow!ctx+shadow!"
+    );
+}
+
+/// The context value comes first: `($registry: Registry, $registry$1: Ref$ObjectRef, $other)`.
+/// kotlinc prints `ctxshadow!+shadow!`.
+#[test]
+fn a_context_value_before_a_written_shadowing_var_stays_unshared() {
+    let source = mutable_shadow_source(
+        "        val prefix = contextualValue()\n        registry += \"!\"\n        return prefix + registry + other",
+    );
+    assert_same_class(
+        "ContextFirstMutableShadow",
+        &source,
+        "ContextFirstMutableShadowKt$render$C",
+    );
+    assert_eq!(
+        common::expect_box_run_with_stdlib(&source, "ContextFirstMutableShadow"),
+        "ctxshadow!+shadow!"
+    );
+}

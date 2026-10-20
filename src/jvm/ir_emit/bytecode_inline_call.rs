@@ -155,8 +155,18 @@ impl Emitter<'_> {
             inline,
             reified,
         } = request;
-        let for_inline_copy =
-            self.ir.suspend_calls.contains_key(&call_expression) && !inline.must_inline();
+        // A `$default` bridge has no `$$forInline` copy: its body is never a state machine.
+        let inline_only =
+            match self.call_is_inline_only(call_expression, owner, name, descriptor, inline) {
+                Ok(inline_only) => inline_only,
+                Err(reason) => {
+                    self.run.set_inline_bail(reason);
+                    return InlineCallOutcome::HandledWithError;
+                }
+            };
+        let for_inline_copy = self.ir.suspend_calls.contains_key(&call_expression)
+            && !inline.must_inline()
+            && !self.default_call_operands.contains(call_expression);
         if let Some(recv) = dispatch_receiver {
             let recv_desc = type_descriptor(self.value_ty(recv));
             let splice_desc = format!("({}{}", recv_desc, &descriptor[1..]);
@@ -168,13 +178,7 @@ impl Emitter<'_> {
                 name,
                 descriptor,
                 splice_desc: &splice_desc,
-                inline_only: self.call_is_inline_only(
-                    call_expression,
-                    owner,
-                    name,
-                    descriptor,
-                    inline,
-                ),
+                inline_only,
                 allow_owner_bridge: true,
                 for_inline_copy,
             };
@@ -191,13 +195,7 @@ impl Emitter<'_> {
                 name,
                 descriptor,
                 splice_desc: descriptor,
-                inline_only: self.call_is_inline_only(
-                    call_expression,
-                    owner,
-                    name,
-                    descriptor,
-                    inline,
-                ),
+                inline_only,
                 allow_owner_bridge: inline.must_inline() || has_lambda_arg,
                 for_inline_copy,
             };
@@ -849,6 +847,7 @@ impl Emitter<'_> {
                 .map(|(index, ((supply, &ty), &argument))| Parameter {
                     category: Category::of_descriptor(&type_descriptor(ty)),
                     binding: match (lambda_bindings.get(&index), supply) {
+                        (Some(&lambda), Supply::Omitted) => Binding::DefaultLambda(lambda),
                         (Some(&lambda), _) => Binding::Lambda(lambda),
                         (None, Supply::CallerLocal) => self.caller_local_binding(argument, ty),
                         (None, Supply::Unread) => Binding::Unread,
