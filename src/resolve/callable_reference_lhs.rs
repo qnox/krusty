@@ -1,6 +1,7 @@
 //! The classifier type named by a callable-reference or class-literal LHS (`Outer<A>.Inner<B>::m`),
 //! with the applied type preserved at every nested edge.
 
+use super::expression_qualifiers::QualifierBinding;
 use super::*;
 
 impl Checker<'_> {
@@ -101,11 +102,26 @@ impl Checker<'_> {
     /// at every nested edge. Unlike the general qualifier probe, this understands `::` as an inner
     /// classifier separator, but only while the enclosing callable-reference/class-literal syntax
     /// owns the interpretation.
+    ///
+    /// The walk records what each written segment bound, for the checks of the qualifier chain.
     pub(super) fn callable_ref_lhs_classifier_type(
         &mut self,
         scope: &CheckerScope<'_>,
         expression: ExprId,
         diagnostic_site: ExprId,
+    ) -> Result<Option<(TypeName, Ty, bool)>, QualifierError> {
+        let mut bound = Vec::new();
+        let resolved = self.walk_callable_ref_lhs(scope, expression, diagnostic_site, &mut bound);
+        self.record_qualifier_chain(expression, bound);
+        resolved
+    }
+
+    fn walk_callable_ref_lhs(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        diagnostic_site: ExprId,
+        bound: &mut Vec<(ExprId, QualifierBinding, bool)>,
     ) -> Result<Option<(TypeName, Ty, bool)>, QualifierError> {
         let mut segments = Vec::new();
         callable_ref_lhs_classifier_segments(self.file, expression, &mut segments)?;
@@ -120,32 +136,11 @@ impl Checker<'_> {
             Expr::CallableRef { name, .. } if name == "class"
         );
 
-        let (root_selection, _, root_alias, _) = self.select_classifier_binding(scope, root_name);
-        let mut prefix = match root_selection {
-            InheritedNestedClassifier::Found(classifier) => {
-                ResolvedQualifier::Classifier(classifier)
-            }
-            InheritedNestedClassifier::Ambiguous => {
-                return Err(QualifierError::AmbiguousRoot {
-                    expression: Some(*root_expression),
-                    name: root_name.clone(),
-                });
-            }
-            InheritedNestedClassifier::NotFound => {
-                if self.fed_source().package_exists(TypeName::ROOT, root_name) {
-                    ResolvedQualifier::Package(crate::types::type_name_child(
-                        TypeName::ROOT,
-                        root_name,
-                    ))
-                } else {
-                    return Err(QualifierError::UnresolvedSegment {
-                        expression: Some(*root_expression),
-                        name: root_name.clone(),
-                    });
-                }
-            }
-        };
-
+        let root = self.qualifier_root_step(scope, Some(*root_expression), root_name)?;
+        let (mut prefix, root_alias) = (root.resolved, root.alias);
+        if let Some(binding) = QualifierBinding::of(prefix) {
+            bound.push((*root_expression, binding, root_alias.is_some()));
+        }
         let (mut applied_parent, mut final_class_literal_arguments_checked) =
             match (prefix, root_alias) {
                 (ResolvedQualifier::Classifier(internal), alias) => {
@@ -165,63 +160,20 @@ impl Checker<'_> {
             };
 
         for (segment_expression, segment) in segments.iter().skip(1) {
-            let (next_prefix, selected_alias) = match prefix {
-                ResolvedQualifier::Value => return Ok(None),
-                ResolvedQualifier::Package(package) => {
-                    let source = self.fed_source();
-                    let record = source.symbols(
-                        crate::symbol_source::SymbolNamespace::Package(package),
-                        segment,
-                    );
-                    if let Some(classifier) = record.classifier_name {
-                        let classifier = self.libraries.canonical_source_type_name(classifier);
-                        let alias = self
-                            .selected_provider_alias(
-                                classifier,
-                                record.classifier_declaration.as_ref(),
-                            )
-                            .map_err(|()| QualifierError::AmbiguousRoot {
-                                expression: Some(*segment_expression),
-                                name: segment.clone(),
-                            })?;
-                        (ResolvedQualifier::Classifier(classifier), alias)
-                    } else if source.package_exists(package, segment) {
-                        (
-                            ResolvedQualifier::Package(crate::types::type_name_child(
-                                package, segment,
-                            )),
-                            None,
-                        )
-                    } else {
-                        return Err(QualifierError::UnresolvedSegment {
-                            expression: Some(*segment_expression),
-                            name: segment.clone(),
-                        });
-                    }
-                }
-                ResolvedQualifier::Classifier(owner) => {
-                    let source = self.fed_source();
-                    let record = source.symbols(
-                        crate::symbol_source::SymbolNamespace::Classifier(owner),
-                        segment,
-                    );
-                    let Some(classifier) = record.classifier_name else {
-                        return Err(QualifierError::UnresolvedSegment {
-                            expression: Some(*segment_expression),
-                            name: segment.clone(),
-                        });
-                    };
-                    let classifier = self.libraries.canonical_source_type_name(classifier);
-                    let alias = self
-                        .selected_provider_alias(classifier, record.classifier_declaration.as_ref())
-                        .map_err(|()| QualifierError::AmbiguousRoot {
-                            expression: Some(*segment_expression),
-                            name: segment.clone(),
-                        })?;
-                    (ResolvedQualifier::Classifier(classifier), alias)
-                }
+            // The ordinary qualifier step continues the chain; the type position reads the
+            // Kotlin declaration of a classifier it reaches through its JVM realization.
+            let step = self.qualifier_step(prefix, Some(*segment_expression), segment)?;
+            let next_prefix = match step.resolved {
+                ResolvedQualifier::Classifier(classifier) => ResolvedQualifier::Classifier(
+                    self.libraries.canonical_source_type_name(classifier),
+                ),
+                resolved => resolved,
             };
+            let selected_alias = step.alias;
             prefix = next_prefix;
+            if let Some(binding) = QualifierBinding::of(prefix) {
+                bound.push((*segment_expression, binding, selected_alias.is_some()));
+            }
             let (next_applied, checked) = match prefix {
                 ResolvedQualifier::Classifier(internal) => {
                     let (applied, checked) = self.applied_callable_ref_classifier(
@@ -378,6 +330,28 @@ impl Checker<'_> {
                 bound_outer,
             ),
             class_literal_arguments_checked,
+        )
+    }
+
+    /// Whether the left-hand side `lhs`, which the walk bound to a package, has no callable named
+    /// `name`. kotlinc reports the package used as an expression and still resolves the reference
+    /// in the package's callable scope.
+    pub(super) fn package_lhs_lacks_callable(&self, lhs: ExprId, name: &str) -> bool {
+        match self
+            .bound_qualifier_segment(lhs)
+            .map(|segment| segment.binding)
+        {
+            Some(QualifierBinding::Package(package)) => self.package_lacks_callable(package, name),
+            _ => false,
+        }
+    }
+
+    /// Whether the walk bound the left-hand side `lhs` to a package.
+    pub(super) fn package_lhs(&self, lhs: ExprId) -> bool {
+        matches!(
+            self.bound_qualifier_segment(lhs)
+                .map(|segment| segment.binding),
+            Some(QualifierBinding::Package(_))
         )
     }
 
