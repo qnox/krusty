@@ -75,11 +75,12 @@ impl BodyLowering<'_> {
 
     /// An implicit cast to `target`. One to the value's own type converts nothing and adds no
     /// node, and neither does one of `null` to a nullable type. One to the value's nullable type
-    /// is a widening checked FIR lowering marks as a coercion. One from a nullable type to its
-    /// non-null type is the smart cast the source relies on, which checked FIR lowering lowers as
-    /// a cast of a reference and as a coercion of a primitive value. Any other implicit cast is a
-    /// narrowing or a widening this lowering cannot tell apart without the classes' supertypes,
-    /// and declines.
+    /// is a widening checked FIR lowering marks as a coercion, and one to another supertype (by
+    /// the calling compilation's subtyping) is the value itself, as in the source. An implicit
+    /// cast of a reference to a subtype, or to another parameterization of its classifier, is a
+    /// smart cast the declaring compilation proved, which checked FIR lowering lowers as a cast.
+    /// One of a primitive value from its nullable type is a coercion. Any other implicit cast
+    /// declines.
     fn implicit_cast(&mut self, target: Ty, argument: KlibIrExprId, ty: Ty) -> Lowered<ExprId> {
         if target != ty {
             return Err(mismatch("an implicit cast is typed apart from its target"));
@@ -92,13 +93,19 @@ impl BodyLowering<'_> {
         if let Some(widened) = self.nullable_widening(arg, actual, target) {
             return Ok(self.typed(widened, ty));
         }
-        if target.is_nullable() || Ty::nullable(target) != actual {
-            return Err(KlibBodyDeclineReason::ImplicitConversion);
+        if let Some(upcast) = self.upcast(arg, actual, target) {
+            return Ok(upcast);
         }
-        let op = if target.is_reference() {
+        let to_non_null = !target.is_nullable() && Ty::nullable(target) == actual;
+        let op = if target.is_reference()
+            && actual.is_reference()
+            && (to_non_null || self.narrows(actual, target))
+        {
             IrTypeOp::Cast
-        } else {
+        } else if to_non_null {
             IrTypeOp::ImplicitCoercion
+        } else {
+            return Err(KlibBodyDeclineReason::ImplicitConversion);
         };
         let cast = self.ir.add_expr(IrExpr::TypeOp {
             op,
@@ -110,6 +117,17 @@ impl BodyLowering<'_> {
 }
 
 impl BodyLowering<'_> {
+    /// Whether a smart cast of a value of `actual` to `target` narrows it: `target` is a subtype
+    /// of `actual`, or names the same classifier at other type arguments.
+    fn narrows(&self, actual: Ty, target: Ty) -> bool {
+        let classifier = |ty: Ty| match ty.non_null() {
+            Ty::Obj(name, _) => Some(name),
+            _ => None,
+        };
+        self.linker.is_subtype(target, actual)
+            || classifier(actual).is_some_and(|name| classifier(target) == Some(name))
+    }
+
     /// `value`, of the non-null type `actual`, widened to its nullable type `target`: a coercion
     /// checked FIR lowering places for the target to represent. `None` for any other pair.
     pub(super) fn nullable_widening(

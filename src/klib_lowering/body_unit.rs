@@ -411,6 +411,17 @@ impl CallLinker for Linker<'_, '_> {
         ))
     }
 
+    fn singleton(&self, _classifier: TypeName) -> Result<(), KlibBodyDeclineReason> {
+        Err(KlibBodyDeclineReason::UnsupportedOperation(
+            "an object value",
+        ))
+    }
+
+    fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
+        // A support unit links no member of a generic class.
+        (sub.kotlin_class_internal() == Some(owner)).then_some(sub)
+    }
+
     fn link_accessor(
         &mut self,
         _callee: &KlibAccessorIdSignature,
@@ -513,6 +524,7 @@ impl CallLinker for Linker<'_, '_> {
                 context_count: 0,
                 singleton_dispatch: None,
                 type_parameters: Vec::new(),
+                class_type_parameters: Vec::new(),
             });
         }
         if let Some(&emitted) = self.sources.externals.get(&identity) {
@@ -549,6 +561,7 @@ impl CallLinker for Linker<'_, '_> {
                 context_count,
                 singleton_dispatch: emitted.singleton_classifier(),
                 type_parameters: Vec::new(),
+                class_type_parameters: Vec::new(),
             });
         }
         if declaration.dispatch_receiver.is_some() {
@@ -586,6 +599,7 @@ impl CallLinker for Linker<'_, '_> {
             context_count: ir.fn_context_counts.get(&function).copied().unwrap_or(0),
             singleton_dispatch: None,
             type_parameters: Vec::new(),
+            class_type_parameters: Vec::new(),
         })
     }
 }

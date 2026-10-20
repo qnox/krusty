@@ -137,6 +137,50 @@ fn prepared_inline_selection_takes_every_inline_declaration_of_its_module() {
 }
 
 #[test]
+fn only_an_inline_only_or_reified_inline_function_must_be_inlined() {
+    use crate::libraries::InlineKind;
+
+    let mut ordinary = function("ordinary", None, Vec::new());
+    ordinary.is_inline = true;
+    let mut inline_only = function("inlineOnly", None, Vec::new());
+    inline_only.is_inline = true;
+    inline_only.annotations = vec![type_name("kotlin/internal/InlineOnly")];
+    let mut reified = function("reified", None, Vec::new());
+    reified.is_inline = true;
+    reified.has_reified_type_params = true;
+    reified.formals = vec![KotlinTypeParameter {
+        id: KotlinTypeParameterId(1),
+        name: "T".to_owned(),
+        bounds: vec![class("kotlin/Any", true)],
+        variance: TypeVariance::Invariant,
+        only_input: false,
+        reified: true,
+    }];
+    let plain = function("plain", None, Vec::new());
+    let libraries = KlibLibraries::from_packages(vec![(
+        segments(&["p"]),
+        package_of(vec![ordinary, inline_only, reified, plain]),
+    )])
+    .expect("the functions are signable");
+
+    let inline = |name| single_function(&libraries, "p", name).callable.inline;
+    assert_eq!(
+        [
+            inline("ordinary"),
+            inline("inlineOnly"),
+            inline("reified"),
+            inline("plain")
+        ],
+        [
+            InlineKind::CanInline,
+            InlineKind::MustInline,
+            InlineKind::MustInline,
+            InlineKind::None
+        ]
+    );
+}
+
+#[test]
 fn a_package_type_alias_is_published_from_its_metadata_declaration() {
     let upper = Ty::nullable(Ty::obj("kotlin/Any"));
     let parameter = Ty::ty_param("T", upper);

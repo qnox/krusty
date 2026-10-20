@@ -27,17 +27,9 @@ fn template(
     libraries: &KlibLibraries,
     selected: &ExternalCallableRealization,
 ) -> Result<KlibInlineTemplate, crate::klib_lowering::KlibBodyDecline> {
-    let provider = |identity: &crate::libraries::KlibDependencyCallable| {
-        libraries.external_callable_by_dependency(identity)
-    };
-    let properties =
-        |identity| crate::symbol_source::SymbolSource::external_property(libraries, identity);
-    let types = crate::symbol_resolver::SourceOracle(libraries);
     let callees = TemplateCallees {
         declarations: libraries.declaration_bodies(),
-        provider: &provider,
-        properties: &properties,
-        types: &types,
+        source: libraries,
     };
     lower_inline_template(ir, selected, libraries.inline_declaration_bodies(), callees)
         .expect("a KLIB function")
@@ -316,5 +308,78 @@ fn a_dependency_property_read_reads_the_provider_property() {
     assert_eq!(property.name, "length");
     assert!(property.setter.is_none());
     assert!(ir.functions[template.function as usize].body.is_some());
+    validated(&ir);
+}
+
+#[test]
+fn a_member_of_a_generic_class_is_called_at_its_receiver_type_arguments() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/collections")),
+        "isNotEmpty",
+    );
+    let collection = type_name("kotlin/collections/Collection");
+    let [function] = symbols
+        .callables
+        .functions()
+        .iter()
+        .filter(|function| {
+            function
+                .receiver
+                .and_then(|receiver| receiver.non_null().kotlin_class_internal())
+                == Some(collection)
+        })
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("expected one `kotlin.collections.isNotEmpty` of a `Collection`");
+    };
+    let selected = libraries
+        .external_callable(
+            function
+                .callable
+                .external_identity
+                .expect("a KLIB identity"),
+        )
+        .expect("the provider realizes its own identity");
+    let mut ir = IrFile::default();
+    let template = template(&mut ir, &libraries, &selected)
+        .unwrap_or_else(|decline| panic!("`isNotEmpty`: {decline}"));
+    assert_eq!(template.type_parameters.len(), 1);
+    let calls = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Call {
+                callee:
+                    Callee::External {
+                        target,
+                        params,
+                        ret,
+                        ..
+                    },
+                dispatch_receiver: Some(_),
+                args,
+            } => Some((*target, params.clone(), *ret, args.len())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(target, params, ret, arguments)] = &calls[..] else {
+        panic!("`isNotEmpty` calls one member, called {calls:?}");
+    };
+    assert_eq!(
+        (params.as_slice(), *ret, *arguments),
+        (&[][..], Ty::Boolean, 0)
+    );
+    let member = libraries
+        .external_callable(*target)
+        .expect("the provider realizes the member identity");
+    assert_eq!(member.callable.name, "isEmpty");
+    assert_eq!(
+        member.declaration_owner,
+        Some(crate::types::SemanticCallableOwner::Classifier(collection))
+    );
     validated(&ir);
 }

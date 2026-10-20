@@ -874,11 +874,20 @@ impl BodyLowering<'_> {
         // A lambda or anonymous class the copied body declares is specialized per call site under
         // the module declaration that declares it. A dependency template declares neither: one
         // that would need either specialization is not a template this expansion understands.
+        // A template constructs a dependency class by the provider's constructor identity; only a
+        // construction without one names a class the copied body would declare.
         let module_callee = match frame.module {
             Some(module) => Some(module),
             None if escaping_lambda_plan.is_empty()
                 && !escaping_copies.iter().any(|(source, copy)| {
-                    !protected.contains(source) && matches!(self.ir.expr(*copy), IrExpr::New { .. })
+                    !protected.contains(source)
+                        && matches!(
+                            self.ir.expr(*copy),
+                            IrExpr::New {
+                                external_target: None,
+                                ..
+                            }
+                        )
                 }) =>
             {
                 None

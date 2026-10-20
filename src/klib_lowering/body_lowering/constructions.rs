@@ -1,17 +1,35 @@
-//! Calls of dependency constructors.
+//! Calls of dependency constructors and reads of dependency singletons.
 //!
 //! A constructor call lowers as checked FIR lowers the source construction of a dependency class:
 //! one construction of the class by the provider's constructor identity, with its supplied operands
-//! in declaration order and the ordinals of the parameters it leaves to their defaults.
+//! in declaration order and the ordinals of the parameters it leaves to their defaults. An object
+//! value lowers as the source reference of the singleton: its classifier's singleton value.
 
 use super::calls::arguments;
 use super::{mismatch, unsupported, BodyLowering, Lowered};
 use crate::ir::{ExprId, IrExpr};
 use crate::metadata::klib_ir::tree::KlibIrMemberAccess;
-use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
+use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::Ty;
 
 impl BodyLowering<'_> {
+    /// The value of the dependency object `symbol`, typed `ty`: the object's own class type.
+    pub(super) fn object_value(&mut self, symbol: &KlibIrSymbol, ty: Ty) -> Lowered<ExprId> {
+        if symbol.kind != KlibIrSymbolKind::Class {
+            return Err(mismatch("an object value's symbol is not a class"));
+        }
+        let KlibIrSignature::Public(object) = &symbol.signature else {
+            return unsupported("a file-private object value");
+        };
+        let classifier = super::super::klib_types::classifier_name(object)?;
+        let object = crate::types::builtin_semantic(classifier).unwrap_or(Ty::obj_name(classifier));
+        if ty != object {
+            return Err(mismatch("an object value is typed apart from its object"));
+        }
+        self.linker.singleton(classifier)?;
+        Ok(self.ir.add_expr(IrExpr::SingletonValue { classifier }))
+    }
+
     pub(super) fn constructor_call(
         &mut self,
         access: &KlibIrMemberAccess,

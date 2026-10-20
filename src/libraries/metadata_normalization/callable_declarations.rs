@@ -76,6 +76,20 @@ impl CallablePlacement {
     }
 }
 
+/// A KLIB inline function's call obligation. A public inline function is an ordinary callable
+/// too, so a call may be made when its body is not expanded. An `@InlineOnly` declaration has no
+/// standalone code and reified type parameters have no erased meaning, so either one must be
+/// expanded at every call.
+fn declared_inline(function: &KotlinFunction, reified: bool) -> InlineKind {
+    let inline_only = function
+        .annotations
+        .contains(&crate::types::type_name("kotlin/internal/InlineOnly"));
+    InlineKind::from_flags(
+        function.is_inline,
+        function.is_inline && (inline_only || reified),
+    )
+}
+
 /// Normalize one function at `placement` into a selection candidate. `enclosing` bounds the type
 /// parameters of the classes around the declaration.
 ///
@@ -120,8 +134,8 @@ pub(crate) fn declared_function(
             FnKind::TopLevel
         }
     };
-    let inline = InlineKind::from_flags(function.is_inline, function.is_inline);
     let reified = reified_type_parameter_ordinals(&function.formals);
+    let inline = declared_inline(function, !reified.is_empty());
     let declaration_owner = placement.declaration_owner();
     let is_abstract = function.modality == KotlinModality::Abstract;
 

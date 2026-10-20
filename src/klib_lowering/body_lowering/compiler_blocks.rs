@@ -178,15 +178,28 @@ impl BodyLowering<'_> {
             }
             return Ok(None);
         }
+        self.unnamed_local(id).map(Some)
+    }
+
+    /// The compiler temporary `id` as an unnamed immutable local holding its initializer's value.
+    pub(super) fn unnamed_local(&mut self, id: KlibIrVariableId) -> Lowered<ExprId> {
+        let variable = self.arena.variable(id);
+        if variable.base.flags != 0 || !variable.base.annotations.is_empty() {
+            return unsupported("a mutable or annotated compiler temporary");
+        }
+        let initializer = variable
+            .initializer
+            .ok_or_else(|| mismatch("a compiler temporary has no initializer"))?;
+        let symbol = variable.base.symbol.clone();
         let ty = super::semantic_type(self.arena, self.header.type_parameters(), variable.ty)?;
         let init = self.operand(initializer, ty)?;
         let local = self.locals.temporary(&symbol, ty)?;
-        Ok(Some(self.ir.add_expr(IrExpr::Variable {
+        Ok(self.ir.add_expr(IrExpr::Variable {
             index: local.index,
             ty,
             init: Some(init),
             named: false,
-        })))
+        }))
     }
 
     /// Whether `id` is a value no statement can change: a constant, or a read of a parameter, a
