@@ -13,6 +13,7 @@ use std::path::Path;
 use std::process::Command;
 
 use super::avoidance;
+use super::ksp;
 use super::plan::{Plan, Step};
 use super::schedule::schedule;
 
@@ -21,6 +22,8 @@ use super::schedule::schedule;
 pub enum RunFailure {
     /// krusty failed on a module, exiting with `code`.
     Compiler { module: String, code: i32 },
+    /// KSP failed on a module, exiting with `code`.
+    Ksp { module: String, code: i32 },
     /// Something other than krusty failed: the message says what.
     Io(String),
 }
@@ -105,6 +108,9 @@ fn run_step(step: &Step, krusty: &Path, printed: &mut Printed) -> Result<(), Run
             step.module
         ))
     };
+    if let Some(ksp) = &step.ksp {
+        run_ksp(step, ksp, printed)?;
+    }
     match &step.arguments {
         Some(arguments) => {
             let inputs = avoidance::inputs(krusty, arguments);
@@ -126,8 +132,8 @@ fn run_step(step: &Step, krusty: &Path, printed: &mut Printed) -> Result<(), Run
                         step.module
                     ))
                 })?;
-            printed.stdout = ran.stdout;
-            printed.stderr = ran.stderr;
+            printed.stdout.extend(ran.stdout);
+            printed.stderr.extend(ran.stderr);
             if !ran.status.success() {
                 return Err(RunFailure::Compiler {
                     module: step.module.clone(),
@@ -146,6 +152,54 @@ fn run_step(step: &Step, krusty: &Path, printed: &mut Printed) -> Result<(), Run
         }
     }
     copy_resources(step)
+}
+
+/// Run `step`'s KSP run `ksp`, unless its inputs and output are as its last successful run left
+/// them; what KSP printed goes to `printed`.
+fn run_ksp(step: &Step, ksp: &ksp::Ksp, printed: &mut Printed) -> Result<(), RunFailure> {
+    let output = |action: &str, directory: &Path, error: io::Error| {
+        RunFailure::Io(format!(
+            "cannot {action} {} for module `{}`: {error}",
+            directory.display(),
+            step.module
+        ))
+    };
+    // KSP's inputs are fingerprinted before the module's: the module compiles against KSP's output.
+    let inputs = avoidance::tool_inputs(&ksp.arguments, &ksp.reads)
+        .map_err(|error| output("fingerprint the inputs of KSP", &ksp.outputs.base, error))?;
+    if avoidance::up_to_date(&ksp.state, &ksp.outputs.base, &inputs) {
+        return Ok(());
+    }
+    avoidance::forget(&ksp.state).map_err(|error| output("remove", &ksp.state, error))?;
+    let ran = ksp::run(ksp).map_err(|error| {
+        RunFailure::Io(format!(
+            "cannot run KSP ({}) for module `{}`: {error}",
+            ksp.java.display(),
+            step.module
+        ))
+    })?;
+    printed.stdout = ran.stdout;
+    printed.stderr = ran.stderr;
+    if !ran.status.success() {
+        return Err(RunFailure::Ksp {
+            module: step.module.clone(),
+            code: ran.status.code().unwrap_or(1),
+        });
+    }
+    let generated = ksp::generated_sources(&ksp.outputs)
+        .map_err(|error| output("read", &ksp.outputs.base, error))?;
+    if let Some(source) = generated.first() {
+        return Err(RunFailure::Io(format!(
+            "KSP generated sources for module `{}` ({} first), and krusty-toolchain does not compile generated sources yet",
+            step.module,
+            source.display()
+        )));
+    }
+    // KSP writes the directory only when it generates a resource.
+    std::fs::create_dir_all(&ksp.outputs.resources)
+        .map_err(|error| output("create", &ksp.outputs.resources, error))?;
+    avoidance::record(&ksp.state, &ksp.outputs.base, &inputs)
+        .map_err(|error| output("record", &ksp.state, error))
 }
 
 /// Make the module's resources output exactly its resource directories' contents, a file of a

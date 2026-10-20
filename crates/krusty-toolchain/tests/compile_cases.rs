@@ -233,7 +233,7 @@ fn ledger(problems: &[ExpectedDiagnostic]) -> String {
 fn every_compile_case_is_exact() {
     compiling::recorder();
     let cases = compile_cases();
-    assert_eq!(cases.len(), 18, "the cases are missing");
+    assert_eq!(cases.len(), 19, "the cases are missing");
     let mut failures = Vec::new();
     for case in &cases {
         let ran = krusty_toolchain(
@@ -522,6 +522,193 @@ fn a_rerun_leaves_no_output_of_removed_sources_or_resources() {
         assert!(!artifacts.join(gone).exists(), "{gone}");
     }
     assert!(artifacts.join("appjvm/kotlin-output").is_dir());
+}
+
+/// The `ksp` case with `files` added to its project.
+fn ksp_case(files: &[(&str, &str)]) -> CompileCase {
+    let mut case = case("ksp");
+    case.project.extend(
+        files
+            .iter()
+            .map(|(file, text)| (file.to_string(), text.to_string())),
+    );
+    case
+}
+
+/// Whether each invocation in a record runs KSP.
+fn runs_ksp(record: &str) -> Vec<bool> {
+    compiling::invocations(record)
+        .iter()
+        .map(|invocation| {
+            invocation
+                .iter()
+                .any(|argument| argument == "com.google.devtools.ksp.cmdline.KSPJvmMain")
+        })
+        .collect()
+}
+
+/// KSP failing on a module stops the task with KSP's status, after what KSP printed, before the
+/// module compiles.
+#[test]
+fn a_failing_ksp_run_stops_the_task_before_its_module_compiles() {
+    compiling::recorder();
+    let case = ksp_case(&[("app/ksp-fails", "processor: no registry\n")]);
+    let ran = krusty_toolchain("ksp-fails", &case, &[":consumer:compileJvm"], |_| {});
+    assert_eq!(
+        (
+            ran.output.code,
+            placed(&ran.output.root, &ran.output.stdout),
+            placed(&ran.output.root, &ran.output.stderr),
+            runs_ksp(&ran.record),
+            ran.outputs,
+        ),
+        (
+            5,
+            String::new(),
+            "processor: no registry\n\nERROR: Task ':app:kspJvm' failed: KSP exited with status 5\n"
+                .to_string(),
+            vec![true],
+            String::new(),
+        )
+    );
+}
+
+/// krusty-toolchain does not compile the sources KSP generates: a module KSP generates a source for
+/// fails before it compiles.
+#[test]
+fn a_ksp_run_that_generates_sources_fails_its_module() {
+    compiling::recorder();
+    let case = ksp_case(&[(
+        "app/ksp-generates/src/ksp/kotlin/generated/Registry.kt",
+        "package generated\n\nobject Registry\n",
+    )]);
+    let ran = krusty_toolchain("ksp-sources", &case, &[":consumer:compileJvm"], |_| {});
+    assert_eq!(
+        (
+            ran.output.code,
+            placed(&ran.output.root, &ran.output.stdout),
+            placed(&ran.output.root, &ran.output.stderr),
+            runs_ksp(&ran.record),
+            ran.outputs,
+        ),
+        (
+            1,
+            String::new(),
+            "\nERROR: KSP generated sources for module `app` (<directory>/project/build/generated/app/main/src/ksp/kotlin/generated/Registry.kt first), and krusty-toolchain does not compile generated sources yet\n"
+                .to_string(),
+            vec![true],
+            String::new(),
+        )
+    );
+}
+
+/// Each KSP run starts from empty output directories, so what an earlier run generated and this
+/// one does not is gone, from KSP's output and from the module's resources output.
+#[test]
+fn a_ksp_rerun_keeps_nothing_an_earlier_run_generated() {
+    compiling::recorder();
+    let case = case("ksp");
+    let first = krusty_toolchain("ksp-rerun", &case, &[":consumer:compileJvm"], |_| {});
+    assert_eq!(
+        first.output.code,
+        0,
+        "{}",
+        placed(&first.output.root, &first.output.stderr)
+    );
+    let project = first.directory.join(Resolving::PROJECT);
+    let generates = project.join("app/ksp-generates/resources/ksp");
+    std::fs::remove_dir_all(generates.join("META-INF")).unwrap();
+    std::fs::write(generates.join("other.txt"), "other\n").unwrap();
+    // A changed source, which KSP reads, so KSP runs again.
+    std::fs::write(
+        project.join("app/src/Model.kt"),
+        "class Model(val name: String)\n",
+    )
+    .unwrap();
+
+    let second = run_task(
+        &first.directory,
+        &project,
+        &[":consumer:compileJvm"],
+        |_| {},
+    );
+    assert_eq!(second.code, 0, "{}", placed(&second.root, &second.stderr));
+    let mut generated = Vec::new();
+    files_below(
+        &project.join("build/generated/app/main"),
+        "",
+        &mut generated,
+    );
+    generated.sort();
+    assert_eq!(
+        (
+            generated,
+            compiling::artifact_outputs(&first.directory, None)
+        ),
+        (
+            vec![
+                (
+                    "classes/ksp/generated/Registry.class".to_string(),
+                    "A stand-in for a generated class.\n".to_string()
+                ),
+                ("resources/ksp/other.txt".to_string(), "other\n".to_string()),
+            ],
+            "== appjvm/resources-output/other.txt\nother\n".to_string()
+        )
+    );
+}
+
+/// KSP does not run again while what it reads and what it generated are as its last successful run
+/// left them: its arguments (the processor options among them), the processors, and its output.
+#[test]
+fn an_unchanged_ksp_run_is_skipped() {
+    compiling::recorder();
+    let case = case("ksp");
+    let first = krusty_toolchain("ksp-skip", &case, &[":consumer:compileJvm"], |_| {});
+    assert_eq!(
+        first.output.code,
+        0,
+        "{}",
+        placed(&first.output.root, &first.output.stderr)
+    );
+    let project = first.directory.join(Resolving::PROJECT);
+    let record = first.directory.join(compiling::RECORD);
+    let ksp_runs = || {
+        runs_ksp(&std::fs::read_to_string(&record).unwrap())
+            .into_iter()
+            .filter(|&ksp| ksp)
+            .count()
+    };
+    let rerun = || {
+        let ran = run_task(
+            &first.directory,
+            &project,
+            &[":consumer:compileJvm"],
+            |_| {},
+        );
+        assert_eq!(ran.code, 0, "{}", placed(&ran.root, &ran.stderr));
+        ksp_runs()
+    };
+    let module = project.join("app/module.yaml");
+    let processor = first
+        .directory
+        .join(Resolving::HOME)
+        .join(".m2/repository/org/example/processor/1.0/processor-1.0.jar");
+    let generated = project.join("build/generated/app/main/resources/ksp/META-INF/registry.txt");
+    let mut runs = vec![ksp_runs(), rerun()];
+    let written = std::fs::read_to_string(&module).unwrap();
+    std::fs::write(&module, written.replace("alpha: first", "alpha: second")).unwrap();
+    runs.push(rerun());
+    std::fs::write(&processor, "Another processor.\n").unwrap();
+    runs.push(rerun());
+    std::fs::remove_file(&generated).unwrap();
+    runs.push(rerun());
+    runs.push(rerun());
+    assert_eq!(runs, [1, 1, 2, 3, 4, 4]);
+    assert_eq!(
+        std::fs::read_to_string(&generated).unwrap(),
+        "generated.Registry\n"
+    );
 }
 
 #[test]
