@@ -211,7 +211,7 @@ impl Emitter<'_> {
         let discarded_erased_invocation = matches!(
             node,
             IrExpr::InvokeFunction { ret, .. }
-                if !matches!(ret, crate::types::Ty::Unit | crate::types::Ty::Nothing)
+                if !matches!(*ret, crate::types::Ty::Unit | crate::types::Ty::Nothing)
                     && !self.machine_suspensions.contains_key(&expression)
                     && self.transformed_result(expression).is_none()
         );

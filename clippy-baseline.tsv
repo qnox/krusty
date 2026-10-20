@@ -62,12 +62,12 @@
 1	src/ir/generated_members.rs	all variants have the same prefix: `Serialization`
 1	src/ir/value_class_constructors.rs	redundant closure: help: replace the closure with the function itself: `&remap_ty`
 1	src/jvm/backend.rs	this function has too many arguments (8/7)
-1	src/jvm/builtin_member_operations.rs	large size difference between variants: the entire enum is at least 240 bytes
+1	src/jvm/builtin_member_operations.rs	large size difference between variants: the entire enum is at least 216 bytes
 1	src/jvm/bytecode_passes/temporaries/null_check_folds.rs	this `if` can be collapsed into the outer `match`
 1	src/jvm/classfile/control_flow.rs	this function has too many arguments (8/7)
 1	src/jvm/classfile/local_variables.rs	this OR pattern can be rewritten using a range: help: try: `0x15..=0x19`
 1	src/jvm/classfile/stack_maps.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/jvm/classpath/inline_plan_cache.rs	large size difference between variants: the entire enum is at least 280 bytes
+1	src/jvm/classpath/inline_plan_cache.rs	large size difference between variants: the entire enum is at least 240 bytes
 1	src/jvm/declaration_collisions/local_function_diagnostics.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/jvm/external_calls.rs	unnecessary closure used to substitute value for `Option::None`
 1	src/jvm/in_place_delegates.rs	this loop could be written as a `while let` loop
@@ -138,10 +138,10 @@
 1	src/parser.rs	field assignment outside of initializer for an instance created with Default::default()
 1	src/parser.rs	this manual char comparison can be written more succinctly: help: consider using an array of `char`: `['L', 'l', 'u', 'U']`
 1	src/parser.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if header_ctor_kw { self.tok().span.lo } else { 0 }`
-1	src/plugins/mod.rs	large size difference between variants: the entire enum is at least 1160 bytes
+1	src/plugins/mod.rs	large size difference between variants: the entire enum is at least 1032 bytes
 1	src/plugins/mod.rs	this `map_or` can be simplified
 1	src/plugins/serialization.rs	the following explicit lifetimes could be elided: 'ir
-1	src/plugins/serialization/intrinsic_serializer.rs	large size difference between variants: the entire enum is at least 1136 bytes
+1	src/plugins/serialization/intrinsic_serializer.rs	large size difference between variants: the entire enum is at least 1008 bytes
 1	src/resolve.rs	called `expect` on `current_owner` after checking its variant with `is_some`
 1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `&hidden`
 1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `matches_qual`
@@ -169,7 +169,7 @@
 1	src/resolve/generic_call_bindings.rs	this function has too many arguments (8/7)
 1	src/resolve/interface_delegation.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if setter { Ty::Unit } else { property_type }`
 1	src/resolve/interface_delegation.rs	you are using an explicit closure for copying elements
-1	src/resolve/local_method_dependencies.rs	large size difference between variants: the entire enum is at least 1328 bytes
+1	src/resolve/local_method_dependencies.rs	large size difference between variants: the entire enum is at least 1176 bytes
 1	src/resolve/local_method_dependencies.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let (inherited, provider) = self.inherited_body_local_default_candidate(owner, candidate)?;`
 1	src/resolve/member_extension_properties.rs	this function has too many arguments (8/7)
 1	src/resolve/member_extension_properties.rs	very complex type used. Consider factoring parts into `type` definitions
@@ -193,12 +193,12 @@
 1	src/resolve/streaming_signature_bridge.rs	redundant closure: help: replace the closure with the associated function itself: `Box::<str>::from`
 1	src/resolve/streaming_signature_bridge.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if member.ret.obj_internal() == Some(owner) { member.ret.type_args() } else { Default::default() }`
 1	src/resolve/streaming_signature_bridge/demanded_source_call.rs	this function has too many arguments (8/7)
-1	src/resolve/streaming_signature_bridge/implicit_context_candidates.rs	the `Err`-variant returned from this function is very large: the `Err`-variant is at least 1328 bytes
+1	src/resolve/streaming_signature_bridge/implicit_context_candidates.rs	the `Err`-variant returned from this function is very large: the `Err`-variant is at least 1176 bytes
 1	src/resolve/streaming_signature_bridge/local_signatures.rs	this function has too many arguments (10/7)
 1	src/resolve/streaming_signature_bridge/local_signatures.rs	this method chain can be written more clearly with `if .. else ..`
 1	src/resolve/streaming_signature_bridge/lookups.rs	this function has too many arguments (8/7)
 1	src/resolve/streaming_signature_bridge/lookups.rs	this function has too many arguments (9/7)
-1	src/resolve/streaming_signature_bridge/operator_conventions.rs	large size difference between variants: the entire enum is at least 1392 bytes
+1	src/resolve/streaming_signature_bridge/operator_conventions.rs	large size difference between variants: the entire enum is at least 1232 bytes
 1	src/resolve/streaming_signature_bridge/operator_conventions.rs	this block may be rewritten with the `?` operator
 1	src/resolve/streaming_signature_bridge/rejected_member_call.rs	this function has too many arguments (10/7)
 1	src/resolve/streaming_signature_bridge/selected_result_publication.rs	this function has too many arguments (13/7)

@@ -112,7 +112,7 @@ impl Emitter<'_> {
                 .iter()
                 .filter(|(_, body)| !self.diverges(*body))
                 .map(|(_, body)| self.value_ty(*body))
-                .filter(|ty| !matches!(ty, Ty::Null | Ty::Nothing | Ty::Error))
+                .filter(|ty| !matches!(*ty, Ty::Null | Ty::Nothing | Ty::Error))
                 .filter_map(|ty| internal(&ty));
             if let Some(first) = names.next() {
                 if names.any(|name| name != first) {

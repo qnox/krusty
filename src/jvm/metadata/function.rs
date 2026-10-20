@@ -506,7 +506,7 @@ pub(super) mod tests {
         assert_eq!(function.deprecation(), None);
         // Four empty vectors and an `Option<Ty>` used to sit on every function. The side
         // record is one pointer. Pin the size so those fields cannot move back onto `MetaFn`.
-        assert_eq!(size_of::<MetaFn>(), 264);
+        assert_eq!(size_of::<MetaFn>(), 240);
     }
 
     #[test]
