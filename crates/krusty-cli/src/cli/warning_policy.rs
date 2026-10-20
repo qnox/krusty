@@ -58,6 +58,14 @@ impl WarningName {
                             .is_some()
                     })
                 }
+                krusty::diag::CompilerWarningName::ParenthesizedPackageQualifier
+                | krusty::diag::CompilerWarningName::TypeArgumentsNotAllowedInPackageQualifier => {
+                    FeatureTable::for_version(release).is_some_and(|table| {
+                        table
+                            .get("ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier")
+                            .is_some()
+                    })
+                }
                 krusty::diag::CompilerWarningName::TypeIntersectionAsReified
                 | krusty::diag::CompilerWarningName::TypeIntersectionAsReifiedDeprecation
                 | krusty::diag::CompilerWarningName::TypeParameterAsReifiedDeprecation => true,

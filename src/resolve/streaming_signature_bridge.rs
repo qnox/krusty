@@ -5887,8 +5887,6 @@ pub(crate) fn finalized_streamed_signature_index(
     for (declaration, spelling) in type_alias_spellings {
         index.publish_type_alias_spelling(declaration, spelling);
     }
-    drop(evaluator);
-    drop(semantics);
     table.stable_declared_spellings.extend(declared_spellings);
     failed.append(&mut spelling_failures);
     failed.sort_by_key(|declaration| declaration.raw());

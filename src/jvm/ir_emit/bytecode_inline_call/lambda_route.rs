@@ -163,6 +163,7 @@ impl Emitter<'_> {
                         false,
                         SourceMap::default(),
                     ),
+                    enum_entries: &mut self.call_enum_entries(false),
                 },
             );
             if let Err(error) = probe {

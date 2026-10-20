@@ -119,6 +119,56 @@ impl Store {
     }
 }
 
+/// Why a project's store could not be opened.
+pub enum OpenError {
+    /// There is no cache root: the message says what to set.
+    NoCacheRoot(&'static str),
+    /// The local Maven repository the project lists could not be located.
+    LocalRepository(Problem),
+}
+
+impl Store {
+    /// The store a project resolves from: the shared cache of this host, after the local Maven
+    /// repository when a module lists it (`maven_local`).
+    pub fn for_project(maven_local: bool) -> Result<Self, OpenError> {
+        let root = Self::default_root().ok_or(OpenError::NoCacheRoot(
+            "cannot locate the user cache directory: set KOTLIN_SHARED_CACHE_DIR",
+        ))?;
+        let local = if maven_local {
+            Self::local_repository().map_err(OpenError::LocalRepository)?
+        } else {
+            None
+        };
+        Ok(match local {
+            Some(local) => Self::with_local(&local, &root),
+            None => Self::new(&root),
+        })
+    }
+
+    /// The file `name` in the directory of `coordinates` (its version's) in the first repository
+    /// that holds it, or `None` when none does. Coordinates or a name that name no file are
+    /// problems.
+    pub fn artifact_file(
+        &self,
+        coordinates: &Coordinates,
+        name: &str,
+    ) -> Result<Option<PathBuf>, Problem> {
+        let mut relative = relative_path(coordinates, "jar")?;
+        if !super::coordinates::is_safe_file_name(name) {
+            return Err(Problem::general(format!(
+                "`{name}` of {} names no file in a Maven repository",
+                coordinates.pretty(None)
+            )));
+        }
+        relative.set_file_name(name);
+        Ok(self
+            .repositories
+            .iter()
+            .map(|repository| repository.join(&relative))
+            .find(|path| path.is_file()))
+    }
+}
+
 /// Whether reading a file failed only because it is not there.
 fn is_absent(error: &std::io::Error) -> bool {
     matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory)

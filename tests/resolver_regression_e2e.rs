@@ -2322,3 +2322,146 @@ fn a_pure_qualifier_prefix_reports_its_missing_segment() {
         &[],
     );
 }
+
+#[test]
+fn qualified_nested_alias_constructors_continue_their_resolved_owner() {
+    let src = r#"
+package nested.aliases
+
+class Outer {
+    class Mid {
+        class Leaf(val value: String)
+        typealias LeafAlias = Leaf
+    }
+    class Box<T>(val value: T)
+    typealias BoxAlias<T> = Box<T>
+}
+
+fun box(): String {
+    val a = Outer.Mid.LeafAlias("O").value
+    val b = nested.aliases.Outer.BoxAlias<String>("K").value
+    return a + b
+}
+"#;
+    assert_accepted_and_runs(src, "ResolverQualifiedNestedAliasConstructors");
+}
+
+/// A callable reference or class literal whose left-hand side names a typealias declared in a
+/// classifier's body continues that classifier through the same qualifier step as an expression,
+/// for a nested and for a local owner.
+#[test]
+fn nested_and_local_alias_references_continue_their_owner() {
+    let src = r#"
+class Item(val value: String)
+
+class Outer {
+    class Mid {
+        class Leaf(val value: String)
+        typealias LeafAlias = Leaf
+    }
+    typealias ItemAlias = Item
+}
+
+fun nested(): String {
+    val a = Outer.Mid.LeafAlias::class.simpleName
+    val b = Outer.ItemAlias::class.simpleName
+    val c = Outer.Mid::LeafAlias
+    val d = Outer::ItemAlias
+    val e = Outer.Mid.LeafAlias::value
+    return "$a $b ${c("C").value} ${d("D").value} ${e(Outer.Mid.Leaf("E"))}"
+}
+
+fun local(): String {
+    class Local {
+        typealias ItemAlias = Item
+    }
+    val a = Local.ItemAlias::class.simpleName
+    val b = Local::ItemAlias
+    val c = Local.ItemAlias::value
+    return "$a ${b("B").value} ${c(Item("C"))}"
+}
+
+fun box(): String {
+    val result = nested() + "|" + local()
+    return if (result == "Leaf Item C D E|Item B C") "OK" else result
+}
+"#;
+    common::expect_box_same_as_kotlinc_with_args(
+        src,
+        "ResolverNestedAndLocalAliasReferences",
+        &["-XXLanguage:+LocalTypeAliases"],
+    );
+}
+
+/// A typealias a local class declares selects the same declaration as a type, a constructor, a
+/// runtime type operand and a callable-reference qualifier.
+#[test]
+fn a_local_class_alias_agrees_across_type_constructor_and_qualifier_uses() {
+    let src = r#"
+class Item(val value: String)
+
+fun local(): String {
+    class Local {
+        typealias ItemAlias = Item
+    }
+    val typed: Local.ItemAlias = Local.ItemAlias("A")
+    val any: Any = typed
+    val checked = any is Local.ItemAlias
+    val cast = (any as Local.ItemAlias).value
+    val reference = Local.ItemAlias::value
+    return "${typed.value} $checked $cast ${reference(Item("C"))}"
+}
+
+fun box(): String {
+    val result = local()
+    return if (result == "A true A C") "OK" else result
+}
+"#;
+    common::expect_box_same_as_kotlinc_with_args(
+        src,
+        "ResolverLocalAliasUsesAgree",
+        &["-XXLanguage:+LocalTypeAliases"],
+    );
+}
+
+/// A qualified alias resolves its prefix left to right: a local class named `kotlin` binds the
+/// root, so `kotlin.Exception` is that class's alias as a type and as a constructor, never the
+/// same-spelled `kotlin.Exception` typealias of the standard library.
+#[test]
+fn a_local_owner_named_like_a_package_selects_its_own_alias() {
+    let src = r#"
+class Num(val value: Int)
+
+fun local(): String {
+    class kotlin {
+        typealias Exception = Num
+    }
+    val typed: kotlin.Exception = kotlin.Exception(7)
+    return "${typed.value}"
+}
+
+fun box(): String {
+    val result = local()
+    return if (result == "7") "OK" else result
+}
+"#;
+    common::expect_box_same_as_kotlinc_with_args(
+        src,
+        "ResolverLocalOwnerShadowsPackageAlias",
+        &["-XXLanguage:+LocalTypeAliases"],
+    );
+}
+
+#[test]
+fn a_package_qualified_property_value_is_invoked() {
+    let src = r#"
+package invoked.values
+
+val greeting = { "O" }
+object Suffix { operator fun invoke() = "K" }
+val suffix = Suffix
+
+fun box(): String = invoked.values.greeting() + invoked.values.suffix()
+"#;
+    assert_accepted_and_runs(src, "ResolverPackageQualifiedPropertyInvoke");
+}

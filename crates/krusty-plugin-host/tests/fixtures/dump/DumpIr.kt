@@ -1,7 +1,7 @@
 @file:OptIn(org.jetbrains.kotlin.compiler.plugin.ExperimentalCompilerApi::class)
 
 // An IR plugin that writes the module's IR, as kotlinc dumps it, to the file its `out` option names,
-// then every element's offsets: what a test compares between kotlinc's own IR and the plugin host's.
+// then every element's offsets with the line and column its start is at: what a test compares between kotlinc's own IR and the plugin host's.
 package fixture.dump
 
 import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
@@ -48,7 +48,9 @@ private class Dump(private val out: String) : IrGenerationExtension {
             text.append(file.dump())
             file.acceptVoid(object : IrVisitorVoid() {
                 override fun visitElement(element: IrElement) {
-                    text.append("${element.startOffset}:${element.endOffset} ${element.render().lineSequence().first()}\n")
+                    val start = element.startOffset
+                    val at = if (start < 0) "" else "${file.fileEntry.getLineNumber(start)}:${file.fileEntry.getColumnNumber(start)} "
+                    text.append("${start}:${element.endOffset} $at${element.render().lineSequence().first()}\n")
                     element.acceptChildrenVoid(this)
                 }
             })

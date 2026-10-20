@@ -6,6 +6,7 @@
 mod compound_assignments;
 mod condition_facts;
 mod evaluated_casts;
+mod expression_stack;
 mod integer_literals;
 mod local_alias_header_dependencies;
 mod mutable_local_flow;
@@ -74,6 +75,8 @@ pub struct SignatureConstraintExtractor {
     extracting_local_effects: HashSet<DeclarationId>,
     lambda_returns: Vec<CompactLambdaReturnScope>,
     approximate_anonymous_result: bool,
+    /// Nesting of the active `expression` calls; see [`expression_stack`].
+    expression_depth: u32,
 }
 
 #[derive(Clone)]
@@ -1330,7 +1333,7 @@ impl SignatureConstraintExtractor {
         }))
     }
 
-    fn expression(
+    fn expression_frame(
         &mut self,
         file: &File,
         expression: ExprId,
