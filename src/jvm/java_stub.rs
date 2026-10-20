@@ -99,7 +99,21 @@ pub fn stub_classes(
 
     let member_types = MemberTypes::new(
         world,
-        parsed.iter().flat_map(|(_, declarations)| declarations),
+        parsed
+            .iter()
+            .flat_map(|(_, declarations)| declarations)
+            .filter_map(|declaration| {
+                Some((
+                    (
+                        declaration.outer_internal.as_deref()?,
+                        declaration.simple_name.as_str(),
+                    ),
+                    JavaMemberType {
+                        internal: declaration.internal.clone(),
+                        visibility: member_types::visibility_of_access(declaration.access),
+                    },
+                ))
+            }),
     );
     let mut out = Vec::new();
     let mut emitted: HashSet<&str> = HashSet::default();

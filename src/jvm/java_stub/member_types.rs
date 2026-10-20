@@ -10,7 +10,6 @@
 use super::super::classfile::{ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC};
 use super::super::classreader::ClassInfo;
 use crate::fx_hash::{HashMap, HashSet};
-use crate::java_source::RawDecl;
 use crate::types::{TypeName, Visibility};
 use std::cell::RefCell;
 
@@ -188,8 +187,8 @@ struct InheritedMemberType {
 /// Member-type lookup over the parsed Java sources and the world beyond them.
 pub(super) struct MemberTypes<'a> {
     world: &'a dyn JavaHeaderWorld,
-    /// `(declaring classifier, simple name)` → the first source declaration of that member type.
-    declared: HashMap<(&'a str, &'a str), &'a RawDecl>,
+    /// `(declaring classifier, simple name)` → the first normalized source member header.
+    declared: HashMap<(&'a str, &'a str), JavaMemberType>,
     /// Direct supertypes already resolved for a classifier; `None` while they are being resolved,
     /// so a cyclic `extends` reads as declaring none instead of recursing.
     supertypes: RefCell<HashMap<String, Option<Vec<String>>>>,
@@ -198,15 +197,11 @@ pub(super) struct MemberTypes<'a> {
 impl<'a> MemberTypes<'a> {
     pub(super) fn new(
         world: &'a dyn JavaHeaderWorld,
-        declarations: impl IntoIterator<Item = &'a RawDecl>,
+        members: impl IntoIterator<Item = ((&'a str, &'a str), JavaMemberType)>,
     ) -> Self {
         let mut declared = HashMap::default();
-        for declaration in declarations {
-            if let Some(outer) = declaration.outer_internal.as_deref() {
-                declared
-                    .entry((outer, declaration.simple_name.as_str()))
-                    .or_insert(declaration);
-            }
+        for (key, member) in members {
+            declared.entry(key).or_insert(member);
         }
         Self {
             world,
@@ -345,11 +340,8 @@ impl<'a> MemberTypes<'a> {
     }
 
     fn declared_member_type(&self, owner: &str, name: &str) -> Option<JavaMemberType> {
-        if let Some(declaration) = self.declared.get(&(owner, name)) {
-            return Some(JavaMemberType {
-                internal: declaration.internal.clone(),
-                visibility: visibility_of_access(declaration.access),
-            });
+        if let Some(member) = self.declared.get(&(owner, name)) {
+            return Some(member.clone());
         }
         self.world.member_type(owner, name)
     }
@@ -396,7 +388,7 @@ fn package_of(internal: &str) -> &str {
     internal.rsplit_once('/').map_or("", |(package, _)| package)
 }
 
-fn visibility_of_access(access: u16) -> Visibility {
+pub(super) fn visibility_of_access(access: u16) -> Visibility {
     if access & ACC_PUBLIC != 0 {
         Visibility::Public
     } else if access & ACC_PROTECTED != 0 {
